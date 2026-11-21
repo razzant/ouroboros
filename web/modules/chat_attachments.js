@@ -441,15 +441,15 @@ export function placeIngressNote(bubble, note) {
  * (or echoed before a deferred dispatch): the frame waits for the next fact. A saved row
  * with neither dispatch fact came from a host process that has since ended (a restart came
  * between): whether it reached the agent is unknown and Send again would only rejoin
- * it, so its bubble says "Saved; delivery not confirmed" and the frame is dropped; the one action it keeps is "Send as a
- * new message", which only prepares the composer with the owner's words (`compose`) and sends nothing. Bubble
+ * it, so its bubble says "Saved; delivery not confirmed"; the tab keeps this doubt across reloads and the one action
+ * "Send as a new message", which only prepares the composer with the owner's words (`compose`) and sends nothing. Bubble
  * labels (markIngressSaved): `Input saved` on `ingress_dispatched` and `ingress_pending`.
- * `count` feeds the chat
+ * `count` excludes saved delivery doubts and feeds the chat
  * instance's `hasPendingWork`, which keeps a Project room holding one hidden instead of
  * destroying it. Nothing here resends by itself or deletes an upload: those stay on the host.
  */
 export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, storage = null, storageKey = '' }) {
-    const frames = new Map();  // id -> { frame, reply, views, ts, restored, queued }
+    const frames = new Map();  // id -> { frame, reply, views, ts, restored, queued, deliveryUnknown }
     const bubbleOf = (id) => [...(root()?.querySelectorAll('.chat-bubble.user[data-client-message-id]') || [])]
         .find((node) => node.dataset.clientMessageId === id) || null;
     let unreadable = false;  // a kept copy this tab cannot read restores nothing, and says so
@@ -458,7 +458,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         for (const entry of kept === null ? [] : JSON.parse(kept)) {
             const frame = keptFrame(entry?.frame);
             if (frame) frames.set(String(frame.client_message_id), { frame, reply: entry.reply, views: attachmentViews(entry.views),
-                ts: String(entry.ts || ''), restored: true });
+                ts: String(entry.ts || ''), restored: true, deliveryUnknown: entry.deliveryUnknown === true });
             else unreadable = true;
         }
     } catch { unreadable = true; }
@@ -472,7 +472,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         try {
             if (!frames.size) storage.removeItem(storageKey);
             else storage.setItem(storageKey, JSON.stringify([...frames.values()]
-                .map(({ frame, reply, views, ts }) => ({ frame: keptFrame(frame), reply, views, ts }))));
+                .map(({ frame, reply, views, ts, deliveryUnknown }) => ({ frame: keptFrame(frame), reply, views, ts,
+                    ...(deliveryUnknown ? { deliveryUnknown: true } : {}) }))));
         } catch {
             showToast(tr('chat.send_unconfirmed_unkept',
                 'This tab could not keep the unsaved message for a reload. Send again still works until then.'), 'error',
@@ -486,7 +487,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
 
     function retry(id, note) {
         const entry = frames.get(id);
-        if (!entry) return;
+        if (!entry || entry.deliveryUnknown) return;
         if (send(entry.frame, { queue: false })?.status !== 'sent') {
             showToast(tr('chat.send_again_offline', 'Still offline. Reconnect and send again.'), 'error');
             return;
@@ -524,6 +525,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
     // The doubt on its bubble, or a pending saved note after a disconnect, gains the two actions; a selected reply, which
     // left the composer when it was sent, a third that brings its words and quote back.
     function mark(id, bubble) {
+        const entry = frames.get(id);
+        if (entry?.deliveryUnknown) return doubtDelivery(bubble, entry.reply?.reply_to);
         const saved = bubble.querySelector('[data-ingress-saved]');
         let note = saved || bubble.querySelector('[data-ingress-unconfirmed]');
         if (!frames.has(id) || saved?.dataset.ingressSaved === '' || note?.querySelector('[data-unconfirmed-action]')) return false;
@@ -564,7 +567,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         for (const id of ids) {
             const bubble = frames.has(id) && bubbleOf(id);
             if (!bubble) continue;  // settled meanwhile, or not in the feed now: still unsaved, the frame stays
-            if (bubble.querySelector('[data-ingress-saved]')?.dataset.ingressSaved === '') forget(id);
+            if (!frames.get(id).deliveryUnknown && bubble.querySelector('[data-ingress-saved]')?.dataset.ingressSaved === '') forget(id);
             else if (!frames.get(id).queued) onDomWrite(() => mark(id, bubble));  // the socket's own queue still holds a queued one
         }
     }
@@ -594,16 +597,22 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             } else if (row.ingress_pending === true) {
                 // The running host took it and still owes dispatch: the frame waits for its confirmation,
                 // and a reload's first read that shows it so has answered for the kept copy (no doubt from `reconcile`).
-                frames.get(id).restored = false;
+                const entry = frames.get(id);
+                entry.restored = false;
+                if (entry.deliveryUnknown) { entry.deliveryUnknown = false; persist(); }
             } else if (bubble) {  // without its bubble the frame waits, so the doubt is not lost unseen
-                forget(id);
-                onDomWrite(() => doubtDelivery(bubble, row.reply_to));
+                const entry = frames.get(id);
+                entry.deliveryUnknown = true;
+                entry.restored = false;
+                entry.reply = { ...entry.reply, reply_to: row.reply_to || entry.reply?.reply_to };
+                persist();
+                onDomWrite(() => doubtDelivery(bubble, entry.reply.reply_to));
             }
         },
         /** The socket closed or a frame was refused: every still-unsaved sent message in the feed says so. */
         unsettle,
         /** What a disconnect now puts in doubt: the held messages the socket has written (a queued one is the queue's). */
-        written: () => [...frames].filter(([, entry]) => !entry.queued).map(([id]) => id),
+        written: () => [...frames].filter(([, entry]) => !entry.queued && !entry.deliveryUnknown).map(([id]) => id),
         /** After a reload's first history read (or its failure): a kept message it did not settle (nor show
          *  `ingress_pending`) shows its bubble again from the kept words and views if the read did not, then its doubt.
          *  A message this page sent while that read was pending is not in doubt: the read predates it. */
@@ -615,7 +624,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             }
             unsettle(kept.map(([id]) => id));
         },
-        get count() { return frames.size; },
+        get count() { return [...frames.values()].filter(entry => !entry.deliveryUnknown).length; },
         /** Room teardown: this instance forgets; the tab's kept copies stay for the room's next instance. */
         release() { frames.clear(); },
     };

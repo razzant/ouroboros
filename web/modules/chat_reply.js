@@ -355,7 +355,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             || bubble.querySelector('.chat-quiz-question')?.textContent || bubble.dataset.rowWords || '';
         const sender = bubble.querySelector(':scope > .sender, :scope > .chat-bubble-voice > .sender');
         return { address, chat_id: chatId, role,
-            author_label: caption?.dataset.sourceAuthor || sender?.textContent || '',
+            author_label: caption?.dataset.sourceAuthor || bubble.dataset.replyAuthor || sender?.textContent || '',
             kind: bubble.querySelector('.chat-quiz-card') ? 'question' : 'message', snippet: replySnippet(words),
             ts: caption ? caption.dataset.sourceTs || '' : bubble.dataset.ts ? new Date(Number(bubble.dataset.ts)).toISOString() : '',
             task_id: bubble.dataset.taskId || '' };
@@ -452,6 +452,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         decorate(bubble, row) {
             const address = String(row?.row_address || '');
             if (address) bubble.dataset.rowAddress = address;
+            if (row?.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
             if (row?.reply_excerpt_disabled) bubble.dataset.replyExcerptDisabled = '1';
             // Work speech another room also shows: its read is shared (read_ahead.js).
             if (row?.room_revisions && typeof row.room_revisions === 'object') bubble.dataset.roomRevisions = JSON.stringify(row.room_revisions);
@@ -471,6 +472,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         stamp(bubble, row) {
             const address = String(row?.row_address || '');
             if (bubble && address && bubble.dataset.rowAddress !== address) bubble.dataset.rowAddress = address;
+            if (bubble && row?.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
         },
         /** The host's saved row for the owner's own echo: the bubble takes its address and, with it, its Reply. */
         adopt(row) {
@@ -480,6 +482,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             const bubble = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
                 .find((node) => node.dataset.clientMessageId === cmid);
             if (bubble && row.reply_excerpt_disabled) bubble.dataset.replyExcerptDisabled = '1';
+            if (bubble && row.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
             if (!bubble || bubble.dataset.rowAddress === address) return false;
             bubble.dataset.rowAddress = address;
             if (row.reply_to?.excerpt || row.reply_to?.role === 'system') {

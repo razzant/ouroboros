@@ -688,7 +688,9 @@ def test_editing_restored_selected_reply_reuses_files_or_reports_expiry(direct_s
             page = browser.new_page()
             page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
             sent, uploads = [], []
+            held_uploads, upload_plan = [], {"hold": False}
             page.on("request", lambda r: uploads.append(r.url) if r.method == "POST" and r.url.endswith('/api/chat/upload') else None)
+            page.route("**/api/chat/upload", lambda route: held_uploads.append(route) if upload_plan["hold"] else route.continue_())
 
             def route(client):
                 server = client.connect_to_server()
@@ -722,16 +724,47 @@ def test_editing_restored_selected_reply_reuses_files_or_reports_expiry(direct_s
 
             page.reload()
             page.wait_for_function(online)
+            expect(words).to_have_value("")
+            expect(page.locator('.attach-name')).to_have_count(0)
+            expect(page.locator('.chat-quote--composer')).to_have_count(0)
+            page.get_by_role('button', name='Send as a new message', exact=True).click()
+            expect(words).to_have_value("Please check the files.")
+            expect(page.locator('.chat-quote--composer[data-excerpt]')).to_be_visible()
+
+            # Text is read-only during upload; selecting a different quote is an available owner action that
+            # makes a newer draft. Its files keep their own uploaded refs after the submitted version goes out.
+            page.locator("#chat-file-input").set_input_files([
+                {"name": name, "mimeType": "text/plain", "buffer": name.encode()} for name in ("keep.txt", "expired.txt")])
+            upload_plan["hold"] = True
+            send_btn.click()
+            expect(send_btn).to_be_disabled()
+            assert held_uploads
+            source.evaluate("""el => { const range = document.createRange();
+                range.setStart(el.previousSibling, 0); range.setEnd(el.previousSibling, 5);
+                const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); }""")
+            page.get_by_role('button', name='Reply to quote', exact=True).click()
+            expect(page.locator('.chat-quote--composer:not([inert]) .chat-quote-text')).to_have_text('Check')
+            upload_plan["hold"] = False
+            for held in held_uploads:
+                held.continue_()
+            expect(send_btn).to_be_enabled()
+            expect(page.locator('[data-ingress-unconfirmed]')).to_have_count(2)
+            first, second = sent
+            assert first["reply_excerpt"] == second["reply_excerpt"], "the submitted selection was fixed before the upload"
+            assert ds.accepted_row(data, 1, second["client_message_id"]) is None
+            page.reload()
+            page.wait_for_function(online)
             expect(words).to_have_value("Please check the files.")
             expect(page.locator('.attach-name')).to_have_text(["keep.txt", "expired.txt"])
             expect(page.locator('.chat-quote--composer[data-excerpt]')).to_be_visible()
+            expect(page.locator('.chat-quote--composer .chat-quote-text')).to_have_text('Check')
             if evidence := os.environ.get("OUROBOROS_UI_EVIDENCE_DIR"):
                 page.screenshot(path=Path(evidence) / f"restored-selected-reply-{engine}.png")
             page.get_by_role('button', name='Cancel reply').click()
-            (data / "uploads" / first["attachments"][1]["filename"]).unlink()
+            (data / "uploads" / second["attachments"][1]["filename"]).unlink()
             send_btn.click()
             expect(page.locator('#toast-stack')).to_contain_text('Saved attachment “expired.txt” is unavailable')
-            assert sent == [first] and len(uploads) == 2
+            assert sent == [first, second] and len(uploads) == 4
             page.get_by_role('button', name='Remove attachment expired.txt').click()
 
             page.reload()  # the edited draft's refs survive too, without reviving the old version
@@ -741,10 +774,10 @@ def test_editing_restored_selected_reply_reuses_files_or_reports_expiry(direct_s
             send_btn.click()
             expect(page.locator('.chat-bubble.user[data-row-address]')).to_have_count(1)
             later = sent[-1]
-            assert later['client_message_id'] != first['client_message_id'] and 'reply_excerpt' not in later
-            assert later['attachments'] == first['attachments'][:1] and len(uploads) == 2
+            assert later['client_message_id'] not in {first['client_message_id'], second['client_message_id']} and 'reply_excerpt' not in later
+            assert later['attachments'] == second['attachments'][:1] and len(uploads) == 4
             accepted = ds.accepted_row(data, 1, later['client_message_id']).row
-            assert accepted['attachments'][0]['upload'] == first['attachments'][0]['filename']
+            assert accepted['attachments'][0]['upload'] == second['attachments'][0]['filename']
             expect(words).to_have_value('')
             expect(page.locator('.attach-name')).to_have_count(0)
         finally:
@@ -861,6 +894,11 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
             # Saved by the host, then the host restarted before the page heard back: the new process
             # cannot know what became of it, so the kept message is saved with its delivery unconfirmed.
             plan.update(cut=1, hold=True)
+            page.locator(_BUBBLE).last.locator('.message').evaluate("""node => {
+                const range = document.createRange(); range.selectNodeContents(node);
+                getSelection().removeAllRanges(); getSelection().addRange(range);
+            }""")
+            page.get_by_role('button', name='Reply to quote', exact=True).click()
             send("restart.png", "third")
             # A served-SHA recovery can reload and reset the page's socket counter.
             # Observe the fault boundary itself, not an assumed number of prior sockets.
@@ -884,11 +922,19 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
             assert delivery.inner_text().startswith("Saved; delivery not confirmed.")
             actions = page.locator(f"{_BUBBLE} [data-unconfirmed-action]")
             assert actions.all_inner_texts() == ["Send as new"], "no Send again: it could only rejoin"
-            assert page.evaluate("() => Object.keys(sessionStorage).filter(k => k.startsWith('ouro_chat_unconfirmed'))") == []
+            for _ in range(2):
+                kept = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_unconfirmed'))")
+                assert len(kept) == 1 and kept[0]["deliveryUnknown"] is True
+                assert kept[0]["frame"]["reply_excerpt"]["text"] == "second"
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_function(open_socket, timeout=30_000)
+                delivery.wait_for(timeout=30_000)
+                assert actions.all_inner_texts() == ["Send as new"]
             assert len(seen) == 4 and len(inbound(seen[-1])) == 1, "nothing was resent"
             # Send as new only puts his words back in the composer, as a new message he may edit or send.
             actions.first.click()
             assert "third" in page.locator("#chat-input").input_value()
+            assert page.locator('.chat-quote--composer[data-excerpt]').count() == 1
             page.wait_for_timeout(500)
             assert len(seen) == 4 and len(inbound(seen[-1])) == 1, "Send as new sent nothing by itself"
             _capture(page, page.locator(_BUBBLE).last, evidence / f"attachments-delivery-unconfirmed-{engine}.png")

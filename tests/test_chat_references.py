@@ -355,10 +355,19 @@ def test_older_reply_with_only_a_short_address_requires_the_source_for_more_digi
 def test_a_replied_row_is_signed_with_the_author_its_record_names(tmp_path, monkeypatch, fields, expected):
     """Without a ``sender_label`` the actor its transport recorded is the author; only a row of the owner's own door
     is You, and a place row whose author nothing records is not."""
-    from ouroboros.chat_references import ingress_reply
+    from ouroboros.chat_references import ingress_reply, projection_fields
+    from ouroboros.gateway.history import _history_identity
 
-    _web_bridge(tmp_path, monkeypatch)
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
     source = message_bus.log_chat("in", 1, 1, "Meet at noon.", ts="2026-10-01T00:00:00Z", **{"source": "skill:telegram", **fields})
+    assert projection_fields(source)["reply_author_label"] == expected
+    assert _history_identity({**source, **projection_fields(source)})["reply_author_label"] == expected
+    if not fields.get("source"):  # a skill's live echo; web is echoed at acceptance, places use their bound room
+        message_bus.record_inbound_message(bridge, {"source": "skill:telegram", **fields}, chat_id=1, user_id=1,
+                                           client_message_id="speaker-live", text="Meet at noon.", ts="2026-10-01T00:00:01Z")
+        assert echoes[-1]["reply_author_label"] == expected
+        replay = next(row for row in _history(tmp_path) if row.get("client_message_id") == "speaker-live")
+        assert replay["reply_author_label"] == expected and replay["row_address"] == echoes[-1]["row_address"]
     whole = resolve_reply(tmp_path, format_address(row_address(source)))
     assert whole["role"] == "user" and whole["author_label"] == expected
     selected = ingress_reply(tmp_path, {"reply_to": whole["address"], "reply_excerpt": {"text": "noon", "start_utf16": 8}})

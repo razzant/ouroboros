@@ -11898,8 +11898,8 @@ html[data-layout="stack"] .project-panel {
 }
 :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
 /* A row that takes focus only to be returned to (a quote's target, a closed row menu) shows the one keyboard ring. */
-:is(.chat-bubble, .chat-live-card, .chat-live-line)[tabindex="-1"]:focus { outline: none; }
-:is(.chat-bubble, .chat-live-card, .chat-live-line)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item)[tabindex="-1"]:focus { outline: none; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
     :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item).is-quote-target { animation: none; box-shadow: 0 0 0 3px var(--accent-25); }
 }

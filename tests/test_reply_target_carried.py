@@ -517,3 +517,84 @@ def test_an_empty_message_id_never_merges_two_messages(empty):
     _record_owner_directive(ctx, source="owner_mailbox", content="the same message again", msg_id="",
                             origin={"client_message_id": "c-3"})
     assert [row["content"] for row in ctx._owner_directives] == ["message 1", "message 2", "the same message again"]
+
+
+@pytest.mark.parametrize("carried", [False, True], ids=["relay", "carriage"])
+@pytest.mark.parametrize("explicit", [False, True], ids=["carry-rows", "quote-rows"])
+def test_held_owner_row_carries_the_captured_source_without_rewriting_its_address(tmp_path, monkeypatch, carried, explicit):
+    from ouroboros.owner_relay import _rows_to_carry, inject_relay, owner_row_address, owner_source_row, quote_rows
+    from ouroboros.owner_words import reply_target
+    from ouroboros.store import StoreError
+    from tests.test_owner_relay import context
+
+    full = "Map: **North trail**. Return at dawn. " * 12
+    files = [{"name": "trail.pdf", "mime": "application/pdf", "size": 55}]
+    reference = {**_proposal(tmp_path, full), "author_label": "Ouroboros", "role": "assistant",
+                 "snippet": "Map: North trail…", "excerpt": {"text": "North trail", "start_utf16": 5}}
+    captured = {**reply_target(tmp_path, reference), "attachments": files}
+    owner = {"chat_id": 1, "direction": "in", "source": "web", "user_id": 1,
+             "ts": "2026-11-04T09:01:00Z", "client_message_id": "owner-held", "text": "Which trail?",
+             "reply_to": reference}
+    parent = context(tmp_path)
+    parent._held_owner_messages = {owner_row_address(owner): owner}
+    _record_owner_directive(parent, source="owner_mailbox", content=owner["text"], msg_id="owner-held",
+                            origin={"chat_id": 1, "client_message_id": "owner-held"}, reply_to=captured)
+
+    def unavailable(*_args, **_kwargs):
+        raise StoreError("history unavailable")
+
+    monkeypatch.setattr("ouroboros.chat_chain.resolve_row", unavailable)
+    if explicit:
+        address = owner_row_address(owner)
+        monkeypatch.setattr("ouroboros.chat_chain.resolve_row", lambda *_: pytest.fail("the captured source needs no history read"))
+        [quote], error = quote_rows(parent, [address])
+        assert not error
+    else:
+        _, address, quote, _, _ = _rows_to_carry(parent, tmp_path)[0]
+    assert quote["reply_to"]["text"] == full and quote["reply_to"]["attachments"] == files
+    assert quote["owner_row"]["reply_to"] == reference, "the accepted row is not rewritten with projection fields"
+    assert owner_source_row(quote["owner_row"]) == owner and owner_row_address(quote["owner_row"]) == address
+    monkeypatch.setattr("ouroboros.chat_chain.resolve_row", lambda *_: pytest.fail("the captured source needs no history read"))
+    receiver = context(tmp_path)
+    receiver.task_id = "receiver"
+    frames = []
+    entry = {"owner_rows": [quote["owner_row"]], "source_task_id": "teller", "text": "note",
+             "relay": {"relay_id": "held-source", "quotes": [quote]},
+             **({"host_carried": {"went_to": ""}} if carried else {})}
+    inject_relay(receiver, entry, frames)
+    target = governing_words_for_schedule(receiver)[FIELD]
+    [source] = [row for row in target if row["source"] == REPLY_TARGET]
+    assert source["text"] == full and source["attachments"] == files
+    assert full in frames[0]["content"] and "trail.pdf" in frames[0]["content"]
+    if not carried:
+        assert receiver._owner_directives[0]["reply_to"] == captured
+
+
+@pytest.mark.parametrize("capture", ["absent", "other-owner", "other-source", "other-selection", "other-role"])
+def test_explicit_quote_never_borrows_a_source_not_captured_for_its_owner_selection(tmp_path, monkeypatch, capture):
+    from ouroboros.owner_relay import owner_row_address, quote_rows
+    from tests.test_owner_relay import context
+
+    reference = {"address": "row:1@source#0123456789ab", "author_label": "Mira", "role": "user",
+                 "snippet": "North…", "excerpt": {"text": "North", "start_utf16": 0}}
+    owner = {"chat_id": 1, "direction": "in", "source": "web", "user_id": 1,
+             "ts": "2026-11-04T09:01:00Z", "client_message_id": "owner-held", "text": "Which trail?",
+             "reply_to": reference}
+    handle, parent = owner_row_address(owner), context(tmp_path)
+    parent._held_owner_messages = {handle: owner}
+    if capture != "absent":
+        target = {**reference, "author": "Mira", "text": "North trail. Unrelated full body."}
+        if capture == "other-source":
+            target["address"] = "row:1@source#abcdef012345"
+        elif capture == "other-selection":
+            target["excerpt"] = {"text": "trail", "start_utf16": 6}
+        elif capture == "other-role":
+            target["role"] = "assistant"
+        _record_owner_directive(parent, source="owner_mailbox", content=owner["text"], msg_id="captured",
+                                origin={"chat_id": 1, "client_message_id": "other" if capture == "other-owner" else "owner-held"},
+                                reply_to=target)
+    monkeypatch.setattr("ouroboros.chat_chain.resolve_row", lambda *_: pytest.fail("an explicit quote must not fetch new history"))
+    [quote], error = quote_rows(parent, [handle])
+    assert not error and quote["reply_to"] == reference
+    assert quote["owner_row"] == {**owner, "_owner_source_root": str(tmp_path)}
+    assert parent._held_owner_messages == {handle: owner}, "quote preparation changes neither row nor held state"

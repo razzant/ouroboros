@@ -33,6 +33,52 @@ def select_contents(locator):
         getSelection().removeAllRanges(); getSelection().addRange(r); }""")
 
 
+def test_rendered_mapping_is_reused_until_the_body_changes(project_chat):
+    page = project_chat["page"]
+    source = row(1, "North **trail**.")
+    project_chat["rows"][:] = [source]
+    page.reload()
+    facts = bubble(page, source).evaluate("""async node => {
+        const {readExcerpt, excerptRange} = await import('/static/modules/chat_reply_excerpt.js');
+        const body = node.querySelector('.message'), range = document.createRange();
+        const original = window.getComputedStyle;
+        let reads = 0;
+        window.getComputedStyle = (...args) => { reads++; return original(...args); };
+        try {
+            range.selectNodeContents(body);
+            const first = readExcerpt(node, range), built = reads;
+            const second = readExcerpt(node, range), landed = excerptRange(node, first)?.toString(), reused = reads;
+            body.querySelector('strong').firstChild.data = 'gate';
+            range.selectNodeContents(body);
+            const changed = readExcerpt(node, range), rebuilt = reads;
+            return {first, second, landed, built, reused, changed, rebuilt};
+        } finally { window.getComputedStyle = original; }
+    }""")
+    assert facts["first"] == facts["second"] == {"text": "North trail.", "start_utf16": 0}
+    assert facts["landed"] == "North trail." and facts["built"] > 0
+    assert facts["reused"] == facts["built"] and facts["rebuilt"] > facts["reused"]
+    assert facts["changed"] == {"text": "North gate.", "start_utf16": 0}
+
+
+@pytest.mark.parametrize("media", [False, True], ids=["words", "caption"])
+def test_live_and_reloaded_selection_keep_the_host_recorded_speaker(project_chat, media):
+    page = project_chat["page"]
+    source = row(1, "Meet at noon.", role="user", source="presence:telegram", reply_author_label="Mira",
+                 **({"msg_type": "photo", "caption": "Meet at noon."} if media else {}))
+    page.evaluate("""([kind, source]) => emit(kind, {...source, content:source.text,
+        ...(kind === 'photo' ? {image_base64:'aW1hZ2U=', mime:'image/png'} : {})})""", ["photo" if media else "chat", source])
+    for reloaded in (False, True):
+        if reloaded:
+            project_chat["rows"][:] = [source]
+            page.reload()
+        body = bubble(page, source).locator('[data-reply-caption]' if media else '.message[data-reply-body]')
+        select_contents(body)
+        page.get_by_role("button", name="Reply to quote", exact=True).click()
+        staged = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
+        assert staged["author_label"] == "Mira" and staged["excerpt"]["text"] == "Meet at noon."
+        page.get_by_role("button", name="Cancel reply").click()
+
+
 def test_selected_list_code_and_backward_link_drag(project_chat):
     page = project_chat["page"]
     items = row(1, "- first\n- second\n\n```\na\n  b\n```")

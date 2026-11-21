@@ -57,6 +57,7 @@ def projection_fields(row: dict, root=None) -> dict:
             and row.get("client_message_id"):
         fields["row_client_message_id"] = str(row["client_message_id"])
     fields["row_address"] = format_address(row_address(row))
+    fields["reply_author_label"] = _reply_author_label(row)
     if _card_display_only(row, _card_display(root, row)):
         fields["reply_excerpt_disabled"] = True
     return fields
@@ -87,6 +88,14 @@ def project_answer_text(row: dict) -> str:
 REPLY_ROLES = ("user", "assistant", "system")
 
 
+def _reply_author_label(row: dict) -> str:
+    from ouroboros.dialogue_provenance import recorded_speaker_name, row_provenance
+
+    if reply_role(row) == "user":
+        return recorded_speaker_name(row) or ("author not recorded" if row_provenance(row) == "place" else "You")
+    return "Ouroboros" if reply_role(row) == "assistant" else "System"
+
+
 def reply_role(row: dict) -> str:
     """Whose words a replied row holds, from the stored row alone: the one actor identity every reader of it
     shares, whatever label each shows for that person. A lifecycle row carrying an authored answer is that answer
@@ -104,13 +113,10 @@ def reference_from_row(row: dict, root=None) -> dict:
             "system" if row.get("direction") == "system" else "message")
     role = reply_role(row)
     body = card_reply_display(root, row)  # the host's account of a card display, for its preview alone: the row is still its sender's
-    from ouroboros.dialogue_provenance import recorded_speaker_name, row_provenance
     from ouroboros.room_membership import reply_target_home
     address = row_address(row)
-    # Only a row from the owner's own door, with no sender recorded, is You: another actor's name or an unrecorded place author is not.
-    sender = recorded_speaker_name(row) or ("author not recorded" if row_provenance(row) == "place" else "You")
     return {"address": format_address(address), "row_sha256": address["row_sha256"], "chat_id": address["chat_id"],
-            "role": role, "author_label": sender if role == "user" else {"assistant": "Ouroboros", "system": "System"}[role],
+            "role": role, "author_label": _reply_author_label(row),
             "kind": kind, **_preview(body or answer or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
             "target_home": reply_target_home(row)}

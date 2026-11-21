@@ -40,6 +40,29 @@ def test_fitting_view_and_irreducible_tail_never_cut(tmp_path):
         assert receipt is None and kept == rows == before
 
 
+def test_a_fresh_selection_keeps_its_earlier_shared_full_source_during_a_physical_cut(tmp_path):
+    from ouroboros.context_budget import HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY
+    from ouroboros.loop_round_limits import _append_reply_context
+
+    rows = conversation()[:2]
+    source = {"address": "row:1@source#0123456789ab", "author": "Ouroboros", "text": "North trail. South gate.",
+              "attachments": [{"name": "map.pdf", "mime": "application/pdf", "size": 55}]}
+    _append_reply_context(rows, {**source, "excerpt": {"text": "North trail", "start_utf16": 0}}, None)
+    full = rows[2]
+    rows.append(bound_host_row("owner_words", "First question."))
+    rows.extend(conversation()[2:-2])
+    _append_reply_context(rows, {**source, "excerpt": {"text": "South gate", "start_utf16": 13}}, None)
+    rows.append(bound_host_row("owner_words", "Second question."))
+    rows.append({"role": "assistant", "content": "Current tail."})
+    assert rows[-3][REPLY_SOURCE_SHA_KEY] == full[HOST_TEXT_SHA_KEY]
+    kept, receipt = physical_window_cut(rows, drive_root=tmp_path, task_id="shared-source",
+                                       measure=estimate_context_prompt_tokens,
+                                       usable=estimate_context_prompt_tokens(rows) // 2)
+    assert receipt and full in kept and "map.pdf" in full["content"]
+    assert kept[-3:] == rows[-3:] and 2 not in receipt["positions"]
+    assert json.loads(read_actor_source_bytes(tmp_path, "shared-source", receipt["source"])) == rows
+
+
 def test_physical_cut_keeps_fresh_reply_citation_and_never_bisects_an_older_reply(tmp_path):
     old_quote = bound_host_row('reply_citation', 'An old citation.' * 800)
     old_words = bound_host_row('owner_words', 'My old reply.' * 100)

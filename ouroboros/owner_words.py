@@ -870,7 +870,7 @@ def _chat_words(row: Mapping[str, Any], *, key: str, carrier: str, source: str, 
     reference, (block, asker) = _mapping(row.get("reply_to")), answered_card_source(row, root)
     from ouroboros.answer_facts import card_input
     living = card_input(row, root, source)
-    replied = living.get("reply_to") or answered_card_reply(block, asker) or reply_target(
+    replied = living.get("reply_to") or answered_card_reply(block, asker) or row.get("_owner_reply_target") or reply_target(
         root, reference if root is not None or reference.get("excerpt") else {**reference, "unresolved": True})
     carried = _mapping(row.get("corpus_answer"))
     item = living or {"source": row_source(row, source), "content": owner_text(row),
@@ -1109,7 +1109,7 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
         if isinstance(row, Mapping) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"):
             source_root = row.get("_owner_source_root") or root
             item = card_input(row, source_root)
-            replied = item.get("reply_to") or answered_card_reply(*answered_card_source(row)) or reply_target(
+            replied = item.get("reply_to") or answered_card_reply(*answered_card_source(row)) or row.get("_owner_reply_target") or reply_target(
                 source_root, row.get("reply_to"))
             add({"source": item.get("source") or row_source(row, "owner_mailbox"),
                  "content": item["content"] if item else owner_text(row), "msg_id": str(key),
@@ -1190,13 +1190,13 @@ def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: s
     if row and (row.get("late_answer") or row.get("card_press") or row.get("type") == "quiz_answer"):
         return _chat_words(row, key=reference, carrier=carrier, task_id=task_id, source="origin_message", root=source_root)
     if isinstance(text, str) and text.strip():
-        target = reply_target(source_root, _mapping(row).get("reply_to"))
+        target = _mapping(row).get("_owner_reply_target") or reply_target(source_root, _mapping(row).get("reply_to"))
         return _words_rows({"source": "origin_message", "content": text, "reply_to": target}, carrier=carrier,
                            task_id=task_id, ts=ref.get("ts"), ref=reference)
     if not owner_row(row, source_root, accounts=accounts if str(source_root) == str(drive_root) else None):
         return []
     return _words_rows({**row, "source": "origin_message", "content": row["text"],
-                        "reply_to": reply_target(source_root, row.get("reply_to"))}, carrier=carrier,
+                        "reply_to": row.get("_owner_reply_target") or reply_target(source_root, row.get("reply_to"))}, carrier=carrier,
                        task_id=task_id, ts=row.get("ts"), ref=reference)
 
 

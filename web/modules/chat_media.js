@@ -747,7 +747,7 @@ export function createChatMedia({
         return caption.trim() && msg.row_address?.startsWith('row:') && !msg.text_placeholder
             && (msg.role === 'assistant' || msg.role === 'user')
             ? ` data-reply-caption data-row-address="${escapeHtmlAttr(msg.row_address)}"`
-                + ` data-source-ts="${escapeHtmlAttr(msg.ts || '')}" data-source-author="${escapeHtmlAttr(messageSender(msg, msg.role))}"`
+                + ` data-source-ts="${escapeHtmlAttr(msg.ts || '')}" data-source-author="${escapeHtmlAttr(msg.reply_author_label || messageSender(msg, msg.role))}"`
             : '';
     }
 

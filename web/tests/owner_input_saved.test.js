@@ -631,7 +631,8 @@ test('after a host restart a kept send meets its saved row: delivery not confirm
         assert.deepEqual(reloaded.notes('cm-3')[0].textContent, 'Input saved');
         assert.deepEqual(reloaded.actions('cm-3'), []);
         assert.equal(reloaded.actions('cm-2').length, 2, 'the one the host never saw is still in doubt with its actions');
-        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-2', 'cm-3']);
+        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-1', 'cm-2', 'cm-3']);
+        assert.equal(tab.kept()[0].deliveryUnknown, true);
 
         // The pending row after a restart: the host no longer knows; the doubt replaces Input saved.
         tab.host.history = [tab.row('cm-1', reloadWords, { restarted: true }), tab.row('cm-3', pendingWords, { restarted: true })];
@@ -654,15 +655,18 @@ test('after a host restart a kept send meets its saved row: delivery not confirm
         reloaded.press('cm-1', 'Send as new');
         assert.equal(document.activeElement, document.byId.get('chat-input'), 'the composer is focused');
         assert.deepEqual(reloaded.sent.map((item) => item.frame.client_message_id), ['cm-2'], 'preparing the composer sends nothing');
-        assert.deepEqual(tab.kept(), []);
+        assert.ok(tab.kept().every(entry => entry.deliveryUnknown), 'the tab keeps all saved delivery doubts');
         assert.equal(reloaded.instance.hasPendingWork(), false);
         reloaded.instance.destroy();
 
-        // Nothing is kept any more: the next read shows these rows as history, like every other saved row.
+        // The next read keeps the warning and recovery action, including for rows absent from this history page.
         tab.host.history = [tab.row('cm-1', reloadWords, { restarted: true })];
         const later = tab.open();
-        await until(() => later.notes('cm-1').length === 1, 'history replays');
-        assert.deepEqual(later.notes('cm-1').map((node) => node.textContent), ['Input saved']);
+        await until(() => later.asNew('cm-1').length === 1, 'history replays the kept doubt');
+        assert.deepEqual(later.notes('cm-1').map((node) => node.textContent), [DOUBT]);
+        assert.deepEqual(later.retries('cm-1'), []);
+        later.echo('cm-1', reloadWords);
+        assert.deepEqual(tab.kept().map(entry => entry.frame.client_message_id), ['cm-2', 'cm-3']);
     } finally { tab.close(); }
 });
 
@@ -771,7 +775,7 @@ test('an echo sent before a deferred dispatch waits; a close offers Send again, 
         assert.deepEqual(room.notes('cm-2').map((node) => node.textContent), [DOUBT]);
         assert.deepEqual(room.retries('cm-2'), []);
         assert.equal(room.asNew('cm-2').length, 1, 'the doubt keeps its one action');
-        assert.deepEqual(tab.kept(), []);
+        assert.deepEqual(tab.kept().map(entry => [entry.frame.client_message_id, entry.deliveryUnknown]), [['cm-2', true]]);
         assert.equal(room.instance.hasPendingWork(), false);
     } finally { tab.close(); }
 });

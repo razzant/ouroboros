@@ -43,6 +43,7 @@ RETURN_FACTS_KIND = "return_facts"
 # production. Only a row whose text still matches is retirable host state; a row written
 # before this binding, or changed since (an old merge), stays whole for the mind to fold.
 HOST_TEXT_SHA_KEY = "_host_text_sha256"
+REPLY_SOURCE_SHA_KEY = "_reply_source_sha256"  # A selection depends on this exact full-source host row.
 
 
 def bound_host_row(kind: str, text: str) -> Dict[str, Any]:

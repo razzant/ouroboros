@@ -148,11 +148,28 @@ function bodyStream(body) {
     return { text, runs, barriers, separators, crossesLost };
 }
 
+// Dragging the handles changes the range, not the rendered body. Mutations invalidate synchronously too:
+// a caller in the same turn as a Markdown/caption write must not see yesterday's coordinates.
+const renderedStreams = new WeakMap();
+function renderedStream(body) {
+    const Observer = body.ownerDocument.defaultView.MutationObserver;
+    if (!Observer) return bodyStream(body);
+    let cached = renderedStreams.get(body);
+    if (!cached) {
+        cached = { stream: null };
+        cached.observer = new Observer(() => { cached.stream = null; });
+        cached.observer.observe(body, { subtree: true, childList: true, characterData: true, attributes: true });
+        renderedStreams.set(body, cached);
+    }
+    if (cached.observer.takeRecords().length) cached.stream = null;
+    return cached.stream ||= bodyStream(body);
+}
+
 export function readExcerpt(row, range) {
     const body = excerptBody(row);
     if (!body || !range || !body.contains(range.startContainer) || !body.contains(range.endContainer)
         || foldHides(range, row)) return null;
-    const stream = bodyStream(body);
+    const stream = renderedStream(body);
     if (stream.barriers.some(node => range.intersectsNode(node))) return null;
     let start = Infinity, end = 0;
     for (const { node, at, from, to } of stream.runs) {
@@ -177,7 +194,7 @@ export function readExcerpt(row, range) {
 export function excerptRange(row, excerpt) {
     const body = excerptBody(row);
     if (!body || !validExcerpt(excerpt)) return null;
-    const stream = bodyStream(body), start = excerpt.start_utf16, end = start + excerpt.text.length;
+    const stream = renderedStream(body), start = excerpt.start_utf16, end = start + excerpt.text.length;
     if (stream.text.slice(start, end) !== excerpt.text || stream.crossesLost(start, end)) return null;
     function boundary(unit, after) {
         const run = stream.runs.find(({ at, from, to }) => at <= unit && unit < at + to - from);

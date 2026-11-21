@@ -97,7 +97,7 @@ def _stamp_owner_delivery(
 
 
 def _append_reply_context(messages, target, owner_ctx):
-    from ouroboros.context_budget import HOST_TEXT_SHA_KEY, REPLY_CITATION_KIND, bound_host_row, host_row_intact
+    from ouroboros.context_budget import HOST_TEXT_SHA_KEY, REPLY_CITATION_KIND, REPLY_SOURCE_SHA_KEY, bound_host_row, host_row_intact
     from ouroboros.dialogue_provenance import excerpt_citation
 
     if citation := excerpt_citation(target):
@@ -113,6 +113,7 @@ def _append_reply_context(messages, target, owner_ctx):
                    and row.get(HOST_TEXT_SHA_KEY) == source[HOST_TEXT_SHA_KEY] and host_row_intact(row) for row in messages):
             messages.append(source)
         _loop()._append_or_merge_user_message(messages, citation, slot=owner_ctx, kind=REPLY_CITATION_KIND)
+        messages[-1][REPLY_SOURCE_SHA_KEY] = source[HOST_TEXT_SHA_KEY]
 
 
 def _owner_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:

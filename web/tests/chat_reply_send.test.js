@@ -11,12 +11,13 @@ const ME = 'session-me';
 const TS = '2026-10-16T09:40:00Z';
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
-function fixture({ savedReply, onSend } = {}) {
+function fixture({ savedReply, keptSends, onSend } = {}) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history') ? { messages: [], window: { complete: true } }
             : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true } }));
     globalThis.sessionStorage.setItem('ouro_chat_session_id', ME);
     if (savedReply) globalThis.sessionStorage.setItem('ouro_chat_reply', JSON.stringify(savedReply));
+    if (keptSends) globalThis.sessionStorage.setItem('ouro_chat_unconfirmed', JSON.stringify(keptSends));
     const handlers = new Map();
     const sent = [];
     let coined = 0;
@@ -135,6 +136,8 @@ test('a saved row an ended host took says delivery not confirmed, and Send as ne
         f.echo(frame.client_message_id, 'restart the audit', { ingress_dispatched: undefined });
         assert.deepEqual(f.notes(mine).map((note) => note.textContent), ['Saved; delivery not confirmed.']);
         assert.deepEqual(f.actions(mine), ['Send as new'], 'nothing replays; the one honest step is a new message');
+        assert.equal(f.kept()[0].deliveryUnknown, true);
+        assert.equal(f.instance.hasPendingWork(), false, 'a saved delivery doubt is not pending work');
         const sentBefore = f.sent.length;
         mine.querySelector('.message').textContent = 'restart the audit';  // the stub DOM keeps no bubble words
         document.byId.get('chat-input').value = 'my plain draft';
@@ -142,6 +145,52 @@ test('a saved row an ended host took says delivery not confirmed, and Send as ne
         assert.equal(document.activeElement, document.byId.get('chat-input'), 'the composer takes focus');
         assert.equal(document.activeElement.value, 'my plain draft\n\nrestart the audit', 'ordinary text-only recovery joins ordinary words');
         assert.equal(f.sent.length, sentBefore, 'preparing sends nothing');
+    } finally { f.close(); }
+});
+
+test('a selected reply keeps its delivery doubt and recovery through two reloads, even without history', async () => {
+    const savedReply = { address: 'row:1@source#0123456789ab', role: 'user', author_label: 'Mira',
+        excerpt: { text: 'north gate', start_utf16: 12 } };
+    let f = fixture({ savedReply });
+    let kept;
+    try {
+        await f.send('Which gate?');
+        const frame = f.sent.at(-1).frame;
+        f.echo(frame.client_message_id, frame.content, { ingress_dispatched: undefined, reply_to: savedReply });
+        kept = f.kept();
+    } finally { f.close(); }
+    for (let reload = 0; reload < 2; reload += 1) {
+        f = fixture({ keptSends: kept });
+        try {
+            for (let n = 0; n < 100 && !f.bubbleOf(node => node.dataset.clientMessageId === kept[0].frame.client_message_id); n += 1) {
+                await new Promise(resolve => setTimeout(resolve, 5));
+            }
+            const bubble = f.bubbleOf(node => node.dataset.clientMessageId === kept[0].frame.client_message_id);
+            assert.ok(bubble);
+            assert.deepEqual(f.actions(bubble), ['Send as new']);
+            assert.ok(f.notes(bubble)[0].textContent.startsWith('Saved; delivery not confirmed.'));
+            assert.equal(f.sent.length, 0);
+            assert.equal(f.instance.hasPendingWork(), false);
+            if (reload === 1) {
+                bubble.querySelector('.message').textContent = 'Which gate?';
+                bubble.querySelector('[data-unconfirmed-action="send_as_new"]').click();
+                assert.equal(document.byId.get('chat-input').value, 'Which gate?');
+                assert.deepEqual(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).excerpt, savedReply.excerpt);
+                f.echo(kept[0].frame.client_message_id, 'Which gate?');
+                assert.deepEqual(f.kept(), [], 'a confirmed dispatch settles the stored delivery doubt');
+            } else kept = f.kept();
+        } finally { f.close(); }
+    }
+});
+
+test('a reply stages the speaker projected by the host rather than its generic displayed sender', async () => {
+    const f = fixture();
+    try {
+        f.fire('chat', { role: 'user', chat_id: 1, ts: TS, content: 'Meet at noon.',
+            row_address: 'row:1@mira#0123456789ab', reply_author_label: 'Mira' });
+        const source = f.bubbleOf(node => node.dataset.rowAddress === 'row:1@mira#0123456789ab');
+        replyButton(source).click();
+        assert.equal(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).author_label, 'Mira');
     } finally { f.close(); }
 });
 
