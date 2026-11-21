@@ -136,7 +136,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "Omit write_surface or use read_only. Checked for caller and child before queueing; [] reports an empty "
             "receipt. API children read each copy with read_file. The first session start verifies retained bytes "
             "unless it explicitly replaces the selection."),
-        "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
+        "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree, directly or by applying its own children's patches. Pro runtime mode needs it, Cyber Pro does not, lower modes refuse either way; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {
             "type": "array", "items": {"type": "string"},

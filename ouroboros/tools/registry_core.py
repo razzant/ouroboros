@@ -28,7 +28,6 @@ from ouroboros.runtime_mode_policy import (
     core_patch_notice,
     mode_allows_protected_write,
     mode_has_unrestricted_agency,
-    runtime_mode_at_least,
     protected_paths_in,
     protected_write_block_message,
 )
@@ -1178,7 +1177,7 @@ class ToolRegistry:
         local_readonly_subagent = self._is_local_readonly_subagent()
         acting_subagent = self._is_acting_subagent()
         acting_self_worktree = acting_subagent and str(getattr(task_constraint, "surface", "") or "") == "self_worktree"
-        from ouroboros.workspace_copies import is_system_copy
+        from ouroboros.workspace_copies import is_system_copy, protected_write_admitted
 
         acting_system_worktree = acting_self_worktree and is_system_copy(self._ctx)
         acting_protected_grant = acting_subagent and bool(getattr(task_constraint, "protected_paths_grant", False))
@@ -1367,11 +1366,9 @@ class ToolRegistry:
             protected_matches = protected_paths_in(tool_resolution.protected_repo_write_paths(
                 self._ctx, name, args, resolved_binding,
                 workspace_mode=workspace_mode, acting_system_worktree=acting_system_worktree))
-            allow_protected = registry_guards._authorized_managed_update_resolver(self._ctx) or (
-                mode_allows_protected_write(_runtime_mode)
-                and (acting_protected_grant or not acting_subagent
-                     or runtime_mode_at_least(_runtime_mode, "cyber_pro"))
-            )
+            # The one protected-path rule, shared with the three integration doors (owner decision 6A).
+            allow_protected = registry_guards._authorized_managed_update_resolver(self._ctx) or protected_write_admitted(
+                _runtime_mode, acting=acting_subagent, grant=acting_protected_grant)
             if protected_matches and not allow_protected:
                 first = protected_matches[0]
                 return _protected_write_block_result(
