@@ -2,7 +2,7 @@
 
 Connectors supply facts and identity; the mind judges. Focus voice, owner match, Safety and delivery use the
 event snapshot; other Safety/own wakes use the first valid identity among 50 newest arrivals. Browser status is
-account-scoped (§3); server consumers never dispatch connector routes. Only `kind: user` can match account-scoped owner confirmation.
+account-scoped (§3); server consumers never dispatch connector routes, save one post of a built-in skill's setup-card options its owner consented to (`onboarding_connections`). Only `kind: user` can match account-scoped owner confirmation.
 Identity never enters `places.json` (wire, label compatibility: CREATING_SKILLS). Silent can wake.
 
 ### Host Service boundary

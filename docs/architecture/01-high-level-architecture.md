@@ -374,7 +374,7 @@ ouroboros/ — agent core and shared runtime (§6)
   presence_call.py, presence_events.py — Presence call admission and shared event identity (§12)
   realtime_turn.py, realtime_setup.py, realtime_credentials.py — call route evidence, host-selected provider input and the one credential capture a session prepares and opens with (§13)
   skill_token.py — Opaque Host Service token minting/validation (§12)
-  skill_sources.py, skill_source_git.py, skill_source_catalog.py, skill_source_install.py, skill_starter.py — Sources, git caches, catalogs, install lifecycle, starter (§13)
+  skill_sources.py, skill_source_git.py, skill_source_catalog.py, skill_source_install.py, skill_starter.py, onboarding_connections.py — Sources, git caches, catalogs, install lifecycle, starter, setup cards (§13)
   marketplace/ — ClawHub and install substrate (§13)
     clawhub.py, fetcher.py, adapter.py, install.py, install_specs.py, isolated_deps.py, provenance.py — Registry, fetch, adaptation, install specs, isolated deps, receipts
   skill_lifecycle_queue.py — Single FIFO skill-mutation lane and event snapshot (§13)

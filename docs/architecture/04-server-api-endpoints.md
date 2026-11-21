@@ -79,6 +79,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/onboarding/complete` | |
 | POST | `/api/onboarding/subagents/preview` | |
 | POST | `/api/onboarding/model-catalog` | draft's access, nothing saved |
+| POST | `/api/onboarding/connection/identity` | |
 | GET | `/api/settings` | effects, tokens (§7) |
 | POST | `/api/settings` | origin, conditions, receipt (§7) |
 | POST | `/api/settings/secret` | |
