@@ -1,0 +1,247 @@
+# One-off qualification for the accepted #3172 model-handover fix.
+#
+# This file lives ONLY on qa/handover-successor-3172-r11. It is never part of the
+# product PR, never dispatched from main or any other branch, and pushes nothing:
+# it checks out the exact frozen product commit (which does NOT contain this
+# file, enforced below) and runs a bounded, targeted suite against it.
+#
+# Materialize by substituting the literal placeholders everywhere they appear:
+#   59509a6959a2cf7bb86f483cc417217a29ef7fa0  product commit under test (HEAD of the frozen fix)
+#   728e4496e2bb684c2b705dbc933825c831000c0d that commit's root tree id
+#   82fa6e154fcd16ed5daefa99bde3ac100756484a       the ratchet/reference base the candidate is compared to
+name: Model handover successor - targeted qualification (branch only)
+'on':
+  push:
+    branches: [qa/handover-successor-3172-r11]
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  targeted:
+    name: targeted (${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: linux, interpreter: shipped}
+          - {os: windows-latest, leg: windows, interpreter: setup-python}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: '59509a6959a2cf7bb86f483cc417217a29ef7fa0'
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      # Rooted proof that the tree tested is exactly the frozen product commit, that
+      # it is clean, and that the product commit does not carry this workflow.
+      - name: Verify the exact frozen candidate after setup
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          printf 'candidate HEAD: %s\ncandidate tree: %s\n' "$actual_sha" "$actual_tree"
+          test "$actual_sha" = '59509a6959a2cf7bb86f483cc417217a29ef7fa0'
+          test "$actual_tree" = '728e4496e2bb684c2b705dbc933825c831000c0d'
+          test "$(git rev-parse HEAD^)" = '82fa6e154fcd16ed5daefa99bde3ac100756484a'
+          git diff --quiet --
+          git diff --cached --quiet --
+          test ! -e .github/workflows/qa-handover-successor-3172.yml
+      # Text/hash selection after one reminder, saved/replayed completion, genuine Stop,
+      # distinct warnings, and the working checkpoint with its adjacent resume readers.
+      - name: Targeted handover, completion and checkpoint tests
+        timeout-minutes: 30
+        run: >-
+          python -m pytest -o addopts= -q --tb=short --timeout=600
+          tests/test_authoring_handover.py
+          tests/test_authoring_handover_loop.py
+          tests/test_completion_hold_observation.py
+          tests/test_forced_completion_request.py
+          tests/test_working_checkpoint.py
+          tests/test_resume_handover.py
+          tests/test_handover_native_reset.py
+          tests/test_owner_model_custody.py
+          tests/test_reasoning_binding_sends.py
+      - name: Adjacent task history projection checks
+        timeout-minutes: 10
+        run: >-
+          python -m pytest -o addopts= -q --tb=short --timeout=300
+          tests/test_conversation_activity_block.py::test_terminal_truth_carries_the_direct_turn_fact
+          tests/test_consciousness_initiator_label.py::test_the_initiator_survives_the_chat_row_the_summary_row_and_replay
+          tests/test_chat_history_quotas.py::test_history_projects_terminal_review_truth_only_on_existing_summary
+          tests/test_gateway_history.py::test_chat_history_settles_a_card_from_the_reviews_row_it_stamps_with_canonical_truth
+      - name: Structural docs, domain and inventory checks
+        timeout-minutes: 10
+        run: >-
+          python -m pytest -o addopts= -q --tb=short --timeout=300
+          tests/test_domain_manifest.py
+          tests/test_domain_report.py
+          tests/test_generated_inventories.py
+          tests/test_architecture_facts.py
+          tests/test_docs_sync.py
+      # Card-side sharing, custody, Continue, handover rendering and the child report.
+      - name: Targeted card and Continue tests (Node)
+        timeout-minutes: 15
+        run: >-
+          node --test
+          web/tests/task_detail_read_sharing.test.js
+          web/tests/card_detail_read_custody.test.js
+          web/tests/task_continue.test.js
+          web/tests/model_handover_details.test.js
+          web/tests/task_presentation.test.js
+          web/tests/task_episodes.test.js
+          web/tests/child_report_label.test.js
+          web/tests/chat_history_reveal.test.js
+          web/tests/liveness_scan.test.js
+          web/tests/wire_contract.test.js
+          web/tests/review_presentation.test.js
+          web/tests/reason_detail.test.js
+          web/tests/chat_history_replay.test.js
+          web/tests/review_truth.test.js
+      # Exactly the seven `size_ratchet` checks: 4 in test_smoke, 1 in
+      # test_repo_health_smoke, 2 in test_reference_book_budgets.
+      - name: Targeted size ratchet (7 checks)
+        timeout-minutes: 15
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: '82fa6e154fcd16ed5daefa99bde3ac100756484a'
+        run: >-
+          python -m pytest -o addopts= -q --tb=short -m size_ratchet
+          tests/test_repo_health_smoke.py
+          tests/test_reference_book_budgets.py
+          tests/test_smoke.py
+
+  browser-witness:
+    name: browser witness (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: '59509a6959a2cf7bb86f483cc417217a29ef7fa0'
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+        id: setup_python
+      - name: Verify the exact frozen candidate after setup
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          printf 'candidate HEAD: %s\ncandidate tree: %s\n' "$actual_sha" "$actual_tree"
+          test "$actual_sha" = '59509a6959a2cf7bb86f483cc417217a29ef7fa0'
+          test "$actual_tree" = '728e4496e2bb684c2b705dbc933825c831000c0d'
+          test "$(git rev-parse HEAD^)" = '82fa6e154fcd16ed5daefa99bde3ac100756484a'
+          git diff --quiet --
+          git diff --cached --quiet --
+          test ! -e .github/workflows/qa-handover-successor-3172.yml
+      # The reviewed Node, Playwright's packages and both engines, with every download
+      # bounded and one retry (the same helper the UI lane uses).
+      - name: Install Chromium and WebKit
+        id: install_browsers
+        if: ${{ success() && steps.setup_python.outcome == 'success' }}
+        timeout-minutes: 70
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      # 7 real-browser nodes = 3 WebKit + 4 Chromium:
+      #   open_details[webkit|chromium], folded_child[webkit|chromium],
+      #   exact_row_reference[chromium], episode_content[chromium|webkit].
+      - name: Run the targeted real-browser handover witness
+        id: browser
+        if: ${{ success() && steps.install_browsers.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          OUROBOROS_BROWSER_EVIDENCE_OUT: ${{ runner.temp }}/browser-evidence/handover
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/browser-evidence/episodes
+        run: |
+          set -euo pipefail
+          nodes=(
+            "tests/test_model_handover_details_browser.py::test_open_details_show_the_settled_model_handover"
+            "tests/test_model_handover_details_browser.py::test_folded_settled_child_reads_detail_only_when_revealed"
+            "tests/test_model_handover_details_browser.py::test_exact_row_reference_reads_open_details"
+            "tests/test_task_episode_history_browser.py::test_physical_episode_content_survives_continue"
+          )
+          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/browser" \
+            -- python -m pytest "${nodes[@]}" -m ui_browser -q --tb=short --timeout=900 \
+               --junitxml="${{ runner.temp }}/ci-private/browser.xml"
+      # Grade the run before publishing: exactly 7 nodes, none skipped, none failed, and
+      # the desktop+phone screenshots present for BOTH engines. Only curated bytes leave.
+      - name: Require and curate the browser witness
+        id: curate
+        if: ${{ success() && steps.browser.outcome == 'success' }}
+        env:
+          JUNIT: ${{ runner.temp }}/ci-private/browser.xml
+          HANDOVER: ${{ runner.temp }}/browser-evidence/handover
+          EPISODES: ${{ runner.temp }}/browser-evidence/episodes
+          CURATED: ${{ runner.temp }}/curated
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, shutil, xml.etree.ElementTree as ET
+          junit, handover, episodes, curated = (os.environ["JUNIT"], os.environ["HANDOVER"],
+                                                os.environ["EPISODES"], os.environ["CURATED"])
+          root = ET.parse(junit).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          def total(name):
+              return sum(int(s.get(name, 0)) for s in suites)
+          tests, failures, errors, skipped = total("tests"), total("failures"), total("errors"), total("skipped")
+          print(f"browser nodes: tests={tests} failures={failures} errors={errors} skipped={skipped}")
+          assert tests == 7, f"expected the 7 targeted browser nodes, got {tests}"
+          assert failures == 0 and errors == 0, "a targeted browser node failed"
+          assert skipped == 0, "a targeted browser node was skipped; a skip is not evidence"
+          os.makedirs(curated, exist_ok=True)
+          for engine in ("chromium", "webkit"):
+              for size in ("desktop", "phone"):
+                  name = f"handover-{engine}-{size}.png"
+                  path = os.path.join(handover, name)
+                  assert os.path.isfile(path) and os.path.getsize(path) > 0, f"missing or empty witness {name}"
+                  shutil.copy2(path, os.path.join(curated, name))
+          for engine in ("chromium", "webkit"):
+              for name in ("before.png", "after.png", "reload-narrow.png"):
+                  path = os.path.join(episodes, engine, name)
+                  assert os.path.isfile(path) and os.path.getsize(path) > 0, f"missing episode witness {name} for {engine}"
+                  shutil.copy2(path, os.path.join(curated, f"episode-{engine}-{name}"))
+          with open(os.path.join(curated, "summary.txt"), "w", encoding="utf-8") as fh:
+              fh.write("targeted #3172 browser witness\n")
+              fh.write("candidate: 59509a6959a2cf7bb86f483cc417217a29ef7fa0\ntree: 728e4496e2bb684c2b705dbc933825c831000c0d\n")
+              fh.write(f"nodes: {tests} tests, {failures} failed, {errors} errored, {skipped} skipped\n")
+              fh.write("handover: desktop+phone screenshots for chromium and webkit\n")
+              fh.write("episode: before, after and narrow reload frames per engine\n")
+          PY
+      - name: Upload curated browser witness
+        if: ${{ success() && steps.curate.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: handover-3172-browser-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/curated
+          retention-days: 14
+          if-no-files-found: error
