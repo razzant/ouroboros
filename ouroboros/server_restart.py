@@ -685,8 +685,8 @@ def _shutdown_task_cleanup_args(restart_requested: bool, stop_source: str | None
     if stop_source is None:
         from ouroboros.server_process import server_stop_source
         stop_source = server_stop_source()
-    words = {"launcher_quit": "the application was quit", "launcher_gone": "the application that started it ended"
-             }.get(stop_source, "external stop/restart signal")
+    words = {"launcher_quit": "the application was quit", "launcher_gone": "the application that started it ended",
+             "external_signal": "external stop/restart signal"}.get(stop_source, "the server stopped")
     return "cancelled", (f"Server shut down ({words}) before this task finished; "
                          "the task was interrupted, not a worker crash.")
 
