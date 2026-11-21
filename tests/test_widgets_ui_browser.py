@@ -1205,6 +1205,19 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     assert '"record": 9007199254740993' in rows.nth(index).locator(".part pre").inner_text()
                 assert inner.evaluate("() => window.formatted") == 2
                 assert "9007199254740993" in frame.locator("#request dl").inner_text()
+                # A secret masked in a row marks that row alone, however deep its path runs ("[1]" is not "[10]"); an
+                # exclusion of another class marks nothing, and a section that is no list is marked whole.
+                paths = ("$.messages[1].content[0].text", "$.messages[10]", "$.tools[1].function.name", "$.system.x")
+                masked_rows = {"messages": [{"role": "user", "content": f"m{index}"} for index in range(12)],
+                               "tools": [{"name": "a"}, {"name": "b"}], "system": "be brief"}
+                choose(json.dumps({"format": "ouroboros.context-report/1", "stored_json": json.dumps(masked_rows), "facts": {
+                    "task_id": "report-task", "attempt_id": "masked-rows", "body": "redacted_host_candidate",
+                    "host_exclusions": [{"class": "secret_redaction", "path": path} for path in paths]
+                                       + [{"class": "provider_native_custody", "path": "$.messages[2]"}]}}).encode("utf-8"),
+                       "masked-rows", "#attempt-facts")
+                for kind, marked in (("messages", [1, 10]), ("tools", [1]), ("system", [0])):
+                    heads = frame.locator(f"#request .rows[data-kind='{kind}'] > .row summary")
+                    assert [at for at in range(heads.count()) if "secret masked" in heads.nth(at).inner_text()] == marked, kind
                 # A report of a gap says which gap at the top; an earlier /1 report without the later facts opens.
                 choose(reports["over_limit"], "larger than this report", "#headline")
                 gap_reads_without_opening(f"--max-bytes {len(stored.encode('utf-8'))}")

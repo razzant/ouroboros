@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-73dLTlWKiwGY+efViDci0R//7oXcHtwj70Y6KsMzWd0='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-gSSKDIBb1SN5paNDohdKtNbxlgNPei3OFsYYBQWwDrY='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -360,7 +360,7 @@ function section(title, key, masked) {
     const head = element('summary');
     const [role, said] = rowWords(item, key);
     const path = `$.${key}${Array.isArray(body[key]) ? `[${index}]` : ''}`;
-    const hidden = masked.some((at) => at === path || at.startsWith(`${path}.`) || at.startsWith(`${path}[`));
+    const hidden = masked.has(path);
     head.append(element('span', 'meta', String(index + 1)), element('span', 'role', role),
       element('span', 'what', said.slice(0, 240).split('\n', 1)[0]),
       element('span', 'meta how', size(JSON.stringify(item).length) + (hidden ? ' · secret masked' : '')));
@@ -393,6 +393,8 @@ function add(label, value) {
 }
 const SECTIONS = [['system', 'System'], ['instructions', 'Instructions'], ['messages', 'Messages'], ['input', 'Input'],
   ['tools', 'Tools'], ['functions', 'Functions']];
+// The row of a request that an exclusion's path begins with: its section ("$.messages") and, in a list, the item's index.
+const ROW_OF = /^(\$\.\w+)(\[\d+\])?(?=$|[.[])/;
 // The reader's own command that writes a request this page cannot open to a file for another tool.
 // An ID from the opened file enters that command only as a plain word, never as shell syntax or an option.
 const word = (value, placeholder) => (typeof value === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(value) ? value : placeholder);
@@ -448,8 +450,13 @@ function show(facts, name) {
   byId('stored-note').textContent = absent ? '' : `One line of ${count(source.length)} characters, exactly as recorded.`;
   if (!absent) {
     add('Stored request', `${Number.isInteger(facts.bytes) ? bytes(facts.bytes) : size(source.length)} of JSON`);
-    const masked = (Array.isArray(facts.host_exclusions) ? facts.host_exclusions : [])
-      .map((row) => (isRecord(row) && row.class === 'secret_redaction' && typeof row.path === 'string' ? row.path : '')).filter(Boolean);
+    // The rows a masked secret lies in ("$.messages[3]", or "$.system" for one that is no list), indexed once for this
+    // report: a row asks the set, never the whole list of exclusions.
+    const masked = new Set();
+    for (const row of Array.isArray(facts.host_exclusions) ? facts.host_exclusions : []) {
+      const at = isRecord(row) && row.class === 'secret_redaction' && typeof row.path === 'string' ? ROW_OF.exec(row.path) : null;
+      if (at) { masked.add(at[1]); if (at[2]) masked.add(at[1] + at[2]); }
+    }
     for (const [key, title] of SECTIONS) if (key in body) section(title, key, masked);
     const rest = Object.entries(body).filter(([key]) => !SECTIONS.some(([known]) => known === key));
     if (rest.length) {
