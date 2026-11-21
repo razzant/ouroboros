@@ -106,7 +106,7 @@
 /**
  * @typedef {Object} WorkTail
  * @property {string} kind  // helper | run | review | model
- * @property {string} state  // live | unknown | held (a helper a sleeping episode chose, paused until its Resume)
+ * @property {string} state  // live | unknown | open (an observed inactive run) | held (a paused helper)
  * @property {string} code
  * @property {string} text  // its English sentence, said beside the work's word, never as it
  * @property {number=} count
@@ -133,9 +133,24 @@
  * @property {boolean} live
  */
 /**
+ * @typedef {Object} WorkMemberState
+ * @property {"working"|"queued"|"waiting"|"paused"|"unknown"} activity
+ * @property {"none"|"finalizing"|"pausing"} transition
+ * @property {""|"preparing"|"sending"|"thinking"|"working"} call
+ * @property {boolean} live  // this task executes, independent of its external runs
+ * @property {"self"|"owner"|"mind"|"none"} release
+ * @property {boolean} confirmed
+ * @property {Array<WorkTurn>} turn
+ * @property {Array<WorkReason>} because
+ * @property {Array<WorkTail>} tails  // only this task's runs, reviews and model handoffs
+ * @property {string} mark  // the member's own mark, independent of its tails
+ * @property {number=} queue_attempt  // observed queue ordinal of this member's state, not an executor ordinal
+ * @property {LastResume=} last_resume
+ */
+/**
  * @typedef {Object} WorkMembers
  * @property {Array<string>} ids  // every member task id (episode roots and helpers): a card of another id re-reads the state
- * @property {Object<string, Object>=} states  // the same server classification for each Activity row
+ * @property {Object<string, WorkMemberState>=} states  // keyed by the exact member task id
  */
 /**
  * @typedef {Object} WorkFocus

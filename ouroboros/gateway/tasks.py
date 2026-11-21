@@ -1422,7 +1422,7 @@ async def api_task_resume(request: Request) -> JSONResponse:
     # exists (Panic's owner-only hold, an unresumable stop, a selection still to observe, money, custody...).
     status = 404 if error in {"task_not_pending", "missing_task_id"} else 409
     return JSONResponse({"error": error, "task_id": task_id, **{key: result[key] for key in (
-                             "action", "blockers", "message", "acceptable_unknown") if result.get(key)}},
+                             "action", "blockers", "message", "refusal_basis", "acceptable_unknown") if result.get(key)}},
                         status_code=status)
 
 
