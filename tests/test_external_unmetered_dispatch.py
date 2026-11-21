@@ -697,7 +697,10 @@ def test_windows_job_assignment_failure_retires_through_the_same_owner(tmp_path,
 @pytest.mark.parametrize("finale", ["panic", "retry"])
 def test_loader_rollback_keeps_unconfirmed_companion_until_death(tmp_path, monkeypatch, windows, finale):
     """register -> publish -> start fails -> load_extension's unload -> stop keeps the owner."""
+    from dataclasses import replace
+
     from ouroboros import extension_loader, extension_plugin_api
+    from ouroboros.gateway.extensions import _build_extensions_index
     from tests._extension_loader_shared import _prepare_extension
     from tests._shared import clean_extension_runtime_state
 
@@ -707,36 +710,59 @@ def test_loader_rollback_keeps_unconfirmed_companion_until_death(tmp_path, monke
     ledger = {"down": True}
     spawned, jobs = _isolate_companion_platform(monkeypatch, windows=windows, honours_kill=[False, True],
                                                 ledger=ledger)
-    supervisor = CompanionSupervisor(tmp_path / "companions")
-    for module in (extension_plugin_api, extension_loader):
-        monkeypatch.setattr(module, "get_global_supervisor", lambda: supervisor)
     # Only the spawn env is synthetic (model-capable); the registration and rollback are real.
     monkeypatch.setattr(extension_plugin_api, "companion_spawn_env",
                         lambda *_args, **_kwargs: {"OPENROUTER_API_KEY": "test-provider-key"})
-    loaded, _repo, drive_root = _prepare_extension(
+    loaded, repo, drive_root = _prepare_extension(
         tmp_path, "unmetered", "def register(api):\n    api.register_companion_process('daemon')\n",
         permissions=["companion_process"],
         extra_frontmatter="companion_processes:\n  - name: daemon\n    runtime: python3\n"
                           "    command: [\"python3\", \"scripts/daemon.py\"]\n",
     )
 
-    def load():
-        return extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root, _force_in_process=True)
+    supervisor = CompanionSupervisor(drive_root)
+    monkeypatch.setattr(companion_mod, "_GLOBAL_SUPERVISOR", supervisor)
+
+    def reconcile(*, revert=False):
+        return extension_loader.reconcile_extension(loaded.name, drive_root, lambda: {}, repo_path=str(repo),
+                                                    retry_load_error=True, revert_enabled_on_error=revert,
+                                                    health_stamp=("test", "test-sha"))
+
+    def listed():
+        return next(row for row in _build_extensions_index(drive_root, str(repo))["skills"]
+                    if row["name"] == loaded.name)
 
     try:
-        assert "ledger down" in load()
-        assert "replacement refused" in load()  # the rollback kept the owner: no duplicate spawn
+        failed = reconcile()
+        assert "ledger down" in failed["load_error"]
+        with monkeypatch.context() as passive:
+            passive.setattr(spawned[0], "poll", lambda: pytest.fail("listing polled the retained process"))
+            row = listed()
+            other = replace(loaded, skill_dir=tmp_path / "another-bucket" / loaded.name)
+            sibling = extension_loader.runtime_state_for_loaded_skill(other, drive_root, skills=[other])
+            assert sibling["desired_live"] and sibling["reason"] == "ready" and "retained_companions" not in sibling
+        assert row["enabled"] and not row["live_loaded"] and row["live_reason"] == "load_error"
+        assert row["load_error"] == failed["load_error"]
+        assert row.get("retained_companions") == {"daemon": "cost disclosure failed"}
+        assert failed.get("retained_companions") == row["retained_companions"]
+        assert row["health_observations"]["server"]["retained_companions"] == row["retained_companions"]
+        assert "replacement refused" in reconcile(revert=finale == "panic")["load_error"]  # no duplicate spawn
         assert len(spawned) == 1 and supervisor.snapshot()["unmetered:daemon"]["pid"] == 20001
         assert spawned[0].kill_requests >= 2 and jobs["closed"] == []
         if finale == "panic":
+            row = listed()
+            assert not row["enabled"] and not row["live_loaded"] and "replacement refused" in row["load_error"]
+            assert row["retained_companions"] == {"daemon": "cost disclosure failed"}
             assert supervisor.panic_kill_all(request_only=True) == [
                 {"pid": 20001, "job": "job-0" if windows else None, "requested": True}]
         spawned[0].exited.set()
         _join_companion_monitors()
         assert supervisor.snapshot() == {}
+        row = listed()
+        assert "retained_companions" not in row and "replacement refused" in row["load_error"]
         if finale == "retry":
             ledger["down"] = False
-            assert load() is None
+            assert reconcile()["action"] == "extension_loaded"
             assert supervisor.snapshot()["unmetered:daemon"]["pid"] == 20002
             extension_loader.unload_extension("unmetered")
             _join_companion_monitors()
@@ -752,9 +778,13 @@ def test_loader_rollback_keeps_unconfirmed_companion_until_death(tmp_path, monke
 
 @pytest.mark.parametrize("windows", [False, True])
 def test_reconcile_reports_retained_auto_restart_not_already_running(tmp_path, monkeypatch, windows):
-    """live load -> crash -> auto-restart disclosure fails, kill unconfirmed -> real reconcile consumers."""
+    """live load -> crash -> auto-restart disclosure fails, kill unconfirmed -> the failed restart and the unexited
+    process stay in view -> real reconcile consumers -> a later start closes the failure."""
+    from dataclasses import replace
+
     from ouroboros import extension_health, extension_loader, extension_plugin_api
     from ouroboros.extension_reconcile_queue import process_extension_reconcile_requests, request_extension_reconcile
+    from ouroboros.gateway.extensions import _build_extensions_index
     from tests._extension_loader_shared import _prepare_extension
     from tests._shared import clean_extension_runtime_state
 
@@ -764,19 +794,24 @@ def test_reconcile_reports_retained_auto_restart_not_already_running(tmp_path, m
     ledger = {"down": False}
     spawned, jobs = _isolate_companion_platform(monkeypatch, windows=windows, honours_kill=[True, False, True],
                                                 ledger=ledger)
-    supervisor = CompanionSupervisor(tmp_path / "companions")
-    for module in (extension_plugin_api, extension_loader):
-        monkeypatch.setattr(module, "get_global_supervisor", lambda: supervisor)
     monkeypatch.setattr(extension_plugin_api, "companion_spawn_env",
                         lambda *_args, **_kwargs: {"OPENROUTER_API_KEY": "test-provider-key"})
-    # Reconcile's health stamp would run git through the patched spawn seam.
-    monkeypatch.setattr(extension_health, "fresh_code_stamp", lambda: ("test", "test-sha"))
+    # Reconcile's health stamp and the journal's would run git through the patched spawn seam.
+    for stamp in ("code_stamp", "fresh_code_stamp"):
+        monkeypatch.setattr(extension_health, stamp, lambda: ("test", "test-sha"))
     loaded, repo_root, drive_root = _prepare_extension(
         tmp_path, "restarted", "def register(api):\n    api.register_companion_process('daemon')\n",
         permissions=["companion_process"],
         extra_frontmatter="companion_processes:\n  - name: daemon\n    runtime: python3\n"
                           "    command: [\"python3\", \"scripts/daemon.py\"]\n",
     )
+
+    supervisor = CompanionSupervisor(drive_root)
+    monkeypatch.setattr(companion_mod, "_GLOBAL_SUPERVISOR", supervisor)
+
+    def listed():
+        return next(row for row in _build_extensions_index(drive_root, str(repo_root))["skills"]
+                    if row["name"] == loaded.name)
 
     def reconcile():
         return extension_loader.reconcile_extension(loaded.name, drive_root, lambda: {},
@@ -786,6 +821,7 @@ def test_reconcile_reports_retained_auto_restart_not_already_running(tmp_path, m
         assert extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root,
                                                _force_in_process=True) is None
         assert reconcile() == "already_running"  # healthy counterpart
+        known_good = listed()["last_known_good"]
         first_monitors = [t for t in threading.enumerate() if t.name.startswith("companion-monitor-")]
         ledger["down"] = True
         spawned[0].exited.set()  # unsuccessful exit within budget: the monitor restarts it itself
@@ -795,6 +831,23 @@ def test_reconcile_reports_retained_auto_restart_not_already_running(tmp_path, m
         retained = supervisor.snapshot()["restarted:daemon"]
         assert retained["pid"] == 20002 and retained["retiring"] == "cost disclosure failed"
 
+        before = extension_health.health_path(drive_root, loaded.name).read_bytes()
+        with monkeypatch.context() as passive:
+            passive.setattr(spawned[1], "poll", lambda: pytest.fail("listing polled a process"))
+            row = listed()  # before reconcile: the card already sees the retained runtime
+        assert extension_health.health_path(drive_root, loaded.name).read_bytes() == before
+        restart_failed = "companion 'daemon' exited with code -9 and its automatic restart failed"
+        assert row["live_loaded"] and (row["live_reason"], row["load_error"]) == ("companion_failed:daemon", restart_failed)
+        assert row["retained_companions"] == {"daemon": "cost disclosure failed"}
+        off = extension_loader.runtime_state_for_loaded_skill(replace(loaded, enabled=False), drive_root, skills=[loaded])
+        assert (off["reason"], off["retained_companions"]) == ("disabled", row["retained_companions"])  # Off proves no exit
+        other = replace(loaded, skill_dir=tmp_path / "other")
+        assert "retained_companions" not in extension_loader.runtime_state_for_loaded_skill(other, drive_root,
+                                                                                          skills=[other])
+        with monkeypatch.context() as worker:
+            worker.setattr(companion_mod, "is_server_process", lambda: False)
+            state = extension_loader.runtime_state_for_loaded_skill(loaded, drive_root, skills=[loaded])
+            assert state["process"] == "worker" and "retained_companions" not in state
         assert reconcile() == "retained_unresolved"
         assert extension_loader.ensure_companions_running(
             loaded.name, drive_root, lambda: {}, repo_path=str(repo_root),
@@ -803,20 +856,99 @@ def test_reconcile_reports_retained_auto_restart_not_already_running(tmp_path, m
         request_extension_reconcile(drive_root, loaded.name, reason="retained")
         processed = process_extension_reconcile_requests(drive_root, lambda: {}, repo_path=str(repo_root))
         assert processed[-1]["companions"]["action"] == "retained_unresolved"
+        health = extension_health.read_extension_health(drive_root, loaded.name)
+        assert health["last_observed"]["retained_companions"] == row["retained_companions"]
+        failure = health["companion_failures"]["daemon"]
+        assert health["last_known_good"] == known_good and (failure["returncode"], failure["restart_failed"]) == (-9, True)
         assert len(spawned) == 2 and jobs["closed"] == (["job-0"] if windows else [])  # no duplicate spawn
 
         spawned[1].exited.set()  # observed death settles the retained owner; no automatic restart
         _join_companion_monitors()
         assert supervisor.snapshot() == {} and len(spawned) == 2
+        assert "retained_companions" not in listed() and len(spawned) == 2
         ledger["down"] = False
         assert reconcile() == "started_missing"  # replacement after observed death
         assert supervisor.snapshot()["restarted:daemon"]["pid"] == 20003
         assert supervisor.snapshot()["restarted:daemon"]["retiring"] == ""
         assert reconcile() == "already_running"
+        row = listed()
+        assert row["live_reason"] == "ready" and "retained_companions" not in row["health_observations"]["server"]
+        events = [json.loads(line) for line in (drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8")
+                  .splitlines() if '"extension_companion_' in line]
+        assert [(event["type"], event["returncode"]) for event in events] == [
+            ("extension_companion_restart_failed", -9), ("extension_companion_recovered", -9)]
         extension_loader.unload_extension(loaded.name)
         _join_companion_monitors()
         assert supervisor.snapshot() == {} and len(spawned) == 3
         assert jobs["closed"] == jobs["created"] == (["job-0", "job-1", "job-2"] if windows else [])
+    finally:
+        for proc in spawned:
+            proc.exited.set()
+        _join_companion_monitors()
+        clean_extension_runtime_state()
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_an_off_extension_keeps_its_unexited_companion_in_view_until_its_death(tmp_path, monkeypatch, windows):
+    """live load -> Off -> its stop's kill is not honoured -> the Off row, the reconcile, its health and a package
+    block of the same installed directory name the process awaiting exit; another directory and a worker never do
+    -> its observed death ends that, restarting nothing."""
+    from dataclasses import replace
+
+    from ouroboros import extension_health, extension_liveness, extension_loader, extension_plugin_api
+    from ouroboros.gateway.extensions import _build_extensions_index
+    from ouroboros.skill_loader import save_enabled
+    from tests._extension_loader_shared import _prepare_extension
+    from tests._shared import clean_extension_runtime_state
+
+    init_server_process_pid()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    clean_extension_runtime_state()
+    spawned, jobs = _isolate_companion_platform(monkeypatch, windows=windows, honours_kill=[False],
+                                                ledger={"down": False})
+    monkeypatch.setattr(extension_plugin_api, "companion_spawn_env", lambda *_args, **_kwargs: {})
+    for stamp in ("code_stamp", "fresh_code_stamp"):  # git would run through the patched spawn seam
+        monkeypatch.setattr(extension_health, stamp, lambda: ("test", "test-sha"))
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path, "switched", "def register(api):\n    api.register_companion_process('daemon')\n",
+        permissions=["companion_process"],
+        extra_frontmatter="companion_processes:\n  - name: daemon\n    runtime: python3\n"
+                          "    command: [\"python3\", \"scripts/daemon.py\"]\n",
+    )
+    supervisor = CompanionSupervisor(drive_root)
+    monkeypatch.setattr(companion_mod, "_GLOBAL_SUPERVISOR", supervisor)
+
+    def listed():
+        return next(row for row in _build_extensions_index(drive_root, str(repo_root))["skills"]
+                    if row["name"] == loaded.name)
+
+    try:
+        assert extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root,
+                                               _force_in_process=True) is None
+        save_enabled(drive_root, loaded.name, False)
+        state = extension_loader.reconcile_extension(loaded.name, drive_root, lambda: {}, repo_path=str(repo_root))
+        waiting = {"daemon": "stop requested"}
+        assert (state["action"], state["reason"], state.get("retained_companions")) == (
+            "extension_unloaded", "disabled", waiting)
+        row = listed()
+        assert (row["enabled"], row["live_reason"], row.get("retained_companions")) == (False, "disabled", waiting)
+        assert extension_health.read_extension_health(drive_root, loaded.name)["last_observed"][
+            "retained_companions"] == waiting
+        with monkeypatch.context() as packages:
+            packages.setattr(extension_liveness, "_deps_block_reason", lambda *_args: "deps_missing")
+            blocked = extension_loader.runtime_state_for_loaded_skill(loaded, drive_root, skills=[loaded])
+        assert (blocked["reason"], blocked.get("retained_companions")) == ("deps_missing", waiting)
+        elsewhere = replace(loaded, skill_dir=tmp_path / "another-bucket" / loaded.name, enabled=False)
+        assert "retained_companions" not in extension_loader.runtime_state_for_loaded_skill(
+            elsewhere, drive_root, skills=[elsewhere])
+        with monkeypatch.context() as worker:
+            worker.setattr(companion_mod, "is_server_process", lambda: False)
+            assert "retained_companions" not in extension_loader.runtime_state_for_loaded_skill(
+                loaded, drive_root, skills=[loaded])
+        spawned[0].exited.set()  # its observed death settles it; Off restarts nothing
+        _join_companion_monitors()
+        assert supervisor.snapshot() == {} and len(spawned) == 1 and "retained_companions" not in listed()
+        assert jobs["closed"] == jobs["created"] == (["job-0"] if windows else [])
     finally:
         for proc in spawned:
             proc.exited.set()

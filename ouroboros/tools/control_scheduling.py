@@ -39,7 +39,7 @@ from ouroboros.subagent_runtime import (
     runtime_subagent_settings,
     select_subagent_snapshot,
 )
-from ouroboros.subagent_work_order import declared_words_fact
+from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, declared_words_fact
 from ouroboros.subagents import build_subagent_envelope
 from ouroboros.task_results import STATUS_REQUESTED, write_task_result
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
@@ -934,7 +934,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     if _drive_err:
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", _drive_err)
     child_attachment_authority, attachment_error = ({"attachment_manifest": []}, "")
-    input_error = _prepare_child_input_files(ctx, fields, tid)  # first: its refusal leaves no copy for the child
+    resource_intent = _schedule_resource_intent(ctx, metadata, workspace_root)
+    input_error = _prepare_child_input_files(ctx, fields, tid, workspace_root, child_drive, resource_intent)
     if not input_error and (fields.get("input_sources") != "declared" or fields.get("attachment_paths")):  # selected documents are declared material
         child_attachment_authority, attachment_error = _materialize_child_attachment_manifest(
             parent_contract, child_drive or status_drive_root, tid, owner_drive=Path(ctx.drive_root),
@@ -975,7 +976,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         executor=requested_executor,
         status=STATUS_REQUESTED,
     )
-    resource_intent = _schedule_resource_intent(ctx, metadata, workspace_root)
     intent_fields = {
         "model_lane": requested_model_lane,
         "requested_model_lane": requested_model_lane,
@@ -988,6 +988,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "parent_cognitive_route": parent_cognitive_route,
         **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace", "attachment_paths",
                                         "attachment_import", "document_import_intent", "prepared_input_files", "memory_view") if key in fields},
+        **({ORIGINAL_INPUTS_FACT: True} if fields.get("prepared_input_files") else {}),
         "resource_intent": resource_intent,
     }
     owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract)}  # the owner's words, by value
@@ -1087,7 +1088,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     })
 
 
-def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_task_id: str) -> str:
+def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_task_id: str,
+                               workspace_root: str, child_drive: Optional[Path], resource_intent: Dict[str, Any]) -> str:
     """Check and retain the child's ``input_files`` before it is queued; "" or the published refusal.
 
     The caller's read authority and the child's read-only limits under its own resource
@@ -1100,7 +1102,9 @@ def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_t
 
     try:
         fields["prepared_input_files"] = schedule_selected_inputs(
-            ctx, fields["input_files"], child_task_id, fields.get("resource_policy")) if fields["input_files"] else []
+            ctx, fields["input_files"], child_task_id, fields.get("resource_policy"),
+            workspace_root=workspace_root, child_drive=child_drive,
+            resource_intent=resource_intent) if fields["input_files"] else []
         return ""
     except InputSelectionError as exc:
         text, reason = (f"⚠️ {exc.code}: {exc.detail} The child was not queued. "

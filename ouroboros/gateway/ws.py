@@ -248,6 +248,11 @@ def broadcast_ws_sync(msg: dict) -> bool:
     return True
 
 
+def notify_extension_health_changed() -> None:
+    """Ask Skills to reread server health or a newly unconfirmed companion stop."""
+    broadcast_ws_sync({"type": "extension_health_changed"})
+
+
 async def _dispatch_extension_message(
     websocket: WebSocket,
     msg: dict[str, Any],
@@ -584,6 +589,7 @@ __all__ = [
     "broadcast_ws_sync",
     "close_all_ws",
     "has_ws_clients",
+    "notify_extension_health_changed",
     "set_event_loop",
     "ws_endpoint",
 ]

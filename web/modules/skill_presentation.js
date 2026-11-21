@@ -18,6 +18,16 @@ export const WARNING_GLYPH = strokeIcon(WARNING_PATH, 14);
 
 export const plural = (count, one, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 
+/**
+ * The title opens a sheet for an installed row or an install still queued or running; a failed or name-level attempt
+ * names no installation to describe, so its title stays plain text.
+ */
+export const opensDetail = (skill) => !skill.lifecycle_name_level
+    && (!skill.lifecycle_virtual || (skill.lifecycle_kind === 'install' && ['queued', 'running'].includes(skill.lifecycle_status)));
+
+/** A real folder whose manifest the host could not read (`manifest_file: ''`): it declares nothing we may state; an absent field is an older host's row. */
+export const manifestUnread = (skill) => !skill.lifecycle_virtual && skill.manifest_file === '';
+
 /** A version label as published; labels are opaque, never ordered as numbers. */
 export function versionText(version) {
     const text = String(version ?? '').trim();
@@ -194,6 +204,21 @@ export function permissionWords(permissions = []) {
     for (const permission of Array.isArray(permissions) ? permissions : []) {
         const base = String(permission || '').split(':')[0];
         const word = PERMISSION_WORDS[base];
+        if (word && !words.includes(word)) words.push(word);
+    }
+    return words;
+}
+
+/**
+ * What an installed skill's own manifest declares it can use: a known permission's plain word, else the id as declared
+ * (callers escape it). Only a non-empty string is an id; a malformed entry says nothing.
+ */
+export function declaredPermissionWords(permissions = []) {
+    const words = [];
+    for (const permission of Array.isArray(permissions) ? permissions : []) {
+        const id = typeof permission === 'string' ? permission.trim() : '';
+        const known = permissionWords([id])[0];
+        const word = typeof known === 'string' ? known : id;  // a prototype key (`constructor`) is no word
         if (word && !words.includes(word)) words.push(word);
     }
     return words;

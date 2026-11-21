@@ -985,6 +985,10 @@ export function summarizeLogEvent(evt) {
         });
     }
 
+    return summarizeHostLogEvent(evt, t, view, about, tool);
+}
+
+function summarizeHostLogEvent(evt, t, view, about, tool) {
     if (t === 'startup_verification') {
         return view(Number(evt.issues_count || 0) > 0 ? 'warn' : 'ok', 'Startup verification', {
             body: describeStartupChecks(evt.checks),
@@ -1063,6 +1067,7 @@ export function summarizeLogEvent(evt) {
     if (evt.ok === true) return view('ok', name, { body });
     if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') return view('error', name, { body });
     if (level === 'warning' || level === 'warn') return view('warn', name, { body });
+    if (['extension_companion_exhausted', 'extension_companion_restart_failed', 'extension_companion_refresh_failed'].includes(t)) return view('error', name, { body });
     if (t.includes('error') || t.includes('crash') || t.includes('fail')) return view('error', name, { body });
     return view('info', name, { body, meta: [evt.tool ? compactModel(evt.model) : '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)] });
 }

@@ -133,10 +133,9 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "the child's work order attaches them; its later starts, continuations and replacements select their own. "
             "With input_sources=declared only these inputs are copied to the child."),
         **input_files_parameter(
-            "Read-only children only (write_surface omitted or read_only); [] reports an empty receipt. Checked with your "
-            "read authority and the child's limits and retained before the child is queued; the queued receipt lists each "
-            "copy. An API child's first input names each copy for read_file(path=<copy>); an agent_session child's first "
-            "start verifies them."),
+            "Omit write_surface or use read_only. Checked for caller and child before queueing; [] reports an empty "
+            "receipt. API children read each copy with read_file. The first session start verifies retained bytes "
+            "unless it explicitly replaces the selection."),
         "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {

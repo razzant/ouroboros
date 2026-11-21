@@ -366,10 +366,8 @@ function mountProvider(container, { path }) {
         <div id="harness-login-card"></div>`;
     const find = (selector) => container.querySelector(selector);
     let bars = '';
-    const paint = () => {
-        const payload = store.snapshot || {};
-        const reads = { accountsRead: store.facet(FACET_ACCOUNTS), quotaRead: store.facet(FACET_QUOTA) };
-        const rows = store.accountsUnsupported ? [] : accountRows(payload).filter((row) => row.harness === harness);
+    const paintOverview = (payload, { accountsUnsupported, ...reads }) => {
+        const rows = accountsUnsupported ? [] : accountRows(payload).filter((row) => row.harness === harness);
         const known = reads.accountsRead === READ_OK;
         const lead = !known ? '' : rows.length > 1 ? `${rows.length} accounts take turns, so a spent quota does not stop the work.`
             : rows.length ? 'One account. Add a second one and they take turns.' : 'No account yet.';
@@ -383,11 +381,8 @@ function mountProvider(container, { path }) {
         find('[data-provider-turns]').textContent = glance.words;
     };
     const mine = providerMounts += 1;
-    void initHarnessAccounts({ family: harness, path, mark: (facts) => accountMarkHtml(facts, store.snapshot || {}) });
-    const offStore = store.subscribe(paint, { visible: () => false });
-    paint();
+    void initHarnessAccounts({ family: harness, path, paintOverview, mark: (facts) => accountMarkHtml(facts, store.snapshot || {}) });
     return { unmount() {
-        offStore();
         if (mine === providerMounts) destroyHarnessAccounts();
     } };
 }

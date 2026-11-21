@@ -265,6 +265,13 @@ test('showing the list reads no status, starts no daemon and calls no provider; 
     assert.equal(world.find('#btn-harness-refresh').textContent, 'Refresh');
     assert.equal(world.find('#btn-claudexor-restart').textContent, 'Restart Claudexor');
     assert.ok(world.find('[data-family-maintenance]'), 'the program\'s row has its host above the accounts');
+    const family = world.find('[data-family="codex"]');
+    const login = family.querySelector('[data-family-login]');
+    const program = family.querySelector('[data-family-maintenance]');
+    await claudexorStatus.observe({ afterCurrent: true });
+    assert.equal(world.find('[data-family="codex"]'), family);
+    assert.equal(world.find('[data-family-login]'), login);
+    assert.equal(world.find('[data-family-maintenance]'), program);
     // Another page of Settings shown while this one stands reads nothing more.
     world.state.calls.length = 0;
     world.show('accounts');
