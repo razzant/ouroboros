@@ -78,8 +78,9 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         status, (detail, note) = "wake_paused", held_sentence(wake, snapshot.get("live_wake_hold"))
     elif wake:
         status, detail = "thinking", f"Wake-up {wake} is running."
-    elif outcome == "skipped:waiting_for_first_conversation":
-        status, detail = "waiting_for_first_conversation", "No owner chat is bound yet; the first conversation binds it."
+    elif outcome == "skipped:owner_chat_unknown":  # unknown, never empty: a known empty slot wakes in Main
+        why = snapshot.get("last_error") or "unknown error"
+        status, detail = "owner_chat_unknown", f"The owner chat could not be read ({why}); retry {next_at}."
     elif outcome == "skipped:allowance_exhausted":
         spent, daily = snapshot.get("spent_24h_usd"), snapshot.get("daily_usd")
         status = "allowance_exhausted"

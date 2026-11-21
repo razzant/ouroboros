@@ -944,8 +944,9 @@ def test_projection_names_every_honest_status(describe):
     assert "Early wake" not in stale["detail"] and stale["detail"] == sleeping["detail"]
     thinking = describe({**BASE, "live_wake_task_id": "wake0001"})
     assert thinking["status"] == "thinking" and "wake0001" in thinking["detail"]
-    first = describe({**BASE, "last_wake_outcome": "skipped:waiting_for_first_conversation"})
-    assert first["status"] == "waiting_for_first_conversation"
+    unread = describe({**BASE, "last_wake_outcome": "skipped:owner_chat_unknown", "last_error": "runtime state unavailable"})
+    assert unread["status"] == "owner_chat_unknown"  # unknown, never "no chat yet": a known empty slot wakes in Main
+    assert unread["detail"].startswith("The owner chat could not be read (runtime state unavailable); retry ")
     exhausted = describe({**BASE, "last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": 21.5,
                           "allowance_resets_at": "2027-01-15T18:00:00+00:00",
                           "next_wake_at": "2027-01-15T18:00:00+00:00"})  # a real skip waits no sooner than its reset
