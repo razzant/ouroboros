@@ -268,18 +268,14 @@ def test_inline_controls_keep_their_existing_capability_boundary(contact_runtime
         for mode in ("warm", "cold"):
             ctx._active_builtin_tool_result = None  # a direct handler call publishes its typed result here
             text = _await_as_sleep(ctx, mode, wake_after_sec=5)
-            # The refusal names the form that works here, with the call's own seconds.
-            assert "no continuation owner" in text and 'await_messages(mode="in_slot", timeout_sec=5)' in text
-            assert "in_slot takes no" not in text
+            # The refusal names the in-slot mail wait that works with no continuation owner.
+            assert text.endswith('this task has no continuation owner to sleep under; to wait here for any mail: '
+                                 'await_messages(mode="in_slot", timeout_sec=…), which takes no senders/tasks/runs/services')
             refused = ctx._active_builtin_tool_result
             assert (refused.code, refused.meta.get("operation_outcome")) == ("TOOL_ARG_ERROR", "completed_no_effect")
-        # No seconds to carry: the form keeps a placeholder; a selector the slot cannot keep is named.
-        selected = _await_as_sleep(ctx, "warm", tasks=["kid"], wake_after_sec=30)
-        # Selected tasks keep their wake condition only through wait_tasks: both forms, the mind choosing.
-        assert selected.endswith('await_messages(mode="in_slot", timeout_sec=30) (in_slot takes no tasks: any unread '
-                                 "mail ends it), or for those tasks wait_tasks(task_ids=['kid'], timeout_sec=30)")
-        senders = _await_as_sleep(ctx, "warm", senders=["peer"])
-        assert senders.endswith('timeout_sec=…) (in_slot takes no senders: any unread mail ends it)')
+        # A contract that withholds await_messages keeps the bare fact: no call that dispatch would refuse.
+        ctx.task_metadata = {**(ctx.task_metadata or {}), "disabled_tools": ["await_messages"]}
+        assert _await_as_sleep(ctx, "warm", tasks=["kid"]).endswith("no continuation owner to sleep under")
         assert not getattr(ctx, "_model_sleep", None)
 
     _run(contact_runtime, during)

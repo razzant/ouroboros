@@ -1208,22 +1208,15 @@ def _forward_to_worker(
     if not data:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ TASK_NOT_FOUND: task {tid} is not registered.")))
     if status in FINAL_STATUSES:
-        # Fact first, then each means this caller has, without choosing between them (P5): the record is
-        # on this status root, so get_task_result reads it unless a Presence ceiling leaves it out; Continue
-        # is named only when the card's own predicate offers it and the caller is not a subagent profile.
-        from ouroboros.owner_continue import continuation_offer
-        from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
-        from ouroboros.tool_access_roots import active_tool_profile
+        # The record is on the caller's status root, so get_task_result reads it where the caller may call it
+        # (a not-started promotion answers with its own notice instead, so no read is named for it).
+        from ouroboros.promotion_intent import promotion_intent_notice
+        from ouroboros.tools.arg_feedback import repair_call_available
 
-        ceiling = presence_ceiling_from_context(ctx)
-        has = lambda name: ceiling is None or presence_ceiling_allows_tool(ceiling, name)  # noqa: E731
-        means = [f"read its result with get_task_result(task_id={tid!r})"] if has("get_task_result") else []
-        if (has("continue_task") and active_tool_profile(ctx) not in ("local_readonly_subagent", "acting_subagent")
-                and continuation_offer(data, tid).get("eligible")):
-            means.append(f"continue it with continue_task(task_id={tid!r}, reason='…') where your tools include it")
+        read = (f" get_task_result(task_id={tid!r}) reads its result."
+                if repair_call_available(ctx, "get_task_result") and not promotion_intent_notice(tid, data) else "")
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(
-            f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}; the message was not delivered because the work "
-            "has ended." + (f" You can {'; or '.join(means)}." if means else ""))))
+            f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}; the message was not delivered.{read}")))
     # A requested child's mailbox exists in its recorded drive from the request on: its words are
     # read when it starts, or stay in its result as unread mail, the same receipt a queued one gives.
     if status not in (STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED):

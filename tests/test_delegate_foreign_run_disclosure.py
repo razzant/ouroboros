@@ -59,9 +59,10 @@ def test_unknown_refusal_names_the_crosstask_read(tmp_path):
 
 
 def test_a_task_id_given_as_a_run_id_names_the_exact_read(tmp_path, monkeypatch):
-    """Both directions: a task this drive records is named with its ready read; a Presence ceiling that leaves
-    get_task_result out keeps the general pointer, since the host cannot show that read works for the caller."""
-    from ouroboros import presence_authority
+    """Both directions: a task this drive records is named with its ready read; a contract that withholds
+    get_task_result, and a store that cannot be read, keep the general pointer and the typed refusal."""
+    from ouroboros import task_status
+    from ouroboros.store import StoreBusy
     from ouroboros.task_results import write_task_result
 
     custody._CUSTODY.clear()
@@ -71,10 +72,18 @@ def test_a_task_id_given_as_a_run_id_names_the_exact_read(tmp_path, monkeypatch)
     assert out["reason"] == "run_ownership_unknown"
     assert out["hint"] == ("That id names a task, not a delegated run: "
                            "get_task_result(task_id='kidtask01') reads it.")
-    monkeypatch.setattr(presence_authority, "presence_ceiling_from_context", lambda _ctx: object())
-    monkeypatch.setattr(presence_authority, "presence_ceiling_allows_tool", lambda _ceiling, _name: False)
-    refusal, _ = _owned_run(_Ctx("task-a", tmp_path), "delegate_wait", "kidtask01")
+    withheld = _Ctx("task-a", tmp_path)
+    withheld.task_metadata["disabled_tools"] = ["get_task_result"]
+    refusal, _ = _owned_run(withheld, "delegate_wait", "kidtask01")
     assert json.loads(refusal.text)["hint"].startswith("The run may belong to a different drive")
+
+    def busy(*_args, **_kwargs):
+        raise StoreBusy("contention")
+
+    monkeypatch.setattr(task_status, "load_effective_task_result", busy)
+    refusal, _ = _owned_run(_Ctx("task-a", tmp_path), "delegate_cancel", "kidtask01")
+    out = json.loads(refusal.text)
+    assert out["reason"] == "run_ownership_unknown" and out["hint"].startswith("The run may belong")
 
 
 def test_settled_row_state_replays_into_terminal_state(tmp_path):

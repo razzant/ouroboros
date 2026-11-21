@@ -90,25 +90,6 @@ def sleep_choice(sleep_mode: Any, timeout_sec: Any, wake_after_sec: Any, wake_at
     return mode, ""
 
 
-def ownerless_mail_wait(ctx: Any, chosen: Dict[str, Any]) -> str:
-    """await_messages' refusal of a sleep with no continuation owner: each in-slot form that works here
-    (``wake_after_sec`` carries an unnamed sleep's ``timeout_sec``), the mind choosing. Selected tasks keep their
-    wake condition only through wait_tasks, named where a Presence ceiling does not leave it out."""
-    from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
-
-    seconds = chosen.get("wake_after_sec")
-    seconds = seconds if isinstance(seconds, int) and not isinstance(seconds, bool) and seconds > 0 else "…"
-    dropped = [name for name in ("senders", "tasks", "runs", "services") if chosen.get(name)]
-    text = ("this task has no continuation owner to sleep under; to wait here for any mail use "
-            f"await_messages(mode=\"in_slot\", timeout_sec={seconds})"
-            + (f" (in_slot takes no {'/'.join(dropped)}: any unread mail ends it)" if dropped else ""))
-    ceiling = presence_ceiling_from_context(ctx)
-    tasks = chosen.get("tasks")
-    if isinstance(tasks, list) and tasks and (ceiling is None or presence_ceiling_allows_tool(ceiling, "wait_tasks")):
-        text += f", or for those tasks wait_tasks(task_ids={tasks!r}, timeout_sec={seconds})"
-    return text
-
-
 def armed_conflict(ctx: Any, *, native: bool = False) -> str:
     """Why another voluntary wait cannot arm in this tool batch (``""``: it can). An owed native
     wait is never overwritten; a native arm also refuses over a sleep or owner-question wait this

@@ -243,7 +243,16 @@ def test_a_run_only_this_process_holds_is_read_at_once_unless_a_selected_durable
             for rid, owner in (("run-local", _NANNY), ("run-sibling", "t-b"))}
     custody._CUSTODY.update(held)
     try:
-        assert _armed(ds.run_wait(ctx, "run-nobody"))["reason"] == "run_ownership_unknown"
+        nobody = _armed(ds.run_wait(ctx, "run-nobody"))
+        assert nobody["reason"] == "run_ownership_unknown" and "hint" not in nobody
+        # A task id given as a run id: the public wait names the read that answers it.
+        from ouroboros.task_results import write_task_result
+        from ouroboros.tools.control_task_results import _status_root
+
+        write_task_result(_status_root(ctx), "kidtask09", "completed", result="done")
+        task = _armed(ds.run_wait(ctx, "kidtask09"))
+        assert task["reason"] == "run_ownership_unknown" and task["hint"] == (
+            "That id names a task, not a delegated run: get_task_result(task_id='kidtask09') reads it.")
         assert _armed(ds.run_wait(ctx, "run-sibling"))["reason"] == "run_not_owned" and reads == []
         for durable, ready, status, woke_by in (("run-quiet", None, "no_progress", None),
                                                 ("run-done", _ended, "terminal", "run:run-done"),

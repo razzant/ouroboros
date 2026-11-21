@@ -160,10 +160,10 @@ def git_directory_options_refusal(target_root, strategy, scope_paths, *, git_wor
     from ouroboros import work_domain
 
     if (git_workspace or work_domain.exists(Path(target_root) / ".git")) and not default_shaped_directory_options(strategy, scope_paths):
-        named = [f"{key}={value!r}" for key, value in (("directory_strategy", strategy), ("scope_paths", scope_paths))
-                 if value not in (None, "direct", [])]
+        named = "directory_strategy and scope_paths" if strategy == "copy" and scope_paths else (
+            "directory_strategy" if strategy == "copy" else "scope_paths")
         return ("Directory options apply to ordinary folders; Git workspaces keep their snapshot contract. "
-                f"Omit {' and '.join(named)} for this Git workspace.")
+                f"Omit {named} for this Git workspace.")
     return ""
 
 

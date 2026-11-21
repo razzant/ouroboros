@@ -165,25 +165,27 @@ def _emit(ctx: ToolContext, kind: str, payload: Dict[str, Any]) -> bool:
     })
 
 
-def _unknown_run_hint(ctx: ToolContext, run_id: str) -> str:
-    """The repair for an unknown run id: the exact read when the id is a task on the caller's status root
-    and its tools include get_task_result (the Presence-ceiling test presence_continuation applies), else
-    today's general pointer."""
-    from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
+_UNKNOWN_RUN_HINT = ("The run may belong to a different drive or the id may be mistyped; get_task_result(<task_id>) "
+                     "is the ownership-free way to read another task's delegated-run outcome.")
+
+
+def task_id_read_hint(ctx: ToolContext, run_id: str) -> str:
+    """For an id with no run custody: the exact read when it is a task on the caller's status root that
+    get_task_result answers and the caller may call it (``arg_feedback.repair_call_available``), else ``""``.
+    A store that cannot be read leaves the kind unknown, never the refusal itself."""
+    from ouroboros.promotion_intent import promotion_intent_notice
+    from ouroboros.store import StoreError
     from ouroboros.task_status import load_effective_task_result
+    from ouroboros.tools.arg_feedback import repair_call_available
     from ouroboros.tools.control_task_results import _status_root
 
-    general = ("The run may belong to a different drive or the id may be mistyped; get_task_result(<task_id>) "
-               "is the ownership-free way to read another task's delegated-run outcome.")
     try:
-        ceiling = presence_ceiling_from_context(ctx)
-        readable = ceiling is None or presence_ceiling_allows_tool(ceiling, "get_task_result")
-        is_task = readable and bool(run_id) and bool(load_effective_task_result(
-            _status_root(ctx), run_id, materialize_artifacts=False))
-    except (ValueError, OSError):  # an unreadable carrier or record leaves the kind unknown: the general pointer
-        return general
+        record = (load_effective_task_result(_status_root(ctx), run_id, materialize_artifacts=False)
+                  if run_id and repair_call_available(ctx, "get_task_result") else {})
+    except (ValueError, OSError, StoreError):
+        return ""
     return (f"That id names a task, not a delegated run: get_task_result(task_id={run_id!r}) reads it."
-            if is_task else general)
+            if record and not promotion_intent_notice(run_id, record) else "")
 
 
 def _owned_run(ctx: ToolContext, tool: str, run_id: str) -> Tuple[Optional[ToolResult], Optional[_RunCustody]]:
@@ -202,7 +204,7 @@ def _owned_run(ctx: ToolContext, tool: str, run_id: str) -> Tuple[Optional[ToolR
         return _fail(tool, "run_ownership_unknown",
                      "No durable record of that run id exists on this drive, so ownership "
                      "cannot be established. Unknown ownership is refused, not waved through.",
-                     run_id=run_id, hint=_unknown_run_hint(ctx, run_id)), None
+                     run_id=run_id, hint=task_id_read_hint(ctx, run_id) or _UNKNOWN_RUN_HINT), None
     if status == custody.FOREIGN:
         # The refusal stays a refusal; the additive facts give the caller the
         # two things it needs to stop being stuck — the run is over, and whom
@@ -235,7 +237,9 @@ def message_run(ctx: ToolContext, tool: str, run_id: str):
         require_owned_root(ctx.drive_root)
         status, entry = custody.lookup(root, sender, run_id)
         if status == custody.UNKNOWN or entry is None:
-            return _fail(tool, "run_ownership_unknown", "No durable run custody is available.", run_id=run_id), None, ""
+            hint = task_id_read_hint(ctx, run_id)
+            return _fail(tool, "run_ownership_unknown", "No durable run custody is available.", run_id=run_id,
+                         **({"hint": hint} if hint else {})), None, ""
         target = load_effective_task_result(root, entry.task_id) or {}
         for key in ("child_drive_root", "headless_child_drive_root", "drive_root"):
             if target.get(key):

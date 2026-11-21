@@ -42,7 +42,7 @@ import uuid
 from typing import Any, Iterable, Optional
 
 from ouroboros import delegate_custody as custody
-from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
+from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code, task_id_read_hint
 from ouroboros.delegate_feed import _TICK_SEC
 from ouroboros.owner_mailbox import (
     KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL, KIND_TASK_MESSAGE, drain_owner_entries,
@@ -1390,8 +1390,9 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
     try:  # the sleep's selection is durable custody; an unknown run is still refused here
         chosen = model_sleep.selectors(ctx, runs=[rid for rid in run_ids if rid not in in_process],
                                        wake_after_sec=delay)
-    except ValueError as exc:
-        return _fail("delegate_wait", "run_ownership_unknown", str(exc))
+    except ValueError as exc:  # an id that is a task gets its exact read (``task_id_read_hint``)
+        hints = " ".join(hint for rid in run_ids if (hint := task_id_read_hint(ctx, rid)))
+        return _fail("delegate_wait", "run_ownership_unknown", str(exc), **({"hint": hints} if hints else {}))
     descriptor["wake_at"] = chosen["wake_at"]
     chosen.update(_choice(descriptor))
 

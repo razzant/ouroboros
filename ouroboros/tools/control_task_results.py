@@ -1032,10 +1032,10 @@ def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
     try:
         if mode not in (model_sleep.MODE_WARM, model_sleep.MODE_COLD, "default"):
             raise ValueError("senders/tasks/runs/services/wake_at/wake_after_sec select a sleep: in_slot takes only timeout_sec, and a task with no continuation owner cannot sleep")
-        from ouroboros.native_task_wait import armed_conflict, ownerless_mail_wait
-
         if not callable(getattr(ctx, "owner_wait_callback", None)):
-            raise ValueError(ownerless_mail_wait(ctx, chosen))
+            from ouroboros.tools.arg_feedback import repair_call_available
+            raise ValueError("this task has no continuation owner to sleep under" + ('; to wait here for any mail: await_messages(mode="in_slot", timeout_sec=…), which takes no senders/tasks/runs/services' if repair_call_available(ctx, "await_messages") else ""))
+        from ouroboros.native_task_wait import armed_conflict
         if conflict := armed_conflict(ctx):  # an owed native task wait is never overwritten
             raise ValueError(conflict)
         selected_runs = []
