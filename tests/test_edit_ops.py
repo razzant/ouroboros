@@ -16,6 +16,7 @@ from ouroboros.tools.edit_ops import (
     _parse_patch,
     _syntax_check,
 )
+from tests._workspace_git import git_repository
 
 
 SAMPLE = "\n".join([
@@ -510,13 +511,10 @@ def test_repo_write_force_bypass_is_disclosed(tmp_path):
 
 def _guard_registry(tmp_path):
     """A registry over a throwaway repo, so guards run for real (no fake resolver)."""
-    import subprocess
-
     from ouroboros.tools.registry import ToolRegistry
 
-    repo = tmp_path / "repo"
-    (repo / "ouroboros").mkdir(parents=True)
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True)
+    (repo / "ouroboros").mkdir()
     drive = tmp_path / "drive"
     drive.mkdir()
     return ToolRegistry(repo_dir=repo, drive_root=drive), repo
@@ -557,18 +555,13 @@ def test_protected_path_blocked_in_every_spelling(tmp_path, tool, spelling):
 
 
 def _workspace_guard_registry(tmp_path, monkeypatch):
-    import subprocess
-
     import ouroboros.safety as safety
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-    system = tmp_path / "system"
-    project = tmp_path / "project"
+    system = git_repository(tmp_path / "system", unborn=True)
+    project = git_repository(tmp_path / "project", unborn=True)
     drive = tmp_path / "drive"
-    for path in (system, project, drive):
-        path.mkdir()
-    for repo in (system, project):
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    drive.mkdir()
     ctx = ToolContext(
         repo_dir=system,
         system_repo_dir=system,
