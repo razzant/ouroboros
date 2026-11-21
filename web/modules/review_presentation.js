@@ -790,8 +790,8 @@ export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
     // A local preparation failure produces NO panel: the group has to exist on
     // the incident alone, or the owner sees nothing at all.
     if (!owner || (!panels.length && !incident)) return null;
-    const acceptanceDecision = detail?.outcome_axes?.review?.acceptance_decision
-        || detail?.review_status?.acceptance_decision;
+    const canonicalReview = detail?.outcome_axes?.review, acceptanceDecision = canonicalReview != null
+        ? canonicalReview.acceptance_decision : detail?.review_status?.acceptance_decision;
     const decisionAuthor = acceptanceDecision?.author_disposition;
     // A task's final author subject can differ from every historical panel:
     // Advisory may finish edited h2 after the critic reviewed h1. Keep this

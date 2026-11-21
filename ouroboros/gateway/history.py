@@ -88,6 +88,7 @@ _PROGRESS_META_FIELDS = (
     "artifact_status",
     "outcome_axes",
     "reason_code",
+    "delegated_runs_unreconciled",  # the current custody debt, an explicit [] included (a stamped code is not live debt)
     "review_projection",
     "worker_saturation_warning",
     "model_execution",
@@ -359,7 +360,7 @@ def _annotate_terminal_task_truth(
         from ouroboros.task_status import FINAL_STATUSES
 
         cache = result_cache if result_cache is not None else {}
-        progress_task_ids, summary_task_ids, result_task_ids = set(), set(), set()
+        progress_task_ids, result_task_ids = set(), set()
         from ouroboros.tool_call_log import replay_evidence_for_tasks
 
         # Carriers are host projections after physical selection, not synthetic
@@ -379,8 +380,6 @@ def _annotate_terminal_task_truth(
             progress, summary = bool(message.get("is_progress")), message.get("system_type") == "task_summary"
             if progress:
                 progress_task_ids.add(task_id)
-            if summary:
-                summary_task_ids.add(task_id)
             if progress or summary or message.get("role") in {"assistant", "system"}:
                 result_task_ids.add(task_id)
             if progress or summary:
@@ -464,7 +463,7 @@ def _annotate_terminal_task_truth(
                         terminal_truth[key] = dict(result[key])
                 if isinstance(result.get("body_adoptions"), list):  # its settled adoptions, read beside its Reviews
                     terminal_truth["body_adoptions"] = [dict(row) for row in result["body_adoptions"] if isinstance(row, dict)]
-                terminal_truth.update({key: str(result[key]) for key in ("wake_summary", "schedule_name", "terminal_origin") if result.get(key)})
+                terminal_truth.update({key: str(result[key]) for key in ("wake_summary", "schedule_name", "terminal_origin", "reason_code") if result.get(key)})
                 if isinstance(result.get("delegated_runs_unreconciled"), list):  # the current debt (#1583)
                     terminal_truth["delegated_runs_unreconciled"] = list(result["delegated_runs_unreconciled"])
                 retention = retention_summary(result)
@@ -473,8 +472,6 @@ def _annotate_terminal_task_truth(
                     terminal_truth["rounds"] = rounds
                 if retention:
                     terminal_truth["history_retention"] = retention
-                if result.get("reason_code"):
-                    terminal_truth["reason_code"] = str(result.get("reason_code") or "")
                 from ouroboros.owner_continue import continuation_offer
 
                 terminal_truth["continuation_offer"] = continuation_offer(result, task_id)
@@ -590,12 +587,15 @@ def _annotate_terminal_task_truth(
                 # read tail keeps its executor receipt on the one final row the
                 # window still holds, so its harness chip needs no "Load older".
                 message.update(terminal_receipt_by_task.get(task_id) or {})
-            is_summary = str(message.get("system_type") or "") == "task_summary"
-            if is_summary or (not message.get("is_progress") and message.get("task_terminal_status")) or (
-                task_id not in summary_task_ids
-                and latest_progress_by_task.get(task_id) is message
-            ):
+            system_type = str(message.get("system_type") or "")
+            is_latest = latest_progress_by_task.get(task_id) is message
+            is_summary = system_type == "task_summary"
+            # R6: the card settles from the LAST status-stamped row the client keeps; a later Reviews row carries the summary's canonical truth.
+            if is_summary or (not message.get("is_progress") and message.get("task_terminal_status")) or is_latest:
                 message.update(terminal_truth_by_task.get(task_id) or {})
+            elif system_type == "subagent_terminal_notice" and "delegated_runs_unreconciled" in (truth := terminal_truth_by_task.get(task_id, {})):
+                # Older terminal notices also state the current list, including an explicit [].
+                message["delegated_runs_unreconciled"] = truth["delegated_runs_unreconciled"]
             if (message.get("is_progress") or is_summary or message.get("system_type") == "task_evidence") and task_id in suggested_name_by_task:
                 message["suggested_name"] = suggested_name_by_task[task_id]
             # Floor-symmetric closed lineage window for chat FINALS: strip runs

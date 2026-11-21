@@ -1,6 +1,6 @@
 // Chat timeline ordering, keyed item reconciliation and reading anchors.
 // These helpers own no history source, navigation or task authority.
-import { compareHistoryPosition } from './chat_history_replay.js';
+import { compareHistoryPosition, timelineReadFields } from './chat_history_replay.js';
 import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
@@ -903,8 +903,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             fullHeadline: summary.fullHeadline || headline || it.fullHeadline,
             body: summary.body || '',
             fullBody: summary.fullBody || summary.body || it.fullBody || '',
-            fullRef: summary.fullRef || it.fullRef || '',
-            truncated: summary.truncated || it.truncated || false,
+            ...timelineReadFields(summary, it),
             evidenceRef: summary.evidenceRef || it.evidenceRef || null,
             // A call's failure frame replaces its receipt start: the row is
             // content again once it reports an error.
@@ -929,8 +928,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             ts: ts || it.ts,
             fullHeadline: summary.fullHeadline || it.fullHeadline || it.headline,
             fullBody: summary.fullBody || it.fullBody || it.body,
-            fullRef: summary.fullRef || it.fullRef || '',
-            truncated: summary.truncated || it.truncated || false,
+            ...timelineReadFields(summary, it),
         };
         if (Object.entries(patch).every(([key, value]) => it[key] === value)) {
             timelineUpdate = 'duplicate-skip';
@@ -953,8 +951,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             fullHeadline: summary.fullHeadline || headline || 'Update',
             body: summary.body || '',
             fullBody: summary.fullBody || summary.body || '',
-            fullRef: summary.fullRef || '',
-            truncated: summary.truncated || false,
+            ...timelineReadFields(summary),
             // A late-review row's exact record link (#1369); null on every other row.
             evidenceRef: summary.evidenceRef || null,
             receipt: Boolean(summary.receipt),
