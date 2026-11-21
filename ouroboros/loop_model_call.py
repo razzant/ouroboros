@@ -917,7 +917,7 @@ def _dispatch_round_model(
             stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx, mailbox_peek=mailbox_peek)) if attempt_cap is None else None,
             owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
             allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
-            physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage) if disposition is not None else None),
+            physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage) if disposition is not None else None),
             candidate_predicate=candidate_predicate, physical_fit_predicate=admit, model_role=role, model_account_override=account,
             processing_preference=task_processing_preference(
                 {"task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})}, model_role=role),
@@ -1056,7 +1056,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
                                          and not use_local and provider_for_model(model) != "claudexor")
     if provider_for_model(model) == "claudexor":
         kwargs["bypass_response_cache"] = False
-    physical = with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage) if disposition else None
+    physical = with_attempt_prefix(_physical_context_for_fit(disposition, ctx.context_fit_plan), ctx.accumulated_usage) if disposition else None
     if physical is not None:  # the remaining attempts of this call send under the new route's measurement
         ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = physical
     return PreparedModelCall(kwargs, physical, current_physical_attempt_predicate())

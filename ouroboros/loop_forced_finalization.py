@@ -869,7 +869,7 @@ def _forced_physical_context(ctx: _RoundLimitContext, messages: List[Dict[str, A
         rendered_mode=mode, round_id=round_id, reasoning_effort=ctx.active_effort,
         anchor=anchor, accepted_input_tokens=accepted)
     _remember_main_fit(ctx, disposition)
-    return with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage, ctx, messages)
+    return with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage, ctx, messages)
 
 
 @receiver_abandonable()

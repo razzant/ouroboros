@@ -2763,6 +2763,8 @@ cards keep their edges rather than taking the shared fade.
   installation; when two windows arrange at once the last change wins. A
   size that failed to save stays on screen and says so under the list until
   a later change saves it; nothing retries on its own.
+- **Beautiful Context.** One neutral button stands after the cards and the board's save note and
+  opens its frame in place below itself; the frame follows the card palette.
 
 ### Storage
 
