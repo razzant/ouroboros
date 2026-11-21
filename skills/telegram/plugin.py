@@ -36,8 +36,8 @@ from .lib.telegram_state import (
     _get_silent_msg, _set_silent_msg, _clear_silent_msg, _subagent_cards_enabled,
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
     _load_runtime_state, _child_row_held_for_root, _child_final_report,
-    _mirror_options, _old_reference_unlinked, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
-    _quiet_progress,
+    _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
+    _quiet_progress, _reply_target, _reply_ingress_transport, _carried_here,
 )
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_origin import origin_label
@@ -980,6 +980,12 @@ async def _handle_owner_message(
                 request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
+    target = _reply_target(api, client.bot_id, chat_id, message)
+    if not target["known"] and quiz_ref is None:  # a bot bubble no map holds: refused here, never guessed (SKILL.md)
+        await client.call("sendMessage", data={"chat_id": str(chat_id), "allow_sending_without_reply": True,
+                                               "text": _LOCALIZED_TEXTS[lang]["reply_not_linked"],
+                                               "reply_to_message_id": message["message_id"]})
+        return
     photos = message.get("photo") or []
     image_base64 = ""
     image_mime = ""
@@ -1007,17 +1013,14 @@ async def _handle_owner_message(
         parked = await telegram_inbound.park_inbound_file(api, client, inbound)
     try:
         await _inject(api, {
-            **_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
+            **_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id, target),
             "text": safe_text,
             "chat_id": chat_id,
             "user_id": int(sender.get("id") or chat_id or 1),
             "source": "telegram",
             "sender_label": sender_label,
-            "transport": {
-                "kind": "telegram",
-                "conversation_id": str(chat_id),
-                "sender_label": sender_label,
-            },
+            "transport": {"kind": "telegram", "conversation_id": str(chat_id), "sender_label": sender_label,
+                          **_reply_ingress_transport(target, client.bot_id, int(message.get("message_id") or 0))},
             "image_base64": image_base64,
             "image_mime": image_mime,
             "image_caption": safe_caption,
@@ -1026,11 +1029,6 @@ async def _handle_owner_message(
     finally:
         if parked is not None:
             parked.cleanup()
-    if _old_reference_unlinked(api, client.bot_id, chat_id, message):
-        try:
-            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["reply_not_linked"])
-        except Exception:
-            api.log("warning", "Telegram note about an unlinked reply could not be delivered.")
 
 
 def _make_poller(api):
@@ -1163,10 +1161,11 @@ def _make_typing(cue: TypingCue):
 
 def _typing_cue(api) -> TypingCue:
     """The bridge's one typing refresher over the host's reply-preparation projection, paced per accepted token."""
-    def targets(state: Dict[str, Any]) -> set:
-        settings = _load_settings(api)
-        rows = [row for row in state.get("chats") or [] if isinstance(row, dict)]
-        return {chat for row in rows if (chat := _target_chat(settings, {"transport": row.get("transport") or {}}))}
+    def targets(state: Dict[str, Any]) -> set:  # a proven address types only in its bot and chat (TypingCue._send)
+        settings, bot = _load_settings(api), bot_id(binding_for(api).snapshot()[0])
+        transports = [row.get("transport") or {} for row in state.get("chats") or [] if isinstance(row, dict)]
+        return {chat for transport in transports if (chat := _target_chat(settings, {"transport": transport}))
+                and _carried_here(bot, transport, chat)}
 
     return TypingCue(read_state=lambda: host_reply_preparation(_data_dir(api)), targets=targets,
                      client_factory=lambda: _telegram_client(api), warn=lambda text: api.log("warning", text),

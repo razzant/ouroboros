@@ -63,15 +63,17 @@ def _owner_message_receipt(client_message_id: Any) -> str:
     return "" if client_message_id.startswith(AGENT_RECEIPT_ID_PREFIX) else client_message_id
 
 
-def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
+def _routing_notice_reply(ctx: Any, evt: Dict[str, Any], address: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The owner message a routing notice answers, as its exact host Reply reference.
 
     The retained owner row the act quotes for this receipt, else the owner source it
     carries by value, else the accepted row its receipt id names. ``{}`` when none
     resolves (a synthetic act, an unreadable store): an explicit "no owner row", which
     keeps a task-keyed System row from borrowing its target task's own origin.
+    ``address`` receives where the notice answers that row when it is an owner-bot Reply
+    whose room the host decided (``chat_references.decided_reply_address``).
     """
-    from ouroboros.chat_references import reference_from_row
+    from ouroboros.chat_references import decided_reply_address, reference_from_row
     from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
 
     client_message_id = str(evt.get("client_message_id") or "").strip()
@@ -87,6 +89,8 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
             from supervisor.message_ingress import accepted_chat_message
 
             row = accepted_chat_message(ctx.DRIVE_ROOT, int(evt.get("chat_id") or 0), client_message_id)
+        if row and address is not None:
+            address.update(decided_reply_address(row))
         return reference_from_row(row) if row else {}
     except Exception:
         log.debug("Routing notice origin unavailable for %s", client_message_id, exc_info=True)
@@ -99,13 +103,16 @@ def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, 
     An ACK whose id names none annotates no chat row, so it is never the carrier: it names ``system``, the System
     row its act's path writes where the host owns the notice (a host-issued act, a steer of my human's words) and
     every client shows; a tool act tied to no owner message writes none, and the model narrates its tool result.
-    Neither field is a row field, and neither proves that a transport delivered anything."""
+    An ACK answering an owner-bot Reply whose room the host decided also names that Reply's own ``transport``.
+    No field is a row field, and none proves that a transport delivered anything."""
     if not _routing_notice_carried(fields["status"], str(fields.get("cause") or ""), fields.get("options"),
                                    fields.get("attachment_manifest")):
         return {}
     if not _owner_message_receipt(evt.get("client_message_id")):
         return {"routing_notice_carrier": "system"}
-    return {"routing_notice_carrier": "routing_ack", "reply_to": _routing_notice_reply(ctx, evt)}
+    address: Dict[str, Any] = {}
+    reply = _routing_notice_reply(ctx, evt, address)
+    return {"routing_notice_carrier": "routing_ack", "reply_to": reply, **({"transport": address} if address else {})}
 
 
 # Acts that pass the owner's words on to a running work: their receipt names that work and its room.

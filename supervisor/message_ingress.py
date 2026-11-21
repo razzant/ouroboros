@@ -243,8 +243,11 @@ def _chat_record(
             from ouroboros.settings_integrity import effective_subagents_mode
 
             record["message_accepted_at"] = utc_now_iso()
+            sent = (message_meta or {}).get("reply_to") if source == "skill:telegram" else None
+            room = sent.get("telegram_room_chat_id") if isinstance(sent, dict) else None  # the turn's room, not this chat
             try:
-                if effective_subagents_mode(task={"chat_id": chat_id}, drive_root=root) == "swarm":
+                if effective_subagents_mode(task={"chat_id": room if type(room) is int and room > 0 else chat_id},
+                                            drive_root=root) == "swarm":
                     record["subagents_mode"] = "swarm"
             except Exception:
                 log.debug("Subagents label unavailable for the inbound row", exc_info=True)
@@ -508,8 +511,16 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     )
     if not logged:
         raise ValueError("message is empty")
-    from ouroboros.chat_references import ingress_reply
+    from ouroboros.chat_references import TELEGRAM_SOURCE, ingress_reply, telegram_reply_room
     reply = ingress_reply(drive_root, message.get("task_metadata") or {})
+    if reply and source == TELEGRAM_SOURCE:  # the owner bot's Reply: its room, decided once on its accepted row
+        transport = message.get("transport") if isinstance(message.get("transport"), dict) else {}
+        try:  # ``owner_message_id``: the bridge names a bot message as the target, never his own words
+            room = telegram_reply_room(root, reply, chat_id, bubble="owner_message_id" in transport)
+        except (OSError, ValueError, StoreError):
+            room = None  # unreadable is refused, never guessed to be this conversation
+        if room != 0:
+            reply = {**reply, "telegram_room_chat_id": room}
     if reply:  # a replayed obligation dispatches the same reference
         message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))

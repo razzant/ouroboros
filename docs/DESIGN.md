@@ -2033,11 +2033,13 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 
 ### Replies
 
-Reply addresses a row for Ouroboros to interpret, never routes. A Main reply to a Project message also
-appears there at its time as the same Main message (owner 28.10, A), without telling, waking or resuming
-anything; replies stay in Main. Saved bubbles offer Reply beside Copy and in row menus; work cards in
-menus only, never hover-only. Reply stages the composer's first-line strip (`Replying to`, quoted author,
-one line, ×; Esc cancels). Send carries the address; the host builds the snippet. Questions use their own field.
+Reply addresses a row for Ouroboros to interpret, never routes; only the owner's Telegram chat, one feed for
+every room, gives a Reply to a Project's card or notice its own turn there (`skills/telegram/SKILL.md`). A Main
+reply to a Project message also appears there at its time as the same Main message (owner 28.10, A), without
+telling, waking or resuming anything; replies stay in Main. Saved bubbles offer Reply beside Copy and in row
+menus; work cards in menus only, never hover-only. Reply stages the composer's first-line strip
+(`Replying to`, quoted author, one line, ×; Esc cancels). Send carries the address; the host builds the
+snippet. Questions use their own field.
 
 One quote component serves bubbles, strips and relays: above the text, a 2 px
 bar and tint in the quoted author's ink (the tint lies on the quote glass, so inside a

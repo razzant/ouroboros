@@ -332,7 +332,8 @@ def test_a_reply_never_takes_a_reference_from_another_bots_message(world):
     world.run(steps)
     by_text = {row["text"]: row for row in world.rows()}
     assert by_text["a reply to the first bot"]["reply_to"]["address"] == world.address(0)
-    assert not by_text["a reply to the new bot's message 100"].get("reply_to")
+    assert "a reply to the new bot's message 100" not in by_text, "another bot's number names nothing here"
+    assert "not routed" in world.bots.bot(B).methods("sendMessage")[-1]["text"]
 
 
 def test_native_reply_and_latest_owner_belong_to_the_sending_bot(world):
@@ -417,8 +418,8 @@ def test_a_reply_answers_only_the_polling_bots_card_and_settles_that_card(quiz_w
         await make_quiz(QUESTION)
         # B's own message 100 is no card, even if A's card has that number here.
         world.bots.bot(B).sent.add(100)
-        await world.deliver(B, _owner(30, "just a remark", reply=100))
-        assert world.texts() == ["just a remark"] and _quiz_block(world)["state"] == "open"
+        await world.deliver(B, _owner(30, "just a remark", reply=100))  # refused: no map of B knows it
+        assert world.texts() == [] and _quiz_block(world)["state"] == "open"
         await world.deliver(B, _owner(31, "postgres, in my words", reply=200))
 
     world.run(steps)
@@ -637,18 +638,18 @@ def test_stored_rows_and_references_stay_as_they_were_and_no_bot_inherits_them(w
         await world.deliver(B, _owner(7, "stored before the upgrade"))
 
     world.run(steps)
-    assert world.ids() == ["tg:42:7", f"tg:{A_ID}:42:7", f"tg:{A_ID}:42:9", f"tg:{B_ID}:42:7"]
+    assert world.ids() == ["tg:42:7", f"tg:{A_ID}:42:7", f"tg:{B_ID}:42:7"]
     stored = accepted_chat_message(world.data, 42, "tg:42:7")
     assert stored["text"] == "stored before the upgrade"
     assert resolve_reply(world.data, world.address(0))["snippet"] == "stored before the upgrade"
     refs = world.refs()
     assert refs["messages"] == _LEGACY_REFS["messages"] and refs["latest_owner"] == _LEGACY_REFS["latest_owner"]
-    assert not world.rows()[2].get("reply_to"), "a matching number proves no ownership: no reference"
+    # A matching number proves no ownership: the reply is refused here, never routed on a guess.
     (note,) = world.bots.bot(A).methods("sendMessage")
-    assert note["text"].startswith("Sent, but not linked to the earlier work")
+    assert "not routed" in note["text"] and int(note["reply_to_message_id"]) == 9
 
 
-def test_a_reply_with_nothing_old_at_its_number_or_known_as_its_own_gets_no_note(world):
+def test_only_a_reply_to_a_message_this_bot_knows_reaches_the_host(world):
     async def steps():
         _seed_legacy_refs(world)
         world.use(A)
@@ -657,8 +658,9 @@ def test_a_reply_with_nothing_old_at_its_number_or_known_as_its_own_gets_no_note
         await world.deliver(A, _owner(20, "a reply to A's own", reply=8), _owner(21, "a reply to nothing known", reply=1234))
 
     world.run(steps)
-    assert world.texts() == ["a reply to A's own", "a reply to nothing known"]
-    assert [form["text"] for form in world.bots.bot(A).methods("sendMessage")] == ["A's own message"]
+    assert world.texts() == ["a reply to A's own"]
+    first, note = world.bots.bot(A).methods("sendMessage")
+    assert first["text"] == "A's own message" and "not routed" in note["text"]
 
 
 def test_a_replayed_batch_across_the_upgrade_repeats_its_turn_once_and_only_once(world):
@@ -698,14 +700,16 @@ def test_botless_bubbles_are_not_edited_by_a_named_bot(world):
 _CANARY = "fixture-secret-canary-value"
 
 
-def test_a_secret_request_no_longer_remembered_has_no_protection_left(world):
-    """The disclosed limit: the local hold exists only while a record says a card was there. The
-    file keeps its last 50 cards; past that, nothing distinguishes the reply."""
+def test_a_reply_to_a_card_no_longer_remembered_is_refused_not_sent(world):
+    """The local hold exists only while a record says a card was there (the file keeps its last 50
+    cards); past that, a reply to that bot message is refused here like any message no map knows."""
     async def steps():
         await world.deliver(A, _owner(90, "a reply to an evicted card", reply=77))
 
     world.run(steps)
-    assert world.texts() == ["a reply to an evicted card"]
+    assert world.texts() == []
+    refused = world.bots.bot(A).methods("sendMessage")[-1]
+    assert "not routed" in refused["text"] and int(refused["reply_to_message_id"]) == 90
 
 
 def _seed_legacy_card(world: _World, token: str, *, secret: bool, message_id: int = 77) -> None:

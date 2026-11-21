@@ -65,7 +65,8 @@ def _take_u16_prefix(value: str, budget: int) -> tuple[str, str]:
 
 
 class TelegramRequestRejected(RuntimeError):
-    """Telegram returned an explicit negative API response; ``retry_after`` is its flood-control wait (429)."""
+    """Telegram returned an explicit negative API response; ``retry_after`` is its flood-control wait (429).
+    ``missing_reply``: Telegram refused a strict native anchor because that message is gone."""
 
     def __init__(
         self,
@@ -74,11 +75,13 @@ class TelegramRequestRejected(RuntimeError):
         status_code: int = 0,
         plain_retry_safe: bool = False,
         retry_after: int = 0,
+        missing_reply: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = int(status_code or 0)
         self.plain_retry_safe = bool(plain_retry_safe)
         self.retry_after = max(0, int(retry_after or 0))
+        self.missing_reply = bool(missing_reply)
 
     @property
     def transient(self) -> bool:
@@ -641,7 +644,8 @@ def message_chunks(text: str, parse_mode: str = "HTML", *, limit: int = _TELEGRA
 
 class TelegramClient:
     def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None,
-                 on_message=None, reply_to_message_id: int = 0,
+                 on_message=None, reply_to_message_id: int = 0, strict_reply: bool = False,
+                 reply_fallback_id: int = 0, on_reply_changed=None,
                  api_base_url: Optional[str] = None, files_dir: Optional[str] = None, binding=None,
                  generation: Optional[int] = None, origin_label: str = ""):
         # A client of the bridge's accepted token (lib/telegram_token.py) is one identity: the token and
@@ -661,6 +665,10 @@ class TelegramClient:
         self.on_message = on_message
         self.origin_label = str(origin_label or "")
         self.reply_to_message_id = int(reply_to_message_id)
+        # An exact Reply's turn: Telegram must keep the anchor (or refuse); its journal keeps the one
+        # fallback and tells ``on_reply_changed`` when it is taken (lib/telegram_outbox.py).
+        self.strict_reply, self.reply_fallback_id = bool(strict_reply), int(reply_fallback_id or 0)
+        self.on_reply_changed = on_reply_changed
         if not self.token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
         # An explicit proxy replaces ambient proxies for these calls only. With the default
@@ -726,7 +734,7 @@ class TelegramClient:
             data[field] = prefix.rstrip() if not body else prefix + body
         if self.reply_to_message_id and method_text in {"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
             data = {**(data or {}), "reply_to_message_id": self.reply_to_message_id,
-                    "allow_sending_without_reply": True}
+                    "allow_sending_without_reply": not self.strict_reply}
         try:
             # trust_env trades ambient-proxy/SSL_CERT isolation for a proxy-routed install's
             # only egress; decided once by the caller via net_transport.env_proxies_configured.
@@ -759,6 +767,8 @@ class TelegramClient:
         except (TypeError, ValueError):
             api_status = response.status_code
         description = str(payload.get("description") or "").strip()
+        missing_reply = api_status == 400 and description.casefold() in {
+            "bad request: message to be replied not found", "bad request: reply message not found"}
         if safe_method == "editMessageText" and description.casefold().startswith(_NOT_MODIFIED_PREFIX):
             self._observe_message(data, data)
             # Preserve the one benign signal callers rely on without forwarding
@@ -771,15 +781,15 @@ class TelegramClient:
             raise self._failed(TelegramRequestRejected(
                 f"Telegram API {safe_method} returned HTTP {response.status_code}.",
                 status_code=response.status_code,
-                plain_retry_safe=(safe_method == "sendMessage" and response.status_code == 400),
-                retry_after=_retry_after(payload),
+                plain_retry_safe=(safe_method == "sendMessage" and response.status_code == 400 and not missing_reply),
+                retry_after=_retry_after(payload), missing_reply=missing_reply,
             ))
         if not payload.get("ok"):
             raise self._failed(TelegramRequestRejected(
                 f"Telegram API rejected {safe_method}.",
                 status_code=api_status,
-                plain_retry_safe=(safe_method == "sendMessage" and api_status == 400),
-                retry_after=_retry_after(payload),
+                plain_retry_safe=(safe_method == "sendMessage" and api_status == 400 and not missing_reply),
+                retry_after=_retry_after(payload), missing_reply=missing_reply,
             ))
         self.accepted += 1
         self._observe_message(data, payload.get("result"))
@@ -1094,7 +1104,7 @@ _MENU_TEXTS_EN = {
     "unknown_command": "Unknown command",
     "use_miniapp": "Use the Mini App.",
     "update_failed": "Could not deliver that Telegram update to Ouroboros.",
-    "reply_not_linked": "Sent, but not linked to the earlier work: a message from before this bridge update can't be matched safely.",
+    "reply_not_linked": "I can't tell which message this reply is about, so it was not routed. Send it as a new message or reply to a newer one.",
     "metrics_budget_status": "• **Budget Status:**\n  Spent: `${spent_usd}`\n  Limit: `${total_budget}`\n  Remaining: `${rem}`\n\n• **System Environment:**\n  Branch: `{branch}`\n  BG Thoughts: `{bg_status}`",
     "file_too_large_notice": "{filename} is saved in Ouroboros. This file exceeds the Telegram upload limit and cannot be mirrored here.",
     "file_open_app_hint": "Open the app to download it.",
