@@ -46,9 +46,21 @@ def test_one_identity_read_refuses_unknown_then_resumes_the_tree(
     latch_before = copy.deepcopy(queue.BUDGET_ROOT_FENCES)
     real, reads, threads = cancel_intents._validated_single_cancel_target, [], []
 
+    def _issued_by_resume_grant(frame):
+        # The grant's own strict root classification: walk past the helpers
+        # budget_resume keeps between _grant_exact_resume and root_actor,
+        # so a renamed intermediary (r3: _resume_actor) cannot silence the spy.
+        names = []
+        while frame.f_back is not None and len(names) < 8:
+            frame = frame.f_back
+            names.append(frame.f_code.co_name)
+            if names[-1] == "_grant_exact_resume":
+                return True
+        return False
+
     def observe(*args, **kwargs):
         if (sys._getframe(1).f_code.co_name == "root_actor"
-                and sys._getframe(2).f_code.co_name == "_grant_exact_resume"):
+                and _issued_by_resume_grant(sys._getframe(1))):
             reads.append(args[1])
             if len(reads) == 1 and fault != "readable":
                 if fault == "io":

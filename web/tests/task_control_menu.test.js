@@ -334,6 +334,41 @@ test('a single offered action is the trigger itself: it names the action and a s
     assert.deepEqual(done, [ACTION_STOP_NOW], 'nothing runs before an item is chosen');
 });
 
+test('the Stop confirmation of an accepted unbound start says the request, never an immediate end (#3428)', async (t) => {
+    const { closeTaskControlMenu, openTaskControlMenu } = await import('../modules/task_control_menu.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    const prior = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class { observe() {} disconnect() {} takeRecords() { return []; } };
+    t.after(() => { closeTaskControlMenu(); globalThis.IntersectionObserver = prior; env.restore(); });
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+    const anchor = env.doc.createElement('button');
+    anchor.dataset.taskControlDirect = '1';
+    env.doc.body.append(anchor);
+    const asked = [];
+    const askConfirm = async (dialog) => { asked.push(dialog); return false; };
+    const open = () => openTaskControlMenu(anchor, { actions: [ACTION_STOP_NOW],
+        onAction: () => { throw new Error('a declined confirm never runs'); }, askConfirm });
+
+    open();
+    await settle();
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].body, 'It stops at once, with the subagents it started.', 'a bound run keeps its words');
+
+    // The same trigger on a work the server marks with an accepted unbound start (activity.js renders the fact):
+    // no engine run answers it yet, so the confirmation says the recorded request, not an immediate end
+    // (tests/test_settled_tree_run_stop.py: HTTP 202 pending, zero engine cancels while the start is unbound).
+    anchor.dataset.unboundStart = '1';
+    open();
+    await settle();
+    assert.equal(asked.length, 2);
+    assert.equal(asked[1].title, 'Stop this work now?');
+    assert.equal(asked[1].danger, true);
+    assert.equal(asked[1].confirmLabel, TASK_CONTROL_LABELS[ACTION_STOP_NOW]);
+    assert.equal(asked[1].body, 'Stop is requested at once. A helper whose start was never confirmed may keep '
+        + 'working until it is identified and its stop is confirmed.');
+});
+
 test('the dropdown replaced the old cancel confirm dialogs (dismiss = continue)', () => {
     // Q2: dismissing the menu continues the run — no separate confirm dialog
     // remains on either cancel path (Activity keeps its schedule-delete one).
@@ -406,8 +441,7 @@ test('Activity marks root rows and hides Pause for a child; Chat cards stay root
     // A compact retry row can omit lineage; its own root-only census identity still counts.
     assert.match(activity, /phases\.has\(ownId\) \|\| isRootTaskRow\(t, ownId\)/);
     assert.match(activity, /wholeTree: btn\.dataset\.root === '1'/);
-    // Census rows are roots (the census lists root activities only).
-    assert.match(activity, /data-id="\$\{esc\(a\.activity_id \|\| ''\)\}" data-root="1"/);
+    // activity_work_truth.test.js checks the root and target on rendered census and tail-only buttons.
     // A chat card offers the menu only for a root (never a subagent card).
     assert.match(chat, /cancelRunEligibility\(\{\s*groupId: record\.groupId, isSubagent: record\.isSubagent/);
 });
@@ -543,6 +577,46 @@ test('a Resume held only by calls of unknown outcome asks once, then resumes nam
         toast, askOwner: async () => { throw new Error('a live call is never offered'); } });
     assert.equal(toasts.length, 1);
     assert.match(toasts[0][0], /^Resume refused: .*is in a live worker/);
+});
+
+test('the same confirmation exposes every addressed task and invocation before accepting running and spending risk', async () => {
+    const { renderConfirmDialogDetails } = await import('../modules/confirm_dialog.js');
+    const blockers = Array.from({ length: 7 }, (_, i) => ({
+        kind: 'delegated_run', task_id: `helper-${i}`, invocation_id: `lost-${i}`, run_id: '',
+        state: 'stop_unknown', stop_outcome: 'pending_invocation_unbound',
+        choice_id: `delegate_start:tree/helper-${i}/lost-${i}/tree/fence-id/park-id`,
+    }));
+    blockers.push({ kind: 'tool_handoff', task_id: 'tree', reason: 'local_completion_unknown', operation_id: 'op-8' });
+    const ids = blockers.map(b => b.choice_id || b.operation_id);
+    const calls = [];
+    const resume = async (task, body) => {
+        calls.push(body);
+        if (!body) throw Object.assign(new Error('held'), { status: 409, body: {
+            error: 'owner_pause_effects_unsettled', blockers, acceptable_unknown: ids,
+        } });
+        return { ok: true };
+    };
+    for (const confirmed of [false, true]) {
+        calls.length = 0;
+        await resumeTaskAction('tree', { resume, toast: () => {}, askOwner: async (dialog) => {
+            assert.match(dialog.body, /still be running, changing files or spending money/);
+            assert.match(renderConfirmDialogDetails(dialog.details), /<details[^>]* open>/);
+            assert.doesNotMatch(renderConfirmDialogDetails({ rows: dialog.details.rows }), /<details[^>]* open>/);
+            assert.equal(dialog.details.rows.length, ids.length);
+            dialog.details.rows.forEach(({ label, value }, i) => {
+                assert.ok(label.includes(blockers[i].task_id));
+                if (blockers[i].kind === 'delegated_run') {
+                    assert.equal(value, `Start request ${blockers[i].invocation_id}`);
+                } else assert.ok(value.includes(ids[i]));
+            });
+            return confirmed;
+        } });
+        assert.equal(calls.length, confirmed ? 2 : 1);
+        if (confirmed) {
+            assert.deepEqual(calls[1].accept_unknown, ids);
+            assert.match(calls[1].reason, /spending/);
+        }
+    }
 });
 
 test('a held model answer receiver is worded by what is known', () => {

@@ -47,7 +47,7 @@ def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops
                               lambda self, root_id, drive_root=None: (models or {}).get(root_id, [])), \
             mock.patch.object(wp._Observations, "stop_unknown",
                               lambda self, task_id, drive_root=None, owner=None: frozenset(stops.get(task_id, ()))), \
-            mock.patch.object(wp, "_open_runs", lambda drive_root: held), \
+            mock.patch.object(wp, "_open_runs", lambda drive_root, state=None: held), \
             mock.patch.object(wp._Observations, "resume_attempt",
                               lambda self, task_id, drive_root=None: attempts.get(task_id, {})), \
             mock.patch.object(wp, "_inflight_upkeep", lambda drive_root, known: []):

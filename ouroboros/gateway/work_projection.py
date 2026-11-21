@@ -15,9 +15,9 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from ouroboros.external_runs import unbound_starts
+from ouroboros.delegate_custody_current import open_work_custody, tree_unbound_starts
 from ouroboros.gateway import work_status as ws
-from ouroboros.owner_pause import owner_stopped
+from ouroboros.owner_pause import fence_closed, owner_stopped
 from ouroboros.project_naming import without_continue, work_shown_name
 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
@@ -84,6 +84,14 @@ class _Observations:
         self.reviews: Dict[str, bool] = {}
         self.models: Dict[str, list] = {}
         self.gaps: List[Dict[str, Any]] = []
+        # A failed tail-root batch read (``prime_tail_roots``) makes the projection incomplete without a retry.
+        self.tail_roots_unreadable = False
+        # Roots whose stored record this read explicitly could not open: an unknown identity, never the same
+        # fact as a record that reads as absent (#3428). ``_work_of`` collects the episode ids it had to stand
+        # in for their work here -- along the chain, not just at the failed read -- and ``_project`` says them:
+        # on a live row as its gap, and as a deferral (no row at all) for a tail-only group.
+        self.unreadable: set[str] = set()
+        self.unverified: set[str] = set()
 
     def result(self, task_id: str) -> Optional[dict]:
         """The task's stored result: the last projection's when its row has not moved since, else one read."""
@@ -102,9 +110,40 @@ class _Observations:
             except Exception:
                 log.debug("Work projection could not read %s", task_id, exc_info=True)
                 self.results[task_id] = None
+                self.unreadable.add(task_id)
             if signature is not None and self.results[task_id] is not None:
                 self.signatures[task_id] = signature
         return self.results[task_id]
+
+    def prime_tail_roots(self, roots: Iterable[str]) -> None:
+        """Read only the changed roots that lookup-only starts bring into the projection, in one batch. A failed
+        batch or a refused row is an addressed gap that makes the projection incomplete, never an absent record."""
+        from ouroboros.task_results import load_task_results
+
+        missing = {}
+        for root_id in roots:
+            stamp, held = _signature(self.drive_root, root_id), self.previous.get(root_id)
+            if stamp is not None and held is not None and held[0] == stamp:
+                self.results[root_id], self.signatures[root_id] = held[1], stamp
+            else:
+                missing[root_id] = stamp
+        loaded = load_task_results(self.drive_root, list(missing))
+        aggregate = loaded.get("_unavailable")
+        for root_id, stamp in missing.items():
+            row = loaded.get(root_id) or {}
+            failure = aggregate if aggregate is not None else row.get("_refused")
+            if failure is not None:
+                # An unreadable record is an addressed gap and an incomplete projection, never an absent task
+                # that quietly rebinds the work's identity (#3428); no second store read is attempted here.
+                self.results[root_id] = None
+                self.unreadable.add(root_id)
+                self.tail_roots_unreadable = True
+                self.gaps.append({"reason": "episode_record_unavailable", "task_id": root_id,
+                                  "error": type(failure).__name__})
+                continue
+            self.results[root_id] = row
+            if stamp is not None and self.results[root_id]:
+                self.signatures[root_id] = stamp
 
     def effective(self, task_id: str) -> Dict[str, Any]:
         """One effective result through the shared canonical/replica reader, memoized for this projection only.
@@ -223,6 +262,20 @@ def tree_review_reads(drive_root: Any, root_id: str):
     return ask
 
 
+def unbound_run_tails(drive_root: Any, tree: str) -> tuple:
+    """Unconfirmed starts beside this paused work, shared by Activity and the roster. Preserve a failed read as a gap."""
+    try:
+        starts = tree_unbound_starts(drive_root, tree)
+    except Exception as exc:
+        return [], type(exc).__name__
+    return [_typed_unbound(start) for start in starts], None
+
+
+def _typed_unbound(invocation: str) -> dict:
+    # Work tails use opaque ids, but an invocation is never a physical run or Pause authority.
+    return {"run_id": invocation, "kind": "run", "state": "unknown", "unbound": True}
+
+
 def unconfirmed_stops(drive_root: Any, task_id: str, owner: Optional[Mapping[str, Any]] = None) -> frozenset:
     """The runs whose stop ``task_id``'s live Pause could not confirm (``external_runs.EXTERNAL_STOP_UNKNOWN``): its
     cold park's pause row, the record its warm park keeps on its stored result (``owner``, waiting under the
@@ -287,11 +340,22 @@ def _work_of(root_id: str, raw: Mapping[str, Mapping[str, Any]], obs: _Observati
         predecessor = str(continuation.get("predecessor_task_id") or source.get("original_task_id") or "")
         if not predecessor:
             work_id, name = current, _first_name(source)
+            if current in obs.unreadable:
+                # A record that could have carried this episode's continuation edge could not be read: standing
+                # this episode in for the work is an UNVERIFIED address. A live episode keeps its row (the
+                # census vouches for it) and says its gap; a tail-only group is deferred -- never drawn as a
+                # confirmed separate object because a read the record can contradict failed (#3428).
+                obs.unverified.add(current)
             break
         if not (raw.get(predecessor) or obs.result(predecessor)):
             # The edge names a record that cannot be read: the last known episode stands for the work.
             obs.gaps.append({"reason": "episode_record_unavailable", "task_id": predecessor})
             work_id, name = current, _first_name(source)
+            if predecessor in obs.unreadable:
+                # Not merely absent: the read FAILED. The standing address is then unverified exactly as when
+                # the episode's own record could not open -- the mark propagates along the chain edge, it does
+                # not stop at the one branch (#3428).
+                obs.unverified.add(current)
             break
         current = predecessor
     else:
@@ -353,18 +417,30 @@ def _inflight_upkeep(drive_root: Any, known: set) -> List[Dict[str, Any]]:
     return rows
 
 
-def _open_runs(drive_root: Any) -> Dict[str, List[Any]]:
+def _open_runs(drive_root: Any, state=None) -> Dict[str, List[Any]]:
     """Delegated runs with a durable start and no settlement, by their tree's root: members of that root's work,
     which the cascade Stop of that root cancels. A settled run custody still holds (an undisposed patch) runs
     nothing and is not a member; nor is a run the engine already reported finished while its settlement is owed."""
     from ouroboros.delegate_custody_reconcile import open_runs, run_tree_id
+    from ouroboros.delegate_custody import TERMINAL_STATES
 
     held: Dict[str, List[Any]] = {}
-    for entry in open_runs(drive_root):
+    for entry in open_runs(drive_root, state):
         root_id = run_tree_id(entry)
-        if root_id and not str(getattr(entry, "terminal_state", "") or ""):
+        if root_id and not getattr(entry, "terminal_state", "") and getattr(entry, "resume_start_state", None) not in TERMINAL_STATES:
             held.setdefault(root_id, []).append(entry)
     return held
+
+
+def _work_custody(root, obs):
+    try:
+        state, starts, unreadable = open_work_custody(root)
+        held = _open_runs(root, state)
+    except Exception:
+        held, starts, unreadable = {}, {}, True
+    if unreadable:
+        obs.gaps.append({"reason": "delegated_custody_unavailable"})
+    return held, starts, unreadable
 
 
 def _typed_run(entry: Any, obs: _Observations, raw: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
@@ -373,7 +449,8 @@ def _typed_run(entry: Any, obs: _Observations, raw: Mapping[str, Mapping[str, An
     task_id = str(entry.task_id or "")
     owner = obs.result(task_id) if task_id else None
     stops = obs.stop_unknown(task_id, (raw.get(task_id) or {}).get("budget_drive_root"), owner) if task_id else frozenset()
-    kind, state = ws.run_tail(getattr(entry, "source", ""), owner, stop_unknown=str(entry.run_id) in stops)
+    kind, state = ws.run_tail(getattr(entry, "source", ""), owner, stop_unknown=str(entry.run_id) in stops,
+                              start_state=getattr(entry, "resume_start_state", None))
     return {"run_id": str(entry.run_id), "kind": kind, "state": state}
 
 
@@ -438,11 +515,14 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
     from ouroboros.store_hot_facts import snapshot
 
     obs = _Observations(drive_root)
+    custody = _work_custody(drive_root, obs)
+    lookup_roots = {tree for tree, starts in custody[1].items() if any(lookup_only for _, lookup_only in starts)}
     # The signatures of every result this projection may read, in one short transaction (the hot rows only).
     known = {str(row.get("activity_id") or "") for row in owners} | set(raw) | set(obs.previous)
     try:
-        with snapshot([(drive_root, task_id) for task_id in known if task_id]):
-            projected = _project(drive_root, owners, raw, complete, obs, bindings, questions)
+        with snapshot([(drive_root, task_id) for task_id in known | lookup_roots if task_id]):
+            obs.prime_tail_roots(lookup_roots)
+            projected = _project(drive_root, owners, raw, complete, obs, bindings, questions, custody=custody)
     finally:
         if publication_roots is not None:
             publication_roots.update(obs.dependency_roots)
@@ -452,7 +532,7 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
 
 def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
              complete: bool, obs: _Observations, bindings: Mapping[str, Any],
-             questions: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
+             questions: Iterable[Mapping[str, Any]] = (), *, custody=None) -> Dict[str, Any]:
     rows: Dict[str, Dict[str, Any]] = {}
     for row in owners:
         task_id = str(row.get("activity_id") or "")
@@ -468,11 +548,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
     except Exception:
         complete = False
         obs.gaps.append({"reason": "answer_upkeep_unavailable"})
-    try:
-        held = _open_runs(drive_root)
-    except Exception:
-        held, complete = {}, False
-        obs.gaps.append({"reason": "delegated_custody_unavailable"})
+    held, unbound, unavailable = custody if custody is not None else _work_custody(drive_root, obs)
+    complete = complete and not unavailable and not obs.tail_roots_unreadable
     memo: Dict[str, Tuple[str, str]] = {}
     groups: Dict[str, Dict[str, Any]] = {}
 
@@ -496,11 +573,19 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         entry["runs"].extend(_typed_run(run, obs, raw) for run in runs)
         entry["roots"].add(root_id)
         entry["name"] = entry["name"] or name
+    for root_id, starts in unbound.items():
+        if any(lookup_only for _, lookup_only in starts):
+            work_id, name = _work_of(root_id, raw, obs, memo)
+            entry = group(work_id)
+            entry["roots"].add(root_id)
+            entry["name"] = entry["name"] or name
+            # An accepted start no engine run answers yet: this work's Stop stays a recorded request.
+            entry["unbound_start"] = True
     works: List[Dict[str, Any]] = []
     # The census rows' own names: what a sleep waits for is said by them, never by an id or a new read.
     names = {task_id: _first_name(facts) for task_id, facts in raw.items()}
     for work_id, entry in groups.items():
-        members, live_roots, owners_by_root, starts = [], [], {}, set()
+        members, live_roots, owners_by_root, paused_roots = [], [], {}, {}
         for row, facts, root_id in entry["rows"]:
             member = ws.classify_member(row, _member_raw(row, facts, obs, root_id), names)
             members.append(member)
@@ -508,9 +593,20 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
             if _episode_row(row, facts, root_id):
                 live_roots.append((row, facts, member, root_id))
             if row.get("phase") in {"budget_paused", "budget_pausing"}:
-                starts.update(unbound_starts(obs.fence(root_id, facts.get("budget_drive_root"))))
-        # A start no run is bound to yet: the fence names it, no custody row can, and nobody can confirm it.
-        entry["runs"].extend({"run_id": start, "kind": "run", "state": "unknown"} for start in sorted(starts))
+                drive = facts.get("budget_drive_root") or drive_root
+                if fence_closed(obs.fence(root_id, drive)):
+                    paused_roots[root_id] = drive
+        for tree in sorted(entry["roots"]):
+            pending = {invocation for invocation, lookup_only in unbound.get(tree, ())
+                       if lookup_only or tree in paused_roots}
+            drive = paused_roots.get(tree)
+            if drive and _root_key(drive) != _root_key(drive_root):
+                other, gap = unbound_run_tails(drive, tree)
+                pending.update(start["run_id"] for start in other)
+                if gap:
+                    complete = False
+                    obs.gaps.append({"reason": "delegated_custody_unavailable", "task_id": tree, "error": gap})
+            entry["runs"].extend(_typed_unbound(invocation) for invocation in sorted(pending))
         current_row = current_state = None
         current_root = ""
         if live_roots:
@@ -538,14 +634,25 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
             facts = raw.get(episode_id) or stored
         if not members and not entry["runs"]:
             continue
+        if current_row is None and work_id in obs.unverified:
+            # A tail-only group is standing in for its own unreadable record: name, room and work-level controls
+            # would rest on the very read that failed. The unverified address is not drawn as a confirmed
+            # object (#3428): the deferral is said beside the addressed gap the failed read left, the roster
+            # still names the tree and its tails, and a successful read brings the row back. A live episode
+            # keeps its row -- there the census itself vouches for the episode, and the owner keeps Stop.
+            if not any(gap.get("task_id") == work_id and gap.get("reason") == "episode_record_unavailable"
+                       for gap in obs.gaps):
+                obs.gaps.append({"reason": "episode_record_unavailable", "task_id": work_id})
+            complete = False
+            continue
         name = entry["name"] or _first_name(facts)
         work = ws.roll_up_work(work_id, members, episode=episode, name=name, room=room_row.get("chat_id"),
-                               focus=(facts or {}).get("focus"), runs=entry["runs"], outcome=outcome)
+                               focus=(facts or {}).get("focus"), runs=entry["runs"], outcome=outcome,
+                               gaps=[{"reason": "episode_record_unavailable", "task_id": root}
+                                     for root in sorted(entry["roots"] & obs.unverified)])
         current_id = str(episode["task_id"])
-        # Every root grouped here owns a live queue or direct row of its tree (each member is one) or an open
-        # delegated run: exactly what the Stop door reaches (queue_transitions.task_subtree_is_live), so each root
-        # takes Stop. A writer the door cannot reach (an unbound start, a handoff, a process) is no member and adds
-        # no root, so no control is offered for it.
+        # The root owns a queue/direct row, an open run or an accepted lookup-only start: the cascade Stop
+        # already reaches each (queue_transitions.task_subtree_is_live). No other unknown start adds a Stop target.
         # Every other root is the earlier attempt; a retry attempt's own original stands for the same episode.
         earlier = sorted(root for root in entry["roots"] if root not in {current_id, current_root})
         # Stop ends the whole work: a retry's logical original carries its tree too (never an earlier attempt).
@@ -566,7 +673,7 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         # may still execute (the door reads the same ended task: ``owner_pause_control._ended_tail``).
         stored_root = obs.result(current_id) or {} if current_state is None else {}
         if current_state is None and (any(m["activity"] in {"working", "queued", "waiting"} for m in members) or (
-                any(run["kind"] == "run" for run in entry["runs"])
+                any(run["kind"] == "run" and not run.get("unbound") for run in entry["runs"])
                 and stored_root.get("status") in _TRULY_TERMINAL_STATUSES and not owner_stopped(stored_root))):
             controls.insert(0, {"action": "pause", "target": current_id})
         if current_state is None:
@@ -579,6 +686,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
                     project_id=str(room_row.get("project_id") or ""), since=_since(room_row), controls=controls)
         if presence_turn or (current_row or {}).get("kind") == "presence":
             work["place_turn"] = True  # a correspondent's Presence turn (the fact its controls read)
+        if entry.get("unbound_start"):
+            work["unbound_start"] = True  # the Stop confirmation reads this (task_control_menu.js UNBOUND_STOP_BODY)
         if current_row is not None and current_row.get("lead"):
             work["lead"] = current_row["lead"]
             if isinstance(current_row.get("processing"), dict):
@@ -589,6 +698,10 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         works.append(work)
     works.sort(key=lambda work: (str(work.get("room") or ""), ws._rank(work["activity"]),
                                  -float(work.get("since") or 0.0), work["work_id"]))
+    # A standing-in address this read could not verify is an incompleteness of the whole projection, even when
+    # the row it belongs to survives on census facts: readers keep what they hold and do not read a deferred
+    # or gap-marked row as settled (#3428).
+    complete = complete and not obs.unverified
     # What waits for the owner is one set: a current question is its room's turn, in its work's when one holds it.
     loose = ws.place_questions(works, questions)
     by_room: Dict[str, List[Dict[str, Any]]] = {}

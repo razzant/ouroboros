@@ -1111,8 +1111,8 @@
  */
 
 /**
- * The optional body of `POST /api/tasks/{task_id}/resume`: held calls whose outcome is unknown
- * (a refusal's `acceptable_unknown`) the owner goes on past, and why. Recorded, never re-run.
+ * Send back the opaque IDs offered in this saved task's refusal, with a reason. Do not reconstruct an ID.
+ * For a delegated start, external work and costs may continue.
  * @typedef {Object} TaskResumeRequest
  * @property {string[]=} accept_unknown
  * @property {string=} reason
@@ -1138,6 +1138,7 @@
  * @property {string=} released_hold
  * @property {boolean=} held  // a Continue back in its writer wait: it starts by itself once `blockers` settle
  * @property {Array<Object>=} blockers
+ * @property {Array<Object>=} accepted_start_risks
  * @property {{rows: Array<{task_id: string, reason: string}>, count: number}=} membership_gaps
  * @property {string=} message
  */

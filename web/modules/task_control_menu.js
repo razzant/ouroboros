@@ -93,6 +93,17 @@ const STOP_CONFIRMS = Object.freeze({
         danger: true, body: 'What still runs of the earlier attempt stops at once; the Continue itself keeps going.' },
 });
 
+// A Stop over an accepted start whose outcome is unknown (#3428; the work projection's `unbound_start` on the
+// Activity trigger): the press records the request at once, but no engine run answers the start yet — the
+// confirmation says that truth instead of the bound run's immediate end.
+const UNBOUND_STOP_BODY = 'Stop is requested at once. A helper whose start was never confirmed may keep '
+    + 'working until it is identified and its stop is confirmed.';
+
+function stopConfirm(action, anchor) {
+    return action === ACTION_STOP_NOW && anchor?.dataset?.unboundStart === '1'
+        ? { ...STOP_CONFIRMS[action], body: UNBOUND_STOP_BODY } : STOP_CONFIRMS[action];
+}
+
 /**
  * Whether a queue row's task is the ROOT of its tree — the server's own rule
  * (`task_results.resolve_task_lineage`), so a child never offers the whole-tree
@@ -236,6 +247,8 @@ const HELD_FACTS = {
     })[b.reason] || `a merge of task ${b.task_id} is not settled`,
     workspace_executor: (b) => `a workspace process of task ${b.task_id} is not settled`,
     delegated_run: (b) => (b.state === 'running' ? `delegated run ${b.run_id} is running`
+        : b.state === 'terminal' ? `delegated run ${b.run_id} ended and awaits collection`
+        : b.choice_id ? `start ${b.invocation_id} of task ${b.task_id} has an unknown outcome`
         : b.stop_outcome === 'pending_invocation_unbound'
             ? 'a delegated start has an unknown outcome (no run was recorded)'
             : b.state === 'stop_requested' ? `delegated run ${b.run_id}: its stop is requested, not confirmed`
@@ -289,16 +302,27 @@ const KEPT_PAUSED = Symbol('kept_paused');
 async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
     const named = refusal?.body?.acceptable_unknown;
     if (!Array.isArray(named) || !named.length) throw refusal;
-    const facts = heldWorkFacts(refusal.body.blockers, 5);
+    const blockers = refusal.body.blockers || [];
+    const starts = blockers.some((b) => b.kind === 'delegated_run' && b.choice_id);
+    const facts = heldWorkFacts(blockers, Infinity);
     const one = named.length === 1;
     const confirmed = await askOwner({
         title: 'Resume without these results?',
-        body: `${facts.charAt(0).toUpperCase()}${facts.slice(1)}. If you resume, ${one ? 'this call is' : 'these calls are'} `
+        body: starts ? `Resume the saved task ${id} without waiting for the listed results? The delegated work may `
+            + 'still be running, changing files or spending money. Resuming will not send these requests again. '
+            + 'Your decision is recorded in the task history.'
+            : `${facts.charAt(0).toUpperCase()}${facts.slice(1)}. If you resume, ${one ? 'this call is' : 'these calls are'} `
             + `never run again, whatever ${one ? 'it' : 'they'} changed outside stays as it is, `
             + 'and your decision is recorded on the task.',
+        details: { open: true, summary: `Inspect all ${named.length} ${one ? 'request' : 'requests'}`,
+            rows: blockers.map((b) => ({ label: `Task ${b.task_id}`,
+                value: b.kind === 'delegated_run' && b.choice_id ? `Start request ${b.invocation_id}`
+                    : `${heldWorkFacts([b])} (${b.operation_id || b.attempt_id || b.receipt_id})` })) },
         confirmLabel: 'Resume anyway',
     });
-    return confirmed ? resume(id, { accept_unknown: named, reason: 'The owner resumed without these results.' })
+    return confirmed ? resume(id, { accept_unknown: named, reason: starts
+        ? 'The owner accepted that the listed starts may still be working or spending money.'
+        : 'The owner resumed without these results.' })
         : KEPT_PAUSED;
 }
 
@@ -643,7 +667,7 @@ export function openTaskControlMenu(anchor, {
     // choice. A trigger that always says `Stop…` keeps its menu: its label and its press change together.
     if (offered.length === 1 && anchor.dataset?.taskControlDirect === '1') {
         const [action] = offered;
-        if (!busy) Promise.resolve(STOPS.has(action) ? askConfirm(STOP_CONFIRMS[action]) : true).then((ok) => { if (ok) run(action); });
+        if (!busy) Promise.resolve(STOPS.has(action) ? askConfirm(stopConfirm(action, anchor)) : true).then((ok) => { if (ok) run(action); });
         return null;
     }
     // A11y: the trigger owns a popup menu; expanded tracks the open state.

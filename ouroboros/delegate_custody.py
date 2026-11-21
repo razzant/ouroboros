@@ -39,6 +39,9 @@ SUCCEEDED_STATES = frozenset({"succeeded"})
 # Durable row kinds. Every one of them is written to the event log the agent, the
 # supervisor and the forensic tooling already read.
 START_REQUESTED = "delegate_run_start_requested"
+START_RISK_ACCEPTED = "delegate_run_start_risk_accepted"
+START_STATE_OBSERVED = "delegate_run_start_state_observed"
+START_UNSENT = "delegate_run_start_handoff_refused"
 STARTED = "delegate_run_started"
 START_FAILED = "delegate_run_start_failed"
 TERMINAL_OBSERVED = "delegate_run_terminal_observed"
@@ -53,6 +56,7 @@ CLOSED_ABSENT = "delegate_run_closed_absent"
 STORE_BOUND = "delegate_run_store_bound"
 PROJECT_RETIRED = "delegate_run_project_retired"
 PROJECT_RETIRE_FAILED = "delegate_run_project_retire_failed"
+CANCEL_HANDOFF = "delegate_run_cancel_handoff"
 CANCEL_OUTCOME = "delegate_run_cancel_outcome"
 UNCONFINED = "delegate_run_unconfined"
 CONTAINMENT_FAULT = "delegate_run_containment_fault"
@@ -246,6 +250,7 @@ class RunCustody:
     # incident (``open_containment_faults``), the START_REQUESTED row that minted the
     # run's invocation (``invocation_record``) and its admission bucket (``billing_group``).
     started_ts: str = ""
+    resume_start_state: Optional[str] = None  # first engine state after a saved task accepted the start risk
     window_started_at: Optional[str] = None  # None: ordinary/legacy STARTED clock; "": recovered origin unknown
     max_seconds: int = 0
     cost_usd: Optional[float] = None
@@ -257,6 +262,7 @@ class RunCustody:
     containment_fault: Dict[str, Any] = field(default_factory=dict)
     request_event: Dict[str, Any] = field(default_factory=dict)
     billing_group: Dict[str, Any] = field(default_factory=dict)
+    _recovered_cancel = ""  # Serialized only on a lookup-only run that actually had a control handoff.
 
     @property
     def window_origin(self) -> str:
@@ -433,7 +439,7 @@ class ActorDecisionLockUnavailable(TimeoutError):
 
 
 @contextmanager
-def actor_decision_lock(drive_root: Any, task_id: str) -> Iterator[None]:
+def actor_decision_lock(drive_root: Any, task_id: str, *, wait: bool = True) -> Iterator[None]:
     """Serialize one actor's mutually exclusive zero-run/start decisions.
 
     The custody log and the verification-receipt store are separate append-only
@@ -455,9 +461,10 @@ def actor_decision_lock(drive_root: Any, task_id: str) -> Iterator[None]:
     lock_path = pathlib.Path(drive_root) / "state" / "delegate_actor_claims" / f"{digest}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     outcome: Dict[str, Any] = {}
-    fd = acquire_exclusive_file_lock(lock_path, timeout_sec=20.0, stale_sec=120.0, outcome=outcome)
+    timeout = 20.0 if wait else 0.0
+    fd = acquire_exclusive_file_lock(lock_path, timeout_sec=timeout, stale_sec=120.0, outcome=outcome)
     if fd is None:
-        raise ActorDecisionLockUnavailable(outcome, 20.0)
+        raise ActorDecisionLockUnavailable(outcome, timeout)
     try:
         yield
     finally:
@@ -542,9 +549,7 @@ from ouroboros.delegate_source_coverage import (
 )
 
 def _merge_started_into(entry: RunCustody, previous: RunCustody) -> None:
-    """Project a duplicate STARTED fact set onto an existing run — the ONE
-    merge, used by both the durable replay and the in-process memo (gate fix 8).
-
+    """Merge duplicate STARTED facts for durable replay and the in-process memo.
     Progress, the settlement's closing facts (cost, disclosure, model/profile,
     terminal state) and an unresolved containment fault always carry forward;
     binding facts are truthy-first-wins per field; the SHAPE GROUP (access/mode/isolation/delegated) plus the resource
@@ -554,6 +559,9 @@ def _merge_started_into(entry: RunCustody, previous: RunCustody) -> None:
     """
     for attr in (*_STARTED_PROGRESS_FLAGS, *_STARTED_SETTLEMENT_FACTS):
         setattr(entry, attr, getattr(previous, attr))
+    if previous._recovered_cancel:
+        entry._recovered_cancel = previous._recovered_cancel
+        entry._cancel_action = getattr(previous, "_cancel_action", {})
     if previous.containment_fault:
         entry.containment_fault = dict(previous.containment_fault)
     for attr in ("terminal_source", "observation_seq", "interaction_source", "pending_interaction_ids",
@@ -568,9 +576,11 @@ def _merge_started_into(entry: RunCustody, previous: RunCustody) -> None:
         prior = getattr(previous, attr)
         if prior:
             setattr(entry, attr, prior)
-    for attr in _STARTED_OPTION_FIELDS:
-        if getattr(previous, attr) is not None:
-            setattr(entry, attr, getattr(previous, attr))
+    for attr in _STARTED_OPTION_FIELDS:  # first non-None wins; only a recovered start's "unknown" yields to a later state
+        prior = getattr(previous, attr)
+        if prior is not None and (attr != "resume_start_state" or prior != "unknown" or entry.resume_start_state is None
+                                  or previous.settled or previous.terminal_state):
+            setattr(entry, attr, prior)
     for attr in ("work_order_source_request", "prompt_cache_ttl"):
         if getattr(previous, attr):
             setattr(entry, attr, copy.deepcopy(getattr(previous, attr)))
@@ -647,6 +657,9 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
             project_id=str(row.get("project_id") or ""), source=str(row.get("source") or ""))
     if custody is None:
         return
+    if kind in (CANCEL_HANDOFF, CANCEL_OUTCOME, START_STATE_OBSERVED):  # a recovered start's facts: its owner folds them
+        from ouroboros.delegate_resume import fold_start_control
+        fold_start_control(custody, row)
     if kind == STORE_BOUND and not custody.daemon_store_id:
         if row.get("task_id") == custody.task_id and row.get("invocation_id") == custody.invocation_id:
             custody.daemon_store_id = str(row.get("daemon_store_id") or "")
@@ -1049,7 +1062,9 @@ def record_started(drive_root: Any, custody: RunCustody,
     if shape and "delegated" in shape:
         custody.delegated = shape.get("delegated") is True
     previous = _CUSTODY.get(custody.run_id)
-    if previous is not None and previous is not custody:
+    if (previous and previous is not custody and (previous.task_id, previous.invocation_id) ==
+            (custody.task_id, custody.invocation_id) and (not previous.daemon_store_id or not custody.daemon_store_id
+                                                         or previous.daemon_store_id == custody.daemon_store_id)):
         _merge_started_into(custody, previous)
     _CUSTODY[custody.run_id] = custody
     if not publish:
@@ -1250,14 +1265,13 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
     except Exception:
         log.warning("Terminal observation was not retained for %s", custody.run_id, exc_info=True)
 
-    if custody.settled:
-        return {"settled": True, "ledger_recorded": custody.ledger_recorded,
-                "project_retired": not custody.project_owned and not custody.project_persistent,
-                "project_persistent": custody.project_persistent, "retried": False}
+    already_settled = custody.settled
     result = record_terminal_money(drive_root, custody, detail)
-    if custody.review_owned or custody.project_persistent:
+    if result.get("deferred") == "custody_owner_mismatch":
+        return result
+    if not already_settled and (custody.review_owned or custody.project_persistent):
         retire_project(drive_root, gateway, custody)
-    if custody.settled:
+    if not already_settled and custody.settled:
         resolve_containment_fault(drive_root, custody, "settled_terminal")
     result.update(project_retired=not custody.project_owned and not custody.project_persistent,
                   project_persistent=custody.project_persistent)
@@ -1383,33 +1397,31 @@ def resolve_containment_fault(drive_root: Any, custody: RunCustody, reason: str,
                                          **({"expected_reason": expected_reason} if expected_reason else {})})
 
 
-def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason: str) -> Dict[str, Any]:
-    """Cancel a run and report ONLY what a terminal receipt proves.
-
-    ``confirmed`` needs the run to read back terminal — or a durable settlement, or the
-    daemon answering that it has no such run. ``requested`` is an accepted control the run
-    has not obeyed yet. ``failed`` is a reachable daemon refusing while the run keeps
-    mutating, and an unverifiable attempt is a containment fault. The old path answered
-    all four with ``status: cancelled``.
-    """
+def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason: str, *, owner_stop=None) -> Dict[str, Any]:
+    """Cancel once and verify terminality or absence in the owning store."""
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.transport_custody import is_pre_dispatch_transport_failure
 
-    # The same durable fact ``settle_run`` short-circuits on, consulted by its twin. A run
-    # this module already recorded as terminal is not an overpowered live process, and a
-    # later ordinary cancel of it must not manufacture a permanent CRITICAL against a run
-    # the settlement had closed.
+    from ouroboros.delegate_resume import prepare_recovered_cancel, recovered_cancel_detail
+    recovered = getattr(custody, "resume_start_state", None) is not None
+    if recovered and not custody.settled:
+        if (observed := prepare_recovered_cancel(drive_root, gateway, custody, reason, owner_stop)) is not None:
+            return observed
     if custody.settled:
         return _cancel_result(drive_root, custody, CANCEL_CONFIRMED, accepted=False,
                               control_status="", state="settled")
-    accepted, control_status, control_error = False, "", ""
+    accepted, control_status, control_error, unsent = False, "", "", False
     try:
         receipt = gateway.cancel_run(custody.run_id, reason=str(reason or ""))
         accepted = bool((receipt or {}).get("accepted"))
         control_status = str((receipt or {}).get("status") or "")
+        if recovered and not isinstance((receipt or {}).get("accepted"), bool):
+            accepted, control_error = False, "The engine returned no cancellation verdict."
     except ClaudexorUnavailable as exc:
         # A refused control is not a verdict on the RUN, and the control route's 404 names no
         # store: the read below decides both absence and whether anything is still mutating.
         control_error = f"{exc.code}: {exc}"
+        unsent = recovered and not exc.status_code and is_pre_dispatch_transport_failure(exc)
     try:
         detail = gateway.get_run(custody.run_id)
     except ClaudexorUnavailable as exc:
@@ -1420,20 +1432,22 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
         return _cancel_result(drive_root, custody, CANCEL_CONTAINMENT_FAULT, accepted=accepted,
                               control_status=control_status, state="",
                               fault_reason="cancel_unreachable" if control_error else "cancel_unverified",
-                              detail=control_error or f"{exc.code}: {exc}")
+                              detail=control_error or f"{exc.code}: {exc}", control_owed=unsent)
     state = str(summary_of(detail).get("state") or "")
+    if names_another_run(detail, custody.run_id) or recovered and not recovered_cancel_detail(gateway, custody, detail):
+        return _cancel_result(drive_root, custody, CANCEL_CONTAINMENT_FAULT, accepted=accepted,
+                              control_status=control_status, state="", fault_reason="cancel_unverified",
+                              detail="read-back did not verify the same run and store", control_owed=unsent)
     if state in TERMINAL_STATES:
         settle_run(drive_root, gateway, custody, detail)
-        # The verify read's own detail rides the result (BR2-1, purely additive):
-        # a caller consuming a discovered natural terminal (completion wins) must
-        # not depend on a SECOND fetch succeeding after the run is settled.
+        # A caller collecting this terminal needs the detail even if its next fetch fails.
         return _cancel_result(drive_root, custody, CANCEL_CONFIRMED, accepted=accepted,
                               control_status=control_status, state=state,
                               terminal_detail=detail)
     if control_error:
         return _cancel_result(drive_root, custody, CANCEL_CONTAINMENT_FAULT, accepted=False,
                               control_status=control_status, state=state,
-                              fault_reason="cancel_unreachable", detail=control_error)
+                              fault_reason="cancel_unreachable", detail=control_error, control_owed=unsent)
     if accepted:
         return _cancel_result(drive_root, custody, CANCEL_REQUESTED, accepted=True,
                               control_status=control_status, state=state)
@@ -1445,21 +1459,20 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
 
 def _cancel_result(drive_root: Any, custody: RunCustody, outcome: str, *, accepted: bool,
                    control_status: str, state: str, fault_reason: str = "",
-                   detail: str = "",
+                   detail: str = "", control_owed: bool = False,
                    terminal_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     emit(drive_root, CANCEL_OUTCOME, {
         "run_id": custody.run_id, "task_id": custody.task_id, "outcome": outcome,
         "accepted": accepted, "control_status": control_status, "state": state,
+        "control_owed": control_owed,
     })
     if fault_reason:
         record_containment_fault(drive_root, custody, fault_reason, detail)
     elif outcome == CANCEL_CONFIRMED:
         resolve_containment_fault(drive_root, custody, "verified_terminal")
-    result = {"outcome": outcome, "accepted": accepted, "control_status": control_status,
-              "state": state, "fault_reason": fault_reason, "detail": detail}
-    # BR2-1, backward-compatible: the key exists only when a verify read produced
-    # the run detail — absent otherwise, so every pre-existing consumer of the
-    # six-key shape is untouched (the emit above deliberately excludes it too).
+    result = {"outcome": outcome, "accepted": accepted, "control_status": control_status, "state": state,
+              "fault_reason": fault_reason, "detail": detail, "control_owed": control_owed}
+    # Keep the read-back for the caller. The custody event contains only the control facts.
     if terminal_detail is not None:
         result["terminal_detail"] = terminal_detail
     return result

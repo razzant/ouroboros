@@ -223,6 +223,9 @@ class Work(WorkLeadFields):
     gaps: NotRequired[List[Dict[str, Any]]]
     client_message_id: NotRequired[str]
     place_turn: NotRequired[bool]  # a correspondent's Presence turn: Telegram's owner list leaves it out
+    unbound_start: NotRequired[bool]  # an accepted delegate start no engine run answers yet: its Stop is a request
+    # taken against the recorded request and the tree, never against a remote run handle; the remote start's true
+    # fate stays unknown until a stop is confirmed (#3428; ``task_control_menu.js``). Said only when true.
 
 
 class RoomStatus(TypedDict):

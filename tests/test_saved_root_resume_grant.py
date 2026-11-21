@@ -851,6 +851,87 @@ def test_an_unusable_saved_source_keeps_its_refusal_through_the_owners_resume(tm
     assert rows[OTHER] == children[OTHER] and eb.budget_hold_fact(rows[OTHER]) and rows[ROOT] in q.PENDING
 
 
+@pytest.mark.parametrize("rail", ["accept", "foreign", "delegated", "deadline", "live"])
+def test_owner_can_accept_a_local_unknown_without_restoring_an_unusable_source(tmp_path, monkeypatch, rail):
+    import asyncio
+    import json
+    import os
+    from types import SimpleNamespace
+
+    from ouroboros import owner_pause
+    from ouroboros.gateway.tasks import api_task_resume
+    from ouroboros.process_custody import current_custody_session_id
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_store import patch_document
+    from ouroboros.work_stop import continuation_refusal
+    from supervisor import events_budget as eb
+
+    system, rows = _update_aborted_tree(tmp_path, monkeypatch, freeze_fault=True)
+    q, workers = system.queue, system.workers
+    paused, _basis = _pause(q, tmp_path, ROOT)
+    # Durable fixture input: the old call returned, but its outside effect is unconfirmed.
+    # No external call is sent. The real census, Resume door and retirement writer run.
+    operation = "lost-local-receipt"
+    claim = {"task_id": ROOT, "root_task_id": ROOT, "tool": "call_mcp_tool", "state": "returned",
+             "external_pending": {"synthetic-effect": "mcp_transport"}}
+    patch_document(tmp_path, ROOT, lambda row: {**row, "launch_handoffs": {operation: claim}})
+    reason = "Go on without this result"
+
+    def resume(*ids):
+        async def body():
+            return {"accept_unknown": list(ids), "reason": reason} if ids else {}
+
+        response = asyncio.run(api_task_resume(SimpleNamespace(path_params={"task_id": ROOT}, json=body)))
+        return response.status_code, json.loads(response.body)
+
+    code, offer = resume()
+    assert (code, offer["error"], offer["acceptable_unknown"]) == (
+        409, "owner_pause_effects_unsettled", [operation]), offer
+    assert [(b["kind"], b["task_id"], b["reason"]) for b in offer["blockers"]] == [
+        ("tool_handoff", ROOT, "returned_effect_unconfirmed")]
+    choices = offer["acceptable_unknown"]
+    claims = {operation: claim}
+    if rail == "foreign":
+        choices = [*choices, "not-offered"]
+    elif rail == "delegated":
+        choices = [*choices, "delegate_start:foreign/foreign/lost"]
+    elif rail == "deadline":
+        monkeypatch.setitem(rows[ROOT], "deadline_at", "1970-01-01T00:00:00Z")
+    elif rail == "live":
+        # Only the test process exists. Its own recorded session gives positive liveness.
+        pid = os.getpid()
+        claims["live"] = {**claim, "state": "claimed", "external_pending": {},
+                          "local_owner": {"pid": pid, "process_birth": "fixture", "task_attempt": 1},
+                          "owner_proof": {"pid": pid, "session": current_custody_session_id()}}
+        patch_document(tmp_path, ROOT, lambda row: {**row, "launch_handoffs": claims})
+    code, resumed = resume(*choices)
+    if rail != "accept":
+        assert (code, resumed["error"]) == (409, {
+            "foreign": "selection_authority_changed", "delegated": "selection_authority_changed",
+            "deadline": "deadline_passed", "live": "owner_pause_effects_unsettled"}[rail]), resumed
+        assert not resumed.get("acceptable_unknown")
+        if rail == "live":
+            assert any(b["reason"] == "local_call_live" for b in resumed["blockers"])
+        stored = load_task_result(tmp_path, ROOT, strict=True)
+        assert stored["launch_handoffs"] == claims and not stored.get("retired_tool_invocations")
+        assert owner_pause.read_fence(tmp_path, ROOT) == paused
+        return
+    assert code == 200 and resumed["owner_pause_released"] and not resumed.get("accepted_start_risks"), resumed
+    stored = load_task_result(tmp_path, ROOT, strict=True)
+    assert not stored.get("launch_handoffs")
+    retired = stored["retired_tool_invocations"][operation]
+    assert (retired["effect_outcome"], retired["replay_authorized"]) == ("unknown_accepted", False)
+    assert (retired["accepted"]["actor"], retired["accepted"]["text"]) == ("owner", reason)
+    assert owner_pause.read_fence(tmp_path, ROOT)["state"] == "released"
+    assert continuation_refusal(rows[ROOT])["reason"] == "dispatch_outcome_unknown"
+    assert not eb.live_root_resume_grant(q, ROOT, tmp_path)
+    assert _model_selects(tmp_path, workers, q, CHOSEN, ROOT)["error"] == "root_resume_grant_missing"
+    again = resume()[1]
+    assert (again["error"], again["action"]) == ("dispatch_outcome_unknown", "cancel_or_new_run")
+    workers.assign_tasks()
+    assert _sent(system) == [] and rows[ROOT] in q.PENDING
+
+
 @pytest.mark.parametrize("failure", ["snapshot", "fence"])
 def test_a_failed_resume_write_keeps_no_refusal_and_a_retry_records_it(tmp_path, monkeypatch, failure):
     from ouroboros import owner_pause

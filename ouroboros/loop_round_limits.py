@@ -811,6 +811,7 @@ class _RoundLimitContext:
     # LAST field: existing positional construction (tests included) stays valid.
     tool_schemas: Optional[List[Dict[str, Any]]] = None
     emit_progress: Optional[Callable[..., None]] = None  # the room's progress: a forced answer shows what it displaced
+    resume_candidate: bool = False
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -1249,7 +1250,8 @@ def _maybe_early_finalize(
 
     waiter = getattr(tools._ctx, "model_wait_context", None)
     reason = waiter.control_reason() if waiter is not None else None
-    if reason in {"absolute_ceiling", "execution_deadline"}:
+    retained = getattr(limit_ctx, "resume_candidate", False)
+    if reason in {"absolute_ceiling", "execution_deadline"} or (retained and reason in {"cancelled", "deadline"}):
         return _handle_model_wait_control(limit_ctx, ModelWaitInterrupted(reason),
                                           transport_episode=transport_episode)
     # The owner's Pause (a Stop above still wins): the root's durable fence, not
@@ -1258,6 +1260,11 @@ def _maybe_early_finalize(
 
     enter_owner_pause(limit_ctx)
     enter_cold_sleep(limit_ctx)  # the model's own cold sleep armed in the last tool batch
+    if retained:
+        # A selected answer does not need a paid wrap-up. An actual elapsed bound still ends it.
+        if (remaining := local_deadline_remaining(tools._ctx, limit_ctx)) is not None and remaining <= 0.0:
+            return _handle_model_wait_control(limit_ctx, ModelWaitInterrupted("deadline"))
+        return None
     # An active episode owns the deadline sliver: its last free redial +
     # no-resend terminal replace the paid deadline_local finalize call.
     if transport_episode is None:

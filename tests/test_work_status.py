@@ -524,7 +524,7 @@ _REAL_OPEN_RUNS = wp._open_runs  # the custody reader itself, before a fixture f
 def stored(monkeypatch):
     results = {}
     monkeypatch.setattr(wp._Observations, "result", lambda self, task_id: results.get(task_id))
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {})
     monkeypatch.setattr(wp, "_inflight_upkeep", lambda drive_root, known: [])
     return results
 
@@ -625,7 +625,7 @@ def _run(run_id, task_id, source="delegated_subagent", terminal_state=""):
 
 def test_working_helpers_and_runs_of_an_ended_root_are_its_tails(stored, monkeypatch, tmp_path):
     stored["p"] = {"task_id": "p", "status": "failed", "chat_id": 42}
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {"p": [_run("run-1", "p-a"), _run("run-2", "p-b")]})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {"p": [_run("run-1", "p-a"), _run("run-2", "p-b")]})
     snap = wp.works_snapshot(tmp_path, [row("h0", parent_task_id="p", root_task_id="p")], {})
     [work] = snap["works"]
     assert work["activity"] == "working" and work["because"] == []
@@ -729,7 +729,7 @@ def test_a_stop_is_unconfirmed_only_while_its_tasks_pause_lives(tmp_path):
 
 
 def test_a_review_the_pause_lets_finish_is_one_review_tail_from_either_source(stored, monkeypatch, tmp_path):
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {"t": [_run("run-rv", "t", source="review_substrate")]})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {"t": [_run("run-rv", "t", source="review_substrate")]})
     owners = [row("t", "budget_paused", pause_cause="owner", finishing_reviews=True)]
     snap = wp.works_snapshot(tmp_path, owners, {})
     [work] = snap["works"]
@@ -738,7 +738,7 @@ def test_a_review_the_pause_lets_finish_is_one_review_tail_from_either_source(st
         ("review", "Review work finishing", ["run-rv"])]
     assert "count" not in work["tails"][0]
     # A native review (no custody row) is the same tail; with no review at all there is none.
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {})
     [work] = wp.works_snapshot(tmp_path, owners, {})["works"]
     assert [(tail["kind"], tail.get("ids")) for tail in work["tails"]] == [("review", None)]
     [work] = wp.works_snapshot(tmp_path, [row("t", "budget_paused", pause_cause="owner")], {})["works"]
@@ -748,7 +748,7 @@ def test_a_review_the_pause_lets_finish_is_one_review_tail_from_either_source(st
 def test_a_run_whose_own_task_failed_is_unconfirmed_and_its_work_stays_stoppable(stored, monkeypatch, tmp_path):
     stored["p"] = {"task_id": "p", "status": "failed", "chat_id": 42}
     stored["h"] = {"task_id": "h", "status": "failed"}
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {"p": [_run("run-u", "h")]})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {"p": [_run("run-u", "h")]})
     [work] = wp.works_snapshot(tmp_path, [], {})["works"]
     assert (work["activity"], work["live"], work["mark"]) == ("unknown", False, "ring")
     assert [(tail["state"], tail["text"]) for tail in work["tails"]] == [("unknown", "1 external run may still be running")]

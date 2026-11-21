@@ -444,7 +444,7 @@ TAIL_STATES = ("live", "unknown")
 _FAILED_OWNER = frozenset({"failed", "cancelled"})
 
 
-def run_tail(source: Any, owner: Optional[Mapping[str, Any]], *, stop_unknown: bool = False) -> tuple:
+def run_tail(source: Any, owner: Optional[Mapping[str, Any]], *, stop_unknown: bool = False, start_state=None) -> tuple:
     """How one open delegated run is said beside its work, ``(kind, state)``: the one typing the server's work
     projection and Ouroboros's own roster share. A review-owned ``source`` is review work; a run nobody can confirm
     is one whose own task (``owner``, its stored result) ended failed or cancelled, or whose stop that task's live
@@ -454,7 +454,9 @@ def run_tail(source: Any, owner: Optional[Mapping[str, Any]], *, stop_unknown: b
 
     if review_owned_source(source):
         return "review", "live"
-    return "run", "unknown" if stop_unknown or _outcome(owner or {}) in _FAILED_OWNER else "live"
+    if stop_unknown or start_state == "unknown":
+        return "run", "unknown"
+    return "run", "live" if start_state in {"queued", "running"} or _outcome(owner or {}) not in _FAILED_OWNER else "unknown"
 
 
 def _tail(kind: str, code: str, ids: List[str], *, state: str = "live", count: Optional[int] = None) -> Dict[str, Any]:

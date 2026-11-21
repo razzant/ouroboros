@@ -575,29 +575,31 @@ def _ended_tail(drive_root: Any, root_id: str) -> tuple:
     """``(live, stoppable)`` of what an ended root's tree left, by the work's own run typing (``work_status.run_tail``
     over its open runs, with ``work_projection.unconfirmed_stops``, as the work's tails are typed): ``live`` only when a
     run is typed live, never for a run nobody can confirm, an unbound start or unreadable custody; ``stoppable`` while
-    an open run is there for the Stop door to reach (its ``tree_open_runs``). One tree-scoped custody read."""
+    custody holds an open run or an accepted lookup-only start of this tree. One tree-scoped read."""
+    from ouroboros.delegate_custody import TERMINAL_STATES
     from ouroboros.delegate_custody_current import tree_closure
     from ouroboros.gateway import work_status as ws
     from ouroboros.gateway.work_projection import unconfirmed_stops
     from ouroboros.task_results import load_task_result
 
     try:
-        held = tree_closure(pathlib.Path(drive_root), root_id)["unfinished"].values()
-        runs = [run for run in held if not run.settled]
+        closure = tree_closure(pathlib.Path(drive_root), root_id)
+        runs = [run for run in closure["unfinished"].values() if not run.settled]
     except Exception:
         return False, True  # unknown custody runs nothing it can prove; the Stop door reads it again itself
     for run in runs:
         task_id = str(run.task_id or "")
-        if run.terminal_state or not task_id:  # an engine terminal is no member of the work (``_open_runs``)
+        start_state = getattr(run, "resume_start_state", None)
+        if run.terminal_state or start_state in TERMINAL_STATES or not task_id:
             continue
         try:
             owner = load_task_result(pathlib.Path(drive_root), task_id)
         except Exception:
             owner = None  # an unreadable owner proves no failure: the run reads live, as on its tail
         stops = unconfirmed_stops(drive_root, task_id, owner)
-        if ws.run_tail(run.source, owner, stop_unknown=str(run.run_id) in stops) == ("run", "live"):
+        if ws.run_tail(run.source, owner, stop_unknown=str(run.run_id) in stops, start_state=start_state) == ("run", "live"):
             return True, True
-    return False, bool(runs)
+    return False, bool(runs) or any(row.get("resume_decisions") for row in closure["pending"])
 
 
 def _answered_root_phase(drive_root: Any, root_id: str, facts: dict, reviews: Any, members: bool) -> tuple:
@@ -606,7 +608,7 @@ def _answered_root_phase(drive_root: Any, root_id: str, facts: dict, reviews: An
     The fence's own census is the truth of "Paused": reviewers already launched finish separately and never keep the
     tree Pausing. With no member left, what they left holds a requested Pause: a run typed live is the Pause settling
     (``running``); anything else (a run nobody can confirm, an unbound start) is ``tail_unknown``, never running and
-    never a settled Pause, with ``nothing_to_stop`` when no open run is there for Stop. Without this row an accepted
+    never a settled Pause, with ``nothing_to_stop`` when custody has nothing the cascade can reach. Without this row an accepted
     Pause over an ended root would show nowhere.
     """
     from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight

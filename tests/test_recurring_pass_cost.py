@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from tests._budget_pause_exact_helpers import _install_queue
+from tests._budget_pause_exact_helpers import _install_fresh_supervisor_memory, _install_queue
 from tests._cost_meter import CostMeter, tagged
 
 # The work a pass may not repeat: connections, transactions, statements, decoded JSON (a decoded task
@@ -470,6 +470,8 @@ def test_l1_settled_trees_cost_nothing_per_pass_at_one_root_or_twenty(tmp_path, 
     def one_pass(name, roots):
         _root, queue, _workers, ids = _paused_trees(tmp_path, monkeypatch, name, roots)
         assert all(owner_pause_control._AT_REST.get(root_id) for root_id in ids)
+        # task_done also marks trees whose last queue carrier and latch are gone.
+        owner_pause_control.mark_tree_changed(f"{name}-ended")
         outcome = counted(meter, f"L1:{name}", lambda: owner_pause_control.settle_requested_owner_pauses(queue))
         monkeypatch.undo()
         assert outcome["result"] == [], "a settled tree is not examined again"
@@ -496,7 +498,7 @@ def test_l1_a_new_process_reads_each_fenced_tree_once_then_rests(tmp_path, monke
     assert owner_pause_control.settle_requested_owner_pauses(queue) == [] and census == []
 
 
-@pytest.mark.parametrize("change", ["member_left", "attempt_changed", "new_generation"])
+@pytest.mark.parametrize("change", ["member_left", "attempt_changed", "new_generation", "marked"])
 def test_l1_a_member_transition_brings_exactly_its_own_tree_back(tmp_path, monkeypatch, meter, change):
     """The companion: a transition wakes the tree it touched. Its neighbours keep costing nothing."""
     from supervisor import owner_pause_control
@@ -526,6 +528,7 @@ def test_l1_a_member_transition_brings_exactly_its_own_tree_back(tmp_path, monke
 def test_l1_the_look_is_owed_by_the_cadence_and_a_mark_and_never_without_a_pause(tmp_path, monkeypatch):
     from supervisor import owner_pause_control as control
 
+    _install_fresh_supervisor_memory(monkeypatch)
     queue = type("Q", (), {"BUDGET_ROOT_FENCES": {}})()
     control.request_settlement_look()
     assert not control.settlement_look_owed(queue), "no owner Pause stands: nothing is owed"
@@ -573,9 +576,9 @@ def test_l1_a_pass_longer_than_the_cadence_is_never_followed_at_once_by_another(
     monkeypatch.setattr(maintenance, "child", maintenance.MaintenanceChild())
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {"root": {"cause": "owner_pause", "fence_id": "f"}})
+    _install_fresh_supervisor_memory(monkeypatch)
     with control._BOOK_LOCK:
         control._LOOK_OWED[0] = False
-        control._CHANGED.clear()
 
     def tick():
         monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [0.0])  # the 20 s block is due
