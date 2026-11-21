@@ -56,7 +56,16 @@ jobs:
           # the packaged unit as shipped, with only its ExecStart replaced and the memory bounded for this run
           sed 's#^ExecStart=.*#ExecStart=/home/cmtest/src/_internal/python-standalone/bin/python3 /home/cmtest/src/scripts/verify_command_memory_linux.py --in-unit --require packaged_probe_is_enabled,packaged_gate_without_system_python,leaf_oom_kills_only_its_group,parent_pressure_selects_among_leaves,multi_process_build_is_the_victim,two_healthy_commands_start,tiny_remainder_still_starts --json-out /home/cmtest/command-memory-unit.json#' \
             packaging/systemd/ouroboros.service.in | sudo -u cmtest tee "$unit/ouroboros.service" >/dev/null
-          printf '[Service]\nMemoryMax=512M\nMemorySwapMax=0\n' | sudo -u cmtest tee "$unit/ouroboros.service.d/verify.conf" >/dev/null
+          # Diagnostic: which bus the packaged service can reach, and the socket owners.
+          cat > /home/cmtest/busdiag.sh <<'DIAG'
+          id
+          echo "XDG=$XDG_RUNTIME_DIR DBUS=$DBUS_SESSION_BUS_ADDRESS"
+          ls -ln /run/user/$(id -u)/bus /run/dbus/system_bus_socket
+          systemctl --user show ouroboros.service --property=LoadState; echo "user_rc=$?"
+          systemctl show user@$(id -u).service --property=LoadState; echo "sys_rc=$?"
+          DIAG
+          sudo chown cmtest:cmtest /home/cmtest/busdiag.sh
+          printf '[Service]\nMemoryMax=512M\nMemorySwapMax=0\nExecStartPre=/bin/sh /home/cmtest/busdiag.sh\n' | sudo -u cmtest tee "$unit/ouroboros.service.d/verify.conf" >/dev/null
           as_user systemctl --user daemon-reload
           as_user systemctl --user start --wait ouroboros.service || status=$?
           sudo cp /home/cmtest/command-memory-unit.json "$RUNNER_TEMP/command-memory-unit.json" || true
