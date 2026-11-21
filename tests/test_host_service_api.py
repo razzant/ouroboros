@@ -982,3 +982,62 @@ def test_chat_inject_allows_slash_command_caption_even_with_text(tmp_path: pathl
 def _focus_authority_available(monkeypatch):
     monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
     monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})
+
+
+@pytest.fixture
+def owner_state(tmp_path, monkeypatch):
+    """An initialized core state of this test's own, its external owner slot known to be empty."""
+    from supervisor import state
+
+    for name in ("DRIVE_ROOT", "STATE_PATH", "STATE_LAST_GOOD_PATH", "STATE_LOCK_PATH"):
+        monkeypatch.setattr(state, name, getattr(state, name))
+    state.init(tmp_path)
+    state.init_state()
+    return state
+
+
+def _external(state):
+    current = state.load_state()
+    return current.get("owner_external_id"), current.get("owner_external_chat_id")
+
+
+def test_owner_external_binds_only_an_empty_slot_and_the_emergency_door_observes_it(tmp_path, owner_state,
+                                                                                    panic_bridge):
+    """A transport that bound its owner registers that pair as the external command owner, and the door accepts
+    that pair's first /panic at once. Only a slot known to be empty binds: the same pair again answers ``same``, a
+    bound pair is never replaced, an unreadable state binds nothing, and the gate is the one /chat/inject has."""
+    _seed_token(tmp_path, permissions=["inject_chat"])
+    _seed_token(tmp_path, skill="no_grant", token="other-token", permissions=[])
+    bridge = panic_bridge
+    client = TestClient(create_host_service_app(tmp_path, bridge_getter=lambda: bridge))
+    owner = {"user_id": 17, "chat_id": 23}
+
+    assert client.post("/owner/external", json=owner).status_code == 403
+    assert client.post("/owner/external", headers={"X-Skill-Token": "other-token"}, json=owner).status_code == 403
+    for bad in ({"user_id": 0, "chat_id": 23}, {"user_id": 17, "chat_id": -5}, {"user_id": "17", "chat_id": 23},
+                {"user_id": True, "chat_id": 23}, [17, 23]):
+        assert client.post("/owner/external", headers={"X-Skill-Token": "token"}, json=bad).status_code == 400
+    assert _external(owner_state) == (None, None) and bridge.panic._owner[1] is None
+
+    answer = client.post("/owner/external", headers={"X-Skill-Token": "token"}, json=owner)
+    assert answer.status_code == 200 and answer.json() == {"ok": True, "owner": "bound"}
+    assert _external(owner_state) == (17, 23) and bridge.panic._owner[1] == (17, 23)
+    accepted = client.post("/chat/inject", headers={"X-Skill-Token": "token"}, json={"text": "/panic", **owner})
+    assert accepted.status_code == 202 and bridge.stopped.wait(3)
+
+    again = client.post("/owner/external", headers={"X-Skill-Token": "token"}, json=owner)
+    other = client.post("/owner/external", headers={"X-Skill-Token": "token"}, json={"user_id": 99, "chat_id": 99})
+    assert again.json()["owner"] == "same" and other.json()["owner"] == "other"
+    assert _external(owner_state) == (17, 23) and bridge.panic._owner[1] == (17, 23)
+    assert bridge.messages == []  # registering an owner writes no chat message
+
+
+def test_owner_external_binds_nothing_while_the_state_cannot_be_read(tmp_path, owner_state, panic_bridge,
+                                                                    monkeypatch):
+    from supervisor.state import STATE_READ_KEY
+
+    _seed_token(tmp_path, permissions=["inject_chat"])
+    monkeypatch.setattr(owner_state, "load_state", lambda: {STATE_READ_KEY: {"quality": "unavailable"}})
+    client = TestClient(create_host_service_app(tmp_path, bridge_getter=lambda: panic_bridge))
+    answer = client.post("/owner/external", headers={"X-Skill-Token": "token"}, json={"user_id": 17, "chat_id": 23})
+    assert answer.json() == {"ok": True, "owner": "unknown"} and panic_bridge.panic._owner[1] is None
