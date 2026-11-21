@@ -2780,7 +2780,9 @@ bundling is uninstalled on update when its copy is unchanged (its grants survive
 and stays as the owner's copy when edited or when another folder uses its name;
 `design_demo` was merged into `ui_design` this way. An owner's edited `ui_design`
 keeps its own text, which may still name `design_demo`.
-`unix_computer_use` and `windows_computer_use` are bundled extensions.
+`unix_computer_use`, `windows_computer_use` and `ui_look` are bundled extensions; `ui_look` adds one
+read-only tool that runs `ui_design`'s live stand, so `ui_design` stays an instruction that delegated
+sessions keep in their index.
 
 Non-declared delegated sessions receive an index of enabled, accepted or reviewed
 instruction skills from every installed bucket: bounded descriptions, triggers and
