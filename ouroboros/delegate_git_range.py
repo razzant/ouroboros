@@ -20,6 +20,9 @@ ROOTS = ("active_workspace", "system_repo")
 FIELDS = ("repository", "base", "head", "path")
 FLAGS = ("--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=none",
          "--submodule=short", "--no-color", "--no-relative", "-r", "--no-commit-id")
+# vcs_read's diff with every presentation argument at its default: the whole patch, unstaged, no summary, no length
+# limit. The range retains exactly that, so a reader may fix one of these at its exact typed default and at no other.
+PRESENTATION_DEFAULTS = {"staged": False, "stat": False, "name_only": False, "max_chars": 0}
 
 
 class RangeAdmission(NamedTuple):
@@ -92,6 +95,11 @@ def _admit_path(readers, source, name, admission):
         admission.admit_source(reader, read, entry=entry)
 
 
+def _exactly(value, expected):
+    """Equal and of one JSON type: 0, "0" and False are not each other."""
+    return type(value) is type(expected) and value == expected
+
+
 def range_binding(readers, spec, admission):
     """Use the selecting caller's VCS repository, intersected with both readers' permissions."""
     from ouroboros import work_domain
@@ -104,13 +112,13 @@ def range_binding(readers, spec, admission):
     executor = executor_ref_from_ctx(ctx)
     if work_domain.managed() or (executor and executor.kind == "docker_exec"):
         raise ValueError("git_range is unavailable in a managed or Docker work domain")
-    # The two-tree diff the host renders is never staged; a reader that fixes staged=false only says so.
-    comparison = {"action": "diff", "base": spec["base"], "head": spec["head"], "staged": False}
+    # A reader that restates a default only says what is already so: it narrows nothing and fixes no scope.
+    comparison = {"action": "diff", "base": spec["base"], "head": spec["head"], **PRESENTATION_DEFAULTS}
     bindings = []
     for reader in readers:
         bound = admission.bound_args(reader, "vcs_read", comparison)
         fixed = {key: value for key, value in bound.items() if key not in comparison}
-        if (any(bound.get(key) != value for key, value in comparison.items())
+        if (not all(_exactly(bound.get(key), value) for key, value in comparison.items())
                 or fixed.keys() - {"root", "repository", "path"}
                 or not all(isinstance(value, str) for value in fixed.values())):
             raise PermissionError(PRESENCE_RESOURCE_BLOCKED)

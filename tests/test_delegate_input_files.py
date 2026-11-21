@@ -1628,15 +1628,24 @@ def test_a_fixed_vcs_repository_names_one_physical_scope_in_both_reader_folders(
     def fix(*more):
         _presence(ctx, ("active_workspace", "source/removed"), vcs=True, vcs_bindings=(*scope, *more))
 
+    def argument(name, value):
+        return PresenceArgumentBinding((name,), "static", static_value=value)
+
     entry = {"git_range": {"repository": "source", "base": "before", "head": "after", "path": "removed"}}
-    # A two-tree diff is never staged: fixing staged=false only repeats that, while every other fixed
-    # argument (staged=true, a summary mode) restricts what the range renders and still refuses it.
-    fix(PresenceArgumentBinding(("staged",), "static", static_value=False))
-    allowed = schedule_selected_inputs(ctx, [entry], "same-repository", workspace_root=str(ctx.repo_dir))
-    assert {row["source"] for row in allowed} == {str(repo)}
-    assert all(row["status"] == "prepared" for row in allowed)
-    for index, (name, value) in enumerate((("staged", True), ("stat", True), ("stat", False))):
-        fix(PresenceArgumentBinding((name,), "static", static_value=value))
+    # The range is the whole two-tree patch: vcs_read's diff with every presentation argument at its default.
+    # A fixed argument may restate that exact typed default, which restricts nothing; a narrower value, another
+    # type or an operand the diff does not take would restrict the reader, so the range still refuses it.
+    defaults = (("staged", False), ("stat", False), ("name_only", False), ("max_chars", 0))
+    for index, restated in enumerate([*([case] for case in defaults), list(defaults)]):
+        fix(*(argument(*case) for case in restated))
+        allowed = schedule_selected_inputs(ctx, [entry], f"same-repository-{index}", workspace_root=str(ctx.repo_dir))
+        assert {row["source"] for row in allowed} == {str(repo)}, restated
+        assert all(row["status"] == "prepared" for row in allowed), restated
+    for index, (name, value) in enumerate((
+            ("staged", True), ("stat", True), ("name_only", True), ("max_chars", 1),  # narrower
+            ("staged", 0), ("stat", 0), ("name_only", "false"), ("max_chars", False), ("max_chars", "0"),  # not typed
+            ("max_count", 20), ("unknown", False))):  # not the diff's presentation
+        fix(argument(name, value))
         with pytest.raises(InputSelectionError) as restricted:
             schedule_selected_inputs(ctx, [entry], f"restricted-{index}", workspace_root=str(ctx.repo_dir))
         assert "PRESENCE_RESOURCE_BLOCKED" in restricted.value.results[0]["detail"], (name, value)
@@ -1708,8 +1717,8 @@ def test_ordinary_input_respects_presence_in_the_receiving_workspace(tmp_path, m
     ctx, selected, _ = _scheduler(tmp_path, monkeypatch, kind="api_model")
     nested = ctx.repo_dir / "nested"
     nested.mkdir()
-    (nested / "one.md").write_text("nested brief\n", encoding="utf-8")
-    (ctx.repo_dir / "other.md").write_text("outside the starting folder\n", encoding="utf-8")
+    (nested / "one.md").write_bytes(b"nested brief\n")
+    (ctx.repo_dir / "other.md").write_bytes(b"outside the starting folder\n")
     options = {"subagent_id": selected, "objective": "Read", "expected_output": "Summary",
                "workspace_root": str(nested)}
     nested_file = {"root": "active_workspace", "path": "nested/one.md"}

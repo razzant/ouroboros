@@ -509,7 +509,7 @@ def test_first_start_override_after_unrun_keeps_original_out_of_effective_inputs
     monkeypatch.setattr(delegate, "prepare_delegate_start_actor", subagent_runtime.prepare_delegate_start_actor)
     if ranged:
         _range_fixture(rt.repo / "source")
-    (rt.repo / "own.txt").write_text("replacement input\n", encoding="utf-8")
+    (rt.repo / "own.txt").write_bytes(b"replacement input\n")  # LF on every platform: the copy is compared as bytes
     _parent_files(rt)
     original = [{"git_range": {"repository": "source", "base": "before", "head": "after"}}] if ranged else SELECTION[:1]
     _, event = _schedule(chain, sid, access="readonly", attachment_paths=["attachments/brief.md"], input_files=original)
