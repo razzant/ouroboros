@@ -7,13 +7,14 @@ the card line renderers live here, also for the card transitions the observation
 ranking. A section with nothing to say is not printed. They stand whole in the full text and in the projection the
 wake takes when its observation does not fit; only the bare pointer folds each to its count and the kind of its rows.
 
-Works that ended without success (``fallen_works``): in each open project (lifecycle active, no ``closed`` record), its
-newest-started work root when that root ended failed or cancelled and ``ended_without_success`` holds. A root that
-starts later in the project (a Continue successor is one) or closing the project takes it off the list; nothing ages
-it out. Presence's own rows (a speaker turn, work acting for a binding) neither stand nor retire; the owner's work
-related to a binding does both. Not covered: works with no project, and a root that fails while a later-started root
-of its project exists. Cost per wake: one index probe per open project and the bodies of the candidates, read by
-primary key in the same snapshot; nothing is stored.
+Works that ended without success (``fallen_works``): in each open project (lifecycle active, no ``closed`` record;
+a root's project is its binding when it has one), its newest-started work root when that root ended failed or
+cancelled and ``ended_without_success`` holds. A root that starts later in the project (a Continue successor is one)
+or closing the project takes it off the list; nothing ages it out. Presence's own rows (a speaker turn, work acting
+for a binding, a carrier that lost its id) neither stand nor retire; the owner's work related to a binding does both.
+Not covered: works with no project, and a root that fails while a later-started root of its project exists. Cost per
+wake: one index probe per open project, one primary-key read of the roots bound to open projects and the bodies of
+the candidates, all in the same snapshot; nothing is stored.
 
 Own clock (``_clock_section``): ``consciousness_clock.own_clock_lines`` over the state the alarm read when it admitted
 the wake, while a named time or my human's reported zone stands; the appointment and the bounds alone make none.
@@ -167,7 +168,7 @@ def ended_without_success(row: Any) -> bool:
     their word (``owner_requested_finalization``); not cancelled by a focus's tool; not a wake (work a wake started
     is not one); no successor: a Continue past ``bound``, a supersession or a retry under another id. A Continue
     bound and not yet admitted keeps it (its line names the successor). Presence's own rows are not judged here:
-    ``fallen_works`` skips them by their typed columns."""
+    ``fallen_works`` skips them by their typed column."""
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION, recorded_cause
     from ouroboros.owner_continue import OWNER_STOP_SOURCES
 
@@ -235,24 +236,45 @@ def fallen_line(row: Dict[str, Any], *, project: str, now: float) -> str:
 
 
 def fallen_works(root: Any, *, now: float, projects: Iterable[Mapping[str, Any]]) -> List[FallenWork]:
-    """The works that stand, newest-started first: in each open project its newest work root (the partial index
-    ``tasks_project_root_ts``, skipping only Presence's own rows by their typed columns) when it ended failed or
-    cancelled and ``ended_without_success`` holds. Bodies are read only for those candidates, by primary key in the
-    probes' snapshot, and decoded after it closes."""
+    """The works that stand, newest-started first: in each open project its newest-started work root when it ended
+    failed or cancelled and ``ended_without_success`` holds. A root's project is its binding when it has one (owner
+    B4=A, ``projects_registry.project_id_for_task``): the stored ``project_id`` the partial index
+    ``tasks_project_root_ts`` walks is a copy a mid-run "Turn into project" never reaches, so a root bound elsewhere
+    is skipped there and the roots bound to an open project are read beside it by primary key. Rows Presence's
+    authority governs (``presence_authority_recorded``) are skipped by that typed column. Bodies are read only for the
+    candidates, by primary key in the probes' snapshot, and decoded after it closes."""
     from ouroboros import task_store
+    from ouroboros.projects_registry import project_task_bindings
 
     names = open_projects(projects)
     if not names:
         return []
-    newest = (f"SELECT task_id, status, ts FROM tasks INDEXED BY tasks_project_root_ts WHERE project_id=? AND "
-              f"{task_store.ROOT_RESULT_WHERE} AND NOT (presence_binding_id IS NOT NULL AND presence_authority_recorded=1) "
-              f"{task_store._NEWEST_ORDER} LIMIT 1")
-    candidates, fetched = [], []
+    bound = {task_id: str(row.get("project_id") or "") for task_id, row in project_task_bindings(root).items()}
+    moved = sorted(task_id for task_id, project_id in bound.items() if project_id in names)
+    own = f"{task_store.ROOT_RESULT_WHERE} AND presence_authority_recorded=0"
+    newest = (f"SELECT task_id, status, ts FROM tasks INDEXED BY tasks_project_root_ts WHERE project_id=? AND {own} "
+              f"{task_store._NEWEST_ORDER}")
+    best: Dict[str, Tuple[bool, str, str, str]] = {}  # project -> (has a start, start, id, status) of its newest root
+
+    def keep(project_id: str, task_id: Any, status: Any, ts: Any) -> None:
+        key = (ts is not None, ts or "", str(task_id), str(status or ""))
+        if project_id not in best or key[:3] > best[project_id][:3]:
+            best[project_id] = key
+
+    fetched = []
     with task_store.open_store(root, write=False) as txn:
         for project_id in names:
-            found = txn.conn.execute(newest, (project_id,)).fetchone()
-            if found is not None and found[1] in FALLEN_STATUSES:
-                candidates.append((found[2] is not None, found[2] or "", str(found[0]), project_id))
+            for task_id, status, ts in txn.conn.execute(newest, (project_id,)):
+                if (bound.get(task_id) or project_id) == project_id:  # one bound elsewhere is that project's root
+                    keep(project_id, task_id, status, ts)
+                    break
+        if moved:
+            for task_id, status, ts in txn.conn.execute(
+                    f"SELECT task_id, status, ts FROM tasks WHERE task_id IN (SELECT value FROM json_each(?)) AND {own}",
+                    (json.dumps(moved),)):
+                keep(bound[task_id], task_id, status, ts)
+        candidates = [(known, ts, task_id, project_id) for project_id, (known, ts, task_id, status) in best.items()
+                      if status in FALLEN_STATUSES]
         if candidates:
             fetched = task_store._fetch(txn, "t.task_id IN (SELECT value FROM json_each(?))",
                                         (json.dumps(sorted(task_id for _known, _ts, task_id, _p in candidates)),))

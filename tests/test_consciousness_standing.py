@@ -225,6 +225,52 @@ def test_the_owners_related_work_stands_and_retires(tmp_path):
     assert _listed(tmp_path) == []
 
 
+@pytest.mark.parametrize("fields", [
+    {"metadata": {"presence": {"binding_id": ""}}},  # a malformed carrier is still a Presence one
+    {"task_contract": {"capability_ceiling": {"tools": []}}},  # a ceiling whose carrier was lost
+])
+def test_a_presence_row_whose_carrier_lost_its_id_neither_stands_nor_retires(tmp_path, fields):
+    """``presence_authority_recorded`` marks such a row beside an empty ``presence_binding_id``
+    (``store.typed_columns``): it is Presence's, like a speaker turn."""
+    _root(tmp_path, "turn", ts=T0 - 1800, ended=T0 - 600, **fields)
+    assert _listed(tmp_path) == []
+    _root(tmp_path, "fell", ts=T0 - 3600, ended=T0 - 3000)
+    _root(tmp_path, "turn", ts=T0 - 1800, status="completed", ended=T0 - 600, **fields)
+    assert _listed(tmp_path) == ["fell"]
+
+
+def _bind(root, **projects_by_task):
+    """``state/project_task_bindings.json`` as "Turn into project" leaves it: the binding names a work's project."""
+    (root / "state").mkdir(exist_ok=True)
+    rows = {task_id: {"task_id": task_id, "project_id": project_id, "project_chat_id": 0, "bound_at": _iso(T0 - 900)}
+            for task_id, project_id in projects_by_task.items()}
+    (root / "state" / "project_task_bindings.json").write_text(json.dumps({"bindings": rows}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("copy", ["", "other"])
+def test_a_root_counts_in_the_project_its_binding_names_never_in_the_copy_it_started_with(tmp_path, copy):
+    """A work turned into a project while it ran keeps, in its own terminal row, the project copy it started with
+    (Main's empty one, or another room's); the binding is its project (owner B4=A): there it stands or retires."""
+    projects = [*PROJECTS, {"id": "other", "name": "Other", "lifecycle": "active"}]
+    _root(tmp_path, "earlier", ts=T0 - 9000, project="other", ended=T0 - 8000)
+    _root(tmp_path, "converted", ts=T0 - 1800, project=copy, ended=T0 - 600)
+    assert _listed(tmp_path, projects) == (["converted"] if copy else ["earlier"]), "the copy alone decides"
+    _bind(tmp_path, converted="p1")
+    works = standing.fallen_works(tmp_path, now=T0, projects=projects)
+    assert {work.task_id: work.project_id for work in works} == {"converted": "p1", "earlier": "other"}
+    assert "- task converted Failed in project Audit," in works[0].line
+
+
+def test_a_root_bound_to_the_project_later_retires_its_earlier_failure(tmp_path):
+    _root(tmp_path, "fell", ts=T0 - 3600, ended=T0 - 3000)
+    _root(tmp_path, "moved", ts=T0 - 600, project="", status="running")
+    assert _listed(tmp_path) == ["fell"]
+    _bind(tmp_path, moved="p1")
+    assert _listed(tmp_path) == []
+    _bind(tmp_path, moved="elsewhere", unrelated="p1")  # bound to no open project, and a binding with no row
+    assert _listed(tmp_path) == ["fell"]
+
+
 def test_bodies_are_read_only_for_candidates_and_the_line_stays_compact(tmp_path, monkeypatch):
     from ouroboros import task_store
 
