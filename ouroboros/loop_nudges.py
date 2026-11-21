@@ -40,40 +40,73 @@ def _loop():
     return loop
 
 
-def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, Any]) -> str:
-    names = _loop()._skill_names_touched_by_trace(llm_trace)
-    if not names:
-        return ""
+def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, Any], ctx: Any = None) -> str:
+    """Facts before the final answer about skills this work changed or touched; what to do is the mind's.
+
+    A skill enabled at the work's first view whose files differ now (``skills_changed_during_work``; this
+    work or another participant changed them) gets one neutral line: its keys keep working, the permissions
+    on the owner's behalf wait for the check of the new version (owner 1A, 21.11). A self-authored skill
+    the trace touched that is not ready keeps its readiness facts; another skill the trace touched (a delegate's
+    work has no first view) is named when its permissions wait for the check of its current files. An intended
+    Off is not a blocker, and a key the owner is still to save in a form keeps nothing from running."""
     try:
-        from ouroboros.skill_loader import find_skill
-        from ouroboros.skill_readiness import skill_readiness_for_execution
+        from ouroboros.skill_grant_scope import blocking_items
+        from ouroboros.skill_loader import find_skill, grant_status_for_skill, skill_state_dir_path
+        from ouroboros.skill_readiness import skill_readiness_for_execution, skills_changed_during_work
     except Exception:
         return ""
-    blockers: List[str] = []
-    for name in names:
+    facts: List[str] = []
+    changed: List[str] = []
+
+    def changed_fact(skill: Any, how: str) -> None:
+        grants = grant_status_for_skill(pathlib.Path(drive_root), skill)
+        keys = ", ".join(grants.get("granted_keys") or [])
+        waiting = ", ".join(grants.get("waiting_permissions") or [])
+        facts.append(
+            f"files of skill {skill.name} {how}" + (f"; its keys ({keys}) still work" if keys else "")
+            + (f"; its permissions on the owner's behalf ({waiting}) wait for the check of the new version "
+               f"(skill_review {skill.name!r} or another acceptance of the current files)" if waiting else "")
+            + (f"; it does not run until the owner grants {blocking_items(grants)}" if grants.get("blocked") else ""))
+
+    try:
+        for skill in skills_changed_during_work(ctx, pathlib.Path(drive_root)):
+            changed.append(skill.name)
+            if skill.enabled:  # turned off during the work: an intended Off is the owner's, not a pending step
+                changed_fact(skill, "changed during this work (by this work or another participant)")
+    except Exception:
+        log.debug("Changed-skill facts unavailable", exc_info=True)
+    for name in _loop()._skill_names_touched_by_trace(llm_trace):
         try:
             skill = find_skill(pathlib.Path(drive_root), name)
-            if skill is None or not getattr(skill, "is_self_authored", False):
+            if skill is None or skill.name in changed:
+                continue
+            if not getattr(skill, "is_self_authored", False):
+                # A work without a first view (a delegate's) knows the skills it touched from its trace.
+                if skill.enabled and grant_status_for_skill(pathlib.Path(drive_root), skill).get("waiting_permissions"):
+                    changed_fact(skill, "differ from the version its permissions were granted for (this work touched it)")
                 continue
             readiness = skill_readiness_for_execution(pathlib.Path(drive_root), skill)
-            ready = readiness.ready
         except Exception:
             continue
-        if not ready:
-            blockers.append(
+        # A recorded Off is an intended one, not a step left: only a skill never turned on names it.
+        recorded = (skill_state_dir_path(pathlib.Path(drive_root), skill.name) / "enabled.json").exists()
+        off = {"skill_disabled"} if recorded else set()
+        blockers = [item for item in readiness.blockers if item not in off]
+        if blockers:
+            facts.append(
                 f"{skill.name}: status={skill.review.status!r}, "
-                f"blockers={readiness.blockers}, "
+                f"blockers={blockers}, "
                 f"agent_fixable={readiness.agent_fixable_blockers}, "
-                f"owner_action={readiness.owner_action_blockers}, "
+                f"owner_action={[item for item in readiness.owner_action_blockers if item not in off]}, "
                 f"next_actions={readiness.next_actions}"
             )
-    if not blockers:
+    if not facts:
         return ""
     return (
-        "⚠️ SKILL_NOT_FINALIZED: self-authored skills this task touched are not ready to "
-        "execute. A fresh review does not supply a missing owner grant or override an "
-        "intentional disablement, and an intentionally disabled skill may still satisfy the "
-        "task. Current facts, each with its available next actions: " + "; ".join(blockers)
+        "⚠️ SKILL_NOT_FINALIZED: facts about skills this work changed or touched, each with its available "
+        "next actions. With automatic grants for reviewed skills on, an acceptance of a skill's current files "
+        "(a finished review or another acceptance basis) grants what it requests and carries this "
+        "installation's earlier grants; an intentional disablement stays the owner's. " + "; ".join(facts)
     )
 
 
@@ -594,7 +627,8 @@ def _maybe_inject_finalization_nudges(
 
     from ouroboros.tool_access import canonical_data_root
 
-    finalization_msg = _loop()._skill_finalization_message(canonical_data_root(tools._ctx), llm_trace)
+    finalization_msg = "" if getattr(tools._ctx, "_skill_finalization_injected", False) else \
+        _loop()._skill_finalization_message(canonical_data_root(tools._ctx), llm_trace, tools._ctx)
     if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
         tools._ctx._skill_finalization_injected = True
         return _inject(finalization_msg, finalization_msg, "skill_not_finalized")

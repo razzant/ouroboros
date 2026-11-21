@@ -75,6 +75,33 @@ def _skill_tool_identity_mapping() -> Dict[str, str]:
     }
 
 
+def note_enabled_skill_digests(ctx: Any, skills: Any) -> None:
+    """The work's first view of its enabled skills' files, taken where the Installed Skills section reads
+    them: the end-of-work fact compares against it, so an edit through a shell, a delegate or another
+    participant is seen too (``skills_changed_during_work``). Later builds keep the first view."""
+    if ctx is None or getattr(ctx, "_skill_digests_at_start", None) is not None:
+        return
+    try:
+        ctx._skill_digests_at_start = {
+            str(skill.name): str(skill.content_hash) for skill in skills or []
+            if getattr(skill, "enabled", False) and getattr(skill, "content_hash", "")
+            and not getattr(skill, "identity_collision", False)}
+    except Exception:
+        log.debug("Skill digest view not recorded", exc_info=True)
+
+
+def skills_changed_during_work(ctx: Any, drive_root: pathlib.Path) -> List[Any]:
+    """Skills enabled at the work's first view whose files differ now (by this work or another participant)."""
+    start = getattr(ctx, "_skill_digests_at_start", None) if ctx is not None else None
+    if not isinstance(start, dict) or not start:
+        return []
+    from ouroboros.skill_loader import discover_skills
+
+    now = {skill.name: skill for skill in discover_skills(pathlib.Path(drive_root)) if not skill.identity_collision}
+    return [now[name] for name, digest in start.items()
+            if name in now and now[name].content_hash and now[name].content_hash != digest]
+
+
 def skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
     """Names of the skills a task's tool trace touched.
 
