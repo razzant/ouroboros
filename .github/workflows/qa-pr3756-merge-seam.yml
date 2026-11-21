@@ -1,0 +1,95 @@
+# Temporary #3756 qualification; only this file is added above the exact product.
+name: QA PR3756 integration seam
+on:
+  push:
+    branches: ['qa/pr3756-merge-seam']
+permissions:
+  contents: read
+jobs:
+  focused:
+    if: github.repository == 'razzant/ouroboros'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      MSYS_NO_PATHCONV: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind this run to the exact product and its public parents
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa=$(git rev-parse HEAD)
+          product=5789c19695e824a3619d7445d7b3a2c8a204be65
+          test "$qa" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P "$qa")" = "$product"
+          test "$(git diff --no-renames --name-status "$product" "$qa")" = $'A\t.github/workflows/qa-pr3756-merge-seam.yml'
+          test "$(git show -s --format=%P "$product")" = 'd2827690169c4309365f04f4670989c7ec3181f7 541238ef4f7ecf3916326a509f1e0e15f25ea4fc'
+          git checkout --detach "$product"
+          test "$(git rev-parse HEAD)" = "$product"
+          printf 'QA %s; product %s (%s); base 541238ef4f7ecf3916326a509f1e0e15f25ea4fc\n' "$qa" "$product" "$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_STEP_SUMMARY"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Check Go, result files, and persistence on the product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TEMP="$RUNNER_TEMP" TMP="$RUNNER_TEMP"
+          py=$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')
+          out="$RUNNER_TEMP/pr3756"
+          mkdir -p "$out"
+          tests=(
+            tests/test_opencode_go_chat.py::test_same_host_conversation_through_chat_tool_roundtrip
+            tests/test_opencode_go_chat.py::test_other_routes_do_not_get_go_headers
+            tests/test_opencode_go_chat.py::test_reported_cost_controls_return_and_settlement
+            tests/test_opencode_go_chat.py::test_sdk_stream_policy_matches_durable_settlement
+            tests/test_headless_task_events.py::test_task_result_readers_keep_posix_name_bytes_and_ordinary_download
+            tests/test_headless_task_events.py::test_task_result_http_and_sse_carriers_preserve_raw_posix_names
+            tests/test_result_review.py::test_result_subject_states_ordinary_copy_failure_for_byte_named_material
+            tests/test_verify_artifact_lifecycle.py::test_bytes_equal_operands_are_the_exact_declared_names
+            tests/test_persistence_inventory.py::test_scan_is_populated_and_pinned
+            tests/test_persistence_inventory.py::test_every_scanned_path_has_an_inventory_row
+            tests/test_persistence_inventory.py::test_every_inventory_row_is_still_real
+            tests/test_review_cost_knowledge.py
+            tests/test_gateway_history.py::test_chat_history_replays_posix_document_labels_from_live_delivery
+            tests/test_message_bus.py::test_send_document_publishes_transport_event_with_payload
+            tests/test_message_bus.py::test_send_document_persists_compact_chat_row
+            tests/test_telegram_reply_references.py::test_every_mirrored_media_surface_retains_reference_and_native_reply
+            tests/test_telegram_reply_references.py::test_an_exact_replys_turn_takes_its_own_address_first_and_leaves_the_rooms_binding
+          )
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" \
+            --evidence-dir "$out/evidence" --timeout 720 -- \
+            "$py" -m pytest -o addopts= -q --junitxml="$out/junit.xml" "${tests[@]}"
+          "$py" -I -S - "$out/junit.xml" "${tests[@]}" <<'PY'
+          import pathlib, sys, xml.etree.ElementTree as ET
+
+          cases = list(ET.parse(sys.argv[1]).getroot().iter('testcase'))
+          assert cases, 'empty JUnit'
+          for case in cases:
+              assert not any(case.find(tag) is not None for tag in ('skipped', 'failure', 'error')), case.attrib
+          names = {(c.get('classname', '').split('.')[-1], c.get('name', '').split('[', 1)[0]) for c in cases}
+          for target in sys.argv[2:]:
+              path, _, func = target.partition('::')
+              module = pathlib.PurePosixPath(path).stem
+              assert any(m == module and (not func or f == func) for m, f in names), target
+          print(f'{len(cases)} passing cases, every named witness ran')
+          PY
+      - name: Upload the two bounded evidence files
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr3756-junit-${{ matrix.os }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/pr3756/junit.xml
+            ${{ runner.temp }}/pr3756/evidence/run-*/result.json
+          if-no-files-found: warn
+          retention-days: 14
