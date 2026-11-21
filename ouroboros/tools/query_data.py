@@ -86,6 +86,11 @@ def _name(value):
     return value
 
 
+def _lines_kind(kind):
+    """Whether a kind's records are JSONL rows (read by op=jsonl) rather than one JSON document (op=json)."""
+    return kind.endswith("_log") or kind in {"verification_receipts", "knowledge_history"}
+
+
 def _arg(name, value):
     """``name=value`` as the call spelled it in JSON, bounded: a refusal names field and value."""
     text = json.dumps(value, ensure_ascii=False, default=str)
@@ -530,10 +535,27 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
     from ouroboros.observability import read_blob_ref
 
     # ``plane`` names the plane a result was read from; ``requested_plane`` is the caller's selector.
-    result, requested_plane, plane, missing = {}, plane or "", "", ""
+    result, requested_plane, plane, missing, notes = {}, plane or "", "", "", []
     try:
         if op not in {"sql", "json", "jsonl", "blob"}:
             raise ValueError(f"{_arg('op', op)}: use sql, json, jsonl or blob")
+        jsonl_only = [_arg(name, value) for name, value, used in (("filter", filter, filter is not None),
+                                                                  ("tail", tail, tail != 100)) if used]
+        # Every kind has exactly one reader of json/jsonl, so naming the other one has one meaning: it is read
+        # with the kind's reader, disclosed in ``notes``. jsonl's filter or tail on a JSON kind asks for rows that
+        # kind does not have: refused here, before the filter's own checks, so the repair is one call.
+        if op in {"json", "jsonl"} and isinstance(kind, str) and (kind in _FILES or kind == "task_result"):
+            legal = "jsonl" if _lines_kind(kind) else "json"
+            if op != legal and legal == "json" and jsonl_only:
+                raise ValueError(f"kind={kind} requires op=json; {', '.join(jsonl_only)} "
+                                 f"{'applies' if len(jsonl_only) == 1 else 'apply'} only to op=jsonl: "
+                                 f"send op=\"json\" without {'it' if len(jsonl_only) == 1 else 'them'}")
+            if op != legal:
+                rows = ("" if legal == "json" or type(tail) is not int else
+                        "; tail=0 reads its rows from the start" if tail == 0 else
+                        f"; tail={tail} limits the read to its last {tail} rows")
+                notes.append(f"op={op!r} read as op={legal!r}: kind={kind} is read only by op={legal}{rows}")
+                op = legal
         if format not in {"json", "text"}:
             raise ValueError(f"{_arg('format', format)}: use json or text")
         for name, value, low, high in (("max_bytes", max_bytes, 256, sql.MAX_BYTES), ("max_rows", max_rows, 1, 10000),
@@ -650,9 +672,6 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 raise ValueError(f"{_arg('kind', kind)}: op={op} needs one of task_result, {', '.join(_FILES)}")
             if state_file not in _STATES:
                 raise ValueError(f"{_arg('state_file', state_file)}: use one of {', '.join(_STATES)}")
-            is_lines = kind.endswith("_log") or kind in {"verification_receipts", "knowledge_history"}
-            if (op == "jsonl") != is_lines:
-                raise ValueError(f"kind={kind} requires op=" + ("jsonl" if is_lines else "json"))
             identities = ids if ids is not None else ([ctx.task_id] if kind == "verification_receipts" else [""])
             if not isinstance(identities, list) or not 1 <= len(identities) <= 32:
                 raise ValueError("ids must be an array of 1..32 identities")
@@ -740,6 +759,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                       code=code, message=str(exc) + (missing if code == "not_found" else ""))
     if plane and result["status"] != "ok":  # a refusal or gap names the plane it concerns, like a result
         result.setdefault("plane", plane)
+    if notes:
+        result["notes"] = notes
     text = _canonical(result).decode("utf-8")
     code = {"ok": "OK", "error": "TOOL_ERROR", "blocked": "ACCESS_BLOCKED", "unavailable": "CAPABILITY_UNAVAILABLE"}[result["status"]]
     return _publish_tool_result(ctx, ToolResult(status=result["status"], code=code, text=text))
