@@ -5,7 +5,7 @@ import copy
 import json
 from types import SimpleNamespace
 
-from tests.worker_pool_support import affirm_ready
+from tests.worker_pool_support import affirm_ready, fixed_pool
 
 import pytest
 
@@ -61,8 +61,8 @@ def resume_after_app_stop(host, *task_ids):  # noqa: F811
 def worker(host, monkeypatch):  # noqa: F811
     sent = []
     # These consumers finish each task on slot 0 before assigning the next one.
-    # Keep demand reconciliation inside this one-slot fake pool.
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)
+    # Keep demand reconciliation inside this fake pool: no new process starts.
+    fixed_pool(monkeypatch)
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=lambda _event: None))
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
     workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, reaping=False,
@@ -477,3 +477,40 @@ def test_schedule_projection_cannot_clear_independent_owner_hold(host, tmp_path,
     workers.assign_tasks()
     assert not sent and host.pending[0]["_owner_hold"] == {"reason": "independent owner pause"}
     assert not host.pending[0].get("_project_admission_restore_hold")
+
+
+def test_a_named_schedule_born_project_continuation_returns_through_its_project_hold(host, tmp_path, monkeypatch):  # noqa: F811
+    """#3192 on its Project shape: a scheduled Project work that ran and saved a step, named by an acknowledged
+    restart, comes back with a Project verification hold but no "saved when the app stopped" hold; that hold is
+    released by the same unlaunched-step proof, and the same task is sent again from its saved step."""
+    from ouroboros import delegate_recovery, working_checkpoint as wc
+    from supervisor.events_budget import budget_hold_fact
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    task = accepted(host, tmp_path)
+    task["metadata"] = {"schedule_occurrence": {"schedule_id": "daily-review", "token": "occ-1"}}
+    write_task_result(host.root, "held", "scheduled", schedule_admission={
+        "token": "occ-1", "schedule_id": "daily-review", "dispatch": "none", "task": copy.deepcopy(task)})
+    sent = worker(host, monkeypatch)
+    workers.assign_tasks()
+    assert [row["id"] for row in sent] == ["held"]
+    assert load_task_result(host.root, "held")["schedule_admission"]["dispatch"] == "possible"
+    _ctx, limit = _loop_ctx(host.root, "held")
+    wc.save_round(limit, "pre_effect")
+    assert prepare_restart_returns(host.root, workers.RUNNING, workers.PENDING, transaction_id="tx-update") == {"held"}
+    row = delegate_recovery._read_restart_transaction(host.root, "tx-update")
+    delegate_recovery._write_restart_transaction(host.root, {**row, "status": "normal_exit_acknowledged", "exit_code": 42})
+
+    monkeypatch.setattr(workers, "WORKERS", {})  # the fixture's slot is no process: nothing to tear down
+    workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
+                         stop_source="server_shutdown", retain_saved_work=True, preserve_pending=True)
+    host.pending.clear()
+    workers.RUNNING.clear()
+    queue.restore_pending_from_snapshot()
+    [returned] = host.pending
+    assert budget_hold_fact(returned) is None, "no 'saved when the app stopped' hold on a named return"
+    sent = worker(host, monkeypatch)
+    workers.assign_tasks()
+    assert [(row["id"], row["_attempt"]) for row in sent] == [("held", 2)]
+    assert sent[0]["_working_recovery"]["cause"] == "restart" and not sent[0].get("_project_admission_restore_hold")

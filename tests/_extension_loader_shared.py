@@ -8,7 +8,8 @@ importers ``test_extension_surfaces.py``, ``test_extension_isolated_deps.py``,
 helpers through the parent module's re-export) keeps the exact skill payloads
 and review state it was written against. ``_clear_loader_state`` is autouse, so
 importing it into a test module re-applies it there — every sibling suite
-imports it.
+imports it. ``version_plugin`` and ``extension_tool_answer`` let a suite tell which
+published revision of an installed extension answers.
 """
 
 from __future__ import annotations
@@ -67,6 +68,30 @@ def _write_ext_skill(
     entry_path.parent.mkdir(parents=True, exist_ok=True)
     entry_path.write_text(plugin_body, encoding="utf-8")
     return skill_dir
+
+
+def version_plugin(version: str) -> str:
+    """A plugin whose one ``version`` tool answers the release that registered it."""
+    return (f"def register(api):\n    api.register_tool('version', lambda ctx: {version!r}, description='release',"
+            " schema={})\n")
+
+
+def extension_tool_answer(drive: pathlib.Path, skill: str, tool: str = "version") -> str | None:
+    """What ``skill``'s published ``tool`` answers through the dispatcher, whose fresh liveness gate
+    refuses an ineligible extension; ``None`` while nothing is registered under that name. Only the
+    model safety verdict is stubbed: it is not what these callers test."""
+    from unittest import mock
+
+    from ouroboros import extension_loader
+    from ouroboros.tools.extension_dispatch import dispatch_extension_tool
+    from ouroboros.tools.registry import ToolContext
+
+    published = extension_loader.get_tool(extension_loader.extension_surface_name(skill, tool))
+    if published is None:
+        return None
+    with mock.patch("ouroboros.safety.check_safety", lambda *_args, **_kwargs: (True, "")):
+        return dispatch_extension_tool(ToolContext(repo_dir=drive, drive_root=drive, task_id="caller"),
+                                       published["name"], published, {})
 
 
 def _prepare_extension(

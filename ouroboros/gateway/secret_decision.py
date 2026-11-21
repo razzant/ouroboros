@@ -265,6 +265,11 @@ def _save_locked(drive_root: pathlib.Path, decision_id: str, task_id: str, quiz_
             code = "settings_locked" if isinstance(exc, SettingsLockUnavailable) else "secret_save_failed"
             return (*_refusal(503, code, f"Settings could not be written ({type(exc).__name__}); nothing was "
                               "saved. Try again.", decision_id), False)
+    if boundary.committed:
+        # The credential changed even if later read-back or completion recording fails.
+        from ouroboros.skill_mcp import lifecycle_settled
+
+        lifecycle_settled(reason="secret_saved")
     try:
         document = _owner_settings_document(strict=True)
         retained = all(document.get(key) == value for key, value in changes.items())

@@ -1,10 +1,7 @@
 """Registration persistence policy and the STARTED-row field tables.
 
-The leaf module the delegate custody core leans on at the module line gate
-(both ``delegate_custody.py`` and ``tools/delegate.py`` sit exactly on the
-1600-line ceiling): the #362 persistence decision lives here, and the
-STARTED-row shape tables move here with it so the core pays for the marker
-by extraction, not compression.
+The leaf module the delegate custody core leans on: the #362 persistence
+decision and the STARTED-row shape tables live here.
 
 #362 (the f9356572 A3 remediation, ported): on engines that support the
 delegated ``workspaceRoot`` field the run registers the user's STABLE target
@@ -173,9 +170,15 @@ def minted_root(root: str, drive: Any) -> bool:
     ``state/headless_tasks/<id>/**``, which the drive custody pass retires) or a checkout the subagent
     worktree registry holds (a child's copy, a body candidate). Any other root, an owner's project or
     the system repository, keeps its registration wherever it lives, even under the data root."""
+    from ouroboros.subagent_worktrees import registered_checkout
+
+    return minted_shape(root, drive) or registered_checkout(root)
+
+
+def minted_shape(root: str, drive: Any) -> bool:
+    """``minted_root``'s data-root half: the tree's place under the data root alone, no registry read."""
     import pathlib
 
-    from ouroboros.subagent_worktrees import registered_checkout
     from ouroboros.tools.review_subject import CHECKOUT_SUBDIR
 
     path, data = pathlib.Path(root).resolve(), pathlib.Path(drive).resolve()
@@ -183,8 +186,7 @@ def minted_root(root: str, drive: Any) -> bool:
     return (parts[:2] == ("state", CHECKOUT_SUBDIR)
             or any(parts[i:i + 2] == ("source_handles", "review_inputs") for i in range(len(parts) - 1))
             or (len(parts) > 1 and parts[0] == "task_drives")
-            or (len(parts) > 2 and parts[:2] == ("state", "headless_tasks"))
-            or registered_checkout(root))
+            or (len(parts) > 2 and parts[:2] == ("state", "headless_tasks")))
 
 
 def ephemeral_scope(gateway: Any, *, thread: bool = False) -> bool:
@@ -270,10 +272,11 @@ STARTED_STR_FIELDS: Tuple[Tuple[str, str], ...] = tuple(
         "continuation_of", "capture_id", "snapshot_task_id",
     )
 )
-# None means an old row omitted the choice; '' is a captured default choice. ``row_effort`` is
-# the configured row's pin ('' = Auto) beside ``effort``, the LEAF level the engine ran.
+# None means no optional fact; '' is a captured default choice, or an unknown recovered
+# window origin. ``row_effort`` is the configured pin ('' = Auto), ``effort`` the leaf's level; ``row_processing``
+# the row's own tier, ``processing_preference`` the run's.
 STARTED_MAPPING_FIELDS = ("authority_ceiling", "promotion")
-STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort")
+STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort", "row_processing", "window_started_at")
 # Progress carried forward from a previous row: an idempotent re-start writes a
 # SECOND started row; replacing wholesale would forget a settlement and put a
 # finished run back into the orphan sweep (which would cancel it).
@@ -298,5 +301,5 @@ STARTED_FIRST_WINS_FACTS: Tuple[str, ...] = (
     "capture_id", "snapshot_task_id", "authority_source", "resource_ref", "selected_subagent_id",
     "config_fingerprint", "work_order_fingerprint", "work_order_coverage",
     "authority_fingerprint", "work_order_source_request", "category", "source",
-    "execution_mode", "effective_access", "thread_id", *STARTED_MAPPING_FIELDS,
+    "execution_mode", "effective_access", "thread_id", "engine_ref", *STARTED_MAPPING_FIELDS,
     *REVIEW_ATTRIBUTION_KEYS)

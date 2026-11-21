@@ -94,6 +94,18 @@ def _compat_cost_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
         "prompt_cache_ttls": dict(bucket.get("prompt_cache_ttls") or {}),
     }
 
+def _recorded(bucket: Dict[str, Any]) -> bool:
+    """The ledger recorded something for this value: a call, an unpriced row, a priced row (a disclosed
+    $0 subscription session has no physical call) or an amount. A value with no row stays out, never $0."""
+    return bool(
+        int(bucket.get("physical_calls") or 0)
+        or int(bucket.get("unknown_unmetered") or 0)
+        or int(bucket.get("priced_rows") or 0)
+        or int(bucket.get("subscription_sessions") or 0)
+        or float(bucket.get("accounted_usd") or 0.0)
+    )
+
+
 def _compat_cost_groups(
     groups: Dict[str, Dict[str, Any]],
     unattributed: Dict[str, Any],
@@ -102,11 +114,7 @@ def _compat_cost_groups(
 ) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     for name, raw_bucket in groups.items():
-        if not (
-            int(raw_bucket.get("physical_calls") or 0)
-            or int(raw_bucket.get("unknown_unmetered") or 0)
-            or float(raw_bucket.get("accounted_usd") or 0.0)
-        ):
+        if not _recorded(raw_bucket):
             continue
         key = group_key(str(name)) if group_key else str(name)
         source = _compat_cost_bucket(raw_bucket)
@@ -123,11 +131,7 @@ def _compat_cost_groups(
         target["cost_final"] = target["cost_final"] and source["cost_final"]
         for ttl, count in source["prompt_cache_ttls"].items():
             target["prompt_cache_ttls"][ttl] = int(target["prompt_cache_ttls"].get(ttl, 0)) + int(count)
-    if (
-        int(unattributed.get("physical_calls") or 0)
-        or int(unattributed.get("unknown_unmetered") or 0)
-        or float(unattributed.get("accounted_usd") or 0.0)
-    ):
+    if _recorded(unattributed):
         result["unattributed"] = _compat_cost_bucket(unattributed)
     for bucket in result.values():
         bucket["cost"] = round(float(bucket["cost"]), 6)
@@ -136,7 +140,19 @@ def _compat_cost_groups(
 def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
     from starlette.responses import JSONResponse
 
-    def _cost_breakdown_response() -> JSONResponse:
+    def _period_view(period: str) -> Dict[str, Any]:
+        """The optional period view (``cost_period``); its own failure never takes the page's totals with it."""
+        from ouroboros.gateway.cost_period import PERIODS, cost_period
+
+        if period not in PERIODS:
+            return {"available": False, "period": period, "error_code": "unknown_period", "periods": list(PERIODS)}
+        try:
+            return cost_period(data_dir, period)
+        except Exception:
+            log.exception("Cost period view unavailable")
+            return {"available": False, "period": period, "error_code": "ledger_unavailable"}
+
+    def _cost_breakdown_response(period: str = "") -> JSONResponse:
         try:
             from ouroboros.pricing import infer_model_category
             from ouroboros.usage_accounting import usage_breakdown
@@ -193,6 +209,7 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                 ),
                 "accounting": accounting,
                 "unattributed": unattributed,
+                **({"period": _period_view(period)} if period else {}),
             })
         except Exception:
             log.exception("Physical-attempt accounting unavailable")
@@ -206,11 +223,12 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                 },
             }, status_code=503)
 
-    async def api_cost_breakdown(_request: Request) -> JSONResponse:
-        """Return ledger-derived cost and physical-attempt breakdowns."""
+    async def api_cost_breakdown(request: Request) -> JSONResponse:
+        """Return ledger-derived cost and physical-attempt breakdowns; ``?period=24h|7d|30d`` adds that period's view."""
         # Off the event loop (as ``gateway/state.py`` does): a ledger read, stale
         # path or a cold first replay, must never hold every HTTP client behind it.
-        return await asyncio.to_thread(_cost_breakdown_response)
+        params = getattr(request, "query_params", None) or {}
+        return await asyncio.to_thread(_cost_breakdown_response, str(params.get("period") or ""))
 
     return api_cost_breakdown
 

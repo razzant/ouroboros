@@ -82,7 +82,7 @@ export function createStarterSkillsRow({ read = () => skillSourcesApi.starterSki
 
     function summaryValue() {
         if (state.status === 'loading') return '<span class="skills-starter-value">Reading the list…</span>';
-        if (state.status === 'error') return `<span class="skills-starter-value">The default set</span><span class="skills-starter-sub">The list couldn’t be read (${escapeHtml(state.error)}). Ouroboros installs the recommended skills after it starts; you can change them on the Skills page.</span>`;
+        if (state.status === 'error') return `<span class="skills-starter-value">The default set</span><span class="skills-starter-sub">The list couldn’t be read (${escapeHtml(state.error)}). Ouroboros installs the recommended skills after it starts. Manage them in Extensions › Skills.</span>`;
         if (state.status === 'empty') return '<span class="skills-starter-value">None offered</span>';
         const all = items();
         const ticked = all.filter((item) => state.ticked.has(item.id));
@@ -120,7 +120,7 @@ export function createStarterSkillsRow({ read = () => skillSourcesApi.starterSki
                 <section class="skills-starter-group"><h4>${escapeHtml(group.label)}<span>${group.items.length}</span></h4>
                     <div class="wizard-choice-grid skills-starter-cards">${group.items.map(cardHtml).join('')}</div></section>`).join('')}</div>` : ''}
             ${trustRows ? `<div class="skills-starter-trust"><span class="skills-starter-sub">How skills from the Ouroboros hub install</span>${trustRows}
-                <span class="skills-starter-sub">Suggested choices apply until you choose. You can add or remove skills any time on the Skills page.</span></div>` : ''}
+                <span class="skills-starter-sub">Suggested choices apply until you choose. In Extensions, add skills under Browse or remove them under Skills.</span></div>` : ''}
         </div>`;
     }
 

@@ -265,11 +265,12 @@ def test_safety_prompt_protected_path_list_mirrors_runtime_policy():
     )
 
     safety_md = (REPO / "prompts" / "SAFETY.md").read_text(encoding="utf-8")
-    marker = "Protected paths (exact mirror of `PROTECTED_RUNTIME_PATHS` plus the protected prefix in `ouroboros/runtime_mode_policy.py`):"
+    marker = ("(exact mirror of `PROTECTED_RUNTIME_PATHS` plus the protected prefix in "
+              "`ouroboros/runtime_mode_policy.py`):")
     start = safety_md.find(marker)
     assert start != -1, "SAFETY.md lost its protected-path mirror sentence"
-    line_end = safety_md.find("\n", start)
-    listed = set(re.findall(r"`([^`]+)`", safety_md[start + len(marker):line_end]))
+    sentence = safety_md[start + len(marker):].split("\n", 1)[0].split("`. ", 1)[0]  # the list ends its sentence
+    listed = set(re.findall(r"`([^`]+)`", sentence + "`"))
     expected = set(PROTECTED_RUNTIME_PATHS) | set(PROTECTED_RUNTIME_PATH_PREFIXES)
     assert listed == expected, listed ^ expected
 
@@ -303,8 +304,10 @@ def test_server_workers_init_reads_manifest_branches_not_hardcoded_strings():
 
     assert "workers_init(" in server_py
     assert 'branch_dev="ouroboros", branch_stable="ouroboros-stable"' not in server_py
-    assert 'branch_dev=_workers_branch_dev' in server_py
-    assert 'branch_stable=_workers_branch_stable' in server_py
+    # The pair `_run_supervisor` reads from the manifest is the pair it feeds the pool.
+    supervisor = server_py.split("def _run_supervisor(", 1)[1].split("\ndef ", 1)[0]
+    assert "branch_dev, branch_stable = _runtime_branch_defaults()" in supervisor
+    assert "branch_dev=branch_dev, branch_stable=branch_stable" in supervisor
 
 
 def test_architecture_module_tree_lists_all_live_extension_http_endpoints():

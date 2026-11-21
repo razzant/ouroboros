@@ -172,12 +172,12 @@ test('an older record without the pool facts prints exactly as before, even besi
     assert.doesNotMatch(costed, /^Panel: |Wave total|ticked|counted/m);
 });
 
-test('a pool-era panel says strictness, who chose, k of n ticked reviewers and the advisers in words', () => {
+test('a pool-era panel says who chose, k of n ticked reviewers and the advisers in words', () => {
     assert.equal(panelPoolRecorded(ADVISORY), true);
     assert.equal(panelPoolRecorded({ ...POOL_FACTS, strictness: 'blocking' }), true);
     assert.equal(panelPoolRecorded({ ...POOL_FACTS, pool: [] }), true);
     const lines = formatReviewProjection({ panels: [poolPanel(ADVISORY)] }).split('\n');
-    assert.ok(lines.includes('Panel: Advisory · chosen by Ouroboros · 2 of 3 ticked reviewers · 1 adviser, not counted'), lines.join('\n'));
+    assert.ok(lines.includes('Panel: chosen by Ouroboros · 2 of 3 ticked reviewers · 1 adviser, not counted'), lines.join('\n'));
     assert.ok(lines.includes('Why these reviewers: Touches the gateway only.'));
     // The technical composition line gives way to the words; its model facts stay, in words too.
     assert.ok(!lines.some((line) => line.startsWith('Panel composition:')));
@@ -185,9 +185,9 @@ test('a pool-era panel says strictness, who chose, k of n ticked reviewers and t
     assert.ok(!lines.some((line) => /chosen by ouroboros|seats=|reason: /.test(line)));
 });
 
-test('who chose reads Ouroboros, the host or you, and strictness reads as the owner names it', () => {
+test('who chose reads Ouroboros, the host or you; an advisory panel prints no mode word, an older Blocking one still does', () => {
     const head = (facts) => panelPoolLines({ panel_facts: facts })[0];
-    assert.match(head({ ...ADVISORY, chosen_by: 'host' }), /^Panel: Advisory · chosen by the host · /);
+    assert.match(head({ ...ADVISORY, chosen_by: 'host' }), /^Panel: chosen by the host · /);
     assert.match(head({ ...ADVISORY, chosen_by: 'owner', strictness: 'blocking' }), /^Panel: Blocking · chosen by you · /);
     assert.match(head({ ...ADVISORY, strictness: 'cyber_pro' }), /^Panel: Cyber Pro · chosen by Ouroboros · /);
     // A word outside the known ones prints as the record wrote it, never a guess.
@@ -255,9 +255,9 @@ test('the wave total counts the priced seats and names the seats it cannot inclu
 
 test('an empty pool says no reviewer was ticked instead of a fraction of none', () => {
     assert.equal(panelPoolLines({ panel_facts: { ...ADVISORY, pool: [], seats: 1, additional_seats: 0, chosen_by: 'owner', reason: '' } })[0],
-        'Panel: Advisory · chosen by you · no reviewer ticked · 1 counted seat');
+        'Panel: chosen by you · no reviewer ticked · 1 counted seat');
     assert.equal(panelPoolLines({ panel_facts: { ...ADVISORY, pool: undefined, additional_seats: 0 } })[0],
-        'Panel: Advisory · chosen by Ouroboros · 2 counted seats');
+        'Panel: chosen by Ouroboros · 2 counted seats');
 });
 
 test('panel facts are said once whatever the seat count; each seat line carries only its own facts', () => {
@@ -267,7 +267,7 @@ test('panel facts are said once whatever the seat count; each seat line carries 
         const actors = Array.from({ length: size }, (_, index) => seat(`s${index + 1}`));
         const facts = { ...ADVISORY, seats: size, additional_seats: 0, pool: actors.map((actor) => actor.slot_id) };
         const lines = formatReviewProjection({ panels: [poolPanel(facts, { actors })] }).split('\n');
-        assert.deepEqual(lines.filter((line) => line.startsWith('Panel: ')), [`Panel: Advisory · chosen by Ouroboros · ${size} of ${size} ticked reviewers`]);
+        assert.deepEqual(lines.filter((line) => line.startsWith('Panel: ')), [`Panel: chosen by Ouroboros · ${size} of ${size} ticked reviewers`]);
         const seatLines = lines.filter((line) => /^Reviewer s\d+: /.test(line));
         assert.equal(seatLines.length, size);
         assert.ok(seatLines.every((line) => !/Advisory|chosen by|ticked|Wave total/.test(line)), seatLines[0]);
@@ -318,5 +318,5 @@ test('a preflight record reads its pre-pool line, whatever pool facts its record
     assert.match(old, /^Panel composition: composed · chosen by ouroboros · seats=1/m);
     assert.doesNotMatch(old, /^Panel: |ticked reviewer|Why these reviewers|Wave total|Reviewer scout: counted/m);
     // The same facts on a change wave are a pool panel.
-    assert.match(card('change', stamped), /^Panel: Advisory · chosen by Ouroboros · 1 of 3 ticked reviewers$/m);
+    assert.match(card('change', stamped), /^Panel: chosen by Ouroboros · 1 of 3 ticked reviewers$/m);
 });

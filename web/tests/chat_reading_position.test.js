@@ -42,6 +42,21 @@ test('explicit navigation clears approximate position and immediately republishe
     assert.equal(f.changed(), 2, 'the persistent notice clears without waiting for another history read');
 });
 
+test('a jump keeps its own reading intent when a later visit moves the same room', t => {
+    const f = fixture(t, false, null);
+    f.feed.scrollHeight = 5000;
+    const restore = f.reading.capture();
+    f.reading.cancel();
+    f.reading.top = 3500;
+    f.reading.request();
+    assert.equal(f.reading.target.scrollTop, 3500);
+    restore();
+    assert.equal(f.reading.target.scrollTop, 2400, 'the earlier jump keeps the earlier passage');
+    f.ready(); f.reading.position(); f.frame(); f.frame();
+    assert.equal(f.feed.scrollTop, 2400);
+    assert.equal(f.reading.pending, false);
+});
+
 test('an exact second positioning pass clears the earlier approximation', t => {
     let exact = false;
     const f = fixture(t, () => exact);
@@ -591,9 +606,14 @@ test('a box gesture supersedes a ↓ still awaiting history; with nothing pendin
     f.reading.cancel();
     Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 100, clientHeight: 400 });
     const current = f.reading.claim(); // ↓ pressed; its latest page is still loading
+    f.reading.wait(current);
+    f.reading.followAfterLayout(); f.frame(); f.frame();
+    assert.equal(f.feed.scrollTop, f.feed.scrollHeight, 'the retained end is already reached');
     assert.equal(current(), true);
     f.gesture({ type: 'wheel', deltaY: 1, target: text, timeStamp: 1000 }); f.frame();
     assert.equal(current(), false, 'reading on inside a box keeps the reader where they are');
+    assert.equal(f.reading.returning, false, 'the pending load loses its landing too');
+    assert.equal(f.reading.stick, false, 'a shared read must not follow after the pending return was cancelled');
     // With no ↓ waiting, box scrolling leaves layout already on its way alone.
     const generation = f.reading.generation;
     f.gesture({ type: 'wheel', deltaY: 1, target: text, timeStamp: 2000 }); f.frame();
@@ -628,6 +648,38 @@ test('an unread opening still owed yields to a box gesture after its claim reach
     assert.equal(f.reading.arriving, null, 'reading inside a box ends the opening still owed');
     f.feed.scrollTop = 100; f.reading.land(() => -50, token);
     assert.equal(f.feed.scrollTop, 100, 'its later landing moves no one');
+});
+
+test('↓ is drawn busy only while its own claim waits: a gesture or newer navigation ends it, a superseded end changes nothing', t => {
+    const previous = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = () => {};
+    t.after(() => { globalThis.requestAnimationFrame = previous; });
+    let drawn = 0, live = true;
+    const feed = { scrollTop: 0, scrollHeight: 1000, clientHeight: 400, clientWidth: 400, offsetWidth: 400 };
+    const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => live, ready: () => true,
+        anchors: { serialize: () => null, capture: () => null, restore: () => true },
+        changed() {}, afterWrite() {}, activity() {}, updateButton() { drawn++; } });
+    const first = reading.claim();
+    reading.wait(first);
+    assert.deepEqual([reading.returning, drawn], [true, 1], 'drawn busy at once, before any read answers');
+    reading.cancel();  // the reader's own gesture
+    assert.deepEqual([reading.returning, drawn], [false, 2], 'and drawn idle the moment it is superseded');
+    reading.wait(first, false);
+    assert.equal(drawn, 2, 'its read settling later draws nothing');
+    const second = reading.claim();
+    reading.wait(second);
+    const third = reading.claim();  // another navigation, or ↓ pressed again as a fresh Retry
+    assert.equal(reading.returning, false);
+    reading.wait(third);
+    reading.wait(second, false);
+    assert.equal(reading.returning, true, 'an older ↓ settling leaves the newer one busy');
+    reading.wait(third, false);
+    assert.equal(reading.returning, false);
+    const fourth = reading.claim();
+    live = false;  // destroyed meanwhile
+    const before = drawn;
+    reading.wait(fourth);
+    assert.deepEqual([reading.returning, drawn], [false, before], 'a destroyed room is never drawn busy');
 });
 
 test('saved Review readiness distinguishes pending/error from confirmed absence and trails revisions', async () => {
@@ -687,3 +739,83 @@ test('a sideways finger (the drawer, a swipe to reply) is not reading; a vertica
     assert.equal(f.reading.stick, false, 'a vertical move past the slop is reading back: following ends');
     assert.deepEqual(navigation, [-1]);
 });
+
+test('a second finger makes the touch a pinch: no reading, paging or dismissal until a new one-finger touch', t => {
+    const f = fixture(t), navigation = [];
+    f.reading.bindGestures(direction => navigation.push(direction));
+    Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 600, clientHeight: 400 });
+    f.reading.stick = true;
+    const fingers = (...points) => points.map(([clientX, clientY]) => ({ clientX, clientY }));
+    // Fingers spread apart vertically: the first one moves down the feed as a reading swipe would.
+    f.gesture({ type: 'touchstart', touches: fingers([200, 300]) });
+    f.gesture({ type: 'touchstart', touches: fingers([200, 300], [200, 420]) });
+    for (const [a, b] of [[290, 440], [270, 470], [240, 500]]) {
+        f.gesture({ type: 'touchmove', touches: fingers([200, a], [200, b]) }); f.frame();
+    }
+    // One finger lifted: the rest of the pinch is still no reading.
+    f.gesture({ type: 'touchmove', touches: fingers([200, 300]) }); f.frame();
+    f.gesture({ type: 'touchmove', touches: fingers([200, 380]) }); f.frame();
+    assert.equal(f.reading.stick, true, 'a pinch only magnifies: following stays');
+    assert.deepEqual(navigation, []);
+    // A pinch that began as a one-finger read ends that read where the second finger lands.
+    f.gesture({ type: 'touchstart', touches: fingers([200, 300]) });
+    f.gesture({ type: 'touchmove', touches: fingers([200, 306]) }); f.frame();
+    f.gesture({ type: 'touchmove', touches: fingers([200, 360]) }); f.frame();
+    assert.deepEqual(navigation, [-1], 'a new one-finger touch reads again');
+    f.reading.stick = true;
+    f.gesture({ type: 'touchstart', touches: fingers([200, 360], [260, 200]) });
+    f.gesture({ type: 'touchmove', touches: fingers([200, 420], [260, 150]) }); f.frame();
+    assert.deepEqual(navigation, [-1]);
+    assert.equal(f.reading.stick, true);
+});
+
+test('a write between a feed box change and its reflow keeps a reader following the newest message', async () => {
+    // A keyboard room that shrinks leaves the feed short of its newest row until the resize's reflow, a frame later. A
+    // write landing in that frame (a state poll's) found the reader "away" and ended the following for good.
+    const { createChatReadingPosition: create } = await import('../modules/chat_reading_position.js');
+    const feed = { clientWidth: 390, offsetWidth: 390, clientHeight: 253, scrollHeight: 1000, top: 0,
+        get scrollTop() { return this.top; },
+        set scrollTop(value) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); } };
+    const state = create({ feed, visible: () => true, alive: () => true, ready: () => true, changed() {}, afterWrite() {},
+        activity() {}, updateButton() {}, anchors: { capture: () => feed.scrollTop, restore: () => true, serialize: () => null } });
+    state.reflow();
+    assert.deepEqual([state.stick, feed.scrollTop], [true, 747], 'the room opens following its newest message');
+    feed.clientHeight = 60;  // the room shrinks: the newest row is 193 px below until the reflow
+    assert.equal(state.nearBottom(), false);
+    assert.equal(state.mutate(() => true), true);
+    assert.equal(state.stick, true, 'the write is no reading back');
+    state.reflow();
+    assert.deepEqual([state.stick, feed.scrollTop], [true, 940], 'the reflow brings the newest row back');
+    // In the box the last reflow placed, a reader found away from the newest row is away: a write keeps the place.
+    feed.scrollTop = 300;
+    state.mutate(() => true);
+    assert.deepEqual([state.stick, feed.scrollTop], [false, 300]);
+});
+
+for (const supersede of [false, true]) for (const readBack of [false, true]) {
+    test(`a return ${supersede ? 'superseded by ↓' : 'completed'} settles its box before ${readBack ? 'focus reads back' : 'more rows arrive'}`, t => {
+        const previous = globalThis.requestAnimationFrame, frames = [];
+        globalThis.requestAnimationFrame = fn => frames.push(fn);
+        t.after(() => { globalThis.requestAnimationFrame = previous; });
+        const frame = () => frames.splice(0).forEach(fn => fn());
+        const feed = { clientWidth: 390, offsetWidth: 390, clientHeight: 0, scrollHeight: 1000, top: 0,
+            get scrollTop() { return this.top; },
+            set scrollTop(value) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); } };
+        const state = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+            changed() {}, afterWrite() {}, activity() {}, updateButton() {},
+            anchors: { capture: () => feed.scrollTop, restore: top => { feed.scrollTop = top; return true; }, serialize: () => null } });
+        state.request(); // resume restores a follower even before its read finishes
+        feed.clientHeight = 400;
+        state.reflow(); // resize arrives while that restoration owns positioning
+        if (supersede) { state.claim(); state.followAfterLayout(); }
+        frame(); frame();
+        assert.deepEqual([state.pending, feed.scrollTop], [false, 600]);
+        // Tab can scroll a focused disclosure into view without a wheel/PageUp intent.
+        if (readBack) { feed.scrollTop = 300; state.scroll(); }
+        state.mutate(() => { feed.scrollHeight += 100; });
+        const expected = [!readBack, readBack ? 300 : 700];
+        assert.deepEqual([state.stick, feed.scrollTop], expected, 'the settled box distinguishes later reading from following');
+        state.reflow();
+        assert.deepEqual([state.stick, feed.scrollTop], expected, 'the following reflow keeps the same place');
+    });
+}

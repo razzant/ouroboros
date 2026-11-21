@@ -1,6 +1,6 @@
 """The task detail carries the host's objection fold (scope R1, Opus C2 / Astra F3): the
 browser renders ``plan_objections`` and never re-derives which objections stand, so an
-upgraded task whose imported finding holds the gate is shown holding, not "not asked yet"."""
+upgraded task's imported finding is shown open, not "not asked yet"; no row claims a hold."""
 from __future__ import annotations
 
 from starlette.applications import Starlette
@@ -33,7 +33,7 @@ def test_the_detail_projects_the_host_fold_with_imported_objections_and_their_ra
     view = _detail(tmp_path, "mixed")["plan_objections"]
     assert view["legacy_engaged"] is True and view["withdrawn"] == [] and "legacy_unreadable" not in view
     [row] = view["open_objections"]["s1"]
-    assert row["id"] == "s1:f1" and row["holds"] is True and row["legacy"] is True and row["ask_id"] == "legacy"
+    assert row["id"] == "s1:f1" and "holds" not in row and row["legacy"] is True and row["ask_id"] == "legacy"
     plan_record.append_ask(tmp_path, "mixed", {"ask_id": "a1", "ts": "t", "revision": 1, "message": "", "participants": [
         {"seat_id": "s2", "model": "m", "route": "api_chat", "owner_marked": True, "dispatched": True, "status": "answered",
          "reply": {"prose": "", "objections": [], "withdrawn": [{"id": "s1:f1", "why": "not mine"}]}}]})
@@ -56,7 +56,8 @@ def test_a_new_only_record_a_task_without_a_plan_and_an_unreadable_earlier_state
          "reply": {"prose": "", "objections": [{"id": "k1", "text": "no"}], "withdrawn": []}}]})
     view = _detail(tmp_path, "new")["plan_objections"]
     assert view["legacy_engaged"] is False
-    assert {seat: [(r["id"], r["holds"]) for r in rows] for seat, rows in view["open_objections"].items()} == {"s1": [("o1", True)], "critic": [("k1", False)]}
+    assert {seat: [r["id"] for r in rows] for seat, rows in view["open_objections"].items()} == {"s1": ["o1"], "critic": ["k1"]}
+    assert not any("holds" in r for rows in view["open_objections"].values() for r in rows), "an open objection holds nothing"
     seed_result(tmp_path, "none", {"task_id": "none", "status": "running"})
     assert "plan_objections" not in _detail(tmp_path, "none")
     seed_result(tmp_path, "bad", {"task_id": "bad", "status": "running", "plan_review_state": {"schema_version": 99}})

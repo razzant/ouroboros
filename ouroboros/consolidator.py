@@ -27,10 +27,10 @@ LIGHT_ANSWER_CEILING_TOKENS = 16384
 def _consolidation_route() -> Tuple[str, bool]:
     """Resolve summaries through the configured Light lane.
 
-    Reuse the lane resolver so an empty Light slot inherits both Main's model
-    and its local-routing flag. Remote routes retain the provider-independence
-    fallback; explicitly local routes must never be rewritten to a remote
-    credentialed model.
+    Reuse the lane resolver, so the Light slot follows its one rule (an empty
+    slot is Main's route unless its own box sends it local). Remote routes
+    retain the provider-independence fallback; explicitly local routes must
+    never be rewritten to a remote credentialed model.
     """
     from ouroboros.provider_models import resolve_credentialed_model
     from ouroboros.subagents import resolve_subagent_lane

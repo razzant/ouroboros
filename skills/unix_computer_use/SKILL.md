@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.7.1
+version: 0.8.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -20,10 +20,11 @@ tools:
     effect: read
   - name: list_connections
     effect: read
+optional_mcp_servers: [{"id": "mac_window_session", "title": "Local Mac window capture (requires begin)", "runtime": "agent_python", "entry": "window_session_server.py", "task_session": true}]
 when_to_use: The user asks Ouroboros to inspect a desktop, take a screenshot, act in a named application (click/type/press keys there), drag, or operate a local/explicitly configured remote GUI under human or benchmark supervision.
 model_experience:
-  what_model_sees: Desktop tools include bounded AX reads (hierarchy, separate title/description/value/url with a chosen text_limit), local macOS element_act press/set_value without activation or pointer input (optionally followed by a read of the same window in the same call), explicit foreground input, screenshot observation IDs, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback, the read after the action and front observations.
-  token_effect: When loaded, all 25 tool schemas total about 16K characters; Nano can load tools on demand. Results are compact JSON without dropped fields. Input receipts grow with commands and output; screenshots add an image and capture metadata. Window lists and AX reads grow with returned entries and text (limit, app, max_nodes, text_limit); an element_act observation adds its own tree (default max_nodes 600; ax_tree 150). A receipt marked observed_effect also carries that tree and its window text into result review, increasing the material sent to the selected reviewers.
+  what_model_sees: Desktop tools include bounded AX reads (hierarchy, separate title/description/value/url with a chosen text_limit), local macOS element_act press/set_value without activation or pointer input (optionally followed by a read of the same window in the same call), explicit foreground input, screenshot observation IDs, capture-only images of one exact local macOS window, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback, the read after the action and front observations. After the owner connects the window server, `mcp_mac_window_session__begin(app, window)` starts a capture-only stream of that window on the local Mac for this task. `frame` returns the latest MCP image with its sequence and ages. `release` stops the stream.
+  token_effect: When loaded, all 25 tool schemas total about 16K characters; Nano can load tools on demand. Results are compact JSON without dropped fields. Input receipts grow with commands and output; screenshots add an image and capture metadata. Window lists and AX reads grow with returned entries and text (limit, app, max_nodes, text_limit); an element_act observation adds its own tree (default max_nodes 600; ax_tree 150). A receipt marked observed_effect also carries that tree and its window text into result review, increasing the material sent to the selected reviewers. The connected window session adds three MCP tool schemas (about 1.4K characters) and its server instructions; each delivered frame is one image of at most 1280x800 with a small JSON object, and `frame(after_seq=...)` sends no image when nothing newer exists.
 ---
 
 # Unix Computer Use
@@ -70,6 +71,24 @@ Tools:
   field, so the host attaches the image to the conversation in the same round;
   an engine that cannot take images receives the path instead (host behaviour),
   so the text facts in every other tool are the way to check without a picture.
+  Omit `window` for a display capture. With `window=` (a positive integer `window_id`
+  or a nonblank title string, matched literally even if it is all digits)
+  and `app=`, local macOS 14+ captures that one window through ScreenCaptureKit
+  in a short-lived helper (`macos_capture.py`), also while other windows cover it,
+  without activating anything: the window's own pixels, no cursor, no shadow, at
+  its size (downscaled as above), under a new file name each call. Only a window
+  ScreenCaptureKit lists for the resolved application's process qualifies; none
+  or several (`no_window`, `window_not_found`, `window_ambiguous`) is refused,
+  never replaced by another window or a display. `window=` without `app=`, on a
+  remote connection or off macOS is refused before anything else runs. Without
+  the Screen Recording grant (prompt-free preflight) nothing is asked or captured
+  (`screen_recording_denied`). Both ScreenCaptureKit answers share one 5 s budget;
+  the helper has 30 s in all, and only its normal end with one complete answer and
+  a PNG that decodes at the reported size is a capture. The result is capture-only
+  (`capture_kind: window`, `mapped_input_available: false`): no `observation_id`,
+  transform or `display`; its `auto_attach_source` names that window, so a newer
+  capture of it replaces only that window's older picture in what the model is sent. A window that is not on
+  screen (`window.on_screen: false`: minimized, another Space) may come back blank.
 - `click` (left/right/middle, double/triple), the thin aliases
   `double_click`/`triple_click` (models call these names unprompted), `move`,
   `left_click_drag`, `mouse_down`/`mouse_up`, `cursor_position`, `type_text`,
@@ -86,6 +105,10 @@ Tools:
 - `ax_tree` reads one window as text through the Accessibility API, bounded:
   the frontmost application's window, or `app=`'s without bringing it forward;
   `window=` (a window ID or exact title) reads that window instead.
+  On local macOS, `until_text="expected text"` waits for that literal,
+  case-sensitive substring in a returned title, description, value or URL.
+  It rereads the selected window under the same `timeout_ms` and returns the
+  last tree with `until_text.status` (`matched`, `not_observed`, or `unknown`).
 - `element_act` performs local macOS `press` or text `set_value` through the
   control's own Accessibility interface. It never activates, focuses, injects
   global input, writes the clipboard or falls back to pointer/keyboard input.
@@ -94,6 +117,66 @@ Tools:
 - `remote_exec` runs a shell command on the active remote backend only; it
   refuses on local backend. Use ordinary Ouroboros shell/file tools for local
   work.
+
+## Window session (opt-in MCP tools)
+
+Use `screenshot(app=..., window=...)` for one image; it needs no MCP connection.
+For repeated observations, the owner can connect `mac_window_session` with **Connect tools**
+on the Skills card. It watches a window on the **local Mac**, even if the other desktop tools
+currently target a remote computer. Connecting or listing tools may start an idle server;
+only `begin` starts capture. The host owns one server per task loop. Ending the loop closes
+the server and its capture. The session is not restored after a Stop or restart.
+
+- `mcp_mac_window_session__begin(app, window)` resolves `app` launch-free and selects
+  exactly one of its windows as `screenshot(window=)` does (a `window_id` or an exact
+  title; none or several is refused). Before starting, WindowServer must also confirm that
+  window belongs to the selected PID. A missing window or failed lookup starts no stream;
+  a later `begin` can try again. The stream binds the selected window once and does not
+  resolve its title again. It starts one ScreenCaptureKit stream of that
+  window alone (no cursor, no shadow, no audio; at most 1280x800, 5 frames per second,
+  four queued surfaces) and returns facts, no image. One session per task: another
+  `begin` is `session_exists` until `release`.
+- `mcp_mac_window_session__frame(after_seq, wait_ms)` returns the latest complete image
+  as an MCP image beside one JSON object. `seq` numbers the session's images and
+  `frame_age_ms` is that image's own age (`frame_time_basis`: the stream's display
+  time, else when it was received). `stream.last_report` with its age is separate
+  evidence: `idle` says the window had not changed at that moment; it is not a newer
+  image. Pass the last `seq` as `after_seq` to receive an image only when a newer one
+  exists (`wait_ms`, at most 10000, waits for it); otherwise the answer is
+  `image: false`, `no_newer_frame`, and the same picture is not sent again. Reset this
+  cursor after a new `begin`: sequence numbers belong to that session, not the task's history.
+- `mcp_mac_window_session__release()` ends the stream; without a session it is a
+  no-op. `stop_unconfirmed` means the stream did not confirm its stop: call it again,
+  since no other session begins until it is confirmed.
+
+Besides `no_frame_yet` and `no_newer_frame`, `frame` can withhold an image for these reasons:
+
+- `frame_withheld`: macOS supplied no usable pixels (`blank`, `suspended`, `stopped`,
+  `invalid_sample`, `callback_error`, or `inactive` on macOS 15.2+). No earlier picture is
+  substituted. A new complete frame from the same stream can still be delivered.
+- `window_lookup_unavailable`: a window lookup that worked at `begin` now gives no answer.
+  No frame is delivered on this call. A later call can check again.
+- `window_gone`: WindowServer no longer lists the selected window for its process. The server
+  checks during frame requests and while idle (`window_gone_check: window_server`). It permanently withholds frames from this session and asks macOS to
+  stop capture, even if no one requests another frame. Reuse of the ID does not restart it.
+- `stream_stopped`: the stream ended. See `stop.reason` and, if a native end arrived after
+  delivery closed, `stream_end.reason`. Ask the owner before beginning again after `user_stopped`.
+
+For `window_gone` and `stream_stopped`, `cleanup.confirmed` reports whether macOS confirmed
+that capture is over. A missing window or image is not confirmation. `release` frees the
+session slot, retrying an unconfirmed stop. `window.on_screen: false` by itself means neither
+closure nor destruction. A Close button may only hide a window that macOS can still capture.
+
+The images are capture-only, like `screenshot(window=)`: one window's pixels, no
+`observation_id`, no display mapping (`mapped_input_available: false`), and no input
+tool may use their coordinates; act through `element_act` or a mapped `screenshot`.
+The observer does not retarget input tools. It requires macOS 14+ and the ordinary Screen
+Recording grant. `begin` checks without prompting; without the grant it returns
+`screen_recording_denied`. Other platforms or older macOS return `unsupported_platform` or
+`unsupported_os`. macOS normally marks a running capture
+with its own indicator; an owner who ends the capture there is reported as
+`user_stopped`. The server holds only the latest frame; each image a task asked for
+is kept by the host with that call's result.
 
 ## Choosing a control path
 
@@ -131,6 +214,25 @@ before that line, with or without `observe`, leaves no receipt: the outcome is
 unknown (the action may have run), as below. A call carries one
 action at most. Several independent calls in one response are admitted one by
 one; a step that depends on an earlier step's outcome belongs to the next round.
+
+With `observe=true`, `until_text="expected text"` polls only that observation;
+the action, target selection and AX exposure are each done once. The checkpoint
+still precedes the first observation. Choose a positive piece of expected UI
+text, such as part of the loaded thread, rather than treating a nonempty tree
+as readiness. The match is a literal, case-sensitive substring within one
+returned `title`, `description`, `value` or `url`; it never joins fields or
+matches unseen text beyond `text_limit` (the legacy `label` is not searched).
+Use `text_limit` large enough for the expected text and `include_web=true` when
+it belongs under an AXWebArea. `matched` returns the read it was found in,
+whose `truncated_by`, `errors`, and text length fields still disclose cuts. At
+the deadline, `not_observed` means the last read was whole and did not show the
+text, not that the app lacks it; any cut (skipped web content, `max_nodes`,
+clipped text) leaves `unknown`. A read the deadline or a failed element cut
+short, or one that returned nothing, never replaces an earlier read that
+finished its walk: that tree comes back with `tree_read`, `tree_age_ms` and
+the `latest` read's loss, as `unknown`. A lost window ends with `window_gone`
+and no tree, a read that raised with `read_failed`. Without `until_text`, the
+single-read behavior is unchanged.
 
 On local macOS, `ax_tree` and `element_act` first request app-local accessibility
 exposure with Electron's documented `AXManualAccessibility=true` attribute. The
@@ -200,7 +302,14 @@ Acting in a named application (`app=`):
   not be sent keeps its mark (`activation_done`). Without `app=` every step
   goes to whatever is in front at that moment, and the receipt names each
   step's recipient when they differ (`steps_delivered_to`, `"unknown"` for a
-  step whose front could not be read). On a sequence that stopped, `dispatched`
+  step whose front could not be read). `key` asks `get_stop_state` before a
+  command that can raise the target and again before each chord. On macOS the
+  activation helper also resolves the app. X11, OSWorld and SSH check after
+  resolving it, just before requesting the switch. Each chord checks after
+  the local front recheck or before the guest's own front probe. A refusal
+  returns `status: stopped` with the host's reason. A confirmed switch keeps
+  its receipt. The remaining chords stay unsent. Stop can arrive between
+  a check and its command. A hold includes the release, and a drag stays whole. On a sequence that stopped, `dispatched`
   is the fact for the step that failed (`steps_done` counts the steps that ran
   before it; a step whose remote call did not answer is `null`, and the note
   says so, never "not sent"). A tool's registered budget covers one
@@ -258,8 +367,9 @@ Input receipts (the same contract on every backend):
   application or window in front when the input was dispatched: app, pid,
   bundle id or class, window id and title where the backend knows them;
   `"unknown"` when no reader answered), `dispatched` (whether the input helper
-  ran at all: `false` for a refused combo or a failed clipboard write, `true`
-  for a helper that ran, whatever it reported, `null` with `transport_failed`
+  ran at all: `false` for a refused combo, a failed clipboard write or a
+  Command shortcut its program refused before posting anything, `true` for any
+  other helper that ran, whatever it reported, `null` with `transport_failed`
   when a remote call did not answer, so whether it ran is unknown), `front_before` (only when the
   tool switched applications first), `front_after` (who was in front when the tool
   read again after the input: present when that is another place than
@@ -376,7 +486,20 @@ Backend matrix (honest limitations):
   combos the base key is tapped while modifiers are held (`cmd+s` = hold cmd,
   tap s). On a local or SSH Mac and on X11 a letter's case under a modifier adds
   no Shift (`cmd+S` = `cmd+s`; Shift is named: `cmd+shift+s`), and a bare `A` is a
-  capital. `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
+  capital. On local/SSH Macs, Command plus one printable character presses the
+  key that gives that character under Command in the active layout. One only
+  Command and Shift give adds Shift on the key an app reads as it: its
+  Command+Shift character, or its Shift character where the layout ignores
+  Shift under Command (`cmd+?` on ABC is Command, Shift and /). Name a
+  shortcut by that character: under a Cyrillic layout `cmd+g`, while its own
+  letters (`cmd+п`) are refused, never typed. A missing key or posting grant
+  refuses before posting. Other modifiers, named keys and holds still use
+  cliclick, which types the base character on the layout's typing plane: a
+  character that plane lacks is refused, and where the planes differ cliclick
+  may add a modifier (Option on Russian - PC) or press a key that means another
+  shortcut (Dvorak - QWERTY ⌘) under an ok receipt (#2589 measured `v`).
+  `key(cmd+v)` sends only the shortcut, without changing the clipboard.
+  `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
   UTF-8 and told so whatever locale the process inherited, as over SSH) and
   pastes with Command and the key that gives `v` under Command in the active
   keyboard layout, with exactly the Command flag (an `osascript` JavaScript
@@ -456,13 +579,14 @@ Backend matrix (honest limitations):
   letter reaches pyautogui as written (`ctrl+C` = `hotkey('ctrl', 'C')`);
   screenshots are capped at 20 MB and PNG-validated before use.
 - Remote SSH macOS: `screenshot` uses remote `screencapture` + `scp`; input uses
-  `cliclick` on the Mac, wrapped so the same ssh call reads the frontmost
+  `cliclick` (Command-alone shortcuts/paste: the shared JXA helper), wrapped
+  so the same ssh call reads the frontmost
   application before and after and withholds a targeted input when the target
   is no longer in front. `app=` is resolved from the Mac's `lsappinfo list`
   (name, bundle id, `pid:<n>`; nothing is launched) and activated by pid
   through System Events (only the integer pid enters the remote command, never
   the name), verified by polling `lsappinfo front` up to `wait_ms`; an input
-  cliclick cannot express is refused before any switch; a transport failure
+  the selected input helper cannot express is refused before any switch; a transport failure
   after a switch still reports the switch; an ssh call that ended without the
   wrapper's completion marker (a refused connection, a channel broken after
   the input may have run: `ssh_failed`) leaves the outcome unknown
@@ -510,7 +634,8 @@ Layout: `plugin.py` (registration, coordinate contract, local input),
 `place.py` (targets, activation, the receipt composer `_finish` shared by every
 transport, window rows, element reads), `remote.py` (OSWorld and SSH
 transports), `macos_native.py` (the helper process), `paste_chord.js` (the
-macOS paste chord, local and over SSH). The skill intentionally
+macOS paste chord, local and over SSH), `macos_stream.py` and
+`window_session_server.py` (the window session and its MCP server). The skill intentionally
 does not hide OS permission requirements, and missing backends produce explicit
 errors with the capability report instead of guessing. The agent should prefer
 semantic application APIs when available and should ask the human before

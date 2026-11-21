@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ouroboros.model_slots import normalize_processing_preference, resolve_processing_preference
-from ouroboros.provider_models import CONNECTIONS_KEY, READINESS_SETTING_KEYS
+from ouroboros.provider_models import CONNECTIONS_KEY, READINESS_SETTING_KEYS, connection_id
 from ouroboros.review_dispatch import slot_id_for_row
 from ouroboros.route_spec import (
     ROUTE_KIND_AGENT_SESSION as SHARED_ROUTE_KIND_SESSION,
@@ -825,7 +825,7 @@ def migration_applies(document: Mapping[str, Any]) -> bool:
     return bool(migration_trigger(document))
 
 
-# Whether a connection is configured decides the outcome; the digest reads presence only.
+# Whether a connection is configured decides the outcome; the digest reads presence and serving connections only.
 _SHA_PRESENCE_KEYS = READINESS_SETTING_KEYS | {CONNECTIONS_KEY}
 # The factory rows follow Main's whole route, so a document without lanes of its own is also keyed by
 # its local source (and Main's and Light's account pins); a document WITH lanes never reads the factory.
@@ -846,6 +846,11 @@ def input_sha256(document: Mapping[str, Any]) -> str:
     fact left out would replay another document's outcome."""
     facts = {key: document.get(key) for key in _SHA_VALUE_KEYS if key in document}
     facts["_present"] = sorted(key for key in _SHA_PRESENCE_KEYS if _text(document, key))
+    from ouroboros.provider_connections import configured_connections, connection_rows
+
+    if connection_rows(document.get(CONNECTIONS_KEY)):  # without rows the presence keys say it all (same digest)
+        # Which connections serve (identity, enabled, ready; never a secret): enabling a named one is a new input.
+        facts["_connections"] = configured_connections(document)
     lanes = document.get(REVIEWER_SLOTS_KEY)
     if lanes is None or (isinstance(lanes, str) and not lanes.strip()):
         from ouroboros.subscription_install_presets import role_route_binding
@@ -1359,7 +1364,9 @@ def apply_at_read_seam(loaded: Dict[str, Any], *, merged: bool = False) -> Tuple
         if outcome.error:
             log.warning("settings: review lanes not migrated: %s", outcome.error)
         elif outcome.noop and summary and not summary.get("rows_marked_after"):
-            log.warning("settings: the factory review rows wait for Main: %s", NO_REACHABLE_MAIN)
+            from ouroboros.provider_connections import configured_connections  # ids only: headless names its choice
+            log.warning("settings: the factory review rows wait for Main: %s Serving connections: %s.", NO_REACHABLE_MAIN,
+                        ", ".join(connection_id(*served) for served in configured_connections(loaded)) or "none")
         elif outcome.trigger == TRIGGER_NEVER_CONFIGURED:
             log.info("settings: no review settings configured; the factory review rows run (%s reviewer rows)",
                      summary.get("rows_marked_after"))
@@ -1379,11 +1386,12 @@ def _seat_label(row: Mapping[str, Any]) -> str:
     return _row_label(row)
 
 
-# A mixed install without a chosen Main gets no invented provider panel; the owner chooses Main.
-NO_REACHABLE_MAIN = ("no factory reviewer row can be derived: access is configured, but no OpenRouter key, no single "
-                     "direct provider, and Main (OUROBOROS_MODEL) is no model of a configured provider — set "
-                     "OUROBOROS_MODEL to one (for example openai::…, anthropic::… or openai-compatible::…) or mark "
-                     "reviewers in Settings → Agents.")
+# A mixed install, or one provider on several named keys, without a chosen Main gets no invented panel; the owner
+# chooses Main.
+NO_REACHABLE_MAIN = ("no factory reviewer row can be derived: access is configured, but Main (OUROBOROS_MODEL) is no "
+                     "model of a configured connection (several providers, or several keys of one, and none chosen) — "
+                     "set OUROBOROS_MODEL to one (for example openai::…, openai@<name>::…, anthropic::… or "
+                     "openai-compatible::…) or mark reviewers in Settings → Agents.")
 
 ROLLBACK_SENTENCE = (
     f"To roll back, restore {SUBAGENTS_KEY} and {REVIEWER_SLOTS_KEY} (and the effort keys it lists) from the "

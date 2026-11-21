@@ -1,6 +1,8 @@
 """Room preferences bind each actor, survive cold return and stay live for new children."""
 
 import json
+import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -15,6 +17,9 @@ from ouroboros.settings_integrity import (
     task_settings_scope, task_settings_snapshot,
 )
 from tests.test_task_settings_snapshot import admitted_agent, document, isolated_runtime, save_owner  # noqa: F401
+from tests._process_environment import process_context as _process_context
+
+process_context = _process_context
 
 
 def snapshot(task):
@@ -228,7 +233,9 @@ def test_complete_env_effort_triple_uses_the_saved_format(monkeypatch, independe
 
 
 @pytest.mark.parametrize("exists", [True, False])
-def test_forwarded_nano_is_main_and_new_projects_choice_and_survives_restore(monkeypatch, exists):
+def test_forwarded_nano_is_mains_choice_new_rooms_start_in_max_and_it_survives_restore(monkeypatch, exists):
+    """Main's forwarded Nano is the owner's choice and survives restore; a new room starts in Max all the same
+    (owner 15.11.2026, 3A), whether Main or another room's work creates it."""
     from ouroboros.composer_cognition import read_cognition
 
     if exists:
@@ -239,12 +246,13 @@ def test_forwarded_nano_is_main_and_new_projects_choice_and_survives_restore(mon
             assert config.get_context_mode() == config.get_owner_context_mode() == "nano"
             saved = captured_cognition()
     create_project(config.DATA_DIR, "from-nano")
-    assert read_cognition(config.DATA_DIR, "from-nano")["context_mode"] == "nano"
+    assert read_cognition(config.DATA_DIR, "from-nano")["context_mode"] == "max"
     with task_settings_scope(snapshot({"id": "project", "project_id": "from-nano"})):
-        # A project creating another room still copies Main, not its own overlay.
+        # A project creating another room never passes on its own overlay either.
         set_room("from-nano", choice("low", "none", "low", "medium"))
         create_project(config.DATA_DIR, "second")
-    assert read_cognition(config.DATA_DIR, "second")["context_mode"] == "nano"
+    second = read_cognition(config.DATA_DIR, "second")
+    assert second["context_mode"] == "max" and second["effort_range"] == read_cognition(config.DATA_DIR)["effort_range"]
     save_owner({"OUROBOROS_CONTEXT_MODE": "max", "OUROBOROS_CONTEXT_MODE_AUTO_LOW": "false"})
     with task_settings_scope(snapshot({"id": "resumed"})):
         assert config.get_context_mode() == "max"
@@ -293,3 +301,58 @@ def test_subagents_changes_are_live_while_context_effort_and_resume_stay_snapsho
             restore_cognition(captured)
             assert captured_cognition() == captured and live_subagents_mode() == mode
             assert "subagents_mode" not in captured
+
+
+@pytest.mark.parametrize("tool", ["run_command", "start_service"])
+@pytest.mark.parametrize("operator", [None, "ultra"])
+@pytest.mark.parametrize("change", ["clear", "delete"])
+def test_room_cognition_never_becomes_the_next_process_settings_fallback(
+        process_context, monkeypatch, tool, operator, change):
+    """Both selection entrypoints keep the pre-room operator source across repeated restores."""
+    from ouroboros.settings_integrity import skill_environ, skill_settings
+
+    registry, _ctx, workspace, _data = process_context
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    key = "OUROBOROS_EFFORT_TASK"
+    initial = {key: "low"} if operator is None else {}
+    if operator is not None:
+        monkeypatch.setenv(key, operator)
+    config.SETTINGS_PATH.write_text(json.dumps(initial), encoding="utf-8")
+    create_project(config.DATA_DIR, "selection")
+    first, second = choice("nano", "high", "low", "max"), choice("max", "none", "low", "ultra")
+    set_room("selection", first)
+    entry = snapshot({"id": "selection-task", "project_id": "selection"})
+    expected = operator if operator is not None else config.SETTINGS_DEFAULTS[key]
+    config.SETTINGS_PATH.write_text(json.dumps({key: ""} if change == "clear" else {}), encoding="utf-8")
+    program = "import os; print('selected=' + os.environ['SELECTED'], flush=True)"
+    with task_settings_scope(entry):
+        for cognition in (first, second, first):
+            restore_cognition(cognition)
+            assert captured_cognition() == cognition
+            assert config.runtime_setting(key) == cognition["effort_range"]["recommended"]
+            assert config.runtime_environ()[key] == cognition["effort_range"]["recommended"]
+            args = {"cwd": str(workspace), "cmd": [sys.executable, "-c", program],
+                    "env_from_settings": {"SELECTED": key}}
+            if tool == "start_service":
+                args["readiness"] = {"stdout_contains": "selected=" + expected, "timeout_sec": 5}
+            result = registry.execute_result(tool, args)
+            assert result.status == "ok", result.text
+            if tool == "start_service":
+                try:
+                    assert "selected=" + expected in registry.execute("service_logs", {})
+                finally:
+                    registry.execute("stop_service", {})
+            else:
+                assert "selected=" + expected in result.text
+            assert skill_environ().get(key) == operator
+            assert skill_settings()[key] == config.selection_settings()[key] == expected
+
+
+def test_repeated_cognition_restore_preserves_an_empty_selection_environment():
+    from ouroboros.settings_integrity import skill_environ
+
+    with task_settings_scope(task_settings_snapshot({}, {})):
+        for cognition in (choice("nano", "high", "low", "max"), choice("max", "low", "low", "high")):
+            restore_cognition(cognition)
+            assert captured_cognition() == cognition
+            assert skill_environ() == {}

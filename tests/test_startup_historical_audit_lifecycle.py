@@ -310,7 +310,8 @@ def test_the_child_gets_a_dedicated_process_group(tmp_path, monkeypatch):
     assert cmd[1:3] == ["-m", "ouroboros.startup_historical_audit"]
     # Only ordinary runtime environment, explicit roots (the app, data, program and settings
     # paths, the three configured work roots the storage count walks and the host's work-root
-    # basis) and the inherited containment token reach the child.
+    # basis), the owner's retention days its retirers wait and the inherited containment token
+    # reach the child.
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
 
     assert {key for key in kwargs["env"] if not key.startswith(CONTAINMENT_ENV_PREFIX)} <= {
@@ -318,7 +319,7 @@ def test_the_child_gets_a_dedicated_process_group(tmp_path, monkeypatch):
         "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH", "OUROBOROS_APP_ROOT",
         "OUROBOROS_DATA_DIR", "OUROBOROS_REPO_DIR", "OUROBOROS_SETTINGS_PATH", "OUROBOROS_PARENT_PID",
         "OUROBOROS_SUBAGENT_WORKTREE_ROOT", "OUROBOROS_SUBAGENT_PROJECTS_ROOT", "OUROBOROS_DELIVERABLES_ROOT",
-        "OUROBOROS_WORK_ROOT_BASIS",
+        "OUROBOROS_WORK_ROOT_BASIS", "OUROBOROS_GC_RETENTION_DAYS",
     }, kwargs["env"]
     assert kwargs["env"]["OUROBOROS_PARENT_PID"] == str(os.getpid())
 

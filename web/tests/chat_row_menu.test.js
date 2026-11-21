@@ -8,7 +8,7 @@ import { createMessageActions } from '../modules/message_actions.js';
 import { cardMenuActions, emptyWorkState } from '../modules/work_status.js';
 import { installDomDouble } from './dom_double.js';
 
-function fixture({ actions = undefined } = {}) {
+function fixture({ actions = undefined, selectText } = {}) {
     const env = installDomDouble();
     const { doc, el } = env;
     const feed = el('div', { className: 'chat-messages' });
@@ -18,6 +18,7 @@ function fixture({ actions = undefined } = {}) {
         bubbleRef: (row) => (row.dataset.rowAddress ? { address: row.dataset.rowAddress } : null),
         cardRef: (record) => (record.replyable ? { address: `task:${record.groupId}` } : null),
         start: (ref) => started.push(ref.address),
+        canSelect: row => Boolean(selectText && row.dataset.rowAddress), selectText,
     };
     const copied = [];
     const copy = el('button', { className: 'chat-message-copy' });
@@ -182,6 +183,27 @@ test('a long touch press opens the menu where the finger is; the tap that ends i
         t.mock.timers.tick(1000);
         menu.children[0].click();
         assert.deepEqual(f.started, ['row:1@t#a'], 'a deliberate tap afterwards works');
+    } finally { f.close(); }
+});
+
+test('Select text releases the touched body to native handles without staging a reply', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const calls = [];
+    const f = fixture({ selectText(row, point) { calls.push(point); row.dataset.selectText = '1'; } });
+    const hold = () => f.words.emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: 1, clientX: 20, clientY: 40 });
+    try {
+        hold();
+        t.mock.timers.tick(500);
+        const item = f.openMenu().children.find(button => button.textContent === 'Select text');
+        f.words.emit('pointerup', { pointerType: 'touch', pointerId: 1 });
+        item.emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: 2 });
+        item.click();
+        assert.deepEqual(calls, [{ x: 20, y: 40 }]);
+        hold();
+        t.mock.timers.tick(800);
+        assert.equal(f.openMenu(), null);
+        assert.equal(f.words.emit('contextmenu', { clientX: 20, clientY: 40 }).defaultPrevented, undefined);
+        assert.deepEqual(f.started, []);
     } finally { f.close(); }
 });
 

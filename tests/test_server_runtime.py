@@ -414,7 +414,7 @@ def test_apply_runtime_provider_defaults_keeps_new_triad_on_openrouter():
 
     assert not changed
     assert changed_keys == []
-    assert normalized["OUROBOROS_MODEL"] == "google/gemini-3.8-flash"
+    assert normalized["OUROBOROS_MODEL"] == SETTINGS_DEFAULTS["OUROBOROS_MODEL"]
     assert normalized["OUROBOROS_MODEL_LIGHT"] == SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]
     assert normalized["OUROBOROS_MODEL_FALLBACKS"] == SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]
     # ABI 7.0 (ABI-10): the comma keys are retired settings — a defaults-only
@@ -770,3 +770,39 @@ def test_a_fresh_local_first_install_still_authors_safety_light(tmp_path, monkey
     server_src = (repo / "server.py").read_text(encoding="utf-8")
     assert "save_settings(" not in launcher_host
     assert "save_settings(" not in server_src
+
+
+def test_openai_proposals_follow_the_current_connections_api_and_never_rewrite_saved_ids():
+    """A connection that never chose an API keeps the legacy Chat profile; one explicitly on Responses proposes
+    the Responses profile, named connections included; a saved slot stays exactly as written."""
+    legacy = _loaded({"OPENAI_API_KEY": "sk-openai"})
+    assert tuple(legacy[key] for key in _SLOTS) == ("openai::gpt-5.6-terra", "openai::gpt-5.6-luna", "openai::gpt-5.6-sol")
+    responses = _loaded({"OPENAI_API_KEY": "sk-openai", "OPENAI_API_SURFACE": "responses"})
+    assert tuple(responses[key] for key in _SLOTS) == ("openai::gpt-6.1-terra", "openai::gpt-6-luna", "openai::gpt-6.1-sol")
+    named = _loaded({"OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "work", "api_key": "w", "api_surface": "responses"}]})
+    assert named["OUROBOROS_MODEL"] == "openai@work::gpt-6.1-terra"
+    saved = _loaded({"OPENAI_API_KEY": "sk-openai", "OPENAI_API_SURFACE": "responses", "OUROBOROS_MODEL": "openai::gpt-5.6-terra"})
+    assert saved["OUROBOROS_MODEL"] == "openai::gpt-5.6-terra" and saved["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-6-luna"
+
+
+def test_unselected_named_openai_ignores_stale_builtin_surface():
+    from ouroboros.provider_connections import direct_provider_defaults
+    from ouroboros.server_runtime import main_connection_choice
+
+    settings = {"OPENAI_API_SURFACE": "responses", "OUROBOROS_CONNECTIONS": [
+        {"kind": "openai", "name": "legacy", "api_key": "old"},
+        {"kind": "openai", "name": "new", "api_key": "new", "api_surface": "responses"},
+    ]}
+    unselected = _loaded(settings)
+    assert tuple(unselected[key] for key in _SLOTS) == (
+        "openai::gpt-5.6-terra", "openai::gpt-5.6-luna", "openai::gpt-5.6-sol")
+    assert main_connection_choice(unselected, settings) == ["openai@legacy", "openai@new"]
+    assert direct_provider_defaults("openai", settings, None)["main"] == "openai::gpt-5.6-terra"
+    # Empty means the actual built-in connection, not an unresolved choice.
+    assert direct_provider_defaults("openai", settings, "")["main"] == "openai::gpt-6.1-terra"
+    for name, light, fallback in (("legacy", "gpt-5.6-luna", "gpt-5.6-sol"),
+                                   ("new", "gpt-6-luna", "gpt-6.1-sol")):
+        selected = _loaded({**settings, "OUROBOROS_MODEL": f"openai@{name}::owner-model"})
+        assert tuple(selected[key] for key in _SLOTS) == (
+            f"openai@{name}::owner-model", f"openai@{name}::{light}", f"openai@{name}::{fallback}")
+        assert main_connection_choice(selected, {"OUROBOROS_MODEL": selected["OUROBOROS_MODEL"]}) == []

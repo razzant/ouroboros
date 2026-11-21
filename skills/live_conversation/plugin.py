@@ -106,7 +106,7 @@ def register(api):
     api.register_route("config", settings, methods=["GET", "POST"])
     api.register_settings_section("conversation", title="Calls (beta)", schema={"components": [
         {"type": "markdown", "text": "The call skills are on by default. To talk, turn on Calls (beta), choose an engine "
-         "and add its API key in Settings → Secrets, under the keys the skills request. Gemini and OpenAI do not "
+         "and add its API key in Settings → Accounts and keys, under the keys the skills request. Gemini and OpenAI do not "
          "serve Russia or Belarus."},
         {"type": "form", "route": "config", "method": "POST", "fields": [
             {"name": "enabled", "type": "checkbox", "label": "Calls (beta)", "default": False},

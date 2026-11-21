@@ -234,6 +234,66 @@ def test_a_settled_drive_leaves_only_unserved_trash_for_the_maintenance_child(tm
     assert list(trash.iterdir()) == []
 
 
+def test_the_moves_steps_under_the_interlock_reach_the_passs_report(tmp_path):
+    """Phase B runs under the supervisor's queue lock (the ``guard``): the pass's report carries its steps' seconds
+    (``under_q_sec``), all three for a drive that moved, as far as it got for one kept inside it, none for one kept
+    before it; nothing else is written for them."""
+    import contextlib
+
+    data, drive, _record = _cancelled_with_capture(tmp_path)
+    moved = {}
+    assert _settle(data, drive, report=moved, guard=lambda: contextlib.nullcontext(True))["status"] == "removed"
+    [row] = moved["under_q_sec"]
+    assert set(row) == {"task_id", "rechecks", "locks", "move"} and row["task_id"] == TASK
+    assert all(seconds >= 0 for key, seconds in row.items() if key != "task_id")
+    (tmp_path / "kept").mkdir()
+    data, drive, _record = _cancelled_with_capture(tmp_path / "kept")
+    inside, before = {}, {}
+    assert _settle(data, drive, report=inside, guard=lambda: contextlib.nullcontext(False))["reason"] == "generation_closed"
+    assert [set(row) for row in inside["under_q_sec"]] == [{"task_id", "rechecks"}]
+    assert _settle(data, drive, report=before, live=lambda _task: None)["reason"] == "liveness_unknown"
+    assert "under_q_sec" not in before
+
+
+def test_a_steps_seconds_under_the_interlock_end_where_the_interlock_ends(tmp_path, monkeypatch):
+    """The move's seconds are those spent under the guard, on success and on failure alike: a move that fails counts
+    the time it took inside the guard, never the warning logged after the guard released the queue lock."""
+    import contextlib
+
+    clock, active, busy, real_replace = [0.0], [], [], os.replace
+
+    @contextlib.contextmanager
+    def guard():
+        active.append(True)
+        try:
+            yield True
+        finally:
+            active.pop()
+
+    def replace(old, new):
+        if active:
+            clock[0] += 3  # the move's own time, under the guard
+        if Path(old) in busy:
+            raise OSError("drive in use")
+        return real_replace(old, new)
+
+    def warning(*_args, **_kwargs):
+        assert not active, "the warning comes after the guard released Q"
+        clock[0] += 12
+
+    monkeypatch.setattr(task_custody, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(task_custody.os, "replace", replace)
+    monkeypatch.setattr(task_custody.log, "warning", warning)
+    for name, fails in (("moved", False), ("in_use", True)):
+        (tmp_path / name).mkdir()
+        data, drive, _record = _cancelled_with_capture(tmp_path / name, "task_drives")
+        busy[:] = [drive] if fails else []
+        report = {}
+        outcome = _settle(data, drive, report=report, guard=guard)
+        assert outcome["status"] == ("retained" if fails else "removed"), outcome
+        assert report["under_q_sec"][0]["move"] == 3, report["under_q_sec"]
+
+
 def test_read_only_folders_in_custody_leftovers_never_strand_them(tmp_path):
     """A moved drive or a crashed settlement's staging carrying read-only folders and files (a Git
     object store, a tool's own modes) is removed whole by the permission-granting removal, so no

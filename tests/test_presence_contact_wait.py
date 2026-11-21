@@ -83,6 +83,8 @@ def test_ended_wait_reask_refuses_same_identity_and_new_key_can_wait(contact_run
                          timeout=10, what="new request parked")
                 assert load_task_result(r.root, ctx.task_id)["owner_wait"]["quiz_id"] == new_id
                 history = json.loads(_assemble_history_response(r.root, 1, 20, 0))
+                # The shipped reader shows both questions open: each head is the owner's amber dot (Main's pill counts
+                # both), and only the wait's own line tells the waiting one from the ended one.
                 run = subprocess.run([shutil.which("node"), "web/tests/presence_contact_consumer.mjs"],
                     input=json.dumps({"reask": {"first": first_frame, "ended": end_frame,
                         "fresh": next(f for f in r.frames if f.get("quiz_id") == new_id), "history": history}}),
@@ -264,7 +266,19 @@ def test_inline_controls_keep_their_existing_capability_boundary(contact_runtime
         assert not load_task_result(ctx.drive_root, ctx.task_id).get("budget_pause")
         assert arm_detach(ctx, "continue elsewhere")["error"] == "no_continuation_owner"
         for mode in ("warm", "cold"):
-            assert "no continuation owner" in _await_as_sleep(ctx, mode, wake_after_sec=5)
+            ctx._active_builtin_tool_result = None  # a direct handler call publishes its typed result here
+            text = _await_as_sleep(ctx, mode, wake_after_sec=5)
+            # The refusal names the in-slot mail wait that works with no continuation owner.
+            assert text.endswith('this task has no continuation owner to sleep under; await_messages(mode="in_slot", '
+                                 'timeout_sec=…) waits here for any mail, without selectors')
+            refused = ctx._active_builtin_tool_result
+            assert (refused.code, refused.meta.get("operation_outcome")) == ("TOOL_ARG_ERROR", "completed_no_effect")
+        # With no owner nothing sleeps in any mode: an unnamed or in-slot call with selectors gets the same form.
+        for mode in ("", "in_slot"):
+            assert _await_as_sleep(ctx, mode, tasks=["kid"]).endswith("waits here for any mail, without selectors")
+        # A contract that withholds await_messages keeps the bare fact: no call that dispatch would refuse.
+        ctx.task_metadata = {**(ctx.task_metadata or {}), "disabled_tools": ["await_messages"]}
+        assert _await_as_sleep(ctx, "warm", tasks=["kid"]).endswith("no continuation owner to sleep under")
         assert not getattr(ctx, "_model_sleep", None)
 
     _run(contact_runtime, during)

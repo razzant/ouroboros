@@ -30,6 +30,13 @@ class BackendPathNoMatch(ValueError):
     a plain ``ValueError`` and must be refused.
     """
 
+class ManagedPathRefused(ValueError):
+    """A managed deployment's execution domain (``execution_domain``) does not map this path: nothing starts, and
+    nothing runs on the trusted service instead. A ``ValueError``, so every mapping caller keeps its handling."""
+
+    process_not_started = True
+
+
 @dataclass(frozen=True)
 class ExecutorRef:
     kind: str
@@ -37,6 +44,7 @@ class ExecutorRef:
     network: str
     mappings: tuple[PathMapping, ...]
     container_name: str = ""
+    managed: bool = False  # the deployment's pinned executor: an unmapped path refuses, never runs locally
 
 def normalize_executor_ref(raw: dict[str, Any]) -> ExecutorRef | None:
     if not raw:
@@ -117,6 +125,9 @@ def map_host_path(executor: ExecutorRef, path: pathlib.Path) -> str:
         rel = host.relative_to(mapping.host_path).as_posix()
         base = mapping.backend_path.rstrip("/")
         return base if not rel or rel == "." else f"{base}/{rel}"
+    if executor.managed:
+        raise ManagedPathRefused(f"{host} is outside this deployment's execution domain, which maps only its work "
+                                 "paths; nothing was started, and nothing runs on the service instead")
     raise ValueError(f"path is outside executor mappings: {host}")
 
 

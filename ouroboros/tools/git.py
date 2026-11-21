@@ -8,17 +8,15 @@ from ouroboros.tools.tool_result import (
 
 import copy
 import json
-import hashlib  # noqa: F401
 import logging
 import os
 import pathlib
-import re  # noqa: F401
 import subprocess  # noqa: F401
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.config import get_runtime_mode  # noqa: F401
-from ouroboros.tools.review_helpers import review_enforcement_blocks
+from ouroboros.tools.review_helpers import cyber_review_authority
 from ouroboros.test_selection import bind_commit_test_request, commit_test_options, widening_properties
 from ouroboros.runtime_mode_policy import (
     core_patch_notice,  # noqa: F401
@@ -43,14 +41,12 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.commit_gate import (
     BLOCK_CLASS_INFRA,
-    IDENTICAL_DIFF_BLOCK_REASON,
     _check_overlapping_review_attempt,
     _current_review_tool_name,
     _invalidate_advisory,  # noqa: F401
     _record_commit_attempt,
     record_bound_commit_success, prepare_author_commit_request, exact_open_peer,
-    record_commit_gate_refusal, name_review_record,
-    check_identical_verdict_refusal,
+    name_review_record,
     check_review_cycles_ceiling,
     classify_review_block,  # noqa: F401
     commit_review_contract_fingerprint,
@@ -59,6 +55,7 @@ from ouroboros.tools.commit_gate import (
     resolve_root_task_id,
 )
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED, emit_review_cycles_exhausted
+from ouroboros.review_overrides import note_override_landing
 from ouroboros.tools.release_sync import is_development_marker
 from ouroboros.tools.review_revalidation import handle_revalidation_failure  # noqa: F401
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd  # noqa: F401
@@ -81,22 +78,6 @@ from ouroboros.contracts.skill_payload_policy import (
 log = logging.getLogger(__name__)
 
 
-def _repair_managed_merge_head(ctx: ToolContext) -> None:
-    """Re-establish MERGE_HEAD for an authorized managed resolver after a
-    refusal's index reset, so the resolution is not stranded (same repair the
-    blocked-review path performs in ``_repo_commit_push``)."""
-    try:
-        from supervisor.update_merge import managed_assisted_tx_for, reestablish_merge_head
-
-        tx, _block = managed_assisted_tx_for(
-            getattr(ctx, "task_id", ""), getattr(ctx, "task_metadata", None)
-        )
-        if tx:
-            reestablish_merge_head(str(tx.get("target_sha") or ""))
-    except Exception:
-        log.debug("reestablish_merge_head after free refusal failed", exc_info=True)
-
-
 def _free_cycle_gate(
     ctx: ToolContext,
     commit_message: str,
@@ -109,9 +90,9 @@ def _free_cycle_gate(
 ) -> Optional[Dict[str, Any]]:
     """Collect paid identity before preflight (an open attempt, a reference, or the usable verdict of the round's
     completed wave, whose replays end when it formed none); only new work reads today's pool or cycle limits."""
-    from ouroboros.config import get_review_enforcement
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY
 
-    if getattr(ctx, "_review_cyber_pending", "") and not review_enforcement_blocks("blocking"):
+    if getattr(ctx, "_review_cyber_pending", "") and cyber_review_authority():
         return {"advisory_replay": ctx._review_cyber_pending, "replay_reason": "review_pending"}
     fp = pre_fingerprint.get("fingerprint", "")
     rebuttal_sha = compute_rebuttal_sha256(review_rebuttal)
@@ -137,10 +118,15 @@ def _free_cycle_gate(
     if error:
         return error
     if bool(getattr(ctx, "_review_resume_pending", False)):
-        if pending is not None and str(getattr(pending, "review_retry_key", "") or "") == retry_key:
+        from ouroboros.tools.parallel_review import commit_round_keys
+
+        # A review-only call composes before its overlap check: advisers alone still collect their open counted round.
+        if pending is not None and str(getattr(pending, "review_retry_key", "") or "") in {retry_key, *commit_round_keys(
+                ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal, binding_fingerprint=fp)}:
+            ctx._current_review_retry_key = str(pending.review_retry_key)
             ctx._review_reconcile_only = True
             return None
-        if not review_enforcement_blocks("blocking"):  # Cyber: no second wave and no veto
+        if cyber_review_authority():  # Cyber: no second wave and no veto
             from ouroboros.tools.commit_gate import _return_commit_feedback
             return _return_commit_feedback(ctx, commit_message, commit_start, pre_fingerprint, pre_fingerprint, pending=True,
                 note="Your still-open paid review reads the live index, so this other intent waits; nothing was dispatched. ")
@@ -149,78 +135,38 @@ def _free_cycle_gate(
             "intent. The new candidate was not dispatched; reconcile the original exact attempt first."),
             "block_reason": "overlap_guard"}
     ctx._review_reconcile_only = False
-    identical_msg = check_identical_verdict_refusal(
-        ctx, fp, rebuttal_sha256=rebuttal_sha, contract_fingerprint=contract_fp
-    )
-    if not identical_msg:
-        from ouroboros.review_state import make_repo_key, settle_completed_round
-        reusable = settle_completed_round(  # collected with its own roster at $0 after this call's checks
-            ctx, pathlib.Path(ctx.drive_root), repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)),
-            tool_name=_current_review_tool_name(ctx), task_id=str(getattr(ctx, "task_id", "") or ""),
-            review_retry_key=retry_key, exclude_attempt=int(getattr(ctx, "_current_review_attempt_number", 0) or 0))
-        if reusable is not None:
-            ctx._pending_review_attempt, ctx._review_reconcile_only = reusable, True
-            return None
-    ceiling = None if identical_msg else check_review_cycles_ceiling(
-        ctx, root_task_id=root_task_id
-    )
-    if not identical_msg and ceiling is None:
+    from ouroboros.review_state import make_repo_key, settle_completed_round
+    reusable = settle_completed_round(  # collected with its own roster at $0 after this call's checks
+        ctx, pathlib.Path(ctx.drive_root), repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)),
+        tool_name=_current_review_tool_name(ctx), task_id=str(getattr(ctx, "task_id", "") or ""),
+        review_retry_key=retry_key, exclude_attempt=int(getattr(ctx, "_current_review_attempt_number", 0) or 0))
+    if reusable is not None:
+        ctx._pending_review_attempt, ctx._review_reconcile_only = reusable, True
         return None
-    enforcement = str(get_review_enforcement() or "")
-    reason = IDENTICAL_DIFF_BLOCK_REASON if identical_msg else REASON_REVIEW_CYCLES_EXHAUSTED
-    message = identical_msg or str(ceiling["message"])
-    if ceiling is not None:
-        emit_review_cycles_exhausted(
-            getattr(ctx, "event_queue", None), ctx.drive_root,
-            surface="commit_gate", task_id=str(getattr(ctx, "task_id", "") or ""),
-            cycles_paid=int(ceiling["cycles_paid"]), cap=int(ceiling["cap"]),
-            enforcement=enforcement, root_task_id=root_task_id, fingerprint=str(fp),
-        )
-    if not review_enforcement_blocks(enforcement):
-        # Disclose the free outcome in advisory mode. Identical replay is
-        # defensive: today's verdict rows are blocking-only and enforcement
-        # is part of the contract, so switching to advisory lapses that streak.
-        try:
-            from ouroboros.utils import append_jsonl
-
-            append_jsonl(ctx.drive_logs() / "events.jsonl", {
-                "ts": utc_now_iso(), "type": "commit_review_free_replay",
-                "reason": reason, "enforcement": enforcement,
-                "task_id": str(getattr(ctx, "task_id", "") or ""),
-                "root_task_id": root_task_id,
-                "pre_review_fingerprint": str(fp),
-            })
-        except Exception:
-            log.debug("commit_review_free_replay event emission failed", exc_info=True)
-        return {"advisory_replay": message, "replay_reason": reason}
-    try:
-        _unstage_candidate(ctx)
-    except Exception:
-        pass
-    if _authorized_managed_update_resolver(ctx):
-        _repair_managed_merge_head(ctx)
-    # A free refusal is still a review outcome: its NOT_DISPATCHED ledger record names why nothing was reviewed.
-    record_id = record_commit_gate_refusal(ctx, commit_message, goal=goal, scope=scope, pre_fingerprint=pre_fingerprint,
-                                           kind=reason, message=message)
-    _record_commit_attempt(
-        ctx,
-        commit_message,
-        "blocked",
-        block_reason=reason,
-        block_details=message,
-        duration_sec=time.time() - commit_start,
-        phase="preflight",
-        pre_review_fingerprint=str(fp),
-        rebuttal_sha256=rebuttal_sha,
-        review_contract_fingerprint=contract_fp,
-        review_record_id=record_id,
+    ceiling = check_review_cycles_ceiling(ctx, root_task_id=root_task_id)
+    if ceiling is None:
+        return None
+    reason, message = REASON_REVIEW_CYCLES_EXHAUSTED, str(ceiling["message"])
+    emit_review_cycles_exhausted(
+        getattr(ctx, "event_queue", None), ctx.drive_root,
+        surface="commit_gate", task_id=str(getattr(ctx, "task_id", "") or ""),
+        cycles_paid=int(ceiling["cycles_paid"]), cap=int(ceiling["cap"]),
+        enforcement=RECORDED_REVIEW_AUTHORITY, root_task_id=root_task_id, fingerprint=str(fp),
     )
-    return {
-        "status": "blocked",
-        "message": message,
-        "block_reason": reason,
-        "review_record_id": record_id,
-    }
+    # The spent allowance is a free replay: the outcome returns for the author's explicit decision.
+    try:
+        from ouroboros.utils import append_jsonl
+
+        append_jsonl(ctx.drive_logs() / "events.jsonl", {
+            "ts": utc_now_iso(), "type": "commit_review_free_replay",
+            "reason": reason, "enforcement": RECORDED_REVIEW_AUTHORITY,
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+            "root_task_id": root_task_id,
+            "pre_review_fingerprint": str(fp),
+        })
+    except Exception:
+        log.debug("commit_review_free_replay event emission failed", exc_info=True)
+    return {"advisory_replay": message, "replay_reason": reason}
 
 
 def _install_paid_dispatch_stamp(
@@ -476,8 +422,7 @@ def _subject_binding_mismatch_outcome(
         duration_sec=time.time() - commit_start,
         phase="revalidation",
         # Infra by construction (A1 composition): a binding mismatch is a gate
-        # fact, not a reviewer verdict — it must never build a refusal streak
-        # nor anchor an identical-diff refusal quote.
+        # fact, not a reviewer verdict.
         block_class=BLOCK_CLASS_INFRA,
         pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
         fingerprint_status="invalid",
@@ -506,19 +451,16 @@ def _preflight_and_tests_gate(
     goal: str = "",
     scope: str = "",
     review_only: bool = False,
-    landing: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Ahead of the panel: the free deterministic checks, the tests preflight, then the author's
     preflight when one row was named (decision 3A). The checks and the tests block as before
-    (Cyber Pro continues with a warning); the preflight only informs. ``None`` = proceed.
-    ``landing``: a resumed attempt's collected verdict, before Git, owes only this call's tests (#2410)."""
+    (Cyber Pro continues with a warning); the preflight only informs. ``None`` = proceed."""
     from ouroboros.commit_admission import preflight_evidence_unavailable, run_tests_preflight_with_proof
     from ouroboros.tools.commit_gate import deterministic_preflight, run_commit_preflight
 
     ctx._commit_preflight = {"status": "skipped" if skip_advisory_pre_review else "not_performed", "record_id": ""}
     named = bool(preflight_reviewer) and not skip_advisory_pre_review
-    message = "" if landing else deterministic_preflight(
-        ctx, commit_message, classification_paths or None, review_only=review_only)
+    message = deterministic_preflight(ctx, commit_message, classification_paths or None, review_only=review_only)
     reason = "infra_failure" if preflight_evidence_unavailable(message) else "preflight"
     _managed_needs_proof = _managed_candidate_needs_proof(ctx)
     # The retired advisory's own tests rule, for every commit: the suite runs unless the author
@@ -526,7 +468,7 @@ def _preflight_and_tests_gate(
     if not message and (not skip_tests or _managed_needs_proof):
         ctx.emit_progress_fn(
             "Managed candidate lacks a pre-commit test proof — running the mandatory hermetic suite before review..."
-            if _managed_needs_proof else f"Running the tests preflight before {'Git' if landing else 'the panel'}...")
+            if _managed_needs_proof else "Running the tests preflight before the panel...")
         test_err = run_tests_preflight_with_proof(
             ctx, runner=lambda c, **kw: _run_review_preflight_tests(c, **kw))
         if test_err:
@@ -543,18 +485,17 @@ def _preflight_and_tests_gate(
     else:
         ctx._preflight_execution = execution_exhibit(ctx, otherwise="tests preflight did not pass" if reason == (
             "tests_preflight_blocked") else "skipped by the author (skip_tests)" if skip_tests and not _managed_needs_proof else "")
-    if message and not review_enforcement_blocks("blocking"):
+    if message and cyber_review_authority():
         from ouroboros.tools.review import _handle_review_block_or_warning
 
         ctx._last_review_block_reason = reason
-        _handle_review_block_or_warning(ctx, True, message, "")
+        _handle_review_block_or_warning(ctx, message, "")
     elif message:
         try:
             _unstage_candidate(ctx)  # the tests ran unguarded for minutes: keep paths staged meanwhile
         except Exception:
             pass
-        # Preflight, not a review verdict: must neither inflate nor reset the
-        # identical-diff refusal streak.
+        # Preflight, not a review verdict.
         _record_commit_attempt(ctx, commit_message, "blocked", block_reason=reason, block_details=message,
                                duration_sec=time.time() - commit_start, phase="preflight")
         return {"status": "blocked", "message": message, "block_reason": reason}
@@ -910,10 +851,12 @@ def _prepare_review_commit_worktree(
     ctx: ToolContext,
     managed_tx: Optional[Dict[str, Any]],
 ) -> tuple[bool, str]:
-    """Select the commit branch without orphaning detached work.
+    """Select the commit branch without orphaning detached work or a staged merge.
 
-    Returns ``(came_from_detached_checkout, error_message)``. Managed assisted
-    merges keep their live MERGE_HEAD and only run the existing transaction
+    Returns ``(came_from_detached_checkout, error_message)``. A successful checkout clears
+    MERGE_HEAD, MERGE_MODE and MERGE_MSG, so a staged merge would commit with one parent: the
+    current branch is never checked out again, and no switch runs while a merge is in progress.
+    Managed assisted merges keep their live MERGE_HEAD and only run the existing transaction
     precommit verification.
     """
     if managed_tx:
@@ -921,7 +864,6 @@ def _prepare_review_commit_worktree(
 
         verified, error_message = managed_assisted_precommit_verify(managed_tx)
         return False, "" if verified else error_message
-    came_from_detached_checkout = False
     try:
         current_branch = run_cmd(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
@@ -934,40 +876,36 @@ def _prepare_review_commit_worktree(
             f"⚠️ GIT_BRANCH_UNAVAILABLE: cannot verify local branch {ctx.branch_dev!r}. "
             f"Current branch, index and files were preserved. {_sanitize_git_error(str(exc))}"
         )
+    if current_branch != ctx.branch_dev:
+        try:
+            merge_path = ctx.repo_dir / run_cmd(["git", "rev-parse", "--git-path", "MERGE_HEAD"], cwd=ctx.repo_dir)
+            try:
+                merge_path.stat()
+                merging = True
+            except FileNotFoundError:
+                merging = False
+        except Exception as exc:
+            return False, f"⚠️ GIT_ERROR (checkout): Could not verify merge state: {_sanitize_git_error(str(exc))}"
+        if merging:
+            return False, (
+                f"⚠️ GIT_MERGE_IN_PROGRESS_BLOCKED: a merge is in progress on {current_branch!r}, and switching "
+                f"to {ctx.branch_dev!r} would drop it. Nothing was switched, staged or reviewed: commit or abort "
+                "that merge where it is, or redo it on the commit branch.")
+        try:
+            run_cmd(["git", "checkout", "-B", ctx.branch_dev, "HEAD"] if current_branch == "HEAD"
+                    else ["git", "checkout", "--no-guess", ctx.branch_dev, "--"], cwd=ctx.repo_dir)
+        except Exception as exc:
+            return False, f"⚠️ GIT_ERROR (checkout): {_sanitize_git_error(str(exc))}"
+        return current_branch == "HEAD", ""
+    # Git's checkout refused an unmerged index; without one, the conflicts are refused here, never staged as resolved.
     try:
-        if current_branch == "HEAD":
-            run_cmd(["git", "checkout", "-B", ctx.branch_dev, "HEAD"], cwd=ctx.repo_dir)
-            came_from_detached_checkout = True
-        else:
-            run_cmd(["git", "checkout", "--no-guess", ctx.branch_dev, "--"], cwd=ctx.repo_dir)
+        unmerged = run_cmd(["git", "diff", "--name-only", "--diff-filter=U"], cwd=ctx.repo_dir).strip()
     except Exception as exc:
-        error_message = _sanitize_git_error(str(exc))
-        try:
-            already_on_target = run_cmd(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
-            ).strip() == ctx.branch_dev
-        except Exception:
-            already_on_target = False
-        if not already_on_target:
-            return came_from_detached_checkout, f"⚠️ GIT_ERROR (checkout): {error_message}"
-        try:
-            unmerged = run_cmd(
-                ["git", "diff", "--name-only", "--diff-filter=U"], cwd=ctx.repo_dir
-            ).strip()
-        except Exception as status_exc:
-            return came_from_detached_checkout, (
-                "⚠️ GIT_ERROR (checkout): "
-                f"{error_message}\n\nCould not verify index state after checkout failure: "
-                f"{_sanitize_git_error(str(status_exc))}"
-            )
-        if unmerged:
-            return came_from_detached_checkout, (
-                "⚠️ GIT_ERROR (checkout): "
-                f"{error_message}\n\nRepository has unmerged paths; refusing to treat "
-                "the checkout failure as an incidental dirty-tree no-op.\n"
-                f"{unmerged}"
-            )
-    return came_from_detached_checkout, ""
+        return False, f"⚠️ GIT_ERROR (checkout): Could not verify index state: {_sanitize_git_error(str(exc))}"
+    if unmerged:
+        return False, ("⚠️ GIT_ERROR (checkout): Repository has unmerged paths; resolve them or abort the "
+                       f"merge before committing.\n{unmerged}")
+    return False, ""
 
 
 def _task_attributed_commit_paths(
@@ -992,10 +930,10 @@ def _task_attributed_commit_paths(
     attached = body_candidate.attach_attribution(ctx) if bound else {}
     results_root = body_candidate._results_root(ctx)
     root_task_id = str(body_candidate._metadata(ctx).get("root_task_id") or "").strip() or task_id
-    evidence_task_id = attribution_task_id(results_root, (root_task_id, task_id))
+    evidence_task_id = attribution_task_id(results_root, (root_task_id, task_id), **({"surface_type": "system_repo"} if bound else {"repo_root": ctx.repo_dir}))
     if not evidence_task_id:
-        # No host-captured baseline (manual ToolContext, external dry-run
-        # review): the legacy explicit/whole-tree staging contract applies.
+        # No host baseline of this repo, or for a bound candidate of the body (a manual ToolContext, a dry-run review,
+        # a chat turn's folder-only baseline): the legacy explicit/whole-tree staging contract applies.
         return paths, None, "", None
     selected, attribution, error = resolve_attributed_git_paths(
         results_root,
@@ -1103,7 +1041,10 @@ def _commit_request_refusals(ctx: ToolContext, *, root: str, preflight_reviewer:
 def _commit_reviewed_candidate(ctx, commit_message, started_at, managed_tx):
     """Admit the reviewed commit; join outside the launch lock so Pause stays prompt."""
     from ouroboros.owner_pause import OwnerPauseRefused, run_operation
+    from ouroboros.tools.review_collection import commit_landing_refusal
 
+    if refusal := commit_landing_refusal(ctx, commit_message, started_at, managed_tx):
+        return "", refusal
     try:
         run_operation(ctx, run_cmd, ["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
         return run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip(), ""
@@ -1182,7 +1123,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=refusal))
     _commit_start = time.time()
     if not commit_message.strip():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ ERROR: commit_message must be non-empty.")))
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ ERROR: commit_message must be non-empty." + (" Its review's attempt left the recent review history and the ledger record it was read back from keeps no commit message, so name one." if continuation and getattr(ctx, "_author_commit_source", None) is not None and not ctx._author_commit_source.commit_message else ""))))
     ctx._current_review_commit_message = commit_message
     if _managed_block:
         _record_commit_attempt(ctx, commit_message, "blocked",
@@ -1249,9 +1190,8 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             require_release_tag=not bool(_managed_tx), preflight_reviewer=preflight_reviewer, panel=panel)
         if outcome.get("status") != "passed":
             if _managed_tx:
-                # A blocked review's index reset can clear the live MERGE_HEAD; re-establish it so
-                # the agent can fix the flagged issues and re-commit (precommit_verify needs it),
-                # rather than stranding the resolution until the watchdog / boot rollback.
+                # Retain managed recovery for interrupted older attempts; current unstaging
+                # preserves MERGE_HEAD. Precommit verification still needs the managed parent.
                 try:
                     from supervisor.update_merge import reestablish_merge_head
 
@@ -1419,6 +1359,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                 log.warning("mutation baseline advance failed after commit", exc_info=True)
         if not _managed_tx:  # a managed merge records its success after its post-commit phase
             record_bound_commit_success(ctx, commit_message, _commit_start, pre_fingerprint, post_fingerprint, commit_sha)
+            note_override_landing(ctx, commit_sha)  # landed over a review FAIL or no verdict?
             ctx._coupling_review_history = {}  # the subject's coupling rounds end with its commit (the attempt rows keep them)
     finally:
         _release_git_lock(lock)
@@ -1434,10 +1375,10 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
 
 
 def _run_git_network_cmd(cmd: List[str], cwd: pathlib.Path) -> str:
-    """Bounded network git, returning stdout or raising with stdout/stderr."""
-    from supervisor.update_source import _git_network_bounded
+    """Bounded network git, returning stdout or raising with stdout/stderr (a work repository's in the work domain)."""
+    from ouroboros.tools.git_plumbing import network_git_bounded
 
-    rc, out, err = _git_network_bounded(list(cmd[1:]), cwd=cwd)
+    rc, out, err = network_git_bounded(list(cmd[1:]), cwd=cwd)
     if rc != 0:
         raise RuntimeError(
             f"Command failed: {' '.join(cmd)}\n\nSTDOUT:\n{out}\n\nSTDERR:\n{err}"
@@ -1450,12 +1391,12 @@ def get_tools() -> List[ToolEntry]:
     from ouroboros.review_doctrine import AUTHOR_DISPOSITION_SCHEMA
     from ouroboros.review_waiting import wake_on_schema
     reviewed_commit_contract = (  # one contract, two leads: the older name keeps it whole for callers that see only that name
-        "free deterministic checks, the tests preflight, then the review panel (both questions). Blocking gates on its verdict; under Advisory or "
-        "Cyber Pro every outcome, PASS and pending included, returns before commit/tag/push and the commit is your explicit "
+        "free deterministic checks, the tests preflight, then the review panel (both questions). Every outcome, PASS and "
+        "pending included, returns before commit/tag/push and the commit is your explicit "
         "continuation (review_reference + author_disposition). preflight_reviewer optionally buys ONE named row's early look at the worktree first (review_change surface=preflight): it informs, never "
         "gates, and its record never answers the panel. Without it the commit records preflight not_performed, "
-        "a fact rather than a bypass. reviewers/reason follow strictness: Blocking widens to the whole pool; Advisory "
-        "requires at least one ticked reviewer and a reason when narrowed; Cyber Pro composes freely. Unticked advisers never count."
+        "a fact rather than a bypass. Omitted reviewers mean the whole pool; outside Cyber Pro name at least one ticked reviewer "
+        "and give a reason when you name fewer than all; Cyber Pro composes freely. Unticked advisers never count."
     )
     reviewed_commit_description = "Commit already-changed files of Ouroboros's own body (system_repo) through the unified reviewed commit workflow: " + reviewed_commit_contract
     legacy_commit_description = "Older name of commit_reviewed: commit changes to Ouroboros's own body through the same reviewed workflow. It runs " + reviewed_commit_contract
@@ -1466,16 +1407,16 @@ def get_tools() -> List[ToolEntry]:
         "commit_message": {"type": "string"},
         "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of task-attributed paths. Omitted computes candidates (with author_disposition: the reviewed paths); empty never stages the whole tree."},
         "skip_tests": {"type": "boolean", "default": False, "description": "Skip pre-commit tests."},
-        "review_rebuttal": {"type": "string", "default": "", "description": "A NEW content-hashed counter-argument buys one paid re-review within capacity; repeating it is free-refused."},
+        "review_rebuttal": {"type": "string", "default": "", "description": "A NEW content-hashed counter-argument buys one paid re-review within capacity."},
         "preflight_reviewer": {"type": "string", "default": "", "description": "One ENABLED catalog row (id or handle; a review-pool member or not) for an early informational look at the worktree before the panel; unknown or disabled, or named beside skip_advisory_review=True or an author continuation, is TOOL_ARG_ERROR before anything is staged."},
-        "reviewers": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Enabled catalog ids/handles. Blocking widens a subset to every ticked reviewer. Advisory allows a subset with at least one ticked reviewer and requires reason when narrowed. Cyber Pro composes freely. Omitted means the whole pool. Unticked advisers are heard, not counted; unknown or disabled is TOOL_ARG_ERROR."},
-        "reason": {"type": "string", "default": "", "description": "Why these reviewers; required when an Advisory panel is narrowed. Missing reason refuses at $0 before staging."},
+        "reviewers": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Enabled catalog ids/handles. Omitted means the whole pool; outside Cyber Pro name at least one ticked reviewer. Cyber Pro composes freely. Unticked advisers are heard, not counted; unknown or disabled is TOOL_ARG_ERROR."},
+        "reason": {"type": "string", "default": "", "description": "Why these reviewers; required outside Cyber Pro when you name fewer than all. Missing reason refuses at $0 before staging."},
         "skip_advisory_review": {"type": "boolean", "default": False, "description": "Record that this commit deliberately goes without a preflight (preflight: skipped). The deterministic checks, the tests (see skip_tests) and the panel still run; the opposite of preflight_reviewer."},
         "goal": {"type": "string", "default": "", "description": "High-level goal of this change. Used by the panel's coupling questions to judge completeness."}, "scope": {"type": "string", "default": "", "description": "Declared scope boundary. Without a goal it is the intended transformation the panel's coupling questions judge the change against (completeness, forgotten adjacent surfaces)."},
-        "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task returned. With author_disposition: the free explicit Advisory or Cyber Pro continuation. Without it: collect that paid gate under its ordinary checks before Git, sending nothing but a continuation recorded for it and not yet sent; continue_seats records and sends a new one."},
+        "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task, or of the predecessor its recorded Continue continues, returned. With author_disposition: the free explicit author continuation. Without it: collect that paid gate under its ordinary checks before Git when the index holds exactly its reviewed bytes, else read its outcome back without staging; it sends nothing but a continuation recorded for it and not yet sent; continue_seats records and sends a new one."},
         "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": "With review_reference and no author_disposition: " + CONTINUE_SEATS_SCHEMA["description"]},
         "author_disposition": AUTHOR_DISPOSITION_SCHEMA,
-        "since_review": {"type": "string", "default": "", "description": "A review_record_id of an earlier change review of this repository (another task, or a copy such as a reviewed candidate) to compare with: the panel is shown what changed since its subject, its verdict only as a label of those earlier bytes; no PASS, finding or obligation carries over. Unknown, foreign or unreadable is a stated comparison gap. Omitted: this task's earlier reviews of this checkout."},
+        "since_review": {"type": "string", "default": "", "description": "A review_record_id of an earlier change review of this repository (another task, or a copy such as a reviewed candidate) to compare with: the panel is shown what changed since its subject, its verdict only as a label of those earlier bytes; no PASS or finding carries over. Unknown, foreign or unreadable is a stated comparison gap. Omitted: this task's earlier reviews of this checkout."},
     }
     return [
         ToolEntry("commit_reviewed", {"name": "commit_reviewed", "description": reviewed_commit_description,
@@ -1534,7 +1475,6 @@ from ouroboros.tools.git_plumbing import (  # noqa: E402,F401
     _ensure_gitignore,
     _protected_paths_block_message,
     _publish_git_error,
-    _publish_review_blocked,
     _release_git_lock,
     _sanitize_git_error,
     _staged_index,

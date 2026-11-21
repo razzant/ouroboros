@@ -62,6 +62,42 @@ test('createChatInstance renders a real assistant bubble without senderLabel sha
         restoreDom(prior);
     }
 });
+// A room's feed carries no fade (DESIGN principle 9): its own mask would make it one stacking context, so a card
+// could not lift over the composer, and Chromium drops the lazy-load margin of the photos inside a masked scroller.
+// A card's own scrollers inside the feed keep the shared fade.
+for (const [room, options] of [['Main', { chatId: 1, asPanel: false }], ['a Project', { chatId: 2, asPanel: true }]]) {
+    test(`${room}'s feed takes no shared fade or room-top switch; its live card's scrollers keep theirs`, async () => {
+        const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({
+            messages: [], window: { complete: true }, active_chat_activities: [], active_chat_activities_complete: true,
+            supervisor_ready: true }) }));
+        const handlers = new Map();
+        let generation = 0, instance;
+        try {
+            instance = createChatInstance({
+                ws: { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {} },
+                state: { activePage: 'chat', projectChatIds: new Set(options.asPanel ? [options.chatId] : []), unreadCount: 0 },
+                updateUnreadBadge() {}, idPrefix: 'chat', mountEl: mount, ...options,
+                stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+                    gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
+            });
+            const feed = globalThis.document.byId.get('chat-messages');
+            const page = mount.children.find((node) => node.id === (options.asPanel ? 'panel-chat' : 'page-chat'));
+            assert.equal(feed.classList.contains('scroll-fade-y'), false, 'the feed itself is never masked');
+            assert.equal(Object.hasOwn(page.dataset, 'roomTop'), false, 'no prototype switch on the room root');
+            listActivity(instance, 'feed-card', options.chatId);
+            handlers.get('chat')({ chat_id: options.chatId, role: 'system', is_progress: true, task_id: 'feed-card',
+                content: 'Reading the feed', ts: '2026-11-17T00:00:00Z' });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const card = walkCard(feed, 'feed-card');
+            const part = (name) => card?.children.find((node) => node.classList.contains(name));
+            assert.equal(part('chat-live-timeline')?.classList.contains('scroll-fade-y'), true);
+            assert.equal(part('chat-live-details')?.classList.contains('scroll-fade-y'), true);
+        } finally {
+            instance?.destroy();
+            restoreDom(prior);
+        }
+    });
+}
 test('first task-bound review hydrates a progress-created owner once and reconciles task truth', async () => {
     const calls = [];
     let resolveDeferredDetail = null, resolveNoopDetail = null;
@@ -1583,4 +1619,52 @@ test('a parent whose evidence arrives later re-nests its child, keeping the node
         assert.equal(walkCard(messages(), 'kid-x'), child, 'the child keeps its node identity');
         assert.equal(child.parentNode?.dataset?.subagentsFor, 'par-x', 'and nests under the parent');
     } finally { instance.destroy(); restoreDom(prior); }
+});
+
+// #2801: answer first. The root's final is saved before its result is stored; a reload in between replays the
+// final with its own status while the saved result still runs. Shapes are the real server's (isolated witness).
+test('an answer saved before its result is stored replays as Finalizing…, never a finished Done (#2801)', async () => {
+    const replay = async (finalRow, progressPhase) => {
+        const rows = [
+            { chat_id: 2, role: 'assistant', is_progress: true, system_type: 'model_narration', content: 'still working',
+                ts: '2026-11-09T06:13:59Z', task_id: 'early', task_phase: progressPhase },
+            { chat_id: 2, role: 'assistant', content: 'Witness answer.', text: 'Witness answer.',
+                ts: '2026-11-09T06:14:02Z', task_id: 'early', ...finalRow },
+        ];
+        const { prior, mount } = installDom(async (url) => (String(url).startsWith('/api/chat/history')
+            ? { ok: true, json: async () => ({ messages: rows }) }
+            : { ok: true, json: async () => ({ active_direct_turns: [] }) }));
+        const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
+        let generation = 0;
+        const stateSnapshots = {
+            begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
+            isCurrent: () => true, apply() {},
+        };
+        let instance;
+        try {
+            instance = createChatInstance({
+                ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+                updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true,
+            });
+            await instance.refreshHistory({ revision: 1 });
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const card = globalThis.document.byId.get('chat-messages').children.find((node) =>
+                node.classList.contains('chat-live-card') && node.dataset.taskId === 'early');
+            assert.ok(card, 'the replayed final row minted its task card');
+            const chip = card.querySelector('[data-live-phase]');
+            return { finished: card.dataset.finished, label: chip?.getAttribute('aria-label') || chip?.textContent || '' };
+        } finally {
+            instance?.destroy();
+            restoreDom(prior);
+        }
+    };
+    // The server's projection now: the saved nonterminal result refutes the final's own word; the card holds.
+    const held = await replay({ task_phase: 'finalizing', outcome_final: false }, 'finalizing');
+    assert.equal(held.finished, '0');
+    assert.match(held.label, /Finalizing/);
+    assert.doesNotMatch(held.label, /Done/, 'an outcome no store has answered is not said');
+    // Control: a settled final still closes its card with its word.
+    const settled = await replay({ task_terminal_status: 'completed', outcome_final: true }, undefined);
+    assert.equal(settled.finished, '1');
+    assert.match(settled.label, /Done/);
 });

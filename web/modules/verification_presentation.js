@@ -8,7 +8,7 @@
  * and a later passing check never erases it. Every word comes from typed facts: the
  * producer's `verification` object (live frames carry it directly, the settled row
  * inside `tool_result_meta`) and the process facts beside it — never the result text.
- * `placeReplayedEvidence` is the replay side: it draws the evidence row and these rows from
+ * `placeReplayedEvidence` is the replay side: it draws the evidence row, these rows and any refused steps from
  * the host's replayed observations, under the keys the live frames used.
  */
 import { replayedEvidenceTs, updateLiveTimelineItem, upsertToolFoldRow } from './chat_render_batch.js';
@@ -58,6 +58,27 @@ export function checkFailureCause(evt, check) {
     return tr('task.check.not_confirmed', 'criterion not confirmed');
 }
 
+/** The task's detail sentence for its recorded red check (`outcome_axes.objective.verification_red`, the host's
+ *  `_outcome_receipts.red_check_fact`): the cause in this row's own words and whether any check passed after it, or ''
+ *  when the record holds no such fact (its stored sentence stands). Twin: tool_error_words.red_check_phrase. */
+export function redCheckPhrase(objective) {
+    const fact = objective?.verification_red;
+    if (!fact || typeof fact !== 'object') return '';
+    const count = (value) => (Number.isInteger(value) && value > 0 ? value : 0);
+    const cause = fact.kind === 'artifact_observation'  // the host looked for the named files and ran no command
+        ? (fact.paths_named ? tr('task.check.file_not_found', 'a named file was not found') : tr('task.check.no_files_named', 'no files were named'))
+        : !fact.signal && !Number.isInteger(fact.exit_code) ? tr('task.check.no_exit_code', 'no exit code')
+            : fact.signal || fact.exit_code !== 0 ? checkFailureCause(fact, fact)  // the row beside says the process exited 0; this line says it itself
+                : fmt('exit code 0; {cause}', { cause: checkFailureCause(fact, fact) });
+    const after = count(fact.passed_after), more = count(fact.more);
+    const head = after === 1 ? fmt('A recorded check did not pass ({cause}); 1 check passed after it, none recorded as a rerun of it', { cause })
+        : after ? fmt('A recorded check did not pass ({cause}); {n} checks passed after it, none recorded as a rerun of it', { cause, n: after })
+            : fmt('The last recorded check did not pass ({cause}); no check passed after it', { cause });
+    const tail = more === 1 ? tr('task.check.more_one', '; 1 more failed check has no recorded passing rerun')
+        : more ? fmt('; {n} more failed checks have no recorded passing rerun', { n: more }) : '';
+    return `${head}${tail}.`;
+}
+
 /** The diagnostic row for one failed check, or null. `callKey` is the call's own
  *  timeline key; a failed CALL (is_error) keeps its existing error row instead. */
 export function checkFailureView(evt, callKey) {
@@ -80,9 +101,19 @@ export function checkFailureView(evt, callKey) {
     };
 }
 
-/** Upsert one failed-check row in place by its key; true when the timeline changed.
+/** Draw a marked settlement with the live call formatter. Its command arguments are not part of
+ *  the history projection; its recorded time, invocation key and bounded result preview are. */
+export function refusedStepView(seen, key, presentCall) {
+    if (!key || seen?.fact !== 'settled' || seen.tool_result_meta?.refused_step !== true
+        || !['held', 'error'].includes(seen.status)) return null;
+    const { phase, headline, body, fullBody } = presentCall({ type: 'tool_call', is_error: true,
+        tool: seen.tool, status: seen.recorded_status, tool_result_meta: seen.tool_result_meta, result_preview: seen.result_preview });
+    return { phase, headline, body, fullBody, visible: true, dedupeKey: key, sourceTs: String(seen.ts || '') };
+}
+
+/** Upsert one diagnostic row in place by its key; true when the timeline changed.
  *  Used for a live frame that lands after the task's terminal row as well, so the
- *  arrival order of terminal and check never decides whether the row exists. */
+ *  arrival order of terminal and diagnostic never decides whether the row exists. */
 export function placeCheckRow(record, view, ts, rawTs = view.sourceTs) {
     const { timelineUpdate } = updateLiveTimelineItem(record, view,
         { ts, rawTs, syntheticKey: view.dedupeKey, headline: view.headline, inPlaceByKey: true });
@@ -90,14 +121,14 @@ export function placeCheckRow(record, view, ts, rawTs = view.sourceTs) {
 }
 
 /** Replayed host evidence (`tool_call_log.replay_evidence`) draws the rows the live frames drew:
- *  the folded evidence row (`fold`, its view) at its first call's time, then each failed check's
- *  row under its live key. `carrierTs` is the history row that delivered the evidence and
+ *  the folded evidence row (`fold`, its view) at its first call's time, then failed checks and refused steps
+ *  under their live keys. `carrierTs` is the history row that delivered the evidence and
  *  `formatTs` the card's timestamp formatter. True when the timeline changed. */
-export function placeReplayedEvidence(record, fold, evidence, carrierTs, formatTs) {
+export function placeReplayedEvidence(record, fold, evidence, carrierTs, formatTs, presentCall) {
     const at = replayedEvidenceTs(evidence, carrierTs);
     let changed = !['none', 'duplicate-skip'].includes(upsertToolFoldRow(record, fold, formatTs(at), at).timelineUpdate);
     for (const seen of evidence?.observations || []) {
-        const view = checkFailureView(seen, seen.key);
+        const view = refusedStepView(seen, seen.key, presentCall) || checkFailureView(seen, seen.key);
         if (view) changed = placeCheckRow(record, view, formatTs(view.sourceTs)) || changed;
     }
     return changed;

@@ -350,7 +350,7 @@ def _refusal_then_correction(tmp_path, monkeypatch, *, refused_at_startup: bool,
             for server in servers:
                 asyncio.run_coroutine_threadsafe(server.__aexit__(None, None, None), loop).result(5)
     assert [method for method, _form in refusing.calls] == ["getMe"]
-    assert _status(state) == {"state": "ready", "reason_code": ""}
+    assert _status(state) == {"state": "ready", "reason_code": "", "bot": "123456"}
     assert ("info", "Telegram settings changed after a rejection; polling resumes.") in api.logs
     return api
 
@@ -436,6 +436,76 @@ def test_an_unavailable_token_is_no_reading_and_only_a_changed_token_ends_the_wa
     assert api.logs.count(("warning", _UNREADABLE)) == 1
 
 
+_CLEARED = "Telegram bot token was cleared while polling waits; still waiting for a saved one."
+
+
+def test_a_parked_wait_says_each_change_of_reason_and_a_closing_binding_says_nothing(tmp_path, monkeypatch):
+    """Parked with the bridge's token binding: each change between a cleared token and settings that cannot be
+    read is said (cleared, unreadable, cleared; then unreadable, cleared, unreadable), the same reason again
+    says nothing, a new token ends the wait, and a closing binding claims no reason in either wait."""
+    binding_mod, settings, api = _parked(tmp_path, monkeypatch)
+    token_mod = sys.modules[f"{_PACKAGE}.lib.telegram_token"]
+    saved = settings.read_text(encoding="utf-8")
+    fingerprint = binding_mod.server_fingerprint(api, _TOKEN)
+    cleared, unknown = {"status": "ok", "values": {}}, {"status": "unknown"}
+    corrected = {"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "123456:CORRECTED"}}
+
+    def bound(token: str):
+        binding = token_mod.TokenBinding()
+        binding.observe({"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": token}})
+        return binding
+
+    def said() -> list:
+        return [entry for entry in api.logs if "while polling waits" in entry[1] or "the bridge waits" in entry[1]]
+
+    async def reach(count: int) -> None:
+        """``count`` lines, and no more over further checks of the same reason."""
+        deadline = time.monotonic() + 5
+        while len(said()) < count:
+            assert time.monotonic() < deadline, said()
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        assert len(said()) == count, said()
+
+    async def scenario():
+        binding = bound(_TOKEN)
+        parked = asyncio.create_task(binding_mod.park_until_settings_change(api, fingerprint, binding))
+        for count, reply in enumerate((cleared, unknown, cleared), start=1):
+            binding.observe(reply)
+            binding.observe(reply)  # the same state once more
+            await reach(count)
+        binding.observe(corrected)
+        await asyncio.wait_for(parked, 5)
+
+        binding = bound(_TOKEN)
+        parked = asyncio.create_task(binding_mod.park_until_settings_change(api, fingerprint, binding))
+        settings.write_text("{", encoding="utf-8")  # the saved settings cannot be read; the token stays in force
+        await reach(4)
+        binding.observe(cleared)
+        await reach(5)
+        binding.observe(unknown)
+        await reach(6)
+        settings.write_text(saved, encoding="utf-8")
+        binding.observe(corrected)
+        await asyncio.wait_for(parked, 5)
+
+        closing = bound(_TOKEN)
+        parked = asyncio.create_task(binding_mod.park_until_settings_change(api, fingerprint, closing))
+        await asyncio.sleep(0.05)
+        closing.close()
+        waiting = asyncio.create_task(token_mod._wait_for_bot_token(api, closing, poll_sec=0.01))
+        await reach(6)
+        for task in (parked, waiting):
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(scenario())
+    assert said() == [("info", _CLEARED), ("warning", _UNREADABLE), ("info", _CLEARED),
+                      ("warning", _UNREADABLE), ("info", _CLEARED), ("warning", _UNREADABLE)]
+    assert api.logs.count(("info", "Telegram settings changed after a rejection; polling resumes.")) == 2
+
+
 @pytest.mark.parametrize("readable", [True, False])
 def test_a_parked_wait_stays_cancellable(tmp_path, monkeypatch, readable):
     binding, settings, api = _parked(tmp_path, monkeypatch)
@@ -464,8 +534,8 @@ def test_a_competing_poll_is_retried_without_a_save_or_the_restart_budget(tmp_pa
     written: list[tuple[str, str]] = []
     save_status = plugin._save_bridge_status
     monkeypatch.setattr(plugin, "_save_bridge_status",
-                        lambda api, state, reason_code="": (written.append((state, reason_code)),
-                                                            save_status(api, state, reason_code))[-1])
+                        lambda api, state, reason_code="", bot="", **kw: (written.append((state, reason_code)),
+                                                                          save_status(api, state, reason_code, bot, **kw))[-1])
     server = _ConflictingServer(conflicts, first_update_id=30)
     with _host_loop(monkeypatch) as loop:
         asyncio.run_coroutine_threadsafe(server.__aenter__(), loop).result(5)
@@ -484,8 +554,110 @@ def test_a_competing_poll_is_retried_without_a_save_or_the_restart_budget(tmp_pa
     assert len(server.methods("getMe")) == 1  # one run of the poller: nothing restarted it
     # Degraded while the token is held, ready after the first successful poll: one write each.
     assert written == [("ready", ""), ("degraded", "telegram_conflict"), ("ready", "")]
-    assert _status(state) == {"state": "ready", "reason_code": ""}
+    assert _status(state) == {"state": "ready", "reason_code": "", "bot": "123456"}
     warnings = [message for level, message in api.logs if level == "warning" and "degraded" in message]
     assert warnings == ["Telegram poller degraded (TelegramRequestRejected): Telegram API getUpdates returned HTTP 409."]
     assert ("info", "Telegram poller recovered after TelegramRequestRejected; polling resumed.") in api.logs
     assert not any(level == "error" for level, _message in api.logs)
+
+
+def test_the_observer_applies_settings_to_the_mini_app_on_its_first_read_and_after_each_change(monkeypatch):
+    """Refresh is asked on the first read and after each accepted change, naming the token read, retried while it
+    cannot settle, confirmed from the host's memory at each read after an applied answer, never asked for an
+    unknown document, and the observer ends when the API closes."""
+    plugin, _api, _notifier = _load()
+    token_mod = sys.modules[plugin.__package__ + ".lib.telegram_token"]
+    replies = iter([{"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a"}, "missing": []},
+                    {"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a"}, "missing": []},
+                    {"status": "unknown", "values": {}, "missing": []},
+                    {"status": "ok", "values": {}, "missing": ["TELEGRAM_BOT_TOKEN"]},
+                    {"status": "ok", "values": {}, "missing": ["TELEGRAM_BOT_TOKEN"]},
+                    {"status": "access_closed", "values": {}, "missing": []}])
+    outcomes = iter(["unchanged", "unchanged", "stop_unconfirmed", "restarted"])
+    asked = []
+
+    class Api:
+        logs = []
+
+        def get_settings_state(self, keys):
+            return next(replies)
+
+        def refresh_companion_process(self, name, expected=None, only_if_differs=False):
+            asked.append((name, expected, only_if_differs))
+            return next(outcomes)
+
+        def log(self, level, message, **_fields):
+            self.logs.append((level, message))
+
+    api = Api()
+    monkeypatch.setattr(token_mod, "WATCH_SEC", 0)
+    woken = []  # the typing cue's wake: told of each accepted change, never of an unchanged or unknown read
+    asyncio.run(token_mod.make_token_observer(api, "miniapp_gateway",
+                                              lambda: woken.append(token_mod.binding_for(api).snapshot()))())
+    assert woken == [("1:a", 1), ("", 2)]
+    # First read; its confirmation at the next read; the change; its retry. Unknown asks nothing.
+    assert asked == [("miniapp_gateway", {"TELEGRAM_BOT_TOKEN": token}, confirm)
+                     for token, confirm in (("1:a", False), ("1:a", True), ("", False), ("", False))]
+    assert token_mod.binding_for(api).state == "closed" and token_mod.binding_for(api).snapshot() == ("", 3)  # closing advanced it
+
+
+@pytest.mark.parametrize("outcome,asks", [("not_desired", 1), ("disabled", 1), ("missing_grants", 1),
+                                          ("settings_unknown", 3), ("settings_changed", 3), ("unchanged", 3)])
+def test_the_observer_settles_on_each_refusal_of_the_closed_set_and_asks_again_only_after_the_others(
+    monkeypatch, outcome, asks,
+):
+    """PluginAPI 2.4 answers any other reason not to run as ``not_desired``: one ask per generation, never a
+    runtime-state read every tick; a state worth asking again (unreadable settings, or a save after this read)
+    is asked each read, and a newer save warns nobody. After an applied answer each read only confirms it
+    (``only_if_differs``), which the host answers from memory."""
+    plugin, _api, _notifier = _load()
+    token_mod = sys.modules[plugin.__package__ + ".lib.telegram_token"]
+    replies = iter([{"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a"}, "missing": []}] * 3
+                   + [{"status": "access_closed", "values": {}, "missing": []}])
+    asked = []
+
+    class Api:
+        logs = []
+
+        def get_settings_state(self, keys):
+            return next(replies)
+
+        def refresh_companion_process(self, name, expected=None, only_if_differs=False):
+            asked.append(only_if_differs)
+            return outcome
+
+        def log(self, level, message, **_fields):
+            self.logs.append((level, message))
+
+    monkeypatch.setattr(token_mod, "WATCH_SEC", 0)
+    api = Api()
+    asyncio.run(token_mod.make_token_observer(api, "miniapp_gateway")())
+    assert asked == ([False] + [True] * (asks - 1) if outcome == "unchanged" else [False] * asks)
+    warned = [message for level, message in api.logs if level == "warning"]
+    once = f"Telegram Mini App could not apply the saved token yet ({outcome}); retrying."
+    assert warned == ([once] if outcome == "settings_unknown" else [])  # settled, or a newer save to apply
+
+
+def test_a_missing_token_waits_past_the_former_restart_budget(tmp_path, monkeypatch):
+    """Without a token the supervised poller and notifier wait instead of failing: the host's runner with
+    the poller's ten restarts and a fast backoff would have spent them all in this time."""
+    plugin, _api, notifier = _load()
+    state, api = _state(tmp_path)
+    api.granted.clear()
+    sends = []
+    monkeypatch.setattr(plugin, "TelegramClient", lambda *a, **k: sends.append(a) or (_ for _ in ()).throw(AssertionError))
+    with _host_loop(monkeypatch):
+        poller = _supervise(plugin, api)
+        spec = _StagedSupervisedTask(name="notifier", factory=notifier._make_notifier(api), restart_policy="on_failure",
+                                     max_restarts=10, backoff_seconds=0.01)
+        host = types.SimpleNamespace(_skill="telegram", _disclose_model_capable_dispatch=lambda *_args: None)
+        notifying = extension_plugin_api.PluginAPIImpl._start_supervised_task(host, spec)
+        try:
+            time.sleep(1.0)
+            assert not poller.done() and not notifying.done()
+        finally:
+            poller.cancel()
+            notifying.cancel()
+    assert sends == []
+    assert plugin._bridge_status(api)["state"] == "missing_token"
+    assert not [message for level, message in api.logs if level in {"error", "warning"}]

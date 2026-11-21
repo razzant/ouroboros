@@ -304,12 +304,18 @@ def _update_row(row: Dict[str, Any], change, data_dir: Optional[Any] = None) -> 
 
 
 def _recorded_terminal(task_id: str, results_root: Any) -> bool:
-    """Positive lifecycle evidence only: an unreadable or missing record is not terminal (a missing one by its typed row)."""
+    """Positive lifecycle evidence only: an unreadable or missing record is not terminal (a missing one by its typed row).
+    A row its writer derived as a stable final (``task_store.stable_finals``) answers from its columns, its body unread:
+    a body damaged later without its columns is not seen here (``live_lineage_processes`` still reads the owner's)."""
     try:
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
-        from ouroboros.task_store import exists
-        root = _wt._data_dir(results_root)  # a recurring GC asking about an owner with no record reads no document
-        record = load_effective_task_result(root, task_id, materialize_artifacts=False) if exists(root, task_id) else {}
+        from ouroboros.task_store import exists, stable_finals
+        root = _wt._data_dir(results_root)
+        if not exists(root, task_id):  # a recurring GC asking about an owner with no record asks no body row
+            return False
+        if stable_finals(root, [task_id]).get(str(task_id)):
+            return True
+        record = load_effective_task_result(root, task_id, materialize_artifacts=False)
         return (record or {}).get("status") in FINAL_STATUSES
     except Exception:
         log.debug("candidate owner status unavailable for %s", task_id, exc_info=True)
@@ -343,6 +349,7 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
             _fingerprint_matches, _owned_service_row, _service_group_survives_leader, custody_record_id,
         )
         from ouroboros.task_status import load_effective_task_result
+        from ouroboros.task_store import stated_roots
         from ouroboros import workspace_executor as executor
 
         root = _wt._data_dir(results_root)
@@ -363,6 +370,12 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
             return lineage[member] in owners
 
         custody = read_custody(root, every_drive=True)
+        # The root each owner ``ours`` will ask about states in its own body, in one read (what its effective read
+        # answers); ``ours`` reads whole only an owner that states none or is redirected by a retry.
+        named = {str(entry.get("owner_task") or entry.get("task_id") or "") for entry in custody.records
+                 if str(entry.get("root_task_id") or "") not in owners}
+        named.update(str(row.get("owner_task") or "") for row in custody.rows if _owned_service_row(row))
+        lineage.update(stated_roots(root, named - owners))
         active: List[int] = [-1] if custody.blind or not custody.readable else []
         stamped = set()
         for entry in custody.records:
@@ -520,7 +533,8 @@ def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any], *
     not prove who wrote each line. A dirty row recorded later for the same creation base is superseded (it
     stays whole in history); any other recorded row is kept, its dirt uncertain for an explicit selection,
     and joins this copy's identity when it lacks one.
-    Without a host baseline (a direct turn, a manual context) the explicit/whole-tree contract applies.
+    Without a host baseline of the body (a direct turn, whose baseline observes only its admitted folder; a
+    manual context) the explicit/whole-tree contract applies.
     """
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id or str(_metadata(ctx).get("delegation_role") or "").lower() == "subagent":
@@ -529,7 +543,7 @@ def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any], *
         from ouroboros.mutation_attribution import ESTABLISHED_BASES, attribution_task_id, capture_mutation_baseline
 
         results_root, lineage = _results_root(ctx), owner_id(ctx)
-        evidence_task_id = attribution_task_id(results_root, (lineage, task_id))
+        evidence_task_id = attribution_task_id(results_root, (lineage, task_id), surface_type="system_repo")
         if not evidence_task_id:
             return {"state": "no_baseline"}
         existing = _recorded_surface(results_root, evidence_task_id, candidate)
@@ -809,8 +823,18 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
         else:
             declare_scratch(env_root, "body-process", owner=json.dumps({
                 "task_id": str((bound or {}).get("task_id") or getattr(ctx, "task_id", "") or ""), "copy": str(candidate)}))
-        return isolated_environment(env_root, candidate,
-                                    source=runtime_environ() if source is None else source)
+        env = isolated_environment(env_root, candidate,
+                                   source=runtime_environ() if source is None else source)
+        if source is None:  # a process on this host; an executor's container runs its own runtime, never a host path
+            from ouroboros.config import DATA_DIR
+            from ouroboros.node_runtime import carry_pinned_node, forward_playwright_node
+
+            # The serving installation's pinned Node as one carried executable, never its store: the candidate's
+            # lookups find it by its record (``claudexor_node_seed.generation_roots``), a nested safe_test keeps it.
+            # An operator's literal driver stays the driver's, unmarked, even when it equals that executable.
+            forward_playwright_node(env)
+            carry_pinned_node(env, str(DATA_DIR))
+        return env
     except Exception as exc:
         log.warning("candidate process environment unavailable", exc_info=True)
         raise CandidateRefused(
@@ -836,7 +860,7 @@ def executor_environment(ctx: Any, cwd: Any, *, executor, map_path) -> Optional[
 
 
 def record_reviewed_commit(ctx: Any, commit_sha: str, *, row: Optional[Dict[str, Any]] = None, created_tag: str = "") -> None:
-    """The commit gate created ``commit_sha`` on this candidate under the configured enforcement
+    """The commit gate created ``commit_sha`` on this candidate
     (``row``: the candidate whose interrupted gate an evolution intent proves). The author's
     test widening stays with that commit, so a later run of the same unadopted delta keeps it."""
     bound = row or descriptor(ctx)
@@ -1104,7 +1128,7 @@ def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
 
 
 def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[Any] = None,
-                      discard_excluded: bool = False) -> Dict[str, Any]:
+                      discard_excluded: bool = False, owed: Optional[Any] = None) -> Dict[str, Any]:
     """Whether the worktree GC may delete this candidate's checkout, and with what kept.
 
     ``{"remove": bool, "keep_branch": bool, "reason": str, "pin": str}``. Age alone
@@ -1112,6 +1136,8 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
     and an incomplete capture retains the original directory. ``discard_excluded`` is the
     owner's explicit discard alone (``copy_capture_proof.discard_unsaved_copy``): the paths
     the capture leaves out are the accepted loss, everything else is still captured first.
+    ``owed`` (a pass over many rows): called only when this row reaches the kept-output gate, for the pass's one read of
+    those debts; ``verdict_holds`` reads them fresh at the effect.
     """
     path = pathlib.Path(str(row.get("path") or ""))
     if not path.is_dir():
@@ -1124,6 +1150,8 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
         return {"remove": False, "keep_branch": True, "reason": "owner_not_terminal", "pin": ""}
     if live_lineage_processes(data_dir, str(row.get("task_id") or "")):
         return {"remove": False, "keep_branch": True, "reason": "owner_processes_live", "pin": ""}
+    if _capture_owed(row, data_dir, owed() if owed else None):
+        return {"remove": False, "keep_branch": True, "reason": "kept_service_capture_owed", "pin": ""}
     if _retained_scratch(row, classify=True, data_dir=data_dir):
         return {"remove": False, "keep_branch": True, "reason": "retained_process_environment", "pin": ""}
     work = unique_work(row)
@@ -1147,6 +1175,15 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
             "owner": _owner_stamp(row)}
 
 
+def _capture_owed(row: Dict[str, Any], data_dir: Optional[Any], owed: Any = None) -> bool:
+    """A kept service's declared outputs, not yet captured, live in this checkout (its working directory, an output
+    or the declaration): it stays until a complete capture (``kept_service_outputs.owed_output_hold``); ``owed``, the
+    selection a pass over many rows already read."""
+    from ouroboros.tools.kept_service_outputs import owed_output_hold
+
+    return bool(row.get("path")) and bool(owed_output_hold(_wt._data_dir(data_dir), str(row["path"]), owed=owed))
+
+
 def _owner_stamp(row: Dict[str, Any]) -> Dict[str, Any]:
     return {"task_id": str(row.get("task_id") or ""), "used_at": float(row.get("used_at") or 0)}
 
@@ -1166,7 +1203,7 @@ def verdict_holds(row: Dict[str, Any], verdict: Dict[str, Any], *, data_dir: Opt
     if verdict.get("owner") != _owner_stamp(row):
         return False
     if not _recorded_terminal(str(row.get("task_id") or ""), data_dir) or live_lineage_processes(
-            data_dir, str(row.get("task_id") or "")):
+            data_dir, str(row.get("task_id") or "")) or _capture_owed(row, data_dir):
         return False
     seen = verdict.get("work") or {}
     now = unique_work(row)

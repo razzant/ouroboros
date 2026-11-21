@@ -16,7 +16,8 @@ from PIL import Image
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests.test_design_system_gate_browser import open_nav, seed_page
-from tests.test_shell_interactions_browser import DRAWER, UNDER, boot, chromium_ui, evidence, open_project, shell_ui
+from tests.test_shell_interactions_browser import (DRAWER, PROJECT_LAYERS, UNDER, boot, chromium_ui, evidence,
+                                                    open_project, shell_ui)
 from tests.test_ui_smoke_playwright import _install_controlled_visual_viewport
 
 subscription_ui = setup_browser.subscription_ui
@@ -65,7 +66,7 @@ def test_the_drawer_opens_from_the_edge_from_the_chrome_and_keeps_the_finger(chr
     following when a browser bar changes the height and when the row first under the finger is redrawn; a field
     keeps its finger."""
     page = seed_page(chromium_ui, 390, 844)
-    under = [] if room == 'main' else ['project']
+    under = [] if room == 'main' else PROJECT_LAYERS
     facts = {'room': room}
     scope = '#page-chat' if room == 'main' else '#project-panel'
     feed_selector = '#chat-messages' if room == 'main' else '#project-panel .chat-messages'

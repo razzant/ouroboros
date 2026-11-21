@@ -16,28 +16,31 @@ def _worker(workers):
     return sent
 
 
-def test_cold_final_census_rejects_new_queued_dependency_without_leaving_a_fence(tmp_path, monkeypatch):
-    from ouroboros import budget_pause, model_sleep, owner_pause
+def test_a_cold_sleep_on_its_queued_child_parks_and_fences_only_its_own_launches(tmp_path, monkeypatch):
+    """The final census reads the sleeper's own work: a queued child it waits for is no dependency hold,
+    and the parked sleep fences that child's launches no longer; the sleeper's own late launch it still does."""
+    from ouroboros import budget_pause, owner_pause
     from ouroboros.task_results import write_task_result
+    from tests._budget_pause_exact_helpers import _fast_hold, _quiet_external
 
     _install_queue(tmp_path, monkeypatch)
     write_task_result(tmp_path, "root", "running", root_task_id="root")
     write_task_result(tmp_path, "child", "scheduled", root_task_id="root")
     ctx, limit = _loop_ctx(tmp_path, "root")
     ctx._model_sleep = {"sleep_id": "cold", "mode": "cold", "tasks": ["child"], "senders": []}
-    original = model_sleep.cold_blockers
-    checks = []
-    def census(source, **kw):
-        checks.append(True)
-        return [] if len(checks) == 1 else original(source, **kw)
-    monkeypatch.setattr(model_sleep, "cold_blockers", census)
-    monkeypatch.setattr(budget_pause, "_hold_control_reason", lambda _ctx: "")
-    budget_pause.enter_cold_sleep(limit)
-    assert budget_pause.budget_pause_row(tmp_path, "root")["abandon_reason"] == "cold_sleep_dependency_blocked"
-    assert ctx._model_sleep is None and ctx._budget_pausing is False
-    assert "Sleep warm" in limit.messages[-1]["content"]
+    _fast_hold(monkeypatch, budget_pause)
+    _quiet_external(monkeypatch, budget_pause)
+    try:
+        with pytest.raises(budget_pause.BudgetPauseRequested) as parked:
+            budget_pause.enter_cold_sleep(limit)
+    finally:
+        budget_pause.end_dispatch_fence("root")
+    assert parked.value.pause["reason"] == "sleep" and parked.value.pause["sleep"]["tasks"] == ["child"]
     with owner_pause.launch_admission(SimpleNamespace(task_id="child", root_task_id="root", drive_root=tmp_path)):
         pass
+    with pytest.raises(owner_pause.OwnerPauseRefused, match="model_sleep"):
+        with owner_pause.launch_admission(SimpleNamespace(task_id="root", root_task_id="root", drive_root=tmp_path)):
+            pass
 
 
 def test_terminal_root_pause_requires_selected_schedule_restore(world):  # noqa: F811

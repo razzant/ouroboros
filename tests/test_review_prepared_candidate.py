@@ -53,7 +53,7 @@ def test_mechanical_files_are_staged_before_fingerprint_and_preflight(stage_cont
     monkeypatch.setattr(git, "_free_cycle_gate", free_gate)
     monkeypatch.setattr(git, "_preflight_and_tests_gate", preflight)
     result = _stage(ctx)
-    assert result["status"] == "passed"
+    assert result["status"] == "reviewed"  # its PASS returns before Git
     assert calls == ["prepare", "admission", "preflight"]
     assert result["pre_fingerprint"]["fingerprint"] == result["post_fingerprint"]["fingerprint"]
 
@@ -72,7 +72,7 @@ def test_preflight_mutation_cannot_reach_triad(stage_context, monkeypatch, stage
     assert _stage(ctx)["block_reason"] == "revalidation_failed"
 
 
-def test_budget_ceiling_refuses_before_preflight(stage_context, monkeypatch):
+def test_a_spent_ceiling_buys_no_wave_and_returns_its_replay_before_git(stage_context, monkeypatch):
     ctx = stage_context
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
     update_state(ctx.drive_root, lambda state: state.record_attempt(CommitAttemptRecord(
@@ -80,8 +80,9 @@ def test_budget_ceiling_refuses_before_preflight(stage_context, monkeypatch):
         repo_key=make_repo_key(ctx.repo_dir), task_id=ctx.task_id,
         root_task_id=ctx.task_id, paid=True, attempt=1,
     )))
-    monkeypatch.setattr(git, "_preflight_and_tests_gate", lambda *a, **kw: pytest.fail("no paid preflight before admission"))
-    assert _stage(ctx)["block_reason"] == "review_cycles_exhausted"
+    monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **kw: pytest.fail("a spent ceiling buys no wave"))
+    result = _stage(ctx)
+    assert result["status"] == "reviewed" and "No new review wave was bought" in result["message"], result
 
 
 @pytest.mark.parametrize("change_index", [False, True])
@@ -106,8 +107,9 @@ def test_pending_retry_never_prepares_or_restages(stage_context, monkeypatch, ch
         return "review pending", None, "review_late_result_pending", []
 
     monkeypatch.setattr(git, "_run_parallel_review", wave)
+    pending = "Review outcome returned before commit: reviewers are still running."
     first = _stage(ctx)
-    assert first["block_reason"] == "review_late_result_pending"
+    assert first["status"] == "reviewed" and first["message"].startswith(pending), first
     original_index = _git(ctx, "write-tree")
     assert _git(ctx, "diff", "--cached", "--name-only") == "change.py"
     assert load_state(ctx.drive_root).attempts[-1].late_result_pending
@@ -131,6 +133,6 @@ def test_pending_retry_never_prepares_or_restages(stage_context, monkeypatch, ch
         assert calls == [False]
     else:
         assert before_retry == original_index
-        assert second["block_reason"] == "review_late_result_pending"
+        assert second["status"] == "reviewed" and second["message"].startswith(pending), second
         assert calls == [False, True]
     assert sum(row.paid for row in load_state(ctx.drive_root).attempts) == 1

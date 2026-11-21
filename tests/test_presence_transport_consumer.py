@@ -28,6 +28,7 @@ from ouroboros.config import task_settings_scope
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
 from ouroboros.task_results import write_task_result
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_host_service_api import _seed_presence_behavior, _seed_token
 from tests.test_presence_forced_delivery import RECORD, _forced, _read
@@ -120,6 +121,7 @@ def _turn(client, binding):
     (_forced("tool_delivered", NOTE), []),  # the note is context, never a reply
     (RECORD, []),  # an undeclared internal record says nothing new
 ], ids=["message", "tool_delivered", "undeclared"])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_the_installed_transport_gets_the_partial_now_and_the_owed_result_later(
         tmp_path, monkeypatch, turn_forced, spoken_now):
     _seed_token(tmp_path, skill="telegram-bot", token=_TOKEN, permissions=["presence"],

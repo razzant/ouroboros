@@ -1,6 +1,6 @@
 # Ouroboros
 
-> Ouroboros is an open-source AI agent with a continuing identity, durable memory, agent swarms, autonomous evolution, and an implementation it can rewrite.
+> Ouroboros is an open-source AI agent that runs on your own computer: a continuing identity and durable memory, swarms of coding agents (Codex, Claude Code, Cursor, Antigravity) as helpers, voice calls, places in Telegram, Slack, email and GitHub, autonomous evolution, and an implementation it can rewrite under review.
 
 Canonical site: https://ouroboros-agent.ai/
 Source: https://github.com/razzant/ouroboros
@@ -12,10 +12,13 @@ Ouroboros publishes self-reported benchmark results with status labels and links
 
 - [Install](https://ouroboros-agent.ai/install/): Packaged downloads for normal use; clone the source only for development.
 - [Technical report](https://ouroboros-agent.ai/paper/): Paper metadata, authors, citation, code, and public evidence links.
+- [Community and research](https://ouroboros-agent.ai/community/): Projects adapting Ouroboros code and ideas, and papers that cite it.
 - [About](https://ouroboros-agent.ai/about/): What Ouroboros is and how it works.
 - [Privacy and account connections](https://ouroboros-agent.ai/privacy/): Connected data, local records, configured providers and disconnection.
 - [Terms and software license](https://ouroboros-agent.ai/terms/): The MIT license and operating a self-hosted installation.
 - [Benchmark evidence](https://ouroboros-agent.ai/benchmarks/): Scores, publication status, runs, traces, and methodology.
+- [LLM rating](https://ouroboros-agent.ai/llm-rating/): My monthly model ratings from real work, with English and Russian views, case counts and the grading method.
+- [Rating editions](https://ouroboros-agent.ai/llm-rating/editions.html): Frozen monthly editions and changes between them.
 - [Architecture](https://github.com/razzant/ouroboros/blob/ouroboros/docs/ARCHITECTURE.md): Runtime structure, data flow, and operating boundaries.
 - [Constitution](https://github.com/razzant/ouroboros/blob/ouroboros/BIBLE.md): Identity and governing principles.
 - [Releases](https://github.com/razzant/ouroboros/releases): Published versions and assets.

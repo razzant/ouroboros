@@ -1,12 +1,12 @@
 import { apiClient } from './api_client.js';
 import { setInlineStatus } from './ui_primitives.js';
 
-/* Startup & background: two immediate host controls, separate from the /api/settings draft.
-   Sign-in startup is the OS registration; keep-running is the host's own settings choice
-   (the desktop's first close may also set it). Both re-read when Settings opens, because the
-   OS or another client can change them meanwhile. A host that cannot offer a control says so
-   as a plain note (a fact about the host, not a problem); a state the owner can change is a
-   warning; a failed read or write is an error (docs/DESIGN.md §3-§5). */
+/* This computer › Start and background: two host switches that act at once through the host's own endpoints, never
+   through the settings save. Sign-in startup is the OS registration; keep-running is the host's own settings choice
+   (the desktop's first close may also set it). Both are read again whenever the page is shown
+   (`ouro:settings-page-shown`), because the OS or another client can change them meanwhile. A host that cannot offer
+   a switch says so in its row as a plain note (a fact about the host, not a problem); a state the owner can change
+   is a warning; a failed read or write is an error (docs/DESIGN.md §3-§5). */
 
 const STARTUP_NOTES = {
     unavailable: 'Sign-in startup is unavailable on this host.',
@@ -85,7 +85,7 @@ function bindHostToggle({ container, box, status, notes, noun, read, write, onPa
             if (snapshot === undefined) {
                 box.checked = !wanted; // last observed value, not a claim about the current host state
                 box.disabled = true;
-                fail(`Could not change the ${noun}: ${error.message}. Current host state could not be read; reopen Settings to retry.`);
+                fail(`Could not change the ${noun}: ${error.message}. Current host state could not be read; open this page again to retry.`);
             } else {
                 paint(snapshot);
                 fail(`Could not change the ${noun}: ${error.message}`);
@@ -97,6 +97,7 @@ function bindHostToggle({ container, box, status, notes, noun, read, write, onPa
     return {
         box,
         status,
+        describedBy: box.getAttribute?.('aria-describedby') || '',
         shown: () => shown,
         refresh,
         dispose: () => {
@@ -122,7 +123,9 @@ export function bindAutostartControl(page) {
         }
         for (const control of controls) {
             if (control.status) control.status.hidden = Boolean(same && shared);
-            if (same && shared) control.box.setAttribute?.('aria-describedby', shared.id);
+            // The row's own line describes its switch; the shared note takes its place while it speaks for both.
+            const described = same && shared ? shared.id : control.describedBy;
+            if (described) control.box.setAttribute?.('aria-describedby', described);
             else control.box.removeAttribute?.('aria-describedby');
         }
     };
@@ -144,18 +147,18 @@ export function bindAutostartControl(page) {
 
     const refreshAll = () => controls.forEach((control) => { void control.refresh(); });
     const onPageShown = (event) => {
-        if (event.detail?.page === 'settings') refreshAll();
+        if (event.detail?.path === 'computer') refreshAll();
     };
     const dispose = () => {
         controls.forEach((control) => control.dispose());
-        window.removeEventListener('ouro:page-shown', onPageShown);
+        window.removeEventListener('ouro:settings-page-shown', onPageShown);
         window.removeEventListener('pagehide', onPageHide);
     };
     const onPageHide = (event) => {
         if (!event.persisted) dispose();
     };
 
-    window.addEventListener('ouro:page-shown', onPageShown);
+    window.addEventListener('ouro:settings-page-shown', onPageShown);
     window.addEventListener('pagehide', onPageHide);
     refreshAll();
     return dispose;

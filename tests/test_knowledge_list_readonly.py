@@ -83,7 +83,7 @@ def test_first_write_into_indexless_store_seeds_the_full_index(tmp_path):
     (kdir / "beta.md").write_text("# beta\n\nSummary of beta.\n", encoding="utf-8")
     assert not (kdir / INDEX_FILE).exists()
 
-    _knowledge_write(ctx, topic="gamma", content="# gamma\n\nSummary of gamma.\n")
+    _knowledge_write(ctx, topic="gamma", mode="overwrite", content="# gamma\n\nSummary of gamma.\n")
 
     listing = _knowledge_list(ctx)
     for topic in ("alpha", "beta", "gamma"):
@@ -100,7 +100,7 @@ def test_written_index_keeps_underscore_notes_and_never_lists_itself(tmp_path):
     kdir.mkdir(parents=True)
     (kdir / "_draft.md").write_text("# Draft\n\nA useful provisional note.\n", encoding="utf-8")
 
-    _knowledge_write(ctx, topic="visible", content="# Visible\n\nShown.\n")
+    _knowledge_write(ctx, topic="visible", mode="overwrite", content="# Visible\n\nShown.\n")
 
     index = (kdir / INDEX_FILE).read_text(encoding="utf-8")
     assert "**_draft**" in index and "**visible**" in index

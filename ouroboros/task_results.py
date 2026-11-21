@@ -15,7 +15,7 @@ from ouroboros.utils import utc_now_iso
 # Projection owner retains read custody; this historical import remains compatible.
 from ouroboros.review_projection import merge_review_projection as merge_review_projection
 from ouroboros.review_records import validate_author_disposition
-from ouroboros.terminal_time import preserve_terminal_attempt, task_attempt_witness, terminal_time_patch
+from ouroboros.terminal_time import SUPERVISOR_CANCEL, preserve_terminal_attempt, task_attempt_witness, terminal_time_patch
 
 log = logging.getLogger(__name__)
 
@@ -347,6 +347,22 @@ def _refuse_occupied(drive_root: Any, task_id: str, *, write: bool) -> None:
         raise ValueError(f"task result authority is unreadable or invalid: task:{task_id}")
 
 
+def set_aside(drive_root: Any) -> Dict[str, str]:
+    """Every identity ``_refuse_occupied`` refuses, with the import's reason: occupied and without a row (a
+    refused file can stand beside an older row, which a strict read still serves). What a pass over many
+    members asks once instead of meeting that refusal on each: no restart changes such an identity, and
+    only an admissible file at a later import re-opens it."""
+    from ouroboros import store
+    from ouroboros.store_import import OCCUPIED
+
+    with store.open_store(drive_root, write=False) as txn:
+        occupied = txn.meta(OCCUPIED) or {}
+        rows = {record["task_id"] for record in txn.conn.execute(
+            "SELECT task_id FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(occupied)),))} if occupied else set()
+    return {task_id: str(reason) for task_id, reason in occupied.items() if reason and task_id not in rows}
+
+
 def _admit_stored(data: Dict[str, Any], task_id: str, *, strict: bool, noun: str) -> None:
     """A stored row was admitted when it entered the store; the strict reader still refuses an
     identity or status it cannot bind (the file-era message, so callers keep their wording)."""
@@ -389,6 +405,42 @@ def load_task_results(drive_root: Any, task_ids: List[str]) -> Dict[str, Any]:
     return results
 
 
+def load_working_note_results(drive_root: Any, task_ids: List[str]) -> Dict[str, Any]:
+    """Strict current working-note pointers in ``load_task_results``' entry shapes.
+
+    The source remains the canonical task body. No task cards, handoff rows, normalization
+    or notes-source reads are needed to name its pointer in the resident memory view. Unlike
+    the full reader, a row without a body or with an undecodable one is refused on its own
+    entry: no other task's pointer is lost with it.
+    """
+    from ouroboros.task_store import working_note_documents
+
+    if not task_ids:
+        return {}
+    valid: Dict[str, str] = {}
+    for task_id in task_ids:
+        try:
+            valid[task_id] = validate_task_id(task_id)
+        except ValueError:
+            valid[task_id] = ""
+    try:
+        documents = working_note_documents(drive_root, (tid for tid in valid.values() if tid))
+    except Exception as exc:
+        return {"_unavailable": exc}
+    results: Dict[str, Any] = {}
+    for task_id, tid in valid.items():
+        if tid not in documents:
+            continue
+        data = documents[tid]
+        try:
+            _admit_stored(data, tid, strict=True, noun="task result authority")
+        except Exception as exc:
+            results[task_id] = {"_refused": exc}
+        else:
+            results[task_id] = data
+    return results
+
+
 def list_task_results(
     drive_root: Any,
     *,
@@ -414,9 +466,11 @@ def write_task_result(
     status: str,
     *,
     _field_projector: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+    _last_word: Optional[Callable[[Any, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     strict_existing_dict: bool = False,
     create_only: bool = False,
     _terminal_observed: bool = False,
+    _cancel_observed: bool = False,
     _terminal_time_source: Optional[Dict[str, Any]] = None,
     **fields: Any,
 ) -> Dict[str, Any]:
@@ -428,6 +482,8 @@ def write_task_result(
     ``_field_projector`` runs after review-publication selection under the same
     lock, deriving fields/status from CURRENT or publishing its verified refs;
     repeating the incoming-review merge afterward would undo that handoff.
+    ``_last_word`` (``store.update_task``) judges the finished document against other addressed
+    tasks in this transaction; a refusal leaves no write and no follow-up of one.
     ``strict_existing_dict`` is accepted for its callers: every stored row is a dict.
     ``create_only`` initializes only absence, before projection or timestamps.
     The body is one store transaction: the merge over CURRENT, the typed columns and
@@ -450,7 +506,14 @@ def write_task_result(
         # (what an earlier round prepared is kept, not read again).
         if "mail" not in prepared and (status in _TRULY_TERMINAL_STATUSES or "mail" in needs):
             prepared["mail"] = (capture_unread_mail(results_drive_root, task_id), capture_owner_mail(results_drive_root, task_id))
-        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared))
+        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared),
+                              last_word=_judged if _last_word else None)
+
+    def _judged(txn: Any, current: Dict[str, Any], document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        judged = _last_word(txn, current, document)
+        if judged is None:
+            transition.clear()
+        return judged
 
     def _merge(existing: Dict[str, Any], prepared: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         transition.clear()
@@ -477,6 +540,9 @@ def write_task_result(
         projected_fields = _field_projector(existing, {**prepared_fields, "status": status}) if _field_projector else prepared_fields
         if projected_fields is None:  # projector saw a terminal/stale row: no mutation
             return None
+        from ouroboros.owner_model import preserve_carrier
+
+        projected_fields = preserve_carrier(existing, projected_fields)
         # The owner's lift of a producer allowance outlives any writer's older copy of the task (a warm stack's own
         # dict at its terminal): nothing re-arms the number a restart, a member or a Continue would read (#2566).
         metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
@@ -546,8 +612,11 @@ def write_task_result(
                 projected_fields.update(wake_summary=None, fold_read=None,
                                         suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
+        # The clock belongs to whoever performs this transition: the executor ending its attempt, or
+        # (``_cancel_observed``) the supervisor carrying out a requested cancel. No field can claim either.
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
-            task_id=task_id, observed_at=now if _terminal_observed else None, replica=_terminal_time_source))
+            task_id=task_id, observed_at=now if (_terminal_observed or _cancel_observed) else None,
+            replica=_terminal_time_source, source="executor_terminal" if _terminal_observed else SUPERVISOR_CANCEL))
         transition["admitted"] = (existing_status in {"", STATUS_REQUESTED}
                                   and projected_status in {STATUS_SCHEDULED, STATUS_RUNNING})
         # ABI-3: shared deep cost normalization handles both rows/nested planes; incoming values win.

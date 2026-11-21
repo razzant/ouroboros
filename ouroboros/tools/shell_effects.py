@@ -15,8 +15,9 @@ from hashlib import sha256
 import os
 import pathlib
 import stat
-import subprocess
 from typing import List
+
+from ouroboros import work_domain
 
 from ouroboros.artifacts import record_task_scratch
 from ouroboros.tools.registry import (
@@ -31,14 +32,21 @@ from ouroboros.git_observation import host_git_env
 
 def _resolve_git_root(path: pathlib.Path) -> pathlib.Path | None:
     try:
-        from ouroboros.workspace_admission import has_git_metadata
-        if not has_git_metadata(path.resolve()):
-            return None
-        from ouroboros.review_state import discover_repo_root
-        root = discover_repo_root(path)
-        if not (root / ".git").exists():
-            return None
-        probe = subprocess.run(
+        if work_domain.is_work(path):
+            root = work_domain.settle(path)
+            while work_domain.is_work(root) and not work_domain.lexists(root / ".git"):
+                root = root.parent
+            if not work_domain.is_work(root):
+                return None
+        else:
+            from ouroboros.workspace_admission import has_git_metadata
+            if not has_git_metadata(path.resolve()):
+                return None
+            from ouroboros.review_state import discover_repo_root
+            root = discover_repo_root(path)
+            if not (root / ".git").exists():
+                return None
+        probe = work_domain.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
             cwd=str(root),
             capture_output=True,
@@ -62,6 +70,14 @@ def _shallow_listing(work_dir: pathlib.Path, cap: int = 5000) -> dict:
     detect a non-git user_files cwd actually producing a top-level deliverable."""
     out: dict = {}
     try:
+        if work_domain.is_work(work_dir):
+            for name, _kind in work_domain.entries(work_dir)[:cap]:
+                try:
+                    st = work_domain.lstat(work_dir / name)
+                    out[name] = (int(st.st_mtime_ns), int(st.st_size))
+                except OSError:
+                    continue
+            return out
         with os.scandir(work_dir) as it:
             for entry in it:
                 if len(out) >= cap:
@@ -98,11 +114,13 @@ def _user_files_run_had_effect(
 def _tree_fingerprint(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     root = pathlib.Path(path)
-    if not root.exists():
+    if not work_domain.exists(root):
         return ""
-    for child in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+    children = ((pathlib.Path(folder) / name for folder, rows in work_domain.walk_entries(root) for name, _kind in rows)
+                if work_domain.is_work(root) else root.rglob("*"))
+    for child in sorted(children, key=lambda item: item.as_posix()):
         try:
-            st = child.lstat()
+            st = work_domain.lstat(child)
         except OSError:
             continue
         try:
@@ -115,7 +133,7 @@ def _tree_fingerprint(path: pathlib.Path) -> str:
         digest.update(str(st.st_mtime_ns).encode())
         if stat.S_ISLNK(st.st_mode):
             try:
-                digest.update(os.readlink(child).encode("utf-8", errors="replace"))
+                digest.update(work_domain.readlink(child).encode("utf-8", errors="replace"))
             except OSError:
                 pass
     return digest.hexdigest()
@@ -124,14 +142,14 @@ def _tree_fingerprint(path: pathlib.Path) -> str:
 def _resolve_scratch_abs(scratch: List[str] | None, work_dir) -> list[pathlib.Path]:
     """Resolve declared ephemeral `scratch=[...]` paths to absolute host paths (relative ones
     against the command cwd). Blank entries dropped. (v6.52.2)"""
-    base = pathlib.Path(work_dir).resolve(strict=False) if work_dir else None
+    base = work_domain.settle(work_dir) if work_dir else None
     out: list[pathlib.Path] = []
     for raw in (scratch or []):
         text = str(raw or "").strip()
         if not text:
             continue
         p = pathlib.Path(text).expanduser()
-        out.append((p if p.is_absolute() else ((base / p) if base is not None else p)).resolve(strict=False))
+        out.append(work_domain.settle(p if p.is_absolute() else ((base / p) if base is not None else p)))
     return out
 
 
@@ -153,14 +171,18 @@ def _scratch_safety_reason(ctx: ToolContext, scratch_abs: list[pathlib.Path], wo
         # No git worktree at the cwd: we cannot prove a path is git-untracked, and there is no
         # workspace patch to exclude it from — so scratch is not meaningful here.
         return "scratch requires a git-worktree cwd (it is for in-repo verification); use outputs= for a deliverable"
-    base = pathlib.Path(work_dir).resolve(strict=False) if work_dir else None
+    base = work_domain.settle(work_dir) if work_dir else None
     tracked: set[str] = set()
     try:
-        res = subprocess.run(["git", "ls-files"], cwd=str(repo_root), capture_output=True, text=True, timeout=20)
+        res = work_domain.run(["git", "ls-files"], cwd=str(repo_root), capture_output=True, text=True, timeout=20)
         if res.returncode == 0:
-            root = pathlib.Path(repo_root).resolve(strict=False)
-            tracked = {str((root / line.strip()).resolve(strict=False)) for line in (res.stdout or "").splitlines() if line.strip()}
+            root = work_domain.settle(repo_root)
+            tracked = {str(work_domain.settle(root / line.strip())) for line in (res.stdout or "").splitlines() if line.strip()}
+        elif work_domain.is_work(repo_root):
+            return "scratch could not establish the work repository's tracked files; nothing was started"
     except Exception:
+        if work_domain.is_work(repo_root):
+            return "scratch could not establish the work repository's tracked files; nothing was started"
         tracked = set()
     adopt: dict = {}
     for cand in scratch_abs:
@@ -172,15 +194,15 @@ def _scratch_safety_reason(ctx: ToolContext, scratch_abs: list[pathlib.Path], wo
         # file-by-file — silently adopting one would let its contents leak into the
         # deliverable while SCRATCH_REMAINS nags forever. Refuse explicitly.
         try:
-            if cand.is_dir():
+            if work_domain.is_dir(cand):
                 return f"scratch path is a directory — declare the throwaway FILES, not their parent dir: {cand}"
         except OSError:
             pass
         # Adoptable: an existing untracked+confined file — record its current sha now so a
         # re-declaration is idempotent and the adopted state is captured at declaration.
         try:
-            if cand.is_file():
-                adopt[str(cand)] = sha256(cand.read_bytes()).hexdigest()
+            if work_domain.is_file(cand):
+                adopt[str(cand)] = sha256(work_domain.read_bytes(cand)).hexdigest()
         except OSError:
             continue
     if adopt:
@@ -198,8 +220,8 @@ def _record_scratch_fingerprints(ctx: ToolContext, scratch_abs: list[pathlib.Pat
     fingerprints: dict = {}
     for sp in scratch_abs:
         try:
-            if sp.is_file():
-                fingerprints[str(sp)] = sha256(sp.read_bytes()).hexdigest()
+            if work_domain.is_file(sp):
+                fingerprints[str(sp)] = sha256(work_domain.read_bytes(sp)).hexdigest()
         except OSError:
             continue
     if fingerprints:
@@ -209,7 +231,7 @@ def _record_scratch_fingerprints(ctx: ToolContext, scratch_abs: list[pathlib.Pat
 def _get_changed_files(repo_dir: pathlib.Path) -> list:
     """Return changed files after an edit."""
     try:
-        res = subprocess.run(
+        res = work_domain.run(
             ["git", "status", "--porcelain"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
             env=host_git_env(),
@@ -224,7 +246,7 @@ def _get_changed_files(repo_dir: pathlib.Path) -> list:
 def _get_diff_stat(repo_dir: pathlib.Path) -> str:
     """Return git diff --stat output."""
     try:
-        res = subprocess.run(
+        res = work_domain.run(
             ["git", "diff", "--stat"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
             env=host_git_env(),

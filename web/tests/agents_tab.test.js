@@ -30,13 +30,11 @@ import {
     humanizeResetAt,
     nextUpBadge,
     quotaSummary,
-    removeAccount,
     removeAccountConfirmBody,
     rowActionLabel,
     rowLoginAction,
     loginStatusUnknown,
     serviceBannerLine,
-    setAccountEnabled,
     vendorCredentialRetainedNotice,
 } from '../modules/harness_accounts.js';
 import { profileOptionsFor } from '../modules/route_editor_primitives.js';
@@ -99,7 +97,7 @@ test('Cursor auth and agent catalog access do not certify either execution surfa
     assert.equal(group.harness, 'cursor');
     assert.deepEqual(group.status, { tone: 'ok', label: 'Signed in' });
     const html = harnessFamilyMarkup(group, snapshot, { accountsRead: 'ok', quotaRead: 'ok' });
-    assert.match(html, /Login verified/);
+    assert.match(html, /Signed in/);
     assert.doesNotMatch(html, />Connected<|Verified live|rotating/);
     assert.equal(familyStatusText(snapshot, 'cursor').text, 'Signed in');
     for (const skipPresets of [false, true]) {
@@ -244,7 +242,7 @@ test('disabling excludes rotation without erasing a passed login', () => {
     assert.deepEqual(familyStatus(allOffNotRun, { accountsRead: 'failed' }),
         { tone: 'muted', label: '2 accounts · all disabled — last known' });
     // …and the metadata line states the exclusion in words on the row itself.
-    assert.match(accountMetaLine(allOff[0], payload()), /^disabled — excluded from rotation/);
+    assert.match(accountMetaLine(allOff[0], payload()), /^Out of rotation/);
 });
 
 test('a disabled account with a failed verification does not redden the family header', () => {
@@ -762,6 +760,25 @@ test('Remove consumes the non-input confirm boolean and performs the mutation on
     }
 });
 
+test('a removal result is said at once: a refusal reads nothing again, an unknown outcome reconciles without holding the list', async () => {
+    for (const refused of [true, false]) {
+        const calls = [];
+        const store = {
+            snapshot: { harnesses: [{ id: 'claude', display_name: 'Claude Code' }] },
+            // The slow discovery that follows a write never settles here.
+            refresh: (options) => { calls.push(['refresh', options]); return new Promise(() => {}); },
+        };
+        await confirmRemoveAccount('claude', 'work', {
+            dialogImpl: async () => true,
+            removeImpl: async () => { throw Object.assign(new Error('Authentication required.'), { refused }); },
+            store,
+            renderImpl: () => calls.push(['render']),
+        });
+        assert.deepEqual(calls, refused ? [['render']] : [['refresh', { afterCurrent: true }], ['render']],
+            refused ? 'a refused removal waited for, or asked for, a status read' : 'an unknown removal held its result behind the read');
+    }
+});
+
 test('removing a named account goes through the engine contract, and says so', () => {
     const calls = [];
     const receipt = { profile: {
@@ -774,13 +791,17 @@ test('removing a named account goes through the engine contract, and says so', (
         vendorCredentialDisposition: {
             owner: 'vendor', state: 'left_unchanged', scope: 'os_user',
         } };
-    const fetchImpl = async (url, init) => {
+    const fetchImpl = async (url, init = {}) => {
         calls.push([url, init.method]);
         return { ok: true, json: async () => receipt };
     };
-    return removeAccount('codex', 'work', { fetchImpl }).then((answer) => {
+    // The store orders the engine's DELETE like the Enabled toggle (one owner of the transport).
+    const store = createClaudexorStatusStore({ fetchImpl, doc: null });
+    return store.removeAccount('codex', 'work').then((answer) => {
+        store.dispose();
         assert.deepEqual(answer, receipt);
-        assert.deepEqual(calls, [['/api/claudexor/credential-profiles/codex/work', 'DELETE']]);
+        assert.deepEqual(calls.filter(([, method]) => method === 'DELETE'),
+            [['/api/claudexor/credential-profiles/codex/work', 'DELETE']]);
         // The confirmation states the two facts an owner needs before agreeing:
         // vendor/OS sign-in may remain, and a pinned reviewer row or Delegation
         // pin survives visibly instead of rerouting.
@@ -820,24 +841,44 @@ test('only the exact vendor left-unchanged disposition produces a retained warni
     }
 });
 
-test('a refused removal is reported as a refusal, never as a removal', () => {
-    const fetchImpl = async () => ({ ok: false, status: 409, json: async () => ({ error: 'in use' }) });
-    return assert.rejects(() => removeAccount('codex', 'work', { fetchImpl }), /in use/);
+// The host's 503 after a transport loss (api_claudexor_credential_profile): the engine may have kept the write.
+const LOST = (method) => ({ ok: false, status: 503, json: async () => ({ error: 'daemon_unreachable: Claudexor control '
+    + `${method} /v2/credential-profiles/... failed after 0.002s: RemoteProtocolError` }) });
+
+test('only a 4xx removal is a refusal; the host\'s 503 is no proof the account is unchanged', async () => {
+    let answer = { ok: false, status: 409, json: async () => ({ error: 'in use' }) };
+    const deletes = [];
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async (url, init = {}) => {
+        if (init.method === 'DELETE') { deletes.push(url); return answer; }
+        return { ok: false, status: 503, json: async () => ({ error: 'held' }) };
+    } });
+    await assert.rejects(() => store.removeAccount('codex', 'work'), { message: 'in use', refused: true });
+    answer = LOST('DELETE');
+    await assert.rejects(() => store.removeAccount('codex', 'work'), { message: /^daemon_unreachable: /, refused: false });
+    assert.equal(deletes.length, 2, 'one DELETE per removal; a lost answer is never sent again');
+    store.dispose();
 });
 
-test('the Enabled toggle is the engine PATCH contract, and a refusal changes nothing', async () => {
+test('the Enabled toggle is the engine PATCH contract; only a 4xx is a refusal, a 503 leaves it unknown', async () => {
     const calls = [];
-    const fetchImpl = async (url, init) => {
+    const confirmed = { ok: true, harness: 'codex', profile_id: 'work', enabled: false };
+    let answer = { ok: true, status: 200, json: async () => confirmed };
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async (url, init = {}) => {
         calls.push([url, init.method, init.body]);
-        return { ok: true, json: async () => ({ ok: true, enabled: false }) };
-    };
-    const answer = await setAccountEnabled('codex', 'work', false, { fetchImpl });
-    assert.deepEqual(answer, { ok: true, enabled: false });
-    assert.deepEqual(calls, [['/api/claudexor/credential-profiles/codex/work', 'PATCH',
-        JSON.stringify({ enabled: false })]]);
-    const refuse = async () => ({ ok: false, status: 503, json: async () => ({ error: 'daemon_unreachable' }) });
-    await assert.rejects(() => setAccountEnabled('codex', 'work', true, { fetchImpl: refuse }),
-        /daemon_unreachable/);
+        return init.method === 'PATCH' ? answer : { ok: false, status: 503, json: async () => ({ error: 'held' }) };
+    } });
+    assert.deepEqual(await store.setEnabled('codex', 'work', false), confirmed);
+    assert.deepEqual(calls.filter(([, method]) => method === 'PATCH'), [['/api/claudexor/credential-profiles/codex/work',
+        'PATCH', JSON.stringify({ enabled: false })]]);
+    answer = LOST('PATCH');
+    assert.equal(await store.setEnabled('codex', 'work', true), null);
+    assert.match(store.profileAction('codex', 'work').error, /^daemon_unreachable: /);
+    assert.equal(store.profileAction('codex', 'work').refused, false, 'a 503 also answers an engine that kept the write');
+    answer = { ok: false, status: 401, json: async () => ({ error: 'Authentication required.' }) };
+    assert.equal(await store.setEnabled('codex', 'work', true), null);
+    assert.equal(store.profileAction('codex', 'work').refused, true);
+    assert.equal(calls.filter(([, method]) => method === 'PATCH').length, 3, 'one PATCH per press, none resent');
+    store.dispose();
 });
 
 test('a reviewer row pinned to a removed account keeps its pin visible', () => {
@@ -909,10 +950,7 @@ test('account headers and dialogs withdraw retained daemon labels until catalog 
             accountsRead: store.facet('accounts'),
             catalogKnown: store.catalogKnown,
         }).find((candidate) => candidate.harness === 'codex');
-        return harnessFamilyMarkup(group, store.snapshot, {
-            accountsRead: store.facet('accounts'),
-            quotaRead: store.facet('quota'),
-        });
+        return group.label;
     };
     const removeBody = async () => {
         let body = '';
@@ -930,12 +968,12 @@ test('account headers and dialogs withdraw retained daemon labels until catalog 
     try {
         await store.refresh();
         assert.equal(store.catalogKnown, true);
-        assert.match(header(), />Codex Live<\/span>/);
+        assert.match(header(), /^Codex Live$/);
         assert.match(await removeBody(), /for Codex Live account/);
 
         await store.refresh();
         assert.equal(store.catalogKnown, false);
-        assert.match(header(), />Codex<\/span>/);
+        assert.match(header(), /^Codex$/);
         assert.doesNotMatch(header(), /Codex Live/);
         assert.match(await removeBody(), /for Codex account/);
         assert.doesNotMatch(await removeBody(), /Codex Live/);
@@ -944,13 +982,13 @@ test('account headers and dialogs withdraw retained daemon labels until catalog 
         await store.refresh();
         assert.equal(store.snapshot, retained, 'transport failure discarded the usable snapshot');
         assert.equal(store.catalogKnown, false);
-        assert.match(header(), />Codex<\/span>/);
+        assert.match(header(), /^Codex$/);
         assert.doesNotMatch(header(), /Codex Live/);
         assert.doesNotMatch(await removeBody(), /Codex Live/);
 
         await store.refresh();
         assert.equal(store.catalogKnown, true);
-        assert.match(header(), />Codex Restored<\/span>/);
+        assert.match(header(), /^Codex Restored$/);
         assert.match(await removeBody(), /for Codex Restored account/);
     } finally {
         store.dispose();

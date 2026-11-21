@@ -46,31 +46,3 @@ def test_no_time_bound_means_no_time_notice(monkeypatch):
         task_contract={},
     )
     assert task_pacing.build_time_budget_note(ctx) is None
-
-
-# ---------------------------------------------------------------------------
-# 2.3 — criterion provenance
-
-
-def test_latest_agent_defined_verification_helper(tmp_path):
-    from ouroboros.outcomes import latest_agent_defined_verification
-    from ouroboros.utils import append_jsonl
-
-    receipts = tmp_path / "task_results" / "artifacts" / "t-x" / "verification_receipts.jsonl"
-    receipts.parent.mkdir(parents=True)
-    append_jsonl(receipts, {"status": "pass", "criterion_source": "task_stated"})
-    assert latest_agent_defined_verification(tmp_path, "t-x") is None
-    append_jsonl(receipts, {"status": "pass", "criterion_source": "agent_defined"})
-    hit = latest_agent_defined_verification(tmp_path, "t-x")
-    assert hit is not None and hit["criterion_source"] == "agent_defined"
-    # A stated basis reconciles the nudge condition.
-    append_jsonl(receipts, {"status": "pass", "criterion_source": "agent_defined", "criterion_basis": "task asks exactly this"})
-    assert latest_agent_defined_verification(tmp_path, "t-x") is None
-
-
-# ---------------------------------------------------------------------------
-# 2.3 — FINAL ANSWER latch (its opt-in CANDIDATES sub-latch left with task acceptance)
-
-
-# ---------------------------------------------------------------------------
-# 2.3 — web_search answer_type

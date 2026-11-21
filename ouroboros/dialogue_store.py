@@ -28,9 +28,10 @@ import sqlite3
 import uuid
 from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
-from ouroboros import shared_values, store, store_empty
+from ouroboros import room_messages, shared_values, store, store_empty, store_timing
 from ouroboros.store import StoreBusy, StoreError, StoreLost, StoreMigrating, TIER_ENFORCED, TIER_NAME
-from ouroboros.utils import utc_now_iso
+from ouroboros.store_capture import capture
+from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -138,8 +139,9 @@ def present(root: Any) -> bool:
 
 
 def encode(row: Dict[str, Any]) -> str:
-    """The exact text a chain line held: ``append_jsonl``'s own encoding, without the newline."""
-    return json.dumps(row, ensure_ascii=False)
+    """The dialogue line's JSON without the newline, with its original spacing for byte coordinates.
+    Escape POSIX name bytes so typed document rows also have a UTF-8 representation."""
+    return json_dumps_utf8(row, ensure_ascii=False)
 
 
 def decode(body: str) -> Dict[str, Any]:
@@ -149,7 +151,7 @@ def decode(body: str) -> Dict[str, Any]:
 
 def _typed(exc: sqlite3.Error) -> StoreError:
     if isinstance(exc, sqlite3.OperationalError) and store.busy(exc):
-        error = StoreBusy(f"dialogue store busy: {exc}", reason="contention")
+        error = StoreBusy(f"dialogue store busy: {exc}{store_timing.busy_note(exc)}", reason="contention")
         if hasattr(exc, "rollback_confirmed"):
             error.rollback_confirmed = exc.rollback_confirmed
         return error
@@ -248,7 +250,7 @@ def create(root: Any, *, tier: Optional[str] = None) -> pathlib.Path:
                 conn.execute(APPEARANCES_DDL)
                 for key, value in (("schema_version", SCHEMA_VERSION), ("lock_tier", tier), ("created_at", utc_now_iso()),
                                    (APPEARANCES_MARK, 0), (APPEARANCES_CONTACT_REPLIES, {"next": 0, "upper": 0}),
-                                   (APPEARANCES_COVERED, 0)):
+                                   (APPEARANCES_COVERED, 0), (room_messages.THROUGH_KEY, 0)):
                     conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(value)))
                 store.commit(conn)
             os.replace(tmp, target)
@@ -636,7 +638,7 @@ def release_shared_version(root: Any) -> int:
 def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Dict[str, Any]] = None,
            feed: bool = False, wait_sec: float = WAIT_SEC, idempotent: bool = False,
            emit_live: bool = True, also_feed: Iterable[int] = (), room_revisions: bool = False,
-           appearances: Optional[Iterable[str]] = ()) -> Receipt:
+           appearances: Optional[Iterable[str]] = (), shown_in: Iterable[int] = ()) -> Receipt:
     """Store exact JSON, room facts and named dispatch in one transaction.
 
     Named inbound duplicates return the existing receipt (the UNIQUE index also
@@ -645,7 +647,8 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
     advances the revision of each other room that shows the row (one message, unread
     where it is shown), and ``room_revisions`` stamps the row with the revision it took in
     every fed room, so one read can be recorded wherever it counted. ``appearances`` are
-    its derived index keys (``None``: unknown, left to the job). Optional idempotence
+    its derived index keys (``None``: unknown, left to the job); a message dates its room and
+    the other rooms that show it (``shown_in``, ``room_messages``). Optional idempotence
     compares content identity, stamp aside, under the existing room/time index. A provider
     thread in ``transport.conversation`` is stored once (``_by_reference``); ``length``, the
     identity and the receipt's row stay the whole row's.
@@ -662,6 +665,16 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
     length = len(body.encode("utf-8")) + 1
     counted = stream_row(stream, columns)
     _plan_first(root, wait_sec)
+    message = False
+    if stream == "chat":
+        try:
+            from ouroboros.projects_registry import RoomResolver
+
+            with store.acquisition_budget(0):
+                message = bool(room_messages.classified([row], RoomResolver(root, strict=True)))
+        except Exception:
+            message = None  # the append survives; the message job still owes this row's classification
+            log.debug("Message lineage left to maintenance", exc_info=True)
     with transaction(root, write=True, wait_sec=wait_sec) as conn:
         if idempotent:
             from ouroboros.chat_chain import source_row_id
@@ -705,6 +718,8 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
                 conn.execute(f"PRAGMA user_version = {SHARED_VERSION}")
         for chat in others:
             touch_room(conn, chat, None, columns["ts"], 1)
+        if message:
+            room_messages.note(conn, [(chat, columns["ts"]) for chat in (columns["chat_id"], *shown_in, *others)])
         keys = sorted(set(appearances)) if appearances is not None else []
         if keys:
             conn.execute(APPEARANCES_DDL)
@@ -714,6 +729,9 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
             for key in (APPEARANCES_MARK, APPEARANCES_COVERED):
                 conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
                              (json.dumps(seq + length), key, json.dumps(seq)))
+            if message is not None:
+                conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
+                             (json.dumps(seq + length), room_messages.THROUGH_KEY, json.dumps(seq)))
         conn.execute("UPDATE streams SET next_seq=?, next_ordinal=next_ordinal+1, next_pos=next_pos+? WHERE stream=?",
                      (seq + length, int(counted), stream))
     if stream == "progress" and emit_live:
@@ -768,7 +786,7 @@ def append_quietly(root: Any, stream: str, row: Dict[str, Any], **kwargs: Any) -
             _stream_live(row)
         dialogue_retry.retain(root, stream, row, feed=kwargs.get("feed", False), **{
             key: list(kwargs[key]) if key != "room_revisions" and kwargs[key] is not None else kwargs[key]
-            for key in ("also_feed", "room_revisions", "appearances") if key in kwargs})
+            for key in ("also_feed", "room_revisions", "appearances", "shown_in") if key in kwargs})
         return None
 
 
@@ -810,29 +828,41 @@ def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) ->
 
 
 def _move_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, states: Tuple[str, ...],
-                   process: str) -> bool:
+                   process: str, read_reply: bool = False) -> tuple[bool, Optional[Dict[str, Any]]]:
     if not client_message_id or not present(root):
-        return False
+        return False, None
+    # A pending retry takes the original reply snapshot in the same transaction as the claim. Select only the
+    # reference, not the rest of the dispatch input (which can include inline media).
+    returning = (" RETURNING json_quote(json_extract(dispatch_input, '$.message.task_metadata.reply_reference'))"
+                 if read_reply else "")
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
             "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='dispatched', "
             "dispatch_input=json_set(coalesce(dispatch_input, '{}'), '$.process', ?) WHERE stream='chat' AND client_message_id=? "
-            f"AND chat_id IS ? AND direction='in' AND dispatch IN ({','.join('?' * len(states))})",
+            f"AND chat_id IS ? AND direction='in' AND dispatch IN ({','.join('?' * len(states))}){returning}",
             (process, client_message_id, chat_id, *states))
-        return cursor.rowcount == 1
+        rows = cursor.fetchall() if read_reply else []
+        reply = json.loads(rows[0][0]) if len(rows) == 1 else None
+        return cursor.rowcount == 1, reply if isinstance(reply, dict) else None
 
 
 def claim_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
     """Take the owed dispatch of an accepted row (pending -> dispatched): the durable "entered"
     mark, with the ``process`` (custody session) that takes it. Exactly one caller wins -- the
     acceptor, a same-id retry or the recovery."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process)
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process)[0]
+
+
+def claim_dispatch_with_reply(root: Any, chat_id: Optional[int], client_message_id: str, *,
+                              process: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
+    """The same one-winner claim plus its accepted Reply reference, when one was recorded."""
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, read_reply=True)
 
 
 def note_dispatched(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
     """The entry mark of a named acceptance that owed no bus dispatch (``none`` -> dispatched):
     its caller hands it to its own dispatcher now."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("none", "pending"), process=process)
+    return _move_dispatch(root, chat_id, client_message_id, states=("none", "pending"), process=process)[0]
 
 
 def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str) -> bool:
@@ -946,6 +976,18 @@ def last_inbound(root: Any, chat_id: Optional[int], *, before: Optional[int] = N
     return None if record is None else _row(record)
 
 
+def newest_owner_candidates(root: Any, *, before: int, limit: int) -> List[Row]:
+    """The newest rows below ``before`` across every chat that may be my human's words to me, newest first: untyped
+    inbound rows (Main, a room, a bound chat) and card answers and closures (``quiz_answer``, ``quiz_closed``); the
+    caller confirms the speaker. The primary key is read backwards over the columns before the body; only matches
+    fetch it."""
+    with transaction(root, write=False) as conn:
+        records = conn.execute(f"{_SELECT} WHERE stream='chat' AND seq<? AND ((direction='in' AND kind IS NULL) "
+                               "OR kind IN ('quiz_answer', 'quiz_closed')) ORDER BY seq DESC LIMIT ?",
+                               (_bound(before), int(limit))).fetchall()
+    return [_row(record) for record in records]
+
+
 def latest_inbound_transport(root: Any, chat_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
     """Each chat's newest inbound row's ``transport``, by chat id, in one read (``dialogue_inbound``: one seek a chat):
     only that object leaves the store, never the row (what names a room, ``RoomLabelResolver.warm``)."""
@@ -958,6 +1000,25 @@ def latest_inbound_transport(root: Any, chat_ids: Iterable[int]) -> Dict[int, Di
             (wanted,)).fetchone()[0] or "[]"
     return {int(chat): transport for chat, transport in json.loads(page)
             if chat is not None and isinstance(transport, dict)}
+
+
+def transport_witnesses(root: Any, *, skip_chat_ids: Iterable[int]) -> List[Tuple[int, Dict[str, Any]]]:
+    """Project the distinct coordinates of inbound routes and positive delivery receipts, with their stored rooms."""
+    fields = ("provider", "account_id", "conversation_id", "thread_id")
+    coordinates = ", ".join(f"json_extract(body, '$.transport.{field}')" for field in fields)
+    route = f"json_array(chat_id, {coordinates})"
+    rooms = "chat_id IN (SELECT chat_id FROM rooms WHERE chat_id NOT IN (SELECT value FROM json_each(?)))"
+    skipped = json.dumps(sorted(set(skip_chat_ids)))
+    with transaction(root, write=False) as conn:
+        rows = conn.execute(
+            f"SELECT {route} FROM dialogue INDEXED BY dialogue_inbound WHERE stream='chat' AND direction='in' "
+            f"AND {rooms} AND json_type(body, '$.transport')='object' UNION "
+            f"SELECT {route} FROM dialogue INDEXED BY dialogue_kind WHERE stream='chat' AND kind='presence_delivery' "
+            f"AND direction='out' AND {rooms} AND json_extract(body, '$.transport.delivery.state') IN ('accepted', 'delivered')",
+            (skipped, skipped),
+        ).fetchall()
+    decoded = (json.loads(encoded) for (encoded,) in rows)
+    return [(chat, dict(zip(fields, parts))) for chat, *parts in decoded]
 
 
 def newest(root: Any, stream: str, *, limit: int, before: Optional[int] = None) -> List[Row]:
@@ -973,14 +1034,33 @@ def _bound(before: Optional[int]) -> int:
 
 
 def probe_rows(root: Any, stream: str, keys: Iterable[Tuple[str, Any]], *, before: Optional[int] = None,
-               lower: int = 0, limit: int = 200, newest_first: bool = True) -> List[Row]:
+               lower: int = 0, limit: int = 200, newest_first: bool = True,
+               max_bytes: Optional[int] = None) -> List[Row]:
     """The union of the ``(column, value)`` keys' rows in ``[lower, before)``, newest first, at
     most ``limit`` rows: the candidate rows of a room or a task tree. One statement per column reads
     at most ``limit`` coordinates through its index; only the union's winning rows fetch bodies in
-    that snapshot; JSON decoding follows release. ``("chat_id", None)`` probes NULL chats."""
+    that snapshot (with ``max_bytes``, only those up to the one whose stored lengths reach it,
+    ``within_bytes``); JSON decoding follows release. ``("chat_id", None)`` probes NULL chats."""
     with transaction(root, write=False) as conn:
-        probed = _probe(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=newest_first)
+        probed = _probe(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=newest_first,
+                        max_bytes=max_bytes)
     return _probed(*probed)
+
+
+def within_bytes(conn: sqlite3.Connection, stream: str, seqs: List[int], max_bytes: int) -> List[int]:
+    """The first of ``seqs``, in their order, until their stored lengths reach ``max_bytes``, the row crossing it
+    included: a read of the rows' lengths, never of their bodies."""
+    lengths: Dict[int, int] = {}
+    for start in range(0, len(seqs), 900):  # within SQLite's parameter floor
+        batch = seqs[start:start + 900]
+        lengths.update(conn.execute(f"SELECT seq, length FROM dialogue WHERE stream=? AND seq IN "
+                                    f"({','.join('?' * len(batch))})", (stream, *batch)).fetchall())
+    total = 0
+    for index, seq in enumerate(seqs, 1):
+        total += lengths.get(seq, 0)
+        if total >= max_bytes:
+            return seqs[:index]
+    return seqs
 
 
 def _probed(chosen: List[int], pages: List[str]) -> List[Row]:
@@ -990,13 +1070,30 @@ def _probed(chosen: List[int], pages: List[str]) -> List[Row]:
 
 
 def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]], *, before: Optional[int],
-           lower: int, limit: int, newest_first: bool) -> Tuple[List[int], List[str]]:
+           lower: int, limit: int, newest_first: bool, max_bytes: Optional[int] = None) -> Tuple[List[int], List[str]]:
     """Capture the winning stored records; the transaction owner decodes after release.
 
     One statement per column selects, through that column's index, the first ``limit`` coordinates
     matching any of its values (one JSON list), so Python receives at most columns x ``limit``
     integers however many keys a room has: a row among the union's first ``limit`` is among its own
     column's first ``limit``, so the first ``limit`` of these is the union's."""
+    found = _probe_seqs(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=newest_first)
+    chosen = heapq.nlargest(limit, found) if newest_first else heapq.nsmallest(limit, found)
+    if max_bytes is not None:
+        chosen = within_bytes(conn, stream, chosen, max_bytes)
+    # Python 3.10 has no getlimit; 999 is the default variable limit at our SQLite 3.24 floor.
+    variables = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(conn, "getlimit") else 999
+    pages = []
+    for start in range(0, len(chosen), variables - 1):
+        batch = chosen[start:start + variables - 1]
+        pages.append(_page(conn, f"WHERE stream=? AND seq IN ({','.join('?' for _ in batch)})", (stream, *batch)))
+    return chosen, pages
+
+
+def _probe_seqs(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]], *, before: Optional[int],
+                lower: int = 0, limit: Optional[int] = None, newest_first: bool = False) -> set:
+    """Indexed candidate coordinates, batched per column. No limit means the complete candidate union
+    (message dating orders it by event time); otherwise each column contributes at most ``limit``."""
     values: Dict[str, list] = {}
     for column, value in dict.fromkeys(tuple(keys)):
         if column not in _PROBE_INDEX:
@@ -1004,11 +1101,15 @@ def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]
         if value is not None or column == "chat_id":  # the partial indexes hold only rows that carry the fact
             values.setdefault(column, []).append(value)
     found = set()
-    order, bounds = ("DESC" if newest_first else "ASC"), (_bound(before), lower, limit)
-    for column, listed in values.items() if limit > 0 else ():  # each column's coordinates in one step
+    order, bounds = ("DESC" if newest_first else "ASC"), (_bound(before), lower)
+    tail = " AND seq<? AND seq>=?"
+    if limit is not None:
+        tail += f" ORDER BY seq {order} LIMIT ?"
+        bounds += (limit,)
+    tail += ")"
+    for column, listed in values.items() if limit is None or limit > 0 else ():
         select = (f"SELECT json_group_array(seq) FROM (SELECT seq FROM dialogue INDEXED BY {_PROBE_INDEX[column]} "
                   f"WHERE stream=? AND {column} ")
-        tail = f" AND seq<? AND seq>=? ORDER BY seq {order} LIMIT ?)"
         if column == "appearance":  # one seek per key of the derived index; absent before its first row
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_appearances'").fetchone():
                 found.update(json.loads(conn.execute(
@@ -1021,14 +1122,7 @@ def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]
             found.update(json.loads(conn.execute(
                 select + "IN (SELECT +value FROM json_each(?))" + tail,  # unary + keeps the column's affinity
                 (stream, json.dumps([value for value in listed if value is not None]), *bounds)).fetchone()[0]))
-    chosen = heapq.nlargest(limit, found) if newest_first else heapq.nsmallest(limit, found)
-    # Python 3.10 has no getlimit; 999 is the default variable limit at our SQLite 3.24 floor.
-    variables = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(conn, "getlimit") else 999
-    pages = []
-    for start in range(0, len(chosen), variables - 1):  # one binding is the stream, including for 10,000-row readers
-        batch = chosen[start:start + variables - 1]
-        pages.append(_page(conn, f"WHERE stream=? AND seq IN ({','.join('?' for _ in batch)})", (stream, *batch)))
-    return chosen, pages
+    return found
 
 
 def room_candidates(root: Any, stream: str, chat_id: int, *, tasks: Iterable[str] = (), origins: Iterable[str] = (),
@@ -1100,6 +1194,20 @@ def rows_by_client_id(root: Any, client_message_id: str, *, stream: str = "chat"
         records = conn.execute(f"{_SELECT} INDEXED BY dialogue_named WHERE stream=? AND client_message_id=?{where} "
                                "ORDER BY seq DESC LIMIT ?", (stream, client_message_id, *params, limit)).fetchall()
     return [_row(record) for record in records]
+
+
+def carried_ids(root: Any, client_message_ids: Iterable[str], *, stream: str = "chat") -> set:
+    """The ids among ``client_message_ids`` some row of ``stream`` carries (``rows_by_client_id`` non-empty), in ONE
+    step: one ``dialogue_named`` seek an id inside one statement, never a transaction an id (each releases the GIL).
+    Ids travel as JSON: SQLite 3.44 and older (not 3.51) ask an id holding U+0000 by its prefix, as _probe_seqs."""
+    wanted = list(dict.fromkeys(str(value) for value in client_message_ids if value))
+    if not wanted:
+        return set()
+    with transaction(root, write=False) as conn:
+        found = conn.execute("SELECT json_group_array(key) FROM json_each(?) WHERE EXISTS (SELECT 1 FROM dialogue "
+                             "INDEXED BY dialogue_named WHERE stream=? AND client_message_id=+value)",
+                             (json.dumps(wanted, ensure_ascii=False), stream)).fetchone()[0]
+    return {wanted[index] for index in json.loads(found or "[]")}
 
 
 def rows_by_identity(root: Any, chat_id: Optional[int], ts: str, *, stream: str = "chat") -> List[Row]:
@@ -1206,10 +1314,15 @@ def room(root: Any, chat_id: int) -> Optional[Dict[str, Any]]:
     return None if record is None else dict(record)
 
 
+_ROOM_COLUMNS = ("chat_id", "revision", "last_seq", "read_revision", "activity_at")
+
+
 def rooms(root: Any) -> List[Dict[str, Any]]:
-    """Every room the store knows (its revision, last chat row and activity), by chat id."""
+    """Every room the store knows (its revision, last chat row and activity), by chat id, captured in one
+    step (``store_capture``): rows stepped one by one hand the interpreter lock over once per room."""
     with transaction(root, write=False) as conn:
-        return [dict(record) for record in conn.execute("SELECT * FROM rooms ORDER BY chat_id")]
+        captured = capture(conn, f"SELECT {', '.join(_ROOM_COLUMNS)} FROM rooms", columns=_ROOM_COLUMNS)
+    return captured.rows(key=lambda room: room["chat_id"])
 
 
 def mark_room_read(root: Any, chat_id: int, revision: int) -> Dict[str, Any]:

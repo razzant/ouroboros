@@ -20,6 +20,7 @@ from tests.test_budget_pause_holds import _idle_worker
 from tests.test_budget_pause_lineage_restore import _consume, _restart
 from tests.test_model_sleep import _cold_park
 from tests.test_restart_retention import _pool_events
+from tests.worker_pool_support import affirm_ready
 
 
 
@@ -136,7 +137,9 @@ def test_failed_exact_root_resume_preserves_the_owners_existing_child_choice(tmp
     assert eb.budget_resume_dispatch_allowed(q, child) is False
     sent = []
     _idle_worker(workers, sent)
-    workers.assign_tasks()
+    workers.WORKERS[1] = affirm_ready(SimpleNamespace(wid=1, busy_task_id=None, reaping=False, in_q=SimpleNamespace(
+        put=lambda t: sent.append(dict(t)) if t.get("type") != "worker_quiescence" else None)))
+    workers.assign_tasks()  # a pass that reaches the child decides its choice: superseded, it is held, not sent
     assert [row["id"] for row in sent] == ["root"]
     assert SELECTION_KEY not in child
     assert eb.budget_hold_fact(child)["reason"] == eb.HOLD_ROOT_FENCE_LIFTED

@@ -937,8 +937,6 @@ def _build_task(
     physical_task_id: str = "",
     retained_manifest: list | None = None,
 ) -> dict[str, Any]:
-    from ouroboros.config import runtime_setting
-
     task_id = physical_task_id or _task_id(admission, event)
     chat_id = presence_chat_id(event.conversation_key)
     actor_id = _stable_numeric_id(
@@ -971,6 +969,8 @@ def _build_task(
     if admission.place is not None:
         from ouroboros.places import place_summary
         presence_context.update(place_id=admission.place.place_id, place=place_summary(admission.place))
+        if admission.circle:  # absent outside a circle, so a frame recorded before circles still re-renders
+            presence_context["circle"] = dict(admission.circle)
         presence_context["event"]["facts"] = list(event.facts) if event.facts is not None else ["legacy_addressed"]
     previous_turn, open_turns = current_previous_turn(drive_root, event.conversation_key,
                                                      exclude_task_id=physical_task_id)
@@ -986,10 +986,9 @@ def _build_task(
         "presence": presence_context,
     }
     if admission.place is None and admission.model_slot == "light":
-        from ouroboros.config import get_light_model
+        from ouroboros.route_choice import following_route
 
-        metadata["model"] = get_light_model()
-        metadata["use_local_model"] = runtime_setting("USE_LOCAL_LIGHT", "").lower() in {"true", "1"}
+        metadata["model"], metadata["use_local_model"] = following_route("light")
     task: dict[str, Any] = {
         "id": task_id,
         "type": "presence",
@@ -1008,7 +1007,7 @@ def _build_task(
         from ouroboros.presence_context import focus_metadata
         from ouroboros.consciousness_authority import apply_consciousness_authority
         metadata.pop("inline_max_rounds", None)
-        metadata.update(focus_metadata(admission, event, task_id, chat_id))
+        metadata.update(focus_metadata(admission, event, task_id, chat_id, drive_root))
         from ouroboros.presence_context import _own_work_section
         from ouroboros.place_intake import conversation_work_section
         metadata["focus_work_here"] = "\n\n".join(part for part in (
@@ -1058,8 +1057,10 @@ def _build_task(
         rendered = _render_attachment_lines(authority)
         if rendered:
             task["text"] = f"{task['text']}\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]".strip()
-    if not task["text"]:
-        task["text"] = "(attachments received)" if manifest else "(empty presence event)"
+    if not task["text"]:  # a file that did not arrive or content without words is never an empty event
+        from ouroboros.presence_message_facts import carries_content
+        task["text"] = ("(attachments received)" if manifest else
+                        "(no text)" if carries_content(event.message) else "(empty presence event)")
     return attach_task_contract(task)
 
 

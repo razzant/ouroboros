@@ -110,6 +110,38 @@ def test_history_rows_follow_the_published_row_contract(chat):
     assert timestamps == sorted(timestamps), "rows are oldest first"
 
 
+def test_the_reply_author_label_is_a_published_field_of_live_frames_and_history_rows(chat):
+    """What a Reply to a row signs (``chat_references.projection_fields``) rides the live frame and the replay of every
+    stored row, so the published types, their browser twins and the contract's words declare it, and the schema types
+    it: the owner's row says You, an answer Ouroboros, the host's own row System."""
+    import pathlib
+
+    from ouroboros.gateway.reference_contracts import ChatReferenceFields
+    from tests.test_gateway_parity import _js_typedef_fields
+
+    _produce(chat)
+    chat.bridge.handle_web_message("Cue: greet the caller.", client_message_id="call:c1:open",
+                                   task_metadata={"host_fact": {"kind": "call_open", "call_id": "c1"}})
+    frames = [frame for frame in chat.frames if frame.get("type") == "chat" and "reply_author_label" in frame]
+    status, body = _read(chat.root)
+    rows = [row for row in body["messages"] if "reply_author_label" in row]
+    assert status == 200 and frames and rows
+    assert {frame["reply_author_label"] for frame in frames} >= {"You", "Ouroboros", "System"}
+    assert {row["reply_author_label"] for row in rows} >= {"You", "Ouroboros", "System"}
+    for frame in frames:
+        assert not validate_ingress(frame, ChatOutbound), (frame, validate_ingress(frame, ChatOutbound))
+    for row in rows:
+        assert not validate_ingress(row, ChatHistoryMessage), (row, validate_ingress(row, ChatHistoryMessage))
+    assert validate_ingress({**frames[0], "reply_author_label": 3}, ChatOutbound), "typed: a label is a string"
+    assert validate_ingress({**rows[0], "reply_author_label": 3}, ChatHistoryMessage)
+    assert "reply_author_label" in typing.get_type_hints(ChatReferenceFields) and "reply_author_label" in ROW_KEYS
+    web = pathlib.Path(__file__).resolve().parents[1]
+    assert "reply_author_label" in _js_typedef_fields((web / "web/modules/api_types.js").read_text(encoding="utf-8"), "ChatOutbound")
+    assert "reply_author_label" in _js_typedef_fields(
+        (web / "web/modules/client_contract_types.js").read_text(encoding="utf-8"), "ChatHistoryMessage")
+    assert "`reply_author_label`" in (web / "docs/CLIENT_CONTRACT.md").read_text(encoding="utf-8")
+
+
 def test_every_stored_live_frame_finds_exactly_its_history_row(chat):
     _produce(chat)
     stored = [frame for frame in chat.frames if frame["type"] in {"chat", "photo", "document", "links", "quiz"}]

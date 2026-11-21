@@ -1,4 +1,5 @@
 """Tree measurements never infer a critical path from overlapping ancestry."""
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -252,7 +253,8 @@ def test_only_tree_end_initializes_the_tree_receipt(tmp_path):
     assert load_task_result(tmp_path, "root")["swarm_receipt"]["state"] == "provisional"
 
 
-def test_receipt_source_failure_does_not_erase_observed_fanout(tmp_path, monkeypatch):
+def test_receipt_source_failure_does_not_erase_observed_fanout(tmp_path, monkeypatch, caplog):
+    from ouroboros.store import StoreBusy
     from tests.test_swarm_rollup import emit, build
 
     write_task_result(tmp_path, "parent", "running")
@@ -260,6 +262,16 @@ def test_receipt_source_failure_does_not_erase_observed_fanout(tmp_path, monkeyp
     monkeypatch.setattr("ouroboros.swarm_receipt_sources.tree_inputs",
                         lambda *a, **kw: (_ for _ in ()).throw(OSError("unavailable source")))
     assert build(tmp_path)["subagent_count"] == 1
+    # Each failed publication is one line naming its tree: a held store without a stack, any other fault with it.
+    caplog.set_level(logging.WARNING, logger=receipt.__name__)
+    for failure in (OSError("unavailable source"), StoreBusy("held", reason="contention")):
+        caplog.clear()
+        monkeypatch.setattr("ouroboros.swarm_receipt_sources.tree_inputs",
+                            lambda *a, failure=failure, **kw: (_ for _ in ()).throw(failure))
+        assert receipt.publish(tmp_path, "parent") is None
+        [line] = [record for record in caplog.records if record.name == receipt.__name__]
+        assert "root_task_id=parent" in line.getMessage()
+        assert bool(line.exc_info) is not isinstance(failure, StoreBusy)
 
 
 def test_full_task_handoff_discloses_receipt_only_when_recorded():

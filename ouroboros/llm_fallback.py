@@ -12,10 +12,12 @@ callers that decide how far down the ladder a call walks.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import logging
 import time
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 from ouroboros.model_concurrency import limit_physical_send
@@ -28,8 +30,7 @@ from ouroboros.llm_attempt import (
     _finalized_physical_candidate,
     _is_http_status,
     _is_provider_policy_refusal,
-    _is_structured_context_overflow_body,
-    _is_structured_context_overflow_exception,
+    is_size_refusal,
     preserve_prior_dispatch,
     strongest_dispatch_capture,
     processing_refusal,
@@ -37,7 +38,10 @@ from ouroboros.llm_attempt import (
     single_physical_send_active,
 )
 from ouroboros.deadline_utils import physical_dispatch_timeout
+from ouroboros.pricing_catalog import pin_tariff
 from ouroboros.llm_stream import consume_stream, consume_stream_async
+from ouroboros.openai_responses import responses_route
+from ouroboros.provider_models import OPENAI_API_SURFACES
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.reasoning_artifacts import (
     note_replay_omission,
@@ -58,11 +62,33 @@ from ouroboros.usage_accounting import UsageAccountingError, last_physical_attem
 log = logging.getLogger("ouroboros.llm")
 
 
+def _wire_surface(target: Dict[str, Any]) -> str:
+    """The wire profile's API name for this target: Messages, a connection's Responses, else Chat Completions."""
+    if target.get("provider") == "anthropic":
+        return "messages"
+    return OPENAI_API_SURFACES["responses"] if responses_route(target) else OPENAI_API_SURFACES["chat_completions"]
+
+
 def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]:
     try:
         return client._provider_body_error(response.model_dump())
     except Exception:
         return None
+
+
+def _with_tariff(request, target: Dict[str, Any], candidate: Dict[str, Any]):
+    """The request with the selected key's price evidence pinned before reservation (DeepSeek only; else no I/O),
+    merged into what it already carries. The input kind is a fact of the final candidate, never its content: text
+    alone when every message holds a string or text parts (an image, audio or file part is not text)."""
+    if target.get("provider") != "deepseek":
+        return request
+    text_only = all(isinstance(message, dict) and (
+        message.get("content") is None or isinstance(message.get("content"), str)
+        or (isinstance(message["content"], list)
+            and all(isinstance(part, dict) and part.get("type") == "text" for part in message["content"])))
+        for message in candidate.get("messages") or [])
+    pinned = pin_tariff(target, text_only=text_only and "input" not in candidate)
+    return replace(request, cost_evidence={**(request.cost_evidence or {}), **pinned}) if pinned else request
 
 
 class _RecoveryLadderMixin:
@@ -77,7 +103,7 @@ class _RecoveryLadderMixin:
         """Remove only an explicitly rejected cache control or affinity once."""
         if getattr(exc, "stream_incomplete", False):
             return None
-        if _is_structured_context_overflow_exception(exc) or _is_provider_policy_refusal(exc):
+        if is_size_refusal(exc) or _is_provider_policy_refusal(exc):
             return None
         provider = str(target.get("provider") or "").strip().lower()
         extra_body = payload.get("extra_body")
@@ -218,9 +244,21 @@ class _RecoveryLadderMixin:
         exc: Exception,
     ) -> Optional[Dict[str, Any]]:
         """Strip replayed reasoning once for a non-overflow OpenRouter 400."""
-        if not target.get("supports_openrouter_extensions"):
+        if (not target.get("supports_openrouter_extensions")
+                or not self._has_replayed_reasoning_metadata(kwargs.get("messages") or [])):
             return None
         if not reasoning_strip_retry_allowed(exc):
+            return None
+        # A route's catalogue can explain a generic 400 before the loop sees it.
+        # Use the same answer, typed precedence and numeric equality as recovery.
+        from ouroboros._usage_response import provider_answer
+        from ouroboros.context_budget import cited_declared_limit
+        from ouroboros.loop_llm_call import classify_llm_exception
+        from ouroboros.pricing import declared_token_limits
+        model = str(kwargs.get("model") or target.get("resolved_model") or "")
+        if model and classify_llm_exception(exc).untyped and cited_declared_limit(
+                provider_answer(exc).said, int(kwargs.get("max_tokens") or kwargs.get("max_completion_tokens") or 0),
+                lambda: declared_token_limits("openrouter", model)):
             return None
         retry_kwargs = self._reroute_same_model_kwargs(target, kwargs)
         if retry_kwargs is not None:
@@ -348,7 +386,7 @@ class _RecoveryLadderMixin:
         except Exception:
             return None
         err = self._provider_body_error(resp_dict)
-        if not err or _is_structured_context_overflow_body(err):
+        if not err or is_size_refusal(err):  # read on the whole object, before the transient heuristic below
             return None
         if not self._is_transient_body_error(err):
             return None
@@ -379,7 +417,7 @@ class _RecoveryLadderMixin:
         except Exception:
             return None
         body_err = self._provider_body_error(resp_dict)
-        if not isinstance(body_err, dict) or _is_structured_context_overflow_body(body_err):
+        if not isinstance(body_err, dict) or is_size_refusal(body_err):
             return None
         try:
             code = int(body_err.get("code") or 0)
@@ -412,11 +450,8 @@ class _RecoveryLadderMixin:
 
         def _send(candidate: Dict[str, Any]) -> Any:
             nonlocal prior_capture
-            candidate = _finalized_physical_candidate(
-                target, candidate, "messages" if target.get("provider") == "anthropic" else "chat.completions",
-                fresh_clock=True,
-            )
-            request = _attempt_request(target, candidate)
+            candidate = _finalized_physical_candidate(target, candidate, _wire_surface(target), fresh_clock=True)
+            request = _with_tariff(_attempt_request(target, candidate), target, candidate)
 
             def dispatch():
                 timeout = physical_dispatch_timeout(transport_timeout)
@@ -427,7 +462,10 @@ class _RecoveryLadderMixin:
                     if refusal is error:
                         raise
                     raise refusal from error
-                return consume_stream(response, expected_choices=candidate.get("n", 1)) if candidate.get("stream") else response
+                if not candidate.get("stream"):
+                    return response
+                return consume_stream(response, expected_choices=candidate.get("n", 1),
+                                      responses=responses_route(target), opencode_go=request.opencode_go)
 
             try:
                 result = _execute_candidate(
@@ -593,8 +631,10 @@ class _RecoveryLadderMixin:
 
         async def _send(candidate: Dict[str, Any]) -> Any:
             nonlocal prior_capture
-            candidate = _finalized_physical_candidate(target, candidate, "chat.completions", fresh_clock=True)
+            candidate = _finalized_physical_candidate(target, candidate, _wire_surface(target), fresh_clock=True)
             request = _attempt_request(target, candidate)
+            if target.get("provider") == "deepseek":  # its key's balance read stays off the event loop
+                request = await asyncio.to_thread(_with_tariff, request, target, candidate)
 
             async def dispatch():
                 timeout = physical_dispatch_timeout(transport_timeout)
@@ -605,7 +645,10 @@ class _RecoveryLadderMixin:
                     if refusal is error:
                         raise
                     raise refusal from error
-                return await consume_stream_async(response, expected_choices=candidate.get("n", 1)) if candidate.get("stream") else response
+                if not candidate.get("stream"):
+                    return response
+                return await consume_stream_async(response, expected_choices=candidate.get("n", 1),
+                                                  responses=responses_route(target), opencode_go=request.opencode_go)
 
             try:
                 result = await _execute_candidate_async(

@@ -7,8 +7,8 @@ by task id, which hid a genuinely stale tree — the panel said ``stale`` with n
 reason while ``review_status`` and the commit gate still reported the edit. The
 marker is ATTRIBUTED instead: every reader on the checkout keeps seeing it, and
 the task whose mutation or review wrote it is named relative to the reader.
-An unrecorded writer or reader stays ``unknown``; freshness, obligations and
-commit-readiness debt never read the attribution.
+An unrecorded writer or reader stays ``unknown``; freshness never reads the
+attribution.
 """
 
 from __future__ import annotations
@@ -155,7 +155,7 @@ def test_a_legacy_marker_without_a_writer_stays_unknown_for_every_reader(tmp_pat
 def test_a_marker_no_preflight_look_precedes_is_history_never_current(tmp_path):
     """The retired advisory lane wrote markers with no look behind them (owner decision:
     archive only). Such a marker stays in the file; no reader treats it as current
-    freshness or copies it into debt, and a look written after it does not revive it.
+    freshness, and a look written after it does not revive it.
     Only an edit after a look stales that look."""
     from ouroboros.agent_task_pipeline import build_review_context
     from ouroboros.review_status_projection import build_review_projection
@@ -166,7 +166,7 @@ def test_a_marker_no_preflight_look_precedes_is_history_never_current(tmp_path):
     state.last_stale_from_edit_ts = "2026-09-20T00:00:00+00:00"
     state.last_stale_reason = "run_command mutated the worktree; advisory freshness invalidated."
     save_state(drive, state)
-    _reviewed(drive, shared, attempt=2)  # a reviewed attempt syncs the debts
+    _reviewed(drive, shared, attempt=2)  # a later reviewed attempt
 
     def surfaces():
         projection = build_review_projection(drive, repo_dir=shared, reader_task_id="task-b")
@@ -179,7 +179,6 @@ def test_a_marker_no_preflight_look_precedes_is_history_never_current(tmp_path):
         assert (projection["stale_from_edit"], projection["stale_from_edit_ts"], projection["stale_reason"]) == (
             False, None, None)
         assert "stale_marker=" not in context and "advisory freshness" not in context
-        assert load_state(drive).get_open_commit_readiness_debts(repo_key=make_repo_key(shared)) == []
         assert load_state(drive).last_stale_from_edit_ts == "2026-09-20T00:00:00+00:00", "history stays in the file"
         _fresh(drive, shared)  # the second pass reads a look newer than the marker
 
@@ -256,7 +255,7 @@ def test_the_writer_round_trips_names_the_invalidation_and_clears_with_a_commit(
         assert (state.last_stale_from_edit_ts, state.last_stale_task_id) == ("", "")
 
 
-def test_attribution_never_changes_freshness_obligations_or_debt(tmp_path):
+def test_attribution_never_changes_freshness(tmp_path):
     """Same staleness written by three different writers reads identically everywhere
     except the attribution itself."""
     from ouroboros.review_status_projection import build_review_projection
@@ -268,7 +267,7 @@ def test_attribution_never_changes_freshness_obligations_or_debt(tmp_path):
         drive = _drive(tmp_path / (writer or "unattributed"))
         _fresh(drive, shared)
         state = load_state(drive)
-        state.record_attempt(CommitAttemptRecord(  # an open obligation the edit must not touch
+        state.record_attempt(CommitAttemptRecord(  # a blocked attempt the edit must not touch
             ts="2026-09-28T00:30:00+00:00", commit_message="blocked", status="blocked", repo_key=repo_key,
             tool_name="commit_reviewed", task_id="task-a", attempt=1, block_reason="critical_findings",
             critical_findings=[{"item": "tests_affected", "reason": "add a test", "severity": "critical",
@@ -277,19 +276,17 @@ def test_attribution_never_changes_freshness_obligations_or_debt(tmp_path):
         save_state(drive, state)
         invalidate_advisory_after_mutation(drive, mutation_root=shared, changed_paths=["tracked.py"],
                                            source_tool="edit_text", mutating_task_id=writer)
-        _reviewed(drive, shared, attempt=2)  # a later reviewed attempt syncs the debts
+        _reviewed(drive, shared, attempt=2)  # a later reviewed attempt
         state = load_state(drive)
         projection = build_review_projection(drive, repo_dir=shared, reader_task_id="task-a")
         observed[writer] = (
-            [(d.category, d.title, d.summary, list(d.evidence), d.fingerprint, d.status)
-             for d in state.get_open_commit_readiness_debts(repo_key=repo_key)],
-            [(o.item, o.status) for o in state.get_open_obligations(repo_key=repo_key)],
+            [(a.status, a.critical_findings) for a in state.filter_attempts(repo_key=repo_key)],
             {key: projection[key] for key in ("stale_from_edit", "effective_status")},
         )
     assert observed["task-a"] == observed["task-b"] == observed[""]
-    assert observed[""][0] == [], "the marker is the one freshness fact: no debt copies it"
-    assert observed[""][1] == [("tests_affected", "still_open")], "the obligation is still owed"
-    assert observed[""][2] == {"stale_from_edit": True, "effective_status": "stale"}
+    assert [status for status, _findings in observed[""][0]] == ["blocked", "reviewed"]
+    assert observed[""][0][0][1][0]["reason"] == "add a test", "the blocked attempt keeps its finding"
+    assert observed[""][1] == {"stale_from_edit": True, "effective_status": "stale"}
 
 
 @pytest.mark.parametrize("writer", ["builtin", "generic", "generic_error"])

@@ -45,9 +45,9 @@ def set_theme(page, theme):
 QUESTIONS = [
     # quiz id, the row's lifecycle fields, the hue, the token its dot resolves to
     ("waiting", {"state": "open", "wait_for_answer": True}, "owner", "--amber"),
-    ("unanswered", {"state": "open"}, "neutral", "--text-meta"),
-    ("continued", {"state": "open", "wait_for_answer": True, "wait_ended_at": "2026-10-19T10:00:00Z"}, "neutral", "--text-meta"),
-    ("finished", {"state": "expired_terminal", "wait_for_answer": True}, "neutral", "--text-meta"),
+    ("unanswered", {"state": "open"}, "owner", "--amber"),
+    ("continued", {"state": "open", "wait_for_answer": True, "wait_ended_at": "2026-10-19T10:00:00Z"}, "owner", "--amber"),
+    ("finished", {"state": "expired_terminal", "wait_for_answer": True}, "owner", "--amber"),
     ("answered", {"state": "answered", "answered_index": 0}, "ok", "--tone-recorded-mark"),
     ("replaced", {"state": "superseded"}, "ink", "--text-disabled"),
     ("closed", {"state": "closed", "closed_reason": "Closed by the owner."}, "ink", "--text-disabled"),
@@ -56,9 +56,10 @@ QUESTIONS = [
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_question_head_mark_is_amber_only_while_the_task_waits(subscription_ui, theme):
-    """Every lifecycle of the question head draws the shared 7px dot in its hue; a closed question is disabled,
-    a finished one neutral (DESIGN "Quiz card"), and an answer in flight turns the waiting dot neutral."""
+def test_question_head_mark_is_amber_while_mains_pill_counts_the_question(subscription_ui, theme):
+    """Every lifecycle of the question head draws the shared 7px dot in its hue: amber while Main's pill counts the
+    question (its task waits, went on or finished), a closed question disabled, and an answer in flight turns the
+    waiting dot neutral."""
     page = open_app(subscription_ui)
     set_theme(page, theme)
     rows = [{"type": "quiz", "task_id": "marks", "quiz_id": quiz_id, "question": f"{quiz_id}?",
@@ -107,7 +108,7 @@ def test_question_head_mark_is_amber_only_while_the_task_waits(subscription_ui, 
         assert mark["color"] == mark["tokens"][token], (quiz_id, mark, token)
     assert marks["waiting"]["word"] == "Waiting for your answer"
     assert marks["finished"]["word"] == "Unanswered · task finished" and marks["closed"]["word"] == "Question closed"
-    assert marks["waiting"]["color"] != marks["unanswered"]["color"], "the owner's dot must differ from neutral"
+    assert marks["waiting"]["color"] != marks["unreadable"]["color"], "the owner's dot must differ from neutral"
     assert marks["sending"]["color"] == marks["sending"]["tokens"]["--text-meta"], marks["sending"]
     # The recorded answer's dot is the owner's own (DESIGN "Quiz card"): the ok green on white, his blue on dark.
     owner = page.evaluate("__probe('var(--user-sender)')")
@@ -161,7 +162,7 @@ def test_skills_jobs_in_flight_are_neutral_and_the_owner_move_amber(subscription
                     animation: getComputedStyle(mark.querySelector('i')).animationName } }];
         }));
         const pill = getComputedStyle(host.querySelector('.app-tab-pill'));
-        const track = host.querySelector('.skills-card[data-skill="locked"] .skills-switch.is-locked .skills-switch-track');
+        const track = host.querySelector('.skills-card[data-skill="locked"] .ui-switch.is-locked .ui-switch-track');
         return { chips, pill: { size: pill.fontSize, family: pill.fontFamily, color: pill.color, background: pill.backgroundColor },
             track: getComputedStyle(track).backgroundColor };
     }""", rows)
@@ -234,7 +235,10 @@ def test_evolution_chip_and_sentence_are_amber_only_for_the_owner(subscription_u
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_context_low_is_neutral_ink(subscription_ui, theme):
-    """Low is a level the owner chose: its lit arc and thumb are the neutral pair; Max stays crimson, Nano fuchsia."""
+    """Low is a level, never a warning: its lit arc is the neutral ink; Max stays crimson, Nano fuchsia. The thumb
+    follows the saved mode, the lit arc the observed one (`data-lit`), each in its mode's ink. Under the approved shell
+    a chosen value never stands on a grey plate (aa7528dcd2, owner 13.11): Low's thumb is the strip's crimson wash, as
+    Max's is, under Low's own neutral ink."""
     page = open_app(subscription_ui)
     set_theme(page, theme)
     page.wait_for_selector('#chat-context-mode .chat-context-arc[data-arc="low"]', state="attached")
@@ -244,17 +248,22 @@ def test_context_low_is_neutral_ink(subscription_ui, theme):
         const saved = el.dataset.contextMode;
         thumb.style.transition = 'none';  // the colour, not its 0.2s fade, is what this reads
         const out = {};
+        const arcs = [...el.querySelectorAll('.chat-context-arc')];
+        const lit = arcs.map((arc) => arc.getAttribute('data-lit'));
         for (const mode of ['low', 'max', 'nano']) {
             el.dataset.contextMode = mode;
+            arcs.forEach((arc) => arc.setAttribute('data-lit', String(arc.dataset.arc === mode)));
             out[mode] = { arc: getComputedStyle(el.querySelector(`.chat-context-arc[data-arc="${mode}"]`)).stroke,
                 thumb: getComputedStyle(thumb).backgroundColor };
         }
         el.dataset.contextMode = saved;
+        arcs.forEach((arc, i) => arc.setAttribute('data-lit', lit[i]));
         thumb.style.transition = '';
         return out;
     }""")
     assert painted["low"] == {"arc": page.evaluate("__probe('var(--status-neutral-fg)')"),
-                              "thumb": page.evaluate("__probe('var(--status-neutral-bg)', 'backgroundColor')")}, painted
+                              "thumb": page.evaluate("__probe('var(--accent-14)', 'backgroundColor')")}, painted
+    assert painted["low"]["thumb"] == painted["max"]["thumb"], "Low and Max share the strip's crimson wash"
     assert painted["max"]["arc"] == page.evaluate("__probe('var(--accent-light)')"), painted
     assert painted["nano"]["arc"] == page.evaluate("__probe('var(--project)')"), painted
     assert painted["low"]["arc"] != page.evaluate("__probe('var(--status-warn-fg)')")

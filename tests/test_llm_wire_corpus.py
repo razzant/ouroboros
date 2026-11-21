@@ -6,6 +6,7 @@ without an exception, at any byte fragmentation, and normalize to the same shape
 non-streaming JSON body of the same request takes. The ``.sse``/``.json`` pairs are SEPARATE
 live requests, so parity is structural — message keys, tool names, argument key sets, the
 ``reasoning_details`` type sequence, finish reason and usage key names — never exact text.
+A recorded direct Responses tool turn must also replay its exact output items on its next request.
 """
 
 from __future__ import annotations
@@ -17,8 +18,10 @@ import pytest
 
 from ouroboros.llm import LLMClient
 from ouroboros.llm_stream import consume_stream
+from ouroboros.openai_responses import input_items
 
 WIRE = pathlib.Path(__file__).parent / "fixtures" / "llm_wire"
+RESPONSES = "openai-responses"  # direct OpenAI on Responses: typed events, ordered output items
 CHUNK_SIZES = (0, 1024, 7)  # whole body, 1 KiB, and 7-byte splits across UTF-8/JSON boundaries
 
 # Per-case expectations, keyed by the fixture's corpus-relative path. Every chat-shaped
@@ -52,6 +55,8 @@ EXPECTED = {
         "reasoning": [], "calls": ["lookup"], "kinds": ["custom"]},
     "openai/gpt-5.6-terra/function_none_stream.sse": {
         "reasoning": [], "calls": ["lookup", "lookup"]},
+    "openai-responses/gpt-6.1-terra/tool_stream.sse": {  # its reasoning, if any, stays an output item
+        "reasoning": [], "calls": ["lookup"], "args": [{"word"}]},
 }
 NATIVE = "anthropic/claude-sonnet-5/native_stream.sse"
 
@@ -97,9 +102,10 @@ class _Wire:
 
 def _target(path: pathlib.Path) -> dict:
     route, model = path.relative_to(WIRE).parts[:2]
+    surface = {"provider": "openai", "api_surface": "responses", "connection": ""} if route == RESPONSES else {}
     return {"provider": route, "resolved_model": model, "usage_model": model,
             "base_url": "https://provider.invalid/v1", "supports_openrouter_extensions": route == "openrouter",
-            "supports_generation_cost": False, "api_key": "fixture"}
+            "supports_generation_cost": False, "api_key": "fixture", **surface}
 
 
 @pytest.fixture(autouse=True)
@@ -111,7 +117,7 @@ def _no_pricing_lookup(monkeypatch):
 
 def _assemble(path: pathlib.Path, size: int, *, native: bool = False) -> tuple[dict, dict]:
     response = _Wire(path.read_bytes(), size)
-    body = consume_stream(response, native=native).model_dump()
+    body = consume_stream(response, native=native, responses=_rel(path).startswith(RESPONSES + "/")).model_dump()
     assert response.closed
     return body, body.pop("_stream_receipt")
 
@@ -140,7 +146,7 @@ def test_recorded_chat_stream_assembles_completely(subtests):
                 body, receipt = _assemble(path, size)
                 assert receipt["anomalies"] == {"count": 0, "first": []}, "a recorded wire is clean; irregularities would be disclosed here"
                 assert receipt["complete"] is True
-                for choice in body["choices"]:
+                for choice in [] if _rel(path).startswith(RESPONSES + "/") else body["choices"]:
                     assert choice["finish_reason"]
                     for call in choice["message"].get("tool_calls") or []:
                         assert call["id"] and call["type"] in {"function", "custom"}
@@ -168,19 +174,27 @@ def _wire_opaque_values(path: pathlib.Path) -> list:
     values = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("data: ") and line != "data: [DONE]":
-            for choice in json.loads(line[6:]).get("choices") or []:
+            chunk = json.loads(line[6:])
+            for choice in chunk.get("choices") or []:
                 for item in (choice.get("delta") or {}).get("reasoning_details") or []:
                     values += [item[key] for key in ("signature", "data") if isinstance(item.get(key), str) and item[key]]
+            if chunk.get("type") == "response.output_item.done":  # a Responses item is final only when done
+                values += [value for value in [(chunk.get("item") or {}).get("encrypted_content")] if value]
     return values
 
 
 def test_each_opaque_wire_payload_is_one_whole_record_value(subtests):
-    """A signature or encrypted payload is minted whole: each arrives in one delta and
-    must stay one record's entire value, never fused with a neighbour's."""
+    """A signature or encrypted payload is minted whole: each arrives in one delta (a Responses
+    reasoning item in its done event) and must stay one record's entire value, never fused with a
+    neighbour's."""
     for path in _streams():
         with subtests.test(path=path):
-            details = _assemble(path, 0)[0]["choices"][0]["message"].get("reasoning_details") or []
-            assembled = [detail[key] for detail in details for key in ("signature", "data") if detail.get(key)]
+            body = _assemble(path, 0)[0]
+            if _rel(path).startswith(RESPONSES + "/"):
+                assembled = [item["encrypted_content"] for item in body["output"] if item.get("encrypted_content")]
+            else:
+                details = body["choices"][0]["message"].get("reasoning_details") or []
+                assembled = [detail[key] for detail in details for key in ("signature", "data") if detail.get(key)]
             assert sorted(assembled) == sorted(_wire_opaque_values(path))
 
 
@@ -237,3 +251,27 @@ def test_recorded_native_stream_assembles_blocks(subtests):
             assert [set(block["input"]) for block in json_blocks if block["type"] == "tool_use"] == [{"query"}, {"query"}]
             assert json_body["stop_reason"] == body["stop_reason"]
             assert set(json_body["usage"]) == set(body["usage"])
+
+
+@pytest.mark.parametrize("model", ["gpt-6.1-terra", "gpt-6.1-sol"])
+def test_recorded_responses_reasoning_replays_exactly_on_its_next_request(model):
+    """A real image -> reasoning + call -> result -> final exchange (no ``include`` asked): the first reply's items,
+    encrypted reasoning among them, come back from the normalizer as its receipt and the projection of the next
+    canonical request carries them whole and in order before the result, as the recorded second request did; that
+    request ended completed with nothing transformed away."""
+    path = WIRE / RESPONSES / model / "reasoning_replay.json"
+    turns = json.loads(path.read_text(encoding="utf-8"))
+    first, second = turns["turn1"], turns["turn2"]
+    msg, usage = _normalized(path, first["reply"])
+    assert [item["type"] for item in first["reply"]["output"]] == ["reasoning", "function_call"]
+    assert first["reply"]["output"][0]["encrypted_content"] and usage["output_tokens_details"]["reasoning_tokens"] > 0
+    assert usage["response_finish_reason"] == "tool_calls" and [call["id"] for call in msg["tool_calls"]] == [
+        first["reply"]["output"][1]["call_id"]]
+    parts = {"input_text": lambda part: {"type": "text", "text": part["text"]},
+             "input_image": lambda part: {"type": "image_url", "image_url": {"url": part["image_url"], "detail": part["detail"]}}}
+    user = {"role": "user", "content": [parts[part["type"]](part) for part in first["input"][0]["content"]]}
+    result = {"role": "tool", "tool_call_id": msg["tool_calls"][0]["id"], "content": second["input"][-1]["output"]}
+    assert input_items(_target(path), [user, {"role": "assistant", **msg}, result]) == second["input"]
+    final, final_usage = _normalized(path, second["reply"])
+    assert (final_usage["response_status"], final_usage["response_finish_reason"]) == ("completed", "stop")
+    assert final_usage["response_input_transformations"] == [] and final["content"] and "tool_calls" not in final

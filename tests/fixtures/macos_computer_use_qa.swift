@@ -8,9 +8,9 @@
 // stdin, one command per line: "mark <label>" (log a state snapshot), "replace" (target: swap Commit for a
 // fresh instance), "decoy" (target: a second window of the SAME process, "<title>-decoy", with its own qa.sentinel),
 // "twinwindow" (target: a third window titled exactly as the decoy), "second" (target: a window with its own field and
-// Commit, shown without activation), "mode <plain|retitle|shift|close>" (target: what
+// Commit, shown without activation), "mode <plain|retitle|shift|close|delay>" (target: what
 // Commit also does: retitle its window to "<title>-retitled", bring the decoy in front as the app's main window, both
-// for retitle, or close its window), "type <interval_ms> <letters>" (front: post the letters as keystrokes while it
+// for retitle, close its window, or show its status a second late, "loading" until then), "type <interval_ms> <letters>" (front: post the letters as keystrokes while it
 // stays the active app), "focus <paste|decoy|window>", "clear", "expect <token>" (paste: the clipboard is compared
 // with the token, never logged), "quit". EOF quits too, so a fixture never outlives its test.
 //
@@ -22,7 +22,8 @@
 // global top-left points, the space clicks are sent in, and every window's title and windowNumber (its CGWindowID,
 // an id the skill does not supply): the target's qa.sentinel reads "target:N" after N commits ("retitled:N" once
 // retitled), the decoy's always "decoy". The paste role also logs key-up and modifier events,
-// the characters AppKit derived for each key event, the input source in use, every action its menu sent and
+// the characters AppKit derived for each key event (and what its key types under Command alone), the input source in
+// use, every action its menu sent and
 // every paste action its text view performed, so a chord that arrived but pasted nothing is told apart from
 // one that never arrived.
 
@@ -65,6 +66,22 @@ func inputSources() -> [String: String] {
     }
     return ["keyboard": identifier(TISCopyCurrentKeyboardInputSource()?.takeRetainedValue()),
             "layout": identifier(TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue())]
+}
+
+/// What a key types under Command alone in the layout in use (kUCKeyActionDown, cmdKey >> 8 = 1, no dead keys), set
+/// beside a Command+Shift event's own characters: the same means the layout ignored Shift under Command; "" when unread.
+func commandCharacters(_ code: UInt16) -> String {
+    guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+          let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData),
+          let bytes = CFDataGetBytePtr(Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue()) else { return "" }
+    var dead: UInt32 = 0
+    var length = 0
+    var chars = [UniChar](repeating: 0, count: 8)
+    let status = bytes.withMemoryRebound(to: UCKeyboardLayout.self, capacity: 1) {
+        UCKeyTranslate($0, code, UInt16(kUCKeyActionDown), 1, UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                       &dead, chars.count, &length, &chars)
+    }
+    return status == noErr ? String(utf16CodeUnits: chars, count: length) : ""
 }
 
 /// The paste role's text view: every paste action it performs is logged with who sent it, then performed.
@@ -314,6 +331,9 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
                      keyEquivalent: "v").keyEquivalentModifierMask = [.command, .option, .shift]
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(withTitle: "Find Next", action: #selector(findNext(_:)), keyEquivalent: "g").target = self
+        for key in ["?", "}"] {  // shifted punctuation: such a key equivalent is the character, Shift implied
+            edit.addItem(withTitle: "Shortcut " + key, action: #selector(findNext(_:)), keyEquivalent: key).target = self
+        }
         NSApp.mainMenu = main
     }
 
@@ -377,10 +397,11 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
                                   "input_source": inputSources()])
             return
         }
-        var row: [String: Any] = ["chars_ignoring": event.charactersIgnoringModifiers ?? "", "key_code": Int(event.keyCode),
-                                  "modifiers": held]
+        // characters: what the event types with its modifiers (a menu matches those); chars_ignoring: the typing plane.
+        var row: [String: Any] = ["characters": event.characters ?? "", "chars_ignoring": event.charactersIgnoringModifiers ?? "",
+                                  "key_code": Int(event.keyCode), "modifiers": held]
         if role == "paste" {
-            row.merge(["characters": event.characters ?? "", "flags": Int(flags.rawValue), "repeat": event.isARepeat,
+            row.merge(["flags": Int(flags.rawValue), "repeat": event.isARepeat, "command_characters": commandCharacters(event.keyCode),
                        "input_source": inputSources(), "first_responder": responder()]) { $1 }
         }
         log(event.type == .keyUp ? "key_up" : "key_down", row)
@@ -422,7 +443,14 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
 
     @objc func commitPressed(_ sender: NSButton) {
         count += 1
-        status.stringValue = "committed:" + field.stringValue
+        let shown = "committed:" + field.stringValue
+        status.stringValue = commitMode == "delay" ? "loading" : shown
+        if commitMode == "delay" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.status.stringValue = shown
+                log("status_shown", ["status": shown, "count": self.count])
+            }
+        }
         counter.stringValue = "count:\(count)"
         let titleBefore = window.title
         if commitMode == "retitle" {
@@ -496,7 +524,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         case "twinwindow" where role == "target" && twinWindow == nil:
             twinWindow = sideWindow(title + "-decoy", "twin", 40)
             log("twin_window_ready", state())
-        case "mode" where role == "target" && words.count == 2 && ["plain", "retitle", "shift", "close"].contains(words[1]):
+        case "mode" where role == "target" && words.count == 2 && ["plain", "retitle", "shift", "close", "delay"].contains(words[1]):
             commitMode = words[1]
             log("mode_set", state())
         case "second" where role == "target":

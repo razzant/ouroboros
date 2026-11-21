@@ -25,6 +25,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, is_a2a_chat_id
+from ouroboros.deployment_extensions import trust_gap
 from ouroboros.event_bus import get_global_event_bus
 from ouroboros.config import WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC
 from ouroboros.gateway._helpers import run_sync_to_completion
@@ -37,7 +38,6 @@ from ouroboros.presence_delivery import (
 from ouroboros.skill_loader import (
     find_skill,
     grant_status_for_skill,
-    load_enabled,
 )
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 
@@ -308,8 +308,10 @@ class HostServiceContext:
             raise HostServiceAuthError(f"skill {skill_name!r} is not installed")
         if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
             raise HostServiceAuthError(f"skill {skill_name!r} has no current executable review authority")
-        if not load_enabled(self.data_dir, skill_name):
+        if not loaded.enabled:  # the effective switch (``deployment_extensions``), as the loader reads it
             raise HostServiceAuthError(f"skill {skill_name!r} is disabled")
+        if loaded.manifest.is_extension() and trust_gap(loaded.name, loaded.skill_dir, loaded.content_hash):
+            raise HostServiceAuthError(f"skill {skill_name!r} is not code this deployment's service runs")
         if str(token_payload.get("content_hash") or "") != str(loaded.content_hash or ""):
             raise HostServiceAuthError(f"skill {skill_name!r} token is stale")
 
@@ -454,6 +456,7 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "presence_wake_signals": 1,
                          "presence_explicit_completion": 1,
                          "presence_reaction_context": 1,
+                         "presence_change_context": 1,
                          "presence_identity": 1,
                          "presence_place_binding_version": PLACE_BINDING_VERSION,
                          "notify_version": NOTIFY_VERSION})
@@ -530,8 +533,13 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
     try:
         from ouroboros.task_status import SETTLED_STATUSES
 
-        if not isinstance(payload.get("reply_to", ""), str):
-            return _json_error("reply_to must be an address string", 400)
+        from ouroboros.chat_references import (ReplyExcerptNotAuthored, ReplyExcerptUnavailable, ingress_reply,
+                                               reply_identity, same_reply)
+
+        try:
+            requested_reply = reply_identity(payload)
+        except ValueError as exc:
+            return _json_error(str(exc), 400)
         text = str(payload.get("text") or "")
         image_caption = str(payload.get("image_caption") or "")
         client_message_id = str(payload.get("client_message_id") or "").strip()[:128]
@@ -566,7 +574,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                 logged = text.strip() or image_caption.strip() or chat_uploads.attachment_placeholder(
                     inline_image, {"chat_attachments": inbound.get("attachments"), "chat_attachment_uploads": incoming})
                 if (not chat_uploads.same_message(inbound, logged, incoming)
-                        or (inbound.get("reply_to") or {}).get("address", "") != payload.get("reply_to", "")):
+                        or not await asyncio.to_thread(same_reply, ctx.data_dir, inbound.get("reply_to") or {}, requested_reply)):
                     return _json_error("client_message_id was already used for a different message", 409)
                 state = await asyncio.to_thread(_operation_state, ctx, accepted)
                 if state["status"] in SETTLED_STATUSES:
@@ -596,6 +604,23 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                         **({"chat_attachments": refs} if refs else {})}
         if payload.get("reply_to"):  # no reference adds nothing to a plain inject's kwargs
             metadata["reply_to"] = payload["reply_to"]
+        if "excerpt" in requested_reply:
+            metadata["reply_excerpt"] = requested_reply["excerpt"]
+            if not client_message_id:  # unnamed injections enter the queue before their chat row is written
+                try:
+                    metadata["reply_reference"] = await asyncio.to_thread(ingress_reply, ctx.data_dir, metadata)
+                except ValueError as exc:
+                    return _json_error(str(exc), 400)
+        from supervisor.message_ingress import ui_control_fact
+
+        try:  # a skill's control (an inline button) composed this text: the press is the owner's, not the words
+            control = ui_control_fact(payload.get("ui_control"), pressed_at=utc_now_iso(), owner_text=False)
+        except ValueError as exc:
+            return _json_error(str(exc), 400)
+        if control and client_message_id:  # a correlated operation is its accepted owner row; a press writes none
+            return _json_error("ui_control cannot name a client_message_id: a press is not an owner message", 400)
+        if control:
+            metadata["ui_control"] = control
         bridge = ctx.bridge_getter()
         response_event: asyncio.Event = asyncio.Event()
         response_holder: dict[str, str] = {}
@@ -629,12 +654,16 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                         retain_inputs=pending_uploads.pop_all,
                         dispatch=functools.partial(dispatch_accepted_restart, bridge), **message,
                     )
+                except (ReplyExcerptNotAuthored, ReplyExcerptUnavailable) as exc:
+                    return _json_error(str(exc), 400)  # the unnamed path's answer; 409 stays an id conflict
                 except ValueError as exc:
                     return _json_error(str(exc), 409)
             else:
                 # Custody passes BEFORE the handoff: dispatch may enqueue and then raise, so from
                 # here a failure is unknown. The copies stay (an orphan at worst), never deleted
                 # under queued work; the error still answers the skill, nothing is re-dispatched.
+                if "reply_reference" in metadata:
+                    message["accepted_reply"] = metadata["reply_reference"]
                 pending_uploads.pop_all()
                 dispatch_accepted_restart(bridge, text, **message)
         if not wait_for_response:

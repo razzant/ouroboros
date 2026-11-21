@@ -62,6 +62,7 @@ import pytest
 from ouroboros import dialogue_store
 from ouroboros.test_evidence import keep_startup_log
 from tests import test_ui_smoke_playwright as smoke
+from tests.settings_browser_helpers import commit_row, open_settings
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
 direct_server_with_data = smoke.direct_server_with_data
@@ -478,11 +479,18 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 expect(dialog).to_be_hidden()
                 record["header_body"] = body
                 page.locator('[data-nav-page="settings"]').click()
-                page.locator("#s-workers").evaluate(
-                    "(node) => {node.value='2'; node.dispatchEvent(new Event('input',{bubbles:true}));}")
-                page.locator("#btn-save-settings").click()
-                expect(page.locator("#btn-restart-now")).to_be_visible(timeout=30_000)
-                dialog, s_title, s_body = _restart_dialog(page, page.locator("#btn-restart-now"))
+                skills = data_dir.parent / "skills-restart-fixture"  # a restart-required field (the cap is live)
+                skills.mkdir(exist_ok=True)
+                open_settings(page, "skill-sources", timeout=30_000)
+                saved = commit_row(page, "OUROBOROS_SKILLS_REPO_PATH", str(skills), timeout=30_000)
+                assert saved.startswith("Saved · applies after restart"), saved
+                # The restart that waits is a line of Ouroboros's card on the Settings home, with its own Restart.
+                open_settings(page, "", timeout=30_000)
+                page.locator('[data-settings-overview-row]').click()
+                page.locator('[data-being-count]').click()
+                restart = page.locator('#page-settings [data-settings-card] [data-needs="restart"] [data-need-action]')
+                expect(restart).to_be_visible(timeout=30_000)
+                dialog, s_title, s_body = _restart_dialog(page, restart)
                 assert (s_title, s_body, _restart_policy(dialog)) == (title, body, policy), \
                     "header and Settings must open the SAME confirmation"
                 shot("03-settings-restart-confirm")

@@ -260,7 +260,7 @@ def release_turn_acceptance_fence(drive_root: Any, root_task_id: str) -> bool:
         return False
 
 
-def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
+def clear_budget_root_fence_for_settled_tree(task: dict, *, fence: Optional[dict] = None) -> bool:
     """Release a root budget fence once its tree has no live members left.
 
     The brother of ``clear_acceptance_fence_for_root``, keyed by the ROOT id
@@ -272,6 +272,7 @@ def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
     (and the snapshot restore would resurrect it after a restart). An owner
     Pause latch also stays while its census names an answered root's running
     upkeep or a run an ended member left: a terminal result is not ended execution.
+    ``fence`` releases only that very latch: a boot's deferred orphan sweep never removes a newer one.
     """
     q = _queue_module()
     if not isinstance(task, dict):
@@ -284,7 +285,7 @@ def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
     held = (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get(
         "cause") == "owner_pause" and owner_latch_holds(q, root_id)
     with q._queue_lock:
-        if root_id not in q.BUDGET_ROOT_FENCES:
+        if root_id not in q.BUDGET_ROOT_FENCES or fence is not None and q.BUDGET_ROOT_FENCES[root_id] is not fence:
             return False
         if held and (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get("cause") == "owner_pause":
             return False
@@ -512,17 +513,18 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
                     return {"ok": False, "error": "snapshot_not_persisted"}
         exact = bool(located is not None and isinstance(located.get("_budget_pause"), dict)
                      and located["_budget_pause"].get("exact_continuation"))
-        pause_reason = located["_budget_pause"].get("reason") if exact else None
+        pause_reason = str(located["_budget_pause"].get("reason") or "") if exact else ""
         result_root = pathlib.Path((located or {}).get("budget_drive_root") or q.DRIVE_ROOT)
         located_state = copy.deepcopy(located)
         needs_selection = located is not None and budget_pause_fact(located) is not None
     if exact:
         # Fresh custody at EVERY grant, read OUTSIDE the queue lock (a harness
         # round trip is not a queue-lock tenant); the grant below re-locates the
-        # row and decides on this observation. A budget pause requests stops of
-        # uncovered runs; owner/technical pauses observe the sent work they retained.
+        # row and decides on this observation. Money pauses request stops; an owner
+        # Pause or retained sleep/authority park observes without cancelling.
         from ouroboros.budget_pause import observe_task_runs
         from ouroboros.owner_pause import fence_closed, read_fence
+        from ouroboros.sleep_custody import RETAINED_REASONS
 
         root_task_id = str(located_state.get("root_task_id") or task_id)
         try:
@@ -533,7 +535,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         owner_paused = pause_reason == "owner" or fence_closed(owner_fence)
 
         external = observe_task_runs(result_root, task_id, reason="budget_resume_uncovered_cost",
-                                     request_stop=not (owner_paused or pause_reason == "authority"))
+                                     request_stop=not (owner_paused or pause_reason in RETAINED_REASONS))
         from supervisor.continuation_admission import action_writers
         if not owner_paused:
             blockers = action_writers(q, root_task_id, drive_root=result_root)

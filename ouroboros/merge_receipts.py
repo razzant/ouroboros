@@ -4,8 +4,8 @@
 and keeps what was REVIEWED, what was CURRENT and what was actually MERGED as
 separate facts on the calling task's result record (``merge_receipts``):
 
-- requested: the explicit method and the head the caller expects (``gh pr merge
-  --match-head-commit``, never ``--auto`` or ``--admin``);
+- requested: the explicit method and the head the caller expects, sent as one
+  synchronous ``PUT …/pulls/{n}/merge`` with that ``sha`` to the PR the readback names;
 - review: the host review record the caller names (``review_record_id``: its
   subject root/kind/base/head/tree, aggregate and per-question verdicts, panel
   size), which then supplies the reviewed subject, and/or what the caller
@@ -24,18 +24,24 @@ separate facts on the calling task's result record (``merge_receipts``):
   readback; merged evidence stays terminal. A queue no longer shown by that
   readback (CLOSED, or auto-merge gone after an unconfirmed request) reads as earlier.
 
-A missing or partial review is LOUD, never a lock: the merge still happens. The
-intent row is written BEFORE ``gh pr merge``; a failed intent write refuses with
-nothing done. After an unknown outcome the next call only reads GitHub back —
-an open PR does not prove the earlier request settled. Queued requests likewise
-remain observation-only, even once their PR closes. A request that provably changed
-nothing (``NO_EFFECT``) holds no custody whatever the readback shows; its receipt
-stays observation-only until GitHub shows the PR open without a queue. A fresh
-request is never sent beside auto-merge the PR already shows. One receipt feeds both
-the task card row and a cleaned block in the PR BODY (unrelated body text preserved,
-publication confirmed by readback); a failed publication after a merge is a
-recorded gap and never repeats the merge. Merges from a shell or the GitHub web
-page leave no receipt; nothing here parses shell commands.
+A missing or partial review is LOUD, never a lock: the merge still happens. The intent
+row precedes the request; a failed intent write refuses with nothing done. Like gh,
+nothing is sent while GitHub shows the PR BLOCKED, BEHIND or DIRTY (no silent admin
+merge) or auto-merge, a check not atomic with the send; a merge queue is never used.
+Only a 2xx ``merged: true`` with a full SHA is the request's own merge and only the
+endpoint's documented refusals prove it changed nothing (``NO_EFFECT``): every other
+answer stays unknown (``tools.github._merge_answer``). A plain repeat after an unknown
+or queued outcome only reads the latest attempt back, even once its PR closes: an open
+PR does not prove the earlier request settled. An explicit ``continue_receipt_id``
+decides one new request after it, a successor (``continues``) claimed at most once
+under the receipt lock and rejoined by a repeat of the decision; earlier receipts keep
+their own effect. A NO_EFFECT request holds no custody and its receipt is observed
+until GitHub shows the PR open without a queue; no request of a task holds once one
+receipt shows its PR merged, nor a settled unknown one a Resume named (``accept_unknown``:
+a decision beside its unchanged facts, never sent again). One receipt feeds the task card row
+and a cleaned PR-BODY block (unrelated text kept, publication read back); a failed
+publication never repeats the merge. Shell or web merges leave no receipt; nothing
+here parses shell commands.
 """
 
 from __future__ import annotations
@@ -67,11 +73,15 @@ _BODY_BLOCK_RE = re.compile(r"<!-- ouroboros:merge-receipt [0-9a-f]+ -->.*?<!-- 
 _PR_FIELDS = ("number,state,url,title,body,comments,headRefOid,baseRefName,baseRefOid,mergeStateStatus,"
               "isDraft,autoMergeRequest,mergeCommit,mergedAt")
 _UNRESOLVED = ("intent_recorded", "effect_attempted")
-# This receipt's own request provably changed nothing: it never reached GitHub's merge mutation (gh's own
-# refusal, a missing CLI, a target refusal), or GitHub refused the sent mutation with an exact answer
-# ``_gh_run`` qualifies. Custody, the readback outcome and every wording read this one set.
+# This receipt's own request provably changed nothing: it never reached GitHub (a missing CLI, a target refusal,
+# or ``pre_effect``: gh's own refusal, which older receipts recorded), or GitHub refused it with an answer
+# ``_merge_answer`` qualifies. Custody, the readback outcome and every wording read this one set.
 NOT_SUBMITTED = frozenset({"cli_missing", "target", "pre_effect"})
 NO_EFFECT = NOT_SUBMITTED | {"server_refused"}
+# gh's ``canMerge`` refuses these client-side unless --admin; the endpoint itself would let an admin merge them.
+_NOT_MERGEABLE = {"BLOCKED": "the base branch policy prohibits the merge",
+                  "BEHIND": "the head branch is not up to date with the base branch",
+                  "DIRTY": "the merge commit cannot be cleanly created"}
 
 Gh = Callable[..., Any]  # (args, timeout=...) -> GhResult-like (ok, text, exit_code, http_status, failure)
 
@@ -86,7 +96,7 @@ def _sha(value: Any) -> str:
 
 def write_receipt(drive_root: Any, task_id: str, receipt: Dict[str, Any], *, claim: bool = False,
                   publication: Optional[Dict[str, Any]] = None,
-                  superseded: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  superseded: Optional[Dict[str, Any]] = None, refused: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Upsert one receipt by id on the task-result record (dedicated locked writer).
 
     Mutates ONLY ``merge_receipts``, the owner_hurry pattern: never through
@@ -95,7 +105,8 @@ def write_receipt(drive_root: Any, task_id: str, receipt: Dict[str, Any], *, cla
     or regress a settled outcome. Publication updates only its matching source,
     never replay the publisher's earlier fact snapshot. A change drops the stored
     publication; ``superseded`` (when given) receives the one it dropped, so the
-    caller can refresh a projection that now shows an earlier revision. Raises on failure.
+    caller can refresh a projection that now shows an earlier revision. A ``claim`` returns the receipt it
+    observes instead when one is due; ``refused`` (when given) receives why a successor may not follow. Raises on failure.
     """
     from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
 
@@ -109,8 +120,8 @@ def write_receipt(drive_root: Any, task_id: str, receipt: Dict[str, Any], *, cla
             raise ValueError(f"task {task_id} has no result record to hold the merge receipt")
         rows = [dict(r) for r in current.get(RECEIPTS_KEY) or [] if isinstance(r, dict)]
         if claim:
-            prior = next((r for r in reversed(rows) if r.get("repo") == receipt["repo"]
-                          and _must_observe(r)), None)
+            prior = _claimed_instead(receipt, [r for r in rows if r.get("repo") == receipt["repo"]],
+                                     current.get("launch_handoffs") or {}, refused if refused is not None else {})
             if prior is not None:
                 selected.update(prior)
                 return None
@@ -139,9 +150,12 @@ def write_receipt(drive_root: Any, task_id: str, receipt: Dict[str, Any], *, cla
                 updated.pop("publication", None)
         updated["updated_at"] = utc_now_iso()
         rows = [r for r in rows if r.get("receipt_id") != receipt["receipt_id"]] + [updated]
-        # Never evict an operation that might still act or owes publication.
+        # A continuation edge is a durable decision: dropping either end permits its replay to send again.
         disposable = [r for r in rows if not _must_observe(r)]
         keep = {r["receipt_id"] for r in disposable[-_RECEIPTS_CAP:]}
+        for row in rows:
+            if row.get("continues"):
+                keep.update((row["receipt_id"], row["continues"]))
         rows = [r for r in rows if _must_observe(r) or r["receipt_id"] in keep]
         selected.update(updated)
         claims = dict(current.get("launch_handoffs") or {})
@@ -166,6 +180,9 @@ def _merge_facts(prior: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, A
         [*(prior.get("launch_operation_ids") or []), *(incoming.get("launch_operation_ids") or [])]))
     if prior.get("effect"):
         merged["effect"] = prior["effect"]  # exactly one merge invocation owns this receipt
+    merged.pop("unknown_accepted", None)  # only ``accept_unknown`` records the decision; observers keep it
+    if prior.get("unknown_accepted"):
+        merged["unknown_accepted"] = prior["unknown_accepted"]
     states = ("intent_recorded", "effect_attempted", "settled")
     if prior.get("state") in states and incoming.get("state") in states:
         merged["state"] = max((prior["state"], incoming["state"]), key=states.index)
@@ -214,6 +231,111 @@ def _must_observe(receipt: Dict[str, Any]) -> bool:
             or (receipt.get("outcome") or {}).get("status") in ("unknown", "queued", "merged")
             or ((receipt.get("outcome") or {}).get("status") == "refused"
                 and (receipt.get("effect") or {}).get("failure") == "exit"))
+
+
+def latest_attempt(receipts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """One PR's latest attempt while any of its receipts is still observed, else ``None`` (a plain request may go).
+
+    The order is the one forward relation, ``continues``, never the row order an upsert changes: an attempt a later
+    one continues is not the latest. Claims keep every observed receipt of a PR on one chain."""
+    following = {r.get("continues"): r for r in receipts if r.get("continues")}
+    current, seen = next((r for r in receipts if _must_observe(r)), None), set()
+    while current is not None and current.get("receipt_id") in following and current["receipt_id"] not in seen:
+        seen.add(current["receipt_id"])
+        current = following[current["receipt_id"]]
+    return current
+
+
+def continuation_refusal(receipt: Dict[str, Any], claims: Dict[str, Any], own: str = "") -> str:
+    """Why no new request may follow this attempt (``""``: one may): its own request is proven merged, queued or
+    accepted by GitHub, or a call of it (``claims``: the task's ``launch_handoffs``; ``own``: this call) still runs."""
+    status = (receipt.get("outcome") or {}).get("status")
+    if status in ("merged", "queued"):
+        return f"its outcome is {status}"
+    if (receipt.get("effect") or {}).get("ok"):
+        return "GitHub answered its request as merged; read the PR back until it shows the merge"
+    if any(op != own and (claims.get(op) or {}).get("state") == "claimed" for op in receipt.get("launch_operation_ids") or []):
+        return "its call may still be running"
+    return ""
+
+
+# The one hold a caller may go on past (``local_custody_repair.ACCEPTABLE_UNKNOWN``): a settled request of unknown
+# outcome. A call still claimed, an unsettled request, a queue or GitHub's merged answer may still act.
+UNKNOWN_EFFECT = "merge_effect_unknown"
+
+
+def held_receipts(row: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str]]:
+    """The requests of one task record that hold its custody, each with why (``tool_custody`` blocks on each).
+
+    A request holds while its own effect is not definite, unless another receipt of the task shows its exact PR
+    merged (a merged PR cannot merge again; an unconfirmed request stays unconfirmed, never rewritten) or a
+    caller went on past its settled unknown outcome (``accept_unknown``); a later queue or call holds again."""
+    receipts = [r for r in row.get(RECEIPTS_KEY) or [] if isinstance(r, dict)]
+    claims = row.get("launch_handoffs") or {}
+    merged = {url for r in receipts if (r.get("outcome") or {}).get("status") == "merged"
+              and (url := (r.get("repo") or {}).get("url"))}
+    held = []
+    for receipt in receipts:
+        if (not receipt.get("launch_operation_ids") or effect_is_definite(receipt)
+                or (receipt.get("repo") or {}).get("url") in merged):
+            continue
+        why = ("merge_call_unreturned" if any((claims.get(op) or {}).get("state") == "claimed"
+                                               for op in receipt["launch_operation_ids"])
+               else "merge_unsettled" if receipt.get("state") != "settled"
+               else "merge_queued" if (receipt.get("outcome") or {}).get("status") == "queued"
+               else "merge_answered" if (receipt.get("effect") or {}).get("ok") else UNKNOWN_EFFECT)
+        if why != UNKNOWN_EFFECT or not receipt.get("unknown_accepted"):
+            held.append((receipt, why))
+    return held
+
+
+def accept_unknown(drive_root: Any, task_id: str, receipt_ids: Any, *, by: Dict[str, Any]) -> Dict[str, str]:
+    """A caller's decision to go on past named requests of this task whose settled outcome is unknown.
+
+    Judged under the receipt lock as ``held_receipts`` holds them: returns why each named one still held and
+    records ``unknown_accepted`` (``by``, its reason, ``replay_authorized=False``) beside each ``UNKNOWN_EFFECT``
+    one. No fact, revision or publication changes: the request is never sent again and its effect stays unknown,
+    a plain call still only reads it back and an explicit continuation stays its own decision."""
+    from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
+
+    wanted, judged = {str(value) for value in receipt_ids or () if value}, {}
+
+    def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        require_writable_task_result_schema(current)
+        judged.clear()
+        judged.update((r["receipt_id"], why) for r, why in held_receipts(current) if r.get("receipt_id") in wanted)
+        decided = {receipt_id for receipt_id, why in judged.items() if why == UNKNOWN_EFFECT}
+        if not decided:
+            return None
+        decision = {**by, "reason": UNKNOWN_EFFECT, "replay_authorized": False}
+        return stamp_task_result_schema({**current, RECEIPTS_KEY: [
+            dict(r, unknown_accepted=decision) if isinstance(r, dict) and r.get("receipt_id") in decided else r
+            for r in current[RECEIPTS_KEY]]})
+
+    if wanted:
+        patch_document(drive_root, task_id, _mutate)
+    return judged
+
+
+def _claimed_instead(receipt: Dict[str, Any], rows: List[Dict[str, Any]], claims: Dict[str, Any],
+                     refused: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Under the receipt lock, the receipt a claim observes instead of writing ``receipt`` (``None``: write it).
+
+    A plain request needs no attempt of its PR still observed. A successor needs the attempt it continues to be
+    the latest (or every receipt settled), continuable and not yet continued; a repeated decision rejoins it."""
+    latest, base_id = latest_attempt(rows), receipt.get("continues")
+    if not base_id:
+        return latest
+    successor = next((r for r in rows if r.get("continues") == base_id), None)
+    base = next((r for r in rows if r.get("receipt_id") == base_id), None)
+    if base is None:
+        raise ValueError(f"merge receipt {base_id} is no longer recorded")
+    why = continuation_refusal(base, claims, (receipt.get("launch_operation_ids") or [""])[0]) or (
+        "" if (latest or base)["receipt_id"] == base_id else f"receipt {latest['receipt_id']} is the latest attempt")
+    if successor is None and not why:
+        return None
+    refused.update({} if successor else {"why": why})
+    return successor or latest or base
 
 
 def task_receipts(drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
@@ -432,7 +554,7 @@ def queued_earlier_note(receipt: Dict[str, Any]) -> str:
     observed, effect = receipt.get("observed_after") or {}, receipt.get("effect") or {}
     state, auto_merge = str(observed.get("state") or "").upper(), bool(observed.get("auto_merge"))
     if ((receipt.get("outcome") or {}).get("status") != "queued" or not state
-            or _queue_reason(state, auto_merge, bool(effect.get("ok")))):
+            or _queue_reason(state, auto_merge, bool(effect.get("ok")) and not effect.get("merge_sha"))):
         return ""
     effect_note = no_effect_request(receipt) or (
         "request accepted, outcome unresolved" if effect.get("ok") else "effect unconfirmed")
@@ -673,16 +795,19 @@ def _queue_reason(state: str, auto_merge: bool, own_effect_ok: bool) -> str:
     return "auto_merge_pending" if auto_merge else "accepted_still_open" if own_effect_ok else ""
 
 
-def _outcome(pr: Optional[Dict[str, Any]], gh_api: Gh, *, own_effect_ok: bool, effect_definite: bool) -> Dict[str, Any]:
-    """GitHub's readback turned into one outcome; queued/auto-merge is never 'merged'."""
+def _outcome(pr: Optional[Dict[str, Any]], gh_api: Gh, effect: Dict[str, Any], *, continued: bool = False) -> Dict[str, Any]:
+    """GitHub's readback of the receipt's own request (``effect``) as one outcome; queued is never 'merged'.
+
+    ``this_call`` needs a first request's merge answer and, where the readback names a merge commit, the same SHA;
+    a successor's request is never proven the cause, since the request it continues may have landed."""
     if pr is None:
         return {"status": "unknown", "reason": "readback_failed"}
-    state = str(pr.get("state") or "").upper()
+    state, answered = str(pr.get("state") or "").upper(), str(effect.get("merge_sha") or "")
     if state == "MERGED":
         merge_sha = _sha((pr.get("mergeCommit") or {}).get("oid"))
+        own = bool(effect.get("ok")) and not continued and (not answered or not merge_sha or merge_sha == answered)
         out = {"status": "merged", "merge_sha": merge_sha, "merged_at": str(pr.get("mergedAt") or ""),
-               "observed_head_sha": _sha(pr.get("headRefOid")),
-               "attribution": "this_call" if own_effect_ok else "unproven"}
+               "observed_head_sha": _sha(pr.get("headRefOid")), "attribution": "this_call" if own else "unproven"}
         match = _PR_URL_RE.match(str(pr.get("url") or ""))
         if merge_sha and match:
             res = gh_api(["api", f"repos/{match.group(2)}/{match.group(3)}/commits/{merge_sha}",
@@ -694,13 +819,15 @@ def _outcome(pr: Optional[Dict[str, Any]], gh_api: Gh, *, own_effect_ok: bool, e
             except (TypeError, ValueError, AttributeError):
                 out["merge_tree_unavailable"] = True
         return out
-    queued = _queue_reason(state, bool(pr.get("autoMergeRequest")), own_effect_ok)
+    # An older receipt's gh exit 0 without a merge answer was GitHub accepting it, e.g. into a merge queue.
+    queued = _queue_reason(state, bool(pr.get("autoMergeRequest")), bool(effect.get("ok")) and not answered)
     if queued:
         return {"status": "queued", "reason": queued}
-    if state == "OPEN" and effect_definite:
-        return {"status": "refused"}
+    definite = effect.get("failure") in NO_EFFECT
+    if state == "OPEN" and (definite or answered):  # an answered merge the readback does not show yet: no queue
+        return {"status": "refused"} if definite else {"status": "unknown", "reason": "merge_answered_pr_still_open"}
     return {"status": "unknown", "reason": f"pr_state_{state.lower() or 'unread'}"
-            + ("" if effect_definite else "_after_unconfirmed_effect")}
+            + ("" if definite or answered else "_after_unconfirmed_effect")}
 
 
 def _publish(ctx: Any, gh: Gh, gh_api: Gh, receipt: Dict[str, Any], drive_root: Any, task_id: str) -> Dict[str, Any]:
@@ -823,8 +950,11 @@ def _finish(ctx: Any, gh: Gh, gh_api: Gh, drive_root: Any, task_id: str,
     A refused outcome is published only over a projection of this receipt that
     already exists (``projected``, a publication this settlement superseded, or one
     this call made): a queue another actor switched off never stays the PR body
-    and card. A refusal nothing showed yet stays tool-and-history only.
+    and card. A refusal nothing showed yet stays tool-and-history only, and an
+    attempt a later one continues never publishes over that newer projection.
     """
+    from ouroboros.task_results import load_task_result
+
     try:
         # Outcome and canonical card source precede either publication effect.
         _recompute_coverage(receipt, gh_api)
@@ -835,8 +965,10 @@ def _finish(ctx: Any, gh: Gh, gh_api: Gh, drive_root: Any, task_id: str,
             _recompute_coverage(receipt, gh_api)
             receipt = write_receipt(drive_root, task_id, receipt, superseded=superseded)
             projected = projected or bool(superseded)
-        while receipt["outcome"]["status"] in ("merged", "queued") or (
-                projected and receipt["outcome"]["status"] == "refused"):
+        while (receipt["outcome"]["status"] in ("merged", "queued") or (
+                projected and receipt["outcome"]["status"] == "refused")) and not any(
+                r.get("continues") == receipt["receipt_id"] for r in (load_task_result(drive_root, task_id) or {}).get(
+                    RECEIPTS_KEY) or []):
             source, projected = receipt, True
             publication = _publish(ctx, gh, gh_api, source, drive_root, task_id)
             # Preserve observed publication facts even if their durable write fails.
@@ -851,14 +983,43 @@ def _finish(ctx: Any, gh: Gh, gh_api: Gh, drive_root: Any, task_id: str,
     return receipt
 
 
-def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str, number: int,
-                 expected_head_sha: str, method: str, review: Dict[str, Any]) -> Dict[str, Any]:
-    """Claim intent atomically; observe that operation on every subsequent call."""
+def _decided_review(base: Dict[str, Any]) -> Dict[str, Any]:
+    """The review arguments of the attempt a decision continues, for a decision that names none."""
+    review = base.get("review") or {}
+    return {"declared": review.get("declared"), "record_id": (review.get("record") or {}).get("record_id") or "",
+            "task_ids": [row.get("task_id") for row in review.get("host_observed") or []],
+            "checks": [{key: row.get(key, "") for key in ("name", "status", "detail")} for row in
+                       (base.get("qualification") or {}).get("checks") or [] if row.get("source") == "author_declared"]}
+
+
+def _repeat(result: Dict[str, Any], rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """``result`` with ``plain_held``: whether a plain repeat for its PR would only read GitHub back."""
+    rows = [r for r in rows if r.get("receipt_id") != result.get("receipt_id")] + [result]
+    return {**result, "plain_held": latest_attempt(rows) is not None}
+
+
+def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, send: Gh, *, drive_root: Any, task_id: str, number: int,
+                 expected_head_sha: str, method: str, review: Dict[str, Any],
+                 continue_receipt_id: str = "") -> Dict[str, Any]:
+    """Claim intent atomically and ``send`` once; a plain repeat observes the latest attempt, and an explicit
+    ``continue_receipt_id`` decides one new request after it (repeating that decision rejoins its request)."""
     expected = _sha(expected_head_sha)
     from ouroboros.owner_pause import current_tool_operation
     operation_id = current_tool_operation(ctx, "pr_merge")
     if method not in METHODS or not expected or number <= 0:
         return {"refused": "arguments", "detail": f"method must be one of {METHODS}; expected_head_sha a hex SHA"}
+    base = None  # the attempt an explicit decision continues
+    if continue_receipt_id:
+        base = next((r for r in task_receipts(drive_root, task_id) if r.get("receipt_id") == continue_receipt_id), None)
+        asked = (base or {}).get("requested") or {}
+        if base is None or (base.get("number"), asked.get("method"), asked.get("expected_head_sha")) != (
+                number, method, expected):
+            return {"refused": "arguments", "detail": f"continue_receipt_id={continue_receipt_id!r} names " + (
+                f"this task's request for PR #{base.get('number')}, {asked.get('method')} of "
+                f"{asked.get('expected_head_sha')}" if base else "no merge receipt of this task")
+                + "; a continuation repeats its PR number, method and head exactly; nothing was merged"}
+        if not any(review.get(key) for key in ("declared", "record_id", "task_ids", "checks")):
+            review = _decided_review(base)
     record_id, record = str(review.get("record_id") or "").strip(), None
     if record_id:
         try:
@@ -896,26 +1057,44 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
             + "; call pr_merge again once GitHub answers to observe it")}
     repo = {"url": str(pr.get("url") or "")}
     mine = [r for r in task_receipts(drive_root, task_id) if r.get("repo") == repo]
-    prior = next((r for r in reversed(mine) if _must_observe(r)), None)
-    observed = _observed(pr)
+    observed, prior = _observed(pr), latest_attempt(mine)
+    if base is not None:
+        base = next((r for r in mine if r.get("receipt_id") == continue_receipt_id), None)
+        if base is None:
+            return {"refused": "arguments", "detail": f"receipt {continue_receipt_id} requested a merge of another "
+                                                      f"pull request than {repo['url'] or 'this one'}; nothing was merged"}
+        prior = next((r for r in mine if r.get("continues") == base["receipt_id"]), None)  # the decision's request
     if prior is None:
+        target = _PR_URL_RE.fullmatch(repo["url"])
+        was = ((base or {}).get("observed_before") or {}).get("base_ref")
         if observed["state"] != "OPEN":
             return {"refused": "pr_not_open", "detail": f"the pull request is {observed['state'] or 'unreadable'}"}
         if observed["head_sha"] != expected:
             return {"refused": "head_moved", "detail": f"current head is {observed['head_sha']}, not {expected}"}
-        # The visible auto-merge fact of this read, not an atomic check: auto-merge enabled after it, or a merge
-        # queue gh's PR JSON does not show, is not seen here and keeps gh's own handling.
+        # The visible auto-merge fact of this read, not an atomic check: auto-merge enabled after it is not seen here.
         if observed["auto_merge"]:
             return {"refused": "auto_merge_pending", "detail": (
                 "GitHub shows auto-merge enabled on this pull request, so it waits for GitHub to merge it once its "
                 "requirements pass; this tool sends no direct merge request beside that queue and cancels nothing. "
                 "Nothing was merged; read it back later, or call pr_merge again once auto-merge is off")}
+        if observed["merge_state"] in _NOT_MERGEABLE:
+            return {"refused": "not_mergeable", "detail": (
+                f"GitHub reports the pull request {observed['merge_state']}: {_NOT_MERGEABLE[observed['merge_state']]}. "
+                "Like gh without --admin, this tool sends no merge only an administrator could make; nothing was merged")}
+        if base is not None and observed["base_ref"] != was:
+            return {"refused": "base_moved", "detail": (
+                f"the pull request now targets {observed['base_ref'] or 'an unread branch'}, not {was or 'an unread one'}; "
+                "a retargeted PR needs a fresh decision, not a continuation; nothing was merged")}
+        if target is None or int(target.group(4)) != number:
+            return {"refused": "pr_unreadable", "detail": f"GitHub named {repo['url'] or 'no URL'} for PR #{number}, "
+                                                          "which no merge request can address; nothing was merged"}
         declared = review.get("declared") or None
         host_observed = observe_review_tasks(drive_root, review.get("task_ids") or [])
         receipt = {
             "schema": 1, "receipt_id": uuid.uuid4().hex, "created_at": utc_now_iso(), "state": "intent_recorded",
             "repo": repo, "number": int(number),
             "launch_operation_ids": [operation_id] if operation_id else [],
+            **({"continues": base["receipt_id"]} if base is not None else {}),
             "requested": {"method": method, "expected_head_sha": expected}, "observed_before": observed,
             "review": {"declared": declared, "record": record, "declared_only": bool(declared) and record is None,
                        "host_observed": host_observed,
@@ -929,16 +1108,18 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
         receipt["qualification"] = merge_qualification(receipt["review"], review.get("checks"),
                                                         relation=request["coverage"]["status"])
         receipt["commit_receipt"] = ("no_merge_commit_for_rebase" if method == "rebase" else "requested")
+        refused: Dict[str, Any] = {}
         try:
-            claimed = write_receipt(drive_root, task_id, receipt, claim=True)
+            claimed = write_receipt(drive_root, task_id, receipt, claim=True, refused=refused)
         except Exception as exc:
             return {"refused": "merge_intent_unwritable", "detail": f"{type(exc).__name__}: {exc}; nothing was merged"}
+        if refused:
+            return {"refused": "continuation_refused", "detail": (
+                f"receipt {continue_receipt_id} cannot be continued: {refused['why']}; nothing was merged")}
         if claimed["receipt_id"] != receipt["receipt_id"]:
-            prior = claimed  # another caller won; this caller never sends a merge
+            prior = claimed  # another caller won or the decision already has its request; this one sends nothing
     if prior is not None:
-        accepted = bool((prior.get("effect") or {}).get("ok"))
-        outcome = _outcome(pr, gh_api, own_effect_ok=accepted,
-                           effect_definite=(prior.get("effect") or {}).get("failure") in NO_EFFECT)
+        outcome = _outcome(pr, gh_api, prior.get("effect") or {})
         if outcome["status"] == "merged":
             historical = prior.get("outcome") or {}
             outcome["attribution"] = (historical.get("attribution", "unproven")
@@ -946,19 +1127,21 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
         recovered = dict(prior, outcome=outcome, observed_after=observed, state="settled")
         recovered["launch_operation_ids"] = list(dict.fromkeys(
             [*(prior.get("launch_operation_ids") or []), *([operation_id] if operation_id else [])]))
-        return {**_finish(ctx, gh, gh_api, drive_root, task_id, recovered), "readback_only": True,
-                "prior_status": str((prior.get("outcome") or {}).get("status") or "")}
-    args = ["pr", "merge", str(number), f"--{method}", "--match-head-commit", expected]
-    body = None
-    if method != "rebase":
-        args += ["--body-file", "-"]
-        body = (_BODY_BLOCK_RE.sub("", str(pr.get("body") or "")).rstrip()
-                + "\n\n" + commit_summary(receipt["qualification"]))
-    res = gh(args, timeout=120, input_data=body)
+        later = next((r["receipt_id"] for r in mine if r.get("continues") == prior["receipt_id"]), "")
+        return _repeat({**_finish(ctx, gh, gh_api, drive_root, task_id, recovered), "readback_only": True,
+                        "prior_status": str((prior.get("outcome") or {}).get("status") or ""),
+                        **({"rejoined": True} if base is not None else {}),
+                        **({"continued_by": later} if later else {})}, mine)
+    body = None if method == "rebase" else (_BODY_BLOCK_RE.sub("", str(pr.get("body") or "")).rstrip()
+                                            + "\n\n" + commit_summary(receipt["qualification"]))
+    res = send(["api", f"repos/{target.group(2)}/{target.group(3)}/pulls/{number}/merge", "--hostname",
+                target.group(1), "--method", "PUT", "--input", "-"], timeout=120, input_data=json.dumps(
+        {"sha": expected, "merge_method": method, **({"commit_message": body} if body is not None else {})}))
+    ok = bool(getattr(res, "ok", False))
     receipt.update(state="effect_attempted", effect={
-        "ok": bool(getattr(res, "ok", False)), "exit_code": getattr(res, "exit_code", None),
-        "http_status": getattr(res, "http_status", None), "failure": str(getattr(res, "failure", "") or ""),
-        "output": str(getattr(res, "text", "") or "")[:600]})
+        "ok": ok, "exit_code": getattr(res, "exit_code", None), "http_status": getattr(res, "http_status", None),
+        "failure": str(getattr(res, "failure", "") or ""), "output": str(getattr(res, "text", "") or "")[:600],
+        **({"merge_sha": _sha(res.text)} if ok else {})})
     superseded: Dict[str, Any] = {}  # an observer may have published while the request was in flight
     try:
         write_receipt(drive_root, task_id, receipt, superseded=superseded)
@@ -966,6 +1149,5 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
         pass  # the durable intent retains unknown custody
     after = _read_pr(gh, number)
     receipt.update(state="settled", observed_after=_observed(after) if after else {},
-                   outcome=_outcome(after, gh_api, own_effect_ok=receipt["effect"]["ok"],
-                                    effect_definite=receipt["effect"]["failure"] in NO_EFFECT))
-    return _finish(ctx, gh, gh_api, drive_root, task_id, receipt, projected=bool(superseded))
+                   outcome=_outcome(after, gh_api, receipt["effect"], continued=base is not None))
+    return _repeat(_finish(ctx, gh, gh_api, drive_root, task_id, receipt, projected=bool(superseded)), mine)

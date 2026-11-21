@@ -232,12 +232,12 @@ def test_review_exempt_revert_keeps_child_authority(tmp_path, monkeypatch, const
 
 
 def test_pull_uses_the_same_selected_binding_as_other_generic_vcs(tmp_path, monkeypatch):
-    from ouroboros.tools import git as git_tools
+    from ouroboros.tools import git_vcs_ops
 
     registry, _ctx, system, project = _registry(tmp_path)
     seen = []
     monkeypatch.setattr(
-        git_tools,
+        git_vcs_ops,
         "_ff_pull",
         lambda repo: seen.append(pathlib.Path(repo)) or "pull simulated",
     )

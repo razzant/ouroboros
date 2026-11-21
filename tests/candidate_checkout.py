@@ -36,6 +36,7 @@ import tempfile
 import urllib.request
 
 from ouroboros.test_environment import retain_tree, retention_markers
+from ouroboros.utils import file_identity
 
 
 # Served from the candidate's own web/ directory, and read back through the
@@ -206,7 +207,7 @@ def _read(root: Path, name: str):
     with path.open("rb") as stream:
         content = stream.read()
         after = os.fstat(stream.fileno())
-    signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    signature = file_identity  # its change stamp is the one fstat and lstat share on Windows too
     named_after = path.lstat()
     # Windows path stat adds execute bits by filename; fstat has no filename.
     # Keep descriptor identity, but compare modes only between the two path stats.

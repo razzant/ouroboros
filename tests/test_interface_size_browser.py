@@ -1,4 +1,4 @@
-"""Settings → Appearance → Interface size on the real SPA (owner 23.10: one slider, smaller than 90 % too).
+"""Settings › Appearance › Interface size on the real SPA (owner 23.10: one slider, smaller than 90 % too).
 
 Static-server fixture with synthetic API rows (test_subscription_setup_browser); no runtime starts. Three surfaces:
 a browser on a computer (the slider gives way to the browser's own zoom keys), the desktop app (a recorder stands in
@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_settings, settings_page, top_path
 from tests.test_design_system_gate_browser import open_nav, rest, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
@@ -36,9 +37,14 @@ FACTS = """() => {
 
 def _appearance(page):
     open_nav(page, 'settings')
-    page.locator('#page-settings [data-settings-tab="appearance"]').click()
+    open_settings(page, 'appearance')
     page.locator('[data-interface-size]').scroll_into_view_if_needed()
     rest(page)
+
+
+def _shown_level(page):
+    """The Settings page on screen now: the scroller that holds its controls."""
+    return settings_page(page, top_path(page))
 
 
 def _slide_to(page, value):
@@ -192,7 +198,7 @@ def test_window_capability_facts_survive_the_real_settings_flow(subscription_ui,
             assert not facts['rowHidden'] and facts['value'] == '80', facts
             assert facts['note'].startswith('For this window;'), facts
             setup_browser.capture(page, f'window-facts-retained-{mode}-{theme}')
-        assert page.locator('#page-settings .settings-scroll').evaluate(
+        assert _shown_level(page).evaluate(
             'e => e.scrollWidth <= e.clientWidth + 1'), 'the actual Settings scroller contains its controls'
         forbidden = {'/api/settings', '/api/update/prepare', '/api/update/apply', '/api/command'}
         assert not any(path in forbidden for path, _ in subscription_ui['posts']), \
@@ -236,8 +242,9 @@ RACE_BRIDGE = """(() => {
             return {available: true, status: 'authorized', platform: 'macos', reason: ''}; },
     }};
 })();"""
-LINES = """() => ({storage: document.querySelector('#page-settings [data-shell-storage-status]').textContent,
-    notify: document.querySelector('#page-settings [data-notify-status]').textContent})"""
+# The storage line stands on Appearance, the notifier's on Notifications: a page not on screen says ''.
+LINES = """() => ({storage: document.querySelector('#page-settings [data-shell-storage-status]')?.textContent ?? '',
+    notify: document.querySelector('#page-settings [data-notify-status]')?.textContent ?? ''})"""
 # What the next chat frame would carry: the page's own controller (the same `ouroInterfaceSize`), read at send time.
 SENT_SIZE = """async () => {
     const before = window.ouroInterfaceSize;
@@ -291,6 +298,7 @@ def test_window_fact_races_keep_the_windows_newest_answer(subscription_ui, theme
             assert lines == answered, lines
             assert 'running without the app entry' in lines['storage'] and '6.82.0' not in lines['storage'], lines
         elif race == 'permission':
+            open_settings(page, 'notifications')
             page.wait_for_function("() => document.querySelector('#page-settings [data-notify-status]')"
                                    ".textContent.includes('has not been asked yet')")
             page.evaluate("() => { window.__reads = 'hold'; dispatchEvent(new Event('pywebviewready')); }")
@@ -322,7 +330,7 @@ def test_window_fact_races_keep_the_windows_newest_answer(subscription_ui, theme
             page.wait_for_function(note, arg='For this window;')
             assert page.evaluate('window.__sizes') == [120, 120]
             assert page.evaluate(SENT_SIZE) == {'size': 120, 'same': True}
-        assert page.locator('#page-settings .settings-scroll').evaluate(
+        assert _shown_level(page).evaluate(
             'e => e.scrollWidth <= e.clientWidth + 1'), 'the actual Settings scroller contains its controls'
         forbidden = {'/api/settings', '/api/update/prepare', '/api/update/apply', '/api/command'}
         assert not any(path in forbidden for path, _ in subscription_ui['posts']), \

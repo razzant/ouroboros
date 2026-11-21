@@ -1193,7 +1193,7 @@ def test_memory_view_main_names_the_bound_room_and_the_project_task_sees_its_row
                                         "task_id": "task-7", "ts": "2026-09-01T00:01:00+00:00"})
 
     _a, _b, main_ctx, _cap = blocks(env, mem, {"id": "main-turn", "chat_id": 1})
-    assert "] plain-main" in section(main_ctx, "## This room (Main)")
+    assert "] plain-main" in section(main_ctx, "## This room (Main [chat_id=1])")
     assert "bound-task-row" not in main_ctx
     others = section(main_ctx, "## Other conversations")
     assert f"### Project Promoted [chat_id={pchat}]" in others and "; host; task task-7] " in others  # a task line
@@ -2551,14 +2551,14 @@ def test_promote_emission_row_carries_the_owner_message_id(tmp_path, monkeypatch
 
 
 def _steer_refusal(tmp_path, monkeypatch, *, running: dict, chat_id: int = 1):
-    """Drive one refused steer and return (receipt kwargs, owner messages)."""
+    """Drive one refused steer and return (receipt kwargs, owner messages); no bridge: the row is the carrier."""
     import supervisor.events as events_mod
     from supervisor.steering import _handle_steer_task
 
     receipts: list = []
     sent: list = []
     monkeypatch.setattr(events_mod, "_emit_routing_receipt",
-                        lambda ctx, evt, **kwargs: receipts.append(kwargs) or {})
+                        lambda ctx, evt, **kwargs: receipts.append(kwargs) or {"routing_notice_carrier": "system"})
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path, RUNNING=running, PENDING=[],
         get_chat_agent=lambda: None,

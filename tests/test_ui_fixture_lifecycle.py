@@ -577,7 +577,147 @@ def test_owner_restart_wait_keeps_the_servers_log_past_its_case(fixture_probe, t
     assert (kept[0] / "server-stdio.log").read_bytes() == log
 
 
-# test_widget_esm_browser's network server: a state read without an answer is no verdict yet.
+# keep_startup_log's exits: a failure copies the log; every exit leaves as it came, the rest without I/O.
+
+class _UnknownExit(BaseException):
+    """An exit the keeper has no name for."""
+
+
+def _stopped_startup(tmp_path):
+    root = tmp_path / "case"
+    (root / "data" / "logs").mkdir(parents=True)
+    (root / "server-stdio.log").write_bytes(b"manager child traceback\n")
+    (root / "data" / "logs" / "supervisor.jsonl").write_bytes(b'{"event": "boot"}\n')
+    return root
+
+
+@pytest.mark.parametrize("raised, keeps", [
+    (lambda: RuntimeError("readiness wait failed"), True),
+    (lambda: pytest.fail.Exception("Timeout (>180.0s) from pytest-timeout."), True),
+    (lambda: pytest.xfail.Exception("an expected failure"), False),
+    (lambda: pytest.skip.Exception("not here"), False),
+    (lambda: pytest.exit.Exception("stop the session"), False),  # pytest.exit: an Exception, still no failure
+    (KeyboardInterrupt, False), (SystemExit, False), (GeneratorExit, False),
+    (lambda: __import__("asyncio").CancelledError(), False), (_UnknownExit, False),
+], ids=["error", "pytest-failure", "xfail", "skip", "pytest-exit", "interrupt", "exit", "generator-close", "cancelled",
+        "unknown"])
+def test_only_a_failure_keeps_the_startup_log_and_every_exit_leaves_unchanged(tmp_path, monkeypatch, raised, keeps):
+    from ouroboros import test_evidence
+
+    root = _stopped_startup(tmp_path)
+    monkeypatch.setenv(EVIDENCE_ENV, str(tmp_path / "evidence"))
+    io = []
+    for name in ("diagnostic_directory", "report_diagnostic", "diagnostics_incomplete", "preview_file"):
+        monkeypatch.setattr(test_evidence, name, lambda *args, _real=getattr(test_evidence, name), _name=name, **kw:
+                            io.append(_name) or _real(*args, **kw))
+    error = raised()
+
+    def wait_for_readiness():
+        raise error
+
+    with pytest.raises(type(error)) as caught:
+        with test_evidence.keep_startup_log(root, "server-stdio.log"):
+            wait_for_readiness()
+    # The very exception, still pointing at where it was raised.
+    assert caught.value is error and caught.traceback[-1].name == "wait_for_readiness"
+    kept = sorted((tmp_path / "evidence").rglob("*")) if keeps else []
+    if keeps:
+        assert "report_diagnostic" in io
+        log = next(path for path in kept if path.name == "server-stdio.log")
+        assert log.read_bytes() == b"manager child traceback\n"
+        assert (log.parent / "data" / "logs" / "supervisor.jsonl").read_bytes() == b'{"event": "boot"}\n'
+        assert (log.parent / test_evidence.PUBLISHED_DIAGNOSTICS_MARKER).is_file(), "its folder, published"
+    else:
+        assert io == [] and not (tmp_path / "evidence").exists()
+
+
+@pytest.mark.parametrize("fault", ["unwritable-evidence", "interrupted-copy"])
+def test_a_failed_or_interrupted_export_never_replaces_the_failure_or_the_interruption(tmp_path, monkeypatch, fault):
+    from ouroboros import test_evidence
+
+    root = _stopped_startup(tmp_path)
+    (tmp_path / "evidence").write_text("a file where the run's evidence should be", encoding="utf-8")
+    monkeypatch.setenv(EVIDENCE_ENV, str(tmp_path / "evidence"))
+    if fault == "interrupted-copy":
+        monkeypatch.setenv(EVIDENCE_ENV, str(tmp_path / "writable"))
+
+        def interrupt(*_args):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(test_evidence.shutil, "copyfile", interrupt)
+    failure = pytest.fail.Exception("Timeout (>3.0s) from pytest-timeout.")
+    with pytest.raises(KeyboardInterrupt if fault == "interrupted-copy" else type(failure)) as caught:
+        with test_evidence.keep_startup_log(root, "server-stdio.log"):
+            raise failure
+    try:
+        if fault == "interrupted-copy":  # the person's stop wins, and the failure it cut short stays attached
+            assert caught.value.__context__ is failure and not (root / RETENTION_MARKER).exists()
+        else:  # the original goes on; the case's tree holds what could not be exported
+            assert caught.value is failure
+            assert "test diagnostics incomplete" in (root / RETENTION_MARKER).read_text(encoding="utf-8")
+    finally:
+        (root / RETENTION_MARKER).unlink(missing_ok=True)  # this test's synthetic hold
+
+
+_TIMED_OUT_READINESS = '''
+import os, signal, time
+import pytest
+from ouroboros import test_evidence
+from tests import test_ui_smoke_playwright as ui
+from tests.test_ui_fixture_lifecycle import fixture_probe, outer_evidence, source  # noqa: F401  the real fixture
+
+RUN = os.environ[test_evidence.EVIDENCE_ENV]  # this session's launcher run, before the probe replaces it
+
+
+@pytest.mark.timeout({timeout}, method="signal", func_only=True)  # 0: no timer, so only the interruption ends it
+def test_readiness_wait(fixture_probe, monkeypatch):
+    monkeypatch.setenv(test_evidence.EVIDENCE_ENV, RUN)  # a real case's export goes to the run, as here
+
+    def never_ready(*_args, **_kwargs):
+        if {scenario!r} == "interrupt":
+            os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(120)
+
+    monkeypatch.setattr(ui, "_wait_supervisor_ready", never_ready)
+    fixture_probe.open()
+'''
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGALRM"), reason="pytest-timeout's signal method needs SIGALRM")
+@pytest.mark.parametrize("scenario, exit_status", [("signal-timeout", 1), ("interrupt", 2)])
+def test_a_real_signal_timeout_in_the_fixtures_readiness_wait_keeps_its_log_past_the_release(
+        tmp_path, scenario, exit_status):
+    """#2716 at its process boundary: a nested session under scripts/safe_test.py whose real UI fixture (the probe's
+    sleeper tree) never becomes ready. pytest-timeout's signal method raises its Failed inside the wait; the log
+    reaches the launcher's run and outlives the released scratch while the timeout stays the reported failure.
+    A real SIGINT in the same wait leaves without a copy."""
+    from ouroboros.test_evidence import diagnostic_directory
+
+    suite = tmp_path / "suite"
+    (suite / "tests").mkdir(parents=True)
+    (suite / "tests" / "test_readiness.py").write_text(_TIMED_OUT_READINESS.format(
+        scenario=scenario, timeout=10 if scenario == "signal-timeout" else 0), encoding="utf-8")
+    entry = tmp_path / "run.py"
+    entry.write_text(f"import os, sys\nsys.path.insert(0, {str(_REPO)!r})\nos.chdir({str(suite)!r})\n"
+                     "import pytest\nraise SystemExit(pytest.main(sys.argv[1:]))\n", encoding="utf-8")
+    evidence = diagnostic_directory(tmp_path / "evidence", "startup-timeout-" + scenario)
+    done = subprocess.run(
+        [sys.executable, "-I", "-S", str(_REPO / "scripts" / "safe_test.py"), "--evidence-dir", str(evidence), "--",
+         sys.executable, str(entry), "tests/", "-p", "tests.conftest", "-o", "addopts=", "--rootdir", str(suite),
+         "--confcutdir", str(suite), "-q", "--tb=short", "-p", "no:cacheprovider"],
+        cwd=_REPO, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    output = done.stdout + done.stderr
+    assert done.returncode == exit_status, output
+    run = Path(next(line.split(" ", 1)[1] for line in done.stderr.splitlines() if line.startswith("SAFE_TEST_EVIDENCE ")))
+    scratch = Path(done.stderr.strip().splitlines()[-1].removeprefix("SAFE_TEST_RELEASED "))
+    assert done.stderr.strip().splitlines()[-1].startswith("SAFE_TEST_RELEASED ") and not scratch.exists(), output
+    logs = list(run.glob("server-startup/*/server-stdio.log"))
+    if scenario == "interrupt":
+        assert "KeyboardInterrupt" in output and logs == []
+        return
+    # The timeout is still what failed, raised inside the fixture's start (where the keeper is).
+    assert "Timeout (>10.0s) from pytest-timeout" in output and "in start_server" in output and "1 failed" in output
+    assert [log.read_bytes().count(b"fixture tree stderr") for log in logs] == [1]
 
 _READY = {"supervisor_ready": True, "supervisor_error": None}
 _FAILED = {"supervisor_ready": False, "supervisor_error": "Supervisor init failed: boom"}

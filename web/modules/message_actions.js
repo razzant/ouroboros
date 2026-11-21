@@ -72,6 +72,11 @@ export function createMessageActions() {
 }
 
 let shared = null;
+// What a host row passes on (Share): an Ouroboros message's own words, exactly as its Copy writes them, or a living
+// card's description, and its room's hold on what an action opens over it (chat.js and chat_media.js record them as
+// they build the bubble).
+const SOURCES = new WeakMap();
+const holdOf = (hold) => (typeof hold === 'function' ? hold : null);
 
 /** The page's one registry. */
 export function getMessageActions() {
@@ -79,20 +84,48 @@ export function getMessageActions() {
     return shared;
 }
 
+/** Record `words` as the source an Ouroboros message `bubble` passes on (Share), and `hold(close)`: its room's own
+ * hold (chat_media.js holdTransient) that runs `close` when the room closes what it opened, returning the release.
+ * Only the host's own rows call it. */
+export function recordAnswerWords(bubble, words, hold = null) {
+    if (bubble && words) SOURCES.set(bubble, { words: String(words), card: null, hold: holdOf(hold) });
+}
+
+/** Record a living card `bubble` as a source Share passes on: `describe()` answers the card as it is now, `{id,
+ * revision, title, words, node}` (chat_cards.js keeps them; `node` is its drawn body, read, never changed), and
+ * `hold(close)` is its room's hold, as for an answer. Only the host's own card rows call it. */
+export function recordCardSource(bubble, describe, hold = null) {
+    if (bubble && typeof describe === 'function') SOURCES.set(bubble, { words: '', card: describe, hold: holdOf(hold) });
+}
+
+function cardOf(entry) {
+    try {
+        const card = entry?.card?.();
+        return card?.id ? card : null;
+    } catch { return null; }
+}
+
 /**
- * What an action sees of a saved bubble: its address, its author's role, its task, its plain words and its content
- * node (read it, never change it). Null for a bubble the host has not saved (no row address).
+ * What an action sees of a saved bubble: its address, its author's role, its task, its plain words, its content
+ * node (read it, never change it) and, for an Ouroboros message, `answerWords`: its exact source as Copy writes it
+ * ('' for any other row), or for a living card, `card`: what `recordCardSource` describes (null for any other row);
+ * with `holdTransient`, its room's hold for an overlay opened from either (null for any other).
+ * Null for a bubble the host has not saved (no row address).
  */
 export function messageRow(bubble) {
     const address = bubble?.dataset?.rowAddress || '';
     if (!address) return null;
     const content = bubble.querySelector(':scope > .message');
+    const source = SOURCES.get(bubble);
     return {
         address,
         role: ROLE_NAMES.find((name) => bubble.classList.contains(name)) || '',
         taskId: bubble.dataset.taskId || '',
         text: String(content?.textContent || bubble.dataset.rowWords || '').trim(),  // a living card: its fallback words
         content,
+        answerWords: source?.words || '',
+        card: cardOf(source),
+        holdTransient: source?.hold || null,
     };
 }
 

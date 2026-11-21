@@ -242,6 +242,27 @@ def test_history_source_pages_an_overlapping_lens_without_fetching_discarded_bod
     assert (replay, replay_before, replay_gaps) == (entries, before, gaps)
 
 
+def test_history_source_ends_an_older_page_at_its_byte_ceiling_on_a_whole_row(tmp_path):
+    """``byte_ceiling`` (chat search's page) ends a backward page once the stored rows read reach it, the crossing row
+    read whole, and the next page continues right below it; without it a page is exactly as before."""
+    from ouroboros.gateway.history_paging import HistorySource, RoomLens
+
+    rows = [{"chat_id": 100, "direction": "out", "text": ("x" * 900 if n % 5 == 2 else "y") + f" {n}"} for n in range(30)]
+    seed(tmp_path, live={"chat": rows})
+    ds.ensure(tmp_path)
+    source = HistorySource(tmp_path, "chat", RoomLens((("chat_id", 100),)))
+    assert source.older(source.upper, 7, lambda _: True) == source.older(source.upper, 7, lambda _: True, byte_ceiling=None)
+    read, before = [], source.upper
+    while before > 0:
+        entries, lower, _gaps = source.older(before, 1000, lambda _: True, byte_ceiling=1000)
+        sizes = [entry["_history_end"] - entry["history_position"]["offset"] for entry in entries]
+        assert sum(sizes) >= 1000 or lower == 0, sizes
+        assert sum(sizes[1:]) < 1000, "the page ends on the row that crossed the ceiling, read whole"
+        read = [entry["text"] for entry in entries] + read
+        before = lower
+    assert read == [row["text"] for row in rows], "every row once, none skipped or split"
+
+
 def test_selection_and_body_hydration_share_the_read_snapshot(tmp_path, monkeypatch):
     # WAL allows the second connection to commit while the reader keeps its snapshot.
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "WAL")

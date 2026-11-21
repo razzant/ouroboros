@@ -16,11 +16,11 @@ import pytest
 
 from ouroboros import working_checkpoint as wc
 from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, load_task_result, write_task_result
+from ouroboros.work_stop import INTERRUPTED_SELECTION, continuation_refusal, interrupted_selection
 from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_restart_retention import _pool_events, _queued
 from tests.worker_pool_support import affirm_ready
-
 
 
 def _working_run(root, workers, task_id, *, attempt=1, parent=""):
@@ -43,10 +43,10 @@ def _stop_and_boot(queue, workers, *, age_sec=0):
     """The application stops (its teardown kill), then the next generation boots."""
     workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
                          stop_source="server_shutdown", retain_saved_work=True)
-    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
     if age_sec:
         snap["ts"] = "2000-01-01T00:00:00+00:00"
-    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap))
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap), encoding="utf-8")
     workers.PENDING[:] = []
     workers.RUNNING.clear()
     return queue.restore_pending_from_snapshot()
@@ -88,7 +88,7 @@ def test_refused_return_reports_planned_and_saved_promises(tmp_path, monkeypatch
     assert recover_saved_running(workers.RUNNING.values(), tmp_path,
         transaction={promised: ["unsaved"]}, cause="restart") == []
     path = tmp_path / "logs/supervisor.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
     refused = [row for row in rows if row.get("type") == "restart_return_refused"]
     assert bool(refused) is (promised != "none")
     if refused:
@@ -129,6 +129,251 @@ def test_quit_keeps_running_work_and_all_accepted_queue_held_for_resume(tmp_path
     assert rows["saved-root"]["_working_recovery"]["source_ref"], "it continues its frozen state"
     assert queue.resume_budget_paused_task("queued")["ok"]
     assert budget_hold_fact(rows["queued"]) is None
+
+
+RESUMED = "resumed-child"
+
+
+def _ended_work(root):
+    """The work the helper served is over: its root completed on its own."""
+    write_task_result(root, "ended-parent", "running", chat_id=0, root_task_id="ended-parent", delegation_role="root")
+    write_task_result(root, "ended-parent", "completed", result="done")
+
+
+def _resume_and_run(root, queue, state, workers, monkeypatch):
+    """The owner's Resume of the held helper, the real assignment pass to one inert pooled worker, and the dispatched
+    attempt's loop: it takes what it was handed (its exact grant, else its saved working state) and saves its own work.
+    Only that worker's inert handle can be killed; no operating-system PID is used."""
+    import queue as stdqueue
+
+    from ouroboros import budget_pause
+    from supervisor import worker_pool_lifecycle
+    from tests.test_budget_pause_lineage import _consume
+    from tests.test_owner_wait_restart import InertProcess
+
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    assert queue.resume_budget_paused_task(RESUMED)["ok"]
+    commands, proc = stdqueue.Queue(), InertProcess()
+    workers.WORKERS[0] = affirm_ready(workers.Worker(0, proc, commands))
+    monkeypatch.setattr(workers, "repo_writer_task_allowed", lambda _task: True)
+
+    def kill_inert(pid, **_kwargs):
+        assert pid == proc.pid
+        proc.terminate()
+
+    monkeypatch.setattr(workers, "kill_worker_tree", kill_inert)
+    monkeypatch.setattr(worker_pool_lifecycle, "kill_worker_tree", kill_inert)
+    workers.assign_tasks()
+    launched = commands.get_nowait()
+    assert launched["id"] == RESUMED and RESUMED in workers.RUNNING
+    ctx, limit = _loop_ctx(root, RESUMED, attempt=launched["_attempt"])
+    ctx.root_task_id = "ended-parent"
+    if isinstance(launched.get("_budget_pause_resume"), dict):
+        _consume(monkeypatch, ctx, limit, launched["_budget_pause_resume"])
+        assert budget_pause.budget_pause_row(root, RESUMED)["grant"]["consumed_at"]
+    else:
+        assert wc.load_recovery(ctx, launched["_working_recovery"])
+        wc.consume_recovery(ctx, launched["_working_recovery"])
+    wc.save_round(limit, "pre_effect")
+    return launched, limit
+
+
+def _resumed_helper_of_ended_work(root, queue, state, workers, monkeypatch, *, door):
+    """A helper of work that ended, running on the owner's explicit Resume when the application stops: of its exact
+    budget Pause (``grant``), or of the saved-work hold an earlier stop left it in (``saved``). Nothing is stamped."""
+    from tests._budget_pause_exact_helpers import _parked
+
+    _ended_work(root)
+    lineage = {"parent_task_id": "ended-parent", "delegation_role": "subagent"}
+    if door == "grant":
+        _parked(root, monkeypatch, task_id=RESUMED, root_task_id="ended-parent", extra=lineage)
+    else:
+        _working_run(root, workers, RESUMED, parent="ended-parent")
+        workers.RUNNING[RESUMED]["task"].update(lineage)
+        _stop_and_boot(queue, workers)  # its work saved, held for Resume; the owner's Resume comes before any sweep
+    return _resume_and_run(root, queue, state, workers, monkeypatch)
+
+
+def _kept_resume(root, row, door, attempt):
+    """The accepted Resume the boot hold over ``attempt``'s saved work still answers to, read where each door keeps it."""
+    from ouroboros import budget_pause
+
+    assert row["_working_recovery"]["source_task_id"] == RESUMED and row["_working_recovery"]["from_attempt"] == attempt
+    if door == "saved":
+        assert interrupted_selection(row)["selected_by"] == "owner"
+    else:  # the consumed grant on its durable pause, the selection carrier gone with the exact handoff
+        assert interrupted_selection(row) == {}
+        assert budget_pause.budget_pause_row(root, RESUMED)["state"] == budget_pause.STATE_RESUMED
+
+
+@pytest.mark.parametrize("door", ["grant", "saved"])
+@pytest.mark.parametrize("intent", ["none", "stale_closure", "owner_stop_joined"])
+def test_a_helper_whose_resume_won_survives_stop_boot_and_the_next_sweep(tmp_path, monkeypatch, intent, door):
+    """#3047: the app stopped while a resumed helper of ended work ran; its boot hold is no abandoned park."""
+    from ouroboros import cancel_intents as ci
+    from supervisor.ended_work_helpers import WORK_FINISHED, close_abandoned_helpers
+    from supervisor.task_lifecycle import sweep_cancel_intents
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    launched, _limit = _resumed_helper_of_ended_work(tmp_path, queue, state, workers, monkeypatch, door=door)
+    if intent != "none":  # minted while the row still read parked, before custody saw the Resume's worker
+        ci.request_cancel(tmp_path, RESUMED, source=WORK_FINISHED, reason="the work it helped has ended")
+    if intent == "owner_stop_joined":
+        ci.request_cancel(tmp_path, RESUMED, source="http_single", reason="Stop", requested_by="owner")
+
+    _stop_and_boot(queue, workers)
+    assert close_abandoned_helpers() == []
+    outcomes = sweep_cancel_intents(now=time.time() + 3600)
+
+    row = load_task_result(tmp_path, RESUMED)
+    returned = next((task for task in workers.PENDING if task["id"] == RESUMED), None)
+    assert not ci.active_intent(tmp_path, RESUMED)
+    if intent == "owner_stop_joined":
+        assert row["status"] == "cancelled" and returned is None and row["followup_stop"]  # the joined Stop, carried out
+        return
+    assert outcomes == ({} if intent == "none" else {RESUMED: "not_found"})
+    assert row["status"] == STATUS_SCHEDULED
+    assert returned["_working_recovery"]["source_ref"] and budget_hold_fact(returned)["reason"] == HOLD_SAVED_WORK
+    _kept_resume(tmp_path, returned, door, launched["_attempt"])
+    assert close_abandoned_helpers() == [] and sweep_cancel_intents(now=time.time() + 7200) == {}  # not just one tick
+    _stop_and_boot(queue, workers)  # held, it waits through a further stop and boot as well
+    returned = next(task for task in workers.PENDING if task["id"] == RESUMED)
+    assert close_abandoned_helpers() == [] and sweep_cancel_intents(now=time.time() + 7200) == {}
+    assert queue.resume_budget_paused_task(RESUMED)["ok"] and budget_hold_fact(returned) is None
+
+
+def test_a_saved_work_resume_stopped_before_its_dispatch_is_not_abandoned(tmp_path, monkeypatch):
+    """The owner resumed the held helper and the application stopped again before any worker took it: restore holds
+    that accepted row for Resume again, and the selection its hold replaced stays beside the same saved source."""
+    from supervisor.ended_work_helpers import close_abandoned_helpers
+    from supervisor.task_lifecycle import sweep_cancel_intents
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _ended_work(tmp_path)
+    _working_run(tmp_path, workers, RESUMED, parent="ended-parent")
+    workers.RUNNING[RESUMED]["task"]["delegation_role"] = "subagent"
+    _stop_and_boot(queue, workers)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    assert queue.resume_budget_paused_task(RESUMED)["ok"]
+    _stop_and_boot(queue, workers)
+    returned = next(task for task in workers.PENDING if task["id"] == RESUMED)
+    assert budget_hold_fact(returned)["reason"] == HOLD_SAVED_WORK
+    assert close_abandoned_helpers() == [] and sweep_cancel_intents(now=time.time() + 3600) == {}
+    assert load_task_result(tmp_path, RESUMED)["status"] == STATUS_SCHEDULED
+    assert returned["_working_recovery"]["from_attempt"] == 1 and interrupted_selection(returned)["selected_by"] == "owner"
+
+
+def test_a_stop_hold_without_its_attempts_resume_still_closes_with_the_ended_work(tmp_path, monkeypatch):
+    """A helper that was only running when its work ended, which nobody resumed, supplies no accepted work."""
+    from supervisor.ended_work_helpers import WORK_FINISHED, close_abandoned_helpers
+    from supervisor.task_lifecycle import sweep_cancel_intents
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _ended_work(tmp_path)
+    _working_run(tmp_path, workers, RESUMED, parent="ended-parent")
+    workers.RUNNING[RESUMED]["task"]["delegation_role"] = "subagent"
+    _stop_and_boot(queue, workers)
+    held = next(t for t in workers.PENDING if t["id"] == RESUMED)
+    assert budget_hold_fact(held)["reason"] == HOLD_SAVED_WORK and interrupted_selection(held) == {}
+
+    assert close_abandoned_helpers() == [RESUMED]
+    assert sweep_cancel_intents(now=time.time() + 3600) == {RESUMED: "cancelled"}
+    row = load_task_result(tmp_path, RESUMED)
+    assert row["status"] == "cancelled" and row["cancel_origin"]["source"] == WORK_FINISHED
+    assert row["pause_at_close"]["_budget_pause_hold"]["reason"] == HOLD_SAVED_WORK
+
+
+def test_a_grant_consumed_by_a_later_attempt_than_the_saved_work_is_no_accepted_work(tmp_path, monkeypatch):
+    """The consumed grant answers only for the attempt whose saved work the stop interrupted. The real grant-door
+    Resume, dispatch and consumption, then the one stamped field changed (the grant now read as a later attempt's):
+    that supplies no accepted work, so the helper closes with its ended work (the clause's negative control)."""
+    from ouroboros import budget_pause
+    from supervisor.ended_work_helpers import WORK_FINISHED, close_abandoned_helpers
+    from supervisor.task_lifecycle import sweep_cancel_intents
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    launched, _limit = _resumed_helper_of_ended_work(tmp_path, queue, state, workers, monkeypatch, door="grant")
+    consumed = budget_pause.budget_pause_row(tmp_path, RESUMED)
+    assert 0 < consumed["task_attempt"] <= launched["_attempt"] and consumed["grant"]["consumed_at"]
+    budget_pause.set_budget_pause(tmp_path, RESUMED, {**consumed, "task_attempt": launched["_attempt"] + 6})
+    _stop_and_boot(queue, workers)
+    held = next(task for task in workers.PENDING if task["id"] == RESUMED)
+    assert budget_hold_fact(held)["reason"] == HOLD_SAVED_WORK and interrupted_selection(held) == {}
+
+    assert close_abandoned_helpers() == [RESUMED]
+    assert sweep_cancel_intents(now=time.time() + 3600) == {RESUMED: "cancelled"}
+    row = load_task_result(tmp_path, RESUMED)
+    assert row["status"] == "cancelled" and row["cancel_origin"]["source"] == WORK_FINISHED
+
+
+@pytest.mark.parametrize("door", ["grant", "saved"])
+def test_a_newer_pause_of_the_resumed_attempt_ends_its_consumed_resume(tmp_path, monkeypatch, door):
+    """The owner's Resume was consumed (its exact grant, or its saved-work selection, which the park copies along),
+    then the same attempt paused again for money (the loop's real pause and the supervisor's park): that newer Pause
+    waits for its own Resume, so after the next stop the helper closes with its ended work, its newer pause kept
+    beside the closed result."""
+    from ouroboros import budget_pause
+    from supervisor.ended_work_helpers import WORK_FINISHED, close_abandoned_helpers
+    from supervisor.events_budget import install_exact_budget_pause
+    from supervisor.task_lifecycle import sweep_cancel_intents
+    from tests._budget_pause_exact_helpers import _fast_hold, _quiet_external, _supervisor_ctx
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _launched, limit = _resumed_helper_of_ended_work(tmp_path, queue, state, workers, monkeypatch, door=door)
+    resumed = budget_pause.budget_pause_row(tmp_path, RESUMED)
+    _fast_hold(monkeypatch, budget_pause)
+    _quiet_external(monkeypatch, budget_pause)
+    with pytest.raises(budget_pause.BudgetPauseRequested):
+        budget_pause.request_pause(limit, rail=budget_pause.RAIL_GLOBAL_EXHAUSTED, scope="global",
+                                   reason_text="money gone again", root_task_id="ended-parent")
+    budget_pause.end_dispatch_fence(RESUMED)
+    newer = budget_pause.budget_pause_row(tmp_path, RESUMED)
+    assert newer["pause_id"] != resumed.get("pause_id")
+    install_exact_budget_pause(_supervisor_ctx(tmp_path, workers, queue, [], []), RESUMED,
+                               budget_pause.exact_pause_marker(newer)["checkpoint"])
+    _stop_and_boot(queue, workers)
+
+    assert close_abandoned_helpers() == [RESUMED]
+    assert sweep_cancel_intents(now=time.time() + 3600) == {RESUMED: "cancelled"}
+    row = load_task_result(tmp_path, RESUMED)
+    assert row["status"] == "cancelled" and row["cancel_origin"]["source"] == WORK_FINISHED
+    assert row["pause_at_close"]["_budget_pause"]["checkpoint"]["pause_id"] == newer["pause_id"]
+
+
+@pytest.mark.parametrize("door", ["grant", "saved"])
+@pytest.mark.parametrize("joined_stop", [False, True])
+@pytest.mark.parametrize("stale_closure", [False, True])
+def test_a_resumed_helpers_later_stop_is_not_a_new_abandonment(tmp_path, monkeypatch, joined_stop, stale_closure, door):
+    """The selected work continues through its boot hold; a second application stop does not cancel that decision.
+    The owner's second Resume selects the saved-work hold; the real assignment and loop take it up before that stop."""
+    from ouroboros.cancel_intents import request_cancel
+    from supervisor.ended_work_helpers import WORK_FINISHED, close_abandoned_helpers
+    from supervisor.task_lifecycle import sweep_cancel_intents
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _resumed_helper_of_ended_work(tmp_path, queue, state, workers, monkeypatch, door=door)
+    _stop_and_boot(queue, workers)
+    assert close_abandoned_helpers() == []
+    launched, _limit = _resume_and_run(tmp_path, queue, state, workers, monkeypatch)
+    if stale_closure:
+        request_cancel(tmp_path, RESUMED, source=WORK_FINISHED)
+    if joined_stop:
+        request_cancel(tmp_path, RESUMED, source="http_single", requested_by="owner")
+    _stop_and_boot(queue, workers)
+    assert close_abandoned_helpers() == []
+    sweep_cancel_intents(now=time.time() + 3600)
+    row = load_task_result(tmp_path, RESUMED)
+    assert row["status"] == ("cancelled" if joined_stop else STATUS_SCHEDULED)
+    assert close_abandoned_helpers() == []
+    if not joined_stop:
+        returned = next(task for task in workers.PENDING if task["id"] == RESUMED)
+        _kept_resume(tmp_path, returned, "saved", launched["_attempt"])  # the newest Resume is the selection
 
 
 def test_a_saved_child_of_an_unsaved_interrupted_parent_is_never_held_alone(tmp_path, monkeypatch):
@@ -258,7 +503,10 @@ def test_runnable_saved_successor_waiting_for_capacity_follows_the_next_stop(tmp
     else:
         _stop_and_boot(queue, workers)
     [restored] = workers.PENDING
-    assert restored["_attempt"] == 2 and restored["_working_recovery"] == handoff
+    kept = {key: value for key, value in restored["_working_recovery"].items() if key != INTERRUPTED_SELECTION}
+    assert restored["_attempt"] == 2 and kept == handoff  # the same frozen source
+    # a Resume this stop interrupted before its dispatch stays beside that source (#3047)
+    assert bool(interrupted_selection(restored)) == (origin == "resumed" and door == "quit")
     ctx, _limit = _loop_ctx(tmp_path, "saved-root", attempt=2)
     assert wc.load_recovery(ctx, handoff)["working"]["boundary"] == "pre_effect"
     commands = stdqueue.Queue()
@@ -483,7 +731,7 @@ def test_a_managed_update_window_never_times_out_the_saved_work_it_returns(tmp_p
 
     def controls(task_id):
         path = _mailbox_path(tmp_path, task_id)
-        return [json.loads(line).get("kind") for line in mailbox_lines(path.read_text())] if path.exists() else []
+        return [json.loads(line).get("kind") for line in mailbox_lines(path.read_text(encoding="utf-8"))] if path.exists() else []
 
     for task_id in ("saved-a", "saved-b", "stopped"):  # slots 0, 1, 2; 25 min into a long tool call
         _working_run(tmp_path, workers, task_id)
@@ -561,7 +809,7 @@ def test_a_stop_keeps_each_saved_queue_time_through_restore_and_its_readers(tmp_
     ]
     workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
                          stop_source="server_shutdown", retain_saved_work=True)
-    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
     saved = {row["id"]: row for row in snap["pending"]}
     assert saved["ordinary"]["queued_at"] == _SAVED_QUEUE_TIMES["ordinary"], "serialized on the outer row"
     # An older writer kept the time only inside its task; another row kept it nowhere.
@@ -569,7 +817,7 @@ def test_a_stop_keeps_each_saved_queue_time_through_restore_and_its_readers(tmp_
     saved["nested"]["task"]["queued_at"] = _SAVED_QUEUE_TIMES["nested"]
     saved["legacy"].pop("queued_at")
     saved["legacy"]["task"].pop("queued_at", None)
-    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap))
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap), encoding="utf-8")
     workers.PENDING[:] = []
     workers.RUNNING.clear()
     queue.restore_pending_from_snapshot()
@@ -630,3 +878,123 @@ def test_the_saved_row_decoder_reads_the_outer_queue_time_first(outer, nested, e
 # R1 #1805 (``direct_pause.retain_direct_hold`` stamping a numeric ``queued_at`` on a failed inline park's
 # hold) is retired with the in-process park: a direct turn is a conversation-lane RUNNING row whose pause
 # the supervisor parks like any carried task's, so no hold of that kind is minted here any more.
+
+
+def _schedule_born(root, workers, task_id):
+    """A running work a schedule started: its row and its receipt say the occurrence was handed to a worker."""
+    occurrence = {"schedule_id": "daily-review", "token": "occ-1", "dispatch": "possible"}
+    task = workers.RUNNING[task_id]["task"]
+    task.update(metadata={"schedule_occurrence": occurrence}, admitted_dispatch="possible")
+    write_task_result(root, task_id, STATUS_RUNNING, chat_id=0, admitted_dispatch="possible", schedule_admission={
+        "token": "occ-1", "schedule_id": "daily-review", "dispatch": "possible", "task": {"id": task_id}})
+
+
+@pytest.mark.parametrize("case", ["unlaunched", "already-launched", "foreign-receipt"])
+def test_a_named_schedule_born_continuation_returns_by_itself(tmp_path, monkeypatch, case):
+    """#3192: once a scheduled work ran, its receipt says ``possible``; that is no evidence against returning the saved
+    step an acknowledged restart named, so it returns and is sent once, from its saved step. The other direction: a
+    named continuation whose next attempt is already recorded as launched, or whose receipt is not its own, is held,
+    never sent again."""
+    import queue as stdqueue
+
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.schedule_occurrence import restore_verdict
+    from tests.test_owner_wait_restart import InertProcess
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _working_run(tmp_path, workers, "digest")
+    _schedule_born(tmp_path, workers, "digest")
+    assert prepare_restart_returns(tmp_path, workers.RUNNING, workers.PENDING, transaction_id="tx-update") == {"digest"}
+    _ack(tmp_path, "tx-update")
+    if case == "already-launched":  # a launcher stamped the successor's attempt before the stop's restore read it
+        write_task_result(tmp_path, "digest", STATUS_RUNNING, chat_id=0, admitted_dispatch_attempt=2)
+    if case == "foreign-receipt":  # the receipt names another occurrence: the run's provenance is unknown
+        write_task_result(tmp_path, "digest", STATUS_RUNNING, chat_id=0, schedule_admission={
+            "token": "occ-other", "schedule_id": "daily-review", "dispatch": "possible", "task": {"id": "digest"}})
+
+    _stop_and_boot(queue, workers)
+    [row] = workers.PENDING
+    assert restore_verdict(row) != "replay", "the schedule's receipt still says the work ran"
+    commands = stdqueue.Queue()
+    workers.WORKERS[0] = affirm_ready(workers.Worker(0, InertProcess(), commands))
+    monkeypatch.setattr(workers, "repo_writer_task_allowed", lambda _task: True)
+    workers.assign_tasks()
+    if case != "unlaunched":
+        assert commands.empty() and not workers.RUNNING
+        held = continuation_refusal(row) or budget_hold_fact(row)
+        assert held["reason"] == "dispatch_outcome_unknown", held
+        return
+    assert budget_hold_fact(row) is None
+    sent = commands.get_nowait()
+    assert (sent["id"], sent["_attempt"], sent["_working_recovery"]["cause"]) == ("digest", 2, "restart")
+    assert commands.empty() and set(workers.RUNNING) == {"digest"} and not workers.PENDING
+
+
+@pytest.mark.parametrize("proof", ["unlaunched", "launched", "unreadable"])
+def test_the_continuation_proof_is_the_saved_steps_unlaunched_attempt(monkeypatch, caplog, proof):
+    """The proof a door names a queued continuation by and a named one returns past a schedule's ``possible`` by
+    (#3192): its saved step's next attempt never launched. A launched attempt or a read that fails proves nothing."""
+    from supervisor import task_admission
+    from supervisor.restart_retention import continues_saved_step
+
+    def granted(_task, _root):
+        if proof == "unreadable":
+            raise OSError("result unreadable")
+        return proof == "unlaunched"
+
+    monkeypatch.setattr(task_admission, "_working_resume_granted", granted)
+    assert continues_saved_step({"id": "digest", "_working_recovery": {}}, "/drive") is (proof == "unlaunched")
+    assert ("could not be proven" in caplog.text) is (proof == "unreadable")
+    assert continues_saved_step({"id": "digest"}, "/drive") is False  # no saved step: nothing to continue
+
+
+def test_a_late_naming_that_fails_names_nothing_and_does_not_raise(monkeypatch, caplog):
+    """The late step runs inside a door's stop: a failure is logged and leaves the door's own names to the next boot,
+    never an exception into the door (an update would take it for its own abort)."""
+    from types import SimpleNamespace
+
+    from supervisor import restart_retention
+
+    def unreadable(_root):
+        raise OSError("restart transaction unreadable")
+    monkeypatch.setattr(restart_retention, "_txn", lambda: SimpleNamespace(active_restart_transaction=unreadable))
+    assert restart_retention.name_late_returns("/drive", "tx-update") == set()
+    assert "Naming late work into restart tx-update did not finish" in caplog.text
+
+
+@pytest.mark.parametrize("door_named", [True, False], ids=["named-at-the-stop", "not-named"])
+def test_work_that_arrived_after_the_returns_were_named_returns_with_them(tmp_path, monkeypatch, door_named):
+    """#3192, 13.11: an update named its returns, then a running parent started a helper before the stop reached
+    its workers. Named into the same transaction once the workers are down (``name_late_returns``), a saved running
+    helper and a queued one return by themselves beside their parent; the earlier names stay. Not named (another
+    door's transaction is no authority), they are held for Resume as before."""
+    from ouroboros import delegate_recovery
+    from supervisor.restart_retention import name_late_returns, prepare_restart_returns
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _working_run(tmp_path, workers, "parent")
+    assert prepare_restart_returns(tmp_path, workers.RUNNING, workers.PENDING, transaction_id="tx-update") == {"parent"}
+    _working_run(tmp_path, workers, "late-run", parent="parent")
+    write_task_result(tmp_path, "late-queued", STATUS_SCHEDULED, chat_id=0)
+    workers.PENDING.append(_queued("late-queued", root_task_id="parent", parent_task_id="parent"))
+    workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server update.",
+                         stop_source="server_shutdown", retain_saved_work=True, preserve_pending=True)
+    named = name_late_returns(tmp_path, "tx-update" if door_named else "another-door")
+    transaction = delegate_recovery._read_restart_transaction(tmp_path, "tx-update")
+    late = {"late-run", "late-queued"}
+    assert named == ({"late-run"} if door_named else set())
+    assert (set(transaction["return_ids"]), set(transaction["queue_ids"])) == (
+        ({"parent", "late-run"}, {"late-queued"}) if door_named else ({"parent"}, set()))
+    _ack(tmp_path, "tx-update")
+    assert name_late_returns(tmp_path, "tx-update") == set(), "an acknowledged transaction is never extended"
+
+    workers.PENDING[:] = []
+    workers.RUNNING.clear()
+    queue.restore_pending_from_snapshot()
+    rows = {row["id"]: row for row in workers.PENDING}
+    assert set(rows) == {"parent"} | late and budget_hold_fact(rows["parent"]) is None
+    for task_id in late:
+        hold = budget_hold_fact(rows[task_id])
+        assert (hold is None) if door_named else hold["reason"] == HOLD_SAVED_WORK, (task_id, hold)

@@ -9,10 +9,17 @@ import { summarizeRoom } from '../modules/project_activity.js';
 import { roomStatusView } from '../modules/work_status.js';
 import { room } from './work_fixture.js';
 
-test('the owner move outranks everything and stands alone as the amber dot', () => {
-    for (const mark of ['moving', 'still', 'pause', 'ring', 'none']) {
+test('the owner move outranks everything: it tints moving work and stands alone as the amber dot elsewhere', () => {
+    assert.deepEqual(markView({ mark: 'moving', owner: true, unread: true, outcome: 'done' }), { shape: 'moving', hue: 'owner' });
+    for (const mark of ['still', 'pause', 'ring', 'none']) {
         assert.deepEqual(markView({ mark, owner: true, unread: true, outcome: 'done' }), { shape: 'dot', hue: 'owner' });
     }
+    // An aggregate (Ouroboros's picture) passes no shape while the owner's move stands: the lone dot.
+    assert.deepEqual(markView({ mark: 'none', owner: true }), { shape: 'dot', hue: 'owner' });
+    assert.deepEqual(markView({ owner: true, unread: true }), { shape: 'dot', hue: 'owner' });
+    // No owner's move: the marks are as before.
+    assert.deepEqual(markView({ mark: 'moving' }), { shape: 'moving', hue: 'ink' });
+    assert.deepEqual(markView({ mark: 'still' }), { shape: 'still', hue: 'ink' });
 });
 
 test('new messages tint the work shape, and are a crimson dot where nothing works', () => {
@@ -74,8 +81,9 @@ test('the owner move a server room lists reads the same on the bar and the sideb
         const listed = room(activity, { turn });
         const bar = roomStatusView({ room: listed, works: [] });
         const row = summarizeRoom(listed);
-        assert.deepEqual(markView({ mark: bar.mark, owner: bar.owner }), { shape: 'dot', hue: 'owner' }, activity);
-        assert.deepEqual(markView({ mark: row.mark, owner: row.owner }), { shape: 'dot', hue: 'owner' }, activity);
+        const owned = { shape: activity === 'working' ? 'moving' : 'dot', hue: 'owner' };
+        assert.deepEqual(markView({ mark: bar.mark, owner: bar.owner }), owned, activity);
+        assert.deepEqual(markView({ mark: row.mark, owner: row.owner }), owned, activity);
         const quiet = room(activity);
         assert.equal(roomStatusView({ room: quiet, works: [] }).owner, false, activity);
         assert.equal(summarizeRoom(quiet).owner, false, activity);
@@ -94,7 +102,17 @@ const PAINTS = [
     /\bdataset\.(?:shape|hue)\s*=(?!=)/, /setAttribute\(\s*['"`]data-(?:shape|hue)['"`]/,
     /class=\\?["']status-mark\b/, /className\s*=\s*['"`]status-mark\b/, /classList\.add\(\s*['"`]status-mark['"`]/,
 ];
-const MARK_PAINT = /(?:^|;|\{)\s*(color|background(?:-color|-image)?|border-color|fill|stroke|opacity|animation(?:-name)?|box-shadow)\s*:/;
+const MARK_PAINT = /(?:^|;|\{)\s*(color|background(?:-color|-image)?|border-color|fill|stroke|opacity|animation(?:-name)?|box-shadow)\s*:/g;
+// The one mark a sheet may ring: on a phone the places control's dot stands on Ouroboros's picture, and a ring in the
+// page's own background cuts the dot out of the picture (79fac1cf4/aa7528dcd, style.css
+// "html[data-layout=stack] .mobile-nav-toggle > .status-mark"). Only that exact declaration, only on that exact rule:
+// another shadow there, any other property it sets, or a ring elsewhere is still a paint.
+// The same dot on the picture of Ouroboros's card is ringed in the card's own fill (owner 15.11, 6A).
+const CUTOUTS = { 'style.css': {
+    'html[data-layout="stack"] .mobile-nav-toggle > .status-mark': '0 0 0 2px var(--bg-primary)',
+    '.nav-ouro-ava > .nav-ava-mark': '0 0 0 2px var(--nav-ouro-fill)',
+    '.nav-ouro:not(.active):hover .nav-ouro-ava > .nav-ava-mark': '0 0 0 2px var(--tone-quiet-hover), 0 0 0 2px var(--nav-ouro-fill)',
+} };
 
 /** The source without its comments, which may name what was retired and why. */
 function code(source) {
@@ -136,7 +154,11 @@ function violations({ scripts, sheets, pages }) {
         if (name === 'ui.css') continue;
         for (const rule of text.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
             if (!marked.test(rule[1])) continue;
-            const property = rule[2].match(MARK_PAINT);
+            const ring = CUTOUTS[name]?.[rule[1].trim()];
+            const shadows = rule[2].split(';').map((part) => part.split(':')).filter(([key]) => key.trim() === 'box-shadow')
+                .map(([, ...value]) => value.join(':').trim());
+            const cutout = Boolean(ring) && shadows.every((value) => value === ring);
+            const property = [...rule[2].matchAll(MARK_PAINT)].find((m) => !(cutout && m[1] === 'box-shadow'));
             if (property) found.push(`${name}: "${rule[1].trim()}" sets ${property[1]} on a mark`);
         }
     }
@@ -160,6 +182,10 @@ test('the ownership check sees a second painter, a painted mark and a retired na
             ['room.css', css('.rw-trigger .status-mark { margin-left: 4px; --mark-ink: red; }\n.x .status-mark i { background: red }')],
             ['old.css', css('/* .chat-live-typing was here */ .nav-unread-dot { color: red }')],
             ['quiz.css', css('.card[data-busy] .quiz-mark { color: gray } .card .quiz-mark { --mark-ink: gray }')],
+            ['style.css', css('html[data-layout="stack"] .mobile-nav-toggle > .status-mark { top: 4px; box-shadow: 0 0 0 2px var(--bg-primary); }\n'
+                + 'html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark { box-shadow: 0 0 0 2px red }\n'
+                + 'html[data-layout="stack"] .mobile-nav-toggle > .status-mark { box-shadow: 0 0 12px 4px red }')],
+            ['room2.css', css('html[data-layout="stack"] .mobile-nav-toggle > .status-mark { box-shadow: 0 0 0 2px red; color: red }')],
         ],
         pages: [],
     };
@@ -169,6 +195,9 @@ test('the ownership check sees a second painter, a painted mark and a retired na
         'modules/rogue.js: paints a mark /class=\\\\?["\']status-mark\\b/',
         'room.css: ".x .status-mark i" sets background on a mark',
         'quiz.css: ".card[data-busy] .quiz-mark" sets color on a mark',
+        'style.css: "html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark" sets box-shadow on a mark',
+        'style.css: "html[data-layout="stack"] .mobile-nav-toggle > .status-mark" sets box-shadow on a mark',
+        'room2.css: "html[data-layout="stack"] .mobile-nav-toggle > .status-mark" sets box-shadow on a mark',
     ]);
 });
 

@@ -589,24 +589,41 @@ def test_retry_refuses_typed_when_the_stored_prompt_diverges(tmp_path, fake_rout
                               root="/tmp/other-repo")
 
 
-def test_definite_refusal_retires_the_registration_it_orphaned(tmp_path, fake_route):
-    """A DEFINITE 4xx proves no run bound this registration, so the project this
-    start created is retired. Only then: an unknown outcome must never destroy state
-    a live run may still be using."""
+@pytest.mark.parametrize("stage", ["launch_fence", "answered_400"])
+def test_only_a_start_that_never_entered_its_post_retires_the_registration_it_orphaned(tmp_path, fake_route,
+                                                                                    monkeypatch, stage):
+    """A start the launch fence refused before its POST provably bound no run, so the project it created is
+    retired and its token dies. An engine 400 answering an entered POST is no such proof (#3138: an accepted
+    command can answer its own start with a 4xx): the registration and the token stay, the outcome unknown."""
+    from ouroboros import review_execution
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.owner_pause import OwnerPauseRefused
+    from ouroboros.review_execution import ReviewRouteUnavailable
 
     # This start registers the project itself (nothing pre-existing to reuse).
     fake_route.project_unregistered = True
-    fake_route.start_error = ClaudexorUnavailable("bad_request", "nope", status_code=400)
+    if stage == "launch_fence":
+        def fenced(*_args, **_kwargs):
+            raise OwnerPauseRefused("owner_pause_fenced")
+        monkeypatch.setattr(review_execution, "run_operation", fenced)
+    else:
+        fake_route.start_error = ClaudexorUnavailable("bad_request", "nope", status_code=400)
     state: dict = {}
-    with pytest.raises(ClaudexorUnavailable):
+    with pytest.raises((ClaudexorUnavailable, ReviewRouteUnavailable)):
         _run_session_directly(tmp_path, retry_state=state)
 
     gateway = fake_route.instances[-1]
     assert gateway.registrations == ["/tmp/fake-repo"]
-    assert gateway.removals == ["proj-new"], gateway.removals
-    # A definitely refused invocation is retired, never replayed.
-    assert "pending_invocation_id" not in state
+    [token] = [row["invocation_id"] for row in custody.custody_rows(tmp_path) if row["type"] == custody.START_REQUESTED]
+    fate = custody.invocation_record(tmp_path, token)["state"]
+    if stage == "launch_fence":  # a definitely unsent invocation is retired, never replayed
+        assert (gateway.removals, fate, "pending_invocation_id" in state) == (["proj-new"], "failed_definite", False)
+        assert gateway.start_requests == []
+    else:
+        assert (gateway.removals, fate, state.get("pending_invocation_id")) == ([], "pending", token)
+        failed = [r for r in custody.custody_rows(tmp_path) if r.get("type") == custody.START_FAILED]
+        assert [(r["definite"], r["project_retention_reason"]) for r in failed] == [
+            (False, "start_outcome_unknown_run_may_exist")]
 
 
 @pytest.mark.parametrize("code,status", [("daemon_unreachable", 0), ("daemon_busy", 503),

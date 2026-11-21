@@ -4,9 +4,9 @@ from __future__ import annotations
 import pytest
 
 from skills.unix_computer_use import macos_native as native
+from tests._unix_computer_use import mac, receipt
 from tests.test_unix_computer_use_element_act import FakeAX, deck
 from tests.test_unix_computer_use_one_process import Clock
-from tests.test_unix_computer_use_targeting import mac, receipt
 
 
 class ColdAX(FakeAX):

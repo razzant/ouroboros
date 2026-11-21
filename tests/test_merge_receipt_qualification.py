@@ -19,7 +19,7 @@ import pytest
 from ouroboros import merge_receipts, review_ledger
 from ouroboros.tools import github
 from tests import test_pr_merge_receipts as merge_fixture
-from tests.test_pr_merge_receipts import BASE, HEAD, MERGE, TREE, _receipts
+from tests.test_pr_merge_receipts import BASE, HEAD, MERGE, NOT_MERGEABLE, ROUTE, TREE, _receipts, sent
 from tests._store_shared import delete_result, read_result, seed_result, unreadable_result
 from tests._cancel_intents_shared import DeliveryBus
 from tests.group_run import run_in_group
@@ -27,11 +27,7 @@ from tests.group_run import run_in_group
 world = merge_fixture.world
 
 REAL_GH = github._gh_run
-PRE_EFFECT = (
-    "X Pull request octo/demo#7 is not mergeable: the base branch policy prohibits the merge.\n"
-    "To have the pull request merged after all the requirements have been met, add the `--auto` flag.\n"
-    "To use administrator privileges to immediately merge the pull request, add the `--admin` flag.\n"
-)
+REFUSAL = ('{"message": "Pull Request is not mergeable"}', "gh: Pull Request is not mergeable (HTTP 405)\n")
 
 
 def registered_merge(world):
@@ -63,7 +59,7 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
             assert _receipts(world)[0]["outcome"]["status"] == "merged"
             writes.append(json.loads(kw["input"]))
         result = world.gh(args, world.ctx, input_data=kw.get("input"))
-        if args[:2] == ["pr", "merge"]:
+        if sent(args):
             world.gh.pr["body"] += note
         return SimpleNamespace(returncode=result.exit_code, stdout=result.text if result.ok else "",
                                stderr="" if result.ok else result.text)
@@ -84,14 +80,14 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
                    for c in world.gh.calls)
 
 
-@pytest.mark.parametrize("failure", ["EOF", "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+@pytest.mark.parametrize("failure", ["EOF", "gh: Server Error (HTTP 502)", "gh: Resource not accessible by integration (HTTP 403)",
                                      "timeout"])
 def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, failure):
     effects = []
 
     def process(argv, **kw):
         args = argv[1:]
-        if args[:2] == ["pr", "merge"]:
+        if sent(args):
             effects.append(args)
             if failure == "timeout":
                 raise github.subprocess.TimeoutExpired(argv, 120)
@@ -114,17 +110,17 @@ def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, f
 
 
 @pytest.mark.parametrize("failure", ["cli_missing", "rejection"])
-def test_proven_pre_effect_failure_can_recover(world, monkeypatch, failure):
+def test_a_proven_no_effect_failure_can_recover(world, monkeypatch, failure):
     attempts = []
 
     def process(argv, **kw):
         args = argv[1:]
-        if args[:2] == ["pr", "merge"]:
+        if sent(args):
             attempts.append(args)
             if len(attempts) == 1:
                 if failure == "cli_missing":
                     raise FileNotFoundError(2, "missing", "gh")
-                return SimpleNamespace(returncode=1, stdout="", stderr=PRE_EFFECT)
+                return SimpleNamespace(returncode=1, stdout=REFUSAL[0], stderr=REFUSAL[1])
         result = world.gh(args, world.ctx, input_data=kw.get("input"))
         return SimpleNamespace(returncode=0, stdout=result.text, stderr="")
 
@@ -168,7 +164,7 @@ def test_post_effect_gaps_reach_the_registered_tool(world, monkeypatch, gap):
         assert "PR-body" in text
     world.gh.fail_edit = False
     assert "sent no new merge request" in registered_merge(world)
-    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert sum(sent(c) for c in world.gh.calls) == 1
 
 
 @pytest.mark.parametrize("delivery_order", ["buffered", "delivered_first", "replay_reverse"])
@@ -189,7 +185,7 @@ def test_concurrent_publication_through_outbox_dedup_and_history(world, monkeypa
     errors = []
     ctx = SimpleNamespace(DRIVE_ROOT=world.root, task_registry={}, send_with_budget=message_bus.send_with_budget,
                           append_jsonl=lambda *a: errors.append(a))
-    world.gh.merge = "accepted_open"
+    world.gh.merge = "queued"  # the request's answer was lost beside a queue GitHub shows: published as queued
     blocked, release = Event(), Event()
     gh = world.gh
 
@@ -244,7 +240,7 @@ def test_concurrent_publication_through_outbox_dedup_and_history(world, monkeypa
                           cwd=pathlib.Path(__file__).resolve().parents[1],
                           env={**os.environ, "MERGE_RECEIPT_PROJECTION": str(fixture)}, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert sum(sent(c) for c in world.gh.calls) == 1
 
 
 def closed_receipt_projection(world, monkeypatch, act=None):
@@ -300,7 +296,7 @@ def test_a_closed_pr_reaches_the_card_through_outbox_history_and_the_consumer(wo
         shutil.copy(fixture, output)
         (pathlib.Path(output) / "closed-projection-node.txt").write_text(result.stdout + result.stderr, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert sum(sent(c) for c in world.gh.calls) == 1
 
 
 @pytest.mark.parametrize("seen", ["at_readback", "by_observer_during_send"])
@@ -310,25 +306,23 @@ def test_a_published_foreign_queue_switched_off_refreshes_to_refused_and_a_new_r
     published (by our readback, or by an observer while the request was in flight). Once the queue is off, the same
     receipt settles refused and that existing projection is refreshed, with no second send. A fresh request GitHub
     refuses publishes nothing new."""
-    from tests.test_pr_merge_conflict_refusal import CONFLICT
-
     gh, queued_blocks = world.gh, []
 
     def send(args, *a, **kw):
-        if args[:2] != ["pr", "merge"]:
+        if not sent(args):
             return gh(args, *a, **kw)
         gh.calls.append(list(args))
-        if gh.pr["mergeStateStatus"] == "DIRTY":  # the earlier attempt: another actor queues meanwhile
+        if gh.pr["mergeStateStatus"] == "UNKNOWN":  # the earlier attempt: another actor queues meanwhile
             gh.pr.update(autoMergeRequest={"enabledAt": "by another actor"})
             if seen == "by_observer_during_send":
                 assert "merge: queued" in registered_merge(world)
                 queued_blocks.append(merge_receipts.public_block(_receipts(world)[0]))
                 gh.pr.update(autoMergeRequest=None)  # switched off before our own readback
-        return github.GhResult(False, "⚠️ GH_ERROR: " + CONFLICT.strip(), 1, None, "server_refused")
+        return github.GhResult(False, NOT_MERGEABLE, 1, 405, "exit")
 
     def act():
         monkeypatch.setattr(github, "_gh_run", send)
-        gh.pr["mergeStateStatus"] = "DIRTY"
+        gh.pr["mergeStateStatus"] = "UNKNOWN"
         texts = [registered_merge(world)]
         if seen == "at_readback":
             queued_blocks.append(merge_receipts.public_block(_receipts(world)[0]))
@@ -364,7 +358,7 @@ def test_a_published_foreign_queue_switched_off_refreshes_to_refused_and_a_new_r
                           cwd=pathlib.Path(__file__).resolve().parents[1],
                           env={**os.environ, "MERGE_RECEIPT_PROJECTION": str(fixture)}, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert sum(c[:2] == ["pr", "merge"] for c in gh.calls) == 2  # the earlier attempt and the explicit new one
+    assert sum(sent(c) for c in gh.calls) == 2  # the earlier attempt and the explicit new one
 
 
 def test_legacy_ambiguous_refusal_keeps_observation_custody(world):
@@ -378,7 +372,7 @@ def test_legacy_ambiguous_refusal_keeps_observation_custody(world):
     record["merge_receipts"] = [receipt]
     seed_result(world.root, "merge-task", record)
     assert "PR_MERGE_UNKNOWN" in registered_merge(world)
-    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert sum(sent(c) for c in world.gh.calls) == 1
 
 
 def test_proven_rejection_survives_unavailable_readback(world):
@@ -386,13 +380,13 @@ def test_proven_rejection_survives_unavailable_readback(world):
     world.gh.merge = "refused"
     world.gh.fail_view_after_merge = True
     # Owner decision (#2455): a known refusal never reads as an unknown effect, even while GitHub is unreadable.
-    assert "PR_MERGE_REFUSED: ⚠️ PR #7 merge: unknown (PR unread; request refused before effect)" in registered_merge(world)
+    assert "PR_MERGE_REFUSED: ⚠️ PR #7 merge: unknown (PR unread; request refused by GitHub)" in registered_merge(world)
     world.gh.fail_view_after_merge = False
     assert "PR_MERGE_REFUSED" in registered_merge(world)
-    assert sum(c[:2] == ["pr", "merge"] for c in gh.calls) == 1
+    assert sum(sent(c) for c in gh.calls) == 1
     world.gh.merge = "ok"
     assert "merge: merged" in registered_merge(world)
-    assert sum(c[:2] == ["pr", "merge"] for c in gh.calls) == 2
+    assert sum(sent(c) for c in gh.calls) == 2
 
 
 def test_receipt_revision_is_canonical_and_idempotent_across_fact_enrichment(world, monkeypatch):
@@ -630,9 +624,9 @@ def test_a_matching_review_record_covers_the_head_and_names_its_source(world, mo
     asked = install_ledger(monkeypatch, {RECORD_ID: record})
     out = record_merge(world, review_record_id=RECORD_ID, review_task_ids=["review-1"])
     assert asked == [(world.root.resolve(), RECORD_ID)]
-    call = next(c for c in world.gh.calls if c[:2] == ["pr", "merge"])
-    assert call[:6] == ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD]
-    assert call[6:] == ["--body-file", "-"] and "Ouroboros-Qualification:" in world.gh.merge_inputs[0]
+    call = next(c for c in world.gh.calls if sent(c))
+    assert call == ["api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
+    assert world.gh.merge_payloads[0]["sha"] == HEAD and "Ouroboros-Qualification:" in world.gh.merge_inputs[0]
     (receipt,) = _receipts(world)
     assert receipt["coverage"]["status"] == "covers_head" and receipt["coverage"]["gaps"] == []
     review = receipt["review"]
@@ -862,7 +856,7 @@ def test_a_shell_merged_pr_stays_receiptless_with_or_without_a_record(world, mon
     world.gh.pr.update(state="MERGED", mergeCommit={"oid": MERGE})  # merged from a shell or the web page
     out = record_merge(world, **({"review_record_id": RECORD_ID} if bind_record else {}))
     assert out.startswith("⚠️ PR_MERGE_REFUSED: pr_not_open")
-    assert not any(call[:2] == ["pr", "merge"] for call in world.gh.calls) and _receipts(world) == []
+    assert not any(sent(call) for call in world.gh.calls) and _receipts(world) == []
 
 
 # --- #1742: a declaration is the author's statement; only a bound record is observed review ---
@@ -877,7 +871,7 @@ def test_a_matching_declaration_beside_a_completed_task_is_not_observed_coverage
                       result="Translated the README into French.")
     out = record_merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE, review_task_ids=["translation-1"],
                        review_verdict="PASS")
-    assert asked == [] and sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert asked == [] and sum(sent(c) for c in world.gh.calls) == 1
     (receipt,) = _receipts(world)
     review = receipt["review"]
     assert receipt["outcome"]["status"] == "merged"  # loud, never a lock

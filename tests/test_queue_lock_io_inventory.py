@@ -25,6 +25,7 @@ import pytest
 
 from supervisor import queue, queue_publication
 from supervisor.loop_load import code_place
+from tests._main_followup import main as main
 from tests.test_conversation_lane_presence import lane as lane  # noqa: F401 -- fixture
 from tests.test_owner_wait_pool import pool as pool  # noqa: F401 -- fixture
 
@@ -54,6 +55,19 @@ ALLOWED: Dict[Site, str] = {
     ("supervisor/task_admission.py in reserve_task_admission", "store.read"):
         "the reservation reads the task's stored record under its own hold (task_admission.py: not this item's file; "
         "the hunk that moves the read before the hold is in the journal)",
+    # Known debt: Phase B of a drive's settlement (task_custody.settle_child_drive) runs under Q, the ownership
+    # interlock that keeps any occupant from being admitted before the move; one hold reached 95 s (sprint S8), and
+    # its steps' seconds now ride the settlement pass's report (``under_q_sec``) until the work leaves Q.
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "open"):
+        "Phase B's census and hold rechecks and its custody and mail lock files",
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "os.mkdir"):
+        "Phase B's lock and trash folders",
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "os.remove"):
+        "Phase B releasing its custody and mail lock files",
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "os.rename"):
+        "Phase B's move itself: the drive into the trash the maintenance child removes",
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "store.read"):
+        "Phase B's occupant recheck of the stored record",
 }
 
 _EVENTS = frozenset({"open", "os.rename", "os.remove", "os.mkdir", "sqlite3.connect"})
@@ -149,7 +163,7 @@ def _drive_owner_wait(pool) -> None:
     worker_owner_wait.handle_owner_wait(pool.event, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "parked"
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-    worker_owner_wait.maintain_owner_wait_capacity()
+    worker_owner_wait.grant_warm_returns()
     assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
 
 
@@ -244,6 +258,18 @@ def _drive_tick() -> None:
     assert queue_publication.publish_queue_changes() in (True, None)
 
 
+def _drive_settlement(tmp_path) -> None:
+    """A settled task's drive moves under Q (``task_settlement_interlock``, Phase B of ``settle_child_drive``)."""
+    from ouroboros import task_custody
+    from supervisor.queue_transitions import task_settlement_interlock
+    from tests.test_child_drive_settlement import TASK, _cancelled_with_capture, not_live
+
+    tmp_path.mkdir(parents=True)
+    data, drive, _record = _cancelled_with_capture(tmp_path)
+    assert task_custody.settle_child_drive(data, TASK, drive, live=not_live,
+                                           guard=task_settlement_interlock)["status"] == "removed"
+
+
 # ---- the laws --------------------------------------------------------------------------------------------------------
 
 def _unnamed_or_gone(seen: Set[Site]) -> Dict[str, list]:
@@ -267,13 +293,34 @@ def test_no_io_under_q_beyond_the_named_inventory(lane, tmp_path, monkeypatch, a
         _drive_continue(tmp_path / "continue", scoped)
     with monkeypatch.context() as scoped:
         _drive_api_task(tmp_path / "api", scoped)
+    _drive_settlement(tmp_path / "settlement")
     with monkeypatch.context() as scoped:
         _drive_restart_pending_admission(tmp_path / "restart", scoped)
+    with monkeypatch.context() as scoped:
+        _drive_exact_pause_and_wake(tmp_path / "sleep", scoped)
     drift = _unnamed_or_gone(set(audited))
     for key in drift.get("unnamed", []):
         sample, stack = _STATE["samples"].get(key, ("", ""))
         print(f"I/O under Q: {key} {sample}\n{stack}")  # the failure names the path and the stack too
     assert not drift, drift
+
+
+def test_a_main_follow_up_reaches_its_owner_turn_with_no_io_under_q(main, audited, store_seams):
+    """Main's follow-up through the real intake: Q spans the row judged and its fences only; the mailbox reads, the
+    mail lock's wait and the append run outside it, so the drive adds no site to the inventory."""
+    from tests._main_followup import _delivered, _say, _turns
+
+    _tick_armed()
+    _say(main.bridge, main.ctx, "Send it to our chat", "cm-audit-first")
+    (turn,) = _turns()
+    _STATE["seen"].clear()  # the first turn's admission is _drive_owner_turn's; this drive is the follow-up
+    _say(main.bridge, main.ctx, "This chat", "cm-audit-second")
+    assert [ack["target"] for ack in _delivered(main.bridge, "cm-audit-second")] == [turn["task"]["id"]]
+    unnamed = sorted(set(audited) - set(ALLOWED))
+    for key in unnamed:
+        sample, stack = _STATE["samples"].get(key, ("", ""))
+        print(f"I/O under Q: {key} {sample}\n{stack}")
+    assert not unnamed, unnamed
 
 
 def test_the_hook_sees_io_under_q_and_names_the_site(audited):
@@ -318,3 +365,17 @@ def test_every_row_names_a_reason():
     events = _EVENTS | {event for _module, _attr, event in _STORE_SEAMS}
     for site, why in ALLOWED.items():
         assert site[1] in events and " in " in site[0] and why, site
+
+
+def _drive_exact_pause_and_wake(tmp_path, monkeypatch):
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests.test_model_sleep import _cold_park, _mail, _result
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
+    _tick_armed()
+    _result(tmp_path, "peer")
+    _cold_park(tmp_path, monkeypatch, workers, senders=["peer"], barrier=q.publish_queue_snapshot)
+    _mail(tmp_path, "sleeper", "ready", sender="peer")
+    assert wake_ready_sleepers(q)[0]["ok"]

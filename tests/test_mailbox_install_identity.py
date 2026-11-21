@@ -1,4 +1,5 @@
 """A stored mailbox pointer never authorizes writing another install's files."""
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -48,7 +49,8 @@ def test_mailbox_producers_refuse_before_mkdir_and_keep_own_and_bare_roots(insta
     for root in (b / layout, bare / layout):
         assert _produce(kind, root)
         path = mailbox._ack_path(root, "parent") if kind == "ack" else mailbox._mailbox_path(root, "parent")
-        assert path.is_file() and '"msg_id": "message"' in path.read_text()
+        assert path.is_file() and any(json.loads(line).get("msg_id") == "message"
+                                      for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
     assert not (bare / identity.IDENTITY_PATH).exists()
 
 

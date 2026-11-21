@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import pathlib
+import time
+import uuid
 from typing import Any, Dict
 
-from ouroboros.control_actor import control_actor
+from ouroboros.control_actor import control_actor, resume_author
 from ouroboros.utils import utc_now_iso
 
 
@@ -15,12 +17,20 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
 
     A never-started root has no members. An admitted retry needs a fresh tree
     census without unsettled effects (owner_pause_blockers); its attempt and
-    dispatch evidence stay, and children still need explicit selection (Q9).
+    dispatch evidence stay. As every other root Resume, this one lends the root
+    one grant, bound to the observed fence generation and root basis: its held
+    members bind to it, and the released fence carries it, so the resumed root
+    or the owner selects each child explicitly (Q9) and nothing fans out;
+    selection and dispatch revalidate it against the current fence and basis.
     Reopen both durable fence and queue latch or refuse: reopening only the
     latch would fail every launch. The latch names the LOGICAL root; task may
     be its current retry (#1730). A Continue whose earlier attempt's writers
     all still run leaves the Pause for its own writer hold, which starts it
-    once they settle (owner, 1 Nov); an unknown outcome still refuses. Queue lock held.
+    once they settle (owner, 1 Nov); an unknown outcome still refuses. An
+    admitted root whose saved source this observation already found unusable
+    (``safe``: assignment's own source check) can never be handed over: its
+    Resume keeps that typed refusal in the same write, which lends nothing, so
+    its own Resume asks next instead of children hidden behind it. Queue lock held.
     """
     from ouroboros.owner_pause import FENCE_RELEASED, launch_lock, read_fence, set_fence_state
     import copy
@@ -34,7 +44,8 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     safe, error = observation["safe"], observation["unsafe_error"]
     if not safe and not admitted:
         return {"ok": False, "error": error, "action": "cancel_or_new_run"}
-    from ouroboros.work_stop import clear_refusal, current_stop, release_refusal
+    refused = error if not safe and "_working_recovery" in task else ""
+    from ouroboros.work_stop import clear_refusal, current_stop, refuse_continuation, release_refusal, stop_record
     if refusal := release_refusal(current_stop(task, {
             "owner": observation["authority"]["owner_fence"], "budget": q.BUDGET_ROOT_FENCES}), control_actor()):
         return refusal
@@ -59,18 +70,27 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
         q.BUDGET_ROOT_FENCES[root_id] = fence
 
     with launch_lock(root, root_id):
-        if read_fence(root, root_id) != observation["authority"]["owner_fence"]:
+        authority = observation["authority"]
+        if read_fence(root, root_id) != authority["owner_fence"]:
             return {"ok": False, "error": "selection_authority_changed"}
+        # Minted before any queue change, from the revalidated observation; held members bind
+        # to it below and the fence release records the same grant, or rollback drops both.
+        grant = {"by": resume_author(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(),
+                 "granted_at_ts": time.time(), "authority": "explicit_resume", "selected_by": "owner",
+                 "generation": int(authority["owner_fence"].get("generation") or 0),
+                 "root_resume_basis": authority["root_resume_basis"]}
         # Publish queue eligibility first, while durable launch authority is still
         # closed. A crash or failed second write cannot start the unrun root.
         q.BUDGET_ROOT_FENCES.pop(root_id, None)
         task.pop("_budget_pause", None)
         task.pop(BUDGET_HOLD_KEY, None)
         clear_refusal(task)
-        wait = hold_continuation_writers(task, predecessor, writers) if writers else None
+        if refused:  # rollback restores the row: the refusal stands only with this published Resume
+            refuse_continuation(task, stop_record(refused, held_at=utc_now_iso(), by=control_actor(),
+                                                  detail="its saved work was unusable at this Resume"))
+        wait = hold_continuation_writers(task, predecessor, writers) if writers and not refused else None
         if members:
-            # No root grant exists to bind: only the owner selects these members.
-            hold_root_resume_descendants(q, root_id, fence, {"grant_id": "", "generation": 0}, actor_id=task_id)
+            hold_root_resume_descendants(q, root_id, fence, grant, actor_id=task_id)
         if not q.publish_queue_snapshot(reason="owner_pause_root_resumed"):  # durable while launch authority is closed
             rollback()
             return {"ok": False, "error": "snapshot_not_persisted"}
@@ -82,7 +102,7 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
             lift = owner_resume_decision(task, root)
             set_fence_state(root, root_id, fence_id=str(fence.get("fence_id") or ""),
                             state=FENCE_RELEASED, release_reason="owner_resume_unstarted_root",
-                            resume_actor=control_actor(),
+                            resume_actor=control_actor(), resume_grant=grant,
                             row_update=(lambda row: lifted_record(row, lift)) if lift else None)
         except Exception as exc:
             rollback()
@@ -92,9 +112,12 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     held = {"held": True, "blockers": wait["blockers"]} if wait else {}
     if wait:
         project_writer_wait(root, task_id, wait)
+    # ok=True: the Pause is released, nothing dispatched; the row's typed refusal says what is next. Only this
+    # append-only event keeps that this Resume kept it once the row is gone; the answer gains no key.
     q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl",
                    {"ts": utc_now_iso(), "type": "owner_pause_resumed", "task_id": task_id,
                     "root_task_id": root_id, "fence_id": str(fence.get("fence_id") or ""),
-                    "same_generation": True, "never_started": not admitted, **held})
+                    "grant_id": grant["grant_id"], "same_generation": True, "never_started": not admitted, **held,
+                    **({"continuation_refused": refused} if refused else {})})
     return {"ok": True, "task_id": task_id, "root_task_id": root_id, "same_generation": True,
-            "owner_pause_released": True, "never_started": not admitted, **held}
+            "owner_pause_released": True, "never_started": not admitted, "grant_id": grant["grant_id"], **held}

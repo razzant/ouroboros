@@ -11,21 +11,21 @@ not at all.
 from __future__ import annotations
 
 import logging
+import re
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.model_concurrency import limit_physical_send
 
-from ouroboros.context_budget import (  # the typed overflow lives with the overflow vocabulary
-    LocalContextTooLargeError,
-    context_overflow_message,
-)
+from ouroboros.context_budget import LocalContextTooLargeError  # the typed overflow lives with the overflow vocabulary
+from ouroboros.llm_messages import DISPLAY_KEY
 from ouroboros.llm_attempt import (
     _attempt_request,
     _candidate_before_dispatch,
     _execute_candidate,
     _finalized_physical_candidate,
-    _is_structured_context_overflow_exception,
+    is_size_refusal,
 )
 from ouroboros.usage_accounting import UsageAccountingError
 from ouroboros.transport_custody import outcome_unknown_on_chain
@@ -48,6 +48,103 @@ def local_context_limits(max_tokens: int) -> Tuple[int, int]:
     except Exception:
         pass
     return ctx_len, local_max
+
+
+def _split_leading_reasoning(text: str) -> Tuple[str, str]:
+    """``(answer, reasoning)`` of a reply whose reasoning comes first; a reply without one is returned whole.
+
+    Two shapes reach this lane: ``<think>…</think>`` the model writes itself (Qwen3), and reasoning that is only
+    closed, because the chat template already opened ``<think>`` in the prompt (Qwen3.5 and later). Reasoning ends at
+    the first ``</think>`` outside code: anywhere after the reply's own opening tag (small models write
+    ``<think>brief</think>Answer``), on a line of its own when the template opened it, and then only if no opening tag
+    outside code comes first. A reply with no closing tag outside code is returned whole. One pass: code spans are
+    read once and met with the tags in order.
+
+    Known limits (review 8): in the template-opened shape, reasoning that names ``<think>`` in plain prose, or a closing
+    tag on a line with other text (``done.</think>``), leaves the whole reply as the answer; reasoning with an unclosed
+    fence pairs it with a fence of the answer, hiding the closing line; an answer without reasoning whose indented code
+    block holds a lone ``</think>`` line loses its beginning."""
+    stripped = text.lstrip()
+    opened = stripped[:7].lower() == "<think>"
+    if not opened and stripped.startswith("<tool_call>"):
+        return text, ""  # a reply that opens with a call has no reasoning before it; its arguments are not reasoning
+    if "</think>" not in stripped.lower():
+        return text, ""  # nothing closes reasoning: the reply is the answer (and its code is never scanned)
+    spans, span = _code_spans(stripped), 0
+    breaks, line, bounds = [m.start() for m in re.finditer("\n", stripped)], 0, None
+    for tag in re.finditer(r"</?think>", stripped, re.IGNORECASE):
+        while span < len(spans) and spans[span][1] <= tag.start():
+            span += 1
+        if (opened and tag.start() == 0) or (span < len(spans) and spans[span][0] <= tag.start()):
+            continue  # the reply's own opening tag, or a tag quoted in code
+        closing = tag.group(0)[1] == "/"
+        if opened:
+            if closing:
+                return stripped[tag.end():].strip(), stripped[7:tag.start()].strip()
+            continue
+        if not closing:
+            return text, ""
+        while line < len(breaks) and breaks[line] < tag.start():
+            line, bounds = line + 1, None
+        if bounds is None:  # this line's first and last visible characters, read once per line
+            first = breaks[line - 1] + 1 if line else 0
+            last = breaks[line] if line < len(breaks) else len(stripped)
+            visible = re.search(r"\S", stripped[first:last])
+            bounds = (first, last, first + visible.start(), first + len(stripped[first:last].rstrip()))
+        if bounds[2] == tag.start() and bounds[3] == tag.end():
+            return stripped[bounds[1]:].strip(), stripped[:bounds[0]].strip()
+    return text, ""
+
+
+def stamp_display(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp a tool-call reply's display projection (``DISPLAY_KEY``): its leading reasoning apart from its visible
+    text.
+
+    History keeps the bytes the server sent (llama.cpp #24890); progress and salvage read the projection and parse no
+    grammar. A reply with its own reasoning field is the server's and is left as it came."""
+    content = msg.get("content")
+    if (msg.get("tool_calls") and isinstance(content, str)
+            and not any(msg.get(key) for key in ("reasoning_content", "reasoning", "reasoning_details"))):
+        visible, reasoning = _split_leading_reasoning(content)
+        if visible != content:
+            msg[DISPLAY_KEY] = {"text": visible, "reasoning": reasoning}
+    return msg
+
+
+def _code_spans(text: str) -> List[Tuple[int, int]]:
+    """``(start, end)`` of closed fenced blocks and one-line inline code spans, in order and in linear time.
+
+    An inline span opens at a backtick run and closes at the next run of the same length on its line; a run without
+    such a partner is literal text."""
+    spans: List[Tuple[int, int]] = []
+    fence, fence_start, offset = "", 0, 0
+    for line in text.splitlines(keepends=True):
+        opener = re.match(r"[ \t]{0,3}(`{3,}|~{3,})", line)
+        if fence:
+            if opener and opener.group(1)[0] == fence[0] and len(opener.group(1)) >= len(fence) \
+                    and not line[opener.end():].strip():
+                spans.append((fence_start, offset + len(line)))
+                fence = ""
+        elif opener:
+            fence, fence_start = opener.group(1), offset
+        else:
+            runs = list(re.finditer(r"`+", line))
+            later: Dict[int, deque] = {}
+            for index, run in enumerate(runs):
+                later.setdefault(len(run.group(0)), deque()).append(index)
+            index = 0
+            while index < len(runs):
+                partners = later[len(runs[index].group(0))]
+                while partners and partners[0] <= index:
+                    partners.popleft()
+                if partners:
+                    close = partners.popleft()
+                    spans.append((offset + runs[index].start(), offset + runs[close].end()))
+                    index = close + 1
+                else:
+                    index += 1
+        offset += len(line)
+    return spans
 
 
 class _LocalLaneMixin:
@@ -93,7 +190,8 @@ class _LocalLaneMixin:
         preference = resolve_processing_preference(override=processing_preference)
         target = {"provider": "local", "resolved_model": "local-model", "usage_model": "local-model",
                   "processing_preference": preference, "context_window_tokens": evidence.get("context_window"),
-                  "context_window_confirmed": evidence.get("confirmed") is True}
+                  "context_window_confirmed": evidence.get("confirmed") is True,
+                  "window_instance_id": str(evidence.get("process_id") or "")}
         return target, kwargs
 
     def _finalize_local_candidate(self, target: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,8 +269,7 @@ class _LocalLaneMixin:
             raise
         except Exception as exc:
             err = str(exc)
-            if (_is_structured_context_overflow_exception(exc)
-                    or context_overflow_message(err)):
+            if is_size_refusal(exc, any_status=True):
                 raise LocalContextTooLargeError(err) from exc
             # Exception-owned capture proves this attempt; prior ContextVar may be unrelated.
             if outcome_unknown_on_chain(exc):
@@ -186,12 +283,18 @@ class _LocalLaneMixin:
         msg = (choices[0] if choices else {}).get("message") or {}
 
         if not msg.get("tool_calls") and msg.get("content") and clean_tools:
-            allowed_tool_names = {
-                str(t.get("function", {}).get("name", "")).strip()
-                for t in clean_tools
-                if isinstance(t, dict)
-            }
-            msg = self._parse_tool_calls_from_content(msg, allowed_tool_names)
+            functions = [t.get("function") or {} for t in clean_tools if isinstance(t, dict)]
+            allowed_tool_names = {str(f.get("name", "")).strip() for f in functions}
+            schemas = {str(f.get("name", "")).strip(): f.get("parameters") for f in functions}
+            msg = self._parse_tool_calls_from_content(msg, allowed_tool_names, schemas)
+        msg = stamp_display(dict(msg))
+        if not msg.get("tool_calls") and msg.get("content") and not msg.get("reasoning_content"):
+            # A plain answer's leading reasoning is the model's own, not the reply: keep it beside the answer. An empty
+            # reasoning block goes too, so its bare tags never reach the owner.
+            content = str(msg["content"])
+            answer, reasoning = _split_leading_reasoning(content)
+            if answer != content:
+                msg = {**msg, "content": answer, **({"reasoning_content": reasoning} if reasoning else {})}
 
         usage["cost"] = 0.0
         usage["cost_final"] = True

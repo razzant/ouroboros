@@ -55,7 +55,7 @@ def _exercise(surface):
     if surface.endswith("unbound"):
         bridge.panic = server_control.PanicIngress()
     bridge.panic.observe_owner(known)
-    message_bus.init(drive_root=root, chat_bridge=bridge, total_budget_limit=10, budget_report_every=10)
+    message_bus.init(drive_root=root, chat_bridge=bridge)
     # No thread drains the inbox. Ordinary consumer and state/chat writes cannot
     # help the emergency path; mark the supervisor live to cover startup routing.
     server._supervisor_thread = SimpleNamespace(is_alive=lambda: True)

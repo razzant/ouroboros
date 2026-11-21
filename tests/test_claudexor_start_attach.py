@@ -268,6 +268,7 @@ def test_a_recovering_daemon_ends_at_the_original_deadline_with_the_typed_refusa
     server, state = _daemon("tok", silent_for=0, serving_mode="recovery_only")
     try:
         _manager(monkeypatch, tmp_path, server, "tok", silent_wait=2.0)
+        probes = _recorded_probes(monkeypatch)
         deadline = monotonic_now() + 1.0  # shorter than the default admission window the start would open
         with execution_deadline_scope(deadline):
             with pytest.raises(ClaudexorUnavailable) as caught:
@@ -275,7 +276,10 @@ def test_a_recovering_daemon_ends_at_the_original_deadline_with_the_typed_refusa
         ended = time.monotonic()
         assert caught.value.code == "daemon_recovery_only"
         assert state["handshakes"] > 1, "admission was re-asked on the proving gateway"
-        assert all(at < deadline for at in state["arrivals"]), "no admission poll starts after the allowance ends"
+        # Each poll's start, where this process sends it: one begun in the window's last instant reaches the
+        # daemon a loopback hop later, after the deadline, and its read is floored so that it may complete.
+        assert len(probes) >= state["handshakes"] and all(at < deadline for at, _bound in probes), (
+            "no admission poll starts after the allowance ends", deadline, probes)
         assert ended - deadline < 0.5, "admission ends at the caller's deadline, not at its own window's end"
     finally:
         server.shutdown()

@@ -11,6 +11,7 @@ import pytest
 
 import ouroboros.tools.browser as browser_mod
 from ouroboros import browser_policy, chromium_runtime
+from tests._browser_fakes import close_generations, coro, install_async_api, run_on
 
 _blocked = partial(browser_policy.browser_url_block_reason, restricted=True)
 
@@ -23,6 +24,13 @@ def _pinned_layout(root: pathlib.Path, receipt: dict | None = None) -> pathlib.P
     (directory / pin.executable).write_text("stub", encoding="utf-8")
     (directory / chromium_runtime.RECEIPT_NAME).write_text(json.dumps(receipt or pin.receipt()), encoding="utf-8")
     return directory / pin.executable
+
+
+@pytest.fixture(autouse=True)
+def pinned_driver_node(monkeypatch):
+    # These tests fake the SDK and browser files; driver Node selection: test_node_runtime_policy.py.
+    from ouroboros import node_runtime
+    monkeypatch.setattr(node_runtime, "select_playwright_node", lambda **kwargs: "/fixture/node")
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +56,7 @@ class TestInfrastructureErrorDetection:
     """
 
     @pytest.mark.parametrize("exc,expected", [
-        (RuntimeError("cannot switch to a different green thread"), True),
+        (RuntimeError("Target page, context or browser has been closed"), True),
         (ValueError("invalid selector"), False),
         (TimeoutError("navigation timeout"), False),
     ])
@@ -63,33 +71,36 @@ class TestBrowserModuleState:
     # `assert callable(...)` on a function imported in this module's
     # imports is trivially true.
 
-    def test_ensure_browser_tolerates_missing_thread_id(self, monkeypatch):
+    def test_ensure_browser_opens_one_guarded_session_on_its_generation_loop(self, monkeypatch):
+        import threading
+
         routes = []
         contexts = []
         fake_page = types.SimpleNamespace(
             set_default_timeout=lambda timeout: None,
             on=lambda event, handler: None,
+            close=coro(lambda: None),  # a close that fails otherwise is no confirmed close
         )
 
         def _new_context(**kwargs):
             context = types.SimpleNamespace(
                 kwargs=kwargs,
-                route=lambda pattern, handler: routes.append((pattern, handler)),
-                new_page=lambda: fake_page,
-                close=lambda: None,
+                route=coro(lambda pattern, handler: routes.append((pattern, handler))),
+                new_page=coro(lambda: fake_page),
+                close=coro(lambda: None),
             )
             contexts.append(context)
             return context
 
         fake_browser = types.SimpleNamespace(
-            new_context=_new_context,
+            new_context=coro(_new_context),
             is_connected=lambda: True,
-            close=lambda: None,
+            close=coro(lambda: None),
             version=chromium_runtime.CHROMIUM_VERSION,
         )
         fake_playwright = types.SimpleNamespace(
-            chromium=types.SimpleNamespace(launch=lambda **kwargs: fake_browser),
-            webkit=types.SimpleNamespace(launch=lambda **kwargs: fake_browser),
+            chromium=types.SimpleNamespace(launch=coro(lambda **kwargs: fake_browser)),
+            webkit=types.SimpleNamespace(launch=coro(lambda **kwargs: fake_browser)),
             devices={
                 "iPhone 13": {
                     "viewport": {"width": 390, "height": 844},
@@ -99,9 +110,7 @@ class TestBrowserModuleState:
                     "has_touch": True,
                 }
             },
-        )
-        fake_sync_api = types.SimpleNamespace(
-            sync_playwright=lambda: types.SimpleNamespace(start=lambda: fake_playwright)
+            stop=coro(lambda: None),
         )
         monkeypatch.setattr(browser_mod, "_HAS_STEALTH", False)
         monkeypatch.setattr(browser_mod, "_ensure_playwright_installed",
@@ -115,7 +124,7 @@ class TestBrowserModuleState:
                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
             ],
         )
-        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync_api)
+        install_async_api(monkeypatch, fake_playwright)
 
         ctx = types.SimpleNamespace(
             browser_state=types.SimpleNamespace(
@@ -125,24 +134,6 @@ class TestBrowserModuleState:
                 last_screenshot_b64=None,
             )
         )
-
-        page, _generation = browser_mod._ensure_browser(ctx)
-
-        assert page is fake_page
-        assert contexts[-1].kwargs["viewport"] == {"width": 1920, "height": 1080}
-        assert "Chrome/131.0.0.0" in contexts[-1].kwargs["user_agent"]
-        assert getattr(ctx.browser_state, "_thread_id", None) is not None
-        assert getattr(ctx.browser_state, "_browser_engine", None) == "chromium"
-        # One composed guard checks URL and owner-operation identity for every
-        # request; the old four path globs are no longer a second policy chain.
-        assert len(routes) == 1 and routes[0][0] == "**/*"
-
-        browser_mod._ensure_browser(ctx, engine="webkit", device="iphone 13")[0]
-        assert contexts[-1].kwargs["viewport"] == {"width": 390, "height": 844}
-        assert contexts[-1].kwargs["is_mobile"] is True
-        assert getattr(ctx.browser_state, "_browser_engine", None) == "webkit"
-        assert getattr(ctx.browser_state, "_browser_device", None) == "iPhone 13"
-
         subagent_ctx = types.SimpleNamespace(
             task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),
             browser_state=types.SimpleNamespace(
@@ -152,27 +143,47 @@ class TestBrowserModuleState:
                 last_screenshot_b64=None,
             )
         )
-        assert browser_mod._ensure_browser(subagent_ctx)[0] is fake_page
-        assert routes and routes[-1][0] == "**/*"
-        events = []
-        route = types.SimpleNamespace(
-            request=types.SimpleNamespace(url="http://127.0.0.1:8765/api/settings"),
-            abort=lambda: events.append("abort"),
-            continue_=lambda: events.append("continue"),
-            # v6.54.3 (review round 8): guard handlers defer non-matching requests
-            # DOWN the chain via fallback so earlier-registered blocks stay live.
-            fallback=lambda: events.append("fallback"),
-        )
-        routes[-1][1](route)
-        route.request.url = "http://192.168.1.1/admin"
-        routes[-1][1](route)
-        route.request.url = "http://169.254.1.1/"
-        routes[-1][1](route)
-        route.request.url = "http://[::]/"
-        routes[-1][1](route)
-        route.request.url = "https://example.com/"
-        routes[-1][1](route)
-        assert events == ["abort", "abort", "abort", "abort", "continue"]
+        try:
+            page, generation = browser_mod._ensure_browser(ctx)
+
+            assert page is fake_page
+            assert contexts[-1].kwargs["viewport"] == {"width": 1920, "height": 1080}
+            assert "Chrome/131.0.0.0" in contexts[-1].kwargs["user_agent"]
+            # The session lives on its generation's own loop, never on the calling thread.
+            owner_thread = generation._owner._thread
+            assert owner_thread.is_alive() and owner_thread.ident != threading.get_ident()
+            assert getattr(ctx.browser_state, "_browser_engine", None) == "chromium"
+            # One composed guard checks URL and owner-operation identity for every
+            # request; the old four path globs are no longer a second policy chain.
+            assert len(routes) == 1 and routes[0][0] == "**/*"
+
+            browser_mod._ensure_browser(ctx, engine="webkit", device="iphone 13")[0]
+            assert contexts[-1].kwargs["viewport"] == {"width": 390, "height": 844}
+            assert contexts[-1].kwargs["is_mobile"] is True
+            assert getattr(ctx.browser_state, "_browser_engine", None) == "webkit"
+            assert getattr(ctx.browser_state, "_browser_device", None) == "iPhone 13"
+            # The replaced Chromium generation closed with its loop.
+            assert generation._cleanup_done and not owner_thread.is_alive()
+
+            assert browser_mod._ensure_browser(subagent_ctx)[0] is fake_page
+            assert routes and routes[-1][0] == "**/*"
+            events = []
+            route = types.SimpleNamespace(
+                request=types.SimpleNamespace(url="http://127.0.0.1:8765/api/settings", method="GET",
+                                              resource_type="document", post_data=None),
+                abort=coro(lambda: events.append("abort")),
+                continue_=coro(lambda: events.append("continue")),
+                # v6.54.3 (review round 8): guard handlers defer non-matching requests
+                # DOWN the chain via fallback so earlier-registered blocks stay live.
+                fallback=coro(lambda: events.append("fallback")),
+            )
+            for url in ("http://127.0.0.1:8765/api/settings", "http://192.168.1.1/admin", "http://169.254.1.1/",
+                        "http://[::]/", "https://example.com/"):
+                route.request.url = url
+                run_on(subagent_ctx.browser_state, routes[-1][1](route))
+            assert events == ["abort", "abort", "abort", "abort", "continue"]
+        finally:
+            close_generations(ctx.browser_state, subagent_ctx.browser_state)
 
     def test_local_readonly_browser_url_guard_resolves_dns_fail_closed(self, monkeypatch):
         def fake_getaddrinfo(host, *args, **kwargs):
@@ -214,26 +225,27 @@ class TestBrowserModuleState:
         assert ctx.browser_state.browser is None and ctx.browser_state.pw_instance is None
 
     def test_subagent_screenshot_text_does_not_reference_blocked_send_photo(self):
-        fake_page = types.SimpleNamespace(screenshot=lambda **_kwargs: b"png")
         ctx = types.SimpleNamespace(
             task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),
             browser_state=types.SimpleNamespace(last_screenshot_b64=None),
         )
 
-        result = browser_mod._extract_page_output(fake_page, "screenshot", ctx)
+        result = browser_mod._compose_output(ctx, ctx.browser_state, "screenshot", (b"png", ""))
 
         assert "send_photo" not in result
         assert "analyze_screenshot" in result
         assert ctx.browser_state.last_screenshot_b64
 
     def test_launches_selected_webkit_engine_without_chromium_args(self):
+        import asyncio
+
         launch_calls = []
         fake_pw = types.SimpleNamespace(
-            chromium=types.SimpleNamespace(launch=lambda **kwargs: launch_calls.append(("chromium", kwargs)) or "chromium-browser"),
-            webkit=types.SimpleNamespace(launch=lambda **kwargs: launch_calls.append(("webkit", kwargs)) or "webkit-browser"),
+            chromium=types.SimpleNamespace(launch=coro(lambda **kwargs: launch_calls.append(("chromium", kwargs)) or "chromium-browser")),
+            webkit=types.SimpleNamespace(launch=coro(lambda **kwargs: launch_calls.append(("webkit", kwargs)) or "webkit-browser")),
         )
 
-        assert browser_mod._launch_browser_with_fallback(fake_pw, engine="webkit") == "webkit-browser"
+        assert asyncio.run(browser_mod._launch_browser_with_fallback(fake_pw, engine="webkit")) == "webkit-browser"
 
         assert launch_calls == [("webkit", {"headless": True})]
 
@@ -296,8 +308,88 @@ class TestHasPlatformWebKit:
         assert browser_mod._has_platform_webkit(root) is expected
 
 
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("allow_install", [True, False])
+def test_driver_node_is_selected_before_either_engine_starts(monkeypatch, tmp_path, engine, allow_install):
+    """Before the Chromium early return as well: neither engine's SDK start or installer runs first. A local Node is
+    selected at once; only a missing one is prepared, beside the calls as a browser is (R2: the inline ~50 MB download
+    sat outside ``_install_beside_calls``), and a refused preparation starts no engine on the SDK's own Node."""
+    from ouroboros import claudexor_runtime, node_runtime
+
+    monkeypatch.setitem(sys.modules, "playwright", types.SimpleNamespace(__file__=str(tmp_path / "__init__.py")))
+    order, beside = [], []
+    monkeypatch.setattr(node_runtime, "select_playwright_node",
+                        lambda **kwargs: order.append(("node", kwargs.get("allow_install", False))) or "/managed/node")
+    monkeypatch.setattr(browser_mod, "_pinned_chromium", lambda **kwargs: order.append("chromium") or "/cft")
+    monkeypatch.setattr(browser_mod, "_playwright_ready", True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "operator-browsers"))
+    # The operator's own browsers path, whatever ran before: once another test had left the module's path marked
+    # as managed, the WebKit row replaced it with the data root's cache, no longer found its ready engine and ran
+    # the real ``playwright install webkit`` (QA 457: alone it passed, in another order it downloaded).
+    monkeypatch.setattr(browser_mod, "_playwright_browsers_path_managed", False)
+    monkeypatch.setattr(browser_mod, "_playwright_ready_engines", {("webkit", str(tmp_path / "operator-browsers"))})
+    real_beside = browser_mod._install_beside_calls
+
+    def beside_calls(key, what, install, hint=""):
+        beside.append(key)
+        assert key == "pinned-node", f"an engine install was started: {key}"  # never an installer from this test
+        return real_beside(key, what, install, hint)
+
+    monkeypatch.setattr(browser_mod, "_install_beside_calls", beside_calls)
+    browser_mod._ensure_playwright_installed(engine=engine, allow_install=allow_install)
+    assert order[0] == ("node", False) and "pinned-node" not in beside  # local: no preparation
+
+    def local_missing(**kwargs):
+        if not kwargs.get("allow_install"):
+            raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "Node 24.22.3 is not prepared yet")
+        order.append(("node", True))
+        return "/managed/node"
+
+    order.clear()
+    monkeypatch.setattr(node_runtime, "select_playwright_node", local_missing)
+    if allow_install:
+        browser_mod._ensure_playwright_installed(engine=engine, allow_install=True)
+        assert order[0] == ("node", True) and beside == ["pinned-node"]  # prepared beside the calls, then the engine
+    else:
+        with pytest.raises(RuntimeError, match="reviewed Node for Playwright's driver.*PLAYWRIGHT_NODEJS_PATH"):
+            browser_mod._ensure_playwright_installed(engine=engine, allow_install=False)  # read-only: never prepares
+        assert order == [] and beside == []
+
+    def unavailable(**kwargs):
+        raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "the reviewed Node 24.22.3 is not installed here")
+
+    order.clear()
+    monkeypatch.setattr(node_runtime, "select_playwright_node", unavailable)
+    with pytest.raises(RuntimeError, match="reviewed Node for Playwright's driver.*PLAYWRIGHT_NODEJS_PATH") as plain:
+        browser_mod._ensure_playwright_installed(engine=engine, allow_install=allow_install)
+    assert order == [] and not isinstance(plain.value, chromium_runtime.ChromiumRefusal)  # no engine on the SDK's Node
+
+    def another_process_installs(**kwargs):  # R7 (Fable): the install lock is held past its 4 s wait
+        if not kwargs.get("allow_install"):
+            raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "Node 24.22.3 is not prepared yet")
+        raise claudexor_runtime.ClaudexorRuntimeError("runtime_install_in_progress",
+                                                      "another process is installing the managed runtime")
+
+    monkeypatch.setattr(node_runtime, "select_playwright_node", another_process_installs)
+    beside.clear()
+    if allow_install:  # the typed preparing outcome a browser install gives, not "set PLAYWRIGHT_NODEJS_PATH"
+        with pytest.raises(chromium_runtime.ChromiumRefusal) as preparing:
+            browser_mod._ensure_playwright_installed(engine=engine, allow_install=True)
+        assert preparing.value.code == chromium_runtime.PREPARING and beside == ["pinned-node"]
+        assert "PLAYWRIGHT_NODEJS_PATH" not in preparing.value.tool_text()
+    assert order == []
+
+
 class TestSetPlaywrightBrowsersPathIfBundled:
     """_set_playwright_browsers_path_if_bundled: sets env var when a bundled engine is found."""
+
+    @pytest.fixture(autouse=True)
+    def _module_state_ends_with_the_test(self, monkeypatch):
+        """The function assigns the module's own path state; left behind, it changed what later tests installed."""
+        import ouroboros.tools.browser as bmod
+        for name in ("_playwright_browsers_path_managed", "_playwright_ready"):
+            monkeypatch.setattr(bmod, name, getattr(bmod, name))
+        monkeypatch.setattr(bmod, "_playwright_ready_engines", set(bmod._playwright_ready_engines))
 
     def test_no_op_when_env_already_set(self, monkeypatch, tmp_path):
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/some/custom/path")
@@ -755,17 +847,17 @@ class TestCleanupBrowser:
         assert retired.page is None and retired.browser is None
         assert retired.pw_instance is None
 
-    def test_cleanup_detached_handles_closes_in_order_on_the_calling_thread(self):
-        # Thread-affinity is the CALLER's contract (the settlement callback
-        # runs on the worker thread that owns the handles); this test pins
-        # the close order and records the executing thread honestly.
+    def test_cleanup_closes_in_order_on_the_generation_loop_from_any_thread(self):
+        # Playwright belongs to the generation's own loop: a cleanup called from
+        # any thread (here a worker) closes there, in order, then stops the loop.
+        import asyncio
         import threading
 
         calls = []
         threads = set()
 
         def _mark(name):
-            def _inner():
+            async def _inner():
                 threads.add(threading.get_ident())
                 calls.append(name)
             return _inner
@@ -773,6 +865,8 @@ class TestCleanupBrowser:
         from ouroboros.tools.registry import BrowserState
 
         retired = BrowserState()
+        run_on(retired, asyncio.sleep(0))  # its session loop holds the handles below
+        loop_thread = retired._owner._thread
         retired.page = types.SimpleNamespace(close=_mark("page"))
         retired._browser_context = types.SimpleNamespace(close=_mark("context"))
         retired.browser = types.SimpleNamespace(close=_mark("browser"))
@@ -781,10 +875,10 @@ class TestCleanupBrowser:
         worker.start()
         worker.join()
         assert calls == ["page", "context", "browser", "playwright"]
-        # Every close ran on the SAME (calling) thread — never hopped back
-        # to the main thread.
-        assert threads == {worker.ident}
-        # Idempotence: the retired generation was nulled while closing, so a
+        # Every close ran on the generation's loop, not on the calling worker.
+        assert threads == {loop_thread.ident} and loop_thread.ident != worker.ident
+        assert retired._cleanup_done and not loop_thread.is_alive()
+        # Idempotence: the retired generation was cleared while closing, so a
         # second sweep closes nothing twice.
         cleanup_browser_handles(retired)
         assert calls == ["page", "context", "browser", "playwright"]
@@ -799,29 +893,36 @@ class TestRetiredGenerationBacklog:
         from ouroboros.tools import browser as browser_mod
         from ouroboros.tools.registry import BrowserState
 
+        import asyncio
+
         monkeypatch.setattr(browser_mod, "_ensure_playwright_installed",
                             lambda *a, **k: None)
         hung = []
         for _ in range(browser_mod._RETIRED_GENERATIONS_MAX):
             g = BrowserState()
-            g.pw_instance = types.SimpleNamespace(stop=lambda: None)
+            run_on(g, asyncio.sleep(0))  # a live session loop holding a driver
+            g.pw_instance = types.SimpleNamespace(stop=coro(lambda: None))
             hung.append(g)
         ctx = types.SimpleNamespace(browser_state=BrowserState(),
                                     _retired_browser_generations=list(hung))
-        with pytest.raises(RuntimeError) as err:
-            browser_mod._ensure_browser(ctx)
-        assert "BROWSER_BACKLOG_RETIRED_SESSIONS" in str(err.value)
-        # One hung generation SETTLES (cleanup stamps _cleanup_done after its
-        # closes ran): the prune frees capacity — asserted directly on the
-        # prune seam so this default-lane test never launches real Playwright.
-        browser_mod.cleanup_browser_handles(hung[0])
-        assert len(browser_mod._live_retired_generations(ctx)) \
-            == browser_mod._RETIRED_GENERATIONS_MAX - 1
-        # A close that HANGS mid-way keeps its generation counted: nulled
-        # fields alone are not settlement (sol MAJOR-3).
-        half = types.SimpleNamespace(pw_instance=None, _cleanup_done=False)
-        ctx._retired_browser_generations.append(half)
-        assert half in browser_mod._live_retired_generations(ctx)
+        try:
+            with pytest.raises(RuntimeError) as err:
+                browser_mod._ensure_browser(ctx)
+            assert "BROWSER_BACKLOG_RETIRED_SESSIONS" in str(err.value)
+            assert getattr(ctx.browser_state, "_owner", None) is None  # the refusal started no loop
+            # One hung generation SETTLES (cleanup stamps _cleanup_done after its
+            # closes ran): the prune frees capacity — asserted directly on the
+            # prune seam so this default-lane test never launches real Playwright.
+            browser_mod.cleanup_browser_handles(hung[0])
+            assert len(browser_mod._live_retired_generations(ctx)) \
+                == browser_mod._RETIRED_GENERATIONS_MAX - 1
+            # A close that HANGS mid-way keeps its generation counted: nulled
+            # fields alone are not settlement (sol MAJOR-3).
+            half = types.SimpleNamespace(pw_instance=None, _cleanup_done=False)
+            ctx._retired_browser_generations.append(half)
+            assert half in browser_mod._live_retired_generations(ctx)
+        finally:
+            close_generations(*hung)
 
     def test_detach_registers_the_retired_generation(self):
         from ouroboros.tools import browser as browser_mod
@@ -833,6 +934,8 @@ class TestRetiredGenerationBacklog:
         assert retired is first
         assert ctx.browser_state is fresh and fresh is not first
         assert ctx._retired_browser_generations == [first]
+        # A retired page starts nothing new between calls (its request guard reads this).
+        assert first._retired and not getattr(fresh, "_retired", False)
 
 
 class TestReplacementGenerationGuard:
@@ -842,12 +945,15 @@ class TestReplacementGenerationGuard:
         from ouroboros.tools import browser as browser_mod
         from ouroboros.tools.registry import BrowserState
 
+        import asyncio
+
         closed = []
         mine = BrowserState()
-        mine.pw_instance = types.SimpleNamespace(stop=lambda: closed.append("mine"))
+        run_on(mine, asyncio.sleep(0))  # the call's session loop
+        mine.pw_instance = types.SimpleNamespace(stop=coro(lambda: closed.append("mine")))
         replacement = BrowserState()
         replacement.pw_instance = types.SimpleNamespace(
-            stop=lambda: closed.append("replacement"))
+            stop=coro(lambda: closed.append("replacement")))
         ctx = types.SimpleNamespace(browser_state=mine, task_constraint=None)
 
         def _ensure_and_retire(c, engine="chromium", device=""):
@@ -860,7 +966,7 @@ class TestReplacementGenerationGuard:
         monkeypatch.setattr(browser_mod, "_readonly_subagent", lambda c: False)
         out = browser_mod._browse_page(ctx, "https://example.com")
         assert "BROWSER_SESSION_RETIRED" in out
-        assert closed == ["mine"]
+        assert closed == ["mine"] and mine._cleanup_done
         assert replacement.pw_instance is not None
 
 
@@ -875,7 +981,7 @@ class TestMidEnsureRetirement:
         own = BrowserState()
         replacement = BrowserState()
         page = types.SimpleNamespace(set_default_timeout=lambda ms: None,
-                                     goto=lambda *a, **k: None)
+                                     goto=coro(lambda *a, **k: None))
         ctx = types.SimpleNamespace(browser_state=own, task_constraint=None)
 
         def _ensure_and_retire(c, engine="chromium", device=""):
@@ -885,10 +991,14 @@ class TestMidEnsureRetirement:
         received = []
         monkeypatch.setattr(browser_mod, "_ensure_browser", _ensure_and_retire)
         monkeypatch.setattr(browser_mod, "_readonly_subagent", lambda c: False)
+        monkeypatch.setattr(browser_mod, "_page_output", coro(lambda p, output: "ok"))
         monkeypatch.setattr(
-            browser_mod, "_extract_page_output",
-            lambda p, output, c, bs=None: received.append(bs) or "ok")
-        out = browser_mod._browse_page(ctx, "https://example.com")
+            browser_mod, "_compose_output",
+            lambda c, bs, output, payload: received.append(bs) or payload)
+        try:
+            out = browser_mod._browse_page(ctx, "https://example.com")
+        finally:
+            close_generations(own)
         assert out == "ok"
         assert received == [own]  # never the replacement
 

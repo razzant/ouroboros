@@ -453,7 +453,6 @@ def test_the_assembled_review_brief_names_the_selected_compositions_gap(body, mo
     monkeypatch.setattr(review, "_preflight_check", lambda *_a, **_k: None)
     monkeypatch.setattr(review, "_load_checklist_section", lambda *_a, **_k: "checklist")
     monkeypatch.setattr(review, "load_governance_doc", lambda *_a, **_k: "governance")
-    monkeypatch.setattr(review._cfg, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr(review, "_handle_multi_model_review", panel)
     for delivery in ("packet", "native"):
         set_review_pool(monkeypatch, ["test/reviewer"], **({"delivery": "native"} if delivery == "native" else {}))
@@ -472,7 +471,6 @@ def _commit_until_handback(monkeypatch, reviewer):
     from ouroboros.tools import git as git_tools
     from ouroboros.tools import review_helpers
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setattr(review_helpers, "check_worktree_readiness", lambda *a, **kw: [])
     monkeypatch.setattr(commit_admission, "release_metadata_diagnostics",
                         lambda *a, **kw: {"status": "not_applicable", "findings": [], "unavailable": []})
@@ -511,7 +509,6 @@ def test_every_uncertain_name_reaches_the_brief_and_the_author(body, monkeypatch
         monkeypatch.setattr(review, "_preflight_check", lambda *_a, **_k: None)
         monkeypatch.setattr(review, "_load_checklist_section", lambda *_a, **_k: "checklist")
         monkeypatch.setattr(review, "load_governance_doc", lambda *_a, **_k: "governance")
-        monkeypatch.setattr(review._cfg, "get_review_enforcement", lambda: "blocking")
         monkeypatch.setattr(review, "_handle_multi_model_review",
                             lambda *_a, **kw: captured.update(prompt=kw["prompt"]) or json.dumps({"results": []}))
         set_review_pool(monkeypatch, ["test/reviewer"])

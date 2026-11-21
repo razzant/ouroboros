@@ -13,7 +13,8 @@ polling (``wait_until`` over ``ArtifactOracle`` readers), keyless throughout:
   fanout receipt in the parent's forked drive, quiescence (the child's terminal
   ``task_done`` precedes the parent's; the parent's terminal is clean, not the
   degraded ``children_unabsorbed`` path), the child result reaching the parent
-  verbatim (marker in the complete ``wait_tasks`` result its durable row references), the
+  verbatim (marker in the parent's next model request: its ``wait_tasks`` with no named
+  sleep_mode sleeps and owes the result to that request), the
   authoritative disposition row on the task-tree ledger, and the root cost rollup
   keys on the parent's terminal event.
 * S7 — CANCELLATION (single): a keepalive task is cancelled over the same HTTP
@@ -364,20 +365,16 @@ def test_s6_subagent_tree_lineage_quiescence_and_child_result_handoff(
             fanouts = parent_drive.events("swarm_fanout")
             assert fanouts and fanouts[0].get("task_ids") == [child_id], fanouts
 
-            # Read the complete durable wait_tasks result through its verified
-            # reference; the tools.jsonl preview may omit the child's answer.
+            # A wait_tasks with no named sleep_mode SLEEPS (owner Q2 = A): its call returns the sleep's receipt (or
+            # the result at once when the child had already settled), and the child's whole result reaches the
+            # parent's next model request either way, owed to it at the wake.
             wait_rows = [row for row in parent_drive.tools_rows()
                          if "wait_tasks" in str(row.get("tool") or row.get("name") or "")]
             assert wait_rows, "wait_tasks call missing from the parent tools log"
-            from ouroboros.observability import read_call_payload
-
-            wait_blob = json.dumps([
-                read_call_payload(parent_drive.data_root, task_id=parent_id,
-                                  call_id=row["result_ref"]["call_id"])[1]
-                for row in wait_rows if row.get("type") == "tool_call"
-            ])
-            assert child_id in wait_blob, wait_rows
-            assert S6_CHILD_MARKER in wait_blob, "child result text never reached the parent"
+            parent_text = "\n".join(body_text(body) for _kind, body in model.calls
+                                    if _s6_slot_binder(body) == "mock-model|tools")
+            assert child_id in parent_text, wait_rows
+            assert S6_CHILD_MARKER in parent_text, "child result text never reached the parent"
 
             # Quiescence: the child's terminal task_done precedes the parent's.
             def terminal_done_ids():

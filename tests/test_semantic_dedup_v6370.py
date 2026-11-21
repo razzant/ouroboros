@@ -1,7 +1,7 @@
 """v6.37.0 guards for the semantic-dedup primitive (C9.6) and its consumers
 (C9.1/C9.3/C9.5/C10.1/C10.2). The LLM is mocked everywhere — these assert the
-structural contracts (fail-open, exact-id validation, fingerprint redirect, global
-backlog routing, typed artifact field), not model quality. The backlog's own
+structural contracts (fail-open, exact-id validation, global backlog routing, typed
+artifact field), not model quality. The backlog's own
 semantic redirect, merge writer and ranked digest are retired with its host
 writers: the backlog is one authored note."""
 
@@ -20,12 +20,16 @@ def _fake_llm(monkeypatch, content):
     import ouroboros.config as cfg
     import ouroboros.llm as llm_mod
 
+    sent = []
+
     class FakeClient:
         def chat(self, **kw):
+            sent.append(kw)
             return ({"content": content}, {})
 
     monkeypatch.setattr(llm_mod, "LLMClient", FakeClient)
     monkeypatch.setattr(cfg, "get_light_model", lambda: "fake-model")
+    return sent
 
 
 def test_primitive_fail_open_without_candidates_or_text():
@@ -33,6 +37,21 @@ def test_primitive_fail_open_without_candidates_or_text():
 
     assert find_semantic_duplicate_id("x", [], subject="s", call_type="t") is None
     assert find_semantic_duplicate_id("", [{"id": "a", "text": "y"}], subject="s", call_type="t") is None
+
+
+@pytest.mark.parametrize("main_local", [True, False])
+def test_the_light_check_runs_on_the_lane_the_light_slot_has(monkeypatch, main_local):
+    """An empty Light is Main's route, lane included (route_choice): under a local Main the check goes to the local
+    runtime instead of sending the local model's name to the cloud; under a cloud Main it stays remote."""
+    from ouroboros.semantic_dedup import find_semantic_duplicate_id
+
+    sent = _fake_llm(monkeypatch, '{"duplicate_id":null,"confidence":"high","reason":"new"}')
+    monkeypatch.setenv("OUROBOROS_MODEL", "main-model")
+    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
+    monkeypatch.setenv("USE_LOCAL_MAIN", str(main_local))
+    monkeypatch.delenv("USE_LOCAL_LIGHT", raising=False)
+    find_semantic_duplicate_id("n", [{"id": "obl-1", "text": "o"}], subject="s", call_type="t", drive_root=None)
+    assert [(call["model"], call["use_local"], call["model_role"]) for call in sent] == [("main-model", main_local, "light")]
 
 
 def test_primitive_rejects_low_confidence(monkeypatch):
@@ -108,35 +127,6 @@ def test_outcomes_recovery_uses_typed_artifact_flag():
     # The error is recovered via the typed flag despite the prose preview lacking the marker.
     assert not classified["unresolved"]
     assert classified["recovered"]
-
-
-# --------------------------------------------------------------------------- #
-# C9.3 — review_state obligation redirect (off-lock map applied under lock)
-# --------------------------------------------------------------------------- #
-
-
-def test_obligation_redirect_folds_into_existing(monkeypatch):
-    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord
-
-    state = AdvisoryReviewState()
-    a1 = CommitAttemptRecord(
-        ts="2026-06-18T00:00:00Z", commit_message="m1", status="blocked", repo_key="r", blocked=True,
-        critical_findings=[{"verdict": "FAIL", "severity": "critical", "item": "bug_login", "reason": "npe on submit"}],
-    )
-    state.record_attempt(a1)
-    opens = state.get_open_obligations(repo_key="r")
-    assert len(opens) == 1
-    target = opens[0].obligation_id
-
-    # A reworded restatement misses the exact fingerprint; the off-lock map redirects it.
-    a2 = CommitAttemptRecord(
-        ts="2026-06-18T00:01:00Z", commit_message="m2", status="blocked", repo_key="r", blocked=True,
-        critical_findings=[{"verdict": "FAIL", "severity": "critical", "item": "bug_login", "reason": "null pointer when the form is submitted"}],
-    )
-    from ouroboros.review_state import _make_obligation_fingerprint
-    fp = _make_obligation_fingerprint("bug_login", "null pointer when the form is submitted")
-    state.record_attempt(a2, semantic_redirects={fp: target})
-    assert len(state.get_open_obligations(repo_key="r")) == 1  # folded, not a new obligation
 
 
 # --------------------------------------------------------------------------- #

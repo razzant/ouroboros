@@ -152,8 +152,7 @@ test('the footprint leads, free disk is secondary, every folder opens independen
     assert.equal((view.facts.match(/could not be read/g) || []).length, 1, 'the caveat is said once');
     assert.doesNotMatch(view.summary, /Free on this disk|170 GB/);
     assert.match(view.places, /This disk: 170 GB free of 4.0 TB · read/);
-    assert.match(view.auto, /7 days after the task ends/);
-    assert.match(renderStorage(response({ retention_days: 30 })).auto, /30 days/);
+    assert.equal('auto' in view, false, 'how long finished work is kept is the Cleanup row of dashboard_settings.test.js');
     assert.deepEqual(view.measure, { label: 'Refresh sizes', busy: false });
     const rows = [...view.places.matchAll(/data-storage-place="([^"]+)"/g)].map((match) => match[1]);
     assert.equal(new Set(rows).size, 8);
@@ -255,7 +254,6 @@ test('the door is offered whenever an answer exists at rest, before any count to
     assert.doesNotMatch(never.tray, /storage-cleanup-amount|Can be removed/);
     assert.equal(renderStorage(null).tray, '');
     assert.equal(renderStorage(null).door, false);
-    assert.equal(renderStorage(null).auto, '');
     const listing = renderStorage(response({ count: count(), free: { ...free, state: 'listing', plan: 'p', total: 3 } }), { now: NOW });
     assert.equal(listing.door, false);
     assert.match(listing.tray, /Checking for files to remove/);
@@ -338,6 +336,24 @@ test('a retirer pass says what it released and what it holds, by typed reason si
     assert.match(removerLine(unknownClass, NOW), /holding 1 since .*: 1 some new reason$/, 'a class this client lacks words for is shown by its name');
     const withErrors = [{ id: 'engine_runtime_prune', state: 'done', at, released: 0, errors: 2, first_error: 'x' }];
     assert.equal(removerLine(withErrors, NOW), `Engine program copies: last change ${whenLabel(at, NOW)} · 0 released · 2 errors`);
+    // A job that holds without counting what it released (the retirement job's closed gate, compression's log plane):
+    // the count is said only where the fact carries it, never as a zero.
+    // The gate keeps every task tree and service log unlisted: how many is unknown (`count: null`), said by its reason alone.
+    const gate = [{ id: 'runtime_retirement', state: 'done', at, held: 0, held_since: at,
+        holds: [{ class: 'source_recovery_pending', count: null, example: 'startup recovery report missing', since: at }] }];
+    assert.equal(removerLine(gate, NOW), `Retirement: last change ${whenLabel(at, NOW)} · `
+        + `held since ${whenLabel(at, NOW)}: startup recovery is not confirmed complete: old task folders and service logs are kept`);
+    assert.doesNotMatch(removerLine(gate, NOW), /holding \d/, 'an unknown count is never said as a number');
+    const logs = [{ id: 'record_compression', state: 'done', at, compressed: 1204, saved_bytes: 2.1e9, held: 37, held_since: at,
+        holds: [{ class: 'prior_workers_unconfirmed', count: 37, example: 'events_20261101T000000.jsonl', since: at }] }];
+    const held = `holding 37 since ${whenLabel(at, NOW)}: 37 closed log files waiting for the next app restart (the previous run’s background processes are not confirmed stopped)`;
+    assert.equal(removerLine(logs, NOW), `Compression: 1,204 files compressed, 2.1 GB saved · ${held}`,
+        'the log plane: its hold beside what it compressed and saved, with no released count');
+    assert.equal(removerLine([{ ...logs[0], state: 'pending' }], NOW), `Compression: 1,204 files compressed, 2.1 GB saved, in progress · ${held}`,
+        'an unfinished pass with a hold is said as such');
+    assert.equal(removerLine([{ ...logs[0], state: 'pending', compressed: 0, saved_bytes: 0 }], NOW), `Compression: in progress · ${held}`,
+        'an unfinished pass that compressed nothing here yet is in progress too, never just a date');
+    for (const facts of [gate, logs]) assert.doesNotMatch(removerLine(facts, NOW), /released/);
     const rows = placeRows(count({ places: [{ id: 'session_scratch', group: 'temporary', roots: ['/var/tmp/obs-1'], present: true, same_volume: true,
         bytes: 5e8, logical_bytes: 5e8, files: 10, unreadable: 0, parts: [], rest: { count: 0, bytes: 0 } }] }), 7, { session_scratch: quiet }, NOW);
     assert.equal(rows[0].label, 'Session scratch');

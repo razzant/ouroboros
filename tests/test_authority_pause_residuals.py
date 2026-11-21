@@ -14,7 +14,7 @@ def _prepared_transfer(tmp_path, monkeypatch, *, sleep=False):
 
     env = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(sc, "_runtime", body.body_runtime)
-    env.runtime = body.start_body_runtime(tmp_path, gateway_factory=LiveGateway, max_workers=2)
+    env.runtime = body.start_body_runtime(tmp_path, gateway_factory=LiveGateway)
     original = sc.confirm_release
 
     class Published(BaseException):

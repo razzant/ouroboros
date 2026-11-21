@@ -17,7 +17,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ouroboros import chat_uploads
 from ouroboros.config import DATA_DIR
 from ouroboros.gateway._helpers import run_sync_to_completion, settle_to_completion
-from ouroboros.utils import utc_now_iso
+from ouroboros.gateway.completion_gist import short_gist_frame
+from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -186,7 +187,7 @@ def _record_failure(data_dir: pathlib.Path, row: dict) -> None:
 
 
 def _encode(msg: dict) -> str:
-    return json.dumps(msg, ensure_ascii=False, default=str)
+    return json_dumps_utf8(short_gist_frame(msg), ensure_ascii=False, default=str)
 
 
 def _queue_frame(msg: dict) -> bool:
@@ -245,6 +246,11 @@ def broadcast_ws_sync(msg: dict) -> bool:
             _flush_scheduled = False
         return False
     return True
+
+
+def notify_extension_health_changed() -> None:
+    """Ask Skills to reread server health or a newly unconfirmed companion stop."""
+    broadcast_ws_sync({"type": "extension_health_changed"})
 
 
 async def _dispatch_extension_message(
@@ -315,6 +321,7 @@ async def _dispatch_extension_message(
         return True
 
     if handler_spec.get("out_of_process"):
+        from ouroboros.deployment_extensions import failure_words
         try:
             from ouroboros.extension_process_runner import dispatch_extension_ws_subprocess
 
@@ -328,10 +335,11 @@ async def _dispatch_extension_message(
             if result is not None:
                 await websocket.send_text(json.dumps({"type": msg_type + ".reply", "data": result}))
         except Exception as exc:
-            await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} child failed: {type(exc).__name__}: {exc}"}}))
+            await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} child failed: {failure_words(skill_name, exc)}"}}))
         return True
 
     handler = handler_spec.get("handler")
+    from ouroboros.deployment_extensions import failure_words
     try:
         from ouroboros.extension_process_runner import disclose_inprocess_extension_dispatch
 
@@ -350,7 +358,7 @@ async def _dispatch_extension_message(
                 "level": "error",
                 "message": (
                     f"extension WS handler {msg_type!r} model-cost disclosure failed: "
-                    f"{type(exc).__name__}: {exc}"
+                    f"{failure_words(skill_name, exc)}"
                 ),
             },
         }))
@@ -370,14 +378,13 @@ async def _dispatch_extension_message(
         if result is not None:
             await websocket.send_text(json.dumps({"type": msg_type + ".reply", "data": result}))
     except Exception as exc:
-        await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} raised: {type(exc).__name__}: {exc}"}}))
+        await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} raised: {failure_words(skill_name, exc)}"}}))
     return True
 
 
 def _initialization_notice(client_message_id: str = "", chat_id: int = 1, *, reason: str = "") -> str:
     """The refusal of this socket's frame; it names that frame so only its Sending settles.
-    ``reason`` says in plain words why the message was not saved (no bridge yet: the store is
-    still migrating, or the start failed); a refused acceptance keeps the generic sentence."""
+    ``reason`` says why the frame was not accepted, without exposing internal errors."""
     return json.dumps({
         "type": "chat", "chat_id": chat_id,
         "role": "system", "system_type": "initialization_notice",
@@ -411,10 +418,18 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
     try:
         await run_sync_to_completion(accept)
     except Exception as exc:
+        from ouroboros.chat_references import ReplyExcerptNotAuthored, ReplyExcerptUnavailable
         from ouroboros.store import StoreBusy
+        from supervisor.message_ingress import ClientMessageIdConflict
 
         busy = isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy)
         reason = "⚠️ Your message was not saved: the dialogue store is busy. Please send it again." if busy else ""
+        if isinstance(exc, ReplyExcerptUnavailable):
+            reason = "The quoted message is unavailable. Retry or clear the quote."
+        elif isinstance(exc, ReplyExcerptNotAuthored):
+            reason = "This message has no text you can quote. Clear the quote or select another passage."
+        elif isinstance(exc, ClientMessageIdConflict):
+            reason = "This send already belongs to a different message. Send these words as a new message."
         try:
             await websocket.send_text(_initialization_notice(client_message_id, chat_id, reason=reason))
         except Exception:
@@ -494,6 +509,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         client_surface = normalize_client_surface(msg.get("client_surface"))
                         task_metadata: dict[str, Any] = {
                             "reply_to": msg.get("reply_to", ""),
+                            **({"reply_excerpt": msg["reply_excerpt"]} if "reply_excerpt" in msg else {}),
                         }
                         # Attachment inspection belongs to the ordered acceptance
                         # worker, so this socket can receive Panic during disk I/O.
@@ -519,7 +535,15 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                                 dispatch_accepted_restart, bridge,
                                 callback=getattr(websocket.app.state, "startup_owner_command", None))
                     else:
-                        send_kwargs = {"broadcast": False}
+                        from supervisor.message_ingress import ui_control_fact
+
+                        try:  # a control's press composed this command: no row will speak as my human
+                            control = ui_control_fact(msg.get("ui_control"), pressed_at=utc_now_iso(), command=str(payload))
+                        except ValueError as exc:
+                            await websocket.send_text(json.dumps({"type": "log", "data": {
+                                "level": "warning", "message": f"command refused: {exc}"}}))
+                            continue
+                        send_kwargs = {"broadcast": False, **({"task_metadata": {"ui_control": control}} if control else {})}
                     if msg_type == "command" and (bridge is None or str(payload).strip().lower() == "/restart"):
                         callback = getattr(websocket.app.state, "startup_owner_command", None)
                         action = callback(payload, send_kwargs=send_kwargs) if callable(callback) else None
@@ -565,6 +589,7 @@ __all__ = [
     "broadcast_ws_sync",
     "close_all_ws",
     "has_ws_clients",
+    "notify_extension_health_changed",
     "set_event_loop",
     "ws_endpoint",
 ]

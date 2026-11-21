@@ -438,6 +438,29 @@ def test_caller_physical_rail_blocks_none_without_reordering(monkeypatch):
     assert [item["tools"][0]["type"] for item in captured] == ["custom", "function"]
 
 
+def test_a_refused_reasoning_off_rung_ends_the_ladder(monkeypatch):
+    """The task-local none rung is the last one: its own exact refusal is the provider's answer, never the same
+    request sent again until a rail stops it."""
+    client = LLMClient(api_key="test")
+    refused = [_DialectError("custom tools are not supported", param="tools[0].type")] + [
+        _DialectError("reasoning is not compatible with function tools; must use none", param="reasoning_effort")
+        for _ in range(5)]
+    captured = _install_transport(monkeypatch, client, refused)
+
+    with pytest.raises(_DialectError, match="must use none"):
+        client.chat(
+            [{"role": "user", "content": "Use a tool."}],
+            "openai::future-model-without-prefix",
+            tools=_tools(),
+            reasoning_effort="medium",
+        )
+    assert [(item["tools"][0]["type"], item["reasoning_effort"]) for item in captured] == [
+        ("custom", "medium"),
+        ("function", "medium"),
+        ("function", "none"),
+    ]
+
+
 def test_no_proxy_uses_the_same_custom_physical_send(monkeypatch):
     client = LLMClient(api_key="test")
     captured = _install_transport(monkeypatch, client, [_text_response()], no_proxy=True)
@@ -663,6 +686,60 @@ def test_main_schema_valid_custom_call_reaches_existing_handler(tmp_path):
 
     assert errors == 0
     assert tools.calls == [("probe", {"marker": "ok"})]
+
+
+def test_a_custom_call_the_schema_refuses_names_its_field_and_its_healthy_neighbour_runs(tmp_path):
+    """The real knowledge_write schema on the custom route: a call without its required mode is refused by the exact
+    schema before any handler, and the refusal names the field; the note and its history keep every byte. The valid
+    read beside it in the same batch runs through the real registry."""
+    import json
+
+    from ouroboros import knowledge as store
+    from ouroboros.tools.knowledge import get_tools as knowledge_tools
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    schemas = {entry.name: entry.schema for entry in knowledge_tools()}
+    candidate = bind_wire_candidate(
+        target=_target(),
+        api_surface="chat.completions",
+        source_payload={
+            "model": "future-model-without-prefix",
+            "messages": [{"role": "user", "content": "Add the news to the note."}],
+            "reasoning_effort": "medium",
+            "tool_choice": "auto",
+            "tools": [{"type": "function", "function": schemas[name]} for name in ("knowledge_write", "knowledge_read")],
+        },
+        candidate_spec=WireCandidateSpec("openai_chat_custom", "medium", "requested_wire_form"),
+        requested_effort="medium",
+        ladder_ordinal=1,
+    )
+    drive = tmp_path / "drive"
+    target = store.resolve_knowledge_address(drive, "people/polina", "global")
+    note = store.write_knowledge_note(target, "# Полина\n\n## Работа\n\nВыгрузки.\n").current
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    rows = journal.read_bytes()
+    calls, receipts = normalize_openai_custom_tool_calls([
+        _custom_call("call-write", "knowledge_write", json.dumps({
+            "topic": "people/polina", "scope": "global", "content": "\n## Новость\n\nЗапрос.\n",
+            "expected_revision": note.revision})),
+        _custom_call("call-read", "knowledge_read", json.dumps({"topic": "people/polina", "scope": "global"})),
+    ], candidate)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=drive, task_id="custom"))
+    registry._ctx._request_wire_custom_receipts = receipts
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    messages = [{"role": "assistant", "content": "", "tool_calls": calls}]
+
+    errors = handle_tool_calls(calls, registry, logs, "task", StatefulToolExecutor(), messages, {"tool_calls": []},
+                               lambda _text: None)
+
+    replies = {item["tool_call_id"]: item["content"] for item in messages if item.get("role") == "tool"}
+    assert errors == 1, replies
+    assert ("Arguments for 'knowledge_write' failed the exact custom-tool schema (schema_validation_failed): "
+            "'mode' is a required property. Correct the arguments") in replies["call-write"], replies
+    assert note.revision in replies["call-read"] and "Выгрузки." in replies["call-read"], replies
+    assert target.path.read_bytes() == note.raw and journal.read_bytes() == rows
 
 
 def test_custom_receipt_rejects_canonical_argument_tampering():

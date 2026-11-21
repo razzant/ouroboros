@@ -1,7 +1,7 @@
 // Activity dashboard subtab (P4): a single observability + minimal-control view for
-// cron/scheduled tasks, what is running/queued now, and background consciousness.
-// Management is DIRECT mechanical control via existing APIs (cancel a task, enable/
-// disable/delete/restore schedules, start/stop background consciousness). Every
+// cron/scheduled tasks, what is running/queued now, background consciousness and the services
+// tasks kept running. Management is DIRECT mechanical control via existing APIs (cancel a task, enable/
+// disable/delete/restore schedules, start/stop background consciousness, stop one kept service). Every
 // lifecycle button NAMES its action to the one audited server seam, so the owner's
 // buttons and the agent's tool mean exactly the same thing.
 
@@ -33,6 +33,8 @@ import { markView, statusMarkHtml } from './status_mark.js';
 import { whenLabel } from './storage_format.js';
 import { showToast } from './toast.js';
 import { normalizeConsciousness } from './consciousness_api.js';
+import { switchActionWords, switchReadingWords, turnConsciousness } from './consciousness_switch.js';
+import { autonomyOf } from './consciousness_autonomy.js';
 import { allowanceText } from './consciousness_words.js';
 
 function esc(value) {
@@ -364,9 +366,76 @@ export function scheduleOutcomeToast(action, outcome, { word = action, done: don
     return outcome.status === 'withdrawn' ? [`Schedule ${done}.`, 'info'] : null;
 }
 
+/** One service a task kept running, as custody reads it now (`GET /api/services/kept`): its name leads, then its state,
+ * the task it came from, since when and the address its log printed; Stop ends that one launch. */
+export function keptServiceRowHtml(service) {
+    const name = String(service?.name || 'service');
+    const id = String(service?.launch_id || '');
+    const captureOnly = service?.state === 'capture_owed';
+    const action = captureOnly ? 'Save outputs' : 'Stop';
+    const origin = String(service?.task_title || '').trim() || String(service?.task_id || '').trim();
+    const since = whenLabel(service?.since);
+    const facts = [
+        `Kept by a task · ${service?.state === 'running' ? 'running' : service?.state === 'capture_owed'
+            ? 'ended, declared outputs not captured yet' : 'status unknown'}`,
+        origin ? `from ${esc(origin)}` : '',
+        since ? `since ${esc(since)}` : '',
+        service?.address ? esc(service.address) : '',
+    ].filter(Boolean).join(' · ');
+    return `<div class="ui-row activity-row" data-kept-service="${esc(id)}">
+            <span class="ui-row-title activity-name" data-i18n-authored>${esc(name)}</span>
+            <span class="ui-row-meta activity-sub">${facts}</span>
+            <div class="ui-row-actions activity-row-actions">
+                <button type="button" class="btn btn-default btn-sm" data-act="kept-stop" data-id="${esc(id)}" data-name="${esc(name)}" data-capture-only="${captureOnly ? '1' : '0'}" aria-label="${action} ${esc(name)}">${action}</button>
+            </div>
+        </div>`;
+}
+
+/** The kept services under Background: every row, then what the read could not see. An unreadable list says so. */
+export function keptServicesHtml(data) {
+    if (!data || !Array.isArray(data.services)) {
+        return '<div class="activity-empty">Kept services could not be read. Whether any still run is unknown.</div>';
+    }
+    const rows = data.services.map(keptServiceRowHtml);
+    if (data.complete === false) {
+        rows.push(`<div class="activity-empty">Kept services may be missing from this list: ${esc(data.note || 'custody could not be read whole')}.</div>`);
+    }
+    return rows.join('');
+}
+
+/** The Stop confirmation: what a stop does, never a promise its outputs will be kept (the receipt says). */
+export function keptStopConfirmBody(name, captureOnly = false) {
+    if (captureOnly) return `Save outputs from ${name}? This service was reported ended. This rechecks it, stops any remaining processes and tries to save its declared outputs for the original task. The result will show what was saved.`;
+    return `Stop ${name}? A task started it and asked to keep it running. Stopping it ends its processes and keeps its log, then tries to capture the outputs it declared for that task; the result will say whether they were kept. Nothing else will be stopped.`;
+}
+
+/** A Stop receipt in owner words, with its toast tone: a stop whose declared outputs were not all kept says so. */
+export function keptStopToast(receipt, name) {
+    const subject = receipt?.name || name || 'The service';
+    const outputs = receipt?.outputs || {};
+    switch (receipt?.outcome) {
+    case 'stopped':
+        if (outputs.state === 'captured') return [`Stopped ${subject}. Its log and declared outputs are kept.`, 'success'];
+        if (outputs.state === 'none_declared') return [`Stopped ${subject}. Its log is kept.`, 'success'];
+        return [outputs.state === 'unavailable'
+            ? `Stopped ${subject}. Its log is kept; no declared outputs were captured: ${outputs.detail || 'none recorded'}.`
+            : `Stopped ${subject}. Its log is kept, but not every declared output was captured: ${
+                outputs.detail || 'the capture did not finish'}.`, 'warning'];
+    case 'not_found':
+        if (!receipt.outputs) return [`${subject} was no longer running; nothing was stopped.`, 'info'];
+        return receipt.ok ? [`${subject} was no longer running; its declared outputs are now kept.`, 'success']
+            : [`${subject} was no longer running; not every declared output was captured: ${
+                outputs.detail || 'the capture did not finish'}.`, 'warning'];
+    case 'not_confirmed': return [`${subject} is not confirmed stopped: ${receipt.detail || 'some processes may still run'}.`, 'warning'];
+    default: return [`Whether ${subject} stopped is unknown: ${receipt?.detail || 'custody could not be read'}.`, 'error'];
+    }
+}
+
 export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     if (!mount) return { refresh: () => {} };
     let busy = false;
+    // The switch's preview is being read (seconds on a large install): a repaint meanwhile keeps saying so.
+    let switchReading = false;
     let refreshRevision = 0;
     let migrationTimer = null, destroyed = false;
     // Remembered across re-renders: whether each disclosure (a group, a row's Details) is open, by its key. A refresh
@@ -485,13 +554,13 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             paused.length ? groupHtml('paused', `Paused (${paused.length})`, paused, { open: true }) : ''].join('');
     }
 
-    function renderBg(stateData) {
+    function renderBg(stateData, kept) {
         if (typeof stateData?.bg_consciousness_enabled !== 'boolean') throw new Error('Background state unavailable');
         const enabled = stateData.bg_consciousness_enabled;
         const bg = (stateData && stateData.bg_consciousness_state) || {};
-        const detail = esc(bg.detail || (enabled ? 'enabled' : 'disabled'));
+        const detail = esc(String(bg.detail || '').replace(/\.$/, ''));
         const facts = [
-            bg.level ? `autonomy ${esc(bg.level)}` : '',
+            enabled && bg.level ? esc(autonomyOf(bg.level)?.label || bg.level) : '',
             bg.last_wake_at ? `last wake ${esc(whenLabel(bg.last_wake_at))}${bg.last_wake_outcome ? ` (${esc(bg.last_wake_outcome)})` : ''}` : '',
             // The money line in the Consciousness tab's own words ("≥ $1.50 of $20.00 in the last 24 hours").
             esc(allowanceText(normalizeConsciousness(bg, { enabled }))),
@@ -499,12 +568,12 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         ].filter(Boolean).join(' · ');
         return `<div class="ui-row activity-row">
             <span class="ui-row-title activity-name">Consciousness</span>
-            <span class="ui-row-meta activity-sub">${enabled ? 'enabled' : 'disabled'}${detail ? ` · ${detail}` : ''}${facts ? ` · ${facts}` : ''}</span>
+            <span class="ui-row-meta activity-sub">${esc(bg.position || (enabled ? 'enabled' : 'disabled'))}${detail ? ` · ${detail}` : ''}${facts ? ` · ${facts}` : ''}</span>
             <div class="ui-row-actions activity-row-actions">
-                <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws ? '' : ' disabled'}>${enabled ? 'Stop' : 'Start'}</button>
+                <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws && !switchReading ? '' : ' disabled'}>${esc(switchReading ? switchReadingWords() : switchActionWords(enabled))}</button>
                 <button type="button" class="btn btn-sm btn-ghost" data-act="bg-open" aria-label="Open Dashboard › Consciousness"${openDashboardTab ? '' : ' hidden'}>Details</button>
             </div>
-        </div>`;
+        </div>${keptServicesHtml(kept)}`;
     }
 
     // The standing promises first: what will run, then what waits or is held, then what is withdrawn or switched off.
@@ -548,7 +617,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         for (let details = target.closest?.('details'); details; details = details.parentElement?.closest?.('details')) {
             if (!details.open) details.open = true;
         }
-        target.focus?.();
+        target.focus?.({ preventScroll: true });
     }
 
     async function refresh() {
@@ -556,8 +625,6 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         clearTimeout(migrationTimer); migrationTimer = null;
         const revision = ++refreshRevision;
         rememberDisclosure();
-        const focused = focusedControl();
-        const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
         // A refresh says nothing while it reads (aria-busy only): a line that came and went under each heading moved
         // every row below it (DESIGN principle 6). Only the first read and a failure speak.
         sections.forEach(({ root, status, loaded }) => {
@@ -570,16 +637,15 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             getJson('/api/tasks?queue_only=1'),
             readStateJson(),
             getJson('/api/schedules'),
+            getJson('/api/services/kept'),
         ]);
         if (destroyed || revision !== refreshRevision) return;
-        // A request can take long enough for the owner to move focus elsewhere.
-        // Only restore the original control when it is still the active owner;
-        // if this render detaches it, activeElement is still the original node
-        // immediately before replacement.  A different active element means
-        // the owner made a newer choice while the request was in flight.
-        const mayRestoreFocus = !focusedKey || document.activeElement === focused;
+        // Keep the control focused now: a return may have restored it while this read was pending.
+        const focused = focusedControl();
+        const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
         const census = results[1].status === 'fulfilled' ? results[1].value : null;
-        const renderers = [(data) => renderQueue(data?.queue, census), renderBg, renderSchedules];
+        const kept = results[3].status === 'fulfilled' ? results[3].value : null;
+        const renderers = [(data) => renderQueue(data?.queue, census), (data) => renderBg(data, kept), renderSchedules];
         sections.forEach((section, index) => {
             const { root, status, content } = section;
             root.removeAttribute('aria-busy');
@@ -606,7 +672,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                     : 'Could not load. Current state is unknown. Reopen Activity to try again.', 'error');
             }
         });
-        if (mayRestoreFocus) restoreFocus(focusedKey);
+        restoreFocus(focusedKey);
     }
 
     // One seam for every lifecycle button: the owner NAMES the action and why.
@@ -713,12 +779,36 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 // The outcome speaks the pressed button's word (Enable sends `restore` and says "enabled").
                 await scheduleAction(id, action, `owner chose ${action} from Activity`, btn.dataset.holdId || '',
                     { word: btn.textContent.trim().toLowerCase() || action, done: btn.dataset.done || '' });
+            } else if (act === 'kept-stop') {
+                const name = btn.dataset.name || 'this service';
+                const captureOnly = btn.dataset.captureOnly === '1';
+                const action = captureOnly ? 'Save outputs' : 'Stop';
+                const confirmed = await openConfirmDialog({
+                    title: `${action} ${name}`,
+                    body: keptStopConfirmBody(name, captureOnly),
+                    confirmLabel: action,
+                    danger: true,
+                });
+                if (!confirmed) return;
+                const receipt = await fetchJson(`/api/services/kept/${encodeURIComponent(id)}/stop`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: captureOnly ? 'the owner retried saving its outputs from Activity › Background'
+                        : 'the owner stopped it from Activity › Background' }),
+                });
+                showToast(...keptStopToast(receipt, name));
             } else if (act === 'bg-toggle') {
-                const on = btn.dataset.enabled === '1';
-                // Reuse the existing direct control command (same as the chat header
-                // toggle); /bg is a control slash-command, not a chat message to the agent.
-                ws?.send?.({ type: 'command', cmd: `/bg ${on ? 'stop' : 'start'}` });
-                await new Promise((resolve) => setTimeout(resolve, 400));
+                // The one switch (consciousness_switch.js): it names what changes, then sends the Dashboard's /bg.
+                switchReading = true;  // the preview read can take seconds on a large install; a repaint keeps it
+                btn.textContent = switchReadingWords();
+                const done = () => {
+                    switchReading = false;
+                    const current = mount.querySelector('[data-act="bg-toggle"]');
+                    if (current) current.textContent = switchActionWords(current.dataset.enabled === '1');
+                };
+                if (await turnConsciousness(btn.dataset.enabled === '1' ? 'off' : 'on', { ws, onRead: done })) {
+                    await new Promise((resolve) => setTimeout(resolve, 400));
+                }
             }
         } catch (exc) {
             // A 404 is the documented completion race (the run finished on its own)
@@ -729,6 +819,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             }
         } finally {
             busy = false;
+            switchReading = false;
             btn.disabled = false;
             await refresh();
         }

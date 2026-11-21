@@ -5,7 +5,9 @@ and its owner grants, and it is the only way an extension reaches the host: it
 registers surfaces, subscribes to host events, spawns manifest-declared
 companions, pushes WebSocket messages and reads the settings it was allowed to
 see. Registration closes when ``register()`` returns and runtime access closes
-at unload, so a late call is refused rather than served.
+at unload, so a late call is refused rather than served. A running tool call's
+Stop (``get_stop_state``) is read from the host's own binding of that call,
+never from this shared object.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from ouroboros.contracts.plugin_api import (
     normalize_extension_route_methods,
 )
 from ouroboros.event_bus import VALID_TOPICS as VALID_EVENT_TOPICS, get_global_event_bus
+from ouroboros.deployment_extensions import discloses_failure
 from ouroboros.extension_companion import companion_spawn_env, CompanionDescriptor, get_global_supervisor, is_server_process
 from ouroboros.extension_isolated_deps import (
     async_isolated_site_dirs_scope,
@@ -53,6 +56,7 @@ from ouroboros.extension_registry_state import (
     _StagedRegistrations,
     _StagedSupervisedTask,
     _extensions,
+    _lifecycle_lock_for,
     _load_failures,
     _lock,
     _record_companion_name,
@@ -84,7 +88,7 @@ from ouroboros.node_runtime import (
     skill_node_argv,
 )
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
-from ouroboros.settings_integrity import skill_settings
+from ouroboros.settings_integrity import SettingsDocumentUnknown, skill_settings
 from ouroboros.skill_loader import (
     compute_content_hash,
     requested_core_setting_keys,
@@ -208,6 +212,182 @@ def set_ws_broadcaster(broadcaster: Callable[[dict], None] | None) -> None:
     global _ws_broadcaster
     with _lock:
         _ws_broadcaster = broadcaster
+
+
+# --- the running tool call's Stop (PluginAPI 2.6 ``get_stop_state``) ---
+# The host binds a call, the extension never names one: in process the registry invocation (``owner_pause.
+# _TOOL_OPERATION``: context, tool name and outcome, seen by the call's thread, its async task and contexts copied
+# from them), out of process the per-call child's single binding (tool mode only). The first refusal latches on that
+# call's own record, never on this API object, which the calls of several tasks share.
+STEP_STOP = "step_stop"  # the latch on a call's record, and the field of the host <-> child transport
+_STOP_WORDS = {
+    "cancelled": "Stop is in force for this task",
+    "task_cancelled": "this task has already ended as cancelled",
+    "operation_already_returned": "this tool call has already returned",
+    "stop_unreadable": "this task's Stop could not be read",
+    "no_task": "this call was made for no task, which no Stop governs",
+    "unbound": "no tool call of this skill runs in this context",
+}
+_REFUSALS = frozenset({"cancelled", "task_cancelled", "operation_already_returned", "stop_unreadable"})
+_child_tool_call: Optional[Dict[str, Any]] = None
+
+
+def _stop_answer(status: str, reason: str = "") -> Dict[str, str]:
+    return {"status": status, "reason": reason, "note": _STOP_WORDS.get(reason, "")}
+
+
+def _read_call_stop(source: Any) -> str:
+    """One strict read of the Stop over ``source``'s task: a refusal reason, ``no_task``, or ``""`` (continue).
+
+    Read as ``browser_session._idle_admission`` reads it: ``cancel_intents.immediate_stop_pending`` with the tree root
+    (the task's own immediate Stop, or an immediate cascade above it) within one acquisition budget, then, strictly
+    AFTER that projection, the task row, so an intent settled between the two reads still shows as the ``cancelled``
+    status it left. The tree root is never empty here: without it that predicate reads only its fail-soft pending
+    cancel, never the strict projection. Unreadable authority refuses; a row-less call outside a task's lifecycle has
+    no task to stop."""
+    from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
+    from ouroboros.cancel_intents import immediate_stop_pending
+    from ouroboros.owner_pause import _member_coordinates
+    from ouroboros.store import acquisition_budget
+    from ouroboros.task_results import STATUS_CANCELLED, load_task_result
+
+    root, tree, task_id = _member_coordinates(source)
+    managed = getattr(source, "task_lifecycle_bound", False) is True
+    if not task_id or not root or not tree:
+        return "stop_unreadable" if managed else "no_task"
+    gap: Optional[BaseException] = None
+    try:
+        with acquisition_budget(ACQUISITION_SLICE_SEC):
+            try:
+                if immediate_stop_pending(root, task_id, tree_root_id=tree):
+                    return "cancelled"
+            except Exception as exc:  # unknown, never "no Stop"; the row below still tells a call with no task
+                gap = exc
+            row = load_task_result(root, task_id, strict=True)
+    except Exception:
+        log.warning("Stop of an extension call is unreadable for task %s", task_id, exc_info=True)
+        return "stop_unreadable"
+    if row is None:
+        return "stop_unreadable" if managed else "no_task"
+    if str(row.get("status") or "") == STATUS_CANCELLED:
+        return "task_cancelled"
+    if gap is not None:
+        log.warning("Stop of an extension call is unreadable for task %s", task_id, exc_info=gap)
+        return "stop_unreadable"
+    return ""
+
+
+def _stop_binding_closed(record: Dict[str, Any]) -> bool:
+    return bool(record.get("closed") or record.get("stop_binding_closed"))
+
+
+def _call_stop(record: Dict[str, Any], source: Any) -> Dict[str, str]:
+    """One bound call's answer: its latch, else one read; the first refusal latches on the call's own record. The read
+    holds no lock, so the record decides again after it, whatever it found: a call that returned meanwhile refuses
+    (no later typing reads the record), and a refusal another thread of the call latched meanwhile is answered."""
+    with record["phase_lock"]:
+        if _stop_binding_closed(record):
+            return _stop_answer("stop", "operation_already_returned")
+        latch = record.get(STEP_STOP)
+        if latch:
+            latch["refusals"] += 1
+            return _stop_answer("stop", latch["reason"])
+    reason = _read_call_stop(source)
+    with record["phase_lock"]:
+        if _stop_binding_closed(record):
+            return _stop_answer("stop", "operation_already_returned")
+        if reason in _REFUSALS:
+            latch = record.setdefault(STEP_STOP, {"reason": reason, "note": _STOP_WORDS[reason], "refusals": 0})
+        elif not (latch := record.get(STEP_STOP)):
+            return _stop_answer("continue", reason)
+        latch["refusals"] += 1
+        return _stop_answer("stop", latch["reason"])
+
+
+def call_stop_state(skill: str) -> Dict[str, str]:
+    """``PluginAPI.get_stop_state`` of ``skill``: the call of this skill bound in this context, else ``unbound``."""
+    from ouroboros.owner_pause import _TOOL_OPERATION
+
+    active = _TOOL_OPERATION.get()
+    if active is not None:
+        source, name, record = active
+        if str(name or "").startswith(extension_name_prefix(skill)):
+            return _call_stop(record, source)
+        return _stop_answer("unbound", "unbound")
+    with _lock:
+        child = _child_tool_call
+    if child is not None and child["skill"] == skill:
+        return _call_stop(child, child["source"])
+    return _stop_answer("unbound", "unbound")
+
+
+def bind_child_tool_call(skill: str, source: Any) -> Dict[str, Any]:
+    """Bind the one tool call this per-call child serves (tool mode only); every thread of the child reads it. A
+    second binding is refused, never shared, so no later call, route or handler of the process inherits the first."""
+    global _child_tool_call
+    record = {"skill": skill, "source": source, "phase_lock": threading.Lock(), "closed": False}
+    with _lock:
+        if _child_tool_call is not None:
+            raise RuntimeError("this extension child already serves a tool call")
+        _child_tool_call = record
+    return record
+
+
+def release_child_tool_call(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Close and remove the child's binding (its ``finally``, before unload): the latch a refused further action
+    left, for the transport field ``step_stop``, or None."""
+    global _child_tool_call
+    if record is None:
+        return None
+    with record["phase_lock"]:
+        record["closed"] = True
+        latch = dict(record.get(STEP_STOP) or {})
+    with _lock:
+        if _child_tool_call is record:
+            _child_tool_call = None
+    return latch or None
+
+
+def adopt_child_stop(source: Any, latch: Any) -> None:
+    """The host side of ``step_stop``: a refusal the per-call child reported joins the host invocation ``source``
+    runs, in the host's own words, before its result is typed. Anything else is ignored; this never raises."""
+    from ouroboros.owner_pause import _TOOL_OPERATION
+
+    active = _TOOL_OPERATION.get()
+    reason = str(latch.get("reason") or "") if isinstance(latch, dict) else ""
+    if active is None or active[0] is not source or reason not in _REFUSALS or "phase_lock" not in active[2]:
+        return
+    count = latch.get("refusals")
+    with active[2]["phase_lock"]:
+        if _stop_binding_closed(active[2]):
+            return
+        active[2].setdefault(STEP_STOP, {"reason": reason, "note": _STOP_WORDS[reason],
+                                         "refusals": count if isinstance(count, int) and count > 0 else 1})
+
+
+def close_stop_binding(source: Any, handoff: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Close the extension's Stop reader and snapshot its refusal for the host result."""
+    from ouroboros.owner_pause import _TOOL_OPERATION
+
+    record = handoff
+    if record is None:
+        active = _TOOL_OPERATION.get()
+        record = active[2] if active is not None and active[0] is source else None
+    if not isinstance(record, dict) or "phase_lock" not in record:
+        return None
+    with record["phase_lock"]:
+        # A timeout can end the host's wait while the runner still owns settlement.
+        record["stop_binding_closed"] = True
+        latch = record.get(STEP_STOP)
+        return dict(latch) if latch else None
+
+
+async def await_stop_bound_call(awaitable, source, handoff=None):
+    """Close this call's Stop reader in the handler task, before the event loop runs its next callback."""
+    try:
+        return await awaitable
+    finally:
+        close_stop_binding(source, handoff)
 
 
 class PluginAPIImpl:
@@ -596,7 +776,7 @@ class PluginAPIImpl:
                 except Exception:
                     restarts += 1
                     if spec.restart_policy != "on_failure" or restarts > spec.max_restarts:
-                        log.warning("supervised task %s/%s stopped after failure", self._skill, spec.name, exc_info=True)
+                        log.warning("supervised task %s/%s stopped after failure", self._skill, spec.name, exc_info=discloses_failure(self._skill))
                         return
                     await asyncio.sleep(max(0.1, float(spec.backoff_seconds)))
 
@@ -625,14 +805,24 @@ class PluginAPIImpl:
             raise ExtensionRegistrationError("companion command must be declared in manifest")
         if expected_runtime in {"python", "python3"} and cmd[0] in {"python", "python3"}:
             cmd = [sys.executable, *cmd[1:]]
-        # T14 node symmetry with the python rewrite above; the bundled-first
-        # precedence and its PATH-override carve-out live in node_runtime.
-        cmd = skill_node_argv(spec, expected_runtime, cmd)
         if not is_server_process():
             with _lock:
                 self._require_open_locked()
                 self._stage_companion_name_locked(f"worker-skip:{clean_name}")
             return
+        # T14 node symmetry with the python rewrite above, here where the server spawns it; the precedence and its
+        # PATH-override carve-out live in node_runtime. Under a pin not prepared yet the companion waits: this start
+        # asks for it, and the prepared Node re-queues this extension (``server_boot.requeue_waiting_extensions``).
+        from ouroboros.node_runtime import NodeRuntimeUnavailable, NpmLauncherRefused, pinned_node_wait
+
+        try:
+            cmd = skill_node_argv(spec, expected_runtime, cmd)
+        except NodeRuntimeUnavailable as exc:
+            if pinned_node_wait()[1] and not isinstance(exc, NpmLauncherRefused):
+                from ouroboros.server_boot import request_pinned_node
+
+                request_pinned_node()
+            raise ExtensionRegistrationError(f"companion {clean_name!r}: {exc}") from exc
         supervisor = get_global_supervisor()
         if supervisor is None:
             raise ExtensionRegistrationError("companion supervisor is not initialized")
@@ -719,7 +909,7 @@ class PluginAPIImpl:
             try:
                 broadcaster(payload)
             except Exception:
-                log.warning("extension %s WS broadcast failed for %s", self._skill, full, exc_info=True)
+                log.warning("extension %s WS broadcast failed for %s", self._skill, full, exc_info=discloses_failure(self._skill))
 
     def _send_ws_message_via_host(self, short: str, data: Dict[str, Any]) -> None:
         """Best-effort WS push from an out-of-process child/companion via Host Service."""
@@ -935,6 +1125,7 @@ class PluginAPIImpl:
                     self._state_dir.mkdir(parents=True, exist_ok=True)
                     token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
                     for spawn in staged.companion_spawns:
+                        spawn.descriptor.skill_dir = bundle.skill_dir
                         spawn.descriptor.env.clear()
                         spawn.descriptor.env.update(companion_spawn_env(
                             spawn.spec, token, env_allow=self._env_allow, granted_upper=self._granted_upper,
@@ -957,7 +1148,7 @@ class PluginAPIImpl:
                 log.warning(
                     "extension %s post-swap side effect failed; the published "
                     "bundle is disposed through the standard unload path",
-                    self._skill, exc_info=True,
+                    self._skill, exc_info=discloses_failure(self._skill),
                 )
                 raise
         # Companion PROCESSES start OUTSIDE the registry lock (the pre-split
@@ -968,10 +1159,11 @@ class PluginAPIImpl:
         # same dispose+unload path as a mid-attach failure.
         for spawn in companion_spawns:
             try:
-                companion_supervisor.start(spawn.descriptor)
+                if not companion_supervisor.start(spawn.descriptor):  # workers did not stage a spawn
+                    raise ExtensionRegistrationError(f"companion {spawn.descriptor.name!r} start was declined")
             except Exception:
                 log.warning("extension %s companion %s failed to start; disposed through "
-                            "the standard unload path", self._skill, spawn.descriptor.name, exc_info=True)
+                            "the standard unload path", self._skill, spawn.descriptor.name, exc_info=discloses_failure(self._skill))
                 raise
 
     def _close_runtime_access(self) -> None:
@@ -988,37 +1180,178 @@ class PluginAPIImpl:
         level_no = levels.get(str(level or "info").lower(), logging.INFO)
         log.log(level_no, "[ext %s] %s %s", self._skill, message, fields or "")
 
+    def _readable_settings_keys(self, keys: Sequence[str], settings: Dict[str, Any]) -> list[str]:
+        """The settings keys a request may see in ``settings``, the document its values come from: allowlisted,
+        and a core key, or a custom secret that document holds, only with its owner grant."""
+        protected_upper = {k.upper() for k in FORBIDDEN_SKILL_SETTINGS}
+        protected_upper.update(requested_core_setting_keys(list(self._env_allow), settings))
+        readable: list[str] = []
+        for raw_key in keys or ():
+            key = str(raw_key).strip()
+            canonical = key.upper()
+            if not key:
+                continue
+            if canonical in protected_upper and canonical not in self._granted_upper:
+                # Do not reveal forbidden/core key presence without a grant.
+                continue
+            if key not in self._env_allow and canonical not in self._env_allow_upper:
+                continue
+            settings_key = canonical if canonical in protected_upper else key
+            if settings_key not in readable:
+                readable.append(settings_key)
+        return readable
+
+    def _runtime_unloading(self) -> bool:
+        with _lock:
+            return self._runtime_closing or self._runtime_closed or self._skill in _unloading
+
     def get_settings(self, keys: Sequence[str]) -> Dict[str, Any]:
         from ouroboros.realtime_credentials import session_settings
 
         with self._api_lock:
-            with _lock:
-                if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
-                    return {}
+            if self._runtime_unloading():
+                return {}
             if "read_settings" not in self._permissions:
                 # Missing permission fails closed without leaking key presence.
                 return {}
-            settings = session_settings(self, self._current_settings())
-            with _lock:
-                if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
-                    return {}
-            out: Dict[str, Any] = {}
-            protected_upper = {k.upper() for k in FORBIDDEN_SKILL_SETTINGS}
-            protected_upper.update(requested_core_setting_keys(list(self._env_allow)))
-            for raw_key in keys or ():
-                key = str(raw_key).strip()
-                canonical = key.upper()
-                if not key:
-                    continue
-                if canonical in protected_upper and canonical not in self._granted_upper:
-                    # Do not reveal forbidden/core key presence without a grant.
-                    continue
-                if key not in self._env_allow and canonical not in self._env_allow_upper:
-                    continue
-                settings_key = canonical if canonical in protected_upper else key
-                if settings_key in settings:
-                    out[settings_key] = settings[settings_key]
-            return out
+            document = self._current_settings()
+            settings = session_settings(self, document)
+            if self._runtime_unloading():
+                return {}
+            return {key: settings[key] for key in self._readable_settings_keys(keys, document) if key in settings}
+
+    def _require_api_generation(self, method: str, minimum: str = "2.4") -> None:
+        """2.4+ methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's current 2.x, so
+        in practice a field-less legacy (1.3) payload is the one refused them."""
+        try:
+            major, minor = (int(part) for part in self._plugin_api_generation.split(".", 1))
+        except ValueError:
+            major, minor = 0, 0
+        if (major, minor) < tuple(int(part) for part in minimum.split(".")):
+            raise ExtensionRegistrationError(
+                f"{method} needs plugin_api \"{minimum}\"; skill {self._skill!r} negotiated "
+                f"{self._plugin_api_generation}")
+
+    def get_settings_state(self, keys: Sequence[str]) -> Dict[str, Any]:
+        from ouroboros.realtime_credentials import session_settings
+
+        self._require_api_generation("get_settings_state")
+        closed: Dict[str, Any] = {"status": "access_closed", "values": {}, "missing": []}
+        if not keys or not self._readable_settings_keys(keys, {}):
+            # Nothing any document would let it read (an empty one only lacks custom secrets): only the access
+            # answers, from the flag unload sets before it waits on anything, without the settings read or this
+            # API's lock (a reader may hold it), so a per-request check is cheap.
+            if self._runtime_unloading() or "read_settings" not in self._permissions:
+                return closed
+            return {"status": "ok", "values": {}, "missing": []}
+        with self._api_lock:
+            if self._runtime_unloading() or "read_settings" not in self._permissions:
+                return closed
+            try:
+                document = skill_settings(self._settings_reader, strict=True)
+            except SettingsDocumentUnknown:
+                return closed if self._runtime_unloading() else {"status": "unknown", "values": {}, "missing": []}
+            if self._runtime_unloading():
+                return closed
+            readable, settings = self._readable_settings_keys(keys, document), session_settings(self, document)
+            values = {key: settings[key] for key in readable
+                      if settings.get(key) is not None and str(settings.get(key)).strip() != ""}
+            return {"status": "ok", "values": values, "missing": [key for key in readable if key not in values]}
+
+    def get_stop_state(self) -> Dict[str, Any]:
+        """The Stop of the tool call running in this context (contract: ``PluginAPI.get_stop_state``)."""
+        self._require_api_generation("get_stop_state", "2.6")
+        return call_stop_state(self._skill)
+
+    def _published_and_open(self) -> bool:
+        """This API is still the open runtime of the live publication: unload and reload both end it."""
+        with _lock:
+            if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+                return False
+            bundle = _extensions.get(self._skill)
+            return bundle is not None and self in bundle.api_instances
+
+    def _refresh_admission(self) -> tuple[str, frozenset[str]]:
+        """Why a refresh may not start this skill's companion now ("" when it may), and the grants it carries.
+
+        Read under the skill's lifecycle lock, which saving On/Off, unload and reload also hold. Every reason
+        the runtime state gives besides ``disabled`` and ``missing_grants`` reads ``not_desired``."""
+        if not self._published_and_open():
+            return "access_closed", frozenset()
+        from ouroboros.extension_liveness import runtime_state_for_skill_name
+
+        state = runtime_state_for_skill_name(self._skill, self._drive_root)
+        if not state.get("desired_live"):
+            reason = str(state.get("reason") or "")
+            return (reason if reason in {"disabled", "missing_grants"} else "not_desired"), frozenset()
+        granted = {str(key).strip().upper() for key in (state.get("grant_status") or {}).get("granted_keys") or []}
+        return "", frozenset(self._granted_upper & granted)  # a revoked grant is gone at once; nothing is widened
+
+    def refresh_companion_process(self, name: str, expected: Optional[Mapping[str, Any]] = None, *,
+                                  only_if_differs: bool = False) -> str:
+        _reject_extension_child_side_effect("refresh_companion_process")
+        self._require_api_generation("refresh_companion_process")
+        if "companion_process" not in self._permissions:
+            raise ExtensionRegistrationError(
+                f"skill {self._skill!r} cannot 'companion_process' — manifest permissions={sorted(self._permissions)}")
+        clean_name = _assert_tool_name(name)
+        spec = self._companion_specs.get(clean_name)
+        if spec is None:
+            raise ExtensionRegistrationError(
+                f"companion {clean_name!r} is not declared in manifest.companion_processes")
+        compare_keys = sorted({key for raw in self._env_allow for key in (raw, raw.upper())})
+        if expected is not None and not isinstance(expected, Mapping):
+            raise ExtensionRegistrationError("refresh_companion_process expected= maps settings keys to values")
+        wanted = None if expected is None else {str(key): value for key, value in expected.items()}
+        if wanted is not None and (stray := sorted(set(wanted) - set(compare_keys))):
+            raise ExtensionRegistrationError(  # names only: a value never enters an error
+                f"refresh_companion_process expected= names {stray}, not env_from_settings of {self._skill!r}")
+        if only_if_differs and (wanted is None or any(raw not in wanted and raw.upper() not in wanted
+                                                      for raw in self._env_allow)):
+            raise ExtensionRegistrationError(
+                "refresh_companion_process only_if_differs= needs expected= naming every env_from_settings key")
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise ExtensionRegistrationError("refresh_companion_process blocks; call it off the event loop")
+        if not is_server_process():
+            return "not_server"
+        supervisor = get_global_supervisor()
+        if supervisor is None:
+            return "no_supervisor"
+        if not self._published_and_open():
+            return "access_closed"
+        if blocker := supervisor.refresh_blocker(self._skill, clean_name, wanted if only_if_differs else None):
+            return blocker  # nothing to apply settings to yet, a retained process, or one carrying the caller's read
+        # The skill's lifecycle lock, where Off and unload persist, holds the admission before the stop and the
+        # final one with the spawn; the stop holds no lock, so an owner's Off never waits for it.
+        lifecycle, admitted = _lifecycle_lock_for(self._skill), {"refusal": "", "granted": frozenset()}
+
+        def admit() -> bool:
+            admitted["refusal"], admitted["granted"] = self._refresh_admission()
+            return not admitted["refusal"]
+
+        with lifecycle:
+            if not admit():
+                return admitted["refusal"]
+
+        def build_env() -> Dict[str, str]:
+            settings = skill_settings(self._settings_reader, strict=True)
+            token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
+            return companion_spawn_env(
+                spec, token, env_allow=self._env_allow, granted_upper=admitted["granted"],
+                skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir, settings=settings)
+
+        try:
+            outcome = supervisor.refresh(self._skill, clean_name, build_env, compare_keys=compare_keys,
+                                         still_valid=admit, admission=lifecycle, expected=wanted)
+        except SettingsDocumentUnknown:
+            return "settings_unknown"
+        return admitted["refusal"] if outcome == "refused" else outcome
 
     def get_state_dir(self) -> str:
         return str(self._state_dir)

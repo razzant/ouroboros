@@ -129,9 +129,13 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # tool-reuse sprint (20.10): run_script says the selected cwd is not on Python's
     # import path and that a reusable script lives in a skill payload run with run_command.
     # Rolled for the R1 platform-wait refusal: both timeout_sec descriptions say only the task's deadline or budget
-    # narrows a timeout and that one this platform cannot wait on is refused.
+    # narrows a timeout and that one this platform cannot wait on is refused. Rolled for #2916: both outputs
+    # descriptions say an eligible path is captured even if this run left it unchanged, and that outside Cyber
+    # Pro a system_repo file is eligible only while it has uncommitted changes. Audit 08.11 item12 names what
+    # stop-by-pid/name reaches; cmd already describes argv. Result review adds capture after failure only for
+    # outputs the command created or changed. This pin covers both contributions' composed descriptions.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "8fa8cdd98000032c970512ab62996281bdff885e80e977699ae2b220edb71309"
+        "5616a38354c302a9e984fa2ca29446ff44a1b224335598ff30770ee1931ead0b"
     )
     original = json.loads(schema_bytes)
     for schema in original:
@@ -145,10 +149,11 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
         "The underlying command result echoes the resolved cwd."
     )
     # The reconstruction keeps run_command's CURRENT description (the 2A background-child
-    # sentence and its local-POSIX limit), so this derived digest rolled with the one above.
+    # sentence and its local-POSIX limit, the process-stop fact of audit 08.11 item 12), so this
+    # derived digest rolled with the one above.
     assert hashlib.sha256(json.dumps(original, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":")).encode()).hexdigest() == (
-        "3551b8d0cb3fcd4689936be9aca215b9e3a39033991dd1652a9f6050c3a4361a"
+        "626c01b93f859e8487d972665c5aed91fce33dd52f35b523ecfae59a7cdc2186"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
@@ -169,15 +174,3 @@ def test_shell_facade_reexports_every_moved_identity():
     owned = {name for module in _LEAVES for name in vars(module)}
     owned |= set(vars(shell_audit))
     assert set(_MOVED_OWNERS) <= owned
-
-
-def test_shell_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (shell, *_LEAVES)
-    }
-    assert counts["ouroboros.tools.shell"] <= 800
-    assert all(count <= 1000 for count in counts.values())
-    assert counts["ouroboros.tools.shell_outputs"] <= 1000

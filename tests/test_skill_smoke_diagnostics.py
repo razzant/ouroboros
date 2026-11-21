@@ -42,7 +42,7 @@ def _wave(data, raw, *, status="clean", operation="settled", record_id="rl-curre
     ledger._retain_seat_text(data, TASK, record_id, seat)
     del seat["raw_text"]  # a written row names its retained source, never the text itself
     record = ledger.ReviewLedgerRecord(
-        record_id=record_id, task_id=TASK, root_task_id=TASK, surface="skill", enforcement="blocking",
+        record_id=record_id, task_id=TASK, root_task_id=TASK, surface="skill", enforcement="advisory",
         subject={"skill": NAME, "tree_sha": skill.content_hash, "root": str(skill.skill_dir.resolve())},
         brief={"skill": {"group_id": f"task:{TASK}:{NAME}"}},
         fingerprints={"review_contract": "contract"},

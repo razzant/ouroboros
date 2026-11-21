@@ -13,7 +13,9 @@ from ouroboros import extension_loader as loader, extension_liveness as liveness
 from ouroboros import skill_loader, skill_peer_inventory, skill_identity
 from ouroboros.tools import extension_dispatch
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests.test_extension_freshness_cross_process import live_route as live_route, _in_another_process
+from tests.test_extension_freshness_cross_process import (
+    _discovery_keeps_nothing, _in_another_process, live_route as live_route,
+)
 from tests.test_extensions_api import _write_ext
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -53,6 +55,7 @@ def _consumer(fixture, surface, monkeypatch):
 
 
 def _read_counts(monkeypatch):
+    _discovery_keeps_nothing(monkeypatch)
     counts = Counter()
     real_inventory = skill_loader._skill_location_inventory
     real_text = pathlib.Path.read_text
@@ -83,7 +86,7 @@ def _read_counts(monkeypatch):
     monkeypatch.setattr(pathlib.Path, "read_text", text)
     monkeypatch.setattr(skill_peer_inventory, "parse_skill_manifest_text", parse)
     monkeypatch.setattr(skill_identity, "payload_digest", digest)
-    skill_peer_inventory._peer_manifest_facts.cache_clear()  # count from a new process's empty reuse
+    skill_peer_inventory._HELD_FACTS.clear()  # count from a new process's empty reuse
     return counts
 
 
@@ -119,6 +122,37 @@ def test_dispatch_reuses_locations_but_keeps_each_fresh_state_read(
             **({"peer_parse": on} if peers == 12 else {}),
             "hash:fresh_ext": observations,
         }, (surface, supervisor_present, peers, counts)
+
+
+@pytest.mark.parametrize("surface", ["http", "ws", "tool"])
+def test_more_enabled_peers_than_the_former_reuse_count_are_parsed_once_and_stay_fresh(live_route, monkeypatch, surface):
+    """#1217: 130 harmless enabled peers outran the former 128 reused texts, so every observation of every
+    dispatch parsed them all again. Each is parsed once now; bytes and enablement stay fresh reads, and an
+    equal-size conflicting edit with a restored mtime from another process refuses the next dispatch."""
+    monkeypatch.setattr(loader, "is_server_process", lambda: True)
+    monkeypatch.setattr(loader, "get_global_supervisor", lambda: None)
+    on = 130
+    for index in range(on):
+        _write_ext(live_route["skills_root"], f"many_{index:03d}", permissions=["tool"],
+                   plugin="def register(api):\n    pass\n", conflicts=["other_ext"] if index == 0 else None)
+        skill_loader.save_enabled(live_route["drive_root"], f"many_{index:03d}", True)
+    dispatch = _consumer(live_route, surface, monkeypatch)
+    counts = _read_counts(monkeypatch)
+    observations = 1 if surface == "http" else 2
+    assert dispatch() and counts["peer_parse"] == on
+    for _ in range(2):
+        counts.clear()
+        assert dispatch()
+        assert counts == {"locations": observations, "enabled": observations * (12 + on + 1),
+                          "manifest_text": observations * (on + 1), "hash:fresh_ext": observations}, counts
+    _in_another_process(
+        "from pathlib import Path\nimport os\np = Path(peer) / 'SKILL.md'\ns = p.stat()\n"
+        "raw = p.read_bytes(); changed = raw.replace(b'other_ext', b'fresh_ext')\n"
+        "assert changed != raw and len(changed) == len(raw)\np.write_bytes(changed)\n"
+        "os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))\n", peer=str(live_route["skills_root"] / "many_000"))
+    counts.clear()
+    assert not dispatch(), surface
+    assert counts["peer_parse"] == 1  # only the edited text
 
 
 @pytest.mark.parametrize("tools", [1, 5])

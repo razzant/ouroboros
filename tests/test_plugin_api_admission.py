@@ -289,14 +289,15 @@ def test_bundled_extension_seeds_declare_the_plugin_api_field():
     """Q6/Q-B: bundled skills ship the field in the same release that closes
     native-seed trust to field-less extensions."""
     repo_root = pathlib.Path(__file__).parents[1]
-    for name in ("telegram", "unix_computer_use", "windows_computer_use"):
+    # Telegram opts into 2.4 for its strict token state and companion refresh.
+    for name, version in (("telegram", "2.4"), ("unix_computer_use", "2.0"), ("windows_computer_use", "2.0")):
         from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
 
         manifest = parse_skill_manifest_text(
             (repo_root / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
         )
         assert manifest.is_extension()
-        assert manifest.plugin_api == {"version": "2.0", "capabilities": []}, name
+        assert manifest.plugin_api == {"version": version, "capabilities": []}, name
 
 
 # --- 6.2=A: the declarative dependency fingerprint ---------------------------

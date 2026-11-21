@@ -32,14 +32,15 @@ def main_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
     registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
     registry._ctx.repo_dir.mkdir()
-    registry._ctx.context_fit_plan = _plan(preferred="max", window=900_000)
+    effort = "medium"  # The synthetic fit and first send price the same request shape.
+    registry._ctx.context_fit_plan = replace(_plan(preferred="max", window=900_000), start_reasoning_effort=effort)
     source = "Exact original evidence with its trailing conclusion.\n" * 160
     (registry._ctx.repo_dir / "evidence.txt").write_text(source, encoding="utf-8")
     f = SimpleNamespace(registry=registry, ctx=registry._ctx, source=source,
                         inputs=[], progress=[], incoming=queue.Queue(), events=queue.Queue())
     f.messages = f.ctx.context_fit_plan.messages_for("max")
 
-    def run(responses):
+    def run(responses, *, initial_effort=effort):
         replies = iter(responses)
 
         class Provider:
@@ -72,6 +73,7 @@ def main_loop(tmp_path, monkeypatch):
 
         return loop.run_llm_loop(
             messages=f.messages, tools=f.registry, llm=Provider(),
+            initial_effort=initial_effort,
             drive_logs=f.ctx.drive_root / "logs", drive_root=f.ctx.drive_root,
             emit_progress=lambda text, **kw: f.progress.append(text), incoming_messages=f.incoming,
             task_id="authored-main", event_queue=f.events)
@@ -142,13 +144,15 @@ def test_retelling_instructions_and_authored_account_reach_next_send(main_loop, 
         return call("compact_context", {"working_note": note, "keep_unit_ids": []}, "compact")
 
     def restore(kwargs):
-        accounts = [block["text"] for message in kwargs["messages"]
+        from ouroboros.context_compaction import note_written
+
+        accounts = [(block["text"], note_written(block["_context_capsule"])) for message in kwargs["messages"]
                     if message.get("role") == "assistant" and not message.get("tool_calls")
                     and isinstance(message.get("content"), list)
                     for block in message["content"]
                     if block.get("type") == "text" and block.get("_context_capsule")]
-        assert any(text == "[Actor-authored working view; exact source retained by checkpoint]\n" + note
-                   for text in accounts)
+        assert any(text == f"[Actor-authored working view, written {written}; exact source retained by checkpoint]\n"
+                   + note for text, written in accounts)
         assert not any(m.get("tool_call_id") == "read" for m in kwargs["messages"])
         return call("compact_context", {"restore_unit_refs": [restored]}, "restore")
 
@@ -354,12 +358,13 @@ def test_main_schema_only_view_uses_the_active_envelope(main_loop, monkeypatch, 
     f.ctx.context_fit_plan = replace(f.ctx.context_fit_plan, preferred_mode=mode, initial_mode=mode,
         nano_projection=replace(f.ctx.context_fit_plan.max_projection, mode="nano"))
     f.messages = f.ctx.context_fit_plan.messages_for(mode)
-    f.run([call("compact_context", {"working_note": "", "schema_names": ["read_file"]}, "schemas"),
+    # A tool outside Nano's standing work set (``tool_policy.NANO_RESIDENT_SCHEMA_NAMES``) arrives only when named.
+    f.run([call("compact_context", {"working_note": "", "schema_names": ["query_code"]}, "schemas"),
            {"content": "done"}])
     before = {s["function"]["name"] for s in f.inputs[0]["tools"]}
     after = {s["function"]["name"] for s in f.inputs[1]["tools"]}
     if mode == "nano":
-        assert "read_file" not in before and "read_file" in after
+        assert "query_code" not in before and "query_code" in after
         assert f.ctx._context_view_receipt["status"] == "applied"
     else:
         assert before == after and f.ctx._context_view_receipt["status"] == "no_op"
@@ -386,3 +391,52 @@ def test_successful_fallback_owns_the_next_authored_view(main_loop, monkeypatch)
     assert "The fallback retained the source." in str(f.inputs[-1]["messages"])
     checkpoint = json.loads(read_actor_source_bytes(f.ctx.drive_root, "authored-main", f.ctx._context_view_receipt["checkpoint_ref"]))
     assert checkpoint["messages"] == f.inputs[2]["messages"]
+
+
+def test_main_keeps_earlier_notes_under_empty_keep_and_merges_only_named_ones(main_loop):
+    """The owner-visible case (d9b66195): a second fold with keep_unit_ids=[] keeps the first note, the work's
+    goal with it; a later merge names both notes, the merged note and the receipt name them, and the
+    address the merged note carries restores the goal's exact text."""
+    f, seen = main_loop, {}
+    goal = "Goal: a pair of elegant generalizable prompt fixes; no new framework."
+
+    def accounts(messages):
+        return [block["text"] for m in messages if isinstance(m.get("content"), list)
+                for block in m["content"] if isinstance(block, dict) and block.get("_context_capsule")]
+
+    def receipt(messages):
+        row = [m["content"] for m in messages if str(m.get("content")).startswith("[Context view receipt]")][-1]
+        return json.loads(row.split("\n", 1)[1])
+
+    def merge(kwargs):
+        inspected = json.loads(next(m["content"] for m in kwargs["messages"] if m.get("tool_call_id") == "inspect"))
+        seen["notes"] = [row["unit_id"] for row in inspected["units"] if row["kind"] == "capsule"]
+        return call("compact_context", {"working_note": "Merged: the goal stands; both reads agree.",
+                                        "keep_unit_ids": [], "replace_note_ids": seen["notes"]}, "merge")
+
+    def restore(kwargs):
+        merged = next(text for text in accounts(kwargs["messages"]) if "Merged: the goal stands" in text)
+        seen["address"] = json.loads(merged.partition("\n")[0].split("; replaced notes: ", 1)[1][:-1])
+        first = seen["address"]["notes"][0]
+        return call("compact_context", {"restore_unit_refs": [
+            {"checkpoint_ref": seen["address"]["checkpoint_ref"], **first}]}, "restore")
+
+    f.run([call("read_file", {"path": "evidence.txt"}, "read-1"),
+           call("compact_context", {"working_note": goal, "keep_unit_ids": []}, "fold-1"),
+           call("read_file", {"path": "evidence.txt"}, "read-2"),
+           call("compact_context", {"working_note": "The second read agrees.", "keep_unit_ids": []}, "fold-2"),
+           call("compact_context", {"inspect": True}, "inspect"), merge, restore, {"content": "done"}])
+    kept = accounts(f.inputs[4]["messages"])
+    assert [text.partition("\n")[2] for text in kept] == [goal, "The second read agrees."]
+    assert kept[0] == accounts(f.inputs[2]["messages"])[0]  # the goal note, byte for byte
+    assert "replaced_notes" not in receipt(f.inputs[4]["messages"])
+    assert not any(m.get("tool_call_id") in ("read-1", "read-2") for m in f.inputs[4]["messages"])
+    merged = accounts(f.inputs[6]["messages"])
+    assert [text.partition("\n")[2] for text in merged] == ["Merged: the goal stands; both reads agree."]
+    assert len(seen["notes"]) == 2 and [note["unit_id"] for note in seen["address"]["notes"]] == seen["notes"]
+    replaced = receipt(f.inputs[6]["messages"])["replaced_notes"]
+    assert [(note["unit_id"], note["first_line"]) for note in replaced["notes"]] == list(
+        zip(seen["notes"], [goal, "The second read agrees."]))
+    assert replaced["checkpoint_ref"] == seen["address"]["checkpoint_ref"]
+    restored = [text for text in accounts(f.inputs[7]["messages"]) if text.startswith("[Historical source")]
+    assert len(restored) == 1 and goal in restored[0]

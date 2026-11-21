@@ -62,7 +62,7 @@ def test_a_started_root_reads_the_mode_it_runs_in_but_the_wake_keeps_mains(tmp_p
     from tests.test_context_runtime_section import _make_health_env
 
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     started = {"id": "root-1", "type": "task", "metadata": dict(_wake_task("act")["metadata"])}
     payload = json.loads(build_runtime_section(env, started).split("\n\n", 1)[1])
     assert payload["runtime_mode"] == "light" and "forbids Ouroboros repo mutation" in payload["runtime_mode_rule"]

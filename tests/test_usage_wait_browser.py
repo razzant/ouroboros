@@ -91,8 +91,8 @@ def test_accounting_waits_fold_into_one_receipt_row_while_logs_keep_each_phase(s
     def logs_phases(expected):
         page.click('[data-nav-page="dashboard"]')
         page.wait_for_selector('#page-logs', state="visible")
-        if not page.locator('#log-entries .log-task-details').first.get_attribute('open') == '':
-            page.locator('#log-entries .log-task-details > summary').first.click()
+        if not page.locator('#log-entries .log-task-card').first.get_attribute('open') == '':
+            page.locator('#log-entries .log-task-card > summary').first.click()
         timeline = page.locator('#log-entries .log-task-timeline')
         for label, count in expected.items():
             assert timeline.get_by_text(label, exact=True).count() == count, label

@@ -132,6 +132,128 @@ def test_running_move_waits_for_boundary_and_destination_lease(runtime, tmp_path
     assert work["_project_admission"]["project"]["routing_generation"] == get_project(root, "room")["routing_generation"]
 
 
+def test_a_move_into_a_folder_another_room_holds_waits_before_selection_and_changes_nothing(tmp_path, monkeypatch):
+    """Owner 15.11.2026, one queue per folder: the folder a pending move's readmission would select is its lane before
+    the chooser picks it (its first pass reads the work's own resource off Q, then decides: ``dispatch_choice``) and
+    before readmission writes it, and a launch claimed on the admission lane, not yet RUNNING, holds that folder too
+    (``worker_assignment._started_projection``)."""
+    from supervisor import dispatch_choice, evolution_lifecycle, state
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path / "data"  # folders live beside the data drive, never inside it
+    data.mkdir()
+    queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    shared, old, repo = ((tmp_path / name).resolve() for name in ("shared", "old", "repo"))
+    for folder in (shared, old, repo):
+        folder.mkdir()
+    create_project(data, "room")
+    update_project(data, "room", working_dir=str(shared))
+    work = {"id": "one", "type": "task", "chat_id": 0, "_attempt": 1, "project_id": "old-room", "root_task_id": "one",
+            "workspace_root": str(old), "workspace_mode": "external", "metadata": {}}
+    workers.PENDING.append(work)
+    place(data, "one", "room", workers)
+    holder = {"id": "other", "type": "task", "project_id": "elsewhere", "root_task_id": "other",
+              "workspace_root": str(shared), "workspace_mode": "external"}
+    workers.RUNNING["other"] = {"task": holder, "worker_id": 0}
+    assert dispatch_choice.choose(queue, 5.0, ()) == [], "the chooser leaves it queued"
+    assert work["_placement_folder"] == str(shared) and work["workspace_root"] == str(old)
+    assert dispatch_choice.choose(queue, 5.0, ()) == [], "and its next pass names who keeps the folder"
+    assert work["_folder_wait"] == {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    del workers.RUNNING["other"]
+    assert dispatch_choice.choose(queue, 5.0, ()) == [work], "nothing else held it"
+    assert "_folder_wait" not in work
+    claimed = [{"task": holder}]  # that work's launch is claimed on the admission lane and not RUNNING yet
+    assert not readmit_placement(data, work, repo_dir=repo, running=claimed, pending=workers.PENDING)
+    assert work["workspace_root"] == str(old) and "placement_applied_at" not in work, "a refusal changes nothing"
+    assert readmit_placement(data, work, repo_dir=repo, running=[], pending=workers.PENDING)
+    assert work["workspace_root"] == str(shared) and "_placement_folder" not in work
+
+
+@pytest.mark.parametrize("own_body", [True, False])
+def test_a_moved_body_work_keeps_its_own_resource_and_never_waits_for_the_rooms_busy_folder(tmp_path, monkeypatch,
+                                                                                          own_body):
+    """The folder a pending move waits for is the one its readmission selects (``project_placement.placement_folder``):
+    work that keeps Ouroboros's own body (``keeps_own_resource``) gets no folder from the room, so another room's work
+    in that room's folder never holds it, at the chooser or at readmission; work without a resource of its own waits."""
+    from ouroboros import subagent_worktrees as sw
+    from supervisor import dispatch_choice, evolution_lifecycle, state
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path / "data"
+    data.mkdir()
+    queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    shared, repo, body = ((tmp_path / name).resolve() for name in ("shared", "repo", "body-copy"))
+    for folder in (shared, repo, body):
+        folder.mkdir()
+    create_project(data, "room")
+    update_project(data, "room", working_dir=str(shared))
+    if own_body:
+        sw._put_record({"path": str(body), "task_id": "one", "kind": "body_candidate"}, data_dir=data)
+    work = {"id": "one", "type": "task", "chat_id": 0, "_attempt": 1, "project_id": "old-room", "root_task_id": "one",
+            "workspace_root": "", "workspace_mode": "", "metadata": {}}
+    workers.PENDING.append(work)
+    place(data, "one", "room", workers)
+    holder = {"id": "other", "type": "task", "project_id": "elsewhere", "root_task_id": "other",
+              "workspace_root": str(shared), "workspace_mode": "external"}
+    workers.RUNNING["other"] = {"task": holder, "worker_id": 0}
+    started = list(workers.RUNNING.values())
+    assert [row["id"] for row in dispatch_choice.choose(queue, 5.0, ())] == (["one"] if own_body else [])
+    assert work["_placement_folder"] == ("" if own_body else str(shared))
+    assert readmit_placement(data, work, repo_dir=repo, running=started, pending=workers.PENDING) is own_body
+    if own_body:  # readmitted beside the busy folder: it stays on the body, recorded where every resolver reads it
+        assert (work["workspace_root"], work["metadata"]["resource_intent"]) == ("", {"kind": "system_repo"})
+        assert work["project_id"] == "room" and "_placement_folder" not in work
+    else:  # refused: nothing of it changed
+        assert work["workspace_root"] == "" and "placement_applied_at" not in work
+
+
+def test_the_chooser_reads_a_moved_works_copy_records_once_and_its_launch_reads_them_as_before(tmp_path, monkeypatch):
+    """The folder a moved body work waits for needs ``keeps_own_resource``, a read of every copy record: the chooser
+    reads it once per move, off Q (``dispatch_choice._screen``), and carries it, never reading it under Q; the
+    launch's readmission reads it under Q once, as before the folder lane. A candidate retired meanwhile moves the
+    lane at once: the launch refuses beside the busy folder, and the next walks wait for it without reading."""
+    from ouroboros import subagent_worktrees as sw
+    from supervisor import dispatch_choice, evolution_lifecycle, state
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path / "data"
+    data.mkdir()
+    queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    shared, repo, body = ((tmp_path / name).resolve() for name in ("shared", "repo", "body-copy"))
+    for folder in (shared, repo, body):
+        folder.mkdir()
+    create_project(data, "room")
+    update_project(data, "room", working_dir=str(shared))
+    sw._put_record({"path": str(body), "task_id": "one", "kind": "body_candidate"}, data_dir=data)
+    work = {"id": "one", "type": "task", "chat_id": 0, "_attempt": 1, "project_id": "", "root_task_id": "one",
+            "text": "work", "workspace_root": "", "workspace_mode": "",
+            "metadata": {"resource_intent": {"kind": "system_repo"}}}
+    workers.PENDING.append(work)
+    place(data, "one", "room", workers)
+    workers.RUNNING["other"] = {"task": {"id": "other", "type": "task", "project_id": "elsewhere",
+                                         "root_task_id": "other", "workspace_root": str(shared),
+                                         "workspace_mode": "external"}, "worker_id": 0}
+    reads, real = [], sw._records
+    monkeypatch.setattr(sw, "_records", lambda *a, **kw: reads.append(queue._queue_lock._is_owned()) or real(*a, **kw))
+    walks = [[row["id"] for row in dispatch_choice.choose(queue, 100.0, ())] for _ in range(4)]
+    assert walks == [["one"]] * 4 and reads == [False], "body work never waits for the busy folder; one read off Q"
+    sw._drop_record(str(body), data)  # its candidate is retired before the launch
+    with queue._queue_lock:
+        assert not readmit_placement(data, work, repo_dir=repo, running=workers.RUNNING, pending=workers.PENDING)
+    assert reads == [False, True] and (work["workspace_root"], work["_placement_folder"]) == ("", str(shared))
+    assert [dispatch_choice.choose(queue, 100.0, ()) for _ in range(3)] == [[]] * 3 and len(reads) == 2
+    assert work["_folder_wait"] == {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+
+
 def test_bind_failure_never_changes_pending_or_running(runtime, monkeypatch):
     root, _, workers = runtime
     work = {"id": "one", "project_id": ""}
@@ -225,6 +347,7 @@ def test_real_admission_never_adopts_shared_origin(host):  # noqa: F811
 def test_restore_of_old_execution_scope_readmits_committed_move(host, tmp_path, monkeypatch):  # noqa: F811
     from tests.test_main_project_consistency import admit_main
     from tests.test_project_hold_recovery import resume_after_app_stop, worker
+    from ouroboros import subagent_worktrees as sw
     from supervisor import queue, workers
 
     original = admit_main(host, tid="one")
@@ -238,6 +361,8 @@ def test_restore_of_old_execution_scope_readmits_committed_move(host, tmp_path, 
                          running=workers.RUNNING, pending=host.pending)
     queue.QUEUE_SNAPSHOT_PATH.write_bytes(saved)
     host.pending.clear()
+    reads, real = [], sw._records  # the copy records: whether a read held Q
+    monkeypatch.setattr(sw, "_records", lambda *a, **kw: reads.append(queue._queue_lock._is_owned()) or real(*a, **kw))
     assert queue.restore_pending_from_snapshot() == 1
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
@@ -246,3 +371,84 @@ def test_restore_of_old_execution_scope_readmits_committed_move(host, tmp_path, 
     workers.assign_tasks()
     assert [r["id"] for r in sent] == [original["id"]]
     assert sent[0]["workspace_root"] == str(folder) and sent[0]["project_id"] == "room"
+    # Restore and the passes read no copy record under Q: the chooser once off Q, the launch's readmission as before.
+    assert reads == [False, True]
+
+
+def test_a_folder_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_picked(tmp_path, monkeypatch):
+    """Opus 16.11.2026: two rooms share one recorded folder and a store gate (here a schedule's control) refuses both
+    rows every pass. The row a walk picks holds the folder only for the rest of that walk and may never start, so the
+    later row's wait never names it and a pass marks nothing (``dispatch_choice._collect``'s ``waits``). Work that
+    does hold the folder is named once and stays named."""
+    from supervisor import dispatch_choice, evolution_lifecycle, state
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path / "data"
+    data.mkdir()
+    queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    shared = (tmp_path / "shared").resolve()
+    shared.mkdir()
+    first, second = ({"id": tid, "type": "task", "chat_id": 0, "_attempt": 1, "project_id": room, "root_task_id": tid,
+                      "workspace_root": str(shared), "workspace_mode": "external", "metadata": {}}
+                     for tid, room in (("first", "room-a"), ("second", "room-b")))
+    workers.PENDING.extend([first, second])
+    monkeypatch.setattr(dispatch_choice, "_own_refusal", lambda queue, row, held: "schedule_control")
+    marks = []
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: marks.append(kw.get("reason")) or True)
+
+    def one_pass():  # ``run_pass``'s rounds with two idle workers: a walk, then one without what the store refused
+        assert dispatch_choice.choose(queue, 5.0, (), limit=2) == []
+        assert dispatch_choice.choose(queue, 5.0, (), limit=2, excluded={"first"}) == []
+
+    for _ in range(3):
+        one_pass()
+    assert marks.count("folder_wait") == 0 and "_folder_wait" not in second, marks
+    workers.RUNNING["other"] = {"task": {"id": "other", "type": "task", "project_id": "elsewhere",
+                                         "root_task_id": "other", "workspace_root": str(shared),
+                                         "workspace_mode": "external"}, "worker_id": 0}
+    one_pass()
+    one_pass()
+    wait = {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    assert first["_folder_wait"] == second["_folder_wait"] == wait
+    assert marks.count("folder_wait") == 2, "each named once, then unchanged"
+
+
+def test_a_moved_rows_unreadable_own_resource_is_said_once_a_move_and_the_row_waits(tmp_path, monkeypatch, caplog):
+    """Opus 16.11.2026: the chooser reads a moved row's own resource off Q (``dispatch_choice._screen``). A failed
+    read keeps the row waiting and says why once a move at warning level, as readmission's error said it before
+    the folder lane; the next passes say it only at debug."""
+    import logging
+
+    from ouroboros import project_placement
+    from supervisor import dispatch_choice, evolution_lifecycle, state
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path / "data"
+    data.mkdir()
+    queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    monkeypatch.setattr(dispatch_choice, "_UNREAD_MOVES", {}, raising=False)
+    shared = (tmp_path / "shared").resolve()
+    shared.mkdir()
+    create_project(data, "room")
+    update_project(data, "room", working_dir=str(shared))
+    work = {"id": "one", "type": "task", "chat_id": 0, "_attempt": 1, "project_id": "", "root_task_id": "one",
+            "text": "work", "workspace_root": "", "workspace_mode": "",
+            "metadata": {"resource_intent": {"kind": "system_repo"}}}
+    workers.PENDING.append(work)
+    place(data, "one", "room", workers)
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("a copy record is unreadable")
+
+    monkeypatch.setattr(project_placement, "keeps_own_resource", unreadable)
+    with caplog.at_level(logging.DEBUG, logger="supervisor.dispatch_choice"):
+        assert [dispatch_choice.choose(queue, 100.0, ()) for _ in range(3)] == [[]] * 3
+    assert project_placement.pending_resource(work) is not None, "it still waits for its own resource"
+    said = [record.levelno for record in caplog.records if "Own resource of moved one" in record.getMessage()]
+    assert said == [logging.WARNING, logging.DEBUG, logging.DEBUG]

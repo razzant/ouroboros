@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 
 def write_child(
     tmp_path,
@@ -59,3 +61,10 @@ def write_confirmed_disposition_fixture(
     )
     assert written.startswith("OK:")
     return load_effective_task_result(tmp_path, child_id)
+
+
+def holds(root):
+    """The completion_held rows of the events log under ``root`` (absent file: none)."""
+    path = root / "logs" / "events.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    return [row for row in rows if row.get("type") == "task_checkpoint" and row.get("checkpoint_kind") == "completion_held"]

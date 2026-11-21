@@ -77,8 +77,9 @@ def test_actual_form_configures_edits_keeps_and_clears_proxy(direct_server_with_
             }""", name)
             assert toggled["status"] == 200 and toggled["body"].get("enabled") is True, toggled
             def form():
-                page.click('[data-nav-page="settings"]')
-                page.click('[data-settings-tab="advanced"]')
+                # The skill's form stands on its own Settings page.
+                page.wait_for_function("() => Boolean(window.__ouroSettings)")
+                assert page.evaluate("name => window.__ouroSettings.open(`skill/${name}`)", name) is not False
                 found = page.locator(f'[data-extension-settings-form][data-skill="{name}"][data-route="settings/save"]')
                 found.wait_for(state="visible")
                 return found
@@ -169,8 +170,9 @@ def test_completion_toggle_is_independent_of_reply_editing(direct_server_with_da
             assert toggled["status"] == 200 and toggled["body"].get("enabled") is True
 
             def form():
-                page.click('[data-nav-page="settings"]')
-                page.click('[data-settings-tab="advanced"]')
+                # The skill's form stands on its own Settings page.
+                page.wait_for_function("() => Boolean(window.__ouroSettings)")
+                assert page.evaluate("name => window.__ouroSettings.open(`skill/${name}`)", name) is not False
                 current = page.locator(f'[data-extension-settings-form][data-skill="{name}"][data-route="settings/save"]')
                 current.wait_for(state="visible")
                 return current

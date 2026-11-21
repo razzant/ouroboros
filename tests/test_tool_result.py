@@ -61,13 +61,6 @@ _MANAGED_UNAVAILABLE_TEXT = (
     "update transaction state could not be verified. Retry after the update state is "
     "available or repaired."
 )
-_DIAGNOSTIC_TEXT = (
-    "⚠️ DIAGNOSTIC_CAPABILITY_BLOCKED: this task-related diagnostic may inspect "
-    "work and request existing task controls; it has no product-write or external-tool authority."
-)
-# The host-minted binding the guard reads from the context, never from the registry facade.
-_DIAGNOSTIC_METADATA = {"work_diagnostic": {"kind": "silence", "task_id": "source", "root_task_id": "root",
-                                            "task_attempt": 1, "episode_id": "episode"}}
 _SAFETY_DENIAL_TEXT = "⚠️ SAFETY_VIOLATION: fixture denial"
 
 
@@ -418,7 +411,6 @@ def test_registry_guard_owner_facades_preserve_identity() -> None:
     (
         "local_readonly",
         "managed_active",
-        "diagnostic_external",
     ),
 )
 def test_registry_guard_native_outcomes_preserve_exact_text(
@@ -430,9 +422,7 @@ def test_registry_guard_native_outcomes_preserve_exact_text(
         _subagent_and_update_guard_result,
     )
 
-    diagnostic = scenario.startswith("diagnostic_")
-    ctx = SimpleNamespace(task_id="task-1", task_metadata=dict(_DIAGNOSTIC_METADATA) if diagnostic else {},
-                          active_context_mode="max")
+    ctx = SimpleNamespace(task_id="task-1", task_metadata={}, active_context_mode="max")
     # v7next adaptation: this tree's guard takes the REGISTRY (its read-only
     # allowlist grew the verify_and_record zero-run carve, tip drift), so the
     # fake carries the ctx and the plain allowlist predicate.
@@ -444,25 +434,19 @@ def test_registry_guard_native_outcomes_preserve_exact_text(
     )
     kwargs = {
         "entry": object()
-        if scenario in {"local_readonly", "acting_builtin", "managed_active", "managed_unavailable",
-                        "diagnostic_product"}
+        if scenario in {"local_readonly", "acting_builtin", "managed_active", "managed_unavailable"}
         else None,
-        "ext_tool": {"name": "ext_4_demo_ping"} if scenario in {"acting_external", "diagnostic_external"} else None,
+        "ext_tool": {"name": "ext_4_demo_ping"} if scenario == "acting_external" else None,
         "is_mcp": False,
-        "local_readonly_subagent": scenario in {"local_readonly", "diagnostic_product", "diagnostic_external"},
+        "local_readonly_subagent": scenario == "local_readonly",
         "acting_subagent": scenario in {"acting_builtin", "acting_external"},
         "acting_tool_grants": (),
-        "repo_mutation": scenario in {"managed_active", "managed_unavailable", "diagnostic_product"},
+        "repo_mutation": scenario in {"managed_active", "managed_unavailable"},
     }
-    name = "ext_4_demo_ping" if scenario in {"acting_external", "diagnostic_external"} else (
-        "write_file" if scenario.startswith("managed_") or scenario == "diagnostic_product" else "commit_reviewed"
+    name = "ext_4_demo_ping" if scenario == "acting_external" else (
+        "write_file" if scenario.startswith("managed_") else "commit_reviewed"
     )
-    if diagnostic:
-        # The diagnostic gate answers first, before the managed-update and read-only gates.
-        monkeypatch.setattr(update_merge, "managed_assisted_tx_for", lambda *_args: (_ for _ in ()).throw(
-            AssertionError("the diagnostic refusal precedes managed-update state")))
-        expected = ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_DIAGNOSTIC_TEXT)
-    elif scenario == "managed_active":
+    if scenario == "managed_active":
         monkeypatch.setattr(update_merge, "managed_assisted_tx_for", lambda *_args: (None, True))
         expected = ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_MANAGED_ACTIVE_TEXT)
     elif scenario == "managed_unavailable":
@@ -523,13 +507,6 @@ def test_registry_guard_allow_paths_return_no_result(monkeypatch) -> None:
         (),
         True,
     ) is None
-    # A diagnostic's inspection and source-control tools pass its own gate to the read-only one.
-    registry._ctx = SimpleNamespace(task_id="silence-episode", task_metadata=dict(_DIAGNOSTIC_METADATA),
-                                    active_context_mode="max")
-    for name in ("read_file", "get_task_result", "pause_task"):
-        registry._readonly_tool_allowed = lambda tool, name=name: tool == name
-        assert _subagent_and_update_guard_result(
-            registry, name, object(), None, False, True, False, (), False) is None
 
 
 def test_registry_native_guards_precede_safety_and_physical_dispatch(
@@ -598,7 +575,7 @@ def test_registry_native_guards_precede_safety_and_physical_dispatch(
         LegacyTextResultAdapter, "from_text", lambda *_args, **_kwargs: pytest.fail("legacy adapter used"),
     )
     assert denied.execute_result("read_file", {"path": "missing.txt"}) == ToolResult(
-        status="blocked", code="SAFETY_VIOLATION", text=_SAFETY_DENIAL_TEXT,
+        status="blocked", code="SAFETY_RETURNED", text=_SAFETY_DENIAL_TEXT,
     )
     assert safety_calls == ["safety"]
     assert handler_calls == []
@@ -611,6 +588,9 @@ def test_registry_native_guards_precede_safety_and_physical_dispatch(
         # line happened to carry no generic marker were recorded as clean successes.
         (ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_HISTORICAL_EPHEMERAL_BUILTIN_TEXT), True, "blocked"),
         (ToolResult(status="blocked", code="SAFETY_VIOLATION", text=_SAFETY_DENIAL_TEXT), True, "safety_violation"),
+        (ToolResult(status="blocked", code="SAFETY_RETURNED", text=_SAFETY_DENIAL_TEXT), True, "safety_returned"),
+        (ToolResult(status="unavailable", code="SAFETY_UNAVAILABLE", text=_SAFETY_DENIAL_TEXT), True,
+         "safety_unavailable"),
         (
             ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=_MANAGED_UNAVAILABLE_TEXT),
             True,
@@ -655,6 +635,55 @@ def test_loop_reads_the_guard_code_not_its_denial_text(
         "tool_result_code": typed.code,
         "tool_result_meta": dict(typed.meta),
     }
+    # Every one took no effect (``is_error``); a call Safety returned or could not read is still no tool error in
+    # what the task counts and stores, its own line marked as held, where a guard's denial is one.
+    from ouroboros.outcomes import SAFETY_HELD_STATUSES
+    from ouroboros.post_task_synthesis import build_trace_summary, task_tool_metrics
+
+    held = legacy_status in SAFETY_HELD_STATUSES
+    trace = {"tool_calls": [{"tool": "fixture_guard", "args": {}, "is_error": row["is_error"], **row["result_meta"]}]}
+    assert task_tool_metrics(trace)["tool_errors"] == int(not held)
+    counts = ("0 errors, 1 held by Safety" if held else "1 errors" if legacy_status == "safety_violation"
+              else "0 errors, 1 policy-denied")
+    assert build_trace_summary(trace) == (f"## Tool trace (1 calls, {counts})\n"
+                                          f"1. fixture_guard() [status={legacy_status}] → "
+                                          + ("HELD BY SAFETY" if held else "ERROR"))
+
+
+@pytest.mark.parametrize(("code", "words"), [
+    ("SAFETY_RETURNED", "A command was returned by the Safety Supervisor"),
+    ("SAFETY_UNAVAILABLE", "A command was not run: the Safety Supervisor could not read it"),
+    ("SAFETY_VIOLATION", ""),  # an old record's stop stays a failed step
+    ("TOOL_ERROR", ""),
+])
+def test_a_call_safety_held_is_never_shown_as_a_failed_step(code, words):
+    """The live and replayed step row of a call Safety returned or could not read says what happened to it, outside
+    the error phase, and settles as held, so the block counts no error; a real failure stays a failed step."""
+    import pathlib
+    import subprocess
+
+    from ouroboros.loop_tool_execution import _typed_execution_failure, _typed_result_metadata
+    from ouroboros.preflight_node import resolve_node
+
+    result = ToolResult(status=TOOL_CODE_SPECS[code].status, code=code, text="Call did not run")
+    error = _typed_execution_failure(True, result)
+    event = {"type": "tool_call_finished", "tool": "run_command", "is_error": error,
+             **_typed_result_metadata("run_command", result.text, error, result)}
+    node = resolve_node()
+    assert node, "the owner-facing step rows are the browser's: this proof needs Node"
+    module = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "log_events.js").as_uri()
+    script = ("import { summarizeLogEvent, summarizeChatLiveEvent } from " + json.dumps(module) + ";"
+              "const e = JSON.parse(process.argv[1]);"
+              "console.log(JSON.stringify([summarizeLogEvent(e), summarizeChatLiveEvent(e)]));")
+    views = json.loads(subprocess.run([node, "--input-type=module", "-e", script, json.dumps(event)],
+                                      check=True, capture_output=True, text=True, encoding="utf-8", timeout=60).stdout)
+    assert error  # none of them took effect
+    if words:
+        assert [(view["phase"], view["headline"]) for view in views] == [("warn", words)] * 2
+        assert views[1]["toolCall"]["status"] == "held"
+    else:
+        assert [view["phase"] for view in views] == ["error", "error"]
+        assert all("failed" in view["headline"] for view in views) and views[1]["toolCall"]["status"] == "error"
 
 
 def test_loop_dispatches_typed_result_once_and_reads_the_published_code(

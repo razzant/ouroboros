@@ -7,45 +7,22 @@ import pathlib
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros import context_compaction as cc
 from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, bound_host_row
 from ouroboros.context_renewal import RENEWAL_RECORD_NAME, renew_after_refusal, renewal_seed
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME
 from ouroboros.main_context_authority import PREDECESSOR_NOTES_NAME
+from tests._noted_transcript_fixture import DEEP_CALL, FEEDBACK, LEGACY_FACTS, NOTE, OWNER_LATER, _noted
 from tests.test_context_attention_mind import _owner, _tool, _transcript
 from tests.test_context_reclaim_materializer import _request
 
-OWNER_LATER = "Owner: also keep the CLI flags."
-NOTE = "I verified the migration on both code paths; the old API stays."
-FEEDBACK = {"role": "user", "content": "[Task acceptance feedback] Review verdict: REVISE.",
-            "review_feedback": [{"task_id": "renewal", "run_index": 0, "binding_hash": "b", "settled": True}]}
-LEGACY_FACTS = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME,  # written before binding, merged later
-                "content": "[CONTEXT_FACTS] round 5\n\n---\n\n[Message from my human]: B"}
-PROSE_CALL = {"role": "assistant", "content": "Checking the flag parser next.", "tool_calls": [{
-    "id": "four", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\": \"cli.py\"}"}}]}
-
-
-def _noted(tmp_path):
-    """A real transcript with one authored note (the mind's own fold), then later work."""
-    messages = _transcript()
-    request = replace(_request(messages, 0), working_note=NOTE,
-                      expected_view_revision=cc.context_reclaim_transcript_sha256(messages), keep_unit_ids=())
-    folded, receipt = cc.compact_tool_history_llm(messages, request=request, observed_messages=messages,
-                                                     tool_schemas=[], drive_root=tmp_path, task_id="renewal",
-                                                     fit_candidate=lambda _m, _t: {"accepted": True})
-    assert receipt.status == "applied"
-    return [*folded,
-            {"role": "user", HOST_CONTEXT_KIND_KEY: PREDECESSOR_NOTES_NAME, "content": "[Predecessor notes] earlier work"},
-            LEGACY_FACTS, bound_host_row(CONTEXT_FACTS_NAME, "[CONTEXT_FACTS] round 9"),
-            *_tool("three", "big body " * 2000),
-            {"role": "assistant", "content": "My reasoning since the note."},
-            PROSE_CALL, {"role": "tool", "tool_call_id": "four", "content": "def parse(): ..."},
-            _owner(OWNER_LATER), FEEDBACK,
-            {"role": "user", "content": "A plain notice delivered before typing."}]
-
 
 def test_the_seed_keeps_people_notes_and_recent_reasoning_and_addresses_the_rest(tmp_path):
+    with pytest.raises(RecursionError):  # the fixture witnesses the decoder's depth refusal, not a truncation error
+        json.loads(DEEP_CALL[0]["tool_calls"][0]["function"]["arguments"])
     messages = _noted(tmp_path)
     seed, left = renewal_seed(messages)
     texts = [json.dumps(row.get("content"), ensure_ascii=False) for row in seed]
@@ -169,3 +146,67 @@ def test_a_second_renewal_keeps_the_first_renewals_index_until_a_newer_note(tmp_
     first = bound_host_row(RENEWAL_RECORD_NAME, "[Host record: working view renewed] ... three.py ...")
     seed, _left = renewal_seed([*messages, first, *_tool("five", "more " * 500)])
     assert first in seed
+
+
+@pytest.mark.parametrize(("provider", "effort"), [("openai", "high"), ("openai", "none"), ("openrouter", "high")])
+def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, monkeypatch, provider, effort):
+    from ouroboros import capability_evidence as ce, context_fit as cf, loop
+    from ouroboros.context_renewal import renewal_view
+    from ouroboros.context_window import WindowLimit, WindowRecord
+    from ouroboros.loop_model_call import _measure_round_main_fit
+    from ouroboros.loop_messages import _context_components
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    schemas = [{"type": "function", "function": {"name": f"tool_{i}", "description": "Read a fixture path.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}
+        for i in range(60)]
+    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"', False)
+    plan = cf.build_context_fit_plan(None, core, {"id": "renewal"}, preferred_mode="max",
+        tool_schemas=schemas, reasoning_effort=effort, route_resolver=lambda *_a, **_kw: (
+            {"provider": provider, "model": provider + "::fixture"},
+            SimpleNamespace(route_fp="fixture-route", status="confirmed", stale=False, window_tokens=1_000_000)))
+    messages = [*plan.messages_for("max"), {"role": "assistant", "content": "Earlier progress. " * 4000},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "read1", "type": "function",
+            "function": {"name": "tool_1", "arguments": '{"path":"fixture.txt"}'}}]},
+        {"role": "tool", "tool_call_id": "read1", "content": "unasked fixture result " * 6000},
+        {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": "Keep going with the current plan."}]
+    original = json.loads(json.dumps(messages))
+    canonical = lambda rows: cf.estimate_context_prompt_tokens(rows, schemas)
+    seed, record = renewal_view(messages, observation=None, drive_root=tmp_path, task_id="renewal", measure=canonical)
+    assert record and len(seed) < len(messages)
+    # A fixed input window holds the canonical seed, but not OpenAI reasoning's longer custom catalog.
+    usable = canonical(seed) + 100
+    input_limit = WindowLimit(usable, "input", "metadata")
+    plan = replace(plan, window_tokens=usable, window_record=WindowRecord(
+        plan.route_fp, input=input_limit, declared=(input_limit,)))
+    tools = SimpleNamespace(_ctx=SimpleNamespace(messages=messages, context_fit_plan=plan))
+    ctx = SimpleNamespace(messages=messages, accumulated_usage={}, drive_root=tmp_path,
+        drive_logs=tmp_path / "logs", task_id="renewal", round_idx=12, event_queue=None, tool_schemas=schemas,
+        context_fit_plan=plan, active_model=plan.model, active_context_mode="max", active_effort=effort, tools=tools)
+    before = _measure_round_main_fit(ctx, automatic_pass_used=True).measurement
+    assert before.capacity_deficit_tokens > 0
+    ctx.accumulated_usage["_context_refusal_round"] = ctx.round_idx
+    events = []
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: events.append(_a[-1]))
+    assert renew_after_refusal(ctx, tools)
+    after = _measure_round_main_fit(ctx, automatic_pass_used=True).measurement
+    cut = any(row.get(HOST_CONTEXT_KIND_KEY) == "context_physical_cut" for row in messages)
+    schema_fact = dict(_context_components(ctx, measured=True))["tool schemas"]
+    schema_shape = cf.tool_schema_tokens(schemas, provider=provider, reasoning_effort=effort)
+    print("RENEWAL_PRESEND_SHAPE", {"provider": provider, "effort": effort,
+        "canonical_seed": canonical(seed), "usable": usable, "actual_after": after.estimated_input_tokens,
+        "deficit_after": after.capacity_deficit_tokens, "cut": cut,
+        "schema_fact": schema_fact, "schema_shape": schema_shape})
+    assert after.capacity_total_tokens == before.capacity_total_tokens
+    assert after.response_reserve_tokens == before.response_reserve_tokens
+    assert after.measurement_density == before.measurement_density == 1.0
+    assert after.capacity_deficit_tokens == 0
+    assert schema_fact == schema_shape  # the diagnostic names only the catalog segment, in the same shape
+    assert cut is (provider == "openai" and effort == "high")
+    assert [r["content"] for r in messages[:2]] == [r["content"] for r in original[:2]]
+    assert original[-1]["content"] in [r.get("content") for r in messages]
+    if not cut:
+        assert [(r["role"], r.get("content")) for r in messages] == [
+            (r["role"], r.get("content")) for r in seed]  # publication also seals the last row
+    assert json.loads(read_actor_source_bytes(tmp_path, "renewal", events[0]["source"])) == original

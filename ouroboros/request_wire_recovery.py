@@ -99,7 +99,7 @@ _NON_COMPATIBILITY_4XX = frozenset({401, 402, 403, 408, 409, 425, 429})
 _NON_COMPATIBILITY_CODE_TOKENS = ("quota", "rate_limit", "billing", "auth", "context", "policy")
 _NON_REASONING_OPTIONAL_FIELDS = tuple(
     field for field in OPTIONAL_REQUEST_FIELDS
-    if field not in {"reasoning_effort", "output_config", "thinking"}
+    if field not in {"reasoning_effort", "reasoning", "output_config", "thinking"}
 )
 _HINT_WITHDRAWAL = {"kind": "drop_field", "fields": ["temperature"], "reason_code": HINT_WITHDRAWAL_REASON}
 
@@ -267,7 +267,7 @@ def _candidate_spec_for_action(
         fields = set(action.get("fields") or ())
         # A withdrawal composes after an earlier dropped carrier, whose payload states no effort.
         if fields & {
-            "reasoning_effort", "thinking", "output_config", NESTED_REASONING_FIELD,
+            "reasoning_effort", "reasoning", "thinking", "output_config", NESTED_REASONING_FIELD,
         } or (not effort and action.get("reason_code") == HINT_WITHDRAWAL_REASON):
             effort = "provider_default"
     return WireCandidateSpec(
@@ -297,7 +297,7 @@ def _bind_with_applications(
             elif action.get("kind") == "drop_field" and set(
                 action.get("fields") or ()
             ) & {
-                "reasoning_effort", "thinking", "output_config",
+                "reasoning_effort", "reasoning", "thinking", "output_config",
                 NESTED_REASONING_FIELD,
             }:
                 effort = "provider_default"
@@ -393,10 +393,11 @@ def _first_durable_action(
 
 
 def _direct_openai_tool_source(
-    target: Mapping[str, Any], payload: Mapping[str, Any],
+    target: Mapping[str, Any], payload: Mapping[str, Any], api_surface: str,
 ) -> bool:
+    """Direct OpenAI Chat's custom-tool rail; a connection on Responses sends its function tools as they are."""
     provider = str(target.get("provider") or "").strip().lower()
-    return provider == "openai" and infer_tool_dialect(payload) == "function" and (
+    return provider == "openai" and api_surface == "chat.completions" and infer_tool_dialect(payload) == "function" and (
         payload_effort(payload) not in {"", "none"}
     )
 
@@ -465,6 +466,7 @@ def _records_for_step(
     carrier = profiles[0].reasoning_carrier
     value_path = {
         "reasoning_effort": "reasoning_effort",
+        "reasoning": "reasoning.effort",
         NESTED_REASONING_FIELD: "extra_body.reasoning.effort",
         "anthropic.adaptive": "output_config.effort",
     }.get(carrier, "")
@@ -587,7 +589,7 @@ def prepare_wire_payload_for_send(
     try:
         candidate = (
             _prepare_direct_openai_candidate(target, detached, api_surface)
-            if _direct_openai_tool_source(target, detached)
+            if _direct_openai_tool_source(target, detached, api_surface)
             else _prepare_durable_candidate(target, detached, api_surface)
         )
     except CustomToolProjectionError:
@@ -766,28 +768,9 @@ def _status_and_message_from_exception(exc: BaseException) -> Tuple[Optional[int
 
 
 def _context_overflow_evidence(error: Any) -> bool:
-    try:
-        from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES
-    except Exception:
-        return False
-    values = []
-    if isinstance(error, BaseException):
-        values.extend((getattr(error, "code", None), getattr(error, "type", None)))
-        payload = getattr(error, "body", None)
-        response = getattr(error, "response", None)
-        if payload is None and response is not None and callable(getattr(response, "json", None)):
-            try:
-                payload = response.json()
-            except Exception:
-                payload = None
-    else:
-        payload = error
-    if isinstance(payload, Mapping):
-        values.extend(payload.get(key) for key in ("code", "type", "kind"))
-        nested = payload.get("error")
-        if isinstance(nested, Mapping):
-            values.extend(nested.get(key) for key in ("code", "type", "kind"))
-    return any(str(value or "").strip().lower() in CONTEXT_OVERFLOW_CODES for value in values)
+    from ouroboros.llm_attempt import is_size_refusal  # the shared recognition; that module imports this one
+
+    return isinstance(error, (BaseException, Mapping)) and is_size_refusal(error)
 
 
 def _field_is_present(payload: Mapping[str, Any], field: str) -> bool:
@@ -894,6 +877,7 @@ def _classify_action(
     error_tokens = _error_tokens(low)
     value_path = {
         "reasoning_effort": "reasoning_effort",
+        "reasoning": "reasoning.effort",
         NESTED_REASONING_FIELD: "extra_body.reasoning.effort",
         "anthropic.adaptive": "output_config.effort",
         "anthropic.disabled": "thinking",
@@ -969,7 +953,8 @@ def _classify_action(
     named = []
     compact = low.replace(".", "_")
     for field in (*OPTIONAL_REQUEST_FIELDS, NESTED_REASONING_FIELD):
-        aliases = {field, field.replace(".", "_"), field.split(".")[-1]}
+        # Responses names its carrier's tier, not the object: a refused ``reasoning.effort`` drops ``reasoning``.
+        aliases = {field, field.replace(".", "_"), field.split(".")[-1], *(("reasoning.effort",) if field == "reasoning" else ())}
         implicated = (evidence.param in aliases if evidence.param else
                       field in error_tokens if field in {"stream", "stream_options"}
                       else any(alias in low or alias in compact for alias in aliases)

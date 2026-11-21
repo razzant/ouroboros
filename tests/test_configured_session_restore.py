@@ -10,6 +10,7 @@ import pytest
 
 from tests.test_available_subagents_runtime import _session_row, _settings, _snapshot
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
+from tests._run_wait_shared import wake_now
 
 
 
@@ -263,8 +264,9 @@ def test_shown_interactions_save_before_ack_and_survive_cold_restore(
     limit = SimpleNamespace(tools=registry, messages=messages, llm_trace=trace, accumulated_usage=usage,
                             owner_msg_seen=seen, round_idx=8, tool_schemas=[], budget_tail="tool")
     assert ctx._sleep_interaction_seen == {run_id: ["q1"]}
-    assert "wake-mail" in seen
-    assert not drain_owner_entries(tmp_path, task_id, seen, 2), "live transcript already contains this mail"
+    # A tool wake's shown mail is seen; a startup receipt shows its old wake's mail but leaves it to the first drain.
+    assert ("wake-mail" in seen) is (delivery == "tool")
+    assert bool(drain_owner_entries(tmp_path, task_id, set(seen), 2)) is (delivery == "startup")
     assert ds._load_state(ctx, "")["pending_wake"]
     assert drain_owner_entries(tmp_path, task_id, set(), 2)
     if save_fails:
@@ -304,13 +306,13 @@ def test_shown_interactions_save_before_ack_and_survive_cold_restore(
         assert current["journal_cursor"] == 9 and current["coordination_cursor"] == {"child": "v1"}
         wait_calls.append(True)
         return json.dumps({"status": "terminal", "run_id": rid, "state": "succeeded"})
-    raw_wait = ds.supervised_wait(cold._ctx, run_id, wait_once=observe)
+    raw_wait = wake_now(cold._ctx, run_id, wait_once=observe)
     assert wait_calls == [True], "the acknowledged old wake is not replayed by the later wait"
     assert "terminal" in raw_wait.text
 
 
 def test_restored_run_terminal_keeps_child_and_parent_execution_evidence(tmp_path, monkeypatch, stub_delegate_engines):
-    from ouroboros import delegate_custody as custody, delegate_supervision as ds, subagent_history
+    from ouroboros import delegate_custody as custody, subagent_history
     from ouroboros.agent_dispatch import resolve_dispatch_axes
     from ouroboros.subagents import envelope_from_task
     from ouroboros.tools.control_task_results import _compact_child_projection
@@ -326,7 +328,7 @@ def test_restored_run_terminal_keeps_child_and_parent_execution_evidence(tmp_pat
         assert custody.emit(tmp_path, custody.SETTLED, {"task_id": "nanny", "run_id": rid,
                                                        "state": "succeeded", "model": "stub-model"})
         return json.dumps({"status": "terminal", "run_id": rid, "state": "succeeded"})
-    assert "terminal" in ds.supervised_wait(ctx, "run-one", wait_once=succeeded).text
+    assert "terminal" in wake_now(ctx, "run-one", wait_once=succeeded).text
     envelope = envelope_from_task(task, status="completed")
     assert envelope["actual_substrate"] == "harness_used"
     assert envelope["execution_evidence"]["delegated_runs_succeeded"] == 1

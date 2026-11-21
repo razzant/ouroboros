@@ -14,6 +14,9 @@ import { bindBubbleActions } from './message_actions.js';
 import { revealTimelineNode } from './chat_render_batch.js';
 import { afterMotion } from './motion.js';
 import { readBand } from './project_read_state.js';
+import { bindExcerptAction, clearExcerptHighlight, excerptRange, highlightExcerpt } from './chat_reply_excerpt.js';
+import { createChatSearch } from './chat_search.js';
+import { foldHides } from './project_answer.js';
 
 export const REPLY_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"'
     + ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -56,7 +59,7 @@ function failureText({ state, task_id: taskId, error }) {
  * for cancellation. Neither the quote's stored chat label nor its task chooses the destination.
  */
 export function createChatReplies({ chatId, feed, input, composerArea = null, key = '', reading, history = () => null,
-    navigate = null, present = () => true, onDomWrite = (write) => write(), actions = undefined }) {
+    navigate = null, present = () => true, onDomWrite = (write) => write(), actions = undefined, onDraftChange = () => {} }) {
     // The strip is the field's first line: inside the field, right before its text row (composer.js); a bare field (a
     // test fixture) takes it itself.
     const textRow = input.closest('.chat-text-row') || input;
@@ -66,13 +69,36 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     let staged = null;
     let strip = null;
     let targetTimer = 0;
+    let search = null;  // the room's search (below), whose open surface the clearance counts
+    const selection = bindExcerptAction({ feed, present, choose: (row, excerpt) => start({ ...bubbleRef(row), excerpt }) });
     const bubbleActions = bindBubbleActions({ feed, registry: actions, onDomWrite });
-    // How much of the feed's top the room's header covers: a placed row lands under it, not behind it.
+    // How much of the feed's top the room's header (and an open search, chat_search.js) covers: a placed row lands
+    // under them, not behind them.
     const headerClearance = () => {
         const header = feed.closest('.project-panel')?.querySelector('.project-panel-bar')
             || feed.closest('.page, .chat-instance-panel')?.querySelector('.chat-page-header, .chat-panel-statusbar');
-        return Math.max(HEADER_CLEARANCE, (header?.getBoundingClientRect().bottom || 0) - feed.getBoundingClientRect().top + 12);
+        // What the reader sees begins below the bar and its frosted edge (readBand): a placed row lands below that too.
+        const bottom = Math.max(readBand(feed, header, null).top, search?.cover()?.getBoundingClientRect().bottom || 0);
+        return Math.max(HEADER_CLEARANCE, bottom - feed.getBoundingClientRect().top + 12);
     };
+    /** While the room's search is open the feed's top clears its sheet as it clears the room's bar (style.css
+     * --chat-find-reserve), so a landing places even the room's first message below the sheet; closed, nothing is
+     * reserved. Measured on open, close and each change of the sheet's height (chat_search.js), and before a landing.
+     * True when the reserve changed. */
+    function fitSearch() {
+        const sheet = search?.cover();
+        const prior = parseFloat(feed.style.getPropertyValue('--chat-find-reserve')) || 0;
+        let room = 0;
+        if (sheet && typeof getComputedStyle === 'function') {
+            const scale = feed.getBoundingClientRect().height / feed.offsetHeight || 1;  // a phone drawer scales it
+            const own = parseFloat(getComputedStyle(feed).paddingTop) - prior;  // the feed's top without the reserve
+            room = Math.max(0, Math.ceil(headerClearance() / scale - own));
+        }
+        if (room === prior) return false;
+        if (room) feed.style.setProperty('--chat-find-reserve', `${room}px`);
+        else feed.style.removeProperty('--chat-find-reserve');
+        return true;
+    }
     /** One explicit placement of a row under the header, as a quote's landing is: it claims the reading intent, so the
      * reader's own later gesture supersedes it. `follow` instead returns a reader who was following the newest message
      * to that message. */
@@ -94,36 +120,49 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     // What of the feed a reader sees below: the composer is drawn over the feed's foot.
     const band = () => readBand(feed, null, composerArea);
     const decks = createRelayDecks({ feed, chatId, onDomWrite, reading, clearance: headerClearance, band, place });
+    // The room's search lands through the same reveal, leaving the keyboard in its field (chat_search.js).
+    search = createChatSearch({ chatId, feed, present, onLayout: () => onDomWrite(fitSearch),
+        reveal: (address, isCurrent, locate) => reveal(address, isCurrent, null, { focus: false, locate }) });
     let destroyed = false;
     // `held`: the reader's own live-edge intent while a reveal is pending (a reveal sets stick false itself).
     let revealGeneration = 0, revealing = 0, held = null;
 
     const remember = () => {
+        onDraftChange();
         if (!storage || !storageKey) return;
         try {
             if (staged) storage.setItem(storageKey, JSON.stringify(staged));
             else storage.removeItem(storageKey);
-        } catch { /* a refused write leaves the strip for this page only */ }
+        } catch {
+            if (staged?.excerpt) {
+                try { storage.removeItem(storageKey); } catch { /* storage can be disabled */ }
+                showToast(tr('chat.reply.draft_storage', 'This quote will only be kept until this tab reloads.'), 'info');
+            }
+        }
     };
 
     const rowOf = (address) => (address ? [...feed.querySelectorAll('[data-row-address]')]
         .find((node) => node.dataset.rowAddress === address) : null) || null;
 
-    function markTarget(target) {
-        clearTimeout(targetTimer);
-        feed.querySelectorAll('.is-quote-target').forEach((old) => old.classList.remove('is-quote-target'));
+    function markTarget(target, focus = true) {
         void target.offsetWidth;
         target.classList.add('is-quote-target');
         if (target.tabIndex < 0) target.tabIndex = -1;
-        target.focus({ preventScroll: true });
+        if (focus) target.focus({ preventScroll: true });
         targetTimer = setTimeout(() => target.classList.remove('is-quote-target'), TARGET_MS);
     }
 
     /** One claim covers the loaded fastpath, bounded read and app-owned room switch. Never sends a message.
      * A reveal that moved nothing (an answer, a failed read, a room it could not open) gives a reader who followed
      * the live edge that edge back, with what arrived meanwhile, while the claim is still theirs: a gesture, a
-     * newer reveal or leaving the room decided instead. A landing or a page drawn around it (`left`) keeps its view. */
-    async function reveal(address, isCurrent = () => true, prepared = null) {
+     * newer reveal or leaving the room decided instead. A landing or a page drawn around it (`left`) keeps its view.
+     * A landing answers `{state: 'found', target}`; `focus: false` (a search stepping through matches) leaves the
+     * keyboard where it is, and a search's `locate(target)` names its first matching words (a Range, or null), placed
+     * in view with the row. */
+    async function reveal(address, isCurrent = () => true, prepared = null, { focus = true, locate = null } = {}) {
+        clearExcerptHighlight(feed.ownerDocument);
+        clearTimeout(targetTimer);
+        feed.querySelectorAll('.is-quote-target').forEach((old) => old.classList.remove('is-quote-target'));
         const position = reading();
         const following = held?.claimed() ? held.following : position.stick;
         const claimed = position.claim ? position.claim() : (position.cancel(), () => true);
@@ -131,7 +170,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         const generation = revealing = ++revealGeneration;
         const own = held = { following, claimed };
         position.stick = false;
-        const result = await seek(address, position, wanted, prepared)
+        const result = await seek(address, position, wanted, prepared, focus, locate)
             .catch(error => (wanted() ? { state: 'unknown', error } : null));
         if (generation === revealing) revealing = 0;
         if (held === own) held = null;
@@ -150,30 +189,69 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         return Boolean(node) && node.dataset.portal !== '1';
     };
 
-    async function seek(address, position, wanted, prepared) {
+    /** A search's first matching words, when what the reader sees left them out: first each scrolling box between them
+     * and the feed (a wide code line, table or formula) brings them inside its own clip on the axis it scrolls, then
+     * the feed centres them in the band between the room's header and search and the composer. */
+    function placeWords(words) {
+        const first = () => words?.getClientRects?.()[0];
+        if (!first()) return;
+        // Into [from, to] (screen px) by `scale` screen px per scrolled px: centred, when outside.
+        const shift = (from, to, start, end, scale = 1) => (start < from || end > to ? (start + end - from - to) / 2 / scale : 0);
+        for (let box = words.startContainer.parentElement; box && box !== feed && feed.contains(box); box = box.parentElement) {
+            const style = getComputedStyle(box), edge = box.getBoundingClientRect();
+            const scale = edge.width / box.offsetWidth || 1;  // a phone drawer scales the room
+            const left = edge.left + box.clientLeft * scale, top = edge.top + box.clientTop * scale, word = first();
+            if (/auto|scroll/.test(style.overflowX) && box.scrollWidth > box.clientWidth) {
+                box.scrollLeft += shift(left, left + box.clientWidth * scale, word.left, word.right, scale);
+            }
+            if (/auto|scroll/.test(style.overflowY) && box.scrollHeight > box.clientHeight) {
+                box.scrollTop += shift(top, top + box.clientHeight * scale, word.top, word.bottom, scale);
+            }
+        }
+        const word = first(), top = feed.getBoundingClientRect().top + headerClearance(), { bottom } = band();
+        feed.scrollTop += shift(top, bottom, word.top, word.bottom);
+    }
+
+    async function seek(address, position, wanted, prepared, focus = true, locate = null) {
         let target = !prepared && drawn(address);
         if (!target) {
             const result = await history()?.reference(address, wanted, prepared);
             if (!wanted() || !result) return null;
             if (result.state === 'moved' && Number.isInteger(result.chat_id) && navigate) {
-                return navigate(address, result.chat_id, wanted);
+                return navigate(address, result.chat_id, wanted, locate);
             }
             if (!result.target) return result;
             target = result.target;
         }
         if (!wanted()) return null;
         target = decks.surface(target) || target;  // a tucked note's deck opens, so the row it lands on shows
+        const words = locate?.(target);  // first: what the search then says of the row may change its sheet's height
+        fitSearch();
         revealTimelineNode(target, feed, headerClearance());
+        placeWords(words);
         position.scroll();
         // This explicit placement measured the current column. An ordinary scroll
         // keeps the old-width anchor until reflow; a newly opened room must replace it.
         position.remember(true);
-        markTarget(target);
-        return { state: 'found' };
+        markTarget(target, focus);
+        return { state: 'found', target };
     }
 
     async function jump(ref) {
-        const result = await reveal(ref.address);
+        const locate = ref.excerpt ? target => {
+            const range = target.dataset.rowAddress === ref.address && excerptRange(target, ref.excerpt);
+            if (!range) {
+                showToast(tr('chat.reply.passage_changed', 'The message is here. The quoted passage could not be located.'), 'info');
+                return null;
+            }
+            if (foldHides(range, target)) {
+                showToast(tr('chat.find.folded', 'The words are in the folded part of this answer: its Project shows it in full.'), 'info');
+                return null;
+            }
+            highlightExcerpt(range, TARGET_MS);
+            return range;
+        } : null;
+        const result = await reveal(ref.address, () => true, null, { locate });
         if (!result || result.state === 'found') return;
         const [code, words] = failureText(result);
         showToast(tr(`chat.reply.${code}`, words), 'info');
@@ -206,7 +284,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     }
     function paint(animate = true) {
         const before = strip;
-        strip = staged ? createReplyQuote(staged, { composer: true, onJump: jump, onCancel: () => cancel() }) : null;
+        strip = staged ? createReplyQuote(staged, { composer: true, onJump: jump, onDomWrite, onCancel: () => cancel() }) : null;
         if (strip) {
             const main = strip.querySelector('.chat-quote-main');
             main.id = `${input.id}-reply`;
@@ -249,8 +327,8 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     }
 
     /** After a send: the next message answers nothing. */
-    function clear() {
-        if (!staged) return;
+    function clear(expected = staged) {
+        if (!staged || staged !== expected) return;
         staged = null;
         paint();
         remember();
@@ -269,13 +347,20 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     function bubbleRef(bubble) {
         const address = bubble?.dataset?.rowAddress || '';
         if (!address) return null;
+        const caption = bubble.matches('[data-reply-caption]') ? bubble : null;
+        if (caption) bubble = bubble.closest('.chat-bubble');
+        // A card display is still its sender's bubble: only its passages are off (`data-reply-excerpt-disabled`).
         const role = ROLE_NAMES.find((name) => bubble.classList.contains(name)) || '';
-        const words = bubble.querySelector(':scope > .message')?.textContent
+        const words = caption?.textContent || bubble.querySelector(':scope > .message')?.textContent
             || bubble.querySelector('.chat-quiz-question')?.textContent || bubble.dataset.rowWords || '';
         const sender = bubble.querySelector(':scope > .sender, :scope > .chat-bubble-voice > .sender');
-        return { address, chat_id: chatId, role, author_label: sender?.textContent || '',
+        // A System row speaks as System whatever sender line it wears ("Task Summary") or label an older frame stamped.
+        return { address, chat_id: chatId, role,
+            author_label: role === 'system' ? authorOf('system')
+                : caption?.dataset.sourceAuthor || bubble.dataset.replyAuthor || sender?.textContent || '',
             kind: bubble.querySelector('.chat-quiz-card') ? 'question' : 'message', snippet: replySnippet(words),
-            ts: bubble.dataset.ts ? new Date(Number(bubble.dataset.ts)).toISOString() : '', task_id: bubble.dataset.taskId || '' };
+            ts: caption ? caption.dataset.sourceTs || '' : bubble.dataset.ts ? new Date(Number(bubble.dataset.ts)).toISOString() : '',
+            task_id: bubble.dataset.taskId || '' };
     }
 
     /** The Reply button, placed with the bubble's Copy in one control row. Needs a row address: an unsaved echo has none. */
@@ -369,12 +454,14 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         decorate(bubble, row) {
             const address = String(row?.row_address || '');
             if (address) bubble.dataset.rowAddress = address;
+            if (row?.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
+            if (row?.reply_excerpt_disabled) bubble.dataset.replyExcerptDisabled = '1';
             // Work speech another room also shows: its read is shared (read_ahead.js).
             if (row?.room_revisions && typeof row.room_revisions === 'object') bubble.dataset.roomRevisions = JSON.stringify(row.room_revisions);
             const sender = bubble.querySelector('.sender');
             const role = ROLE_NAMES.find((name) => bubble.classList.contains(name));
             const relay = role === 'assistant' ? createRelayQuote(row?.relay, { onDomWrite, card: bubble.dataset.systemType === 'relay_entry' }) : null;
-            const quote = relay || createReplyQuote(row?.reply_to, { onJump: jump });
+            const quote = relay || createReplyQuote(row?.reply_to, { onJump: jump, onDomWrite });
             if (quote && !relay && role !== 'user') {
                 quote.dataset.derived = '1';
                 quote.dataset.address = normalizeReplyRef(row.reply_to)?.address || '';
@@ -387,6 +474,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         stamp(bubble, row) {
             const address = String(row?.row_address || '');
             if (bubble && address && bubble.dataset.rowAddress !== address) bubble.dataset.rowAddress = address;
+            if (bubble && row?.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
         },
         /** The host's saved row for the owner's own echo: the bubble takes its address and, with it, its Reply. */
         adopt(row) {
@@ -395,8 +483,16 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             if (row?.role !== 'user' || !cmid || !address) return false;
             const bubble = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
                 .find((node) => node.dataset.clientMessageId === cmid);
+            if (bubble && row.reply_excerpt_disabled) bubble.dataset.replyExcerptDisabled = '1';
+            if (bubble && row.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
             if (!bubble || bubble.dataset.rowAddress === address) return false;
             bubble.dataset.rowAddress = address;
+            if (row.reply_to?.excerpt || row.reply_to?.role === 'system') {
+                const saved = createReplyQuote(row.reply_to, { onJump: jump, onDomWrite });
+                const local = bubble.querySelector(':scope > .chat-quote');
+                if (local) { bubble.insertBefore(saved, local); local.remove(); }
+                else bubble.querySelector('.sender')?.after(saved);
+            }
             if (!bubble.querySelector(':scope > .chat-message-actions > .chat-message-reply')) mountControl(bubble);
             syncDerivedQuotes(bubble);
             return true;
@@ -410,25 +506,21 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         syncDerivedQuotes,
         reveal,
         draws,
+        /** The room's search of its saved messages (chat_search.js): Cmd+F on a Mac, Ctrl+F elsewhere, and "+". */
+        search,
         get revealing() { return revealing !== 0; },
-        /**
-         * "Send as a new message" under a delivery doubt: the owner's words join this composer's draft (sent, they are
-         * a new message with a fresh id); nothing is sent here.
-         */
-        compose(words) {
-            const draft = input.value.trimEnd();
-            input.value = draft ? `${draft}\n\n${words}` : words;
-            input.dispatchEvent?.(new Event('input', { bubbles: true }));  // the composer's own sizing and draft keeping
-            input.focus({ preventScroll: true });
-        },
-        /** The field of the chat frame: only the address travels, the host makes the snippet. */
-        frameField: () => (staged ? { reply_to: staged.address } : {}),
+        /** The host resolves the address; the optional citation belongs to the sender. */
+        frameField: (ref = staged) => (ref ? { reply_to: ref.address, ...(ref.excerpt ? { reply_excerpt: ref.excerpt } : {}) } : {}),
+        canSelect: selection.canSelect,
+        selectText: selection.select,
         /** The local echo of a reply, shaped like a row so it draws the same quote (it has no row address yet). */
         echoRow: () => (staged ? { reply_to: staged } : null),
         clear,
         destroy() {
             destroyed = true;
             clearTimeout(targetTimer);
+            search.destroy();
+            selection.destroy();
             bubbleActions.destroy();
             decks.destroy();
             keyHost?.removeEventListener('keydown', onKeydown);

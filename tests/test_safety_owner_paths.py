@@ -1,6 +1,7 @@
 """Owner settings surfaces preserve ordinary provider and roster decisions."""
 import copy
 import json
+from unittest.mock import ANY
 
 import pytest
 from starlette.applications import Starlette
@@ -11,6 +12,7 @@ from tests._safety_fixtures import settings_install as install_fixture
 from tests.test_safety_second_check import catalog
 
 install = install_fixture
+ROSTER_CHANGED = {"OUROBOROS_SUBAGENTS": {"withheld": "structure", "token": ANY}}
 
 
 @pytest.fixture
@@ -18,7 +20,7 @@ def settings_client(install, monkeypatch):
     from ouroboros import config
     from ouroboros.gateway import safety_settings, settings
 
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, "light")
     monkeypatch.setattr(settings, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(settings, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     install.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-router", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}))
@@ -31,29 +33,35 @@ def settings_client(install, monkeypatch):
         yield client, install
 
 
+@pytest.mark.parametrize(("chosen", "surface"), [({}, "responses"), ({"OPENAI_API_SURFACE": "chat_completions"}, "chat_completions")],
+                         ids=["new_key", "chosen_chat"])
 @pytest.mark.parametrize(("resend_shown", "mode"), [(False, "light"), (False, "pro"), (True, "advanced")])
-def test_provider_switch_reproposes_checker_but_explicit_edit_is_refused(settings_client, monkeypatch, mode, resend_shown):
+def test_provider_switch_reproposes_checker_but_explicit_edit_is_refused(settings_client, monkeypatch, mode, resend_shown,
+                                                                         chosen, surface):
     from ouroboros import config
-    from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS
+    from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS, OPENAI_RESPONSES_DIRECT_DEFAULTS
 
+    # A key new to this install is saved on Responses and proposes that profile; a chosen Chat keeps the Chat table.
+    profile = {"responses": OPENAI_RESPONSES_DIRECT_DEFAULTS, "chat_completions": OPENAI_DIRECT_DEFAULTS}[surface]
     client, path = settings_client
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, mode)
     body = config.load_settings() if resend_shown else {}
-    body.update(OPENROUTER_API_KEY="", OPENAI_API_KEY="fixture-openai")
+    body.update(OPENROUTER_API_KEY="", OPENAI_API_KEY="fixture-openai", **chosen)
     before = path.read_bytes()
     # Even explicitly choosing the new provider's proposal is an authored edit.
-    denied = client.post("/api/settings", json={**body, "OUROBOROS_MODEL_LIGHT": OPENAI_DIRECT_DEFAULTS["light"]})
+    denied = client.post("/api/settings", json={**body, "OUROBOROS_MODEL_LIGHT": profile["light"]})
     assert denied.status_code == 400 and "owner-controlled" in denied.json()["error"]
     assert path.read_bytes() == before
     allowed = client.post("/api/settings", json=body)
     assert allowed.status_code == 200, allowed.json()
     stored = json.loads(path.read_text())
     assert stored["OPENAI_API_KEY"] == "fixture-openai" and not stored["OPENROUTER_API_KEY"]
+    assert stored["OPENAI_API_SURFACE"] == surface
     assert "OUROBOROS_MODEL_LIGHT" not in stored
-    assert config.safety_configuration(stored)[0] == OPENAI_DIRECT_DEFAULTS["light"]
+    assert config.safety_configuration(stored)[0] == profile["light"]
     events = [json.loads(line) for line in (path.parent / "logs" / "events.jsonl").read_text().splitlines()]
     event = next(row for row in events if row.get("action") == "safety_settings")
-    assert event["checker"] == OPENAI_DIRECT_DEFAULTS["light"]
+    assert event["checker"] == profile["light"]
     # The proposal follows access back as well; provider spelling is not an owner choice.
     restored = client.post("/api/settings", json={"OPENAI_API_KEY": "", "OPENROUTER_API_KEY": "fixture-router"})
     assert restored.status_code == 200, restored.json()
@@ -73,7 +81,7 @@ def test_catalog_owner_endpoint_uses_same_roster_judgement(settings_client):
     assert owner.json()["error"] == generic.json()["error"]
     assert path.read_bytes() == before
     accepted = client.post("/api/owner/safety-model", json={"settings": {"OUROBOROS_SUBAGENTS": valid}})
-    assert accepted.status_code == 200 and accepted.json() == {"ok": True}
+    assert accepted.status_code == 200 and accepted.json() == {"ok": True, "changes": ROSTER_CHANGED}
     stored = json.loads(json.loads(path.read_text())["OUROBOROS_SUBAGENTS"])
     assert stored["items"][0]["rechecks_flags"] is True
 
@@ -90,13 +98,13 @@ def test_empty_review_pool_needs_same_explicit_confirmation(settings_client, unc
     assert owner.json()["error"] == generic.json()["error"]
     assert path.read_bytes() == before
     accepted = client.post("/api/owner/safety-model", json={**body, "allow_empty_review_pool": True})
-    assert accepted.status_code == 200 and accepted.json() == {"ok": True}
+    assert accepted.status_code == 200 and accepted.json() == {"ok": True, "changes": ROSTER_CHANGED}
     assert "allow_empty_review_pool" not in json.loads(path.read_text())
     from ouroboros.configured_subagents import parse_configured_subagents
     assert not parse_configured_subagents(json.loads(path.read_text())["OUROBOROS_SUBAGENTS"]).items[0].review_eligible
     # Reposting the unchanged catalog is not another empty-pool decision.
     repeated = client.post("/api/owner/safety-model", json={"settings": body["settings"]})
-    assert repeated.status_code == 200 and repeated.json() == {"ok": True}
+    assert repeated.status_code == 200 and repeated.json() == {"ok": True, "changes": {}}
 
 
 def test_operator_checker_is_not_replaced_by_generic_save_of_the_disk_default(settings_client, monkeypatch):
@@ -121,7 +129,8 @@ def test_owner_roster_save_retires_legacy_lanes_only_with_catalog(settings_clien
     assert model_only.status_code == 200, model_only.json()
     assert json.loads(path.read_text())["OUROBOROS_REVIEWER_SLOTS"] == "invalid legacy lanes"
     roster = client.post("/api/owner/safety-model", json={"settings": {"OUROBOROS_SUBAGENTS": catalog(review_eligible=True)}})
-    assert roster.status_code == 200 and roster.json() == {"ok": True}
+    assert roster.status_code == 200 and roster.json() == {"ok": True, "changes": {
+        **ROSTER_CHANGED, "OUROBOROS_REVIEWER_SLOTS": {"old": "invalid legacy lanes", "token": ANY}}}
     assert "OUROBOROS_REVIEWER_SLOTS" not in json.loads(path.read_text())
 
 
@@ -135,15 +144,18 @@ def test_owner_checker_save_preserves_startup_ready_route(settings_client, remot
     }))
     before = path.read_bytes()
     response = client.post("/api/owner/safety-model", json={"settings": {"USE_LOCAL_MAIN": False}})
+    main_off = {"USE_LOCAL_MAIN": {"old": True, "new": False, "token": ANY}}
     if remote:
-        assert response.status_code == 200 and response.json() == {"ok": True}
+        assert response.status_code == 200 and response.json() == {"ok": True, "changes": main_off}
         assert json.loads(path.read_text())["USE_LOCAL_MAIN"] is False
     else:
         assert response.status_code == 400
         assert response.json()["error"] == "Local-only setups must route at least one model to the local runtime."
         assert path.read_bytes() == before
     allowed = client.post("/api/owner/safety-model", json={"settings": {"USE_LOCAL_MAIN": False, "USE_LOCAL_LIGHT": True}})
-    assert allowed.status_code == 200 and allowed.json() == {"ok": True}
+    light_on = {"USE_LOCAL_LIGHT": {"old": False, "new": True, "token": ANY}}
+    assert allowed.status_code == 200 and allowed.json() == {"ok": True, "changes": {
+        **light_on, **({} if remote else main_off)}}
     stored = json.loads(path.read_text())
     assert stored["USE_LOCAL_MAIN"] is False and stored["USE_LOCAL_LIGHT"] is True
 
@@ -163,7 +175,8 @@ def test_owner_checker_readiness_counts_an_environment_provider(settings_client,
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-environment-provider")
     assert has_startup_ready_provider({**config.load_settings(), **body["settings"]})
     allowed = client.post("/api/owner/safety-model", json=body)
-    assert allowed.status_code == 200 and allowed.json() == {"ok": True}
+    assert allowed.status_code == 200 and allowed.json() == {"ok": True, "changes": {
+        "USE_LOCAL_MAIN": {"old": True, "new": False, "token": ANY}}}
     stored = json.loads(path.read_text())
     assert stored["USE_LOCAL_MAIN"] is False
     assert stored.get("OPENROUTER_API_KEY") != "fixture-environment-provider"

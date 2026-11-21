@@ -177,7 +177,7 @@ def test_new_my_skills_source_publishes_and_merges_through_the_existing_transact
     client, _settings = env
     ctx, events, captured = _install_transaction_fakes(monkeypatch, tmp_path, snapshot=_snapshot())
     monkeypatch.setattr(skill_publish, "resolve_publish_destination", skill_publish_destination.resolve_publish_destination)
-    for name in ("github_login", "fetch_repository", "fetch_branch_head", "fetch_tree_paths",
+    for name in ("github_login", "fetch_repository", "fetch_branch_head", "fetch_tree_blobs",
                  "prepare_publish_repository", "ensure_branch", "commit_payload", "create_pr_receipt", "merge_pull_request"):
         monkeypatch.setattr(skill_publish, name, getattr(skill_publish_github, name))
     calls, commits = [], []

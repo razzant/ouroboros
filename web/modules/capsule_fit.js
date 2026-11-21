@@ -1,7 +1,7 @@
 // Where an open composer capsule's strip stands (docs/DESIGN.md "Composer owner controls"): on the composer's line
 // beside the other controls when it fits there, alone (they step aside, its own name too if need be) when it does not,
 // scrolling inside itself only when nothing else fits. The fit is measured, never a breakpoint (a translation or another
-// font needs none). The capsule machine (composer_owner_controls.js) opens and closes the capsule; this measures and
+// font needs none). The capsule machine (capsule.js) opens and closes the capsule; this measures and
 // writes the fit, fades a scrolling strip's hidden side, keeps what the owner moved in view, and holds the capsule's
 // widths while its value gives way to the growing strip.
 
@@ -41,7 +41,7 @@ export function createCapsuleFit({ el, row, kind, strip, segs, padMax = SEG_PAD.
         let width = 0;
         let count = 0;
         for (const node of Array.from(row.children || [])) {
-            if (node === el || node.hidden) continue;
+            if (node === el || node.hidden || node.classList?.contains?.('chat-scroll-bottom-btn')) continue;
             const own = widthOf(node);
             if (own > 0) { width += own + gap; count += 1; }
         }

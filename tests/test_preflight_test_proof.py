@@ -225,6 +225,48 @@ def test_interpreter_identity_preserves_real_venv_invocation_path(candidate, tmp
     assert not before.covers(after)
 
 
+@pytest.mark.parametrize("web_lane", [False, True])
+def test_workload_names_the_lane_node_in_its_environment(candidate, tmp_path, monkeypatch, web_lane):
+    from ouroboros import preflight_node
+    from ouroboros.commit_admission import _executable_identity, preflight_test_workload
+
+    node = tmp_path / "selected-node" / ("node.exe" if os.name == "nt" else "node")
+    node.parent.mkdir()
+    node.write_text("identity only; never executed")
+    monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda _repo: ["tests/witness.test.js"] if web_lane else [])
+    selected = []
+    monkeypatch.setattr(preflight_node, "resolve_node", lambda: selected.append(True) or str(node))
+    # Without a web lane, pure discovery is enough. With one, its selection must
+    # reach the Python PATH too, not the distinct path a passive lookup found.
+    passive = str(tmp_path / "passive-node" / node.name)
+    monkeypatch.setattr(preflight_node, "discovered_host_node", lambda: passive)
+    environments, make_env = [], pr._preflight_env
+
+    def observed_env(*args, **kwargs):
+        env = make_env(*args, **kwargs)
+        environments.append(env)
+        return env
+
+    monkeypatch.setattr(pr, "_preflight_env", observed_env)
+    workload = preflight_test_workload(candidate.repo_dir)
+    assert len(selected) == int(web_lane)
+    assert environments[0]["PATH"].split(os.pathsep)[0] == str(node.parent if web_lane else tmp_path / "passive-node")
+    assert workload[4] == ((_executable_identity(str(node)), ("tests/witness.test.js",)) if web_lane else ())
+
+
+def test_this_process_driver_node_is_neither_passed_nor_fingerprinted(candidate, monkeypatch):
+    """A worker's browser call leaves its driver Node in this process's environment
+    (``node_runtime.select_playwright_node``); browsing never changes what a proof covers or what its tests see."""
+    from ouroboros.commit_admission import preflight_test_workload
+
+    monkeypatch.delenv("PLAYWRIGHT_NODEJS_PATH", raising=False)
+    before = preflight_test_workload(candidate.repo_dir)
+    monkeypatch.setenv("PLAYWRIGHT_NODEJS_PATH", "/data/state/cx/node/g0/bin/node")
+    assert preflight_test_workload(candidate.repo_dir) == before
+    base = candidate.repo_dir.parent / "env"
+    assert "PLAYWRIGHT_NODEJS_PATH" not in pr._preflight_env(base, base / "repo", create=False)
+
+
 @pytest.mark.parametrize("custom", [False, True], ids=["default", "custom"])
 def test_workload_that_reads_head_runs_again_after_commit(candidate, physical_passes, custom):
     from tests.test_preflight_runner import _git
@@ -371,12 +413,12 @@ def test_scrubbed_owner_settings_do_not_change_test_workload(candidate, monkeypa
 
 def test_free_memory_does_not_change_test_workload(candidate, monkeypatch):
     """Memory admits workers at run time; the workload names the requested count."""
-    from ouroboros import test_parallelism as budget
+    from ouroboros import host_memory, test_parallelism as budget
 
     gib = 1024 ** 3
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 48 * gib))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(64 * gib, 48 * gib))
     before = capture_preflight_test_subject(candidate.repo_dir)
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 7 * gib))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(64 * gib, 7 * gib))
     assert budget.admission(os.cpu_count()).workers == 1  # the tight sample really admits fewer workers
     assert before.covers(capture_preflight_test_subject(candidate.repo_dir))
 

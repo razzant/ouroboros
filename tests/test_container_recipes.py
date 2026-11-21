@@ -62,7 +62,10 @@ def test_the_managed_target_hosts_the_launcher_over_a_complete_released_seed():
     entry = _entrypoint(managed["lines"])
     assert entry[:3] == ["python", "/app/launcher.py", "--no-ui"]
     assert entry[entry.index("--seed-bundle") + 1] == "/opt/ouroboros/seed"
-    assert entry[entry.index("--runtime-venv") + 1] == "/ouroboros/body/venv"
+    # Named for the shipped minor, so an existing volume's venv from another Python stays beside it untouched.
+    minor = ".".join(re.search(r'^PY_VERSION="([0-9.]+)"$', (REPO / "scripts" / "download_python_standalone.sh")
+                               .read_text(encoding="utf-8"), re.MULTILINE)[1].split(".")[:2])
+    assert entry[entry.index("--runtime-venv") + 1] == f"/ouroboros/body/venv-{minor}"
     assert '["--launch-intent", "automatic"]' in text
     layout = dict(re.findall(r"(OUROBOROS_[A-Z_]+|HOME)=(\S+)", text))
     assert layout["OUROBOROS_REPO_DIR"] == "/ouroboros/body/repo"
@@ -81,6 +84,9 @@ def test_the_compose_carrier_is_the_one_executable_recipe():
         assert service["profiles"] == [name], "one profile per volume set"
         assert service["restart"] == "on-failure" and service["init"] is True
         assert service["ports"] == ["127.0.0.1:8765:8765"]
+    for guide in ("Dockerfile", "docs/DEPLOYMENT.md"):  # their plain `docker run` publishes on loopback too
+        published = re.findall(r"docker run [^\n]*?-p (\S+)", (REPO / guide).read_text(encoding="utf-8"))
+        assert published and all(port.startswith("127.0.0.1:") for port in published), guide
     image = services["image"]
     assert image["environment"]["OUROBOROS_LAUNCH_INTENT"] == "automatic"
     assert image["environment"]["OUROBOROS_DATA_DIR"] == "/data"

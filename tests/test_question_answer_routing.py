@@ -68,12 +68,14 @@ def test_live_answer_is_owed_until_saved_read_and_keeps_only_owner_words(tmp_pat
     ctx, messages = drain(tmp_path, "asker")
     assert debt(tmp_path)["state"] == "delivered"
     assert "Which database?" in str(messages) and "postgres" in str(messages)
+    from ouroboros.question_answers import MAILBOX_ROUTE_FACT
+    assert str(messages).count(MAILBOX_ROUTE_FACT) == 1  # at delivery the letter states its own route once
     assert [r["content"] for r in ctx._owner_directives] == ["exact answer"]
     from ouroboros.owner_relay import quote_rows
     [handle] = ctx._held_owner_messages
     [quoted], error = quote_rows(ctx, [handle])
     assert not error and quoted["text"] == "exact answer"
-    assert "Which database?" in quoted["question_frame"]
+    assert "Which database?" in quoted["question_frame"] and MAILBOX_ROUTE_FACT not in quoted["question_frame"]
     assert _inbox(bridge) == []
 
 

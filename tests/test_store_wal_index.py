@@ -67,6 +67,19 @@ def _shared_held(database) -> bool:
     return out == "held"
 
 
+def _skip_without_search_only_open() -> None:
+    """A folder searched but not listed is crossed only by a search-only open (``confined_files.SEARCH_DIR_FLAGS``):
+    ``os.O_SEARCH`` or ``O_PATH``, which CPython exposes only where its build's headers define them (setup-python's
+    macOS 3.10.11 has neither). Without one the root opens with the listing right, as ``confined_files`` says. The skip
+    reads the interpreter, never the product's constant: where the interpreter has the open, a constant that lost it is
+    a failure here, not a skip."""
+    from ouroboros import confined_files
+
+    if os.name != "nt" and not (hasattr(os, "O_SEARCH") or hasattr(os, "O_PATH")):
+        pytest.skip("this interpreter has no search-only open (os.O_SEARCH, O_PATH)")
+    assert os.name == "nt" or confined_files.SEARCH_DIR_FLAGS, "the interpreter has a search-only open the product lost"
+
+
 def _live_store(root):
     """A WAL store whose last commit is still in its log."""
     from ouroboros import store_import, task_store
@@ -170,6 +183,47 @@ def test_the_log_and_ordinary_files_still_read_and_keep_the_locks(subtests, tmp_
                     assert result["size"] == size
                 elif name.startswith("notes"):
                     assert result == "plain text\n"
+
+
+@pytest.mark.parametrize("sealed", [False, True], ids=["listed", "search_only"])
+@pytest.mark.parametrize("name", ["current.sqlite", "current.sqlite-wal", "current.sqlite-shm"])
+def test_a_browser_file_intake_of_a_live_store_s_files_keeps_both_locks(tmp_path, monkeypatch, name, sealed):
+    """A page's file input is offered what ``read_file`` admits, this process's own store files included
+    (``runtime_data``): the guard's callback reads the database and its log through the store's shared
+    descriptor, exact bytes, and refuses the index unopened, so the read transaction keeps the database's
+    SHARED range and the index's read mark; a fresh descriptor closed after the read dropped both. The same
+    holds where the store's folder may be searched but not listed (``sealed``), as read_file's path read crosses it."""
+    from ouroboros.tools.registry import ToolContext
+    from tests.test_mcp_browser_guard import _ask, _guard
+
+    if sealed:
+        _skip_without_search_only_open()
+    use_journal(monkeypatch, "WAL")
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    ctx = ToolContext(repo_dir=repo, drive_root=data)
+    ctx.task_id = "t-upload"
+    database = _live_store(data)
+    selected = {"root": "runtime_data", "path": f"state/{name}"}
+    with store.open_store(data, write=False), _guard(ctx) as guard:
+        assert _reset_refused(database) and _shared_held(database)
+        expected = store.read_file_bytes(database.with_name(name)) if not name.endswith("-shm") else None
+        try:
+            if sealed:
+                database.parent.chmod(0o300)
+                if os.name == "nt" or os.access(database.parent, os.R_OK):
+                    pytest.skip("this process can list the folder anyway")
+            answer = _ask(guard, {"action": "file_intake", "files": [selected]})
+        finally:
+            database.parent.chmod(0o755)
+        assert _reset_refused(database), "the intake opened and closed a descriptor of the index"
+        assert _shared_held(database), "the intake closed a fresh descriptor of the database"
+    if expected is None:
+        assert set(answer) == {"block"} and "WAL index" in answer["block"], answer
+        assert answer["block"].startswith("BROWSER_FILE_INTAKE_BLOCKED: file 1 of 1 "), answer
+        return
+    assert answer["block"] == "" and [row["name"] for row in answer["files"]] == [name], answer
+    assert pathlib.Path(answer["files"][0]["path"]).read_bytes() == expected and expected
 
 
 def test_the_header_probe_answers_without_opening_the_index(tmp_path, monkeypatch):
@@ -657,10 +711,13 @@ class _NtShaped:
     branch runs anywhere; each file is recorded, by identity, under the access it got."""
 
     def __init__(self):
-        self.data, self.attributes = set(), set()
+        self.data, self.attributes, self.roots = set(), set(), []
 
-    def open_root(self, path):
-        return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    def open_root(self, path, *, search_only=False):  # a listing right, or a name-only root as NT grants it
+        from ouroboros.confined_files import SEARCH_DIR_FLAGS
+
+        self.roots.append(search_only)
+        return os.open(path, (search_only and SEARCH_DIR_FLAGS) or os.O_RDONLY | os.O_DIRECTORY)
 
     def open_relative(self, parent, name, *, directory, metadata=False):
         assert not metadata, "attributes are asked through identity()"
@@ -696,6 +753,60 @@ def _windows_branch():
         patch.setattr(confined_files, "IS_WINDOWS", True)
         patch.setattr(confined_files._Win32Files, "load", staticmethod(lambda: api))
         yield api
+
+
+def test_a_search_only_root_asks_windows_for_no_listing_right():
+    """A root that only names entries (``search_only``) asks ``CreateFileW`` for ``FILE_READ_ATTRIBUTES`` alone, the
+    right ``require_plain``'s handle query needs, as a path walk needs no listing; every other root keeps
+    ``FILE_LIST_DIRECTORY``. Share mode, disposition and flags are the same, and both still prove a plain,
+    non-reparse directory, closing the handle when that proof fails. The real binding, its kernel calls recorded."""
+    from ouroboros import confined_files
+
+    w32 = confined_files._Win32Files
+    api, asked, proved, closed = object.__new__(w32), [], [], []
+    api._create = lambda path, access, share, security, disposition, flags, template: asked.append(
+        (path, access, share, security, disposition, flags, template)) or 7
+    api._invalid, api.close = -1, closed.append
+    api.require_plain = lambda handle, *, directory: proved.append((handle, directory))
+    assert api.open_root("C:\\data") == 7 and api.open_root("C:\\data", search_only=True) == 7
+    rest = (w32.SHARE_READ | w32.SHARE_WRITE | w32.SHARE_DELETE, None, w32.OPEN_EXISTING, w32.FLAG_BACKUP_SEMANTICS, None)
+    assert asked == [("C:\\data", w32.FILE_LIST_DIRECTORY | w32.FILE_READ_ATTRIBUTES, *rest),
+                     ("C:\\data", w32.FILE_READ_ATTRIBUTES, *rest)]
+    assert proved == [(7, True), (7, True)] and closed == []
+
+    def reparse(handle, *, directory):
+        raise OSError(errno.ELOOP, "a reparse point is not followed")
+    api.require_plain = reparse
+    with pytest.raises(OSError) as refused:
+        api.open_root("C:\\data", search_only=True)
+    assert refused.value.errno == errno.ELOOP and closed == [7]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="NT ACLs, not POSIX modes, grant the listing right")
+def test_the_windows_branch_holds_a_search_only_root_for_names_alone(tmp_path):
+    """``ConfinedDirectory``'s Windows branch passes ``search_only`` to the root it holds: a folder this process may
+    search but not list still yields its named regular file to a search-only holder, while a holder that lists
+    asks for the listing right and is refused, as on POSIX."""
+    from ouroboros import confined_files
+
+    _skip_without_search_only_open()  # the NT-shaped stand-in holds its search-only root by one
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    (sealed / "report.txt").write_bytes(b"sealed report\n")
+    sealed.chmod(0o111)
+    try:
+        if os.access(sealed, os.R_OK):
+            pytest.skip("this process can list the folder anyway")
+        with _windows_branch() as audit:
+            with confined_files.ConfinedDirectory(sealed, search_only=True) as held:
+                handle, observed = held.open_for_read("report.txt")
+                with handle:
+                    assert handle.read() == b"sealed report\n" and stat.S_ISREG(observed.st_mode)
+            with pytest.raises(PermissionError):
+                confined_files.ConfinedDirectory(sealed)
+        assert audit.roots == [True, False]
+    finally:
+        sealed.chmod(0o755)
 
 
 @pytest.mark.parametrize(("alias", "measure"), [

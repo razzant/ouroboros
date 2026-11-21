@@ -16,7 +16,7 @@ from supervisor.event_taxonomy import EVENT_DISPOSITIONS
 
 
 @pytest.mark.parametrize("kind", [
-    "main_llm_call_state", "external_wait_lease",
+    "main_llm_call_state",
     "budget_resume_child",
 ])
 def test_idle_input_kinds_are_declared_by_the_event_registry(kind):
@@ -152,3 +152,42 @@ def test_the_manager_ignores_the_groups_sigterm_and_shutdown_ends_it_even_when_t
     assert stopped[-1]["exitcode_before_shutdown"] is None and stopped[-1]["killed"] is True
     with pytest.raises(RuntimeError):
         workers.get_event_q()  # shut down: nothing creates a second bus in this process
+
+
+def test_a_real_attempt_stopped_after_its_start_is_ended_before_the_next_bus_starts(tmp_path, monkeypatch):
+    """The one new process behaviour of the boot's head start (#3376): a Stop seen just after a REAL manager started
+    kills it before its queue is published; the next ordinary creating call ends that manager first (journaled with no
+    generation), then starts the one bus, which serves; the teardown ends that. Both are gone by their own exit codes."""
+    from supervisor import workers
+
+    for key, value in (("DRIVE_ROOT", tmp_path), ("_EVENT_Q", None), ("_EVENT_Q_MANAGER", None),
+                       ("_EVENT_Q_GENERATION", ""), ("_EVENT_Q_SHUTDOWN", False)):
+        monkeypatch.setattr(workers, key, value)
+    checks = []
+
+    def stop_requested():  # clear before the manager starts, set once its process exists (the Panic/Stop latch)
+        checks.append(len(checks))
+        return len(checks) > 1
+
+    with pytest.raises(RuntimeError, match="preparation stopped"):
+        workers.get_event_q(drive_root=tmp_path, stop_requested=stop_requested)
+    first, second = workers._EVENT_Q_MANAGER, None
+    try:
+        assert first is not None and first._process.pid and checks == [0, 1]
+        assert workers._EVENT_Q is None and workers._EVENT_Q_GENERATION == "", "nothing was published"
+        first._process.join(10)  # killed by its handle at the Stop; joined here so the journal row is exact
+        assert first._process.exitcode not in (None, 0)
+        bus = workers.get_event_q(drive_root=tmp_path)
+        second, generation = workers._EVENT_Q_MANAGER, workers._EVENT_Q_GENERATION
+        assert second is not first and second._process.is_alive() and generation
+        bus.put({"type": "task_heartbeat", "task_id": "after-the-stopped-attempt"})
+        assert bus.get(timeout=5)["task_id"] == "after-the-stopped-attempt"
+    finally:
+        workers.shutdown_event_q()
+    assert first._process.exitcode not in (None, 0) and second is not None and second._process.exitcode is not None
+    rows = [json.loads(line) for line in (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["generation"] for row in rows if row.get("type") == "event_queue_generation_started"] == [generation]
+    stopped = _stopped_rows(tmp_path)
+    assert [row["generation"] for row in stopped] == ["", generation], stopped
+    assert stopped[0]["exitcode_before_shutdown"] == first._process.exitcode and stopped[0]["killed"] is False
+    assert stopped[1]["exitcode_before_shutdown"] is None, "the bus was alive when the teardown reached it"

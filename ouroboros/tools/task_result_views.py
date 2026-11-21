@@ -60,7 +60,14 @@ def validate_result_selectors(selectors: Mapping[str, Any]) -> tuple[str, bool]:
     source_request = (include or other_source or selected or source_only
                       or selectors["source_start_char"] is not None or selectors["source_end_char"] is not None)
     if view not in {"", "full"} and source_request:
-        raise ValueError(f"view={view} is incompatible with authority/source selectors; use view=full or omit view")
+        sent = ", ".join(key for key in (
+            "include_authority", "authority_fields", "authority_projection_sha256", "source_only",
+            "include_work_order_source", "include_completion_source", "include_focus_source", "focus_source_sha256",
+            "review_source_sha256", "delegated_output_sha256", "presence_reentry_sha256", "presence_reentry_offset",
+            "call_id", "manifest_sha256", "source_start_char", "source_end_char",
+        ) if selectors[key] is not None and selectors[key] is not False and selectors[key] != "")
+        raise ValueError(f"view={view} is incompatible with authority/source selectors (sent: {sent}): omit view or "
+                         f"send view=full to read that source, or drop {sent} to get the {view} view")
     return view, other_source
 
 
@@ -87,8 +94,8 @@ def authority_selection(authority: Dict[str, Any], task_id: str, fields: Any, *,
                         digest: str, start: Any, end: Any, presence_scope: str = "") -> Dict[str, Any]:
     """Exact mechanical view of the SAME current authority, never a new dossier/store.
 
-    Digests/ranges describe sorted UTF-8 JSON with surrogate code units escaped;
-    ranges count Unicode code points, not bytes. The identity is separate from the chosen
+    Digests bind sorted JSON with POSIX surrogateescape units escaped. Ranges
+    count code points of that text. The projection identity is separate from the chosen
     fields' serialization and child_result_sha256; receipts/plans may change
     while that result identity stays fixed. Re-reads are current, not immutable.
     """
@@ -99,10 +106,10 @@ def authority_selection(authority: Dict[str, Any], task_id: str, fields: Any, *,
 
     full_text = encode(authority)
     projection_sha = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
-    keys = sorted(authority) if fields is None else fields
-    missing = [key for key in keys if key not in authority]
-    if missing:
-        raise ValueError("unknown authority_fields: " + json_dumps_utf8(missing, ensure_ascii=False))
+    # A name this record does not carry is a fact about the record, not a malformed call: the
+    # field set is each record's own, so the answer serves the names it has and lists the rest.
+    absent = [] if fields is None else [key for key in fields if key not in authority]
+    keys = sorted(authority) if fields is None else [key for key in fields if key in authority]
     arguments: Dict[str, Any] = {"task_id": task_id, "source_only": True,
                                  "authority_projection_sha256": projection_sha}
     arguments.update({"include_authority": True} if fields is None else {"authority_fields": list(keys)})
@@ -114,6 +121,9 @@ def authority_selection(authority: Dict[str, Any], task_id: str, fields: Any, *,
     payload: Dict[str, Any] = {"status": "available", "immutable": False,
         "authority_projection_sha256": projection_sha, "selected_fields": list(keys),
         "partial": fields is not None, "source": source}
+    if absent:
+        payload.update(absent_fields=absent, absent_fields_note=(
+            "this view of the record carries no field with these names; selected_fields and omitted_fields together name the fields it has"))
     if digest and digest != projection_sha:
         return {**payload, "status": "unavailable", "reason": "authority_identity_mismatch",
                 "expected_authority_projection_sha256": digest}
@@ -178,7 +188,7 @@ def retained_call_source(ctx, root, data, task_id, call_id, digest, start, end):
     if not isinstance(projection, dict) or not projection:
         raise FileNotFoundError("retained call has no redacted projection")
     raw = read_blob_ref(root, projection, expected_kind=str(projection.get("kind") or "json"),
-                        max_bytes=16 * 1024 * 1024, raw_bytes=True, admit=admit)
+                        max_bytes=16 * 1024 * 1024, raw_bytes=True, admit=admit, task_id=task_id)
     source, reason = text_source_range_projection(
         raw.decode("utf-8"), kind="redacted_dispatch_projection" if dispatch else "redacted_call_projection",
         start_char=start, end_char=end,
@@ -289,13 +299,17 @@ def render_result_view(
     ``known_result_sha256`` is the child-result identity in every view.  Summary
     and evidence are always rebuilt because cost/custody/retry/authority facts
     can change while the authored answer stays byte-identical; every view keeps
-    the reader's ``current_stop`` beside its status.
+    the reader's ``current_stop`` beside its status, and a root's Continue offer
+    (``owner_continue.offer_view``, as the routing references show it), which an
+    unchanged answer does not freeze either.
     """
     from ouroboros.outcomes import normalize_outcome_axes
+    from ouroboros.owner_continue import offer_view
     from ouroboros.task_finalization import terminal_host_notice_text
 
     answer = str(data.get("result") or "")
     answer_sha = hashlib.sha256(answer.encode("utf-8")).hexdigest()
+    offer = offer_view(dict(data), task_id)
     payload: Dict[str, Any] = {
         "schema_version": 1,
         "view": view,
@@ -307,6 +321,7 @@ def render_result_view(
         "terminal_origin": str(data.get("terminal_origin") or "unknown"),
         "outcome_axes": normalize_outcome_axes(dict(data)),
         **({"current_stop": dict(current_stop)} if current_stop else {}),
+        **({"continuation_offer": offer} if offer is not None else {}),
     }
     notice = terminal_host_notice_text(dict(data))
     if notice:

@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable, List, Optional
 from ouroboros.platform_peer import local_connection_peer  # noqa: F401 — platform facade
 from ouroboros.platform_process_target import (  # noqa: F401 — platform facade
-    capture_process_stop_target, observe_child_exit, retained_child_group,
+    capture_process_stop_target, observe_child_exit, retained_child_group, job_members_running, release_job_members,
 )
 
 log = logging.getLogger(__name__)
@@ -102,13 +102,20 @@ def is_container_env() -> bool:
 
 
 def bootstrap_process_path() -> list[str]:
-    """Add existing common user tool directories to this process PATH once."""
-
+    """Add existing common user tool directories to this process PATH once, ahead of its entries."""
     global _PATH_BOOTSTRAPPED
     if _PATH_BOOTSTRAPPED:
         return []
     _PATH_BOOTSTRAPPED = True
+    path = os.environ.get("PATH", "")
+    if added := common_tool_directories(path):
+        os.environ["PATH"] = PATH_SEP.join([*added, *[part for part in path.split(PATH_SEP) if part]])
+    return added
 
+
+def common_tool_directories(search_path: str) -> list[str]:
+    """The existing common user tool directories (package managers, per-user installs) that the PATH value
+    ``search_path`` lacks, in policy order: a GUI launch can inherit a system PATH without them. Changes nothing."""
     candidates: list[pathlib.Path] = []
     home = pathlib.Path.home()
     if IS_MACOS or IS_LINUX:
@@ -141,7 +148,7 @@ def bootstrap_process_path() -> list[str]:
         if user_profile:
             candidates.append(user_profile / ".cargo" / "bin")
 
-    existing = [part for part in os.environ.get("PATH", "").split(PATH_SEP) if part]
+    existing = [part for part in search_path.split(PATH_SEP) if part]
     existing_norm = {str(pathlib.Path(part)).lower() if IS_WINDOWS else str(pathlib.Path(part)) for part in existing}
     added: list[str] = []
     for candidate in candidates:
@@ -156,8 +163,6 @@ def bootstrap_process_path() -> list[str]:
             added.append(text)
         except OSError:
             continue
-    if added:
-        os.environ["PATH"] = PATH_SEP.join([*added, *existing])
     return added
 
 
@@ -1216,8 +1221,9 @@ def _resolve_bundled_payload(candidates_for: Callable[[pathlib.Path], List[pathl
 
 
 def resolve_bundled_node() -> Optional[str]:
-    """Locate the bundled signed Node; callers own health and PATH preference (§1)."""
-    return _resolve_bundled_payload(embedded_node_candidates)
+    """The pin's Node (shipped, prepared, or exact at any base), else None (``node_runtime.reviewed_host_node``)."""
+    from ouroboros.node_runtime import reviewed_host_node
+    return reviewed_host_node(_resolve_bundled_payload(embedded_node_candidates))
 
 
 def resolve_bundled_ripgrep() -> Optional[str]:
@@ -1227,13 +1233,13 @@ def resolve_bundled_ripgrep() -> Optional[str]:
 
 def get_system_memory() -> str:
     """Return total system memory as a human-readable string."""
-    os_name = platform.system()
+    from ouroboros.process_logging import check_output_with_relayed_stderr
     try:
-        if os_name == "Darwin":
-            mem_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip())
+        if (os_name := platform.system()) == "Darwin":
+            mem_bytes = int(check_output_with_relayed_stderr(["sysctl", "-n", "hw.memsize"]).strip())
             return f"{mem_bytes / (1024**3):.1f} GB"
         elif os_name == "Linux":
-            return subprocess.check_output(
+            return check_output_with_relayed_stderr(
                 ["awk", '/MemTotal/ {print $2/1024/1024 " GB"}', "/proc/meminfo"]).strip().decode()
         elif os_name == "Windows":
             mem_bytes = int(_wmic_value_line("ComputerSystem", "get", "TotalPhysicalMemory").split("=")[1])
@@ -1251,10 +1257,11 @@ def _wmic_value_line(*query: str) -> str:
 
 def get_cpu_info() -> str:
     """Return CPU model string."""
+    from ouroboros.process_logging import check_output_with_relayed_stderr
     os_name = platform.system()
     try:
         if os_name == "Darwin":
-            return subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).strip().decode()
+            return check_output_with_relayed_stderr(["sysctl", "-n", "machdep.cpu.brand_string"]).strip().decode()
         elif os_name == "Windows" and (line := _wmic_value_line("cpu", "get", "Name")):
             return line.split("=", 1)[1].strip()
     except Exception:
@@ -1450,9 +1457,11 @@ def await_process_handle(handle: int) -> dict:
 
 
 def _windows_breakaway_flags() -> int:
-    """Request breakaway from a permitting immediate Job; retain old-launcher spawn.
+    """Request breakaway from an immediate Job that permits it, silently or on request; retain old-launcher spawn.
 
-    This reads Job capability, never psutil/stop readiness (ARCHITECTURE §1/§9)."""
+    Silence alone (a venv redirector's Job) frees the child only up to the first Job that is not silent, there the
+    launcher's generation Job that recycle ends; the request also leaves each Job permitting it, never one that
+    refuses (Microsoft "Nested Jobs"). This reads Job capability, never psutil/stop readiness (ARCHITECTURE §1/§9)."""
     in_job = ctypes.wintypes.BOOL()
     if _kernel32.IsProcessInJob(_kernel32.GetCurrentProcess(), None, ctypes.byref(in_job)):
         if not in_job.value:
@@ -1460,10 +1469,8 @@ def _windows_breakaway_flags() -> int:
         info = _ExtendedLimitInfo()
         if _kernel32.QueryInformationJobObject(None, _JOBOBJECTINFOCLASS_EXTENDED, ctypes.byref(info),
                                                ctypes.sizeof(info), None):
-            flags = info.BasicLimitInformation.LimitFlags
-            if flags & _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK:
-                return 0
-            if flags & _JOB_OBJECT_LIMIT_BREAKAWAY_OK:
+            if info.BasicLimitInformation.LimitFlags & (_JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                                                        | _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK):
                 return getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
     log.warning("The current Windows Job does not confirm breakaway; shared daemon survival "
                 "after launcher close requires an updated launcher or a permitting Job")
@@ -1572,8 +1579,7 @@ def resume_process(pid: int) -> bool:
         return False
 
 
-# Preserve import order without the node_runtime -> platform_layer eager cycle.
-# PEP 562 re-exports retain callers' spellings (ARCHITECTURE §1 "Platform substrate").
+# Lazy PEP 562 compatibility exports avoid node_runtime's eager cycle (ARCHITECTURE §1 "Platform substrate").
 _NODE_RUNTIME_REEXPORTS = (
     "NodeRuntimeHealth",
     "node_runtime_health",

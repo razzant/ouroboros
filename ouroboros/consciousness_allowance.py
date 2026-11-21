@@ -26,6 +26,15 @@ yields the typed ``allowance_unknown`` outcome — the caller refuses the start
 honestly. ``spend_by_cause`` partitions that same window into own thoughts,
 places and started work, with known dollars and unmetered calls; it introduces
 no extra allowance. Stamped root causes come from the existing money rows.
+
+Only a display asks for ``forecast``: in the same read, each root's newest category row, so every counted row
+leaves the window at min(its own time + 24 h, that root's newest category row + 48 h), the very selections above
+with their inclusive edges. Subtracting the leaving rows' contributions from the one reducer's state, a group
+of rows leaving at the same instant at a time, finds ``room_after``: the instant after which known spend first
+falls below the limit, IF nothing is charged, settled or revised meanwhile (an estimate that settles moves its
+row and its amount either way). It is withheld for a zero limit, a degraded ledger and a window not exhausted.
+``window_changes_at`` is the instant the first counted row leaves, when a cached view stops being this window.
+No admission reads either.
 """
 
 from __future__ import annotations
@@ -34,7 +43,7 @@ import datetime as _dt
 import time
 from typing import Any, Dict, Optional
 
-from ouroboros._usage_rows import _summary, row_ts_epoch
+from ouroboros._usage_rows import Bucket, _summary, row_ts_epoch, summary_delta
 from ouroboros.runtime_limits import get_consciousness_daily_usd
 from ouroboros.usage_ledger import _drive_root
 from ouroboros.usage_origin import cause_label, root_cause
@@ -45,30 +54,63 @@ WINDOW_SEC = 24 * 3600
 ROOT_HORIZON_SEC = 48 * 3600  # a root is discovered by a consciousness row this recent
 STATUS_AVAILABLE, STATUS_EXHAUSTED, STATUS_UNKNOWN = "available", "exhausted", "allowance_unknown"
 _MONEY_KIND = "COALESCE(NULLIF(kind, ''), 'attempt') IN ('attempt', 'subscription_session', 'external_unmetered')"
+# The rows that name a consciousness root: root discovery and the forecast's root horizons read exactly these.
+_ROOT_ROWS = ("category IN ('consciousness', 'consciousness_task') "
+              f"AND ts_last_epoch >= ? AND root_task_id != '' AND {_MONEY_KIND}")
 
 
-def _window_rows(txn: Any, now_ts: float) -> tuple:
-    """(roots, their 24 h money rows captured per root for ``decode_attempts``, root causes), addressed selections."""
+def _window_rows(txn: Any, now_ts: float, *, horizons: bool = False) -> tuple:
+    """(roots, their 24 h money rows captured per root for ``decode_attempts``, root causes, and with ``horizons``
+    each root's newest category row time), addressed selections in one read."""
     discovered = list(txn.conn.execute(
         "SELECT DISTINCT root_task_id, category, json_extract(extra, '$.consciousness_cause') AS cause "
-        "FROM attempts WHERE category IN ('consciousness', 'consciousness_task') "
-        f"AND ts_last_epoch >= ? AND root_task_id != '' AND {_MONEY_KIND}", (now_ts - ROOT_HORIZON_SEC,)))
+        f"FROM attempts WHERE {_ROOT_ROWS}", (now_ts - ROOT_HORIZON_SEC,)))
     defaults = {record[0]: record[2] or ("own" if record[1] == "consciousness" else "started")
                 for record in discovered}
     causes = {root: root_cause(txn, root) or fallback for root, fallback in defaults.items()}
     roots = sorted(causes)
     rows = [txn.attempt_rows(f"root_task_id = ? AND ts_last_epoch >= ? AND {_MONEY_KIND}", (root, now_ts - WINDOW_SEC))
             for root in roots]  # captured here, decoded after the read closed (``allowance_window``)
-    return roots, rows, causes
+    newest = dict(txn.conn.execute(f"SELECT root_task_id, MAX(ts_last_epoch) FROM attempts WHERE {_ROOT_ROWS} "
+                                   "GROUP BY root_task_id", (now_ts - ROOT_HORIZON_SEC,))) if horizons else {}
+    return roots, rows, causes, newest
+
+
+def room_after(window: list, newest: Dict[str, float], limit: float) -> tuple:
+    """``(room_after, window_changes_at)`` for ``window`` (``(ts, row)`` pairs of the counted rows) under ``limit``.
+
+    A row counts while now <= its exit, min(ts + 24 h, its root's newest category row + 48 h) (both selections
+    are ``>=``). The leaving rows' contributions come off the one reducer's running state (``Bucket``, the state
+    ``_summary`` renders) one exit instant at a time, every row leaving at that instant together, and the rendered
+    known spend meets the limit by the allowance's own comparison. ``room_after`` is the exit after which it first
+    falls below; ``None`` when it already does or a root has no horizon (nothing is guessed)."""
+    total, leaving = Bucket(), {}
+    for ts, row in window:
+        horizon = newest.get(row["root_task_id"])
+        if horizon is None:
+            return None, None
+        delta = summary_delta(row)
+        total.add(delta)
+        leaving.setdefault(min(ts + WINDOW_SEC, float(horizon) + ROOT_HORIZON_SEC), []).append(delta)
+    first = min(leaving, default=None)
+    if float(total.render_summary()["settled_usd"]) < limit:
+        return None, first
+    for exit_at in sorted(leaving):
+        for delta in leaving[exit_at]:
+            total.add(delta, -1)
+        if float(total.render_summary()["settled_usd"]) < limit:
+            return exit_at, first
+    return None, first
 
 
 def allowance_window(
-    drive_root: Any = None, *, now: Optional[float] = None, allow_stale: bool = False,
+    drive_root: Any = None, *, now: Optional[float] = None, allow_stale: bool = False, forecast: bool = False,
 ) -> Dict[str, Any]:
     """The allowance verdict for the 24 h ending at ``now`` (epoch seconds; default: the clock).
 
     ``allow_stale`` is the STATUS view's read (it admits nothing): after the short display
-    wait it reports ``allowance_unknown``. Every admission of a wake reads exactly."""
+    wait it reports ``allowance_unknown``. Every admission of a wake reads exactly. ``forecast`` (a display's
+    read only) adds ``room_after`` and ``window_changes_at`` (module docstring)."""
     from ouroboros import usage_store
 
     now_ts = time.time() if now is None else float(now)
@@ -76,7 +118,7 @@ def allowance_window(
     try:
         root = _drive_root(drive_root)
         with usage_store.read(root, allow_stale=allow_stale) as txn:
-            roots, captured, root_causes = _window_rows(txn, now_ts)
+            roots, captured, root_causes, newest = _window_rows(txn, now_ts, horizons=forecast)
         degraded = usage_store.integrity_degraded(root)
         rows = [row for part in captured for row in usage_store.decode_attempts(part)]
     except Exception as exc:  # noqa: BLE001 — every read failure is the one typed outcome
@@ -103,7 +145,7 @@ def allowance_window(
         _dt.datetime.fromtimestamp(oldest + WINDOW_SEC, tz=_dt.timezone.utc).isoformat()
         if oldest is not None else ""
     )
-    return {
+    result = {
         "status": STATUS_EXHAUSTED if known >= limit else STATUS_AVAILABLE,
         "limit_usd": limit,
         "settled_usd": known,
@@ -114,9 +156,20 @@ def allowance_window(
         "remaining_usd": round(max(0.0, limit - known), 6),
         "unknown_unmetered": int(summary["unknown_unmetered"]),
         "non_final_rows": int(summary["non_final_rows"]),
+        # Rows that can still settle (a reservation, a call in flight, an estimate): more may join the known spend.
+        "accounting_open_rows": int(summary["accounting_open_rows"]),
         "roots": sorted(roots),
         "spend_by_cause": spend_by_cause,
         "window_rows": len(window),
         "resets_at": resets_at,
         "integrity_degraded": degraded,
     }
+    if forecast:
+        after, changes = room_after(window, newest, limit)
+        withheld = result["status"] != STATUS_EXHAUSTED or limit <= 0 or degraded or after is None or after < now_ts
+        result.update(room_after=None if withheld else _iso(after), window_changes_at=changes)
+    return result
+
+
+def _iso(ts: float) -> str:
+    return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc).isoformat()

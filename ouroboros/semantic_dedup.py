@@ -99,12 +99,12 @@ def find_semantic_duplicate_id(
 
     prompt = _PROMPT.format(subject=subject, new_text=new_text, candidate_block="\n".join(rows))
     try:
-        from ouroboros.config import get_light_model
         from ouroboros.llm import LLMClient
+        from ouroboros.route_choice import following_route
 
         client = LLMClient()
         # One binding: the Light model always travels with its role-owned account and options.
-        use_model, model_role = (model, "") if model else (get_light_model(), "light")
+        use_model, use_local, model_role = (model, False, "") if model else (*following_route("light"), "light")
         messages = [{"role": "user", "content": prompt}]
         if drive_root is not None:
             from ouroboros.llm_observability import chat_observed
@@ -117,13 +117,14 @@ def find_semantic_duplicate_id(
                 model_role=model_role,
                 messages=messages,
                 model=use_model,
+                use_local=use_local,
                 reasoning_effort=reasoning_effort,
                 max_tokens=512,
             )
         else:
             resp, usage = client.chat(
                 messages=messages, model=use_model, reasoning_effort=reasoning_effort, max_tokens=512,
-                model_role=model_role,
+                model_role=model_role, use_local=use_local,
             )
         if usage:
             try:

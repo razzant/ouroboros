@@ -816,7 +816,7 @@ def test_a_worker_that_survived_the_shutdown_is_killed_before_the_terminal_is_wr
     proc = _surviving_worker(root, task_id)
     # Slot hygiene AFTER the durable boundary: a real respawn would start a
     # second worker process, which this test neither observes nor owns.
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
 
     writes: list = []
     real_write = task_results.write_task_result
@@ -860,7 +860,7 @@ def test_an_ordinary_cancel_of_a_live_worker_keeps_stating_the_kill(roots, monke
     task_id = "owner-cancelled-live"
     _interrupted_running_row(root, task_id)
     proc = _surviving_worker(root, task_id)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
 
     cancel_intents.request_cancel(root, task_id, reason="no longer needed",
                                   requested_by="owner")

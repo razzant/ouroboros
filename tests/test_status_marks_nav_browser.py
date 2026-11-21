@@ -44,20 +44,33 @@ def expect():
     return pytest.importorskip('playwright.sync_api').expect
 
 
-def snapshot(work=(), asking=(), unread=(), pins=(), main='', main_revision=None):
-    """An /api/state body: work running in the ``work`` Projects, a question waiting for the owner in ``asking``, three
-    new messages in each ``unread`` Project, ``pins`` pinned, Main's own work in ``main`` (a census phase) and Main's
-    room revision ``main_revision`` (its read cursor starts at 0, see ``open_app``); the work fields are the server's
-    own projection of those rows."""
+def snapshot(work=(), asking=(), unread=(), pins=(), main='', main_revision=None, main_asking=False, question=''):
+    """An /api/state body: work running in the ``work`` Projects, a question waiting for the owner in ``asking`` (with
+    ``question``, an addressed one whose words the body's ``current_questions`` carry), three new messages in each
+    ``unread`` Project, ``pins`` pinned, Main's own work in ``main`` (a census phase), a question of Main's own waiting
+    for the owner (``main_asking``) and Main's room revision ``main_revision`` (its read cursor starts at 0, see
+    ``open_app``); the work fields are the server's own projection of those rows."""
     rows = [dict(activity_id=f'work-{pid}', root_task_id=f'work-{pid}', project_id=pid, chat_id=CHATS[pid],
                  kind='managed_task', phase='working') for pid in work]
     rows += [dict(activity_id=f'ask-{pid}', root_task_id=f'ask-{pid}', project_id=pid, chat_id=CHATS[pid],
                   kind='managed_task', phase='working',
-                  required_question=dict(wait_for_answer=True, owner_wait_state='waiting')) for pid in asking]
+                  required_question=dict(wait_for_answer=True, owner_wait_state='waiting',
+                                         **({'quiz_id': f'quiz-{pid}'} if question else {}))) for pid in asking]
     if main:
         rows.append(dict(activity_id='main-work', root_task_id='main-work', chat_id=1, kind='direct_chat', phase=main))
+    if main_asking:
+        rows.append(dict(activity_id='main-ask', root_task_id='main-ask', chat_id=1, kind='managed_task', phase='working',
+                         required_question=dict(wait_for_answer=True, owner_wait_state='waiting')))
     projects = [dict(p, pinned=p['id'] in pins, visible_revision=3 if p['id'] in unread else 0) for p in PROJECTS]
     main_unread = {} if main_revision is None else {'main_visible_revision': main_revision}
+    if question:
+        names = {p['id']: p for p in PROJECTS}
+        main_unread['current_questions_complete'] = True
+        main_unread['current_questions'] = [dict(
+            role='system', system_type='project_question_pointer', task_id=f'ask-{pid}', quiz_id=f'quiz-{pid}',
+            quiz_state='open', wait_for_answer=True, project_id=pid, project_name=names[pid]['name'],
+            project_chat_id=CHATS[pid], chat_id=1, ts='2026-11-15T00:00:00+00:00', question=question, options=[],
+            text=f'Waiting for your answer in {names[pid]["name"]}') for pid in asking]
     return {'supervisor_ready': True, 'projects': projects, 'project_chat_ids': list(CHATS.values()),
             'active_chat_activities_complete': True, 'active_chat_activities': rows, **work_fields(rows), **main_unread}
 
@@ -100,6 +113,19 @@ def mark_of(page, selector):
         return {shape: m.dataset.shape, hue: m.dataset.hue, drawn: getComputedStyle(m).display !== 'none',
                 fill: s.backgroundColor, ring: s.boxShadow, size: [r.width, r.height],
                 box: (({left, right, top, bottom}) => ({left, right, top, bottom}))(m.getBoundingClientRect())};
+    }""")
+
+
+def picture_dot(page):
+    """The dot on the picture of Ouroboros's card: its mark, the ring the sheet cuts it out with, the card's fill and
+    the picture's box."""
+    return page.locator('.nav-row-main').evaluate("""card => {
+        const picture = card.querySelector('.nav-ouro-ava'), m = picture.querySelector('.status-mark');
+        const i = m.querySelector('i'), r = i.getBoundingClientRect();
+        const box = (el) => (({left, right, top, bottom}) => ({left, right, top, bottom}))(el.getBoundingClientRect());
+        return {shape: m.dataset.shape, hue: m.dataset.hue, drawn: getComputedStyle(m).display !== 'none',
+                fill: getComputedStyle(i).backgroundColor, ring: getComputedStyle(m).boxShadow, size: [r.width, r.height],
+                card: getComputedStyle(card).backgroundColor, box: box(m), picture: box(picture)};
     }""")
 
 
@@ -191,32 +217,26 @@ def test_the_closed_drawer_rests_its_moving_dots_and_opening_it_starts_them(nav_
 
 
 def test_a_closed_project_whose_row_the_collapse_hides_gives_the_focus_to_the_toggle(nav_ui, tmp_path):
-    """Opened by keyboard, then the list collapsed: closing the Project cannot return the focus to its hidden row, so
-    the Projects toggle takes it, never the page body; with the list open the row takes it back as before."""
+    """The Projects list never collapses: closing a Project returns focus to its row, and no retired toggle exists."""
     ui = nav_ui
     facts = {'engine': ui['engine']}
     page, sync = open_app(ui, 1280, 844, snapshot())
     row = f'.nav-project-row[data-project-id="{PROJECTS[2]["id"]}"]'
     focused = "() => { const a = document.activeElement; return a?.id || a?.className || a?.tagName || ''; }"
     try:
-        for collapse in (False, True):
-            page.locator(row).focus()
-            page.keyboard.press('Enter')
-            page.locator('#project-panel:not([hidden])').wait_for()
-            if collapse:
-                page.locator('#nav-projects-toggle').focus()
-                page.keyboard.press('Enter')
-                page.wait_for_function("() => document.getElementById('nav-projects')?.hasAttribute('data-collapsed')")
-            page.locator('#project-panel .chat-messages').first.focus()
-            page.keyboard.press('Escape')
-            page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
-            settle(page)
-            facts[f'collapsed={collapse}'] = page.evaluate(focused)
+        page.locator(row).focus()
+        page.keyboard.press('Enter')
+        page.locator('#project-panel:not([hidden])').wait_for()
+        page.locator('#project-panel .chat-messages').first.focus()
+        page.keyboard.press('Escape')
+        page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
+        settle(page)
+        facts['closed'] = page.evaluate(focused)
+        facts['toggle_count'] = page.locator('#nav-projects-toggle').count()
     finally:
         save_evidence(tmp_path, f'nav-close-focus-{ui["engine"]}', facts)
         page.close()
-    assert 'nav-project-row' in facts['collapsed=False'], facts
-    assert facts['collapsed=True'] == 'nav-projects-toggle', facts
+    assert 'nav-project-row' in facts['closed'] and facts['toggle_count'] == 0, facts
 
 
 def test_mains_unread_count_sits_beside_its_mark_never_on_it(nav_ui, tmp_path):
@@ -245,7 +265,7 @@ def test_mains_unread_count_sits_beside_its_mark_never_on_it(nav_ui, tmp_path):
                 page.wait_for_timeout(300)
             read = """() => { const row = document.querySelector('.nav-row-main'), badge = row.querySelector('.unread-badge');
                 const box = (el) => (({left, right, top, bottom}) => ({left, right, top, bottom}))(el.getBoundingClientRect());
-                const mark = row.querySelector('.status-mark');
+                const mark = row.querySelector('.nav-mark');
                 return {text: badge.textContent, badge: box(badge), label: box(row.querySelector('.nav-row-label')),
                         mark: mark.hidden ? null : box(mark)}; }"""
             facts[case] = page.evaluate(read)
@@ -258,16 +278,21 @@ def test_mains_unread_count_sits_beside_its_mark_never_on_it(nav_ui, tmp_path):
     for case in ('mouse', 'narrow', 'touch'):
         seen, rest = facts[case], facts[case]['rest']
         assert seen['text'] == '99+' and seen['mark'], facts
-        assert seen['label']['right'] <= seen['badge']['left'] + 0.5, (case, facts)  # the label gives way
+        if case in ('mouse', 'narrow'):
+            # The narrow card keeps Main Chat on its second line (783b1cf34, c374668b7).
+            assert seen['label']['top'] >= seen['badge']['bottom'], (case, facts)
+            assert seen['label']['right'] == pytest.approx(seen['mark']['right'], abs=0.5), (case, facts)
+        else:
+            assert seen['label']['right'] <= seen['badge']['left'] + 0.5, (case, facts)
         assert seen['badge']['right'] <= seen['mark']['left'] - 2, (case, facts)
         assert rest['mark'] is None, facts
         assert all(abs(rest['badge'][side] - seen['badge'][side]) <= 0.5 for side in seen['badge']), (case, facts)
 
 
 COLUMNS = """work => {
-    const box = (selector) => { const el = document.querySelector(selector); const r = el.getBoundingClientRect();
-        return {left: r.left, right: r.right, text: el.textContent.trim()}; };
-    return {main_count: box('[data-nav-page="chat"] .unread-badge'), main_mark: box('[data-nav-page="chat"] .status-mark'),
+    const box = (selector) => { const el = document.querySelector(selector); if (!el) return null;
+        const r = el.getBoundingClientRect(); return {left: r.left, right: r.right, text: el.textContent.trim()}; };
+    return {main_count: box('[data-nav-page="chat"] .unread-badge'), main_mark: box('[data-nav-page="chat"] .nav-mark'),
             count: box('#nav-projects-count'), header_mark: box('.nav-projects-facts .status-mark'),
             row_mark: box(`[data-project-id="${work}"] .status-mark`), kebab: box(`[data-project-id="${work}"] ~ .nav-project-kebab`),
             add: box('#nav-projects-add'), chevron: box('#nav-projects-toggle .nav-chevron')};
@@ -275,9 +300,7 @@ COLUMNS = """work => {
 
 
 def test_main_and_the_projects_header_share_the_rows_columns(nav_ui, tmp_path):
-    """Both numbers count unread messages (owner 19.10, Q1 = B): Main's its room's, the Projects' the rows' sum. Each
-    stands just before one mark column shared with the rows; + takes the ⋯ column with a mouse and follows the chevron
-    on touch, where rows have no ⋯ column."""
+    """Main has its own count; each Project row carries its own mark, and the removed Projects header has no total."""
     ui = nav_ui
     facts = {'engine': ui['engine']}
     work, asking, unread = PROJECTS[2]['id'], PROJECTS[6]['id'], [PROJECTS[1]['id'], PROJECTS[4]['id']]
@@ -303,21 +326,105 @@ def test_main_and_the_projects_header_share_the_rows_columns(nav_ui, tmp_path):
         finally:
             save_evidence(tmp_path, f'nav-columns-{ui["engine"]}', facts)
             page.close()
-    for case, main_count in (('mouse', '2'), ('narrow', '99+'), ('touch', '2')):
+    expected_main = {'mouse': '2', 'narrow': '99+', 'touch': '2'}
+    for case in ('mouse', 'narrow', 'touch'):
         seen = facts[case]
-        assert (seen['main_count']['text'], seen['count']['text']) == (main_count, '6'), facts  # 3 + 3 in Projects
-        assert seen['count']['right'] == pytest.approx(seen['main_count']['right'], abs=0.5), (case, facts)
-        # One mark column: a one-dot shape (the header's amber) sits mid-column, as a row's does, under three dots.
+        assert seen['main_count'] and seen['main_count']['text'] == expected_main[case], (case, facts)
+        assert seen['count'] is None and seen['header_mark'] is None, (case, facts)
+        assert seen['main_mark'] and seen['row_mark'], (case, facts)
         middle = (seen['main_mark']['left'] + seen['main_mark']['right']) / 2
-        for mark in ('header_mark', 'row_mark'):
-            assert (seen[mark]['left'] + seen[mark]['right']) / 2 == pytest.approx(middle, abs=0.5), (case, mark, facts)
-    touch = facts['touch']
+        assert (seen['row_mark']['left'] + seen['row_mark']['right']) / 2 == pytest.approx(middle, abs=0.5), (case, facts)
     for case in ('mouse', 'narrow'):  # + keeps the ⋯ column whole, the narrowest sidebar included
         seen = facts[case]
-        assert (seen['add']['left'], seen['add']['right']) == pytest.approx(
-            (seen['kebab']['left'], seen['kebab']['right']), abs=0.5), (case, facts)
-    assert touch['chevron']['right'] <= touch['add']['left'] <= touch['chevron']['right'] + 12, facts
-    assert touch['add']['right'] < touch['count']['left'], facts
+        assert seen['add'] and seen['kebab'], (case, facts)
+        assert (seen['add']['left'] + seen['add']['right']) / 2 == pytest.approx(
+            (seen['kebab']['left'] + seen['kebab']['right']) / 2, abs=0.5), (case, facts)
+    assert facts['touch']['add'] and facts['touch']['chevron'] is None, facts
+
+
+QUESTION = '**The line is up.**\n\nOne step is `yours`: switch the local test on in Circles, then I run the trial and finish the merge.'
+QUESTION_WORDS = 'The line is up. One step is yours: switch the local test on in Circles, then I run the trial and finish the merge.'
+
+
+def test_the_picture_on_ouroboross_card_says_the_owners_move_for_main_and_the_projects(nav_ui, tmp_path):
+    """Ouroboros's picture on his card stands for the rooms the list may hold out of sight (owner 15.11, 6A): while a
+    Project asks, the 7px amber fact dot stands on the picture's top-right rim, ringed in the card's own fill, and the
+    card's words for readers say a Project waits and its tooltip that something does; work or new messages alone
+    never light it; Main's own question lights it beside Main's own mark. The waiting Project's row says its
+    question in the question's own opening words. Docked and in the phone's open drawer alike."""
+    ui = nav_ui
+    facts = {'engine': ui['engine']}
+    asking = PROJECTS[2]['id']
+    for width, touch in ((1280, False), (390, True)):
+        page, sync = open_app(ui, width, 844, snapshot(work=[asking], main='thinking'), touch=touch)
+        try:
+            if width < 720:
+                page.locator('#page-chat [data-mobile-nav-toggle]').click()
+                page.wait_for_function("() => window.__ouroLayers.top() === 'drawer'")
+                page.wait_for_timeout(300)
+            main = page.locator('.nav-row-main')
+            words = page.locator('.nav-row-main .nav-row-words')
+            picture, own = '.nav-row-main .nav-ava-mark', '.nav-row-main .nav-mark'
+            facts[width] = {'amber': token(page, '--mark-owner'), 'work': mark_of(page, picture)}
+            sync(snapshot(asking=[asking]))
+            facts[width]['asks'] = picture_dot(page)
+            facts[width]['asksMain'] = mark_of(page, own)
+            facts[width]['asksWords'] = words.text_content()
+            facts[width]['asksTitle'] = main.get_attribute('title')
+            expect()(main).to_have_accessible_name(
+                re.compile(r'^Ouroboros Main Chat\s*·\s*Something in a project waits for you$'))
+            # The waiting Project's own line: the sentence of its state while the read carries no words of the
+            # question, the question's opening words once it does (one line, cut by the row's width, the room's
+            # primary ink), and the row's name ends with the same words.
+            row = page.locator(f'[data-project-id="{asking}"]')
+            line = """el => ({text: el.textContent, kind: el.dataset.kind, ink: getComputedStyle(el).color,
+                           oneLine: el.getBoundingClientRect().height <= parseFloat(getComputedStyle(el).lineHeight) + 1,
+                           inside: el.getBoundingClientRect().right <= el.closest('.nav-project-row').getBoundingClientRect().right})"""
+            facts[width]['sentence'] = row.locator('.nav-project-says').evaluate(line)
+            sync(snapshot(asking=[asking], question=QUESTION))
+            facts[width]['asked'] = row.locator('.nav-project-says').evaluate(line)
+            facts[width]['askedName'] = row.get_attribute('aria-label')
+            facts[width]['ink'] = token(page, '--text-primary')
+            # A read that vouches for its questions drops the one it no longer lists (a read that does not keeps it).
+            answered = dict(current_questions=[], current_questions_complete=True)
+            sync({**snapshot(unread=[asking]), **answered})
+            facts[width]['answeredLine'] = row.locator('.nav-project-says').text_content()
+            facts[width]['unread'] = mark_of(page, picture)
+            facts[width]['unreadWords'] = words.text_content()
+            facts[width]['unreadTitle'] = main.get_attribute('title')
+            expect()(main).to_have_accessible_name('Ouroboros Main Chat')
+            sync({**snapshot(main_asking=True), **answered})
+            facts[width]['mainAsks'] = {'picture': mark_of(page, picture), 'main': mark_of(page, own),
+                                        'words': words.text_content(), 'title': main.get_attribute('title')}
+            sync({**snapshot(), **answered})
+            facts[width]['rest'] = {'picture': mark_of(page, picture), 'title': main.get_attribute('title')}
+        finally:
+            save_evidence(tmp_path, f'nav-card-picture-{ui["engine"]}', facts)
+            page.close()
+    for width in (1280, 390):
+        seen = facts[width]
+        assert not seen['work']['drawn'], facts
+        asks = seen['asks']
+        assert (asks['shape'], asks['hue'], asks['drawn'], asks['size']) == ('dot', 'owner', True, [7, 7]), facts
+        assert asks['fill'] == seen['amber'] and asks['ring'] == f"{asks['card']} 0px 0px 0px 2px", facts
+        assert abs(asks['box']['right'] - asks['picture']['right'] - 1) <= 0.5, facts
+        assert abs(asks['picture']['top'] - asks['box']['top'] - 1) <= 0.5, facts
+        assert not seen['asksMain']['drawn'], facts
+        assert seen['asksWords'].strip() == '· Something in a project waits for you', facts
+        assert seen['asksTitle'] == 'Main Ouroboros chat · something waits for you', facts
+        assert (seen['sentence']['text'], seen['sentence']['kind']) == ('Waiting for your answer', 'ask'), facts
+        asked = seen['asked']
+        assert (asked['text'], asked['kind']) == (QUESTION_WORDS, 'ask'), facts
+        assert asked['oneLine'] and asked['inside'] and asked['ink'] == seen['ink'], facts
+        assert seen['askedName'].endswith(f' · {QUESTION_WORDS}'), facts
+        assert seen['answeredLine'] == '', facts
+        assert not seen['unread']['drawn'] and seen['unreadWords'] == '', facts
+        assert seen['unreadTitle'] == 'Main Ouroboros chat', facts
+        mine = seen['mainAsks']
+        assert (mine['picture']['shape'], mine['picture']['hue'], mine['picture']['drawn']) == ('dot', 'owner', True), facts
+        assert mine['main']['hue'] == 'owner' and mine['main']['drawn'], facts
+        assert 'in a project' not in mine['words'] and mine['title'] == 'Main Ouroboros chat · something waits for you', facts
+        assert not seen['rest']['picture']['drawn'] and seen['rest']['title'] == 'Main Ouroboros chat', facts
 
 
 def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp_path):
@@ -336,14 +443,13 @@ def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp
             # both once the row's own transition has finished.
             page.wait_for_function("() => { const row = document.querySelector('.nav-row-main');"
                                    " return row && row.getAnimations().length === 0; }")
-            facts[width] = {'main': mark_of(page, '.nav-row-main'), 'project': mark_of(page, project),
+            facts[width] = {'main': mark_of(page, '.nav-row-main .nav-mark'), 'project': mark_of(page, project),
                             'mainInk': main.evaluate('el => getComputedStyle(el).color'),
                             'words': page.locator('.nav-row-main .nav-row-words').text_content()}
-            expect()(main).to_have_accessible_name(re.compile(r'^Main Chat\s*·\s*Thinking'))
+            expect()(main).to_have_accessible_name(re.compile(r'^Ouroboros\s+Main Chat\s*·\s*Thinking'))
+            # Main's own mark rests while only a Project asks (the picture's dot says that wait: the test above).
             sync(snapshot(asking=[PROJECTS[2]['id']]))
-            facts[width]['rest'] = mark_of(page, '.nav-row-main')
-            facts[width]['restWords'] = page.locator('.nav-row-main .nav-row-words').text_content()
-            expect()(main).to_have_accessible_name('Main Chat')
+            facts[width]['rest'] = mark_of(page, '.nav-row-main .nav-mark')
         finally:
             save_evidence(tmp_path, f'nav-main-mark-{ui["engine"]}', facts)
             page.close()
@@ -356,22 +462,19 @@ def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp
         assert abs(main['box']['right'] - project['box']['right']) <= 0.5, facts
         assert abs(main['box']['left'] - project['box']['left']) <= 0.5, facts
         assert facts[width]['words'].strip() == '· Thinking', facts
-        assert not facts[width]['rest']['drawn'] and facts[width]['restWords'] == '', facts
+        assert not facts[width]['rest']['drawn'], facts
 
 
 def test_the_collapse_is_remembered_on_this_device_and_only_there(nav_ui, tmp_path):
     ui = nav_ui
-    pins = [PROJECTS[5]['id']]
-    body = snapshot(pins=pins)
+    body = snapshot(pins=[PROJECTS[5]['id']])
     facts = {'engine': ui['engine']}
     rows = "() => [...document.querySelectorAll('#nav-projects-list > .nav-project-item')].filter(e => !e.hidden).length"
-    expanded = "() => document.getElementById('nav-projects-toggle').getAttribute('aria-expanded')"
+    expanded = "() => document.getElementById('nav-projects-toggle')?.getAttribute('aria-expanded') || null"
     page, _sync = open_app(ui, 1280, 800, body)
     try:
         facts['first'] = [page.evaluate(expanded), page.evaluate(rows)]
-        page.locator('#nav-projects-toggle').click()
-        settle(page)
-        facts['collapsed'] = [page.evaluate(expanded), page.evaluate(rows)]
+        facts['toggle'] = page.locator('#nav-projects-toggle').count()
         ui['errors'].watch(page)  # the reload may cut off this page's own reads; the other pages stay strict
         page.reload()
         page.wait_for_selector('#nav-projects-list [data-project-id]', state='attached')
@@ -385,23 +488,21 @@ def test_the_collapse_is_remembered_on_this_device_and_only_there(nav_ui, tmp_pa
         facts['other'] = [other.evaluate(expanded), other.evaluate(rows)]
     finally:
         other.close()
-    # Storage that refuses (a private window, a locked-down WebView): expanded, and the toggle still works in the page.
+    # Storage that refuses (a private window, a locked-down WebView) has the same permanent feed.
     refusing = ("for (const name of ['getItem', 'setItem', 'removeItem']) Storage.prototype[name] = function () {"
                 " throw new DOMException('storage denied', 'SecurityError'); };")
     locked, _ = open_app(ui, 1280, 800, body, init=[refusing])
     try:
-        facts['locked'] = [locked.evaluate(expanded), locked.evaluate(rows)]
-        locked.locator('#nav-projects-toggle').click()
-        settle(locked)
-        facts['locked_collapsed'] = [locked.evaluate(expanded), locked.evaluate(rows)]
+        facts['locked'] = [locked.evaluate(expanded), locked.evaluate(rows), locked.locator('#nav-projects-toggle').count()]
     finally:
         save_evidence(tmp_path, f'nav-collapse-memory-{ui["engine"]}', facts)
         locked.close()
     everything = len(PROJECTS)
-    assert facts['first'] == ['true', everything], facts
-    assert facts['collapsed'] == facts['reloaded'] == ['false', len(pins)], facts
-    assert facts['other'] == ['true', everything], facts
-    assert facts['locked'] == ['true', everything] and facts['locked_collapsed'] == ['false', len(pins)], facts
+    assert facts['first'] == [None, everything], facts
+    assert facts['toggle'] == 0, facts
+    assert facts['reloaded'] == [None, everything], facts
+    assert facts['other'] == [None, everything], facts
+    assert facts['locked'] == [None, everything, 0], facts
     assert not ui['errors'].unexpected(), ui['errors'].report()
 
 
@@ -457,7 +558,7 @@ def test_a_rows_menu_opens_by_right_click_or_keyboard_and_says_the_rows_state(na
         page.close()
     name = PROJECTS[1]['name']
     right = facts['right']
-    assert right['role'] == 'none' and right['items'] == ['pin', 'rename', 'delete'] and right['focused'] == 'pin', facts
+    assert right['role'] == 'none' and right['items'] == ['pin', 'rename', 'folder', 'delete'] and right['focused'] == 'pin', facts
     assert (right['shape'], right['hue'], right['word']) == ('moving', 'unread', 'Working'), facts
     assert right['words'] == 'Working · new messages', facts
     assert right['name'] == f'Actions for {name} · Working · new messages', facts
@@ -549,7 +650,8 @@ def test_a_long_press_opens_a_rows_menu_on_touch_where_the_dots_take_no_column(c
     assert facts['pressed_by_lift'] == [], 'the lifting finger pressed nothing under it'
     assert facts['pressed'] == {'pinned': True}, 'a deliberate tap afterwards presses the item'
     assert facts['focused_kebab']['size'] == [44, 44], facts
-    assert facts['focused_kebab']['left'] >= facts['focused_kebab']['rowRight'] - 0.5, facts
+    assert facts['focused_kebab']['rowRight'] - (
+        facts['focused_kebab']['left'] + facts['focused_kebab']['size'][0]) == pytest.approx(2, abs=0.5), facts
     under = facts['kebab_under_menu']
     assert under['size'] == [44, 44] and under['expanded'] == 'true' and under['focus'] == 'pin', facts
 
@@ -558,7 +660,7 @@ def test_the_consciousness_chip_says_a_campaign_by_its_word_and_paints_no_tone(n
     ui = nav_ui
     # The host's own sentence for this state (consciousness_view.py): the chip's label says it.
     body = {**snapshot(), 'evolution_enabled': True, 'bg_consciousness_enabled': False,
-            'bg_consciousness_state': {'status': 'disabled', 'detail': 'Background consciousness is off.'}}
+            'bg_consciousness_state': {'status': 'disabled', 'detail': 'Off: no own wakes.'}}
     page, _sync = open_app(ui, 1280, 800, body)
     try:
         chip = page.locator('#page-chat .cx-chip')
@@ -571,5 +673,5 @@ def test_the_consciousness_chip_says_a_campaign_by_its_word_and_paints_no_tone(n
     assert facts['after'] in ('none', 'normal', ''), facts
     assert facts['background'] not in ('rgba(0, 0, 0, 0)', 'transparent'), 'a capsule of the bar'
     assert facts['mark'] == 'none', 'a campaign that goes on by itself draws no mark, never amber'
-    assert facts['label'] == 'Consciousness: Background consciousness is off. · evolution campaign running', facts
+    assert facts['label'] == 'Consciousness: Off: no own wakes. · evolution campaign running', facts
     print(json.dumps(facts))

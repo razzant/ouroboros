@@ -541,16 +541,21 @@ def test_pending_continuation_recovery_keeps_lineage_and_refuses_predecessor_dis
     assert {key: pending[key] for key in lineage} == lineage
 
     class RecoveryGateway:
-        def start_run(self, body, *, idempotency_key):
+        def operations(self):
+            return [{"method": "POST", "path": "/v2/runs/lookup"}]
+        def lookup_run(self, body, *, idempotency_key):
             assert body == request and idempotency_key == invocation
-            return {"runId": "run-next"}
+            return {"status": "found", "storeId": "fixture-store", "handle": {
+                "jobId": "accepted-next", "runId": "run-next", "state": "running"}}
+        def start_run(self, *_a, **_kw):
+            pytest.fail("an unknown continuation must be read, not automatically re-POSTed")
 
         def get_run(self, run_id):
             assert run_id == "run-next"
             return {"summary": {"state": "running"}}
 
     custody._CUSTODY.clear()  # Recovery has only the durable pending invocation.
-    recovered = _recover_pending_invocation(tmp_path, RecoveryGateway(), pending)
+    recovered = _recover_pending_invocation(tmp_path, RecoveryGateway(), pending, may_read=True)
     assert recovered["action"] == "left_live"
     assert custody.pending_invocations(tmp_path) == []
     refusal = _integrate_delegated_patch(ctx, run_id="run-first", decision=decision)

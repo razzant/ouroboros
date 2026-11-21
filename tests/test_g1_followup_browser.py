@@ -77,6 +77,9 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
                 page.set_viewport_size({'width': width, 'height': 960})
                 if width < 700:
                     wait_drawer_closed(page)
+                    # DESIGN "Navigation": a resize keeps the chosen page and its open disclosures.
+                    assert page.locator('[data-dashboard-panel="activity"]').is_visible()
+                    assert history.locator('..').evaluate('details => details.open')
                 section.scroll_into_view_if_needed()
                 assert section.locator('.activity-sub').evaluate_all(
                     '(els) => els.length > 0 && els.every((el) => el.scrollWidth <= el.clientWidth + 1)')

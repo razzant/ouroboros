@@ -16,7 +16,8 @@ def test_current_author_completion_does_not_rewrite_critic_or_independent_failur
     objective = _objective_axis(review)
     assert objective["status"] == "pass" and review["status"] == "fail"
     row = {"status": "completed", "outcome_axes": {"objective": objective, "review": review, "execution": {"status": "ok"}}}
-    assert outcome_phase(row, {}) == "done"
+    # The critic's FAIL stays visible: an author's acceptance over it is Done with warnings (owner, 8 Nov 2026).
+    assert outcome_phase(row, {}) == "warn"
     row["outcome_axes"]["execution"]["status"] = "failed"
     assert outcome_phase(row, {}) == "error"
     author["enforcement"] = "blocking"

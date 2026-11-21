@@ -2,6 +2,25 @@
  *  the marketplaces, agent accounts (relayed Claudexor engine objects), local model, MCP, the model
  *  catalog, updates and core control. `UpdateLetter` sits in ./api_types.js. */
 
+/** `extension_health_changed`: re-read the installed Skills listing; no health data rides the frame.
+ * @typedef {Object} ExtensionHealthChangedOutbound
+ * @property {'extension_health_changed'} type
+ */
+
+/**
+ * One declared server's passive state in an installed skill's `mcp_servers` list.
+ * @typedef {Object} SkillMcpServerFact
+ * @property {string} id
+ * @property {string} title
+ * @property {boolean} conflict
+ * @property {boolean} bound  // the saved row belongs to this skill, even when off
+ * @property {boolean} configured  // bound and both the row and MCP are on
+ * @property {number} tool_count
+ * @property {boolean} listed
+ * @property {string} error  // skill refusal or failed listing
+ * @property {string} notes  // diagnostics from a successful listing
+ */
+
 /**
  * One `GET /api/extensions` `skills` row; a name collision gives one row per occupant (`identity_collision`).
  * @typedef {Object} InstalledSkill
@@ -17,6 +36,7 @@
  * @property {string} source  // native | clawhub | ouroboroshub | external | self_authored | user_repo
  * @property {string} content_hash
  * @property {string} payload_root
+ * @property {string=} manifest_file  // the manifest the loader parsed; '' when none was readable (permissions and grants are then a placeholder); absent on an older host
  * @property {string} installed_at
  * @property {string=} removal  // uninstall | delete | ''
  * @property {string=} review_status
@@ -32,6 +52,7 @@
  * @property {boolean=} desired_live
  * @property {boolean=} live_loaded
  * @property {string=} live_reason
+ * @property {Object<string,string>=} retained_companions
  * @property {string=} process
  * @property {string=} server_reconcile
  * @property {boolean=} health_regressed
@@ -40,14 +61,19 @@
  * @property {boolean=} dispatch_live
  * @property {Object[]=} review_findings
  * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review  // a history row of a Skills-page review may carry `continuable_seats`
+ * @property {?{fields: {id: string, key: string, state: ('configured'|'missing'|'unknown')}[]}=} secret_config  // declared secret fields and whether each is set now (never a value); null when none are declared
  * @property {Object=} grants
+ * @property {SkillMcpServerFact[]=} mcp_servers  // absent on identity-collision rows
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed
  * @property {Object=} presence_runtime
  * @property {Object=} provenance
  * @property {boolean=} identity_collision
+ * @property {string=} collision_row_id  // display identity for one colliding directory, never an operation target
  * @property {?Object=} install  // source, official (exact endorsed bytes), release, basis, base_known, modified, update_available, withdrawn ({reason, version} for a withdrawn release), left_source, turn_on_when_ready, installed_by, installed_at, reason?, task_id?, check?: {by, notes, at}, pending_update?: {version, digest}, update_rejected?: {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}
  * @property {string[]=} category
+ * @property {Object=} deployment  // a policy requires this name: the server's requirement row with its when_unmet
+ * @property {{state: ("trusted"|"untrusted"), reason: (string|undefined), detail: (string|undefined), administered: boolean}=} trust  // an extension under an execution domain
  */
 
 /**
@@ -125,6 +151,8 @@
  * @property {Object=} grants
  * @property {?string=} extension_action
  * @property {?string=} extension_reason
+ * @property {?string=} load_error  // as SkillReconcileResponse: an unfinished repair's words, the switch staying On
+ * @property {Object<string,string>=} retained_companions
  * @property {string=} process
  * @property {string=} server_reconcile
  */
@@ -150,6 +178,7 @@
  * @property {boolean=} enabled
  * @property {?string=} extension_action
  * @property {?string=} extension_reason
+ * @property {Object<string,string>=} retained_companions  // a failed Enable's pending exits
  * @property {string=} process
  * @property {string=} server_reconcile
  * @property {?string=} load_error
@@ -207,6 +236,7 @@
  * @property {?string} extension_reason
  * @property {boolean} live_loaded
  * @property {?string} load_error
+ * @property {Object<string,string>=} retained_companions  // may coexist with a separate load error
  * @property {string} process
  * @property {string} server_reconcile
  */
@@ -401,12 +431,8 @@
  */
 
 /**
- * Engine or host preparation problem. POST may prepare Node/npm:
- * 409 maintenance_restart_required asks for Restart Claudexor in Accounts;
- * 409/503 maintenance_preparation_failed reports failure. Both carry
- * context.acceptance=not_submitted, scope=this_attempt. Optional inspection failure still
- * permits POST. After 503 acceptance=unknown, keep the same body and Idempotency-Key,
- * even after a later preparation-only reply, then resend both.
+ * Engine or host problem. A pre-submit not_submitted covers this attempt only.
+ * After acceptance=unknown, retain the original body and Idempotency-Key until resolved.
  * @typedef {Object} ClaudexorMaintenanceProblem
  * @property {Object} error  // {code, message, retryable?, requiredActions?, context?}
  */
@@ -417,39 +443,170 @@
  * @property {string} profile_id
  */
 
+// Engine program observations and receipts pass through unchanged. Plans are display-only.
 /**
- * Sent with a required Idempotency-Key header.
+ * @typedef {Object} ClaudexorSelectedProgram
+ * @property {?string} path
+ * @property {?string} realPath
+ * @property {?string} version
+ * @property {?string} versionOutput
+ * @property {?string} overrideEnv
+ * @property {?string} overrideValue
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramExecCommand
+ * @property {'exec'} kind
+ * @property {string} command
+ * @property {string[]} args
+ * @property {Object<string, string>=} env
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramScriptCommand
+ * @property {'script'} kind
+ * @property {string} url
+ * @property {string} interpreter
+ * @property {string[]} interpreterArgs
+ * @property {string[]} args
+ * @property {Object<string, string>=} env
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramAction
+ * @property {boolean} available
+ * @property {?string} reason
+ * @property {Array<ClaudexorProgramExecCommand|ClaudexorProgramScriptCommand>} commands
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramActions
+ * @property {ClaudexorProgramAction} install
+ * @property {ClaudexorProgramAction} update
+ * @property {ClaudexorProgramAction} exactVersion
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestNotRead
+ * @property {'not_read'} status
+ * @property {?string} source
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestAvailable
+ * @property {'available'} status
+ * @property {string} source
+ * @property {string} version
+ * @property {string} observedAt
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestUnavailable
+ * @property {'unavailable'} status
+ * @property {?string} source
+ * @property {string} observedAt
+ * @property {Object} problem
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceLatestTarget
+ * @property {'latest'} kind
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceVersionTarget
+ * @property {'version'} kind
+ * @property {string} version
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceLatestReceiptTarget
+ * @property {'latest'} kind
+ * @property {null} version
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceRequest
  * @property {string} harness
- * @property {Object} target
+ * @property {(ClaudexorMaintenanceLatestTarget|ClaudexorMaintenanceVersionTarget)} target
  */
 
 /**
- * Engine ControlHarnessMaintenanceOperation, passed through.
+ * @typedef {Object} ClaudexorMaintenanceRequester
+ * @property {string} source
+ * @property {?string} requestId
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceScript
+ * @property {string} url
+ * @property {number} size
+ * @property {string} sha256
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceCommand
+ * @property {string} binary
+ * @property {string[]} args
+ * @property {Object<string, string>} env
+ * @property {?ClaudexorMaintenanceScript} script
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceElsewhere
+ * @property {ClaudexorSelectedProgram} before
+ * @property {ClaudexorSelectedProgram} after
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceProfileCleanup
+ * @property {string[]} plannedPaths
+ * @property {string[]} removedPaths
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceOperation
  * @property {string} id
- * @property {string} state
- * @property {string=} harness
- * @property {string=} phase
- * @property {string=} mechanism
- * @property {Object=} target
- * @property {*=} before
- * @property {*=} after
- * @property {string=} mutation
- * @property {string=} termination
- * @property {*=} limitations
- * @property {*=} progress
- * @property {*=} problem
- * @property {string=} createdAt
- * @property {?string=} startedAt
- * @property {?string=} finishedAt
+ * @property {string} harness
+ * @property {('queued'|'running'|'succeeded'|'failed'|'cancelled'|'interrupted')} state
+ * @property {('accepted'|'preparing'|'installing'|'settled')} phase
+ * @property {(ClaudexorMaintenanceLatestReceiptTarget|ClaudexorMaintenanceVersionTarget)} target
+ * @property {ClaudexorMaintenanceRequester} requester
+ * @property {?string} installationHome
+ * @property {ClaudexorMaintenanceCommand[]} commands
+ * @property {ClaudexorMaintenanceProfileCleanup=} profileCleanup
+ * @property {?ClaudexorSelectedProgram} before
+ * @property {?ClaudexorSelectedProgram} after
+ * @property {?ClaudexorMaintenanceElsewhere} elsewhere
+ * @property {?number} activeRunsAtStart
+ * @property {?number} exitCode
+ * @property {('changed'|'not_changed'|'changed_elsewhere'|'unknown')} outcome
+ * @property {('none'|'applied'|'unknown')} mutation
+ * @property {('not_applicable'|'confirmed'|'unconfirmed')} termination
+ * @property {string[]} limitations
+ * @property {string[]} progress
+ * @property {?Object} problem
+ * @property {string} createdAt
+ * @property {?string} startedAt
+ * @property {?string} finishedAt
  */
 
 /**
- * Engine ControlHarnessMaintenanceInventory, passed through.
+ * @typedef {Object} ClaudexorMaintenanceEntry
+ * @property {string} harness
+ * @property {ClaudexorSelectedProgram} selection
+ * @property {(ClaudexorNewestNotRead|ClaudexorNewestAvailable|ClaudexorNewestUnavailable)} newest
+ * @property {ClaudexorProgramActions} actions
+ * @property {('yes'|'no'|'cannot_tell')} updateAvailable
+ * @property {?string} releaseNotesUrl
+ * @property {?ClaudexorMaintenanceOperation} operation
+ * @property {string} observedAt
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceInventory
  * @property {string} observedAt
- * @property {Object[]} harnesses
+ * @property {ClaudexorMaintenanceEntry[]} harnesses
  */
 
 /**
@@ -458,13 +615,24 @@
  */
 
 /**
- * Engine ControlAccountResourcesResponse (or ControlQuotaResponse), passed through.
+ * Host transport attempt dates, not provider observation dates. An identical attempt
+ * joined in flight keeps its original dates and sets reused.
+ * @typedef {Object} ClaudexorRefreshAttempt
+ * @property {string} started_at
+ * @property {string} completed_at
+ * @property {boolean} reused
+ */
+
+/**
+ * Engine ControlAccountResourcesResponse (or ControlQuotaResponse), passed through
+ * with optional host refresh provenance. Provider observation dates are unchanged.
  * @typedef {Object} ClaudexorAccountResources
  * @property {Object[]} snapshots
  * @property {Object[]=} absences
  * @property {string=} refreshed_at
  * @property {*=} refresh_skipped
  * @property {Object[]=} resources
+ * @property {ClaudexorRefreshAttempt=} refresh_attempt
  */
 
 /**
@@ -525,7 +693,28 @@
  */
 
 /**
- * One selectable model; `value` is what a model setting stores.
+ * From `min_prompt_tokens` input tokens on, a request is charged these USD per 1M tokens.
+ * @typedef {Object} ModelPriceTier
+ * @property {number} min_prompt_tokens
+ * @property {number} input
+ * @property {number} output
+ */
+
+/**
+ * A catalog's published token price, USD per 1M tokens; `tiers` only when input length changes it; `cache_write`
+ * only where the record states the prompt-cache write figure of the tier this install sends, with `cache_write_ttl`
+ * naming that tier (the resolved `OUROBOROS_PROMPT_CACHE_TTL` the catalog was read under).
+ * @typedef {Object} ModelPrice
+ * @property {number} input
+ * @property {number} output
+ * @property {ModelPriceTier[]=} tiers
+ * @property {number=} cache_write
+ * @property {string=} cache_write_ttl
+ */
+
+/**
+ * One selectable model; `value` is what a model setting stores. The local model's row says `use_local`: `id` names
+ * it and its `value` is a label, never a route.
  * @typedef {Object} ModelCatalogItem
  * @property {string} provider_id
  * @property {string} provider
@@ -551,6 +740,9 @@
  * @property {*=} availability
  * @property {*=} problem
  * @property {*=} processing
+ * @property {boolean=} use_local
+ * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
+ * @property {string=} price_condition  DeepSeek rows whose published entry prices them only off-peak in USD: `off_peak_usd`
  */
 
 /**
@@ -614,11 +806,12 @@
  */
 
 /**
- * One configured MCP server (a configuration error row carries only id, enabled, tool_count, last_error, code).
+ * One server identity, including rejected configurations.
  * @typedef {Object} McpServerStatus
  * @property {string} id
  * @property {string=} name
  * @property {boolean} enabled
+ * @property {number=} configured_count Entries grouped under an ambiguous identity.
  * @property {string=} transport
  * @property {string=} url
  * @property {*=} auth_header
@@ -631,6 +824,8 @@
  * @property {boolean=} schemas_at_start
  * @property {boolean=} task_session
  * @property {boolean=} browser_policy
+ * @property {string=} skill
+ * @property {string=} skill_error
  * @property {string=} instructions
  * @property {number=} map_tokens
  * @property {number=} schema_tokens
@@ -767,6 +962,7 @@
  * @property {UpdateTransactionState} update_tx
  * @property {UpdateProgress} update_progress
  * @property {?import('./api_types.js').UpdateLetter=} letter
+ * @property {boolean=} letter_unavailable - Letter projection failed. Other update facts remain usable.
  * @property {?Object=} after_update - Retained before/after process samples; missing observations stay null.
  * @property {boolean=} managed
  * @property {string=} remote
@@ -795,16 +991,20 @@
  * @property {string=} checked_at
  * @property {string=} checked_target_sha
  * @property {boolean=} from_cache
+ * @property {string=} managed_by_deployment - its administrator replaces the serving program: why in-app updates refuse
  */
 
 /**
  * @typedef {Object} CommandRequest
+ * @property {string=} reply_to
+ * @property {import('./client_contract_types.js').ReplyExcerpt=} reply_excerpt
  * @property {string} cmd
  * @property {string=} if_boot // optional boot.since precondition; Panic ignores it
  * @property {Object=} client_surface
  * @property {string=} visible_text
  * @property {string=} visible_task_id
  * @property {Object=} task_constraint
+ * @property {Object=} ui_control
  */
 
 /**
@@ -866,6 +1066,7 @@
  * @property {Object=} by_task_category
  * @property {Object} accounting
  * @property {Object=} unattributed
+ * @property {Object=} period  only with `?period=24h|7d|30d`: that period's models and cache writes (cost_period.js)
  */
 
 /**
@@ -879,6 +1080,7 @@
  * @property {Object.<string,string[]>} problems
  * @property {InstalledSkill[]} skills
  * @property {ExtensionLiveSnapshot} live
+ * @property {Object=} deployment  // {when_unmet, required}: every requirement as the server observes it
  */
 
 /**
@@ -890,13 +1092,16 @@
  */
 
 /**
- * `GET /api/model-catalog`: with `source_id` (and optionally `credential_profile_id`) one agent
- * account's models only; otherwise every configured provider's, a failed one as an `errors` row.
+ * `GET /api/model-catalog`: `view=sources` lists subscription descriptors with empty `items`.
+ * `source_id` and optional `credential_profile_id` select subscription models, `provider_id` one API connection
+ * or the local model. The full catalog collects sources concurrently, with a 20-second limit per read,
+ * and returns the results together with failures in `errors`.
  * @typedef {Object} ModelCatalogResponse
  * @property {ModelCatalogItem[]} items
  * @property {Object[]} errors
  * @property {Object[]} model_sources
  * @property {Object[]=} account_catalogs
+ * @property {Object=} session_catalog  // native harness row for a harness_id read
  * @property {boolean=} partial
  */
 

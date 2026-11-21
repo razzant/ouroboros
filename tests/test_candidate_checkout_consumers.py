@@ -11,7 +11,7 @@ from devtools.benchmarks.common import server_runner
 from ouroboros import process_containment
 from ouroboros.test_environment import RETENTION_MARKER
 from tests import candidate_checkout as candidate
-from tests import test_owner_wait_integration as owner_wait
+from tests import _browser_candidate as owner_wait
 from tests import test_ui_repair_owner_intent as repair
 from tests.system_e2e import harness
 from tests.test_candidate_checkout import git, source as source_fixture

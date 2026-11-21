@@ -10,7 +10,7 @@ def _park_stops(plugin, monkeypatch):
     """A permanent refusal parks the poller; the parked wait here ends the test run."""
     parked = []
 
-    async def park(_api, fingerprint):
+    async def park(_api, fingerprint, _binding=None):
         parked.append(fingerprint)
         raise asyncio.CancelledError
 
@@ -326,6 +326,7 @@ def test_poller_surfaces_permanent_telegram_rejection_and_records_failure(tmp_pa
     }
     assert plugin._bridge_status(api) == {
         "state": "error",
+        "token": "configured",
         "owner_bound": False,
         "poller": "failed",
         "command_mode": "full_access",
@@ -362,9 +363,10 @@ def test_poller_backoff_grows_monotonically_to_cap_on_typed_transport_failure(tm
     assert all(later >= earlier for earlier, later in zip(sleeps, sleeps[1:]))
     assert max(sleeps) == 60
     assert sleeps[-2:] == [60, 60]
+    # A working bridge that loses Telegram records it once (never Connected while every poll fails).
     assert json.loads((tmp_path / "bridge_status.json").read_text(encoding="utf-8")) == {
-        "state": "ready",
-        "reason_code": "",
+        "state": "degraded",
+        "reason_code": "telegram_unreachable",
     }
 
 

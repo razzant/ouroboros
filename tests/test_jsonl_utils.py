@@ -3,22 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-import pytest
-
 from ouroboros import utils
-
-
-@pytest.mark.parametrize("writer", ["compact", "pretty", "jsonl"])
-def test_json_writers_preserve_surrogateescaped_names_and_normal_unicode(tmp_path, writer):
-    payload = {"fixture_\udcff.dat": ["literal_\\udcff.dat", "é🪶"]}
-    path = tmp_path / ("settings.json" if writer == "pretty" else "state.json")
-    if writer == "jsonl":
-        assert utils.append_jsonl(path, payload)
-    else:
-        utils.atomic_write_json(path, payload)
-    text = path.read_bytes().decode("utf-8")
-    assert json.loads(text) == payload
-    assert "é🪶" in text and "\\udcff" in text
 
 
 def test_iter_jsonl_objects_skips_bad_lines_and_non_dict_by_default(tmp_path):
@@ -145,6 +130,30 @@ def test_every_writer_lands_every_byte_through_short_os_writes(tmp_path, monkeyp
     lines = (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(line) for line in lines] == [{"type": "llm_usage", "cost": 1.5}]
     assert (tmp_path / "state.json").read_bytes() == state.encode("utf-8")
+
+
+def test_append_jsonl_writes_one_compact_line_that_keeps_every_value(tmp_path):
+    """A row takes no separator spaces (``utils.machine_json``); every value, the key order and the text inside strings stay."""
+    row = {"type": "tool_call", "args": {"cmd": "echo a, b: c", "path": "\u0436.txt"}, "n": [1, 2.5, None, True], "text": "two\nlines"}
+    target = tmp_path / "logs" / "events.jsonl"
+    assert utils.append_jsonl(target, row) is True
+    raw = target.read_bytes()
+    assert raw == '{"type":"tool_call","args":{"cmd":"echo a, b: c","path":"\u0436.txt"},"n":[1,2.5,null,true],"text":"two\\nlines"}\n'.encode("utf-8")
+    assert json.loads(raw) == row and list(json.loads(raw)) == list(row)
+
+
+def test_structured_log_round_trips_posix_name_bytes_without_reencoding_normal_unicode(tmp_path):
+    raw_names = [b"fixture-\x80.txt", b"fixture-\xff.txt"]
+    names = [name.decode("utf-8", "surrogateescape") for name in raw_names]
+    row = {"paths": [*names, r"fixture-\udcff.txt", "файл🪶.txt"], names[0]: "name as key"}
+    path = tmp_path / "events.jsonl"
+    assert utils.append_jsonl(path, row)
+    wire = path.read_bytes().decode("utf-8")
+    assert wire == (r'{"paths":["fixture-\udc80.txt","fixture-\udcff.txt","fixture-\\udcff.txt","файл🪶.txt"],'
+                    r'"fixture-\udc80.txt":"name as key"}' + "\n")
+    [restored] = utils.iter_jsonl_objects(path)
+    assert restored == row
+    assert [name.encode("utf-8", "surrogateescape") for name in restored["paths"][:2]] == raw_names
 
 
 def test_append_jsonl_reports_a_write_that_dies_mid_record_and_never_replays_it(tmp_path, monkeypatch):

@@ -101,6 +101,7 @@ async function withWizard(bootstrap, query, body, { fetch, location, prepare } =
         __OURO_ONBOARDING_BOOTSTRAP__: bootstrap,
         addEventListener(type, listener) { listeners.set(listener, type); },
         removeEventListener(type, listener) { listeners.delete(listener); },
+        dispatchEvent(event) { for (const [listener, type] of [...listeners]) if (type === event.type) listener(event); return true; },
         setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
         requestAnimationFrame: (fn) => setTimeout(fn, 0), getComputedStyle: () => ({}),
         matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
@@ -141,6 +142,7 @@ async function withWizard(bootstrap, query, body, { fetch, location, prepare } =
         for (const [listener, type] of listeners) {
             if (type === 'pagehide') listener({ persisted: false });
         }
+        assert.ok(![...listeners.values()].includes('ouro:language-changed'), 'leaving the page drops its language listener');
         for (const [name, descriptor] of Object.entries(installed)) {
             if (descriptor) Object.defineProperty(globalThis, name, descriptor);
             else delete globalThis[name];
@@ -160,7 +162,7 @@ test(`importing the onboarding wizard renders the '${step}' step without throwin
 });
 }
 
-test('the setup contract renders Cyber Pro beside the independent Blocking choice', async () => {
+test('the setup contract renders the four Access choices and no review-mode choice', async () => {
     const reviewIndex = BOOTSTRAP.stepOrder.indexOf('review_mode');
     const bootstrap = {
         ...BOOTSTRAP,
@@ -170,24 +172,23 @@ test('the setup contract renders Cyber Pro beside the independent Blocking choic
         const html = doc.getElementById('root').innerHTML;
         assert.match(html, /wizard-choice-grid four/);
         assert.match(html, /data-runtime-mode="cyber_pro"[\s\S]*Cyber Pro/);
-        assert.match(html, /data-review-mode="blocking"[\s\S]*Blocking/);
+        assert.doesNotMatch(html, /data-review-mode|Blocking|Advisory/);
     });
 });
 
-// IMPL_SPEC §5, verbatim: what a Reviewer tick means per strictness (Cyber Pro outranks enforcement).
+// IMPL_SPEC §5, verbatim: what a Reviewer tick means per Access.
 const TICK = {
-    blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
-    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all ticked reviewers and writes why; it never skips a check that is owed.',
+    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 };
 
-test('the Review step says what a Reviewer tick means under the chosen mode, repainted in place', async () => {
+test('the Access step says what a Reviewer tick means under the chosen Access, repainted in place', async () => {
     const reviewIndex = BOOTSTRAP.stepOrder.indexOf('review_mode');
     const bootstrap = {
         ...BOOTSTRAP,
         stepOrder: [...BOOTSTRAP.stepOrder.slice(reviewIndex), ...BOOTSTRAP.stepOrder.slice(0, reviewIndex)],
         initialState: {
-            ...BOOTSTRAP.initialState, reviewEnforcement: 'advisory', runtimeMode: 'advanced',
+            ...BOOTSTRAP.initialState, runtimeMode: 'advanced',
             availableSubagents: { enabled: true, items: [{ subagent_id: 'reviewer_one', review_eligible: true,
                 recommended_use: 'Reviews changes.', route: { kind: 'api_model', target_id: 'openai/gpt-5.6-luna' } }] },
         },
@@ -198,25 +199,19 @@ test('the Review step says what a Reviewer tick means under the chosen mode, rep
         button.getAttribute = (key) => (key === attribute ? value : null);
         return button;
     });
-    const [advisory, blocking] = choices('data-review-mode', ['advisory', 'blocking']);
     const access = choices('data-runtime-mode', ['light', 'advanced', 'pro', 'cyber_pro']);
     const lead = 'Reviewers: 1 — the rows marked Reviewer under Models → Available subagents. ';
     const prepare = (doc) => {
         const root = doc.getElementById('root');
         const others = root.querySelectorAll;
         root.querySelector = (selector) => (selector === '[data-reviewers-note]' ? note : inertElement());
-        root.querySelectorAll = (selector) => ({ '[data-review-mode]': [advisory, blocking], '[data-runtime-mode]': access }[selector]
-            || others(selector));
+        root.querySelectorAll = (selector) => ({ '[data-runtime-mode]': access }[selector] || others(selector));
     };
     await withWizard(bootstrap, 'reviewers-note', async ({ doc }) => {
         const html = doc.getElementById('root').innerHTML;
         assert.ok(html.includes(`data-reviewers-note>${lead}${TICK.advisory}</div>`), html.match(/data-reviewers-note>[^<]*/)?.[0]);
         assert.doesNotMatch(html, /each of them reviews every change|composes the panel from them/);
-        blocking.fire('click');
-        assert.equal(note.textContent, lead + TICK.blocking);
-        access[3].fire('click');  // Cyber Pro Access: findings never block, whatever the enforcement kept
-        assert.equal(note.textContent, lead + TICK.cyber_pro);
-        advisory.fire('click');
+        access[3].fire('click');  // Cyber Pro Access: Ouroboros decides whom to ask
         assert.equal(note.textContent, lead + TICK.cyber_pro);
         access[1].fire('click');
         assert.equal(note.textContent, lead + TICK.advisory);
@@ -233,7 +228,6 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         initialState: {
             ...BOOTSTRAP.initialState,
             openrouterKey: 'test-key-not-a-secret',
-            reviewEnforcement: 'blocking',
         },
     };
     const modelInputs = {
@@ -251,7 +245,14 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
     const response = new Promise((resolve) => { returnReceipt = resolve; });
     let recordCompletion;
     const completed = new Promise((resolve) => { recordCompletion = resolve; });
+    const catalogReads = [];
     const fetch = (url, init) => {
+        // The Models step reads the catalog of the draft's own access: the key typed here, which no saved file holds.
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
+            catalogReads.push(JSON.parse(init.body));
+            const body = { items: [], model_sources: [], errors: [] };
+            return Promise.resolve({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+        }
         requests.push({ url, method: init.method, body: JSON.parse(init.body) });
         recordSubmission();
         return response;
@@ -267,8 +268,13 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
             input.value = value;
             input.fire('input');
         }
-        doc.getElementById('next-btn').fire('click');   // Models → review mode.
-        doc.getElementById('next-btn').fire('click');   // Review mode → budget.
+        doc.getElementById('next-btn').fire('click');   // Models → Access.
+        const access = doc.getElementById('root').innerHTML;  // the access step in a person's words
+        assert.match(access, /How far Ouroboros reaches into its own code and this computer\./);
+        assert.match(access, /Folder of your own skills \(optional\)/);
+        doc.getElementById('next-btn').fire('click');   // Access → Consciousness: the switch starts on (no state yet).
+        assert.match(doc.getElementById('root').innerHTML, /data-consciousness-choice="on" aria-pressed="true"/);
+        doc.getElementById('next-btn').fire('click');   // Consciousness → budget.
         for (const [id, value] of [['total-budget', '15.5'], ['per-task-budget', '5.25']]) {
             const input = doc.getElementById(id);
             input.value = value;
@@ -276,8 +282,11 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         }
         doc.getElementById('next-btn').fire('click');   // Budget → summary.
         assert.match(doc.getElementById('root').innerHTML, /Start Ouroboros/);
+        assert.match(doc.getElementById('root').innerHTML, />Access level</, 'the summary names the access level as the step does');
         doc.getElementById('next-btn').fire('click');
         await submitted;
+        assert.deepEqual(catalogReads.map((draft) => draft.OPENROUTER_API_KEY), ['test-key-not-a-secret'],
+            'one catalog read for the draft\'s access, carrying its key');
         assert.equal(requests.length, 1);
         assert.equal(requests[0].url, '/api/onboarding/complete');
         assert.equal(requests[0].method, 'POST');
@@ -290,12 +299,13 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
             OUROBOROS_MODEL_FALLBACKS: 'test/owner-fallback',
             TOTAL_BUDGET: 15.5,
             OUROBOROS_PER_TASK_COST_USD: 5.25,
-            OUROBOROS_REVIEW_ENFORCEMENT: 'blocking',
             OUROBOROS_RUNTIME_MODE: 'advanced',
             subscriptionsConnected: false,
             skipSubscriptionPresets: false,
+            consciousness: true,  // the step's position rides the one completion request (owner decision 2026-11-20)
         };
         for (const [key, value] of Object.entries(expected)) assert.equal(requests[0].body[key], value, key);
+        assert.equal('OUROBOROS_REVIEW_ENFORCEMENT' in requests[0].body, false, 'the retired setting is never written');
         assert.deepEqual(replaced, [], 'a pending save is not a completion');
         assert.equal(doc.getElementById('next-btn').disabled, true);
         returnReceipt({
@@ -315,7 +325,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
 // was saved before: exactly the answer that used to confirm a save it knew nothing about. A call for which
 // `server.hold(call)` is true waits for `server.release(prefix)`, and is answered as things stand then.
 const SAVE_TIMEOUT = { status: 503, body: { code: 'settings_save_timeout', saved: null,
-    error: 'the settings save is still running in the server after 60s and was left to finish on its own; reload Settings to see what landed' } };
+    error: 'the settings save is still running in the server after 60s and was left to finish on its own; open Settings again to see what landed' } };
 const receipt = (runtimeMode, restartRequired) => ({ ok: true, status: 'saved', runtime_mode: runtimeMode,
     restart_required: restartRequired, preset: { applied: false, reason: 'not_requested', harnesses: [], receipt: {} } });
 const SUMMARY_FIRST = {
@@ -368,7 +378,7 @@ test('an unknown save keeps the draft; Check status reads back THIS attempt, whi
         assert.match(server.sent[0], /^[0-9a-f]{32}$/, 'the attempt id is made before sending');
         let html = doc.getElementById('root').innerHTML;
         assert.match(html, /The save result is unknown\. Your draft has not been discarded\. Use &quot;Check status&quot; to read the result of this save\./);
-        assert.match(html, /class="footer-copy">The last save did not return a confirmed result\.</);
+        assert.match(html, /class="footer-copy footer-warning">The last save did not return a confirmed result\.</);
         assert.doesNotMatch(html, /Saving\.\.\./, 'the wizard is not stuck on Saving...');
         // "Check status" is the ONE primary action while the outcome is unknown; the re-submit stays offered,
         // as an explicit secondary "Retry save" (rc.15 review MINOR 3).
@@ -430,8 +440,42 @@ test('a confirmed restart comes from the attempt\'s own receipt, never from a gu
         assert.deepEqual(server.replaced, [], 'a plain tab does not navigate past a pending restart');
         const html = doc.getElementById('root').innerHTML;
         assert.match(html, /Setup saved — restart to apply it/);
-        assert.match(html, /Ouroboros saved <code>pro<\/code> as the runtime mode for the next boot/);
+        assert.match(html, /Pro access applies from the next start/);
+        assert.match(html, />Open Ouroboros now</);
     }, { fetch: server.fetch, location: server.location });
+});
+
+test('a framed wizard tells its host the chosen access level by its label as well as its id', async () => {
+    // The browser twin of the restart screen (onboarding_overlay.js) prints the label; without it a person reads only "The chosen access…".
+    const server = completionServer();
+    await withWizard(SUMMARY_FIRST, 'save=framed-restart', async ({ doc }) => {
+        const posted = [];
+        window.parent = { postMessage: (message) => posted.push(message) };
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        server.attempts[server.sent[0]] = { saved: true, receipt: receipt('cyber_pro', true) };
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.deepEqual(posted.map((message) => [message.type, message.restart_required, message.runtime_mode, message.runtime_label]),
+            [['ouroboros:onboarding-complete', true, 'cyber_pro', 'Cyber Pro']]);
+    }, { fetch: server.fetch, location: server.location });
+});
+
+test('the API section is badged by what is entered: a key or a local model reads Configured, nothing reads Optional', async () => {
+    const badge = async (query, initialState) => {
+        let html = '';
+        await withWizard({ ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, ...initialState } }, query,
+            ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+        return html.match(/<span class="selection-badge">([^<]*)<\/span>/)?.[1];
+    };
+    assert.equal(await badge('badge=nothing', {}), 'Optional');
+    assert.equal(await badge('badge=key', { openrouterKey: 'sk-or-v1-abcdefghijklmnop' }), 'Configured');
+    assert.equal(await badge('badge=local', { localSource: '/models/local-test.gguf' }), 'Configured');
+    // What is entered is shown on load: a local-only setup opens the section as a key does.
+    let html = '';
+    await withWizard({ ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf' } },
+        'badge=local-open', ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+    assert.match(html, /data-collapse="api-access"\s+open>/);
 });
 
 test('an answer that never arrives is unknown, and a failure recorded for the attempt reads like its reply', async () => {
@@ -659,8 +703,7 @@ test('the summary step stages the language and applies it only after the complet
     assert.match(source, /stage: \(value\) => \{ state\.languageChoice = value; \} \}\)/);
     const complete = source.indexOf('const result = await completeOnboardingAtomically(payload);');
     const apply = source.indexOf('await applyStagedLanguage();', complete);
-    // The hand-off runs through the Consciousness row's afterSave (#1603), which announces last.
-    const announce = source.indexOf('announce: () => announceCompletion(result)', complete);
+    const announce = source.indexOf('announceCompletion(result);', complete);
     assert.ok(complete > 0 && apply > complete && announce > apply, 'complete → apply the staged language → announce');
     assert.match(source, /await saveLanguageChoice\(choice\)/, 'the shared writer, not a second path');
     // The other verified-success path — an unknown save whose own receipt the attempt read-back returned —
@@ -733,7 +776,7 @@ test('a staged language the gateway refuses for good does not hold the finished 
     }
 });
 
-test('the summary warns, and still offers Start, when Blocking review has no reviewer that reads the work', async () => {
+test('the summary warns, and still offers Start, when no reviewer reads the work, in every Access', async () => {
     // Completion closes the wizard, so a save warning would never be read: the summary says it before the save.
     const reviewer = (id, target, delivery) => ({
         subagent_id: id, recommended_use: `use ${id}`, review_eligible: true,
@@ -753,16 +796,15 @@ test('the summary warns, and still offers Start, when Blocking review has no rev
     };
     const warning = /data-review-pool-warning>Every reviewer is a Packet row, so none reads the repository/;
 
-    const warned = await summaryHtml('pool=packet-blocking', { reviewEnforcement: 'blocking', availableSubagents: packetOnly });
-    assert.match(warned, warning);
-    assert.match(warned, /Start Ouroboros/, 'a warning, never a refusal');
     for (const [query, initial] of [
-        ['pool=packet-advisory', { reviewEnforcement: 'advisory', availableSubagents: packetOnly }],
-        ['pool=reader-blocking', { reviewEnforcement: 'blocking', availableSubagents: withReader }],
-        ['pool=packet-cyber-pro', { reviewEnforcement: 'blocking', runtimeMode: 'cyber_pro', availableSubagents: packetOnly }],
+        ['pool=packet', { availableSubagents: packetOnly }],
+        ['pool=packet-cyber-pro', { runtimeMode: 'cyber_pro', availableSubagents: packetOnly }],
     ]) {
-        assert.doesNotMatch(await summaryHtml(query, initial), /data-review-pool-warning/, query);
+        const warned = await summaryHtml(query, initial);
+        assert.match(warned, warning, query);
+        assert.match(warned, /Start Ouroboros/, 'a warning, never a refusal');
     }
+    assert.doesNotMatch(await summaryHtml('pool=reader', { availableSubagents: withReader }), /data-review-pool-warning/);
 });
 
 // Audit 05.11 item 13: with a subscription, Summary says what an exhausted quota does. A set Fallback continues the
@@ -771,30 +813,32 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const fetch = async (url, init = {}) => {
         let body = {};
-        if (String(url) === '/api/model-catalog') body = subscription.catalog;
+        if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) body = subscription.catalog;
         else if (String(url) === '/api/claudexor/status') body = subscription.status;
         else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
-            body = { ok: true, available_subagents: { enabled: true, items: [] },
+            body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: gaps, partly_counted_spend: partly,
                 model_settings: Object.fromEntries(Object.keys(subscription.preview.model_settings).map((key) => [key, payload[key]])) };
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
     };
+    let gaps = [], partly = [];
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
     // Walk from Accounts (where the connected subscription is observed) to Summary.
     const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
-        let html = '', budget = '';
-        const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel } };
+        let html = '', budget = '', mind = '';
+        const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel, automaticModels: [] } };
         await withWizard(bootstrap, query, async ({ doc }) => {
             await settle();
-            for (let step = 0; step < 4; step += 1) {
+            for (let step = 0; step < 5; step += 1) {
                 doc.getElementById('next-btn').fire('click');
                 await settle();
-                if (step === 2) budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
+                if (step === 2) mind = doc.getElementById('root').innerHTML;  // the Consciousness step
+                if (step === 3) budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
             }
             html = doc.getElementById('root').innerHTML;
         }, { fetch });
-        return { html, budget };
+        return { html, budget, mind };
     };
     const waits = await summary('quota-without-fallback', '');
     assert.match(waits.html, /When quota runs out[\s\S]*?Waits for the reset, then continues/);
@@ -809,6 +853,298 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const api = await summary('quota-api-main', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
     assert.match(api.html, /Total API budget/, 'the walk reached Summary');
     assert.doesNotMatch(api.html, /When quota runs out/);
+    // The Consciousness step names the subscription's quota only where a subscription alone pays for its wakes.
+    const quota = BOOTSTRAP.consciousnessOffer.words.subscriptionCost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(waits.mind, new RegExp(quota.replace(/'/g, '&#39;')));
+    assert.doesNotMatch(api.mind, /subscription&#39;s quota/);
+    assert.match(api.mind, /data-consciousness-step/, 'the walk passed the Consciousness step');
+    // The limits step says what its limits cannot count, as the preview of this draft names it (Dashboard › Costs'
+    // line); with nothing named the line is hidden.
+    assert.match(api.budget, /id="budget-gaps"[^>]* hidden><\/div>/);
+    gaps = ['Light', 'Web search'];
+    const uncounted = await summary('limits-not-counted', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
+    assert.match(uncounted.budget, /id="budget-gaps"[^>]*data-i18n-fmt="spend gaps">Not counted: Light, Web search \(price unknown\)\.<\/div>/);
+    // What the draft counts only under a condition shares that one line (Dashboard › Costs' words).
+    gaps = [];
+    partly = [{ name: 'all model roles', condition: 'off_peak_usd' }, { name: 'Web search', condition: 'usd' }];
+    const partial = await summary('limits-partly-counted', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
+    assert.match(partial.budget, /id="budget-gaps"[^>]*>Partly counted: all model roles \(text only, off-peak, USD only\); Web search \(USD only\)\.<\/div>/);
+});
+
+// Review r1 (Astra M1): pressing Update on Accounts can bring a catalog row the first preview did not have (Luna). A
+// slot still holding what an earlier preview proposed is asked again, blank, so the next preview proposes from the new
+// catalog and Light moves to Luna; a Main the owner set is sent as set, and nothing is proposed beside it.
+// Review r2 (Carbon R2-MAJOR-1): slots are blanked only beside a Main that is itself asked again or blank (the server
+// proposes nothing beside the owner's Main, so the limits must be computed for the slots as held).
+// Review r3 (Astra R3-1): an adoption reloads the roles editor, so once the owner edits any role nothing is asked
+// again or adopted: the draft goes as held and an edit in progress is never reloaded away.
+test('a slot still holding a preview\'s proposal takes the proposal of a changed catalog; a Main the owner set is kept', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const [TEST, LUNA] = ['claudexor::codex=gpt-test', 'claudexor::codex=gpt-6-luna'];
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const location = { origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding', replace() {} };
+    let catalogChanged = false;  // the catalog lists Luna (pressed Update) from the next preview on
+    const finish = async (query, initial, onModels = null) => {
+        const previews = [], posted = [];
+        catalogChanged = !onModels;
+        const fetch = async (url, init = {}) => {
+            let body = {};
+            if (String(url) === '/api/onboarding/complete') {
+                posted.push(JSON.parse(init.body));
+                body = { ok: true, runtime_mode: 'advanced', restart_required: false };
+            } else if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) body = subscription.catalog;
+            else if (String(url) === '/api/claudexor/status') body = subscription.status;
+            else if (String(url) === '/api/onboarding/subagents/preview') {
+                const payload = JSON.parse(init.body);
+                previews.push(payload);
+                // As compile_model_settings: proposals only beside a Main awaiting one; Luna once the catalog lists it.
+                const proposes = !payload.OUROBOROS_MODEL || payload.OUROBOROS_MODEL === BOOTSTRAP.initialState.mainModel;
+                body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: [], partly_counted_spend: [],
+                    model_settings: proposes ? { OUROBOROS_MODEL: TEST, OUROBOROS_MODEL_LIGHT: catalogChanged && previews.length > 1 ? LUNA : TEST } : {} };
+            }
+            return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+        };
+        const bootstrap = { ...BOOTSTRAP, freshInstall: true, initialState: { ...BOOTSTRAP.initialState, ...initial } };
+        await withWizard(bootstrap, query, async ({ doc }) => {
+            await settle();
+            for (let step = 0; step < 6; step += 1) {
+                doc.getElementById('next-btn').fire('click'); await settle();
+                if (step === 0 && onModels) { await onModels(doc); catalogChanged = true; await settle(); }
+            }
+        }, { fetch, location });
+        assert.equal(posted.length, 1, 'the walk reached the completion POST');
+        return { body: posted[0], previews };
+    };
+    const proposed = await finish('light-reproposed', {});
+    assert.ok(proposed.previews.length > 1, 'a later preview was asked');
+    const last = proposed.previews.at(-1);
+    assert.deepEqual([last.OUROBOROS_MODEL, last.OUROBOROS_MODEL_LIGHT], ['', ''], 'the preview\'s own proposals are asked again');
+    assert.deepEqual([proposed.body.OUROBOROS_MODEL, proposed.body.OUROBOROS_MODEL_LIGHT], [TEST, LUNA]);
+    const automaticModels = BOOTSTRAP.initialState.automaticModels.filter((key) => key !== 'mainModel');
+    const kept = await finish('owner-main-kept', { mainModel: TEST, automaticModels });
+    assert.ok(kept.previews.length > 0 && kept.previews.every((draft) => draft.OUROBOROS_MODEL === TEST), 'a set Main is sent as set');
+    assert.equal(kept.body.OUROBOROS_MODEL, TEST);
+    assert.notEqual(kept.body.OUROBOROS_MODEL_LIGHT, LUNA, 'nothing is proposed beside a Main the owner set');
+    // The roles editor's own input: the stand-in keeps one element per id, so the listener it bound is the one fired.
+    const edit = (id, value) => async (doc) => { const input = doc.getElementById(id); input.value = value; input.fire('input'); };
+    const OWNER_MAIN = 'claudexor::codex=main-owner', OWNER_VISION = 'claudexor::codex=vision-owner';
+    const mainEdited = await finish('owner-main-edited', {}, edit('main-model', OWNER_MAIN));
+    const asked = mainEdited.previews.filter((draft) => draft.OUROBOROS_MODEL === OWNER_MAIN);
+    assert.ok(asked.length > 0, 'a preview was asked after Main was edited');
+    assert.ok(asked.every((draft) => draft.OUROBOROS_MODEL_LIGHT === TEST), 'beside the owner\'s Main, Light is asked as held');
+    assert.deepEqual([mainEdited.body.OUROBOROS_MODEL, mainEdited.body.OUROBOROS_MODEL_LIGHT], [OWNER_MAIN, TEST]);
+    const visionEdited = await finish('owner-vision-edited', {}, edit('vision-model', OWNER_VISION));
+    const held = visionEdited.previews.filter((draft) => draft.OUROBOROS_MODEL_VISION === OWNER_VISION);
+    assert.ok(held.length > 0, 'a preview was asked after Vision was edited');
+    assert.ok(held.every((draft) => draft.OUROBOROS_MODEL === TEST && draft.OUROBOROS_MODEL_LIGHT === TEST), 'after an edit the draft is asked as held');
+    assert.deepEqual([visionEdited.body.OUROBOROS_MODEL, visionEdited.body.OUROBOROS_MODEL_LIGHT, visionEdited.body.OUROBOROS_MODEL_VISION],
+        [TEST, TEST, OWNER_VISION], 'nothing is adopted over an edited Models step: Light stays as shown, Vision is the owner\'s');
+});
+
+// A full Retry with the second key is still in flight when Models reopens with the first key. Models reads only
+// that provider once under the restored key. Subsequent opens reuse it. A later account change reads descriptors
+// independently, and the limits line still speaks only for an answered preview.
+test('a replaced key\'s catalog never lands late, the key asked again stays the asked one, and a failed preview leaves the limits line unsaid', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const held = [];
+    const reads = [];
+    let accounts = 0;
+    let previewFails = false;
+    const answer = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
+    const listed = (id) => ({ items: [{ provider_id: 'openrouter', id, value: id, name: id }], model_sources: [], errors: [] });
+    const fetch = async (url, init = {}) => {
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
+            const typed = JSON.parse(init.body).OPENROUTER_API_KEY;
+            reads.push(typed.split('-')[3]);
+            if (typed !== 'sk-or-v1-second-not-a-secret') return answer(listed('first/model'));
+            return new Promise((resolve) => held.push(() => resolve(answer(listed('late/from-replaced-key')))));
+        }
+        if (String(url) === '/api/model-catalog?view=sources') return answer(subscription.catalog);
+        if (String(url) === '/api/claudexor/status') {
+            return answer({ ...subscription.status, profiles: { ...subscription.status.profiles,
+                profiles: subscription.status.profiles.profiles.slice(0, accounts) } });
+        }
+        if (String(url) === '/api/onboarding/subagents/preview') {
+            return previewFails ? answer({ ok: false, error: 'Automatic assignments unavailable.', saved: false }, 503)
+                : answer({ ok: true, model_settings: {}, available_subagents: { enabled: true, items: [] }, known_spend_gaps: ['Light'] });
+        }
+        return answer({});
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, mainModel: 'first/model', automaticModels: [] } };
+    await withWizard(bootstrap, 'late-catalog', async ({ doc, win }) => {
+        await settle();
+        const type = (value) => { const key = doc.getElementById('openrouter-key'); key.value = value; key.fire('input'); };
+        const click = async (id) => { doc.getElementById(id).fire('click'); await settle(); };
+        type('sk-or-v1-first-not-a-secret');
+        await click('next-btn');                                        // Accounts → Models: this provider is read
+        await click('back-btn');
+        type('sk-or-v1-second-not-a-secret');
+        await click('onboarding-access-retry');                         // the owner asks again: a read with the second key, held
+        assert.equal(held.length, 1);
+        type('sk-or-v1-first-not-a-secret');                            // back to the key already read
+        await click('next-btn');                                        // Models opens: read the restored key, retire the held Retry
+        held.forEach((release) => release());
+        await settle();
+        await click('back-btn');
+        await click('next-btn');                                        // Models again: reuse the list for this key
+        assert.deepEqual(reads, ['first', 'second', 'first'], 'return to the changed access reads it once and discards the late answer');
+        await click('next-btn');                                        // Models → Access
+        await click('next-btn');                                        // Access → Consciousness
+        await click('next-btn');                                        // Consciousness → limits: the answered preview's line
+        assert.match(doc.getElementById('root').innerHTML, /id="budget-gaps"[^>]*>Not counted: Light \(price unknown\)\.</);
+        // Its words are composed (data-i18n-fmt, which the page walker skips): a language change says them again.
+        const { applyPayload } = await import('../modules/i18n.js');
+        const say = (payload) => { const kept = globalThis.document; globalThis.document = undefined;
+            try { applyPayload(payload); } finally { globalThis.document = kept; } };
+        say({ language: 'ru', english: false, revision: 81, entries: {
+            'Not counted: {roles} (price unknown).': { text: 'Не учитываются: {roles} (цена неизвестна).' }, Light: { text: 'Лёгкая' } } });
+        try {
+            win.dispatchEvent(new CustomEvent('ouro:language-changed'));
+            assert.equal(doc.getElementById('budget-gaps').textContent, 'Не учитываются: Лёгкая (цена неизвестна).');
+        } finally {
+            say({ language: '', english: true, revision: 82, entries: {} });
+            win.dispatchEvent(new CustomEvent('ouro:language-changed'));
+        }
+        assert.equal(doc.getElementById('budget-gaps').textContent, 'Not counted: Light (price unknown).');
+        previewFails = true;
+        await click('back-btn');
+        await click('next-btn');                                        // a forced preview that fails
+        const line = doc.getElementById('budget-gaps');
+        assert.deepEqual([line.hidden, line.textContent], [true, ''], 'no answered preview of this draft: nothing is claimed');
+        // An account that connects now acquires subscription evidence independently.
+        const asked = reads.length;
+        accounts = 1;
+        await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads.slice(asked), [], 'account discovery reads its own subscription sources without sending a provider key');
+    }, { fetch });
+});
+
+// An account changing on the Accounts step reads subscription sources. Only the Models step or an explicit
+// Retry can send the typed key to a provider for discovery.
+test('an account that connects while a key is being typed never sends that key; opening Models does', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    let accounts = 0;
+    const reads = [];
+    const fetch = async (url, init = {}) => {
+        let body = {};
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
+            reads.push(JSON.parse(init.body).OPENROUTER_API_KEY);
+            body = subscription.catalog;
+        } else if (String(url) === '/api/model-catalog?view=sources') {
+            body = subscription.catalog;
+        } else if (String(url) === '/api/claudexor/status') {
+            body = { ...subscription.status, profiles: { ...subscription.status.profiles,
+                profiles: subscription.status.profiles.profiles.slice(0, accounts) } };
+        } else if (String(url) === '/api/onboarding/subagents/preview') {
+            body = { ok: true, model_settings: {}, available_subagents: { enabled: true, items: [] } };
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    await withWizard(BOOTSTRAP, 'typed-key-stays', async ({ doc }) => {
+        await settle();
+        const key = doc.getElementById('openrouter-key');
+        key.value = 'sk-or-v1-typed-not-a-secret';
+        key.fire('input');
+        const { claudexorStatus } = await import('../modules/claudexor_status_store.js');
+        accounts = 1;
+        await claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads, [], 'subscription discovery never posts a draft API key');
+        accounts = 2;                                    // a second account of the same family
+        await claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads, [], 'account changes do not ask a provider while the key is being typed');
+        doc.getElementById('next-btn').fire('click');   // Accounts → Models: the owner asks for the list
+        await settle();
+        assert.deepEqual(reads, ['sk-or-v1-typed-not-a-secret']);
+        doc.getElementById('back-btn').fire('click');
+        await settle();
+        const asked = reads.length;                      // while the draft is the one he asked with, it may be read again
+        key.value = '';
+        key.fire('input');                               // the key he asked with is deleted
+        accounts = 1;                                    // and an account leaves meanwhile
+        await claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads.slice(asked), [], 'a key deleted since he last asked is not sent again');
+    }, { fetch });
+});
+
+// The built-in OpenAI key's API (settings_provider_cards.js createFlatKeyChoices). A key typed where the install had
+// none is a key being created: the draft the Models step reads with stores Responses with it and proposes the
+// profile that option names, where the server offers one. A key the bootstrap reports as configured keeps what it
+// stored: its untouched choice sends no word and its saved models are left as they were. The bootstraps here add or
+// drop that profile themselves, so the case reads the same before and after the fixture is regenerated.
+test('a key typed on a fresh install carries Responses and its profile in the draft; a configured key keeps its API and its models', async () => {
+    const reads = [];
+    const fetch = async (url, init = {}) => {
+        const catalog = String(url).startsWith('/api/onboarding/model-catalog');
+        if (catalog) reads.push(JSON.parse(init.body));
+        const body = catalog ? { items: [], model_sources: [], errors: [] } : {};
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const strip = (html) => html.match(/<div data-flat-key-choice="OPENAI_API_SURFACE"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/)?.[0] || '';
+    const current = { ...BOOTSTRAP.modelDefaults.openai, main: 'openai::test-current-main', light: 'openai::test-current-light', fallback: 'openai::test-current-fallback' };
+    const { 'openai-responses': _dropped, ...earlierOnly } = BOOTSTRAP.modelDefaults;
+    const offered = { ...BOOTSTRAP, modelDefaults: { ...earlierOnly, 'openai-responses': current } };
+    const typeAndRead = async (doc) => {
+        const key = doc.getElementById('openai-key');
+        key.value = 'sk-openai-typed-not-a-secret';
+        key.fire('input');
+        doc.getElementById('next-btn').fire('click');   // Accounts → Models: the draft is read
+        await settle();
+        return reads.at(-1);
+    };
+    await withWizard(offered, 'openai-api-fresh', async ({ doc }) => {
+        await settle();
+        const html = () => doc.getElementById('root').innerHTML;
+        assert.match(strip(html()), /^<div data-flat-key-choice="OPENAI_API_SURFACE" hidden>/, 'no key in the draft: the strip is not shown');
+        assert.equal((html().match(/data-flat-key-choice=/g) || []).length, 1, 'only the kind that has the choice draws it');
+        assert.doesNotMatch(html(), /id="openai-api-surface"/, 'the contract\'s field of the stored word is this strip, never a text field');
+        const draft = await typeAndRead(doc);
+        assert.deepEqual([draft.OPENAI_API_KEY, draft.OPENAI_API_SURFACE], ['sk-openai-typed-not-a-secret', 'responses']);
+        assert.deepEqual([draft.OUROBOROS_MODEL, draft.OUROBOROS_MODEL_LIGHT, draft.OUROBOROS_MODEL_FALLBACKS],
+            [current.main, current.light, current.fallback], 'the proposals are the profile the option names');
+        doc.getElementById('back-btn').fire('click');   // the step is drawn again from the draft
+        await settle();
+        assert.match(strip(html()), /^<div data-flat-key-choice="OPENAI_API_SURFACE">/);
+        assert.match(strip(html()), /class="ui-segment active" data-connection-choice-value="responses" aria-pressed="true"/);
+        assert.match(strip(html()), /OpenAI’s current API\. Some newer models call tools only through it\./);
+    }, { fetch });
+    // A server that offers no such profile: the kind's own defaults, on Responses all the same.
+    await withWizard({ ...BOOTSTRAP, modelDefaults: earlierOnly }, 'openai-api-fresh-earlier-profile', async ({ doc }) => {
+        await settle();
+        const draft = await typeAndRead(doc);
+        assert.deepEqual([draft.OPENAI_API_SURFACE, draft.OUROBOROS_MODEL], ['responses', BOOTSTRAP.modelDefaults.openai.main]);
+    }, { fetch });
+    const kept = { ...BOOTSTRAP.initialState, openaiKey: BOOTSTRAP.secretPlaceholder, mainModel: 'openai::gpt-kept', automaticModels: [] };
+    await withWizard({ ...offered, initialState: kept }, 'openai-api-configured', async ({ doc }) => {
+        await settle();
+        const drawn = strip(doc.getElementById('root').innerHTML);
+        assert.match(drawn, /^<div data-flat-key-choice="OPENAI_API_SURFACE">/, 'a configured key shows its choice');
+        assert.match(drawn, /class="ui-segment active" data-connection-choice-value="chat_completions" aria-pressed="true"/);
+        assert.match(drawn, /class="ui-segment" data-connection-choice-value="responses" aria-pressed="false"/);
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        assert.ok(!reads.at(-1).OPENAI_API_SURFACE, 'an untouched choice of a key the install holds sends no word');
+        assert.equal(reads.at(-1).OUROBOROS_MODEL, 'openai::gpt-kept', 'and the saved model is left as it was');
+    }, { fetch });
+    // A key the install holds on Responses: shown so, and its saved model is still the owner's.
+    await withWizard({ ...offered, initialState: { ...kept, openaiApiSurface: 'responses' } }, 'openai-api-configured-responses', async ({ doc }) => {
+        await settle();
+        assert.match(strip(doc.getElementById('root').innerHTML), /class="ui-segment active" data-connection-choice-value="responses" aria-pressed="true"/);
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        assert.equal(reads.at(-1).OUROBOROS_MODEL, 'openai::gpt-kept');
+    }, { fetch });
+    // Summary says the key's API beside it.
+    const summary = { ...BOOTSTRAP, stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')], initialState: kept };
+    await withWizard(summary, 'openai-api-summary', async ({ doc }) => {
+        assert.match(doc.getElementById('root').innerHTML, /<strong>OpenAI<\/strong>\s*<span>configured · Chat Completions API<\/span>/);
+    }, { fetch });
 });
 
 // Review R1 (C3): a model the local runtime serves is named Local in Summary, never by the cloud source its stored id implies.
@@ -817,7 +1153,7 @@ test('Summary names a model the local runtime serves as Local, and a cloud one b
         let html = '';
         const bootstrap = { ...BOOTSTRAP, stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
             initialState: { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf', localRoutingMode,
-                mainModel: 'google/gemini-3.8-flash', fallbackModel: 'openai/gpt-5.6-luna' } };
+                mainModel: 'google/gemini-3.8-flash', fallbackModel: 'openai/gpt-5.6-luna', automaticModels: [] } };
         await withWizard(bootstrap, query, ({ doc }) => { html = doc.getElementById('root').innerHTML; });
         return html;
     };
@@ -854,7 +1190,7 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
         } else if (String(url) === '/api/claudexor/status') {
             body = { ...subscription.status, profiles: { ...subscription.status.profiles,
                 profiles: connected ? subscription.status.profiles.profiles : [] } };
-        } else if (String(url) === '/api/model-catalog') {
+        } else if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) {
             body = subscription.catalog;
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
@@ -887,8 +1223,10 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
             type(revisitInputs);
             routeLocal(revisitLocalMode);
             await click(shortcut ? 'quick-start-btn' : 'next-btn');
+            // Review & start lands on the Consciousness step, and its Continue goes to Summary.
+            if (shortcut) assert.match(doc.getElementById('root').innerHTML, /data-consciousness-step/);
         }
-        for (let step = 0; step < (shortcut ? 1 : 4); step += 1) await click('next-btn');   // … → Start Ouroboros.
+        for (let step = 0; step < (shortcut ? 2 : 5); step += 1) await click('next-btn');   // … Consciousness … → Start Ouroboros.
     }, { fetch, location });
     assert.equal(posted.length, 1, 'the walk reached the completion POST');
     return posted[0];
@@ -917,7 +1255,7 @@ test('an owner who clears or replaces the recommended Vision keeps that choice a
 test('a reopened wizard saves an existing install\'s Vision as it was, blank or custom', async () => {
     for (const saved of ['', 'zai::glm-ocr']) {
         const initialState = { ...BOOTSTRAP.initialState, zaiKey: BOOTSTRAP.secretPlaceholder, mainModel: 'zai::glm-5.3',
-            lightModel: 'zai::glm-5.3-flash', fallbackModel: 'zai::glm-5.3-flash', visionModel: saved };
+            lightModel: 'zai::glm-5.3-flash', fallbackModel: 'zai::glm-5.3-flash', visionModel: saved, automaticModels: [] };
         const body = await finishFromAccounts({ ...BOOTSTRAP, freshInstall: false, initialState }, `zai-existing-${saved || 'blank'}`);
         assert.equal(body.OUROBOROS_MODEL_VISION, saved);
     }
@@ -1006,7 +1344,7 @@ test('a fresh local-only setup saves Light and Fallbacks that follow the local M
         models: { 'light-model': 'owner-light' } });
     assert.deepEqual([edited.OUROBOROS_MODEL_LIGHT, edited.OUROBOROS_MODEL_FALLBACKS], ['owner-light', '']);
     const initialState = { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf', localRoutingMode: 'all',
-        mainModel: 'owner-main', lightModel: 'owner-light', fallbackModel: 'owner-fallback' };
+        mainModel: 'owner-main', lightModel: 'owner-light', fallbackModel: 'owner-fallback', automaticModels: [] };
     const reopened = await finishFromAccounts({ ...BOOTSTRAP, freshInstall: false, initialState }, 'local-only-saved');
     assert.deepEqual([reopened.OUROBOROS_MODEL, reopened.OUROBOROS_MODEL_LIGHT, reopened.OUROBOROS_MODEL_FALLBACKS],
         ['owner-main', 'owner-light', 'owner-fallback']);

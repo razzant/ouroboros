@@ -55,6 +55,20 @@ def has_git_metadata(root: pathlib.Path) -> bool:
     return False
 
 
+def _git_root_probe_failure(result: subprocess.CompletedProcess[str]) -> str:
+    if result.returncode == 0:
+        return "git rev-parse did not report a worktree root"
+    from ouroboros.redaction import redact_projection
+
+    # Redact before clipping, so the clip does not turn a whole secret into an unmatched fragment.
+    redacted = redact_projection(result.stderr or "").value
+    detail = " ".join(redacted.split())
+    detail = "".join(char for char in detail if char.isprintable())
+    if len(detail) > 600:
+        detail = detail[:600] + "…"
+    return f"git rev-parse exited {result.returncode}" + (f": {detail}" if detail else "")
+
+
 def validate_workspace_root(
     value: Any,
     *,
@@ -82,7 +96,15 @@ def validate_workspace_root(
             text=True,
             timeout=5,
         )
-    except Exception:
+    except FileNotFoundError:
+        res, failure = None, "could not start git: executable or working directory not found"
+    except subprocess.TimeoutExpired:
+        res, failure = None, "git rev-parse timed out after 5 seconds"
+    except OSError as exc:
+        errno_info = f", errno {exc.errno}" if exc.errno is not None else ""
+        res, failure = None, f"could not start git ({type(exc).__name__}{errno_info})"
+    except (subprocess.SubprocessError, UnicodeError) as exc:
+        failure = f"git rev-parse could not complete ({type(exc).__name__})"
         res = None
     output = (res.stdout or "").strip() if res is not None else ""
     if output.splitlines()[:1] == ["true"]:
@@ -93,33 +115,46 @@ def validate_workspace_root(
         # A failed probe must not reclassify an existing/broken Git worktree
         # as an ordinary folder (including linked worktrees with a .git file).
         if has_git_metadata(root):
-            raise WorkspaceRootError("workspace_root Git worktree could not be resolved")
+            reason = _git_root_probe_failure(res) if res is not None else failure
+            raise WorkspaceRootError(f"workspace_root Git worktree could not be resolved: {reason}")
         return root
     if git_root != root:
         raise WorkspaceRootError(f"workspace_root must be the git worktree root: {git_root}")
     return root
 
 
-def _refuse_protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> None:
+def kept_path(path: pathlib.Path) -> pathlib.Path:
+    """``path`` (resolved) as its volume keeps it: on macOS its deepest existing folder's kept spelling
+    (``platform_darwin_abi.kept_spelling``) followed by the not-yet-existing rest as given. Elsewhere, or
+    where no folder answers, the resolved spelling stays: an error is never taken for a physical fact."""
+    from ouroboros.platform_darwin_abi import IS_DARWIN, kept_spelling
+
+    for depth, folder in enumerate((path, *path.parents) if IS_DARWIN else ()):
+        kept = kept_spelling(str(folder))
+        if kept:
+            return pathlib.Path(kept, *path.parts[len(path.parts) - depth:])
+    return path
+
+
+def protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> str:
+    """Which of Ouroboros's own roots ``root`` (resolved) is inside or around, else ``""``: its system repo or
+    data drive, compared case-folded as tool access compares them, and as one physical folder however spelled
+    (``kept_path``: case, Unicode form, firmlink). Attach applies it before ``init_git`` writes anything."""
     from ouroboros.tool_access import paths_overlap_casefold
 
-    system_repo = pathlib.Path(system_repo_dir).resolve(strict=False)
-    drive = pathlib.Path(drive_root).resolve(strict=False)
-    for protected_root, label in ((system_repo, "Ouroboros system repo"), (drive, "Ouroboros data drive")):
-        overlaps = False
-        try:
-            root.relative_to(protected_root)
-            overlaps = True
-        except ValueError:
-            try:
-                protected_root.relative_to(root)
-                overlaps = True
-            except ValueError:
-                pass
-        if not overlaps and paths_overlap_casefold(root, protected_root):
-            overlaps = True
-        if overlaps:
-            raise WorkspaceRootError(f"workspace_root must not overlap the {label}")
+    kept = kept_path(root)
+    for value, label in ((system_repo_dir, "Ouroboros system repo"), (drive_root, "Ouroboros data drive")):
+        protected = pathlib.Path(value).resolve(strict=False)
+        guard = kept_path(protected)
+        if paths_overlap_casefold(root, protected) or kept.is_relative_to(guard) or guard.is_relative_to(kept):
+            return label
+    return ""
+
+
+def _refuse_protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> None:
+    label = protected_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root)
+    if label:
+        raise WorkspaceRootError(f"workspace_root must not overlap the {label}")
 
 
 def unavailable_workspace_address(value: Any, *, system_repo_dir: Any, drive_root: Any) -> str:

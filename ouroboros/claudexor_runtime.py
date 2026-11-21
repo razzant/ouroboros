@@ -17,6 +17,7 @@ migrated home may refuse it. Forward-only recovery is documented in docs/PERSIST
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -34,7 +35,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
 
-from ouroboros.claudexor_node_seed import bundled_node, is_seed_record, seed_node
+from ouroboros.claudexor_node_seed import (
+    bundled_node, free_generation_index, generation_roots, is_seed_record, node_record, seed_node,
+)
 from ouroboros.utils import replace_atomic
 from ouroboros.verified_download import fetch_exact_file as _fetch_exact_file
 from ouroboros.verified_download import verify_exact_file as _verify_exact_file
@@ -368,7 +371,8 @@ def fetch_node_archive(
     )
 
 
-def managed_runtime_root() -> pathlib.Path:
+def managed_runtime_root(data_root: "str | os.PathLike[str] | None" = None) -> pathlib.Path:
+    """This data root's managed store, or ``data_root``'s (another installation's, read by a test boundary)."""
     from ouroboros.config import DATA_DIR
 
     # Keep this path deliberately compact.  The public runtime closure contains
@@ -377,7 +381,7 @@ def managed_runtime_root() -> pathlib.Path:
     # Exact identity is not weakened by the short directory name: the full SHA,
     # archive digest, size and entrypoint are checked in managed-runtime.json and
     # the candidate's own side-effect-free probe before promotion.
-    return pathlib.Path(DATA_DIR) / "state" / "cx"
+    return pathlib.Path(data_root or DATA_DIR) / "state" / "cx"
 
 
 def managed_runtime_dir(pin: ClaudexorRuntimePin) -> pathlib.Path:
@@ -389,6 +393,11 @@ def managed_node_dir(pin: ClaudexorRuntimePin, platform_key: str) -> pathlib.Pat
     """Legacy Node root; new immutable generations are uniquely named siblings."""
     pin.validate()
     return managed_runtime_root() / "node" / f"{pin.node_version}-{platform_key}"
+
+
+def node_generation_root(pin: ClaudexorRuntimePin, platform_key: str, archive_sha256: str) -> pathlib.Path:
+    legacy = managed_node_dir(pin, platform_key)  # the next promotion's destination (``free_generation_index``)
+    return legacy.parent / f"{legacy.name}.g-{archive_sha256[:12]}-{free_generation_index(legacy, archive_sha256):08d}"
 
 
 def _safe_archive_relative_path(value: str) -> bool:
@@ -476,6 +485,10 @@ class ClaudexorRuntimeManager:
     def pin(self) -> Optional[ClaudexorRuntimePin]:
         return self._pin
 
+    @property
+    def pin_error(self) -> str:
+        return self._pin_error
+
     def resolve_command(self) -> list[str]:
         """Read-only next-spawn selection: override -> managed -> compatibility."""
         explicit, override_error = _explicit_binary()
@@ -526,17 +539,49 @@ class ClaudexorRuntimeManager:
                 self._last_error = f"{exc.code}: {exc}"
                 raise
 
-    def prepare_node_toolchain(self) -> str:
-        """Explicit maintenance preparation, without replacing an engine tree or process."""
-        with self._lock:
-            if self._pin_error or self._pin is None:
-                raise ClaudexorRuntimeError("runtime_cli_unavailable", self._pin_error or "no reviewed runtime pin")
-            self._cli_node_artifact(self._pin)
-            self._install(self._pin, require_npm=True, node_only=True)
-            node = self._resolve_node_toolchain(self._pin)
+    def reviewed_node(self, *, allow_install: bool = False, prepared: bool = False) -> str:
+        """The pin's exact Node, read lock-free, never an older shipped one. ``prepared``: a managed generation by its
+        record and file, nothing run or written (a child's environment); ``allow_install`` makes one, Node only (never
+        the engine), copied from an exact bundle or downloaded. A failure carries ``planned_node``, its destination."""
+        pin = self._pin
+        if self._pin_error or pin is None:
+            raise ClaudexorRuntimeError("runtime_pin_invalid", self._pin_error or "no reviewed runtime pin")
+        lookup = functools.partial(self._resolve_node, pin, bundled=not (prepared or allow_install), probe=not prepared)
+        try:
+            node = lookup()
+            if not node and allow_install:
+                with self._lock:
+                    node = lookup() or self._install(pin, node_only=True) or lookup()
             if not node:
-                raise ClaudexorRuntimeError("runtime_node_install_failed", "prepared Node/npm is not selectable")
-            return node
+                raise ClaudexorRuntimeError("runtime_node_unavailable", f"Node {pin.node_version} is not prepared yet")
+        except ClaudexorRuntimeError as exc:
+            # Plan, then look once more: a peer publishing before the plan is found here, one publishing after it
+            # takes exactly the planned (then still free) generation.
+            exc.planned_node = self.planned_node(pin)
+            try:
+                node = lookup()
+            except ClaudexorRuntimeError:
+                node = ""
+            if not node:
+                raise
+        return node
+
+    @staticmethod
+    def planned_node(pin: ClaudexorRuntimePin) -> str:
+        """The executable the next Node preparation of ``pin`` publishes (``node_generation_root``), or ``""``."""
+        from ouroboros.platform_layer import embedded_node_candidates, node_distribution_platform
+
+        artifact = pin.node_artifacts.get(platform_key := node_distribution_platform())
+        root = artifact and node_generation_root(pin, platform_key, artifact.sha256)
+        return str(embedded_node_candidates(root)[0]) if root else ""
+
+    def prepared_node(self, data_root: "str | os.PathLike[str]") -> str:
+        """``reviewed_node(prepared=True)`` in another installation's store, for a test boundary that isolates it: by
+        record and file, nothing run or written; ``""`` when that installation prepared none."""
+        pin = self._pin
+        if self._pin_error or pin is None:
+            return ""
+        return self._resolve_node(pin, bundled=False, probe=False, store=managed_runtime_root(data_root))
 
     def ensure(self) -> list[str]:
         """Foreground install/repair/update intent, returning the next command."""
@@ -551,7 +596,7 @@ class ClaudexorRuntimeManager:
             if self._pin is not None:
                 try:
                     command = self._managed_command()
-                    # The daemon outlives the app: a bundled Node goes through the install owner, which keeps a copy.
+                    # The daemon may outlive the app: a bundled Node goes through the install owner, keeping a copy.
                     if command and command[0] != bundled_node(self._pin.node_version):
                         try:
                             self._probe(command, self._pin)
@@ -717,8 +762,9 @@ class ClaudexorRuntimeManager:
         The reviewed pin selects the *next* daemon spawn.  A live daemon may
         keep serving an older preserved tree while that pin is already staged,
         so a recovery command binds instead to all three handshake identity
-        fields.  Supported schema-1/2 metadata locates the preserved Node and
-        entry; a fresh side-effect-free probe establishes the additive role
+        fields.  Supported schema-1/2 metadata locates the entry and, for an
+        older serving tree, its preserved Node (the pin's own tree runs only
+        the pin's Node); a fresh side-effect-free probe establishes the role
         without rewriting metadata underneath the live process.
         """
         version = str(engine_version or "").strip()
@@ -776,8 +822,13 @@ class ClaudexorRuntimeManager:
                 "the exact runtime tree reported by the serving daemon is not preserved",
             )
 
-        node_version = str(metadata.get("node_version") or "")
-        node = self._resolve_preserved_node(node_version)
+        node_version, pin = str(metadata.get("node_version") or ""), self._pin
+        if pin is not None and (version, build_sha) == (pin.version, pin.build_sha):
+            # The pin's own tree: a new role process runs the pin's Node, as its next daemon will, never the older one
+            # its stamp names; until the boot's preparation publishes it, the typed ``runtime_node_unavailable``.
+            node, node_version = self.reviewed_node(), pin.node_version
+        else:
+            node = self._resolve_preserved_node(node_version)
         if not node:
             raise ClaudexorRuntimeError(
                 "runtime_serving_node_unavailable",
@@ -857,8 +908,7 @@ class ClaudexorRuntimeManager:
             "protocol_major": pin.protocol_major,
             "archive_sha256": pin.sha256,
             "archive_size": pin.size_bytes,
-            "node_version": pin.node_version,
-            "entrypoint": pin.entrypoint,
+            "entrypoint": pin.entrypoint,  # never ``node_version``: Node has its own generations, probed per spawn
         }
         if pin.cli_entrypoint is not None:
             expected["cli_entrypoint"] = pin.cli_entrypoint
@@ -877,25 +927,12 @@ class ClaudexorRuntimeManager:
         return raw
 
     @staticmethod
-    def _node_roots(version: str, platform_key: str) -> list[pathlib.Path]:
-        """Complete generations first; the pre-generation root remains read-only."""
-        legacy = managed_runtime_root() / "node" / f"{version}-{platform_key}"
-        try:
-            generations = sorted(legacy.parent.glob(legacy.name + ".g-*"), reverse=True)
-        except OSError:
-            generations = []
-        return [*generations, legacy]
+    def _node_roots(version: str, platform_key: str, store: "pathlib.Path | None" = None) -> list[pathlib.Path]:
+        """``generation_roots`` of this store (with the executable a boundary carried in), or of another ``store``."""
+        from ouroboros.node_runtime import CARRIED_NODE_ENV
 
-    @staticmethod
-    def _node_metadata(root: pathlib.Path) -> dict[str, Any]:
-        try:
-            raw = json.loads((root / _NODE_META_FILENAME).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        if (not isinstance(raw, dict) or type(raw.get("schema_version")) is not int
-                or raw["schema_version"] not in (1, _NODE_META_SCHEMA_VERSION)):
-            return {}
-        return raw
+        legacy = (store or managed_runtime_root()) / "node" / f"{version}-{platform_key}"
+        return generation_roots(legacy, "" if store else os.environ.get(CARRIED_NODE_ENV, ""))
 
     @classmethod
     def _resolve_preserved_node(cls, node_version: str) -> str:
@@ -908,7 +945,7 @@ class ClaudexorRuntimeManager:
         platform_key = node_distribution_platform()
         node_only, invalid = [], False
         for root in cls._node_roots(version, platform_key) if platform_key else []:
-            raw = cls._node_metadata(root)
+            raw = node_record(root / _NODE_META_FILENAME, (1, _NODE_META_SCHEMA_VERSION))
             if raw.get("version") != version or raw.get("platform") != platform_key:
                 invalid |= (root / _NODE_META_FILENAME).exists()
                 continue
@@ -930,14 +967,15 @@ class ClaudexorRuntimeManager:
                 "runtime_serving_node_metadata_invalid", "the preserved Node metadata is malformed")
         return ""
 
-    def _resolve_node(self, pin: ClaudexorRuntimePin, *, bundled: bool = True) -> str:
-        """An exact managed Node, complete then Node-only, before the bundled one the daemon would outlive."""
+    def _resolve_node(self, pin: ClaudexorRuntimePin, *, bundled: bool = True, probe: bool = True,
+                      store: "pathlib.Path | None" = None) -> str:
+        """An exact managed Node (complete, then Node-only), else if ``probe`` the bundled one a daemon may outlive."""
         from ouroboros.platform_layer import node_distribution_platform
 
-        platform_key = node_distribution_platform()
-        managed = platform_key and (self._resolve_managed_node(pin, platform_key, require_npm=True)
-                                    or self._resolve_managed_node(pin, platform_key))
-        return managed or (bundled_node(pin.node_version) if bundled else "")
+        platform_key, kw = node_distribution_platform(), {"probe": probe, "store": store}
+        managed = platform_key and (self._resolve_managed_node(pin, platform_key, require_npm=True, **kw)
+                                    or self._resolve_managed_node(pin, platform_key, **kw))
+        return managed or (bundled_node(pin.node_version) if bundled and probe else "")
 
     @staticmethod
     def _archive_npm_cli(artifact: NodeRuntimeArtifact, platform_key: str) -> str:
@@ -951,21 +989,9 @@ class ClaudexorRuntimeManager:
         return str(executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js")
 
     @staticmethod
-    def _managed_npm_cli(node: pathlib.Path) -> pathlib.Path:
-        if node.suffix.lower() == ".exe":
-            return node.parent / "node_modules/npm/bin/npm-cli.js"
-        return node.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
-
-    def _resolve_managed_node(
-        self, pin: ClaudexorRuntimePin, platform_key: str, *, require_npm: bool = False
-    ) -> str:
-        from ouroboros.platform_layer import embedded_node_candidates, probe_node_version
-
-        artifact = pin.node_artifacts.get(platform_key)
-        if artifact is None:
-            return ""
-        archive_npm_cli = self._archive_npm_cli(artifact, platform_key)
-        expected = {
+    def _archive_record(pin: ClaudexorRuntimePin, platform_key: str, artifact: NodeRuntimeArtifact) -> dict[str, Any]:
+        """What a generation's record states about its verified archive: written at promotion, required to select."""
+        return {
             "version": pin.node_version,
             "platform": platform_key,
             "archive_url": artifact.archive_url,
@@ -973,8 +999,26 @@ class ClaudexorRuntimeManager:
             "archive_size": artifact.size_bytes,
             "archive_executable": artifact.executable,
         }
-        for root in self._node_roots(pin.node_version, platform_key):
-            raw = self._node_metadata(root)
+
+    @staticmethod
+    def _managed_npm_cli(node: pathlib.Path) -> pathlib.Path:
+        if node.suffix.lower() == ".exe":
+            return node.parent / "node_modules/npm/bin/npm-cli.js"
+        return node.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+
+    def _resolve_managed_node(
+        self, pin: ClaudexorRuntimePin, platform_key: str, *, require_npm: bool = False, probe: bool = True,
+        store: "pathlib.Path | None" = None,
+    ) -> str:
+        from ouroboros.platform_layer import embedded_node_candidates, probe_node_version
+
+        artifact = pin.node_artifacts.get(platform_key)
+        if artifact is None:
+            return ""
+        archive_npm_cli = self._archive_npm_cli(artifact, platform_key)
+        expected = self._archive_record(pin, platform_key, artifact)
+        for root in self._node_roots(pin.node_version, platform_key, store):
+            raw = node_record(root / _NODE_META_FILENAME, (1, _NODE_META_SCHEMA_VERSION))
             if any(raw.get(key) != value for key, value in expected.items()) and (
                     require_npm or not is_seed_record(raw, pin.node_version, platform_key)):
                 continue  # a seed serves the daemon, never npm, and never claims the archive's fields
@@ -983,7 +1027,7 @@ class ClaudexorRuntimeManager:
                 continue
             candidate = embedded_node_candidates(root)[0]
             try:
-                if not candidate.is_file() or probe_node_version(str(candidate)) != pin.node_version:
+                if not candidate.is_file() or probe and probe_node_version(str(candidate)) != pin.node_version:
                     continue
                 if require_npm and not self._managed_npm_cli(candidate).is_file():
                     continue
@@ -995,10 +1039,7 @@ class ClaudexorRuntimeManager:
     def _resolve_node_toolchain(self, pin: ClaudexorRuntimePin) -> str:
         from ouroboros.platform_layer import node_distribution_platform
 
-        platform_key = node_distribution_platform()
-        if not platform_key:
-            return ""
-        return self._resolve_managed_node(pin, platform_key, require_npm=True)
+        return self._resolve_managed_node(pin, node_distribution_platform(), require_npm=True)
 
     def _cli_node_artifact(
         self, pin: ClaudexorRuntimePin
@@ -1007,11 +1048,7 @@ class ClaudexorRuntimeManager:
 
         platform_key = node_distribution_platform()
         artifact = pin.node_artifacts.get(platform_key)
-        if (
-            not platform_key
-            or artifact is None
-            or not self._archive_npm_cli(artifact, platform_key)
-        ):
+        if artifact is None or not self._archive_npm_cli(artifact, platform_key):  # ``""`` is never a pinned platform
             raise ClaudexorRuntimeError(
                 "runtime_cli_platform_unsupported",
                 "the reviewed platform has no managed Node/npm CLI toolchain contract",
@@ -1023,22 +1060,19 @@ class ClaudexorRuntimeManager:
         from ouroboros.platform_layer import node_distribution_platform
 
         platform_key = node_distribution_platform()
-        node = self._resolve_node(pin, bundled=False) or seed_node(
-            managed_node_dir(pin, platform_key), pin.node_version, platform_key, _NODE_META_FILENAME)
+        artifact = pin.node_artifacts.get(platform_key)
+        root = artifact and node_generation_root(pin, platform_key, artifact.sha256)  # ``planned_node``, before a copy
+        node = self._resolve_node(pin, bundled=False) or seed_node(root, pin.node_version, platform_key,
+                                                                    _NODE_META_FILENAME)  # or download
         if node:
             return node
-        artifact = pin.node_artifacts.get(platform_key)
-        if not platform_key or artifact is None:
+        if not root:
             raise ClaudexorRuntimeError(
                 "runtime_node_platform_unsupported",
                 "no reviewed Node artifact exists for this operating system and architecture",
             )
-        cache = managed_runtime_root() / "cache" / artifact.archive_name
-        archive = fetch_node_archive(artifact, cache)
-        self._promote_node(
-            pin, platform_key, artifact, archive,
-            include_npm=pin.cli_entrypoint is not None,
-        )
+        archive = fetch_node_archive(artifact, managed_runtime_root() / "cache" / artifact.archive_name)
+        self._promote_node(pin, platform_key, artifact, archive, root, include_npm=pin.cli_entrypoint is not None)
         node = self._resolve_node(pin)
         if not node:
             raise ClaudexorRuntimeError(
@@ -1052,9 +1086,9 @@ class ClaudexorRuntimeManager:
         if node:
             return node
         platform_key, artifact = self._cli_node_artifact(pin)
-        cache = managed_runtime_root() / "cache" / artifact.archive_name
-        archive = fetch_node_archive(artifact, cache)
-        self._promote_node(pin, platform_key, artifact, archive, include_npm=True)
+        root = node_generation_root(pin, platform_key, artifact.sha256)  # chosen before the download
+        archive = fetch_node_archive(artifact, managed_runtime_root() / "cache" / artifact.archive_name)
+        self._promote_node(pin, platform_key, artifact, archive, root, include_npm=True)
         node = self._resolve_node_toolchain(pin)
         if not node:
             raise ClaudexorRuntimeError(
@@ -1069,18 +1103,19 @@ class ClaudexorRuntimeManager:
         platform_key: str,
         artifact: NodeRuntimeArtifact,
         archive: pathlib.Path,
+        root: pathlib.Path,
         *,
         include_npm: bool = False,
     ) -> None:
+        """Publish ``root``, the generation chosen before the download, only once complete and still the next free."""
         from ouroboros.platform_layer import embedded_node_candidates, probe_node_version
         from ouroboros.utils import atomic_write_json
 
-        legacy = managed_node_dir(pin, platform_key)
-        parent = legacy.parent
-        parent.mkdir(parents=True, exist_ok=True)
-        nonce = uuid.uuid4().hex[:8]
-        staging = parent / f".tmp-{os.getpid()}-{nonce}"
-        root = parent / f"{legacy.name}.g-{artifact.sha256[:12]}-{nonce}"
+        planned = node_generation_root(pin, platform_key, artifact.sha256)
+        if planned != root:  # the install lock serializes owners: a different name means foreign writes, never ours
+            raise ClaudexorRuntimeError("runtime_node_install_failed", f"{root} is no longer the next Node generation")
+        planned.parent.mkdir(parents=True, exist_ok=True)
+        staging = planned.parent / f".tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         try:
             staging.mkdir(parents=False, exist_ok=False)
             node = embedded_node_candidates(staging)[0]
@@ -1101,15 +1136,8 @@ class ClaudexorRuntimeManager:
                     "runtime_node_version_mismatch",
                     f"managed Node {actual or 'unknown'} does not match the reviewed {pin.node_version}",
                 )
-            metadata = {
-                "schema_version": _NODE_META_SCHEMA_VERSION if archive_npm_cli else 1,
-                "version": pin.node_version,
-                "platform": platform_key,
-                "archive_url": artifact.archive_url,
-                "archive_sha256": artifact.sha256,
-                "archive_size": artifact.size_bytes,
-                "archive_executable": artifact.executable,
-            }
+            metadata = {"schema_version": _NODE_META_SCHEMA_VERSION if archive_npm_cli else 1,
+                        **self._archive_record(pin, platform_key, artifact)}
             if archive_npm_cli:
                 metadata["archive_npm_cli"] = archive_npm_cli
             atomic_write_json(
@@ -1119,7 +1147,7 @@ class ClaudexorRuntimeManager:
             )
             # Never rename, repair or remove an earlier generation: Node/npm may
             # still load its files from a live daemon, installer or vendor child.
-            replace_atomic(staging, root)
+            replace_atomic(staging, planned)
         except ClaudexorRuntimeError:
             raise
         except Exception as exc:
@@ -1316,8 +1344,8 @@ class ClaudexorRuntimeManager:
             metadata=f"pid={os.getpid()} version={pin.version} build_sha={pin.build_sha}\n",
         )
         if lock_fd is None:
-            command = (self._resolve_node_toolchain(pin) if node_only else
-                       self._managed_cli_command() if require_npm else self._managed_command())
+            command = ((self._resolve_node_toolchain(pin) if require_npm else self._resolve_node(pin, bundled=False))
+                       if node_only else self._managed_cli_command() if require_npm else self._managed_command())
             if command:
                 return
             raise ClaudexorRuntimeError(

@@ -7,10 +7,11 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# Where a page's section is mounted and where its header is rendered (Settings splits the two).
-MODULES = {"chat": ("chat.js", "chat.js"), "files": ("files.js", "files.js"), "skills": ("skills.js", "skills.js"),
-           "widgets": ("widgets.js", "widgets.js"), "dashboard": ("dashboard.js", "dashboard.js"),
-           "settings": ("settings.js", "settings_ui.js")}
+# Where a page's section is mounted and where its header is rendered (Extensions, the place `skills`, draws its section
+# in extensions.js; skills.js, whose initSkills app.js calls, mounts the skill views inside it).
+MODULES = {"chat": ("chat.js", "chat.js"), "circles": ("circles.js", "circles.js"), "files": ("files.js", "files.js"),
+           "skills": ("extensions.js", "extensions.js"), "widgets": ("widgets.js", "widgets.js"),
+           "dashboard": ("dashboard.js", "dashboard.js"), "settings": ("settings.js", "settings.js")}
 
 
 def _read(rel: str) -> str:
@@ -29,7 +30,7 @@ def test_registry_matches_the_init_map_and_the_page_sections():
     # A page may take more than the shared context (Files takes the shell's layer stack): `initFiles({ ...ctx, layers })`.
     inits = set(re.findall(r"\b(init[A-Z][A-Za-z]+)\((?:ctx\)|\{ \.\.\.ctx[,}])", app_js))
     rows = _registry()
-    assert [r[0] for r in rows] == ["chat", "files", "skills", "widgets", "dashboard", "settings"]
+    assert [r[0] for r in rows] == ["chat", "circles", "files", "skills", "widgets", "dashboard", "settings"]
     for page_id, label, _icon, _zone, init in rows:
         assert init in inits, f"{page_id}: app.js never calls {init}(ctx)"
         mount, header = (_read(f"web/modules/{name}") for name in MODULES[page_id])

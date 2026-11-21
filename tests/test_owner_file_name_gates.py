@@ -129,7 +129,7 @@ def test_owner_file_ingest_routes_preserve_dotenv_policy_and_ordinary_files(
     drive = tmp_path / "data"
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(drive))
     monkeypatch.setattr(config, "DATA_DIR", drive)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     monkeypatch.setattr(ws, "DATA_DIR", drive)
     source = tmp_path / "home" / relative
     source.parent.mkdir(parents=True)

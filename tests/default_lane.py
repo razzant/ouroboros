@@ -1,7 +1,7 @@
 """Whole-file shards of CI's default suite, preserving its two existing passes.
 
 A file's weight is its recorded time when the run's weight table records it on
-this system (`OUROBOROS_CI_DURATIONS`, written by `tests/ci_evidence.py durations`:
+this system (`OUROBOROS_CI_DURATIONS`, the run's frozen plan, `scripts/ci_shard_plan.py`:
 integer milliseconds of every report of the file in both default passes). A file
 the table does not record weighs its collected default node count times the
 table's median milliseconds per node on this system. Without a readable table that

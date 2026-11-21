@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import task_pacing
 from ouroboros.context import build_incoming_user_content
-from ouroboros.context_budget import OWNER_WORDS_KIND, WHOLE_CATEGORY
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, WHOLE_CATEGORY
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
@@ -96,6 +96,26 @@ def _stamp_owner_delivery(
     return held
 
 
+def _append_reply_context(messages, target, owner_ctx):
+    from ouroboros.context_budget import HOST_TEXT_SHA_KEY, REPLY_CITATION_KIND, REPLY_SOURCE_SHA_KEY, bound_host_row, host_row_intact
+    from ouroboros.dialogue_provenance import excerpt_citation
+
+    if citation := excerpt_citation(target):
+        from ouroboros.owner_words import attachments_line
+
+        # The full source is a host row of its own, bound to its exact text (address, author, words and files). A later
+        # citation of the same source adds only its own selection while a row bound to that same text is still exactly as
+        # produced; with no such proof (a file known later, a read that now succeeds) the source is shown whole again.
+        source = bound_host_row(REPLY_CITATION_KIND, "\n".join(part for part in (
+            f"[Full source from {target.get('author') or 'author not recorded'} at {target['address']}]",
+            target["text"] or "(source unavailable)", attachments_line(target.get("attachments"))) if part))
+        if not any(row.get(HOST_CONTEXT_KIND_KEY) == REPLY_CITATION_KIND
+                   and row.get(HOST_TEXT_SHA_KEY) == source[HOST_TEXT_SHA_KEY] and host_row_intact(row) for row in messages):
+            messages.append(source)
+        _loop()._append_or_merge_user_message(messages, citation, slot=owner_ctx, kind=REPLY_CITATION_KIND)
+        messages[-1][REPLY_SOURCE_SHA_KEY] = source[HOST_TEXT_SHA_KEY]
+
+
 def _owner_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
     """This delivery's content; its words survive an unexpected image-composition failure.
 
@@ -127,10 +147,14 @@ def _drain_incoming_messages(
     returned result's final save, or the published exact pause), so a crash in
     between delivers it again instead of losing it. Non-content controls are
     acknowledged at once. ``place_live_runs`` (the round top alone, never a delivery
-    close, a forced finalization or a live call): my human's rows this run carries
-    are placed into the sessions it holds open (``place_rows_into_runs``), each once.
+    close, a forced finalization or a live call): my human's rows the host's placement at receipt
+    left are placed into the sessions it holds open (``place_rows_into_runs``), each once. The last row of my
+    human's this drain delivers closes with the host's arrival lines (``arrival_notes.mark_arrival``).
     """
     controls: Dict[str, Any] = {}
+    arrivals: List[int] = []  # positions of my human's rows this drain delivered (typed, never merged)
+    from ouroboros.answer_facts import mark_press_arrival
+    start = len(messages)  # this drain's rows follow: the facts row stands before the first of my human's words
 
     def ack_saved(entry: Dict[str, Any]) -> None:
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
@@ -158,9 +182,12 @@ def _drain_incoming_messages(
         try:
             injected = incoming_messages.get_nowait()
             if isinstance(injected, dict):
+                from ouroboros.owner_words import reply_target
+                target = reply_target(getattr(owner_ctx, "budget_drive_root", None) or drive_root, injected.get("reply_reference"))
+                _append_reply_context(messages, target, owner_ctx)
                 owner_content = _owner_content(injected, drive_root, task_id)
                 _loop()._record_owner_directive(
-                    owner_ctx, source="direct_incoming", content=owner_content, origin=_arrival(injected),
+                    owner_ctx, source="direct_incoming", content=owner_content, origin=_arrival(injected), reply_to=target or None,
                     msg_id=str(injected.get("client_message_id") or injected.get("msg_id") or ""),
                 )
                 _stamp_owner_delivery(
@@ -173,6 +200,7 @@ def _drain_incoming_messages(
                 _loop()._append_or_merge_user_content(
                     messages, _loop()._owner_marked_content(owner_content), slot=owner_ctx, kind=OWNER_WORDS_KIND,
                 )
+                arrivals.append(len(messages) - 1)
             else:
                 _loop()._record_owner_directive(
                     owner_ctx, source="direct_incoming", content=injected, origin=_arrival(),
@@ -183,6 +211,7 @@ def _drain_incoming_messages(
                 _loop()._append_or_merge_user_message(
                     messages, _loop()._owner_marked_content(injected), slot=owner_ctx, kind=OWNER_WORDS_KIND,
                 )
+                arrivals.append(len(messages) - 1)
         except queue.Empty:
             break
 
@@ -199,8 +228,11 @@ def _drain_incoming_messages(
                 if entry.get("host_carried") and getattr(owner_ctx, "_task_acceptance_sealed_fence_token", None):
                     _owner_msg_seen.discard(entry.get("msg_id"))  # a sealed close leaves a carried row as unread mail
                     continue
+                start = len(messages)
                 if shown := inject_relay(owner_ctx, entry, messages):  # rows addressed to this work, read by no round
                     controls["owner_carried_addressed"] = controls.get("owner_carried_addressed", []) + shown
+                arrivals += [at for at in range(start, len(messages))
+                             if messages[at].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND]  # its quoted rows
                 delivered = True
                 ack_content(entry)
                 continue
@@ -213,14 +245,21 @@ def _drain_incoming_messages(
                 acknowledge_transcript_entry(drive_root, task_id, entry, wake_id="owner_pause_wake")
                 continue
             if kind == KIND_HURRY:
-                # HQ1 no-chat contract (§19.7.2 item 6): a typed hurry
-                # control routes structurally — never via
-                # _record_owner_directive, _owner_marked_content, messages, or
-                # owner_message_injected.
-                from ouroboros.owner_hurry import apply_latch
+                # HQ1 no-chat contract (§19.7.2 item 6): a typed hurry control routes structurally — never via
+                # _record_owner_directive, _owner_marked_content or owner_message_injected. Arming the latch gives
+                # the running work one typed row of the owner's act (``HURRY_WORDS``), never a directive.
+                from ouroboros.owner_hurry import HURRY_WORDS, apply_latch
 
-                apply_latch(owner_ctx, entry, event_queue=event_queue)
+                if apply_latch(owner_ctx, entry, event_queue=event_queue):
+                    _loop()._append_or_merge_user_message(messages, HURRY_WORDS, slot=owner_ctx, kind=OWNER_WORDS_KIND)
                 controls["hurry"] = str(entry.get("msg_id") or "hurry")
+                continue
+            from ouroboros.owner_mailbox import KIND_OWNER_MODEL
+            if kind == KIND_OWNER_MODEL:
+                from ouroboros.owner_model import apply_current
+
+                controls["owner_model"] = apply_current(owner_ctx) or controls.get("owner_model", False)
+                acknowledge_transcript_entry(drive_root, task_id, entry, wake_id="owner_model_wake")
                 continue
             dmsg = entry.get("text") or ""
             if kind == KIND_TASK_MESSAGE:
@@ -239,15 +278,19 @@ def _drain_incoming_messages(
                 provenance = str(entry.get("provenance") or "ancestor_task")
                 arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
                 if provenance == "place_event":
+                    from ouroboros.place_intake import arrival_owner_words
                     from ouroboros.presence_continuation import note_place_delivery
                     note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
-                    if confirmed := arrival.get("confirmed_words") or arrival.get("owner_words"):  # provenance, as at the opening
-                        from ouroboros.owner_words import PLACE_CONFIRMED, place_reply_target
+                    arrival = {**arrival, "confirmed_words": arrival_owner_words(owner_ctx, drive_root, entry)}  # now
+                    entry = {**entry, "place_arrival": arrival}  # its delivered prefix reads the same fact
+                    if confirmed := arrival["confirmed_words"]:  # provenance, as at the opening
+                        from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
                         from ouroboros.presence_runner import presence_chat_id
                         room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
                         _loop()._record_owner_directive(owner_ctx, source=PLACE_CONFIRMED, carried=True,
                             content=confirmed, msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
-                            reply_to=place_reply_target(arrival.get("message")), origin=_arrival(received=entry.get("ts")))
+                            **place_row_facts(arrival.get("conversation_id"), arrival.get("message"),
+                                              _arrival(received=entry.get("ts"))))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
@@ -262,6 +305,8 @@ def _drain_incoming_messages(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx, kind=words),
                 )
+                if provenance == "place_event" and (arrival.get("confirmed_words") or arrival.get("owner_words")):
+                    arrivals.append(len(messages) - 1)  # my human's words, from their confirmed account
                 if provenance == "system" and isinstance(entry.get("review_feedback"), dict) and messages:
                     messages[-1].setdefault("review_feedback", []).append(dict(entry["review_feedback"]))
                 ack_content(entry)
@@ -277,34 +322,33 @@ def _drain_incoming_messages(
                                                                            kind=SECRET_OUTCOME_ROW_KIND))
                     ack_content(entry)
                     continue
-            if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):  # host frames around the owner's own act
-                _loop()._record_owner_directive(owner_ctx, source="owner_mailbox", origin=_arrival(received=entry.get("ts")),
-                    content=dmsg, msg_id=str(entry.get("msg_id") or ""))
+            from ouroboros.answer_facts import card_input
+            from ouroboros.owner_words import OWNER_PRESS
+            living = card_input(entry, getattr(owner_ctx, "budget_drive_root", None) or drive_root)
+            if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):
+                _loop()._record_owner_directive(
+                    owner_ctx, source=living.get("source", "owner_mailbox"), content=living.get("content", dmsg),
+                    origin={**_arrival(received=entry.get("ts")), "source_task_id": living.get("source_task_id")},
+                    reply_to=living.get("reply_to"), msg_id=str(entry.get("msg_id") or ""))
                 _loop()._append_or_merge_user_message(messages, dmsg, slot=owner_ctx, kind=OWNER_WORDS_KIND)
+                if living.get("source") == OWNER_PRESS:
+                    mark_press_arrival(owner_ctx, messages[-1])
+                arrivals.append(len(messages) - 1)
                 ack_content(entry)
                 continue
             if kind == KIND_QUIZ_ANSWER:
-                from ouroboros.owner_quiz import late_answer_owner_text
-                from ouroboros.owner_words import answered_card_reply
-                delivery = entry.get("quiz_delivery") or {}
-                answer = delivery.get("answer_snapshot")
-                owner_words = late_answer_owner_text(answer) if isinstance(answer, dict) else dmsg
-                from ouroboros.owner_relay import retain_owner_message
-                held = retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row")) if isinstance(answer, dict) else None
-                _loop()._record_owner_directive(  # the card it answers rides beside it, the asking task's words
-                    owner_ctx, source="owner_quiz_answer", content=owner_words, msg_id=str(entry.get("msg_id") or ""),
-                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"), **_arrival(held, entry.get("ts"))},
-                    reply_to=answered_card_reply(answer, delivery.get("task_id")))
+                source = _record_quiz_delivery(owner_ctx, entry, dmsg)
                 deliver_quiz_answer(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
                                                                        kind=OWNER_WORDS_KIND),
                 )
+                arrivals.append(len(messages) - 1)
+                if source == OWNER_PRESS:
+                    mark_press_arrival(owner_ctx, messages[-1])
                 ack_content(entry)
                 continue
-            # A LATE quiz answer: the owner's row and this entry's text are the
-            # owner's own words; the model reads the FULL card frame rebuilt from the
-            # stored block on the canonical root, the corpus the card beside their words.
+            # A late answer keeps the owner's act or words separately from the full stored card frame.
             model_msg = dmsg
             if entry.get("late_answer") is not None:
                 from ouroboros.owner_quiz import late_answer_model_text
@@ -319,7 +363,8 @@ def _drain_incoming_messages(
                 model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
                                                   entry.get("card_press"), dmsg)
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
-            from ouroboros.owner_words import answered_card_reply, answered_card_source, reply_target
+            from ouroboros.answer_facts import row_source
+            from ouroboros.owner_words import OWNER_PRESS, answered_card_reply, answered_card_source, reply_target
 
             chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
             held = _stamp_owner_delivery(  # the chat row is held first: its corpus row names the same room and time
@@ -329,15 +374,19 @@ def _drain_incoming_messages(
                 text=dmsg,
                 ts=str(entry.get("ts") or ""),
             )
+            source = living.get("source") or row_source(entry, "owner_mailbox", chats)
+            target = (living.get("reply_to") or answered_card_reply(*answered_card_source(entry, chats))
+                      or reply_target(chats, entry.get("reply_reference")))
+            _append_reply_context(messages, target, owner_ctx)
             _loop()._record_owner_directive(
                 owner_ctx,
-                source="owner_mailbox",
-                content=_owner_content(entry, drive_root, task_id),
+                source=source,
+                content=living["content"] if living else _owner_content(entry, drive_root, task_id), words=None if living else dmsg,  # the rendering, its exact text beside
                 msg_id=str(entry.get("msg_id") or ""),
                 # The same message relayed, or read from its room, is one row: its room and client id name it.
-                origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id")},
-                reply_to=answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
-                or reply_target(chats, entry.get("reply_reference")) or None,
+                origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id"),
+                        "source_task_id": living.get("source_task_id"), "quiz_id": living.get("quiz_id")},
+                reply_to=target or None,
             )
             from ouroboros.client_surface import noted_owner_text
 
@@ -350,6 +399,9 @@ def _drain_incoming_messages(
                 messages, _loop()._owner_marked_content(owner_content),
                 slot=owner_ctx, kind=OWNER_WORDS_KIND,
             )
+            arrivals.append(len(messages) - 1)
+            if source == OWNER_PRESS:
+                mark_press_arrival(owner_ctx, messages[-1])
             ack_content(entry)
             if event_queue is not None:
                 try:
@@ -360,14 +412,26 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
-    if owner_ctx is not None:  # my human's rows reach every live member below this run, by identity, each once
+    if arrivals:  # my human's words or press reached this work: the host's facts close the last row of theirs
+        from ouroboros.arrival_notes import mark_arrival
+        mark_arrival(owner_ctx, messages, arrivals)  # by position, before the facts row below shifts them
+    if owner_ctx is not None and drive_root is not None:  # what happened since this work last heard my human
+        from ouroboros.return_facts import place_before_words
+        place_before_words(owner_ctx, messages, start, before_rows)
+    if owner_ctx is not None:  # the catch-up of the host's carriage at receipt: every live member below, each row once
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
         carry_to_members(owner_ctx, delivered=delivered or grown)
-        if place_live_runs:  # and the sessions this run holds open, each row once per run
+        if place_live_runs:  # and the sessions this run holds open, each row once per run (and the host's facts)
             from ouroboros.delegate_interactions import place_rows_into_runs
             for line in place_rows_into_runs(owner_ctx):
                 _loop()._append_or_merge_user_message(messages, line, slot=owner_ctx)
+    _show_held_quote_handles(owner_ctx, messages)
+    return controls
+
+
+def _show_held_quote_handles(owner_ctx: Any, messages: List[Dict[str, Any]]) -> None:
+    """Show this turn's available quote handles when their list changes."""
     if owner_ctx is not None and getattr(owner_ctx, "_held_owner_messages", None) and (
             getattr(owner_ctx, "task_metadata", None) or {}).get("delegation_role") != "subagent":
         handles = list(owner_ctx._held_owner_messages)  # a helper has no verb that takes a handle: no list for it
@@ -375,7 +439,29 @@ def _drain_incoming_messages(
             _loop()._append_or_merge_user_message(messages,
                 "[Host fact: owner_quote_handles held by this turn]\n" + json.dumps(handles), slot=owner_ctx)
             owner_ctx._quote_handles_shown = handles
-    return controls
+
+
+def _record_quiz_delivery(ctx, entry: dict, text: str) -> str:
+    """Record the live answer and its card before delivery. Return its input type for the new arrival row."""
+    from ouroboros.answer_facts import answer_source
+    from ouroboros.owner_quiz import late_answer_owner_text
+    from ouroboros.owner_relay import retain_owner_message
+    from ouroboros.owner_words import answered_card_reply
+
+    delivery = entry.get("quiz_delivery") or {}
+    answer = delivery.get("answer_snapshot")
+    held = None
+    if isinstance(answer, dict):
+        text = late_answer_owner_text(answer)
+        held = retain_owner_message(ctx, (answer.get("delivery") or {}).get("answer_row"))
+    source = answer_source(answer)
+    _loop()._record_owner_directive(
+        ctx, source=source, content=text, msg_id=str(entry.get("msg_id") or ""),
+        origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"),
+                **_arrival(held, entry.get("ts"))},
+        reply_to=answered_card_reply(answer, delivery.get("task_id")),
+    )
+    return source
 
 
 def _context_overflow_retries(tool_ctx: Any, record: str = "_context_overflow_retries") -> set:
@@ -395,8 +481,10 @@ def _run_round_compaction(
     """The round's transcript maintenance before the send: the mind's pending authored
     view (Main fit owns every automatic decision), then -- on the transcript that will
     actually go out -- the host roster of independent roots as a TAIL row when it changed
-    (owner 6C). The note follows any view so it is never folded into a rewrite, and precedes
-    the acceptance observation and the seal."""
+    (owner 6C), and the mark changes no row or memory_mark result in view states yet
+    (``mark_anchors.append_mark_changes``). These rows follow any view so they are never
+    folded into a rewrite, and precede the acceptance observation and the seal."""
+    from ouroboros.mark_anchors import append_mark_changes
     from ouroboros.peer_roster import maybe_append_roster_note
     from ouroboros.tools.owner_delivery import publish_pending_owner_dialogue
 
@@ -423,6 +511,7 @@ def _run_round_compaction(
     maybe_append_roster_note(ctx.tools._ctx, messages, ctx.drive_root)
     from ouroboros.skill_context_snapshot import maybe_append_skill_snapshots
     maybe_append_skill_snapshots(ctx.tools._ctx, messages, ctx.drive_root)
+    append_mark_changes(ctx.tools._ctx, messages)
     return messages
 
 
@@ -448,7 +537,7 @@ def _retire_superseded_host_state(messages, ctx):
 
 def _run_authored_context_view(messages, ctx, pending, selected_names):
     """Apply one source/schema view together at the existing completed boundary."""
-    from ouroboros.context_budget import ContextReclaimRequest
+    from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
     from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
     from ouroboros.tool_policy import request_tool_schema_selection, select_tool_schemas
 
@@ -471,7 +560,9 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         requested = request_tool_schema_selection(tool_ctx, registry, names,
                                                   context_mode=mode, current_schemas=current_tools)
         selected_names = requested.selection.chosen if mode == "nano" else None
-    schemas = (list(select_tool_schemas(registry.schemas(), context_mode=mode, schema_names=selected_names).schemas)
+    from ouroboros.tool_policy import nano_standing
+    schemas = (list(select_tool_schemas(registry.schemas(), context_mode=mode, schema_names=selected_names,
+                                        standing=nano_standing(tool_ctx)).schemas)
                if selected_names is not None else list(current_tools))
     fit_candidate = ctx.fit_candidate
     if fit_candidate is None:
@@ -490,7 +581,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         try:
             if plan is None or not observed_core or plan.core_sha256 != observed_core:
                 raise ValueError("memory snapshot changed; inspect the current view")
-            memory_plan = select_view(plan, mode, addresses, owner_note=bool(proposal.get("working_note", "").strip()))
+            memory_plan = select_view(plan, mode, addresses, owner_note=bool(proposal.get("working_note", "").strip()),
+                                      tool_names=[schema["function"]["name"] for schema in schemas])
         except ValueError as exc:
             tool_ctx._pending_compaction = None
             tool_ctx._context_view_receipt = {"status": "selection_failed", "reason": str(exc)}
@@ -520,14 +612,14 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             route_fp="actor", round_id=str(ctx.round_idx),
             transcript_sha256=context_reclaim_transcript_sha256(messages),
             measurement_basis="cold_estimate", measurement_density=1.0, reclaim_goal_tokens=0,
-            **{key: proposal[key] for key in ("working_note", "expected_view_revision", "keep_unit_ids", "restore_unit_refs", "schema_names")},
+            **authored_view_fields(proposal),
         )
         candidate, result = compact_tool_history_llm(
             messages, request=request, observed_messages=observed["messages"],
             observed_tool_schemas=observed["tool_schemas"], tool_schemas=schemas,
             fit_candidate=fit_candidate, drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent,
             task_id=ctx.task_id, trace_refs_by_tool_call_id=reclaim_trace_refs(tool_ctx),
-            exposed_units=observed.get("exposed_units"),
+            exposed_units=observed.get("exposed_units"), written_at=proposal.get("written_at"),
         )
         receipt = asdict(result)
         from ouroboros.context_source_view import retire_host_rows_after_fold
@@ -556,7 +648,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         from ouroboros.memory_floor import owner_note_capsule
         try:
             note = owner_note_capsule(memory_plan, addresses, proposal.get("working_note", ""), request,
-                drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, task_id=ctx.task_id, mode=mode)
+                drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, task_id=ctx.task_id, mode=mode,
+                written_at=proposal.get("written_at"))
             candidate = memory_plan.reproject_transcript(candidate, mode) + ([note] if note else [])
             receipt.update(status="applied", memory_view=memory_price)
         except ValueError as exc:
@@ -566,6 +659,9 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         from ouroboros.tools.tool_discovery import update_resident_notice
         candidate = copy.deepcopy(candidate)
         update_resident_notice(ctx.tools, schemas, candidate)
+    if pending is not None:  # an applied view's facts, kept with the receipt they appear in
+        from ouroboros.tools.compact_context import fold_receipt_facts
+        receipt.update(fold_receipt_facts(proposal["observed"]["messages"], candidate, receipt))
     receipt_source, retained_receipt = None, None
     if receipt["status"] != "no_op":
         from ouroboros.artifacts import store_actor_source_bytes
@@ -579,26 +675,31 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(),
                 data=raw, extension="json")
             notice = {"status": receipt["status"], "receipt_source": source}
+            from ouroboros.context_timing import prologue_step
             from ouroboros.observability import promote_task_source_ref
             from ouroboros.task_custody import canonical_owner_root
 
             root = ctx.drive_root or pathlib.Path(ctx.drive_logs).parent
-            try:
-                promote_task_source_ref(root, getattr(tool_ctx, "budget_drive_root", None) or canonical_owner_root(root),
-                                        source, task_id=ctx.task_id)
+            try:  # its time rides the next round's receipt as ``prologue.source_retention``
+                prologue_step(tool_ctx, "source_retention", promote_task_source_ref, root,
+                              getattr(tool_ctx, "budget_drive_root", None) or canonical_owner_root(root),
+                              source, task_id=ctx.task_id)
                 retained_receipt = copy.deepcopy(receipt)
                 receipt_source = {**source, "task_id": ctx.task_id}
-            except (OSError, ValueError):
-                pass  # Local model receipt remains valid; the event keeps all structures.
+            except (OSError, ValueError) as exc:
+                # Local model receipt remains valid; the event keeps all structures. The raise does not tell a
+                # temporary failure from a lasting one (an owed walk raises OSError, an unavailable source a
+                # ValueError, each for both), so the view names the error itself.
+                notice["receipt_retention_error"] = f"{type(exc).__name__}: {exc}"
         except (OSError, ValueError):
             notice = {"status": receipt["status"], "receipt_source": "unavailable"}
         if memory_price:
             notice["memory_view"] = memory_price
         if receipt["status"] == "applied":  # what the fold freed and kept; the next request's count measures its re-read
-            from ouroboros.tools.compact_context import residue_by_kind
+            from ouroboros.tools.compact_context import FOLD_FACT_KEYS, residue_by_kind
             notice.update(reclaimed_tokens=receipt.get("reclaimed_tokens"), residue=residue_by_kind(candidate),
                           resulting_input_tokens=(receipt.get("fit") or {}).get("estimated_input_tokens"),
-                          basis="host estimates")
+                          basis="host estimates", **{key: receipt[key] for key in FOLD_FACT_KEYS if receipt.get(key)})
         exceptions = receipt.get("request_exceptions") or []
         if receipt.get("inherited_selections_unapplied"):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
@@ -607,11 +708,15 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n" + json.dumps(notice, ensure_ascii=False)}]
         try:
             final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
-            if final_fit.get("accepted") is not True and exceptions:
+            for detail in ("request_exceptions", "bodies_removed", "notes_kept"):
+                if final_fit.get("accepted") is True or detail not in notice:
+                    continue
                 # Optional detail must not undo an otherwise fitting view. The
                 # counted omission still points to the whole retained receipt.
-                notice.pop("request_exceptions")
-                notice["request_exceptions_omitted"] = len(exceptions)
+                # The notes themselves stay in the view; only their list leaves.
+                notice[f"{detail}_omitted"] = len(notice.pop(detail))
+                if detail == "bodies_removed":
+                    notice.pop("restore_checkpoint", None)
                 with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n"
                     + json.dumps(notice, ensure_ascii=False)}]
                 final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
@@ -705,10 +810,11 @@ class _RoundLimitContext:
     # provider prefix as the working round instead of rebuilding it tool-less.
     # LAST field: existing positional construction (tests included) stays valid.
     tool_schemas: Optional[List[Dict[str, Any]]] = None
+    emit_progress: Optional[Callable[..., None]] = None  # the room's progress: a forced answer shows what it displaced
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds}). Consider decomposing into subtasks via schedule_subagent."
+    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds})."
     prompt = (
         f"[ROUND_LIMIT] {finish_reason} Produce your best final answer now from the "
         "verified work so far; clearly mark anything unverified or incomplete. An honest "
@@ -890,7 +996,7 @@ def _handle_model_wait_control(
     remains the supervisor's death-then-settlement transaction.
     """
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
-    from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait
+    from ouroboros.model_wait import OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait
     from ouroboros.transport_custody import outcome_unknown_on_chain
 
     reason = error.control_reason
@@ -899,6 +1005,8 @@ def _handle_model_wait_control(
     # catches a hold's interruption raised outside the model call, must not
     # hand the same error back here.
     error.control_rails_seen = True
+    if reason in {"owner_model", OWNER_WORDS_WAITING}:
+        return None  # a refused call's wait or a granted repeat yielded; the next drain applies the primary or the words
     if reason == "owner_launch_authority_unavailable":
         # Only the positively unsent handoff waits, and only on positive lock contention;
         # sent effects never retry. Reuse this task's live stack and control/deadline
@@ -958,7 +1066,7 @@ def _handle_model_wait_control(
         # is saved on the technical rail where that capture works; otherwise this typed cause ends it.
         from ouroboros.budget_pause import RAIL_CONTROL_AUTHORITY, request_pause
 
-        request_pause(ctx, rail=RAIL_CONTROL_AUTHORITY, scope="task", reason_text=f"control authority unreadable: {reason}")
+        request_pause(ctx, rail=RAIL_CONTROL_AUTHORITY, scope="task", reason_text=f"control authority unreadable: {reason}", cause=reason)
         raise error
     if reason not in {"cancelled", "finalize_requested", "deadline", "execution_deadline", "absolute_ceiling", "accounting_wait_expired"}:
         raise error
@@ -1043,6 +1151,24 @@ def _handle_model_wait_control(
     return result
 
 
+def local_deadline_remaining(tool_ctx: Any, limit_ctx: Any = None) -> Optional[float]:
+    """Seconds left on the task's explicit calendar ``deadline_at`` or API/CLI execution budget, whichever ends first;
+    ``None`` without either. A read deadline is also stamped on ``limit_ctx`` for the round's later rails."""
+    from ouroboros.model_wait import explicit_execution_window_remaining
+
+    meta = getattr(tool_ctx, "task_metadata", {})
+    if not isinstance(meta, dict):
+        return None
+    deadline = parse_deadline_ts(meta.get("deadline_at"))
+    execution_left = explicit_execution_window_remaining(tool_ctx)
+    if deadline is None and execution_left is None:
+        return None
+    if deadline is not None and limit_ctx is not None:
+        limit_ctx.deadline_ts = deadline.timestamp()
+    return min(value for value in ((deadline - _loop().utc_now()).total_seconds() if deadline else None,
+                                   execution_left) if value is not None)
+
+
 def _maybe_deadline_local_finalize(
     ctx: _RoundLimitContext, tools: ToolRegistry
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
@@ -1055,20 +1181,8 @@ def _maybe_deadline_local_finalize(
     one tool-less best answer — independent of the supervisor — so a bound
     NEVER returns emptiness. Never fires without one (no synthesized deadline;
     leaderboard timeouts stay legal); confirmed waits extend only the execution budget."""
-    meta = getattr(tools._ctx, "task_metadata", {})
-    if not isinstance(meta, dict):
-        return None
-    from ouroboros.model_wait import explicit_execution_window_remaining
-
-    deadline = parse_deadline_ts(meta.get("deadline_at"))
-    execution_left = explicit_execution_window_remaining(tools._ctx)
-    if deadline is None and execution_left is None:
-        return None
-    if deadline is not None:
-        ctx.deadline_ts = deadline.timestamp()
-    remaining = min(value for value in ((deadline - _loop().utc_now()).total_seconds() if deadline else None,
-                                        execution_left) if value is not None)
-    if remaining > task_pacing.effective_finalization_reserve_sec(tools._ctx):
+    remaining = local_deadline_remaining(tools._ctx, ctx)
+    if remaining is None or remaining > task_pacing.effective_finalization_reserve_sec(tools._ctx):
         return None
     prompt = (
         f"[DEADLINE] The task's remaining time is ~{max(0.0, remaining)/60:.1f} min "
@@ -1080,12 +1194,32 @@ def _maybe_deadline_local_finalize(
     return _loop()._forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="deadline_local")
 
 
+def _keep_final_over_routeless_round(limit_ctx: _RoundLimitContext, tools: ToolRegistry, controls: Dict[str, Any]):
+    """A round that only the routeless note asks for (``place_reply.routeless_note_pending``, a restored note too) buys
+    nothing past a rail. When Wrap up or the supervisor's grace, a time control, the deadline reserve or a money stop
+    now ends the work, the note is withdrawn once and the retained final finishes as it stood, through the ordinary
+    exit, before any forced wrap-up or pause; owner Stop now keeps its own rail. ``None``: no such round, or it holds."""
+    from ouroboros.place_reply import NO_SEND_KEY, _round_affordable, routeless_note_pending
+
+    ctx, stop = tools._ctx, str(controls.get("finalize_now") or "").splitlines()
+    candidate = getattr(ctx, "_delivery_candidate", None)
+    if (not routeless_note_pending(getattr(limit_ctx, "llm_trace", None), candidate, getattr(limit_ctx, "messages", None))
+            or (stop and stop[0].strip() == REASON_OWNER_STOPPED_DIRECT_TURN)
+            or (not stop and _round_affordable(ctx, limit_ctx, ahead=False))):
+        return None
+    candidate.finalization_control = "candidate"  # withdrawn: the note stays spent and is never shown again
+    limit_ctx.llm_trace[NO_SEND_KEY]["withdrawn"] = True
+    return _loop()._finalize_loop_candidate(None, limit_ctx, tools, lambda *_a, **_k: None, resume_candidate=True)
+
+
 def _maybe_early_finalize(
     limit_ctx: _RoundLimitContext, tools: ToolRegistry, controls: Dict[str, Any],
     *, transport_episode: Optional[TransportWaitEpisode] = None,
     cost_ceiling: Optional[task_pacing.CostCeiling] = None,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Consume supervisor grace, then local deadline, then the round's cost rail."""
+    if (kept := _keep_final_over_routeless_round(limit_ctx, tools, controls)) is not None:
+        return kept
     if controls.get("finalize_now"):
         # The owner's "Stop now" on a direct turn costs no call, so it is
         # honest whatever the transport is doing — never reported to the owner
@@ -1205,7 +1339,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     pass (``refusal_policy``) frees a shown chosen read only after a provider's refusal (an estimate
     never cuts a chosen read)."""
     from ouroboros.context_budget import ContextReclaimRequest
-    from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
+    from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.context_source_view import emergency_address_view
 
     measurement = disposition.measurement
     tool_ctx = ctx.tools._ctx
@@ -1264,10 +1399,11 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     before = plan.projection(mode).system_content_json
     capacity = measurement.capacity_total_tokens
     rebound = plan.reproject_for_route(
-        window_tokens=int(capacity or 0), known_window=capacity is not None,
+        window_tokens=int(capacity or 0), known_window=capacity is not None, admitted=True,
         ratio=measurement.measurement_density,
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
         current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
+        reasoning_effort=str(getattr(ctx, "active_effort", "") or ""),  # the shape the round measured
         refused_tokens=(int(saving) if saving or (saving == 0 and slack)  # a slack-only ask states no excess
                         else max(1, int(measurement.capacity_deficit_tokens or 0))),
         **({"slack_tokens": int(slack)} if slack else {}),
@@ -1282,13 +1418,13 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
     rewrite_view(ctx.tools._ctx, ctx.task_id, "memory_coarsened")
     ctx.tools._ctx.messages = ctx.messages
-    from ouroboros.loop_model_call import _adopt_view_facts
+    from ouroboros.loop_model_call import _adopt_view_facts, _shown
 
     _adopt_view_facts(ctx.tools._ctx, rebound, mode)  # the narrowed view's fact, read back as a memory shortage
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "checkpoint_kind": "context_memory_coarsened", "round": ctx.round_idx,
-        "route_fp": measurement.route_fp, "effective_mode": mode,
-        "window_tokens": measurement.capacity_total_tokens,
+        "route_fp": measurement.route_fp, **_shown(rebound, mode),
+        "window_tokens": rebound.window_tokens,
         "input_tokens_estimate": measurement.estimated_input_tokens,
     })
     return True

@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 WIRE_ACTION_APPLICATION_SOURCES = frozenset({"durable", "pending", "task_local"})
 _REASONING_DROP_FIELDS = frozenset({
     "reasoning_effort",
+    "reasoning",
     NESTED_REASONING_FIELD,
     *ANTHROPIC_REASONING_FIELDS,
 })
@@ -104,11 +105,12 @@ def direct_openai_tool_candidate_ladder(
 
     The helper only truncates.  The accounting rail remains authoritative and
     will refuse any dispatch after its caller-owned limit is exhausted.
+    ``provider_default`` (a request carrying no effort: Provider Test) takes the same rungs.
     """
     from ouroboros.config import EFFORT_SCALE
 
     effort = str(requested_effort or "").strip().lower()
-    if effort not in EFFORT_SCALE:
+    if effort not in (*EFFORT_SCALE, "provider_default"):
         raise ValueError("unsupported requested effort")
     try:
         remaining = max(0, int(remaining_physical_attempts))
@@ -443,6 +445,8 @@ def _drop_path(payload: Dict[str, Any], path: str) -> None:
 def _set_payload_effort(payload: Dict[str, Any], carrier: str, effort: str) -> None:
     if carrier == "reasoning_effort":
         payload["reasoning_effort"] = effort
+    elif carrier == "reasoning":
+        payload["reasoning"]["effort"] = effort
     elif carrier == NESTED_REASONING_FIELD:
         payload["extra_body"]["reasoning"]["effort"] = effort
     elif carrier == "anthropic.adaptive":
@@ -783,7 +787,7 @@ def wire_semantic_kind_allowed(
         if kind not in {"anthropic_message", "anthropic_tool_use"}:
             return False
         has_tool = kind == "anthropic_tool_use"
-    elif profile.api_surface == "chat.completions":
+    elif profile.api_surface in {"chat.completions", "responses"}:  # both read back into one canonical form
         if profile.tool_dialect == "openai_chat_custom":
             if kind not in {"chat_message", "custom_tool_call_json_object"}:
                 return False

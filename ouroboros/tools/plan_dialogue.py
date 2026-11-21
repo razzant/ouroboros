@@ -338,7 +338,7 @@ def fit_dialogue_view(packet: str, own: dict, capacity_chars: int, *, measure=le
 
 def session_input_limits(slots: list) -> dict:
     """Read engine ASK budgets once for fresh delivery, never for paid replay."""
-    from ouroboros.claudexor_daemon import ensure_owned_gateway
+    from ouroboros.execution_domain import native_gateway
     from ouroboros.review_execution import session_route_for_review_slot
     from ouroboros.tools.plan_review_runtime import slot_is_session
 
@@ -353,7 +353,7 @@ def session_input_limits(slots: list) -> dict:
         return {}
     gateway = None
     try:
-        gateway = ensure_owned_gateway()
+        gateway = native_gateway()  # where the seats will run: the domain's work engine, else the owned one
         limits = gateway.ask_input_limits()
         return {sid: dict(limits[route]) for sid, route in routes.items() if route in limits}
     except Exception:

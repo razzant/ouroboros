@@ -33,14 +33,12 @@ def _settings_client(monkeypatch, tmp_path, current: dict):
 
 
 def test_settings_post_updates_budget_limits_and_per_task_threshold(monkeypatch, tmp_path):
-    import supervisor.message_bus as bus_mod
     import supervisor.state as state_mod
 
     from ouroboros.config import SETTINGS_DEFAULTS as _defaults
     current = dict(_defaults)
     current["TOTAL_BUDGET"] = 10.0
     monkeypatch.setattr(state_mod, "TOTAL_BUDGET_LIMIT", 10.0)
-    monkeypatch.setattr(bus_mod, "TOTAL_BUDGET_LIMIT", 10.0)
 
     client = _settings_client(monkeypatch, tmp_path, current)
 
@@ -49,7 +47,6 @@ def test_settings_post_updates_budget_limits_and_per_task_threshold(monkeypatch,
     assert resp.status_code == 200, resp.text
     assert resp.json().get("immediate_changed") is True
     assert state_mod.TOTAL_BUDGET_LIMIT == 25.0
-    assert bus_mod.TOTAL_BUDGET_LIMIT == 25.0
 
     resp = client.post("/api/settings", json={"OUROBOROS_PER_TASK_COST_USD": "7.5"})
 

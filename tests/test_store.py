@@ -663,6 +663,19 @@ def test_copying_a_held_store_file_onto_itself_raises_and_keeps_its_bytes(tmp_pa
     assert pathlib.Path(store.copy_file_bytes(path, tmp_path / "copy.sqlite")).stat().st_size == size
 
 
+def test_the_same_file_is_refused_before_copy2_is_reached(tmp_path, monkeypatch):
+    """From CPython 3.12 a Windows ``copy2`` copies before its own same-file check, so the helper refuses first."""
+    plain, calls = tmp_path / "plain.txt", []
+    plain.write_bytes(b"keep")
+    monkeypatch.setattr(store.shutil, "copy2", lambda source, destination, **kwargs: calls.append(destination))
+    for destination in (plain, tmp_path):
+        with pytest.raises(shutil.SameFileError):
+            store.copy_file_bytes(plain, destination)
+    assert calls == [] and plain.read_bytes() == b"keep"
+    store.copy_file_bytes(plain, tmp_path / "other.txt")
+    assert calls == [tmp_path / "other.txt"]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows reads store files through ordinary handles")
 def test_a_kept_reader_reads_like_a_file_and_continues_short_reads(tmp_path, monkeypatch):
     from ouroboros import store_import

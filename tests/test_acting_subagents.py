@@ -18,7 +18,8 @@ from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, ACTING_SUBAGENT_TO
 from ouroboros.runtime_mode_policy import mode_allows_protected_write
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros import subagent_worktrees as sw
-from tests._store_shared import read_result, seed_result
+from tests._store_shared import seed_result
+from tests._workspace_git import capture_manifest_fields, publish_capture
 
 
 def _git(repo, *args, check=True, text=True):
@@ -468,49 +469,14 @@ def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: 
     return art
 
 
-def _make_child_delete_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: str, rel: str, parent_task_id: str = "parent1", surface: str = ""):
-    """Produce a real workspace.patch that deletes ``rel``."""
-    from ouroboros.artifacts import task_artifact_dir_path
-    from hashlib import sha256
-
-    (target_repo / rel).unlink()
-    patch = _git(target_repo, "diff", "--binary", "HEAD", "--", text=False).stdout
-    _git(target_repo, "checkout", "--", rel)
-    art = task_artifact_dir_path(drive, child_id, create=True)
-    patch_bytes = patch
-    (art / "workspace.patch").write_bytes(patch_bytes)
-    digest = sha256(patch_bytes).hexdigest()
-    manifest = {
-        "schema_version": 1,
-        "status": "ready_with_changes",
-        "patch_name": "workspace.patch",
-        "sha256": digest,
-        "tracked_changed": [rel],
-        "untracked_included": [],
-        "diffstat": f"{rel} | 1 -",
-    }
-    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
-    result = {
-        "_schema_version": 1,
-        "id": child_id,
-        "task_id": child_id,
-        "parent_task_id": parent_task_id,
-        "root_task_id": parent_task_id,
-        "delegation_role": "subagent",
-        "status": "done",
-    }
-    if surface:
-        result["task_constraint"] = {"mode": "acting_subagent", "surface": surface}
-    seed_result(drive, child_id, result)
-    return art
-
-
-def _record_child_workspace_root(drive: pathlib.Path, child_id: str, workspace: pathlib.Path) -> None:
-
-    child_result = read_result(drive, child_id)
-    child_result["workspace_root"] = str(workspace)
-    child_result.setdefault("task_constraint", {})["write_root"] = str(workspace)
-    seed_result(drive, child_id, child_result)
+def _publish_external_child(drive, child_id, workspace, base):
+    _, manifest = publish_capture(drive, {
+        "id": child_id, "parent_task_id": "parent-ext", "root_task_id": "parent-ext", "delegation_role": "subagent",
+        "workspace_root": str(workspace), "workspace_mode": "external",
+        "task_constraint": {"mode": "acting_subagent", "surface": "external_workspace",
+                            "write_root": str(workspace), "base_sha": base},
+    })
+    assert manifest["status"] == "ready_with_changes", manifest
 
 
 def _integrate_ctx(target_repo, drive, **constraint_kw):
@@ -601,16 +567,33 @@ def test_integrate_reject_records_verdict(tmp_path):
     assert child.get("child_result_disposition") == "irrelevant"
 
 
-def test_integrate_protected_blocked_in_advanced(tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+@pytest.mark.parametrize(("mode", "caller"), [
+    ("advanced", "parent"), ("advanced", "acting"), ("pro", "acting"), ("cyber_pro", "acting"), ("pro", "granted"),
+])
+def test_integrate_protected_refusal_names_its_actual_cause(tmp_path, monkeypatch, mode, caller):
+    """The gate stays: mode allowing protected writes AND an acting caller's own protected_paths_grant.
+    #2734: a missing grant is named as the integrating task's own, never as a mode to switch to, and the
+    captured result stays for its parent; a mode refusal keeps the policy's advice."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
     repo = tmp_path / "repo"
     _init_repo(repo, {"ouroboros/safety.py": "X = 1\n"})
     drive = tmp_path / "data"; drive.mkdir()
     _make_child_patch(repo, drive, "child3", "ouroboros/safety.py", "X = 2\n")
-    ctx = _integrate_ctx(repo, drive)
-    out = _integrate_subagent_patch(ctx, task_id="child3")
-    assert "protected" in out.lower() or "PROTECTED" in out
+    acting = {} if caller == "parent" else {"mode": ACTING_SUBAGENT_MODE, "surface": "self_worktree",
+                                            "protected_paths_grant": caller == "granted"}
+    out = _integrate_subagent_patch(_integrate_ctx(repo, drive, **acting), task_id="child3")
+    if caller == "granted":
+        assert "Integrated subagent patch" in out, out
+        assert (repo / "ouroboros/safety.py").read_text(encoding="utf-8") == "X = 2\n"
+        return
+    assert out.startswith("⚠️ CORE_PROTECTION_BLOCKED") and "ouroboros/safety.py" in out, out
+    assert ("protected_paths_grant" in out) == (caller == "acting"), out
+    assert ("Switch to runtime_mode" in out) == (caller == "parent"), out
+    if caller == "acting":
+        assert f"runtime_mode={mode!r}" in out and "kept unapplied" in out and "your parent" in out, out
+    from ouroboros.task_status import load_effective_task_result
+    assert not load_effective_task_result(drive, "child3").get("child_result_disposition")  # the result stays
     assert (repo / "ouroboros/safety.py").read_text(encoding="utf-8") == "X = 1\n"  # unchanged
 
 
@@ -734,13 +717,12 @@ def test_integrate_external_workspace_verifies_shared_files_without_reapplying(t
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext1", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     # Production external_workspace children write into the same directory the parent
     # can inspect; integration should verify, not apply the patch a second time.
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext1", workspace)
+    _publish_external_child(drive, "ext1", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -762,11 +744,11 @@ def test_integrate_external_workspace_rejects_existing_but_mismatched_files(tmp_
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext-drift", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
+    (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
+    _publish_external_child(drive, "ext-drift", workspace, base)
     (workspace / "a.txt").write_text("hi\ndrifted\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-drift", workspace)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -789,11 +771,10 @@ def test_integrate_external_workspace_verifies_without_parent_active_workspace(t
     system_repo = tmp_path / "system"
     _init_repo(system_repo, {"README.md": "system\n"})
     workspace = tmp_path / "project"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "state"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext-project", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-project", workspace)
+    _publish_external_child(drive, "ext-project", workspace, base)
     ctx = ToolContext(repo_dir=system_repo, drive_root=drive, task_id="parent-ext")
 
     monkeypatch.setattr("ouroboros.tool_access._user_files_root", lambda: tmp_path)
@@ -814,11 +795,10 @@ def test_integrate_external_workspace_verifies_assigned_child_root_outside_paren
     parent_workspace = tmp_path / "parent-project"
     _init_repo(parent_workspace, {"a.txt": "parent\n"})
     child_workspace = tmp_path / "other-project"
-    _init_repo(child_workspace, {"a.txt": "hi\n"})
+    base = _init_repo(child_workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(child_workspace, drive, "ext-other", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     (child_workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-other", child_workspace)
+    _publish_external_child(drive, "ext-other", child_workspace, base)
     ctx = ToolContext(
         repo_dir=system_repo,
         drive_root=drive,
@@ -840,11 +820,10 @@ def test_integrate_external_workspace_verifies_deletions(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"obsolete.txt": "remove me\n"})
+    base = _init_repo(workspace, {"obsolete.txt": "remove me\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_delete_patch(workspace, drive, "ext-delete", "obsolete.txt", parent_task_id="parent-ext", surface="external_workspace")
     (workspace / "obsolete.txt").unlink()
-    _record_child_workspace_root(drive, "ext-delete", workspace)
+    _publish_external_child(drive, "ext-delete", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -861,19 +840,15 @@ def test_integrate_external_workspace_verifies_deletions(tmp_path):
     assert verdict["files"] == ["obsolete.txt"]
 
 
-def test_integrate_external_workspace_files_derived_from_patch_not_manifest(tmp_path):
+def test_integrate_external_workspace_files_derived_from_patch_not_manifest(tmp_path, monkeypatch):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    art = _make_child_patch(workspace, drive, "ext-lie", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
-    manifest = json.loads((art / "workspace_patch.json").read_text(encoding="utf-8"))
-    manifest["tracked_changed"] = []
-    manifest["untracked_included"] = []
-    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
+    capture_manifest_fields(monkeypatch, tracked_changed=[], untracked_included=[])
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-lie", workspace)
+    _publish_external_child(drive, "ext-lie", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -1245,7 +1220,7 @@ def test_acting_browser_evaluate_runs_and_keeps_resource_targets(tmp_path, monke
         def set_default_timeout(self, ms):
             calls.append(("default_timeout", ms))
 
-        def evaluate(self, script):
+        async def evaluate(self, script):
             calls.append(script)
             return 2
 
@@ -1253,7 +1228,15 @@ def test_acting_browser_evaluate_runs_and_keeps_resource_targets(tmp_path, monke
     monkeypatch.setattr(browser_mod, "_ensure_browser", lambda ctx, *_args, **_kwargs: (page, ctx.browser_state))
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
     registry.set_context(ctx)
+    from tests._browser_fakes import track_sessions, close_generations
+    sessions = track_sessions(monkeypatch)
+    try:
+        _acting_evaluate_checks(registry, ctx, page, calls, drive)
+    finally:
+        close_generations(*sessions)
 
+
+def _acting_evaluate_checks(registry, ctx, page, calls, drive):
     assert registry.execute("browser_action", {"action": "evaluate", "value": "1 + 1"}) == "2"
     # The requested expression executes (wrapped in the in-page Promise.race
     # timeout bound — harness-health O5); the contract is the script REACHES

@@ -51,3 +51,39 @@ def test_measured_envelope_prices_physical_pressure_without_changing_window(monk
     assert fitted.window_tokens == window and fitted.output_reserve_tokens == reserve
     assert fitted.core.memory_view_json == core.memory_view_json
     assert body in json.dumps(json.loads(core.memory_view_json), ensure_ascii=False)
+
+
+@pytest.mark.parametrize("effort", ["", "high"])
+def test_a_route_reprojection_counts_the_shown_request_as_its_round_does(monkeypatch, effort):
+    """A rebind measures the shown request as the round does (``measure_main_fit``): its messages and schemas in one
+    count, in the shape this provider and effort send (direct OpenAI reasoning: a custom catalog and calls). A carried
+    witness of that count leaves no envelope difference; a larger one leaves exactly its own. 15.11.2026: schemas
+    priced apart, with separator spaces, and the leading system row's host-only block count read as envelope."""
+    tools = [{'type': 'function', 'function': {'name': f'tool_{i}', 'description': 'Do one small fixture thing.',
+        'parameters': {'type': 'object', 'properties': {'path': {'type': 'string', 'description': 'A path.'}},
+                       'required': ['path']}}} for i in range(60)]  # small enough for a custom catalog to carry
+    snap = syn.snapshot(room_facts=syn.room('1'), story=[], conversations=[])
+    core = cf.ContextCore('Core', 'BIBLE', '', '', 'Identity', 'Facts', '"Assignment"', False,
+                          memory_view_json=mv.snapshot_json(snap))
+    monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *a, **kw: 1.0)
+    plan = cf.build_context_fit_plan(None, core, {'id': 'envelope', '_is_direct_chat': True}, preferred_mode='max',
+        tool_schemas=tools, reasoning_effort=effort, route_resolver=lambda *a, **kw: (
+            {'provider': 'openai', 'model': 'fixture'},
+            SimpleNamespace(route_fp='', status='confirmed', stale=False, window_tokens=1000000)))
+    mode, shape = plan.initial_mode, {'provider': 'openai', 'reasoning_effort': effort}
+    call = {'id': 'call_1', 'type': 'function', 'function': {'name': 'tool_1', 'arguments': '{"path": "x"}'}}
+    messages = [*plan.messages_for(mode), {'role': 'assistant', 'content': '', 'tool_calls': [call]},
+                {'role': 'tool', 'tool_call_id': 'call_1', 'content': 'fixture text'}]
+    carried = cf.estimate_context_prompt_tokens(plan.reproject_transcript(messages, mode), tools, **shape)
+    seen, walk = [], cf._view_projections
+    monkeypatch.setattr(cf, '_view_projections', lambda *a, **kw: seen.append(kw) or walk(*a, **kw))
+    for witness in (carried, carried + 37):
+        plan.reproject_for_route(window_tokens=1000000, known_window=True, ratio=1.0, output_reserve=1000,
+                                 tool_schemas=tools, start_mode=mode, current_messages=messages, select_mode=mode,
+                                 measured_input_tokens=witness, reasoning_effort=effort)
+    assert [kw['envelope_overhead_tokens'] for kw in seen] == [0, 37]
+    assert {(kw['provider'], kw['reasoning_effort']) for kw in seen} == {('openai', effort)}
+    canonical = cf.estimate_context_prompt_tokens(messages, tools)
+    assert (carried > canonical) is bool(effort)  # the reasoning shape is longer, and it is the one measured
+    assert plan.projected_tokens_with_tools(mode, tools, **shape) == cf.estimate_context_prompt_tokens(
+        plan.messages_for(mode), tools, **shape)

@@ -263,13 +263,28 @@ def test_every_mirrored_media_surface_retains_reference_and_native_reply(bridge,
 def test_long_quiz_keeps_answer_door_and_earlier_parts_carry_references(bridge, monkeypatch):
     b = bridge
     event = {"chat_id": 1, "row_address": "question-row", "quiz_id": "quiz", "task_id": "task",
-             "question": "Long question " * 900, "options": [{"label": "A"}, {"label": "B"}]}
+             "question": "Long question " * 900, "options": [{"label": "A"}, {"label": "B"}],
+             "message_origin": {"label": "Export"}}
     asyncio.run(b.plugin._make_quiz(b.api)(event))
     assert len(b.calls) > 2
+    heading = "Export\n"
+    parts = []
+    for method, data in b.calls:
+        assert method == "sendMessage" and data["chat_id"] == "42"
+        assert data["text"].startswith(heading) and data["text"].count(heading) == 1
+        assert b.transport._u16len(data["text"]) <= 4096
+        if "reply_markup" not in data:
+            parts.append(data["text"][len(heading):])
+    expected = b.plugin.telegram_quiz.render_quiz_text(event["question"], ["A", "B"], "", "")
+    # Existing raw chunking makes a boundary stand in for its split whitespace.
+    assert "".join("".join(part.split()) for part in parts) == "".join(expected.split())
+    assert b.calls[-1][1]["text"] == heading + "1. A\n2. B\n" + b.plugin.telegram_quiz.hint("en")
     last = 100 + len(b.calls)
     state = _state(b.plugin)
     assert all(state._reply_reference(b.api, "", 42, mid) == "question-row" for mid in range(101, last + 1))
     assert state._message_ref(b.api, "", 42, 101)["kind"] == "question"
+    record = b.plugin.telegram_quiz.quiz_for_message(b.api, "", 42, last)
+    assert record["text"] == heading + "1. A\n2. B"
     posts = _host_posts(b, monkeypatch)
     _receive(b, _owner(50, "Please explain", reply=101))
     assert posts[0][0] == "/chat/inject" and posts[0][1]["reply_to"] == "question-row"
@@ -521,7 +536,7 @@ def test_completion_notifier_maps_persisted_summary_and_keeps_episodes_separate(
     assert mapping._reply_reference(b.api, "", 42, 102) == "task:episode-2"
 
 
-def test_relay_success_silent_failure_one_line_and_its_paired_system_row_only_when_no_ack_carried_it(bridge):
+def test_relay_success_silent_failure_one_line_and_its_system_row_only_when_no_ack_carried_it(bridge):
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX, routing_refusal_cause
 
     b = bridge
@@ -535,15 +550,17 @@ def test_relay_success_silent_failure_one_line_and_its_paired_system_row_only_wh
     asyncio.run(handle(refused))
     assert len(b.calls) == 1 and b.calls[0][1]["text"] == f"Parser · {cause}"
     assert "\n" not in b.calls[0][1]["text"]
-    # The ACK is the carrier for an act that wears no owner message too; its paired System row is skipped
-    # only when it says so, and a row that carries the notice itself (or any standalone one) still arrives.
-    asyncio.run(handle({**refused, "client_message_id": AGENT_RECEIPT_ID_PREFIX + "1"}))
+    # An ACK that answers no chat row (an act wearing no owner message) names its System row the carrier and adds
+    # no line; a host act's row beside a carrier ACK is skipped only when it says so, and a row that carries the
+    # notice itself (or any standalone one) still arrives.
+    asyncio.run(handle({**refused, "client_message_id": AGENT_RECEIPT_ID_PREFIX + "1",
+                        "routing_notice_carrier": "system"}))
     row = {"role": "system", "system_type": "steer_not_delivered", "text": f"Parser · {cause}"}
-    asyncio.run(handle({**row, "routing_notice_carrier": "routing_ack"}))
-    assert [data["text"] for _, data in b.calls] == [f"Parser · {cause}"] * 2
+    asyncio.run(handle({**row, "system_type": "task_not_started", "routing_notice_carrier": "routing_ack"}))
+    assert [data["text"] for _, data in b.calls] == [f"Parser · {cause}"]
     asyncio.run(handle({**row, "routing_notice_carrier": "system"}))
     asyncio.run(handle(row))
-    assert len(b.calls) == 4 and all(method == "sendMessage" for method, _ in b.calls)
+    assert len(b.calls) == 3 and all(method == "sendMessage" for method, _ in b.calls)
 
 
 def test_relay_quotes_the_owners_words_and_files_above_the_note_verbatim(bridge):

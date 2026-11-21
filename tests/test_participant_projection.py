@@ -31,19 +31,17 @@ def test_outer_wake_spill_preserves_continuation(tmp_path, monkeypatch, budget):
     assert "continuation_note" not in out
 
 
-@pytest.mark.parametrize("advanced", [False, True])
-def test_rewait_window_preserves_same_session_fact(advanced):
-    from ouroboros.delegate_progress import WindowObservations, window_payload
+@pytest.mark.parametrize("moved", [False, True])
+def test_a_rewaits_read_preserves_the_same_session_fact(moved):
+    """A wake's read of a run still paused on a question it already showed (``present_payload``), quiet or moved,
+    keeps the flat route fact; a run not paused carries none."""
+    from ouroboros.delegate_progress import present_payload
 
-    seen = WindowObservations()
-    if advanced:
-        seen.record({}, seq=1, at_sec=0)
-    kwargs = dict(run_id="run-peer", state="running", last_seq=1, window=2,
-                  elapsed_seconds=2, max_seconds=30, detail={}, seen=seen, budget=15000,
-                  pending_interactions=[])
-    out = window_payload(waiting_on_user=True, **kwargs)
+    kwargs = dict(run_id="run-peer", state="running", last_seq=1, moved=moved,
+                  elapsed_seconds=2, max_seconds=30, detail={}, budget=15000, pending_interactions=[])
+    out = present_payload(waiting_on_user=True, **kwargs)
     assert out["continuation"] == SAME_SESSION_CONTINUATION["continuation"] == "same_session"
-    out = window_payload(waiting_on_user=False, **kwargs)
+    out = present_payload(waiting_on_user=False, **kwargs)
     assert "continuation" not in out and "continuation_note" not in out
 
 
@@ -62,34 +60,6 @@ def test_supervisor_preserves_peer_relation_for_live_and_durable_events(tmp_path
     assert recorded[0] == pushed[0]
     assert recorded[0]["relation"] == "sibling"
     assert recorded[0]["source_task_id"] == "a"
-
-
-def test_addressed_wakes_carry_the_peer_relation_the_drain_projected(tmp_path):
-    """A child's contribution to its parent (S29: C → P, relation ``parent``) and a
-    sibling's across-message wake the parked supervised wait WITH the sender's typed
-    place beside provenance and id, so a wake never signs a peer as an ancestor or
-    owner; an ancestor's steering carries no relation, as the drain wrote none."""
-    from ouroboros.delegate_supervision import _addressed_wakes
-    from ouroboros.owner_mailbox import PROVENANCE_PEER_TASK, write_task_message
-
-    assert write_task_message(tmp_path, "C's original", "parent-p", source_task_id="child-c",
-                              provenance=PROVENANCE_PEER_TASK, relation="parent", msg_id="c-1")
-    assert write_task_message(tmp_path, "across", "parent-p", source_task_id="sib-s",
-                              provenance=PROVENANCE_PEER_TASK, relation="sibling", msg_id="s-1")
-    assert write_task_message(tmp_path, "steer", "parent-p", source_task_id="root-r",
-                              provenance="ancestor_task", msg_id="a-1")
-    ctx = SimpleNamespace(task_id="parent-p", task_attempt=1, drive_root=tmp_path,
-                          budget_drive_root=str(tmp_path), task_metadata={})
-
-    wakes = {row["msg_id"]: row for row in _addressed_wakes(ctx, {})}
-
-    assert wakes["c-1"] == {
-        "type": "addressed_message", "msg_id": "c-1", "kind": "task_message",
-        "provenance": "peer_task", "source_task_id": "child-c", "relayed_from_task_id": "",
-        "relation": "parent", "text": "C's original", "ts": wakes["c-1"]["ts"],
-    }
-    assert (wakes["s-1"]["provenance"], wakes["s-1"]["relation"]) == ("peer_task", "sibling")
-    assert wakes["a-1"]["provenance"] == "ancestor_task" and "relation" not in wakes["a-1"]
 
 
 def test_outer_wake_spill_keeps_sender_attribution_in_the_reduced_projection(tmp_path, monkeypatch):

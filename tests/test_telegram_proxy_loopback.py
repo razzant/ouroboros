@@ -9,6 +9,7 @@ import asyncio
 import base64
 import contextlib
 import datetime
+import gc
 import ipaddress
 import json
 import logging
@@ -261,7 +262,7 @@ def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeyp
             assert await companion.run() == 0
             assert reached == [42]
             assert bot.button == {"type": "commands"}
-            assert not (state / "menu_button_snapshot.json").exists()
+            assert not list(state.glob("menu_button_snapshot*.json"))  # every ledger restored and removed
             assert options and all(option["proxy"] == proxy_url for option in options)
             assert all(option["follow_redirects"] is False for option in options)
             assert all(option["trust_env"] is False for option in options)
@@ -277,8 +278,15 @@ def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeyp
         finally:
             proxy.close()
             origin.close()
-            await proxy.wait_closed()
-            await origin.wait_closed()
+            gc.collect()  # from CPython 3.12 a dropped client's sockets can wait for garbage collection
+            try:  # from CPython 3.12.1 Server.wait_closed also waits for every connection still open
+                await asyncio.wait_for(asyncio.gather(proxy.wait_closed(), origin.wait_closed()), 10)
+            except asyncio.TimeoutError:
+                stuck = {task.get_name(): [f"{frame.f_code.co_filename}:{frame.f_lineno}" for frame in task.get_stack()]
+                         for task in asyncio.all_tasks() if task is not asyncio.current_task()}
+                if stuck:  # a handler still running is this test's failure; with none, Windows' Proactor loop
+                    raise AssertionError(f"the loopback servers still hold connections: {stuck}") from None
+                # may still owe a closed transport's connection_lost, which only 3.12's wait_closed waits for
             if bot.tasks:
                 await asyncio.wait_for(asyncio.gather(*bot.tasks), 5)
         assert not bot.errors

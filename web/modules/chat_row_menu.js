@@ -57,12 +57,14 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
     const replyRef = (row) => (row.matches('.chat-live-card') ? replies.cardRef(cardOf(row.dataset.taskId || '') || null)
         : replies.bubbleRef(row));
 
-    function bubbleItems(row) {
+    function bubbleItems(row, point, touch) {
         const items = [];
         const ref = replies.bubbleRef(row);
         if (ref) items.push(['reply', tr('chat.reply.reply', 'Reply'), () => replies.start(ref)]);
         const copy = row.querySelector(':scope > .chat-message-copy, :scope > .chat-message-actions > .chat-message-copy');
         if (copy) items.push(['copy', tr('code.copy', 'Copy'), () => copy.click(), true]);
+        if (touch && replies.canSelect?.(row, point)) items.push(['select-text', tr('chat.reply.select_text', 'Select text'),
+            () => { swallowClickUntil = 0; replies.selectText(row, point); }]);
         const view = messageRow(row);
         for (const action of view ? actions.actionsFor(view) : []) {
             items.push([action.key, presentAction(action, view).label, () => runMessageAction(action, view, { anchor: row }), true]);
@@ -89,9 +91,9 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         return items;
     }
 
-    function itemsFor(row) {
+    function itemsFor(row, point, touch) {
         const record = row.matches('.chat-live-card') ? cardOf(row.dataset.taskId || '') : null;
-        const items = record ? cardItems(row, record) : bubbleItems(row);
+        const items = record ? cardItems(row, record) : bubbleItems(row, point, touch);
         // The row's own Project reference (a portal's footer, the reference under an answer or a receipt).
         const reference = [...row.querySelectorAll('[data-intent="open-project"]')]
             .find((node) => shown(node) && rowOf(node) === row && !node.closest('.chat-live-card.subagent'));
@@ -125,7 +127,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
      * `lift`: a long press opened it, so the row lifts while it is open. */
     function open(row, { point, anchor = row, lift = false } = {}) {
         close();
-        const items = itemsFor(row);
+        const items = itemsFor(row, point, lift || doc.documentElement?.dataset.pointer === 'coarse');
         if (!items.length) return false;
         // Focus returns to the row: a bubble or card that is not itself focusable takes focus like a quote's target.
         if (anchor === row && row.tabIndex < 0 && !row.hasAttribute('tabindex')) row.tabIndex = -1;
@@ -149,6 +151,8 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
             menu.append(item);
         }
         doc.body.append(menu);
+        // A new finger on an item is a deliberate press, even just after the long press lifted.
+        menu.addEventListener('pointerdown', () => { swallowClickUntil = 0; });
         if (lift) { setPress(row, 'lift'); haptic('press'); }
         const binding = bindMenu(menu, { anchor, point, onClose: () => {
             menu.remove();
@@ -168,7 +172,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         // it before this event; that selection is the gesture's own, not the owner's, and goes with the row menu.
         const owned = rightPress?.row === row ? rightPress.selected : selectedIn(row);
         rightPress = null;
-        if (event.target.closest(NATIVE) || owned) return;
+        if (event.target.closest(NATIVE) || owned || (row.dataset.selectText && event.target.closest('.message, [data-reply-caption]'))) return;
         // Android may fire it before the long press's time: it answers that touch and lifts the row as the press
         // would, so the touch's timer opens nothing more and the lifting finger's click is swallowed (onPointerEnd).
         const touch = press && !press.fired && press.row === row ? press : null;
@@ -198,9 +202,9 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
     function onPointerDown(event) {
         cancelPress();
         const row = rowOf(event.target);
-        rightPress = event.button === 2 && row ? { row, selected: selectedIn(row) } : null;
+        rightPress = (event.button === 2 || (event.ctrlKey && event.button === 0)) && row ? { row, selected: selectedIn(row) } : null;
         if (event.pointerType !== 'touch' || !event.isPrimary) return;
-        if (!row || event.target.closest(NATIVE)) return;
+        if (!row || event.target.closest(NATIVE) || selectedIn(row) || (row.dataset.selectText && event.target.closest('.message, [data-reply-caption]'))) return;
         const { clientX: x, clientY: y } = event;
         const touch = { id: event.pointerId, x, y, row, fired: false };
         touch.holdTimer = setTimeout(() => { if (press === touch && itemsFor(row).length) setPress(row, 'hold'); }, HOLD_MS);

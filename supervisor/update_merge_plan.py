@@ -132,8 +132,8 @@ def plan_managed_update_merge(
     from ouroboros.update_channels import get_update_channel
     from supervisor.update_merge_policy import classify_conflicts
     branch_dev = branch or _g.BRANCH_DEV
-    remote_name, remote_branch, branch_ref = _g._managed_update_target()
     update_channel = get_update_channel()
+    remote_name, remote_branch, branch_ref = _g._managed_update_target(update_channel)
     identity = {
         "remote": remote_name,
         "remote_branch": remote_branch,

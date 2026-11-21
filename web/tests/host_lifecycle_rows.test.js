@@ -7,6 +7,7 @@ import test from 'node:test';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { foldWaitRow, waitEpisode } from '../modules/task_checkpoints.js';
+import { causeOf, contextShown, lowMissedOf, mapsOf } from '../modules/context_observation.js';
 
 import {
     summarizeChatLiveEvent,
@@ -20,7 +21,7 @@ test('#931 every typed checkpoint kind names itself; only a kindless one is peri
         ['context_fit_low_retry', 'Books shown as chapter navigation during context-size recovery'],
         ['context_fit_refused', 'Context-size check found no room for results'],
         ['context_fit_route_rebound', 'Context fit rebound the route'],
-        ['context_fit_physical_mode', 'Context starts in a smaller mode (window too small)'],
+        ['context_fit_physical_mode', 'Context starts in a smaller mode'],
         ['context_reclaim_manual', 'Context reclaimed on request'],
         ['context_reclaim_automatic', 'Context reclaimed automatically'],
         ['context_view', 'Context inspected'],
@@ -57,6 +58,66 @@ test('#931 every typed checkpoint kind names itself; only a kindless one is peri
     // Only a checkpoint with no kind at all is the periodic round self-check.
     assert.equal(taskCheckpointLabel({ round: 30 }), 'Task checkpoint');
     assert.equal(taskCheckpointLabel({ checkpoint_number: 7 }), 'Checkpoint 7 — periodic self-check');
+});
+
+test('a lowered start names its recorded reason in the Context capsule\'s own words; a row without one names none', () => {
+    // Audit item 23(a): the reason a person reads is the recorded one, on the capsule and on the task card alike.
+    const row = (extra) => ({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max', effective_mode: 'low',
+        round: 1, ...extra });
+    for (const cause of ['memory', 'route', 'window']) {
+        const said = causeOf({ preferred_at_send: 'max', applied: 'low', cause }, 'max');
+        assert.ok(said, cause);
+        assert.equal(taskCheckpointLabel(row({ cause })), `Context starts in a smaller mode. ${said}`);
+    }
+    // A route change after the start lowered the work (the rebind's row): the capsule's sentence alone, never "starts".
+    const moved = causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'after_start' }, 'max');
+    assert.ok(moved);
+    assert.equal(taskCheckpointLabel(row({ cause: 'after_start' })), moved);
+    assert.equal(taskCheckpointLabel(row({})), 'Context starts in a smaller mode', 'a row written before the reason was');
+    assert.equal(taskCheckpointLabel(row({ cause: '' })), 'Context starts in a smaller mode', 'an unknown start');
+});
+
+test('where Low is chosen, a room whose last owner-Low start missed the target says what the rest took', () => {
+    // Owner 15.11.2026, 3A: the screen says the target cannot be met; memory keeps its shortest tellings.
+    const fact = { applied: 'low', profile: 'owner_low', target_missed: true, no_memory_tokens: 532_173 };
+    assert.equal(lowMissedOf(fact), 'Low’s 250K target was not met at the last start here: without memory it '
+        + 'already needed about 532K; memory keeps its shortest tellings.');
+    assert.equal(lowMissedOf({ ...fact, target_missed: false }), '', 'a met target keeps the mode\'s own meaning');
+    assert.equal(lowMissedOf({ ...fact, no_memory_tokens: null }), '', 'an older row names no number');
+    assert.equal(lowMissedOf({ ...fact, profile: 'task_local_low' }), '', 'only the owner\'s Low has this target');
+});
+
+test('a Max start whose books went to chapter maps stays Max on the capsule and the task card, by its cause', () => {
+    // Owner 15.11.2026, 4A: one fact every surface reads (the owner's Max applied, books as maps, the start's cause).
+    const row = (extra) => ({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max', effective_mode: 'max',
+        books: 'maps', round: 1, ...extra });
+    const at = '2026-11-17T10:00:00Z';
+    for (const cause of ['memory', 'route', 'window']) {
+        const maps = mapsOf(cause);
+        assert.match(maps, /^Chapter maps: /, cause);
+        assert.equal(taskCheckpointLabel(row({ cause })), `Context starts in Max with chapter maps. ${maps}`);
+        const fact = { applied: 'max', books: 'maps', cause, preferred_at_send: 'max', observed_at: at };
+        const shown = contextShown({ state: 'now', modes: ['max'], latest: fact }, 'max');
+        assert.equal(shown.word, 'Max');
+        assert.equal(shown.differs, false, 'the owner chose Max and the start ran Max');
+        assert.ok(shown.fact.text.startsWith(maps), cause);
+        assert.equal(shown.label, 'Context: Max now, chapter maps');
+    }
+    assert.equal(taskCheckpointLabel(row({ cause: 'after_start' })), 'The work moved to chapter maps after it started.');
+    // A row written before the fact keeps its own words: a lowered start is told as before.
+    const old = row({ effective_mode: 'low', books: undefined, cause: 'memory' });
+    assert.equal(taskCheckpointLabel(old),
+        `Context starts in a smaller mode. ${causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'memory' }, 'max')}`);
+    // Low chosen meanwhile: the running work stayed Max and only its books moved, never "moved to Max".
+    const moved = contextShown({ state: 'now', modes: ['max'], latest: { applied: 'max', books: 'maps',
+        cause: 'after_start', preferred_at_send: 'max', observed_at: at } }, 'low');
+    assert.equal(moved.differs, true);
+    assert.ok(moved.fact.text.startsWith('The work moved to chapter maps after it started.'), moved.fact.text);
+    // Whole books in Max add nothing to today's closed capsule.
+    const whole = contextShown({ state: 'now', modes: ['max'],
+        latest: { applied: 'max', books: 'whole', preferred_at_send: 'max', observed_at: at } }, 'max');
+    assert.equal(whole.label, '');
+    assert.ok(!whole.fact || !whole.fact.text.includes('Chapter maps'));
 });
 
 test('#931 typed checkpoints are task facts in the expanded card, never narration', () => {

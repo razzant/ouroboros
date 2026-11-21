@@ -116,3 +116,18 @@ def test_late_receipt_remains_writable_after_export_and_reimport(root):
     assert final["cost_final"] is True
     with pytest.raises(ua.UsageAccountingError):
         ua.settle_attempt(attempt, {"prompt_tokens": 4}, cost_usd=.2, cost_final=True)
+
+
+def test_a_close_without_usage_keeps_the_reserved_evidence_through_export(root):
+    evidence = {"billing": {"route": "fixture"}}
+    attempt = ua.reserve_attempt(ua.AttemptRequest(
+        model="fixture", provider="openai", reservation_usd=1.25, drive_root=root, task_id="child",
+        root_task_id="parent", cost_evidence=evidence))
+    ua.mark_dispatched(attempt)
+    observed = rows(root)[-1]["revision"]
+    ua.mark_unresolved(attempt, "response lost")
+    assert ua.terminalize_abandoned_attempt(attempt, reason="dead", expected_revision=observed) == "unresolved"
+    assert ua.terminalize_abandoned_attempt(attempt, reason="owner ended") == "settled"
+    assert usage_store.export_journal(root)["attempts"] == 1
+    [row] = rows(root)
+    assert (row["settle_reason"], row["cost_usd"], row["cost_evidence"]) == ("abandoned", None, evidence)

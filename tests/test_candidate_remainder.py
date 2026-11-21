@@ -87,6 +87,20 @@ def test_failed_durable_capture_cannot_reuse_a_previous_clean_snapshot(tmp_path,
     assert trace["mutation_attribution"]["uncommitted_remainder"]["state"] == "unknown"
 
 
+def test_a_failed_capture_of_an_admitted_folder_claims_no_body_remainder(tmp_path, monkeypatch):
+    """An admitted folder's work is its delivery, never a body candidate's uncommitted remainder: a failed terminal
+    capture of a folder-only baseline (a direct turn's) leaves the card no unknown remainder to warn about."""
+    from ouroboros.agent_task_pipeline import _attach_host_mutation_projection
+    repo, data = _repo(tmp_path), tmp_path / "data"
+    write_task_result(data, "folder-task", STATUS_RUNNING)
+    attribution.capture_mutation_baseline(data, "folder-task", [{"surface_type": "external_workspace", "host_root": str(repo)}])
+    monkeypatch.setattr(attribution, "record_terminal_mutation_candidates",
+                        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk unavailable")))
+    trace = {}
+    _attach_host_mutation_projection(SimpleNamespace(drive_root=data), {"id": "folder-task"}, trace)
+    assert trace["mutation_attribution"]["present"] and "uncommitted_remainder" not in trace["mutation_attribution"]
+
+
 def test_legacy_snapshot_does_not_invent_dirty_files(tmp_path):
     _repo_path, data = _start(tmp_path)
     evidence = attribution.record_terminal_mutation_candidates(data, "candidate-task")

@@ -15,14 +15,18 @@ that identity is unchanged:
   on the runtime mode: the gate reads the mode when asked); its identity is the change key of every directory
   and file of its payload tree (the cache names the hash skips are skipped, the manifest-declared entries the hash
   adds are added) and of the owner-state files a load reads (``STATE_FILES``): an update, review, enablement,
-  attestation, owner edit or an external edit of any payload byte changes it.
+  attestation, owner edit or an external edit of any payload byte changes it;
+- one release digest (``skill_identity.payload_digest``): keyed by the directory and the arguments that shape the
+  walk, with the payload tree's identity alone, so a load that hashes the bytes discovery just hashed (an
+  extension's load, its Host Service token) takes that digest instead of walking and hashing again.
 
 A change key is ``skill_identity._change_key``'s (device, inode, size, mtime, ctime) on a local POSIX filesystem,
 the rule the payload digests already trust: a write, truncation, ``utime``, rename or entry added to a directory
 moves a change time the caller cannot set back. The identity is taken after the read it covers, and kept only when
 no change time lies within ``_RACY_NS`` of the read's start, so a write during the read or in its coarse clock tick
-is read again next time. On Windows or a filesystem the store does not call local nothing is kept: discovery reads
-everything every time, as before. Each caller gets its own skill, review and manifest objects, since callers assign
+is read again next time. On Windows or a filesystem the store does not call local nothing is kept (``keeps``): discovery
+reads everything every time, as before, and a load hashes again what discovery just hashed (``skill_hash_again``, a
+repeat of that platform). Each caller gets its own skill, review and manifest objects, since callers assign
 their fields (``enabled``, ``review``, ``source``); the values inside are shared and no caller mutates them in place,
 as no reader of a parsed view does (a deep copy would cost more than the reviews' JSON it saves parsing). Nothing is
 written, and no process shares another's answers.
@@ -48,6 +52,7 @@ STATE_FILES = ("enabled.json", "review.json", "owner_attestation.json", INSTALL_
 _MISSING = "missing"
 _INVENTORIES: "OrderedDict[Tuple[Any, ...], Tuple[Dict[str, Any], Any]]" = OrderedDict()
 _SKILLS: "OrderedDict[Tuple[Any, ...], Tuple[Dict[str, Any], Any]]" = OrderedDict()
+_DIGESTS: "OrderedDict[Tuple[Any, ...], Tuple[Dict[str, Any], str]]" = OrderedDict()
 _KEPT = 4096  # entries of each memo: a memory bound (an install holds tens to hundreds of packages), not a policy
 
 
@@ -59,6 +64,11 @@ def _key(path: Any) -> Any:
         return _MISSING
     except OSError:
         return None
+
+
+def keeps(path: Any) -> bool:
+    """Whether a read under ``path`` may be kept: its change key is trusted (a local filesystem, never Windows)."""
+    return _key(path) is not None
 
 
 def _tree(root: Any, *, skip: Iterable[str] = (), depth: Optional[int] = None, links: bool = False) -> Dict[str, Any]:
@@ -107,7 +117,7 @@ def _kept(memo: "OrderedDict[Tuple[Any, ...], Any]", key: Tuple[Any, ...], held:
 def reused_inventory(key: Tuple[Any, ...], roots: Iterable[Any], walk: Callable[[], Any]) -> Any:
     """``walk()``, the location inventory of ``roots``, or the last one of ``key`` while its directories hold."""
     roots = [pathlib.Path(root) for root in roots]
-    if any(_key(root) is None for root in roots):  # Windows or a filesystem not called local: read, keep nothing
+    if not all(keeps(root) for root in roots):  # Windows or a filesystem not called local: read, keep nothing
         return walk()
 
     def identity() -> Dict[str, Any]:
@@ -127,23 +137,53 @@ def reused_inventory(key: Tuple[Any, ...], roots: Iterable[Any], walk: Callable[
     return inventory
 
 
+def declared_entries(entry: Any, scripts: Any) -> Tuple[str, ...]:
+    """The manifest-declared entry and script names the release digest re-adds even under a skipped cache name."""
+    return tuple(filter(None, (str(entry or ""), *(str(script.get("name") or "") for script in scripts or ()
+                                                   if isinstance(script, dict)))))
+
+
+def _payload_identity(skill_dir: Any, declared: Iterable[str]) -> Dict[str, Any]:
+    """The change keys of the payload tree the release digest walks, and of its declared entries."""
+    from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES
+
+    keys = _tree(skill_dir, skip=_SKILL_DIR_CACHE_NAMES)
+    for rel in declared:
+        for path in (pathlib.Path(skill_dir) / rel, pathlib.Path(skill_dir) / "scripts" / rel):
+            keys[str(path)] = _key(path)
+    return keys
+
+
+def reused_digest(key: Tuple[Any, ...], skill_dir: Any, declared: Tuple[str, ...], compute: Callable[[], str]) -> str:
+    """``compute()``, the release digest of ``skill_dir``, or the last one of ``key`` while its payload tree holds.
+    Counted in the measured window (``context_timing``): ``skill_hash`` per digest computed, by ``key``,
+    ``skill_hash_reused`` per digest taken; where nothing is kept a second digest of ``key`` is ``skill_hash_again``."""
+    from ouroboros.context_timing import counted
+
+    local = keeps(skill_dir)  # Windows or a filesystem not called local: compute, keep nothing
+    held = _DIGESTS.get(key) if local else None
+    if held is not None and _payload_identity(skill_dir, declared) == held[0]:
+        counted("skill_hash_reused")
+        return held[1]
+    counted("skill_hash", key=key)
+    started = time.time_ns()
+    digest = compute()
+    if local and _trusted(keys := _payload_identity(skill_dir, declared), started):
+        _kept(_DIGESTS, key, (keys, digest))
+    return digest
+
+
 def reused_skill(key: Tuple[Any, ...], skill_dir: Any, state_dir: Any, load: Callable[[], Any]) -> Any:
     """A copy of ``load()``, the loaded package at ``skill_dir`` (or None), or of the last one of ``key`` while
     its payload tree, the owner-state files in ``state_dir`` and the manifest-declared entries hold."""
-    from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES
-
-    if _key(skill_dir) is None:  # Windows or a filesystem not called local: read, keep nothing
+    if not keeps(skill_dir):  # Windows or a filesystem not called local: read, keep nothing
         return load()
 
     def identity(loaded: Any) -> Dict[str, Any]:
-        keys = _tree(skill_dir, skip=_SKILL_DIR_CACHE_NAMES)
-        keys.update((str(pathlib.Path(state_dir) / name), _key(pathlib.Path(state_dir) / name)) for name in STATE_FILES)
         manifest = getattr(loaded, "manifest", None)
-        declared = [getattr(manifest, "entry", "") or "", *(str(script.get("name") or "")
-                    for script in getattr(manifest, "scripts", None) or () if isinstance(script, dict))]
-        for rel in filter(None, declared):  # re-added by the hash even under a skipped cache name
-            for path in (pathlib.Path(skill_dir) / rel, pathlib.Path(skill_dir) / "scripts" / rel):
-                keys[str(path)] = _key(path)
+        keys = _payload_identity(skill_dir, declared_entries(getattr(manifest, "entry", ""),
+                                                            getattr(manifest, "scripts", None)))
+        keys.update((str(pathlib.Path(state_dir) / name), _key(pathlib.Path(state_dir) / name)) for name in STATE_FILES)
         return keys
 
     held = _SKILLS.get(key)

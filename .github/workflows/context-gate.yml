@@ -1,0 +1,102 @@
+# Owner exception, 2026-11-15: only context-related PRs; general CI stays manual/tag.
+name: Context capacity gate (keyless)
+
+on:
+  pull_request:
+    paths:
+      - 'ouroboros/*context*.py'
+      - 'ouroboros/llm*.py'
+      - 'ouroboros/loop*.py'
+      - 'ouroboros/memory*.py'
+      - 'ouroboros/local*.py'
+      - 'ouroboros/model*.py'
+      - 'ouroboros/config*.py'
+      - 'ouroboros/section_floor.py'
+      - 'ouroboros/transcript*.py'
+      - 'ouroboros/mcp*.py'
+      - 'ouroboros/provider*.py'
+      - 'ouroboros/response_limits.py'
+      - 'ouroboros/deployment_policy.py'
+      - 'ouroboros/gateway/settings.py'
+      - 'ouroboros/pricing.py'
+      - 'ouroboros/reviewer_window.py'
+      - 'ouroboros/review_native_episode.py'
+      - 'ouroboros/capability_evidence.py'
+      - 'ouroboros/size_refusal.py'
+      - 'ouroboros/server_window.py'
+      - 'ouroboros/window_learning.py'
+      - 'ouroboros/agent.py'
+      - 'ouroboros/live_conversation.py'
+      - 'ouroboros/_usage_response.py'
+      - 'ouroboros/usage_accounting.py'
+      - 'ouroboros/physical_attempt_context.py'
+      - 'ouroboros/request_wire*.py'
+      - 'ouroboros/owner_continue.py'
+      - 'ouroboros/consolidator.py'
+      - 'ouroboros/safety*.py'
+      - 'ouroboros/subagents*.py'
+      - 'ouroboros/tool*.py'
+      - 'ouroboros/tools/**'
+      - 'prompts/**'
+      - 'BIBLE.md'
+      - 'docs/*.md'
+      - 'docs/architecture/**'
+      - 'docs/development/**'
+      - 'docs/inventories/**'
+      - 'tests/test_*context*.py'
+      - 'tests/test_*window*.py'
+      - 'tests/test_size_refusal*.py'
+      - 'tests/test_capability_route.py'
+      - 'tests/test_image_refusal_retry.py'
+      - 'tests/test_cross_model_reasoning_strip.py'
+      - 'tests/test_generated_inventories.py'
+      - 'tests/test_known_route_reply_budget.py'
+      - 'tests/test_llm*.py'
+      - 'tests/test_nano*.py'
+      - 'tests/_window_history.py'
+      - 'tests/test_required_development_book.py'
+      - 'tests/_first_contact.py'
+      - 'tests/_first_contact_server.py'
+      - 'tests/_size_refusal.py'
+      - 'tests/test_first_contact_local_server.py'
+      - 'tests/test_owner_continue.py'
+      - 'tests/test_completion_hold_observation.py'
+      - 'tests/test_finish_silent_wake.py'
+      - 'tests/test_result_review*.py'
+      - 'tests/fixtures/local_reasoning/**'
+      - 'tests/test_live_call_start_fit.py'
+      - 'ouroboros/delivery_facts.py'
+      - 'tests/fixtures/size_refusals/**'
+      - 'tests/fixtures/server_windows/**'
+      - 'tests/fixtures/llm_golden/**'
+      - 'tests/system_e2e/harness.py'
+      - 'tests/conftest.py'
+      - 'tests/ci_evidence.py'
+      - 'scripts/context_gate.py'
+      - 'scripts/safe_test.py'
+      - 'scripts/ci_retry.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/actions/setup-python-env/**'
+      - '.github/workflows/context-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: context-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Refusals, serving windows, reply budgets and first contact
+        shell: bash
+        run: TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1 python scripts/context_gate.py --workers 2 --evidence-dir "$RUNNER_TEMP/context-gate"

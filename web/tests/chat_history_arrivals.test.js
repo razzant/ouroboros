@@ -10,6 +10,7 @@ import { REVIEW_DETAIL_READS, REVIEW_DETAIL_SLOT_MS, createReviewHydrator } from
 import { createChatHistoryPager } from '../modules/chat_history.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { quiet, room, until } from './project_read_state_fixture.js';
+import { PREVIEW_KEY } from '../modules/chat_preview.js';
 
 const ts = (n) => new Date(Date.UTC(2026, 9, 16, 12, 0, 0, n * 1000)).toISOString();
 
@@ -89,6 +90,26 @@ const newestPage = (after = 'after:1', ids = ['chat:1']) => ({ messages: ids.map
     next_cursor: null, page_cursor: `page:${after}`, after_cursor: after, window: {} });
 const arrivedRows = (ids, after) => ({ messages: ids.map((id) => ({ history_id: id })), has_more: false, next_cursor: null,
     page_cursor: null, after_cursor: after, window: { complete: false, truncated_by: ['page'] } });
+
+test('suspension cancels queued arrivals and their newest fallback while preserving the return cursor', async () => {
+    let answer;
+    const p = arrivalsPager({ fetch: () => new Promise(resolve => { answer = resolve; }) });
+    p.pager.acceptRecent(newestPage());
+    const pending = p.pager.read(), queued = p.pager.read();
+    await Promise.resolve();
+    p.pager.suspend();
+    answer(arrivedRows(['chat:2'], 'after:2'));
+    await Promise.all([pending, queued]);
+    assert.deepEqual(p.arrivals, []);
+    assert.deepEqual(p.newest, [], 'an old visit never starts a fallback read');
+    assert.deepEqual(p.calls, ['after:1']);
+    const resumed = p.pager.read();
+    await Promise.resolve();
+    answer(arrivedRows(['chat:2'], 'after:2'));
+    await resumed;
+    assert.deepEqual(p.calls, ['after:1', 'after:1']);
+    assert.deepEqual(p.arrivals.map(a => a.ids), [['chat:2']]);
+});
 
 test('the pager reads what arrived from the newest read\'s cursor, and leaves the newest page to chat otherwise', async () => {
     const answers = { 'after:1': arrivedRows(['chat:2'], 'after:2'), 'after:2': arrivedRows([], 'after:2') };
@@ -610,4 +631,83 @@ test('a room replaying sixty review owners reads their details two at a time; cl
     while (detail.release.length) { detail.release.shift()(); await quiet(); }
     assert.equal(detail.peak, 2);
     assert.equal(detail.started.length, 12, 'the closed room started none of its queued reads');
+});
+
+test('the saved preview takes the newest page, then merges what arrived by identity; a room without a record keeps no fragment', async (t) => {
+    const s = historyServer();
+    s.say(1);
+    const r = openRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    const saved = () => (JSON.parse(localStorage.getItem(PREVIEW_KEY) || '{"rooms":[]}').rooms
+        .find((entry) => entry.key === JSON.stringify(['', [2, 'room']]))?.rows || []).map((row) => row.text);
+    assert.deepEqual(saved(), ['answer 1']);
+    s.work(2);
+    s.say(3);
+    await r.instance.refreshHistory({ revision: 2 });
+    assert.deepEqual(s.reads, ['newest', 'after']);
+    assert.deepEqual(saved(), ['answer 1', 'answer 3'], 'what arrived joins in order; narration never does');
+    // The record gave way to rooms read since: what arrives next waits for the room's next newest page.
+    localStorage.removeItem(PREVIEW_KEY);
+    s.say(4);
+    await r.instance.refreshHistory({ revision: 3 });
+    assert.deepEqual(s.reads, ['newest', 'after', 'after']);
+    assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'no fragment stands for the room');
+});
+
+for (const mode of ['after', 'newest']) for (const following of [false, true]) for (const confirmed of [false, true]) {
+    test(`returning by ${mode} marks unseen progress only for a history reader (following=${following}, confirmed=${confirmed})`, async (t) => {
+        const s = historyServer();
+        s.say(1); s.work(2);
+        const r = openRoom(t, s);
+        // A census can confirm the work; without it replay may reconcile liveness, but adds no unseen words.
+        if (confirmed) r.instance.hydrateStateSnapshot({ active_chat_activities: [{ activity_id: 'task-1', chat_id: 2,
+            kind: 'managed_task', phase: 'working', status: 'running' }], active_chat_activities_complete: false,
+            supervisor_ready: true });
+        let revision = 0;
+        const read = async () => {
+            if (mode === 'newest') s.refusals.push('history_cursor_gone');
+            await r.instance.refreshHistory({ revision: ++revision });
+            await quiet();
+        };
+        const label = () => globalThis.document.byId.get('chat-scroll-bottom').getAttribute('aria-label');
+        const leave = () => { r.instance.leave(); r.setHidden(true); };
+        const back = async () => { r.setHidden(false); r.instance.stay(); r.instance.resume(false); await read(); };
+        await read();
+        assert.equal(label(), 'Scroll to latest message', 'opening existing history is quiet');
+        if (!following) r.readUp();
+        await read();
+        assert.equal(label(), 'Scroll to latest message', 'an unchanged reread is quiet');
+        // A progress frame seen while following remains the same line when its stored identity arrives.
+        globalThis.document.byId.get('chat-scroll-bottom').click(); await quiet();
+        r.emit('chat', { chat_id: 2, role: 'assistant', is_progress: true, task_id: 'task-1', content: 'step 3', ts: ts(3) });
+        s.work(3);
+        if (!following) r.readUp();
+        await read();
+        assert.equal(label(), 'Scroll to latest message', 'adopting the live row adds no unseen words');
+        for (const kind of ['new task', 'same task', 'answer']) {
+            leave();
+            if (kind === 'new task') s.work(4, 'task-2');
+            else if (kind === 'same task') s.work(5, 'task-2');
+            else s.say(6);
+            await back();
+            assert.equal(label(), following ? 'Scroll to latest message' : 'New activity — scroll to latest message', `${kind}: new history uses the reader\'s activity marker`);
+            globalThis.document.byId.get('chat-scroll-bottom').click(); await quiet();
+            assert.equal(label(), 'Scroll to latest message', 'reaching the newest message clears it');
+            if (!following) r.readUp();
+        }
+    });
+}
+
+
+test('walking into an older page does not mark its existing words as new activity', async (t) => {
+    const s = historyServer({ window: 1 });
+    s.say(1); s.work(2); s.say(3);
+    const r = openRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    r.readUp();
+    const older = r.messages.querySelector('.chat-load-older').querySelector('.chat-load-older-btn');
+    older.click();
+    await quiet();
+    assert.ok(s.reads.includes('older'));
+    assert.equal(globalThis.document.byId.get('chat-scroll-bottom').getAttribute('aria-label'), 'Scroll to latest message');
 });

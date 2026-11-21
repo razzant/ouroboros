@@ -493,7 +493,7 @@ def test_move_to_project_ignores_legacy_planning_obligation(_projects_root, monk
     ctx = _ensure_live(_projects_root, supervisor, task_id="swarm-root",
                        task_metadata={"force_plan": True, "force_plan_source": "swarm"})
     assert _move_to_project(ctx, project_name="Cyber Racing").startswith("OK: this work")
-    assert plan_gate_decision(ctx, {}, enforcement="blocking")["status"] == "not_required"
+    assert plan_gate_decision(ctx, {})["status"] == "not_required"
 
 
 def test_separate_work_reports_its_own_destination(_projects_root, monkeypatch):
@@ -526,7 +526,7 @@ def test_old_transfer_receipts_remain_readable_without_creating_an_obligation(tm
     receipt = {"from": "swarm-root", "to": "new-root", "released": True}
     write_task_result(tmp_path, "swarm-root", STATUS_RUNNING, result="running", force_plan_transfer=receipt)
     ctx = _pooled_root_ctx(tmp_path)
-    assert plan_gate_decision(ctx, {}, enforcement="blocking")["status"] == "not_required"
+    assert plan_gate_decision(ctx, {})["status"] == "not_required"
     assert load_task_result(tmp_path, "swarm-root")["force_plan_transfer"] == receipt
 
 

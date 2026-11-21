@@ -6,14 +6,13 @@ import pytest
 
 
 
-@pytest.mark.parametrize("case", ["same", "blocking", "post_changed"])
+@pytest.mark.parametrize("case", ["same", "post_changed"])
 def test_commit_author_record_requires_prior_review_of_exact_attempt(tmp_path, monkeypatch, case):
     from types import SimpleNamespace
     from ouroboros.review_records import build_author_disposition
     from ouroboros.review_state import load_state
     from ouroboros.tools.commit_gate import _record_commit_attempt
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking" if case == "blocking" else "advisory")
     ctx = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path, task_id="",
                           _review_advisory=[], _current_review_attempt_number=0)
     raw = [{"slot_id": "critic", "text": "Raw unresolved finding"}]

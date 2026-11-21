@@ -26,6 +26,11 @@
     <priority>0.9</priority>
   </url>
   <url>
+    <loc>https://ouroboros-agent.ai/community/</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://ouroboros-agent.ai/install/</loc>
     <changefreq>weekly</changefreq>
     <priority>0.9</priority>
@@ -39,5 +44,15 @@
     <loc>https://ouroboros-agent.ai/history/first-48-hours/</loc>
     <changefreq>yearly</changefreq>
     <priority>0.5</priority>
+  </url>
+  <url>
+    <loc>https://ouroboros-agent.ai/llm-rating/</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://ouroboros-agent.ai/llm-rating/editions.html</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
   </url>
 </urlset>

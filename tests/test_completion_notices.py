@@ -80,9 +80,10 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
     else:
         assert summary["completion_notice"]["neutral"] is False
         assert fragment in summary["reason_detail"]
+    unexamined = dialogue.TASK_CAUSE_PHRASES["receipt_absent"].rstrip(".")
     if case == "receipt":
-        assert summary["outcome_phase"] == "warn"  # notification calm is not a green verdict
-        assert "No host verification receipt" in summary["reason_detail"]
+        assert summary["outcome_phase"] == "done"  # nothing examined the result is a detail (9 Nov 2026)
+        assert unexamined in summary["reason_detail"]
     if case == "mixed":
         assert "receipt_absent" in summary["outcome_axes"]["objective"]["warnings"]
     _write_rows(data, [summary])
@@ -97,13 +98,15 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
     message = _Rec.sent[0][1]
     assert fragment in message
     assert "earlier version" not in message
-    assert "No host verification receipt" not in message
+    assert unexamined not in message
     if case in {"clean", "receipt"}:
         assert "⚠" not in message and "✅" not in message and "done" not in message
 
 
 @pytest.mark.parametrize("trigger,enforcement,obligations,expected_neutral", [
-    ("auto_effect", "advisory", [], True),
+    # An author's acceptance without the reviewers' approval is always flagged, an optional review's too
+    # (owner, 8 Nov 2026): the compact notice says the same sentence as the card.
+    ("auto_effect", "advisory", [], False),
     ("required_effect", "advisory", [], False),
     ("auto_effect", "blocking", [], False),
     ("auto_effect", "advisory", ["unmet-review"], False),
@@ -236,3 +239,23 @@ def test_degraded_review_history_never_leaves_a_bare_warning(lane, tmp_path, mon
     assert not notice["neutral"]  # do not invent finished/approved from degraded facts
     assert notice["detail"] and "earlier version" in notice["detail"], sent
     assert "earlier version" in sent
+
+
+def test_the_works_review_gate_field_reaches_its_telegram_completion_copy_and_nothing_else(tmp_path, monkeypatch):
+    """The work's card fact (``review_overrides``) rides the completion it already sends: no message of its own."""
+    nt = _load()
+    api, data = _api(tmp_path)
+    monkeypatch.setattr(nt, "TelegramClient", _Rec)
+    gated = {**_record("clean"), "task_id": "gated", "review_overrides": {"count": 12, "latest": {
+        "reason": "critical_findings", "task_id": "gated", "text": "x" * 300, "at": "2026-11-11T10:00:00+00:00"}}}
+    plain = {**_record("clean"), "task_id": "plain"}
+    rows = [terminal_projection._project_row(row["task_id"], row, {}, {"chat_id": 1}) for row in (gated, plain)]
+    line = "Review: FAIL or no verdict 12× (latest: critical findings)"
+    assert rows[0]["completion_notice"]["review_gate"] == line and "review_gate" not in rows[1]["completion_notice"]
+    assert rows[0]["completion_notice"]["neutral"] is rows[1]["completion_notice"]["neutral"], "a field, not a cause"
+    _write_rows(data, rows)
+    _Rec.sent = []
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "en"))
+    assert len(_Rec.sent) == 2, "one completion message per work, as before"
+    texts = [text for _chat, text, *_ in _Rec.sent]
+    assert sum(line in text for text in texts) == 1 and "x" * 300 not in "".join(texts)

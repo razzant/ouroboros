@@ -122,6 +122,17 @@ def install_node(repo, python, tools, pins):
     run(tools / "node", "--version")
 
 
+def pin_sdk_node(repo, python, node_pin):
+    """Give the venv's Playwright SDK the common pin's Node bytes and license before any SDK launch.
+
+    This venv is ours and mutable; the stager re-verifies the cached archive and every driver copy."""
+    stager = repo / "scripts/download_node_standalone.py"
+    with tempfile.TemporaryDirectory(prefix="node-stage-", dir=PROVISION) as directory:
+        staged = Path(directory) / "node-standalone"
+        run(python, stager, "--destination", staged, "--archive", node_pin["cached_file"])
+        run(python, stager, "--replace-playwright", APP / "venv", "--node", staged / "bin/node")
+
+
 def install_sdk(repo, pins, *, build_native=True):
     sdk = APP / "android-sdk"
     platform = sdk / "platforms/android-36"
@@ -218,7 +229,7 @@ def ensure_platform(repo):
     pins = [{**p, "url": common_node["archive_url"], "sha256": common_node["sha256"],
              "size_bytes": common_node["size_bytes"]} if p["name"] == "node" else p for p in pins]
     selected = [p for p in pins if ("sdk" in changed and p["name"].startswith("android-"))
-                or ("aapt" in changed and p["name"].startswith("aapt2-")) or ("browser" in changed and p.get("playwright_path")) or ("node" in changed and p["name"] == "node")]
+                or ("aapt" in changed and p["name"].startswith("aapt2-")) or ("browser" in changed and p.get("playwright_path")) or ({"node", "browser"} & changed and p["name"] == "node")]
     cache = Path("/ouroboros-install-cache")
     if not cache.is_dir():
         cache = APP / "data/platform-download-cache"
@@ -235,6 +246,8 @@ def ensure_platform(repo):
         run("/bin/sh", provision / "packages.sh")
     if "node" in changed:
         install_node(repo, python, tools, selected)
+    if {"node", "browser"} & changed:  # a new Node or a reinstalled SDK: its own driver Node is replaced
+        pin_sdk_node(repo, python, next(p for p in selected if p["name"] == "node"))
     if "aapt" in changed:
         # These directories contain reconstructible upstream build inputs only.
         # Reusing an old extraction could retain source files deleted upstream.

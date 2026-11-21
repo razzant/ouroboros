@@ -172,7 +172,7 @@ def test_the_mind_reads_typed_facts_and_never_the_engines_retry_coach():
             "failure_code": "run_failed", "error": prose, "reported_cause": WORDS, "operation_state": "late_settled"}
     record = _record(dead)
     before = copy.deepcopy(record)
-    decision = plan_record.gate_projection(record, enforcement="advisory", cyber_pro=False, hurry=False)
+    decision = plan_record.gate_projection(record, cyber_pro=False)
     text = render_record(record, decision)
     assert record == before and "nextActions" in record["asks"][0]["participants"][0]["error"], "a display substitution never rewrites the stored row"
     assert f'- ask a1 on revision 1: s1 (codex=gpt-6-astra): failed[run_failed] — reported cause: "{WORDS}"; s2 (m): answered' in text

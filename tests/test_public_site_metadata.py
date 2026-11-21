@@ -25,9 +25,12 @@ INDEXABLE = {
     "/privacy/": SITE / "privacy" / "index.html",
     "/terms/": SITE / "terms" / "index.html",
     "/paper/": SITE / "paper" / "index.html",
+    "/community/": SITE / "community" / "index.html",
     "/install/": SITE / "install" / "index.html",
     "/benchmarks/": SITE / "benchmarks" / "index.html",
     "/history/first-48-hours/": SITE / "history" / "first-48-hours" / "index.html",
+    "/llm-rating/": SITE / "public" / "llm-rating" / "index.html",
+    "/llm-rating/editions.html": SITE / "public" / "llm-rating" / "editions.html",
 }
 
 
@@ -141,6 +144,135 @@ def test_install_page_has_version_bound_direct_downloads_before_advanced_setup()
 def test_generated_public_files_match_source():
     for name in ("CNAME", "robots.txt", "sitemap.xml", "llms.txt", "install.json"):
         assert (SITE / "public" / name).read_bytes() == (DOCS / name).read_bytes()
+
+
+def test_readme_install_page_and_deployment_guide_name_the_factory_values():
+    """What a newcomer reads before installing is the factory limits themselves, in one paragraph on every surface;
+    an operator's deployment guide states the same factory values as rows of its first-run table."""
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS as defaults
+
+    total, task, daily = (int(defaults[key]) for key in (
+        "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "OUROBOROS_CONSCIOUSNESS_DAILY_USD"))
+    paragraph = (f"out of the box, new paid work stops once known spend reaches ${total} in total, or ${task} for one "
+                 "task and its helpers; charges already in flight can pass a limit. Background consciousness starts with "
+                 "the setup wizard's switch, which is on unless you turn it off (without the wizard it stays off until "
+                 f"you start it), and then has ${daily} for each 24 hours. Settings changes all three.")
+    guided = "The first-run wizard guides accounts and models, access, background consciousness, and budget setup."
+    for path in (REPO / "README.md", SITE / "install" / "index.html", DOCS / "install" / "index.html"):
+        assert paragraph in path.read_text(encoding="utf-8"), path.relative_to(REPO)
+        assert guided in path.read_text(encoding="utf-8"), path.relative_to(REPO)  # the wizard's steps, its Consciousness one
+    table = (DOCS / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    assert f"| Limits | ${total} in total, ${task} for one task and its helpers, of known spend |" in table
+    assert f"| Consciousness | off (${daily} over 24 hours once started);" in table
+    for label, key in (("Safety coverage", "OUROBOROS_SAFETY_MODE"), ("Access level", "OUROBOROS_RUNTIME_MODE")):
+        assert f"| {label} | `{defaults[key]}`" in table, label
+
+
+def test_rating_publication_is_complete_and_source_bound():
+    source = SITE / "public" / "llm-rating"
+    generated = DOCS / "llm-rating"
+    files = {p.relative_to(source) for p in source.rglob("*") if p.is_file()}
+    assert files == {p.relative_to(generated) for p in generated.rglob("*") if p.is_file()}
+    assert files
+    for path in files:
+        assert (source / path).read_bytes() == (generated / path).read_bytes(), path
+    data = json.loads((source / "data/latest.json").read_text(encoding="utf-8"))
+    assert data["status"] == "final"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", data["published"])
+    archived = source / "data/editions" / data["edition"] / "edition.json"
+    assert archived.read_bytes() == (source / "data/latest.json").read_bytes()
+    groups = {group["id"]: group for group in data["groups"]}
+    works = {work["id"]: work for work in data["works"]}
+    models = {model["id"]: model for model in data["models"]}
+    for cell in data["cells"]:
+        if cell["grade"] is None:
+            continue
+        reason = cell.get("note")
+        if not reason:
+            group = groups[works[cell["work"]]["group"]]
+            assert group["main"], (cell["model"], cell["work"])
+            axis = models[cell["model"]]["groups"][group["id"]]
+            assert axis["grade"] == cell["grade"]
+            reason = axis["reason"]
+        assert all(reason.get(language, "").strip() for language in ("en", "ru"))
+    for path in (SITE / "index.html", DOCS / "index.html"):
+        assert 'href="/llm-rating/"' in path.read_text(encoding="utf-8")
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    for theme in ("light", "dark"):
+        image = f"docs/llm-rating/card/latest-en-{theme}.png"
+        assert image in readme and (REPO / image).is_file()
+
+
+def _tags(page: str, name: str) -> list[dict[str, str]]:
+    """The attributes of every ``<name>`` tag of a page, as an HTML parser reads them."""
+    from html.parser import HTMLParser
+
+    found: list[dict[str, str]] = []
+
+    class Collector(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag == name:
+                found.append({key: value or "" for key, value in attrs})
+
+    Collector().feed(page)
+    return found
+
+
+def test_home_page_references_only_shipped_captures_and_a_hashed_social_card():
+    """Every capture and font the home page or its stylesheet names ships byte-identically in site/public and in
+    docs/, neither copy keeps an orphan, every capture on the source and on the served page declares its real pixel
+    size, docs/ holds exactly the home bundles the served page loads, the served page is its source built, and every
+    indexable page that names the social card, like its served copy, carries one og:image and one twitter:image whose
+    cache-busting hash is the card's own content hash."""
+    import hashlib
+
+    from PIL import Image
+
+    html = (SITE / "index.html").read_text(encoding="utf-8")
+    served = (DOCS / "index.html").read_text(encoding="utf-8")
+    css = (SITE / "src" / "home.css").read_text(encoding="utf-8")
+    referenced = {image["src"][1:] for image in _tags(html, "img") if image.get("src", "").startswith("/ui/")}
+    referenced |= {link["href"][1:] for link in _tags(html, "link") if link.get("href", "").startswith(("/fonts/", "/ui/"))}
+    referenced |= set(re.findall(r"""url\(["']?/(fonts/[^)"']+)""", css))
+    assert referenced
+    for rel in sorted(referenced):
+        assert (SITE / "public" / rel).is_file(), rel
+        assert (SITE / "public" / rel).read_bytes() == (DOCS / rel).read_bytes(), rel
+    for root in (SITE / "public", DOCS):
+        captures = {p.relative_to(root).as_posix() for p in (root / "ui").glob("*.webp")}
+        assert captures == {rel for rel in referenced if rel.startswith("ui/")}, root
+        fonts = {p.relative_to(root).as_posix() for p in (root / "fonts").glob("*.woff2")}
+        assert fonts == {rel for rel in referenced if rel.startswith("fonts/")}, root
+        assert "SIL OPEN FONT LICENSE" in (root / "fonts" / "LICENSE-Inter.txt").read_text(encoding="utf-8")
+    for page in (html, served):
+        shown = [image for image in _tags(page, "img") if image.get("src", "").startswith("/ui/")]
+        assert {image["src"][1:] for image in shown} == {rel for rel in referenced if rel.startswith("ui/")}
+        for image in shown:
+            with Image.open(SITE / "public" / image["src"][1:]) as capture:
+                assert capture.size == (int(image.get("width") or 0), int(image.get("height") or 0)), image["src"]
+    scripts = [tag.get("src", "") for tag in _tags(served, "script") if tag.get("type") == "module"]
+    styles = [tag.get("href", "") for tag in _tags(served, "link") if tag.get("rel") == "stylesheet"]
+    assert len(scripts) == 1 and re.fullmatch(r"/assets/home-[\w-]+\.js", scripts[0]), scripts
+    assert len(styles) == 1 and re.fullmatch(r"/assets/home-[\w-]+\.css", styles[0]), styles
+    assert {p.name for p in (DOCS / "assets").glob("home-*")} == {scripts[0].rsplit("/", 1)[1], styles[0].rsplit("/", 1)[1]}
+    # the served page is this source built: apart from the two bundle lines the build rewrites, they read the same
+    lines = [
+        [line.strip() for line in page.splitlines() if line.strip() and "/src/home." not in line and "/assets/home-" not in line]
+        for page in (html, served)
+    ]
+    assert lines[0] == lines[1]
+    card = (REPO / "assets" / "og-preview.png").read_bytes()
+    assert (DOCS / "assets" / "og-preview.png").read_bytes() == card
+    expected = f"{ORIGIN}/assets/og-preview.png?v={hashlib.sha256(card).hexdigest()[:10]}"
+    public = SITE / "public"
+    pairs = [(source, DOCS / source.relative_to(public if public in source.parents else SITE)) for source in INDEXABLE.values()]
+    naming = [pair for pair in pairs if any("og-preview.png" in page.read_text(encoding="utf-8") for page in pair)]
+    assert (SITE / "index.html", DOCS / "index.html") in naming
+    for pair in naming:
+        for page in pair:
+            metas = _tags(page.read_text(encoding="utf-8"), "meta")
+            assert [meta.get("content") for meta in metas if meta.get("property") == "og:image"] == [expected], page
+            assert [meta.get("content") for meta in metas if meta.get("name") == "twitter:image"] == [expected], page
 
 
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():
