@@ -17,6 +17,9 @@ clicks Commit at a point read off a downscaled screenshot. A fourth, only with `
 because it replaces the clipboard, pastes into the paste fixture under whatever keyboard layout is active (#2589);
 another, on a qualified layout, sends cmd+g and cmd+} there and requires their menu items to fire (cmd+? is judged by
 its event only, its menu recorded), and one waits with until_text for a status the target shows after a single press.
+The input program of #63 (``input_events.js``) has its own cases against a pointer fixture (a scroll view over a large
+document) and the front fixture: a middle click, double and triple click counts, a drag, the wheel each way, mixed
+Unicode text, a held key and the pointer read back; each judges the events the fixture received and their mark.
 The calls run as an owner task's would
 (``work_kind`` owner). A grant the run lacks becomes the skip reason, never a pass.
 Further cases read a named window's rich tree, tell the window an ``observe=true`` action kept from a same-process
@@ -1021,3 +1024,170 @@ def test_press_and_fresh_tree_timing_block(host, launch, tmp_path):
                               "significance": None}) + "\n")
     assert not problems, "\n".join(problems)
 
+
+
+# --- the input program (input_events.js, #63): what the pointer and front fixtures received ------------------------
+# Each case below calls the skill through the production path and judges only the fixture's own log: the events it
+# received (with the skill's mark in kCGEventSourceUserData), where its document stands, and the keys and buttons the
+# session still holds. Breaking the matching operation of input_events.js fails the case.
+SKILL_TAG = 0x4F55524F  # mac_input.EVENT_TAG, written out: the fixture checks the producer, not the producer's constant
+MOUSE = {"left_down": 1, "left_up": 2, "right_down": 3, "right_up": 4, "moved": 5, "left_dragged": 6,
+         "scroll": 22, "other_down": 25, "other_up": 26}  # NSEvent.EventType raw values
+
+
+def _pointer_fixture(call, launch) -> tuple[Owned, dict, list[int]]:
+    """The pointer fixture handed the front, its snapshot, and the centre of its scroll view (global points)."""
+    _input_ready(call)
+    pointer = launch("pointer")
+    held = _hand_front(call, pointer)
+    x, y, w, h = held["scroll_frame"]
+    return pointer, held, [round(x + w / 2), round(y + h / 2)]
+
+
+def _received(owned: Owned, start: dict, end: dict, *types: int) -> list[dict]:
+    """The pointer events delivered to this fixture (its local monitor) between two marks, of these types."""
+    return [row for row in _between(owned.rows(), start["t"], end["t"], "pointer_event")
+            if row["scope"] == "local" and row["type"] in types]
+
+
+def _own_marks(rows: list[dict]) -> list:
+    """Rows not carrying the skill's mark: someone else's events landed in the case."""
+    return [row for row in rows if row.get("tag") != SKILL_TAG]
+
+
+def _near(point, target, slack=1) -> bool:
+    return point is not None and all(abs(a - b) <= slack for a, b in zip(point, target))
+
+
+@desktop_only
+def test_a_middle_click_arrives_as_the_other_button_number_two(host, launch):
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    before = pointer.mark("before")
+    sent = call("click", x=at[0], y=at[1], raw=True, button="middle", app=f"pid:{pointer.pid}", raise_policy="never")
+    pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["other_up"])
+    after = pointer.mark("after")
+    rows = _received(pointer, before, after, MOUSE["other_down"], MOUSE["other_up"], MOUSE["left_down"], MOUSE["right_down"])
+    assert sent.get("ok") is True and sent.get("method") == "cg_events", sent
+    assert [(r["type"], r["button"]) for r in rows] == [(MOUSE["other_down"], 2), (MOUSE["other_up"], 2)], rows
+    assert all(_near(r["at"], at) for r in rows) and not _own_marks(rows) and after["buttons_down"] == 0, (rows, after)
+
+
+@desktop_only
+def test_double_and_triple_click_carry_their_click_count(host, launch):
+    """One double_click and one triple_click call: AppKit reads the click count of each press from the event, so the
+    presses count 1, 2 and 1, 2, 3 (a pause longer than the double-click interval keeps the two calls apart)."""
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    counts = {}
+    for tool in ("double_click", "triple_click"):
+        before = pointer.mark(tool)
+        sent = call(tool, x=at[0], y=at[1], raw=True, app=f"pid:{pointer.pid}", raise_policy="never")
+        time.sleep(1.0)
+        after = pointer.mark(tool + "_after")
+        rows = _received(pointer, before, after, MOUSE["left_down"], MOUSE["left_up"])
+        assert sent.get("ok") is True and not _own_marks(rows), (sent, rows)
+        counts[tool] = [r["clicks"] for r in rows if r["type"] == MOUSE["left_down"]]
+        assert len([r for r in rows if r["type"] == MOUSE["left_up"]]) == len(counts[tool]) and after["buttons_down"] == 0
+    assert counts == {"double_click": [1, 2], "triple_click": [1, 2, 3]}, counts
+
+
+@desktop_only
+def test_a_drag_goes_down_at_its_start_travels_and_comes_up_at_its_end(host, launch):
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    start, end = [at[0] - 80, at[1] - 50], [at[0] + 80, at[1] + 50]
+    before = pointer.mark("before")
+    sent = call("left_click_drag", start_x=start[0], start_y=start[1], end_x=end[0], end_y=end[1], raw=True,
+                app=f"pid:{pointer.pid}", raise_policy="never")
+    pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["left_up"])
+    after = pointer.mark("after")
+    rows = _received(pointer, before, after, MOUSE["left_down"], MOUSE["left_dragged"], MOUSE["left_up"])
+    kinds = [r["type"] for r in rows]
+    assert sent.get("ok") is True and not _own_marks(rows), (sent, rows)
+    assert kinds[0] == MOUSE["left_down"] and kinds[-1] == MOUSE["left_up"] and kinds.count(MOUSE["left_dragged"]) >= 1, kinds
+    assert set(kinds[1:-1]) == {MOUSE["left_dragged"]}, kinds
+    assert _near(rows[0]["at"], start) and _near(rows[-1]["at"], end) and after["buttons_down"] == 0, (rows, after)
+
+
+@desktop_only
+def test_the_wheel_scrolls_the_document_under_the_pointer_each_way(host, launch):
+    """scroll(direction="down") must show what lies further down: the flipped document's visible origin y grows, and
+    "up" makes it shrink; "right" and "left" do the same with x. The skill posts wheel lines with a negative vertical
+    delta for "down" and a negative horizontal one for "right" (CoreGraphics: positive wheel 1 is up, positive wheel 2
+    is left). Whether the system flips that for natural scrolling is not set or assumed here: each direction is
+    compared with what the opposite call did, and the delta AppKit reported is recorded (``delta``, ``inverted``)."""
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    moved = call("move", x=at[0], y=at[1], raw=True)
+    assert moved.get("ok") is True, moved
+    seen = {}
+    for direction in ("down", "up", "right", "left"):
+        before = pointer.mark(direction)
+        sent = call("scroll", clicks=3, direction=direction, app=f"pid:{pointer.pid}", raise_policy="never")
+        time.sleep(0.8)  # the scroll view settles; every wheel event is logged before the mark below
+        after = pointer.mark(direction + "_after")
+        rows = _received(pointer, before, after, MOUSE["scroll"])
+        assert sent.get("ok") is True and sent.get("method") == "cg_events" and not _own_marks(rows), (sent, rows)
+        seen[direction] = {"events": len(rows), "moved": [a - b for a, b in zip(after["origin"], before["origin"])],
+                           "delta": [r["delta"] for r in rows], "inverted": sorted({r["inverted"] for r in rows})}
+    facts = json.dumps(seen)
+    assert all(seen[d]["events"] == 3 for d in seen), facts
+    assert seen["down"]["moved"][1] > 0 > seen["up"]["moved"][1], facts
+    assert seen["right"]["moved"][0] > 0 > seen["left"]["moved"][0], facts
+    assert seen["down"]["moved"][0] == seen["up"]["moved"][0] == seen["right"]["moved"][1] == seen["left"]["moved"][1] == 0, facts
+
+
+@desktop_only
+def test_mixed_text_arrives_whole_as_unicode_events_without_the_clipboard(host, launch):
+    """Latin, Cyrillic, an emoji with a skin tone (a surrogate pair and its modifier in one event), a combining accent
+    and a line break: the front fixture's text view holds exactly the text sent, under whatever layout the session
+    has, and the clipboard's change count did not move."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    text = "Hi Привет 👋🏽 é\nok"
+    before = front.mark("before")
+    sent = call("type_text", text=text, app=f"pid:{front.pid}", raise_policy="never")
+    try:
+        front.wait_for("front_text", after=before["t"], timeout=10, text=text)
+    except AssertionError:
+        pass  # the comparison below shows what arrived instead
+    after = front.mark("after")
+    downs = _between(front.rows(), before["t"], after["t"], "key_down")
+    assert (sent.get("ok"), sent.get("method"), sent.get("chars_sent")) == (True, "unicode_events", sent.get("chars_total")), sent
+    assert after["text"] == text, {"arrived": after["text"], "sent": text, "receipt": sent}
+    assert after["pasteboard_change_count"] == before["pasteboard_change_count"] and not _own_marks(downs), downs
+    assert after["keys_down"] == [], after
+
+
+@desktop_only
+def test_a_held_key_goes_up_after_its_time_and_stays_up(host, launch):
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    before = front.mark("before")
+    sent = call("hold_key", keys="a", duration_ms=600, app=f"pid:{front.pid}", raise_policy="never")
+    up = front.wait_for("key_up", after=before["t"])
+    after = front.mark("after")
+    downs = [r for r in _between(front.rows(), before["t"], after["t"], "key_down") if not r["repeat"]]
+    assert sent.get("ok") is True and sent.get("method") == "cg_events", sent
+    assert len(downs) == 1 and downs[0]["key_code"] == up["key_code"] and not _own_marks(downs + [up]), (downs, up)
+    assert up["t"] - downs[0]["t"] >= 0.6 - 0.05, {"held_s": up["t"] - downs[0]["t"]}
+    assert after["keys_down"] == [], after
+
+
+@desktop_only
+def test_the_pointer_reads_back_where_move_put_it(host, launch):
+    call, _schema = host
+    pointer, held, at = _pointer_fixture(call, launch)
+    target = [at[0] + 37, at[1] - 23]
+    moved = call("move", x=target[0], y=target[1], raw=True)
+    read = call("cursor_position")
+    mark = pointer.mark("after")
+    assert moved.get("ok") is True and read.get("ok") is True, (moved, read)
+    assert _near([read["x"], read["y"]], target), {"read": read, "target": target}
+    moved_rows = _received(pointer, held, mark, MOUSE["moved"])
+    assert moved_rows and _near(moved_rows[-1]["at"], target) and not _own_marks(moved_rows), moved_rows
