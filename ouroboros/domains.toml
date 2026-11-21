@@ -191,6 +191,7 @@ D20 = "Presence"
 "ouroboros/local_custody_repair.py" = "D09"
 "ouroboros/custody_owed.py" = "D09"  # local custody writes a process knows but could not yet land
 "ouroboros/physical_attempt_context.py" = "D16"
+"ouroboros/capability_breakage.py" = "D04"
 "ouroboros/capability_evidence.py" = "D03"
 "ouroboros/density_probe.py" = "D03"
 "ouroboros/response_limits.py" = "D03"
