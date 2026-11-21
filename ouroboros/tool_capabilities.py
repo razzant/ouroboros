@@ -24,6 +24,14 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "memory_read", "memory_mark",
 })
 
+# Where a route cannot carry every schema in one request (direct OpenAI takes 128;
+# ``tool_policy.fit_tool_schemas_to_limit``), the tools with which this mind reads and
+# revises its own memory and the work in front of it are always sent: this set, the
+# selectors and the MCP gateway. Owner administration of the installation, rescue and
+# one-off media wait in the tail (``ROUTE_TAIL_TOOL_NAMES``), and the route's notice
+# names every tool left out with its purpose. The provider's limit is the physical fact;
+# this rule only orders the default, and enable_tools still loads any permitted schema.
+# The set's size stays where it is, so one explicitly loaded skill (25 tools) still fits.
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "inspect_harness", "inspect_subagent", "maintain_harness", "free_storage",
     "finish_task",
@@ -66,10 +74,11 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
+    # The project's progress memory and working page, and the fold of this actor's own transcript.
+    "journal_read", "journal_write", "workpad_read", "workpad_write", "compact_context",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
-    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
-    "generate_image", "list_image_models", "recover_image",
+    "ocr_pdf", "extract_pdf_text",
     *OWNER_DELIVERY_TOOL_NAMES,
     "escalate",
     "switch_model",
@@ -80,6 +89,16 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # load on demand (enable_tools) after a search found something worth it.
     "list_skills", "skill_review", "skill_preflight",
     "submit_skill_to_hub", "skill_search",
+})
+
+# What waits behind every other schema on such a route: the installation's saved
+# settings the owner administers (interface wording, the global tool timeout, the
+# consciousness and evolution switches), and one-off media helpers with the rescue of
+# an earlier image attempt. A name this task already called or the actor loaded keeps
+# its place ahead of the tail.
+ROUTE_TAIL_TOOL_NAMES: frozenset[str] = frozenset({
+    "pin_ui_translation", "set_tool_timeout", "toggle_consciousness", "toggle_evolution",
+    "youtube_transcript", "extract_video_frames", "generate_image", "list_image_models", "recover_image",
 })
 
 # Meta-tools: always visible alongside core tools

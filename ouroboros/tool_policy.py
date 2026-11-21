@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Protocol, Sequence
 
-from ouroboros.tool_capabilities import CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES
+from ouroboros.tool_capabilities import CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES, ROUTE_TAIL_TOOL_NAMES
 from ouroboros.contracts.task_contract import canonical_tool_name
 
 
@@ -132,16 +132,18 @@ def fit_tool_schemas_to_limit(
     Under the ceiling (or without one) the list is unchanged. Above it, core and meta
     schemas and the MCP gateway stay first, then ``protect`` (names this task's history already called),
     then ``first`` (the load being made now), then ``keep`` (names the actor loaded on
-    purpose before), then the rest in their own order; the tail beyond the ceiling is
-    left out. The kept schemas retain their order. Omitted names stay callable;
-    ``enable_tools``, where available, shows or loads their schemas.
+    purpose before), then the rest in their own order, and ``ROUTE_TAIL_TOOL_NAMES`` last
+    (the rule beside ``CORE_TOOL_NAMES``); the tail beyond the ceiling is left out. The
+    kept schemas retain their order. Omitted names stay callable; ``enable_tools``, where
+    available, shows or loads their schemas.
     """
     if limit is None or len(schemas) <= limit:
         return list(schemas), ()
     keep, first, protect = frozenset(keep), frozenset(first), frozenset(protect)
     names = [str(schema["function"]["name"]) for schema in schemas]
     rank = [0 if name in CORE_TOOL_NAMES or name in META_TOOL_NAMES or name == MCP_GATEWAY_TOOL_NAME else 1 if name in protect
-            else 2 if name in first else 3 if name in keep else 4 for name in names]
+            else 2 if name in first else 3 if name in keep else 5 if name in ROUTE_TAIL_TOOL_NAMES else 4
+            for name in names]
     kept = set(sorted(range(len(names)), key=lambda index: (rank[index], index))[:max(0, limit)])
     return ([schema for index, schema in enumerate(schemas) if index in kept],
             tuple(name for index, name in enumerate(names) if index not in kept))
@@ -160,12 +162,29 @@ def usable_selectors(registry: Any, resident: Iterable[Dict[str, Any]] | None = 
     return frozenset(names)
 
 
+def tool_purpose(schema: Mapping[str, Any]) -> str:
+    """A tool's purpose as its own author wrote it: the first sentence of its description."""
+    text = " ".join(str((schema.get("function") or {}).get("description") or "").split())
+    head, stop, _rest = text.partition(". ")
+    return head + "." if stop else text
+
+
 def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequence[str], *,
-                            selectors: Iterable[str]) -> str:
+                            selectors: Iterable[str], schemas: Sequence[Dict[str, Any]]) -> str:
     """The fact an actor reads when its route could not carry all of its loaded schemas.
 
-    It names only the ``selectors`` this actor can use in the fitted request (``usable_selectors``).
+    Each left-out name comes with its purpose (``tool_purpose``) read from ``schemas``, the list the
+    fit was made from, in the fit's own order, so one cut always reads the same; an MCP server's text
+    is quoted as data. It names only the ``selectors`` this actor can use in the fitted request
+    (``usable_selectors``).
     """
+    purposes = {str(schema["function"]["name"]): tool_purpose(schema) for schema in schemas}
+    rows = []
+    for name in left_out:
+        purpose = purposes.get(name, "")
+        if purpose and tool_namespace(name).startswith("mcp_"):
+            purpose = repr(purpose)
+        rows.append(f"- {name}: {purpose}" if purpose else f"- {name}")
     selectors = frozenset(selectors)
     ways = [way for name, way in (
         ("list_available_tools", "list_available_tools marks them not loaded"),
@@ -174,7 +193,7 @@ def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequen
     ) if name in selectors]
     return ("[SYSTEM NOTICE]\n"
             f"The route {model} accepts at most {limit} tool schemas in one request; this task had "
-            f"{total} loaded. Not loaded for now: {', '.join(left_out)}. They stay callable"
+            f"{total} loaded. Not loaded for now:\n" + "\n".join(rows) + "\nThey stay callable"
             + (": " + ", and ".join(ways) if ways else "") + ".")
 
 

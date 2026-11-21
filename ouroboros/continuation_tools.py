@@ -125,7 +125,8 @@ def _adopt_current_tools(tools: Any, state: dict, messages: list, mode: str, bef
         f"~changed {', '.join(changed) or 'none'}.")})
     if left_out:
         messages.append({"role": "user", "content": route_tool_limit_notice(
-            ctx.active_model, limit, len(candidate), left_out, selectors=usable_selectors(tools, fitted))})
+            ctx.active_model, limit, len(candidate), left_out, selectors=usable_selectors(tools, fitted),
+            schemas=candidate)})
     fact = {"checkpoint_kind": "continuation_tools_changed", "from_tools_digest": before,
             "to_tools_digest": after, "added": added, "removed": removed, "changed": changed}
     trace = getattr(ctx, "_execution_trace", None)

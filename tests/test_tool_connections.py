@@ -544,7 +544,11 @@ def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_phy
             "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": "weather",
         })
     monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
-    initial = initial_tool_schemas(registry)
+    from ouroboros.tool_capabilities import ROUTE_TAIL_TOOL_NAMES
+
+    # Without the route tail, which a ceiling leaves out first (tests/test_route_tool_schema_limit.py).
+    initial = [schema for schema in initial_tool_schemas(registry)
+               if schema["function"]["name"] not in ROUTE_TAIL_TOOL_NAMES]
     pinned = "mcp_slack__history"
     initial.sort(key=lambda schema: schema["function"]["name"] == pinned)  # the schema to displace
     limit = len(initial) - 1
@@ -561,7 +565,7 @@ def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_phy
     assert len(resident) == limit and ext in _names(resident) and lookup not in _names(resident)
     assert f"leaves out: {pinned}." in receipt
     notice = route_tool_limit_notice(registry._ctx.active_model, limit, len(initial), [pinned],
-                                     selectors=usable_selectors(registry, resident))
+                                     selectors=usable_selectors(registry, resident), schemas=initial)
     assert "shows an MCP schema" in notice and pinned in notice
     before = json.dumps(resident)
     shown = registry.execute("enable_tools", {"tools": pinned})

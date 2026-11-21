@@ -17,6 +17,7 @@ from ouroboros import extension_loader, loop, loop_model_call
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.extension_surface_names import extension_surface_name
 from ouroboros.provider_models import tool_schema_limit
+from ouroboros.tool_capabilities import ROUTE_TAIL_TOOL_NAMES
 from ouroboros.tool_policy import initial_tool_schemas
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._cases import case_folders
@@ -86,7 +87,8 @@ def test_an_omitted_permitted_schema_loads_stays_through_the_next_fit_and_dispat
     first = _round(registry, resident)
     assert loop_model_call._fit_route_tool_ceiling(first)
     left_out = set(registry._ctx._route_left_out_tool_names)
-    assert len(resident) == 128 and left_out and left_out <= set(extensions)
+    # The one-off media helpers in a child's profile wait behind the extensions (ROUTE_TAIL_TOOL_NAMES).
+    assert len(resident) == 128 and left_out and left_out <= set(extensions) | ROUTE_TAIL_TOOL_NAMES
     notice = first.messages[-1]["content"]
     assert "list_available_tools marks them not loaded, and enable_tools loads one" in notice
     chosen = extensions[-1]  # the late-position tail: what a plain truncation would drop first
