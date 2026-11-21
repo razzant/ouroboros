@@ -13,8 +13,14 @@ secret_fields:
   botToken: TELEGRAM_BOT_TOKEN
   pairingCode: TELEGRAM_PAIRING_CODE
 connection_card:
+  title: "Phone via Telegram"
+  pitch: "Write to Ouroboros and get its results on your phone"
+  steps:
+    - {text: "Open @BotFather in Telegram", link: "https://t.me/BotFather"}
+    - {text: "Send it /newbot"}
+    - {text: "Give the bot a name, then a username ending in \"bot\""}
   token: botToken
-  pairing: {code: pairingCode, new_code: "lib/telegram_pairing.py:new_code", link: "https://t.me/{username}?start={code}", identity: "lib/telegram_pairing.py:bot_identity", status_route: "pairing/status"}
+  pairing: {code: pairingCode, new_code: "lib/telegram_pairing.py:new_code", link: "https://t.me/{username}?start={code}", identity: "lib/telegram_pairing.py:bot_identity", status_route: "pairing/status", hint: "Scan it with your phone's camera, then press Start in Telegram."}
   options:
     - {key: TELEGRAM_NOTIFY_TASKS, label: "Send results and errors of work here", "on": "on", "off": "off", new_connection: true, store: skill_settings, route: settings/save}
 subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state]

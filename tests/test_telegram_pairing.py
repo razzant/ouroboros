@@ -233,3 +233,10 @@ def test_the_connection_card_declaration_names_what_exists():
     assert option["key"] in _SETTINGS_FORM_KEYS and option["store"] == "skill_settings"
     assert option["route"] == "settings/save" and 'api.register_route("settings/save"' in plugin_source
     assert (option["on"], option["off"], option["new_connection"]) == ("on", "off", True)
+    # The card's words are English text the UI translation layer renders; the token row is drawn from `token`.
+    assert card["title"] == "Phone via Telegram" and isinstance(card["pitch"], str) and card["pitch"]
+    assert [step["text"] for step in card["steps"]] == [
+        "Open @BotFather in Telegram", "Send it /newbot", 'Give the bot a name, then a username ending in "bot"']
+    assert [step.get("link") for step in card["steps"]] == ["https://t.me/BotFather", None, None]
+    assert card["pairing"]["hint"] == "Scan it with your phone's camera, then press Start in Telegram."
+    assert all(isinstance(value, str) for row in card["steps"] for value in row.values())
