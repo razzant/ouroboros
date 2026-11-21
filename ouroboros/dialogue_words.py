@@ -142,10 +142,10 @@ def _labels(quiz: Mapping[str, Any]) -> List[str]:
 
 def _receipt(quiz: Mapping[str, Any]) -> str:
     quiz_id = str(quiz.get("quiz_id") or "")
-    if isinstance(quiz.get("secret_outcome"), Mapping):
-        from ouroboros.owner_quiz import secret_outcome_summary  # a pure formatter; plugin and field ids only
-
-        return f"secret request {quiz_id}: {secret_outcome_summary(dict(quiz))}"
+    outcome = quiz.get("secret_outcome")
+    if isinstance(outcome, Mapping):  # owner_quiz.secret_outcome_summary's words (pinned equal by the tests)
+        return (f"secret request {quiz_id}: {outcome.get('event')}: {outcome.get('pluginName')}, "
+                f"{', '.join(outcome.get('fields') or [])}")
     request = quiz.get("secret_request") if isinstance(quiz.get("secret_request"), Mapping) else {}
     fields = [str(field.get("id") or "") for field in request.get("fields") or [] if isinstance(field, Mapping)]
     return f"secret request {quiz_id}: {request.get('plugin_name') or ''}, {', '.join(fields)}".rstrip(", ")
@@ -178,8 +178,10 @@ def fields_of(row: Mapping[str, Any]) -> List[Field]:
     on an answer the press and the comment, on a closure its reason; its stored ``text`` is the host's frame
     of those same facts and is not a field. A ``secret_request`` card yields only its ``receipt``: the event,
     plugin and field ids, never a value. A corpus row of my human's press without words (``corpus_answer``
-    from ``owner_press``) is a ``press``. Every other row yields its message ``text``; a host facts row with no
-    text yields the facts it records (``dialogue_provenance.dialogue_text``). A field without text is left out.
+    from ``owner_press``) is a ``press``. Every other row yields its message ``text``; a row without text (a host
+    facts row with only typed fields) yields no field: its facts are the host's, not words anyone said, and the
+    legacy substring ``search`` still reads their rendering. A field without text is left out. Nothing here opens
+    or imports a store, lazily either: an offline harness calls it on rows it read itself.
     """
     quiz = row.get("quiz") if isinstance(row.get("quiz"), Mapping) else None
     if row.get("type") in _CARD_TYPES and quiz is not None:
@@ -187,10 +189,6 @@ def fields_of(row: Mapping[str, Any]) -> List[Field]:
     else:
         carried = row.get("corpus_answer") if isinstance(row.get("corpus_answer"), Mapping) else {}
         text = str(row.get("text") or "")
-        if not text.strip() and row.get("type") == "task_summary":
-            from ouroboros.dialogue_provenance import dialogue_text  # pure: renders the recorded facts
-
-            text = dialogue_text(row)
         fields = [Field("press", text, "owner", words=False) if carried.get("source") == "owner_press"
                   else Field("text", text, "author")]
     return [field for field in fields if field.text.strip()]

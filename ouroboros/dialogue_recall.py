@@ -32,10 +32,11 @@ API_DOOR_NOTE = "API door, sender not recorded"
 _SPEAKER_WORDS = {"owner": "my human", "host": "host"}
 # The owner-facing sentence of ``chat_history``'s ``words`` (tools/control.py), beside the reader it describes.
 WORDS_DESCRIPTION = (
-    "Instead of search: alternatives, any one may match. Each is words that must all occur, in any order, as word "
-    "prefixes within one field of one row (message text, a card's question, an offered option, the comment on an "
-    "answer); a part in double quotes is an exact word or phrase. Case, ё/е and Unicode forms do not matter; no "
-    "ranking. Each line names the row's address, room, date, speaker, matched field and its readers.")
+    "Instead of search, which matches a literal piece of a rendered row (an id, a label, part of a word): "
+    "alternatives, any one may match. Each is words that must all occur, in any order, as word prefixes within "
+    "one field of one row (message text, a card's question, an offered option, the comment on an answer); a part "
+    "in double quotes is an exact word or phrase. Case, ё/е and Unicode forms do not matter; no ranking. Each "
+    "line names the row's address, room, date, speaker, matched field and its readers.")
 
 
 def _room(room_id: Any) -> Optional[int]:

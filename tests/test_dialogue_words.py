@@ -1,6 +1,7 @@
 """The one tokenization rule and the one word predicate (``ouroboros/dialogue_words.py``, consensus K4.1)."""
 from __future__ import annotations
 
+import json
 import unicodedata
 
 import pytest
@@ -119,5 +120,63 @@ def test_plain_rows_press_rows_and_empty_rows():
     press = {"direction": "in", "text": "2. Merge now", "corpus_answer": {"source": "owner_press"}}
     assert fields_of(press) == [Field("press", "2. Merge now", "owner", words=False)]
     assert fields_of({"direction": "out", "text": "  "}) == []
-    facts = fields_of({"type": "task_summary", "direction": "system", "task_id": "t1", "status": "completed"})
-    assert facts and facts[0].name == "text" and "host facts for t1" in facts[0].text
+    # a host facts row without text is the host's typed facts, not anyone's words: no field
+    assert fields_of({"type": "task_summary", "direction": "system", "task_id": "t1", "status": "completed"}) == []
+    assert fields_of({"type": "task_summary", "direction": "system", "text": "done: merged"}) == [
+        Field("text", "done: merged", "author")]
+
+
+def test_the_receipt_says_what_owner_quiz_says():
+    from ouroboros.owner_quiz import secret_outcome_summary
+
+    block = {"quiz_id": "q1", "secret_request": {"plugin_name": "tg"},
+             "secret_outcome": {"event": "secret_replaced", "pluginName": "tg", "fields": ["a", "b"]}}
+    assert fields_of({"type": "quiz_answer", "quiz": block})[0].text == f"secret request q1: {secret_outcome_summary(block)}"
+
+
+_EVERY_KIND = [
+    {"direction": "in", "text": "plain"},
+    {"direction": "in", "text": "2. x", "corpus_answer": {"source": "owner_press"}},
+    {"type": "task_summary", "direction": "system", "task_id": "t", "status": "completed"},
+    {"type": "task_summary", "direction": "system", "text": "facts"},
+    {"type": "quiz", "direction": "out", "quiz": {"quiz_id": "q", "question": "Q", "options": [{"label": "A"}],
+                                                  "option_details": ["d"]}},
+    {"type": "quiz_answer", "task_id": "t", "quiz": {"quiz_id": "q", "question": "Q", "options": ["A"],
+                                                     "answered_index": 0, "comment": "c"}},
+    {"type": "quiz_closed", "quiz": {"quiz_id": "q", "question": "Q", "options": [], "closed_reason": "r"}},
+    {"type": "quiz_answer", "quiz": {"quiz_id": "q", "secret_request": {"plugin_name": "p", "fields": [{"id": "f"}]},
+                                     "secret_outcome": {"event": "secret_filled", "pluginName": "p", "fields": ["f"]}}},
+    {"type": "quiz", "quiz": {"quiz_id": "q", "secret_request": {"plugin_name": "p", "fields": [{"id": "f"}]}}},
+]
+
+
+@pytest.mark.parametrize("blocked", [True, False])
+def test_fields_of_runs_on_every_row_kind_with_no_store_importable(blocked, tmp_path):
+    """The offline harness calls fields_of with the store modules made unimportable; so does this test (and,
+    the other way, with them importable, so the guard is the blocker and not a broken call)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = tmp_path / "probe.py"
+    script.write_text(
+        "import importlib.abc, json, sys\n"
+        "BLOCKED = ('sqlite3', '_sqlite3', 'ouroboros.store', 'ouroboros.dialogue_store', 'ouroboros.task_store',\n"
+        "           'ouroboros.chronicle_store', 'ouroboros.owner_quiz', 'ouroboros.dialogue_provenance',\n"
+        "           'ouroboros.config', 'ouroboros.contracts')\n"
+        "class Block(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if any(name == b or name.startswith(b + '.') for b in BLOCKED):\n"
+        "            raise ImportError('blocked: ' + name)\n"
+        "if sys.argv[2] == 'blocked':\n"
+        "    sys.meta_path.insert(0, Block())\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from ouroboros.dialogue_words import fields_of\n"
+        "print(json.dumps([[list(f) for f in fields_of(row)] for row in json.loads(sys.stdin.read())]))\n",
+        encoding="utf-8")
+    repo = str(Path(__file__).resolve().parents[1])
+    done = subprocess.run([sys.executable, str(script), repo, "blocked" if blocked else "open"],
+                          input=json.dumps(_EVERY_KIND), capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert [[tuple(f) for f in kind] for kind in json.loads(done.stdout)] == [
+        [tuple(f) for f in fields_of(row)] for row in _EVERY_KIND]
