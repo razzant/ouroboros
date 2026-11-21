@@ -151,7 +151,7 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
   A credential that is already configured reads as `secretPlaceholder`, never the secret itself.
 - **`modelDefaults`** per provider profile, `modelSuggestions` and `localPresets`.
 - **`freshInstall`**, display only; completion checks it again.
-- **`stepOrder`** may contain `consciousness` (between `review_mode` and `budget`): present only while `consciousnessOffer.offered`.
+- **`stepOrder`** may contain `consciousness` (after `review_mode`): present only while `consciousnessOffer.offered`; and `skills` (before `budget`): present only while completion honors `starter_skills`, on a data root whose starter list never ran (no starter record yet, or a new one). Elsewhere the choice changes nothing, so offer none. A page that offers no skills choice sends no field, and the recommended list installs (§12).
 - **`consciousnessOffer`**, display only: the Consciousness step.
   - `offered`: the next boot mints a first state (a new data root, or one after an owner Reset) and setup has never completed here. Where any state exists, whatever it says, there is no step: setup never changes an existing state, and Dashboard › Consciousness does.
   - `enabled`: `null` on an offered step (no state yet; the switch starts on). Without a step, the control as the state shows it, `null` when it cannot be read.
@@ -842,7 +842,7 @@ The retired hub catalog/preview/install/update/uninstall/publication-clear route
 
 **Publication receipt:** `POST /api/skills/{skill}/publication/clear` forgets the local receipt of a publication (`expected_published` is the receipt as shown; a repeat answers `publication_cleared: false`). The pull request stays on GitHub.
 
-**Starter skills:** `GET /api/onboarding/starter-skills` (`StarterSkillsResponse`) groups built-in, Official and every configured starter id by category, ticked as the starter list says. `OUROBOROS_STARTER_SKILLS` absent or `""` uses defaults; `[]` or `"[]"` selects none. `OUROBOROS_STARTER_SKILLS_TURN_ON` (default true) controls first enablement. `POST /api/onboarding/complete` accepts `starter_skills` (catalog ids) and `skill_source_trust` (`{hub row id: "trusted" | "review"}`, which also confirms those rows) in its one write; the ticked skills install once in the background afterwards.
+**Starter skills:** `GET /api/onboarding/starter-skills` (`StarterSkillsResponse`) groups built-in, Official and every configured starter id by category, ticked as the starter list says. An item (`StarterSkillItem`) may carry the catalog's own words for people: `title`, a one-line `pitch`, and `needs`, the prerequisite in words (`""`: none; absent or `null`: the catalog says nothing, and `needs_keys` names what the skill reads, required or not); without them show `name` and `description`. A hub entry or a `skills/builtin.json` row carries them, never a payload manifest; catalog items (`SkillCatalogItem`) carry the same three. `OUROBOROS_STARTER_SKILLS` absent or `""` uses defaults; `[]` or `"[]"` selects none. `OUROBOROS_STARTER_SKILLS_TURN_ON` (default true) controls first enablement. `POST /api/onboarding/complete` accepts `starter_skills` (catalog ids; `[]` installs nothing) and `skill_source_trust` (`{hub row id: "trusted" | "review"}`, which also confirms those rows) in its one write; the ticked skills install once in the background afterwards, only where the setup offers its `skills` step (§4).
 
 ## 13. Agent accounts
 

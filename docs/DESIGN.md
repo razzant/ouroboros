@@ -2954,7 +2954,8 @@ preserve the edited value, caret, focus, selection and scroll position, assignin
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 
-The six wizard steps are Accounts, Models, Review and access, Consciousness, Budget, Summary. Codex is the
+The seven wizard steps are Accounts, Models, Choose access, Consciousness, Skills, Review limits, Summary;
+Consciousness and Skills only where setup offers them. Codex is the
 recommended start without an API key; other connections name their capability.
 Signed in reports authentication, not execution, independently of model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
 contextual Retry that keeps the fields. Connected accounts the engine names as agents only read
@@ -2985,9 +2986,23 @@ choices, its positions in Dashboard › Consciousness words, starting on. Where 
 whatever the state says: setup never changes it, so clicking through lifts no owner or Panic stop, and Dashboard ›
 Consciousness is the place to change it. What the positions mean leads as the step's copy at body size; beneath the
 switch, in meta size: on a subscription alone that its wakes use the quota (said once), the autonomy, allowance and
-own-task limit it runs under now, and where to change it later. Review & start lands on it; its Continue goes to
-Summary, one row there. The choice rides the one save: no command, no row in Main. Summary labels the model row
-Consciousness model, so it does not read as this choice.
+own-task limit it runs under now, and where to change it later. Review & start lands on it; its Continue goes on
+(Skills, then Summary), one row there. The choice rides the one save: no command, no row in Main. Summary labels the
+model row Consciousness model, so it does not read as this choice.
+
+Skills is its own step after Consciousness (owner 2026-11-21: «показать что есть много крутых скилов анимированным
+списком, но юзер может поснимать галочки», which revises his 4A of 2026-10-17, a Summary row), offered only where Finish
+honors its ticks: a data root whose starter list never ran. Elsewhere the step is absent and the Skills page is where
+skills change, so no tick is shown that Finish would ignore. One list of cards by category, built-ins first: each card
+its human title, one line of what it gives (an author's longer description falls back there, clipped by the box, never
+by code), its Built in or Official mark and, where the catalog says one, the prerequisite in words; the maintainer's
+recommended skills are ticked. Tick all and Untick all head the list; an empty choice installs nothing. How the hub's
+skills install is one quiet line under the list, opening to its two choices. What is still being read stands under the
+list too, where the hub's skills join it, so their arrival moves no card; a refresh keeps the ticks, focus and the card
+being read. Entering the step, the cards arrive once in a short sequence, the owner's «анимированный список»: each a
+surface that comes on `--motion-open` by position and opacity, a beat after the one before, the whole under a second;
+the boxes answer from the first frame, a repaint or the hub's late list never plays it again, and reduced motion shows
+the list as it ends. Review & start passes it; Summary keeps one row back to it. Nothing installs before Start.
 
 The first-run wizard is compact; the step rail alone says which step this is. An
 ordinary Accounts state, blank or connected, and the Consciousness step fit a 980×752 client viewport
