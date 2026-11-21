@@ -621,19 +621,22 @@ def effective_delegation_budget(
                     # went stale AGAIN in v6.87.26, each time telling the model the
                     # opposite of the truth at the exact moment it is deciding how to
                     # fix a rejected spawn. A copy of a rule you do not own drifts;
-                    # the remedy below holds whatever the default is.
-                    detail=str(
-                        payload.get("rationale")
-                        or (
+                    # the remedy below holds whatever the default is. It never names
+                    # model_lane: beside the required subagent_id that selector is refused
+                    # (`subagent_selector_conflict`), and the lane compared here is the one
+                    # the request inherits, so no row choice satisfies it; releasing the
+                    # constraint is the call that works, by whoever may (the emitter's
+                    # parent, or the root for its own), which this pure reducer cannot see.
+                    detail=(
+                        str(payload.get("rationale") or (
                             f"Unresolved delegation constraint requires lane {required_lane!r} "
                             f"(requested {str(requested_lane or '').strip() or 'auto'!r}, "
-                            f"intended {str(intended_lane or '').strip()!r}). Name "
-                            f"model_lane={required_lane!r} explicitly, or "
-                            "override_delegation_constraint("
-                            f"{str(payload.get('constraint_id') or '').strip()!r}) instead. If this "
-                            "install has no such slot the child will run Main and disclose the "
-                            "reduction in capability_delta."
-                        )
+                            f"intended {str(intended_lane or '').strip()!r})."
+                        )).rstrip().rstrip(".")
+                        + ". Release it with override_delegation_constraint(constraint_id="
+                        f"{str(payload.get('constraint_id') or '').strip()!r}, reason='…') where your "
+                        "tools include it; only the emitter's parent, or the root for its own "
+                        "constraint, may."
                     ),
                 )
         if directive == "cap_children":

@@ -337,11 +337,19 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
                         "for a read-only child; omit it or write_surface.")
     if params.get("workspace") == "in_place":  # the documented default geometry is no folder request, as at delegate_start
-        if str(params.get("write_surface") or "").strip().lower() not in {"self_worktree", "external_workspace", "genesis"} \
-                or not default_shaped_directory_options(directory_options.get("directory_strategy"),
-                                                        directory_options.get("scope_paths")):
+        surface = str(params.get("write_surface") or "").strip().lower()
+        in_the_way = [] if surface in {"self_worktree", "external_workspace", "genesis"} else [
+            f"write_surface={params['write_surface']!r}" if params.get("write_surface") else "no write_surface"]
+        if not default_shaped_directory_options(directory_options.get("directory_strategy"),
+                                                directory_options.get("scope_paths")):
+            in_the_way += [f"{key}={directory_options[key]!r}" for key in ("directory_strategy", "scope_paths")
+                           if directory_options.get(key) not in (None, "direct", [])]
+        if in_the_way:  # which edit place is meant stays the caller's choice: both forms are named
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace='in_place' needs an acting Git write_surface "
-                        "and no directory options.")
+                        f"and no directory options; in the way: {', '.join(in_the_way)}. An acting Git helper: "
+                        "workspace='in_place' with write_surface='self_worktree', 'external_workspace' or 'genesis' "
+                        "and no directory_strategy/scope_paths; an ordinary folder: omit workspace and keep "
+                        "directory_strategy/scope_paths with write_surface='external_workspace'.")
         directory_options["workspace"] = "in_place"
 
     # Folder geometry is a WRITE-side request: a read-only child reads the selected

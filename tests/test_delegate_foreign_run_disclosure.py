@@ -52,7 +52,29 @@ def test_unknown_refusal_names_the_crosstask_read(tmp_path):
     assert (refusal.status, refusal.code) == ("error", "TOOL_REPORTED_FAILURE")
     out = json.loads(refusal.text)
     assert out["reason"] == "run_ownership_unknown"
-    assert "get_task_result" in out.get("hint", "")
+    # The kind is unknown here: the general pointer, as before.
+    assert out["hint"] == ("The run may belong to a different drive or the id may be mistyped; "
+                           "get_task_result(<task_id>) is the ownership-free way to read another task's "
+                           "delegated-run outcome.")
+
+
+def test_a_task_id_given_as_a_run_id_names_the_exact_read(tmp_path, monkeypatch):
+    """Both directions: a task this drive records is named with its ready read; a Presence ceiling that leaves
+    get_task_result out keeps the general pointer, since the host cannot show that read works for the caller."""
+    from ouroboros import presence_authority
+    from ouroboros.task_results import write_task_result
+
+    custody._CUSTODY.clear()
+    write_task_result(tmp_path, "kidtask01", "completed", result="done")
+    refusal, _ = _owned_run(_Ctx("task-a", tmp_path), "delegate_wait", "kidtask01")
+    out = json.loads(refusal.text)
+    assert out["reason"] == "run_ownership_unknown"
+    assert out["hint"] == ("That id names a task, not a delegated run: "
+                           "get_task_result(task_id='kidtask01') reads it.")
+    monkeypatch.setattr(presence_authority, "presence_ceiling_from_context", lambda _ctx: object())
+    monkeypatch.setattr(presence_authority, "presence_ceiling_allows_tool", lambda _ceiling, _name: False)
+    refusal, _ = _owned_run(_Ctx("task-a", tmp_path), "delegate_wait", "kidtask01")
+    assert json.loads(refusal.text)["hint"].startswith("The run may belong to a different drive")
 
 
 def test_settled_row_state_replays_into_terminal_state(tmp_path):

@@ -161,10 +161,28 @@ def test_unknown_observation_is_disclosed_and_relay_is_still_ancestor_only(tmp_p
 
 
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
-def test_settled_presence_is_not_a_new_mailbox_target(tmp_path, status):
+def test_settled_presence_is_not_a_new_mailbox_target(tmp_path, status, monkeypatch):
+    """Both directions: the refusal states that nothing was delivered because the work ended and names every means
+    the caller has, choosing none: the read always, Continue only where the card's own predicate offers it; a
+    Presence ceiling that leaves a tool out keeps the refusal without naming that tool."""
+    from ouroboros import owner_continue, presence_authority
+
     tid = _inline(tmp_path)
     write_task_result(tmp_path, tid, status, result="settled")
-    assert "TASK_NOT_ACTIVE" in _forward_to_worker(_ctx(tmp_path), tid, "no")
+    lead = f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}; the message was not delivered because the work has ended."
+    read = f"read its result with get_task_result(task_id={tid!r})"
+    monkeypatch.setattr(owner_continue, "continuation_offer", lambda _r, _t: {"eligible": False})
+    assert _forward_to_worker(_ctx(tmp_path), tid, "no") == f"{lead} You can {read}."
+    monkeypatch.setattr(owner_continue, "continuation_offer", lambda _r, _t: {"eligible": True})
+    assert _forward_to_worker(_ctx(tmp_path), tid, "no") == (
+        f"{lead} You can {read}; or continue it with continue_task(task_id={tid!r}, reason='…') where your tools "
+        "include it.")
+    child = _ctx(tmp_path)
+    child.task_metadata = {"tool_profile": "local_readonly_subagent"}  # continue_task is not in a child's set
+    assert _forward_to_worker(child, tid, "no") == f"{lead} You can {read}."
+    monkeypatch.setattr(presence_authority, "presence_ceiling_from_context", lambda _ctx: object())
+    monkeypatch.setattr(presence_authority, "presence_ceiling_allows_tool", lambda _ceiling, _name: False)
+    assert _forward_to_worker(_ctx(tmp_path), tid, "no") == lead
     assert drain_owner_entries(tmp_path, tid) == []
 
 

@@ -90,7 +90,19 @@ def test_independent_folder_field_problems_join_the_shape_refusal(tmp_path, monk
         "⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace must be copy or in_place.")
     assert control._schedule_task(ctx, **base, directory_strategy="copy") == (
         "⚠️ TOOL_ARG_ERROR (schedule_subagent): copy requires scope_paths; use ['.'] to select the whole folder.")
+    # workspace='in_place' names what is in the way and both forms, leaving the edit place to the caller.
+    forms = (" An acting Git helper: workspace='in_place' with write_surface='self_worktree', 'external_workspace' or "
+             "'genesis' and no directory_strategy/scope_paths; an ordinary folder: omit workspace and keep "
+             "directory_strategy/scope_paths with write_surface='external_workspace'.")
+    lead = ("⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace='in_place' needs an acting Git write_surface and no "
+            "directory options; in the way: ")
+    assert control._schedule_task(ctx, **base, workspace="in_place", write_surface="external_workspace",
+                                  scope_paths=["src"]) == lead + "scope_paths=['src']." + forms
+    assert control._schedule_task(ctx, **base, workspace="in_place") == lead + "no write_surface." + forms
     assert not ctx.pending_events
+    # The other direction: an acting Git surface with no folder options passes this check.
+    acting = control._schedule_task(ctx, **base, workspace="in_place", write_surface="self_worktree")
+    assert "in the way" not in acting
 
 
 def test_independent_file_and_origin_problems_join_the_deadline_refusal(tmp_path, monkeypatch):
