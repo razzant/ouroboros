@@ -380,7 +380,7 @@ def _leak(item, what, *known):
 
 
 _CLAUDEXOR_ORDER = pytest.mark.xfail(strict=True, raises=KnownLeak, reason=(
-    "razzant/ouroboros#NEW-claudexor-tool-order: llm_claudexor.py:339 sends the schemas in the registry's order "
+    "razzant/ouroboros#3898: llm_claudexor.py:339 sends the schemas in the registry's order "
     "(registry_core.py:749-797, built-ins then extensions then MCP rows as registered); the other transports sort them "
     "(openai_chat_dispatch.py:106)"))
 
