@@ -14,6 +14,7 @@ import secrets
 import shutil
 import socket
 import sys
+import tempfile
 import threading
 import time
 from multiprocessing.connection import Connection
@@ -21,47 +22,12 @@ from pathlib import Path
 
 LIMIT = 64 * 1024
 HERE = Path(__file__).resolve().parent
-OWN_FILES = ("native_window.py", "window_renewal.py", "arm_source.py", "host_processes.py", "journey_model.py", "typing_evidence.py")
+OWN_FILES = ("native_window.py", "window_renewal.py", "arm_source.py", "host_processes.py", "journey_model.py", "typing_evidence.py",
+             "launcher_evidence.py")
 CAPTURE_BRIDGE = HERE.parents[1] / "skills/unix_computer_use/macos_capture.py"
 WINDOW_ID = ("shell", "pid", "window", "number")
 TYPING_WORD = "Window"
 KEY_CODES = {"\r": 36}  # kVK_Return: WebKit names a synthesized Return "Enter" by its key code
-OSLOG_RESULTS = ("unavailable", "no_matching_entry", "entry_limit", "matched")
-_WEBKIT_INFO = re.compile(rb"\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d[.,]\d{3}Z? \[INFO\] launcher\.webkit: WebKit ")
-_REPLACEMENT = re.compile(rb"window_replacement_requested requested_at=(\d+\.\d{3})")
-_LOOKUP = re.compile(rb"process_log_lookup scope=current_process since=\d+\.\d{3} until=(\d+\.\d{3}) result=(\w+)")
-
-
-def launcher_diagnostics(arm_root: Path, began: float, ended: float) -> dict:
-    """Read only this synthetic arm's launcher.log. Pair the request and lookup by their shared timestamp."""
-    def result(outcome, requested=False):
-        return {"window_replacement_requested": requested, "process_log_lookup": outcome}
-
-    limit = 2 * 1024 * 1024  # launcher's rotating-file bound; no fallback to other logs
-    try:
-        path = arm_root.resolve() / "data/logs/launcher.log"
-        if path.resolve() != path or not path.is_file():
-            return result("launcher_log_unavailable")
-        with path.open("rb") as stream:
-            data = stream.read(limit + 1)
-    except (OSError, RuntimeError):
-        return result("launcher_log_unavailable")
-    if len(data) > limit:
-        return result("launcher_log_limit")
-    requests, lookups = [], {}
-    for line in data.splitlines():
-        prefix = _WEBKIT_INFO.match(line)
-        if not prefix:
-            continue
-        message = line[prefix.end():]
-        if (match := _REPLACEMENT.fullmatch(message)) and round(began, 3) <= float(match[1]) <= round(ended, 3):
-            requests.append(match[1])
-        elif match := _LOOKUP.fullmatch(message):
-            lookups.setdefault(match[1], []).append(match[2].decode("ascii"))
-    if len(requests) != 1:
-        return result("ambiguous" if requests else "request_unobserved", bool(requests))
-    outcomes = lookups.get(requests[0], [])
-    return result(outcomes[0] if len(outcomes) == 1 and outcomes[0] in OSLOG_RESULTS else "lookup_unobserved", True)
 
 
 def same_window(left, right):
@@ -136,8 +102,16 @@ def launcher_channel(root, entry, successor, out, tag):
         "    from native_window import attach\n    attach()\n", encoding="utf-8")
     parent, child = socket.socketpair()
     env = {"PYTHONPATH": str(hooks), "RENEWAL_OBSERVER_FD": str(child.fileno()),
-           "RENEWAL_PICTURES": str(out), "RENEWAL_TAG": tag}
+           "RENEWAL_PICTURES": str(out), "RENEWAL_TAG": tag, "RENEWAL_STAGES": tempfile.mkdtemp(prefix="stages-", dir=hooks)}
     return Channel(parent), child, env
+
+
+def mark(stage):
+    """Leave one empty file for a stage this launch reached, in its own private directory. Never raises."""
+    try:
+        (Path(os.environ["RENEWAL_STAGES"]) / stage).touch()
+    except (KeyError, OSError):
+        pass
 
 
 def attach():
@@ -145,14 +119,17 @@ def attach():
     conn = Connection(fd)
     os.set_inheritable(fd, True)  # same launcher, new program image; Popen children close other descriptors
     threading.Thread(target=serve, args=(conn,), name="window-observation", daemon=True).start()
+    mark("observer_loaded")
     # pywebview 5.4 calls before_show synchronously, before loading the first URL.
     # A fresh source process installs the same witness. In-process renewal shares this configuration.
     import webview
 
+    mark("webview_imported")
     create = webview.create_window
     def watched_window(*args, **kwargs):
         window = create(*args, **kwargs)
         if type(kwargs.get("js_api")).__name__ == "MainApi":
+            mark("window_created")
             webview.create_window = create
             window.events.before_show += install_send_counter
         return window
@@ -160,6 +137,7 @@ def attach():
 
 
 def install_send_counter(window):
+    mark("window_before_show")
     import WebKit
     from webview.platforms.cocoa import BrowserView
 

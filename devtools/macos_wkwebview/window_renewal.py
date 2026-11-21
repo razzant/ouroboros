@@ -30,11 +30,13 @@ from devtools.macos_wkwebview import arm_source  # noqa: E402
 from devtools.macos_wkwebview.arm_source import GIT_IDENTITY, sha256  # noqa: E402
 from devtools.macos_wkwebview.host_processes import alive, command, ps  # noqa: E402
 from devtools.macos_wkwebview.journey_model import (  # noqa: E402
-    FIXTURE_BUTTON, TASKS, continuation, fixture_page, journey_model, pause_kept, reconcile_view, task_description)
+    FIXTURE_BUTTON, FRAME_FIELDS, TASKS, continuation, fixture_page, frame_addressed, history_verdict, journey_model, once_verdict,
+    pause_kept, receipt, reconcile_view, same_frame, send_writes, task_description)
+from devtools.macos_wkwebview.launcher_evidence import OSLOG_RESULTS, Opening, launcher_diagnostics  # noqa: E402
 from devtools.macos_wkwebview.native_window import (  # noqa: E402
-    CAPTURE_BRIDGE, OSLOG_RESULTS, RoomWindow, launcher_channel, launcher_diagnostics, public_reason, same_view, same_window, visible_key_view)
+    CAPTURE_BRIDGE, RoomWindow, launcher_channel, public_reason, same_view, same_window, visible_key_view)
 
-SCHEMA = "ouroboros.macos-window-renewal/7"
+SCHEMA = "ouroboros.macos-window-renewal/8"
 EXIT_CODES = {"PASS": 0, "FAIL": 1, "INCONCLUSIVE": 3, "UNSUPPORTED": 4}
 TRANSITIONS = ("restart", "update", "handoff")
 PROJECT_UPDATES = ("update", "handoff")
@@ -151,80 +153,12 @@ def host_facts() -> dict:
 
 
 def instrument_identity() -> dict:
-    names = ("window_renewal.py", "arm_source.py", "native_window.py", "composer_clearance.py",
-             "host_processes.py", "journey_model.py", "typing_evidence.py", "bubble_probe.js")
+    names = ("window_renewal.py", "arm_source.py", "native_window.py", "composer_clearance.py", "host_processes.py",
+             "journey_model.py", "launcher_evidence.py", "typing_evidence.py", "bubble_probe.js")
     return {**{name: sha256(Path(__file__).with_name(name)) for name in names}, CAPTURE_BRIDGE.name: sha256(CAPTURE_BRIDGE)}
 
 
 # --- one arm: real launcher sessions, their transitions and checks -------------------------------------------------
-
-FRAME_FIELDS = ("type", "content", "client_message_id", "sender_session_id", "chat_id", "project_id", "reply_to")
-
-
-def same_frame(wire, entries):
-    if not wire or not wire.get("client_message_id") or not wire.get("sender_session_id"):
-        return None
-    frames = [entry["frame"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("frame"), dict)
-              and entry["frame"].get("client_message_id") == wire["client_message_id"]]
-    return len(frames) == 1 and {k: frames[0][k] for k in FRAME_FIELDS if k in frames[0]} == {
-        k: wire[k] for k in FRAME_FIELDS if k in wire}
-
-
-def receipt(history, wire, *, room=None):
-    """Count both a repeat of the original id and a repeat under a new id. Never infer identity from text."""
-    if not wire or not wire.get("client_message_id") or not wire.get("sender_session_id") or not history or (
-            history.get("window") or {}).get("complete") is not True:
-        return None
-    rows = [r for r in history["messages"] if r.get("role") == "user"
-            and (r.get("client_message_id") == wire["client_message_id"] or r.get("text") == wire["content"])]
-    if room is not None and len(rows) == 1:
-        row = rows[0]
-        if not all(row.get(k) for k in ("row_address", "client_message_id", "sender_session_id")) or row.get("ingress_accepted") is None:
-            return None
-    exact = [r for r in rows if r.get("client_message_id") == wire["client_message_id"]
-             and r.get("sender_session_id") == wire["sender_session_id"] and r.get("text") == wire["content"]
-             and r.get("ingress_accepted") is True and r.get("row_address")]
-    if room is not None:
-        def addressed(row):
-            reply = row.get("reply_to") or {}
-            return (row["row_address"].startswith(f"row:{room}@") and reply.get("address") == wire.get("reply_to")
-                    and (not reply or (reply.get("chat_id") == room and not reply.get("unresolved"))))
-        exact = [row for row in exact if addressed(row)]
-    return {"count": len(rows), "addresses": [r["row_address"] for r in exact]}
-
-
-def send_writes(initial, current):
-    if initial != [1, 0] or not isinstance(current, list) or len(current) != 2:
-        return None
-    if current[0] > 1 or current[1] > 0:
-        return False
-    return True if current == initial else None  # a missing positive control cannot prove silence
-
-
-def frame_addressed(wire, project, room, text, reply):
-    """The outgoing frame itself names its room, project, text and quote: identity, never a guess."""
-    return bool(wire) and wire.get("type") == "chat" and wire.get("content") == text \
-        and wire.get("project_id") == project and wire.get("chat_id") == room and wire.get("reply_to") == reply
-
-
-def history_verdict(saved, main, *, accepted_address=None):
-    """What this arm's own complete HTTP history reads say about one Project Send: a duplicate, a leak to
-    Main or a row lost from its previously accepted address is a fact about the server, and no later view
-    un-proves it. None while a read is missing; the frame and the page's counter never decide this."""
-    lost = saved is not None and accepted_address is not None and saved["addresses"] != [accepted_address]
-    if (main and main["count"]) or lost or (saved and saved["count"] and (saved["count"] != 1 or len(saved["addresses"]) != 1)):
-        return False
-    return True if saved and saved["addresses"] and main else None
-
-
-def once_verdict(history, writes, addressed=True):
-    """The canonical history verdict combined with the page's wire counter and the captured frame: one
-    accepted addressed room row, nothing in Main, one wire write. None while any read is missing; a
-    demonstrated duplicate, leak or misaddressed row is False even when another read is still missing."""
-    if history is False or not addressed or (writes is not None and writes > 1):
-        return False
-    return True if history is True and writes == 1 else None
-
 
 class Arm:
     def __init__(self, name, sha, parent, out, checkpoint):
@@ -240,7 +174,7 @@ class Arm:
             path.mkdir()
         self.checks = {phase: dict.fromkeys(names) for phase, names in PHASES.items()}
         self.facts, self.gaps, self.task_ids, self.servers = {}, [], {}, []
-        self.project_sends, self.unattributed_before = [], {}
+        self.project_sends, self.unattributed_before, self.openings = [], {}, []
         self.tree, self.project = {}, {}
         self.ack = self.held = self.accepted = self.answer = self.project_reply = None
         self.launcher = self.model = self.win = self.generation = None
@@ -281,22 +215,32 @@ class Arm:
         assert_settings_keyless(cfg)
         write_settings_file(self.data / "settings.json", cfg)
 
-    def start_session(self, entry):
+    def start_session(self, entry) -> bool:
+        """Spawn one launcher and observe its first normal open of the Main room: True when that window was observed.
+        This launch's ``Opening`` is frozen and checkpointed at that boundary, on success or failure and before any
+        other step, so no later transition, relaunch or log line can add to it."""
         channel, child, extra = launcher_channel(self.root, self.tree["src"] / "launcher.py",
                                                   self.app / "repo/launcher.py", self.out, self.tag)
         self.win = RoomWindow(channel, wait_for, self.out, self.observe)
         self.quit_requested = False
-        with child:
-            self.launcher = subprocess.Popen([sys.executable, str(entry), "--seed-bundle", str(self.tree["seed"])],
+        opening = Opening(self.root, Path(extra["RENEWAL_STAGES"]), len(self.openings), len(self.servers))
+        with child, opening.open_stderr() as stderr:  # a private regular file under this arm, never a pipe
+            self.launcher = opening.launcher = subprocess.Popen([sys.executable, str(entry), "--seed-bundle", str(self.tree["seed"])],
                 cwd=entry.parent, env={**self.env, **extra}, pass_fds=(child.fileno(),),
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr)
+        self.openings.append(opening)  # kept for the report even when no ready generation ever follows
         self.settled = False
-        self.generation = self.wait_generation(None)
-        if (self.app / "ouroboros.pid").read_text().strip() != str(self.launcher.pid):
-            raise RuntimeError("launcher PID lock mismatch")
-        self.facts.setdefault("launches", []).append({"launcher_pid": self.launcher.pid, "server": self.generation})
-        self.checkpoint()
-        self.observe("open room", self.open_main)
+        try:
+            self.generation = self.wait_generation(None)
+            opening.ready = True
+            if (self.app / "ouroboros.pid").read_text().strip() != str(self.launcher.pid):
+                raise RuntimeError("launcher PID lock mismatch")
+            self.facts.setdefault("launches", []).append({"launcher_pid": self.launcher.pid, "server": self.generation})
+            self.checkpoint()
+            return bool(self.observe("open room", self.open_main))
+        finally:
+            opening.freeze(len(self.servers))
+            self.checkpoint()
 
     def open_main(self):
         current = self.settle(None)
@@ -887,7 +831,8 @@ class Arm:
             session = self.checks["session"]
             self.prepare()
             self.phase = "first launch"
-            self.start_session(self.tree["src"] / "launcher.py")
+            if not self.start_session(self.tree["src"] / "launcher.py"):  # no Restart or Update on a window never seen
+                raise RuntimeError("the first window was not observed; no later control was sent")
             self.project = self.observe("create initial project", lambda: self.create_project("room-" + self.tag)) or {}
             self.observe("first exchange", self.seed_exchange)
             self.observe("hold original Send", self.pending)
@@ -943,6 +888,7 @@ class Arm:
 
     def result(self):
         return {"sha": self.sha, "phase": self.phase, "checks": self.checks, "facts": self.facts, "gaps": self.gaps,
+                "opening": [opening.record(len(self.servers)) for opening in self.openings],
                 "model_attribution": self.model.attribution() if self.model else None,
                 **{k: self.tree.get(k) for k in ("tree", "base", "target", "handoff", "version")}}
 

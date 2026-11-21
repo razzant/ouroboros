@@ -23,6 +23,7 @@ import pytest
 import yaml
 
 from devtools.macos_wkwebview import arm_source, native_window, typing_evidence
+from devtools.macos_wkwebview import launcher_evidence as evidence
 from devtools.macos_wkwebview import journey_model as journeys
 from devtools.macos_wkwebview import window_renewal as renewal
 
@@ -137,8 +138,8 @@ def test_receipts_distinguish_missing_reads_replayed_text_and_original_identity(
     accepted = {"role": "user", "text": "synthetic", "client_message_id": "original", "sender_session_id": "one",
                 "ingress_accepted": True, "row_address": "row:1"}
     def read(*rows, complete=True):
-        return renewal.receipt({"messages": list(rows), "window": {"complete": complete}}, wire)
-    assert renewal.receipt(None, wire) is None
+        return journeys.receipt({"messages": list(rows), "window": {"complete": complete}}, wire)
+    assert journeys.receipt(None, wire) is None
     assert read(complete=False) is None
     assert read() == {"count": 0, "addresses": []}
     assert read(accepted) == {"count": 1, "addresses": ["row:1"]}
@@ -153,13 +154,13 @@ def test_pending_custody_requires_the_same_original_sender_room_reply_content_an
     wire = {"type": "chat", "content": "hello", "client_message_id": "id-1", "sender_session_id": "sender",
             "chat_id": 23, "project_id": "p", "reply_to": "row:23#original"}
     def kept(*frames):
-        return renewal.same_frame(wire, [{"frame": f, "views": []} for f in frames])
+        return journeys.same_frame(wire, [{"frame": f, "views": []} for f in frames])
     assert kept(wire)
     for key in wire:
         assert not kept({**wire, key: "other"}), key
     assert not kept()
     assert not kept(wire, wire)
-    assert renewal.same_frame({}, []) is None
+    assert journeys.same_frame({}, []) is None
 
 
 @pytest.mark.parametrize("case,verdict", [
@@ -302,34 +303,34 @@ def test_native_typing_and_both_images_use_the_focused_project_field(tmp_path, m
 
 
 def test_a_deduplicated_wire_write_still_fails_and_a_lost_counter_is_unknown():
-    assert renewal.send_writes([1, 0], [1, 0]) is True
-    assert renewal.send_writes([1, 0], [2, 0]) is False
-    assert renewal.send_writes([1, 0], [1, 1]) is False
-    assert renewal.send_writes([1, 0], [0, 0]) is None
-    assert renewal.send_writes(None, [1, 0]) is None
+    assert journeys.send_writes([1, 0], [1, 0]) is True
+    assert journeys.send_writes([1, 0], [2, 0]) is False
+    assert journeys.send_writes([1, 0], [1, 1]) is False
+    assert journeys.send_writes([1, 0], [0, 0]) is None
+    assert journeys.send_writes(None, [1, 0]) is None
 
 
 def test_once_needs_one_addressed_room_row_a_quiet_main_and_a_single_write():
     saved = {"count": 1, "addresses": ["row:17@x#0123456789ab"]}
     quiet = {"count": 0, "addresses": []}
-    kept = renewal.history_verdict(saved, quiet)
+    kept = journeys.history_verdict(saved, quiet)
     assert kept is True  # one addressed room row and a quiet Main: the server's own reading
-    assert renewal.once_verdict(kept, 1) is True
-    assert renewal.once_verdict(kept, 1, addressed=False) is False
-    assert renewal.once_verdict(renewal.history_verdict(saved, {"count": 1, "addresses": ["row:1@x#0123456789ab"]}), 1) is False
-    assert renewal.once_verdict(renewal.history_verdict({"count": 1, "addresses": []}, quiet), 1) is False
-    assert renewal.once_verdict(kept, 2) is False
-    assert renewal.once_verdict(kept, None) is None  # a lost counter proves no silence
-    assert renewal.once_verdict(renewal.history_verdict(None, quiet), 1) is None
+    assert journeys.once_verdict(kept, 1) is True
+    assert journeys.once_verdict(kept, 1, addressed=False) is False
+    assert journeys.once_verdict(journeys.history_verdict(saved, {"count": 1, "addresses": ["row:1@x#0123456789ab"]}), 1) is False
+    assert journeys.once_verdict(journeys.history_verdict({"count": 1, "addresses": []}, quiet), 1) is False
+    assert journeys.once_verdict(kept, 2) is False
+    assert journeys.once_verdict(kept, None) is None  # a lost counter proves no silence
+    assert journeys.once_verdict(journeys.history_verdict(None, quiet), 1) is None
     # The history verdict is the server's own reading: a leak to Main or a lost accepted address is its
     # fact, and neither the captured frame nor the page's counter enters it.
-    assert renewal.history_verdict(saved, {"count": 1, "addresses": ["row:1@x#0123456789ab"]}) is False
-    assert renewal.history_verdict(saved, quiet, accepted_address="row:17@x#999999999999") is False
-    assert renewal.history_verdict(saved, quiet, accepted_address=saved["addresses"][0]) is True
+    assert journeys.history_verdict(saved, {"count": 1, "addresses": ["row:1@x#0123456789ab"]}) is False
+    assert journeys.history_verdict(saved, quiet, accepted_address="row:17@x#999999999999") is False
+    assert journeys.history_verdict(saved, quiet, accepted_address=saved["addresses"][0]) is True
     wire = {"type": "chat", "content": "t", "project_id": "p", "chat_id": 3, "reply_to": "r"}
-    assert renewal.frame_addressed(wire, "p", 3, "t", "r")
-    assert not renewal.frame_addressed(dict(wire, chat_id=1), "p", 3, "t", "r")
-    assert not renewal.frame_addressed(None, "p", 3, "t", "r")
+    assert journeys.frame_addressed(wire, "p", 3, "t", "r")
+    assert not journeys.frame_addressed(dict(wire, chat_id=1), "p", 3, "t", "r")
+    assert not journeys.frame_addressed(None, "p", 3, "t", "r")
 
 
 def _project_ledger_arm(case):
@@ -1288,7 +1289,7 @@ def test_the_fixture_navigates_once_to_a_marked_address():
     assert renewal.FIXTURE_BUTTON in page and page.count("location.assign") == 1
 
 
-@pytest.mark.parametrize("outcome", [*native_window.OSLOG_RESULTS, "unknown_status", None])
+@pytest.mark.parametrize("outcome", [*evidence.OSLOG_RESULTS, "unknown_status", None])
 def test_the_owned_launcher_log_projects_only_the_exact_transition(tmp_path, outcome):
     log = tmp_path / "data/logs/launcher.log"
     log.parent.mkdir(parents=True)
@@ -1300,25 +1301,318 @@ def test_the_owned_launcher_log_projects_only_the_exact_transition(tmp_path, out
     if outcome:
         rows.append(prefix + lookup + "20.005 result=" + outcome)
     log.write_text("\n".join(rows) + "\n", encoding="utf-8")
-    assert native_window.launcher_diagnostics(tmp_path, 20, 30) == {
+    assert evidence.launcher_diagnostics(tmp_path, 20, 30) == {
         "window_replacement_requested": True,
-        "process_log_lookup": outcome if outcome in native_window.OSLOG_RESULTS else "lookup_unobserved",
+        "process_log_lookup": outcome if outcome in evidence.OSLOG_RESULTS else "lookup_unobserved",
     }
-    assert native_window.launcher_diagnostics(tmp_path, 30, 40) == {
+    assert evidence.launcher_diagnostics(tmp_path, 30, 40) == {
         "window_replacement_requested": False, "process_log_lookup": "request_unobserved",
     }
 
 
 def test_an_unreadable_or_oversized_launcher_log_has_no_positive_observation(tmp_path):
-    assert native_window.launcher_diagnostics(tmp_path, 20, 30) == {
+    assert evidence.launcher_diagnostics(tmp_path, 20, 30) == {
         "window_replacement_requested": False, "process_log_lookup": "launcher_log_unavailable",
     }
     log = tmp_path / "data/logs/launcher.log"
     log.parent.mkdir(parents=True)
     log.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
-    assert native_window.launcher_diagnostics(tmp_path, 20, 30) == {
+    assert evidence.launcher_diagnostics(tmp_path, 20, 30) == {
         "window_replacement_requested": False, "process_log_lookup": "launcher_log_limit",
     }
+
+
+LOG_TIME = "2026-11-21T00:00:00.000Z"
+SECRET = "/Users/secret/private-path-token-8731"
+
+
+def _launch(tmp_path, *, ordinal=0, servers_before=0, code=None, stages=(), log=None, stderr=None, pid_file=None):
+    """One recorded launch under ``tmp_path`` (an arm root): its own stage markers, stderr file and launcher.log."""
+    root = tmp_path / "arm"
+    stage_dir = root / f"stages-{ordinal}"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    (root / "data/logs").mkdir(parents=True, exist_ok=True)
+    opening = evidence.Opening(root, stage_dir, ordinal, servers_before)  # reads the log size before this launch writes
+    opening.launcher = SimpleNamespace(pid=4242, poll=lambda: code)
+    for name in stages:
+        (stage_dir / name).touch()
+    if log is not None:
+        with (root / "data/logs/launcher.log").open("ab") as stream:
+            stream.write("".join(f"{LOG_TIME} [INFO] launcher: {line}\n" for line in log).encode())
+    if stderr is not None:
+        with opening.open_stderr() as stream:
+            stream.write(stderr)
+    if pid_file is not None:
+        (root / "app").mkdir(exist_ok=True)
+        (root / "app/ouroboros.pid").write_text(pid_file, encoding="utf-8")
+    return opening
+
+
+def test_an_early_launcher_exit_keeps_its_signal_stages_and_known_fatal_class_without_any_text(tmp_path):
+    opening = _launch(
+        tmp_path, code=-6, stages=("observer_loaded", "webview_imported"), log=[f"Starting agent: {SECRET} server.py (port=1)"],
+        stderr=(f"*** Terminating app due to uncaught exception 'NSInvalidArgumentException', reason: {SECRET}\n"
+                f"Fatal Python error: {SECRET}\n").encode(), pid_file="4242\n")
+    record = opening.record(0)
+    assert record["exit"] == {"signal": 6}
+    assert record["stages"] == ["spawned", "observer_loaded", "webview_imported", "launcher_log_opened", "pid_lock_held",
+                                "server_spawn_logged"]  # nothing past the server spawn was recorded: not a claim about why
+    assert record["error_classes"] == ["objc_exception:NSInvalidArgumentException", "python_fatal_error"]
+    assert record["evidence"] == {"launcher_log": "present", "stderr": "present"}
+    assert SECRET not in json.dumps(record) and "reason" not in json.dumps(record)
+
+
+def test_an_unknown_exception_name_or_a_logged_traceback_is_no_error_class(tmp_path):
+    record = _launch(tmp_path, code=-6, stderr=(
+        f"Traceback (most recent call last):\n  File \"{SECRET}\"\nRuntimeError: {SECRET}\n"
+        "*** Terminating app due to uncaught exception 'MySecretException', reason: x\n").encode()).record(0)
+    assert record["error_classes"] == ["objc_exception"]  # an unlisted name is never copied; the traceback is ordinary noise
+    assert SECRET not in json.dumps(record) and "MySecretException" not in json.dumps(record)
+
+
+def test_normal_progress_records_every_stage_the_launcher_and_driver_observed(tmp_path):
+    opening = _launch(
+        tmp_path, servers_before=1, stages=evidence.OBSERVER_STAGES, pid_file="4242",
+        log=["Starting agent: a b (port=2)", "Agent server exited before it answered /api/health on port 2",
+             "Agent exited with code 3", "Uncaught exception", "an unrelated line"], stderr=b"ordinary log lines\n")
+    opening.ready = True
+    record = opening.record(2)
+    assert record["exit"] is None and record["error_classes"] == []
+    assert record["stages"] == ["spawned", "observer_loaded", "webview_imported", "launcher_log_opened", "pid_lock_held",
+                                "server_spawn_logged", "server_process_bound", "server_exit_before_ready_logged",
+                                "server_exit_logged", "uncaught_exception_logged", "server_ready", "window_created",
+                                "window_before_show"]
+    assert opening.record(1)["stages"].count("server_process_bound") == 0  # no generation beyond this launch's start
+    assert set(record["stages"]) <= set(evidence.STAGES) and record["evidence"]["stderr"] == "present"
+
+
+def test_missing_or_unusable_evidence_is_unavailable_never_a_negative_finding(tmp_path):
+    record = _launch(tmp_path, code=1).record(0)
+    assert record["exit"] == {"code": 1} and record["stages"] == ["spawned"] and record["error_classes"] == []
+    assert record["evidence"] == {"launcher_log": "absent", "stderr": "absent"}
+    (tmp_path / "arm/launcher-7.stderr").mkdir()  # not a regular file
+    blocked = evidence.Opening(tmp_path / "arm", tmp_path / "arm/stages-0", 7, 0)
+    blocked.launcher = SimpleNamespace(pid=1, poll=lambda: None)
+    assert blocked.record(0)["evidence"]["stderr"] == "absent"
+
+
+def test_a_link_in_place_of_the_stderr_file_is_neither_read_nor_written_through(tmp_path):
+    opening = _launch(tmp_path, code=-6)
+    target = tmp_path / "arm/elsewhere.stderr"
+    target.write_bytes(b"Fatal Python error: x")
+    try:
+        opening.stderr.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links cannot be created on this host")
+    record = opening.record(0)
+    assert record["evidence"]["stderr"] == "absent" and record["error_classes"] == []
+    with pytest.raises(FileExistsError):  # exclusive creation never opens through an existing link
+        opening.open_stderr()
+    assert target.read_bytes() == b"Fatal Python error: x"
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="needs POSIX permissions")
+def test_an_unreadable_stderr_file_is_reported_as_unreadable(tmp_path):
+    opening = _launch(tmp_path, code=-6, stderr=b"Fatal Python error: x")
+    opening.stderr.chmod(0)
+    try:
+        record = opening.record(0)
+    finally:
+        opening.stderr.chmod(0o600)
+    assert record["evidence"]["stderr"] == "unreadable" and record["error_classes"] == []
+
+
+def test_a_relaunch_never_inherits_the_first_launchs_log_lines_or_markers(tmp_path):
+    first = _launch(tmp_path, ordinal=0, stages=("observer_loaded",), log=["Starting agent: x y (port=1)"], code=-6)
+    second = _launch(tmp_path, ordinal=1, servers_before=1, code=None)
+    assert "server_spawn_logged" in first.record(1)["stages"] and "observer_loaded" in first.record(1)["stages"]
+    again = second.record(1)
+    assert again["stages"] == ["spawned"] and again["evidence"]["launcher_log"] == "present"  # older bytes lie below its offset
+    (tmp_path / "arm/data/logs/launcher.log").write_bytes(b"")  # rotated or replaced below the offset: not attributable
+    assert second.record(1)["evidence"]["launcher_log"] == "unattributed" and "launcher_log_opened" not in second.record(1)["stages"]
+    assert first.record(1)["ordinal"] == 0 and again["ordinal"] == 1
+
+
+def test_another_arms_files_and_a_freed_root_are_never_read_or_lost(tmp_path):
+    mine = _launch(tmp_path / "mine", code=-6, stderr=b"Fatal Python error: x", log=["Starting agent: a b (port=1)"])
+    other = tmp_path / "other"  # a sibling arm's files carry the same names
+    (other / "data/logs").mkdir(parents=True)
+    (other / "data/logs/launcher.log").write_text(f"{LOG_TIME} [INFO] launcher: Another instance already running.\n")
+    (other / "launcher-0.stderr").write_bytes(b"abort() called")
+    record = mine.freeze(0)
+    assert "lock_refused_logged" not in record["stages"] and record["error_classes"] == ["python_fatal_error"]
+    shutil.rmtree(tmp_path / "mine")
+    assert mine.record(0) == record  # a settled arm's root is removed; its frozen first-opening finding stays
+
+
+def test_the_stderr_file_is_a_fresh_private_regular_file(tmp_path):
+    opening = _launch(tmp_path)
+    with opening.open_stderr() as stream:
+        assert os.path.samestat(os.fstat(stream.fileno()), opening.stderr.stat())
+    assert opening.stderr.is_file() and not opening.stderr.is_symlink()
+    if os.name != "nt":
+        assert opening.stderr.stat().st_mode & 0o077 == 0
+    with pytest.raises(FileExistsError):  # never an earlier launch's file
+        opening.open_stderr()
+
+
+def test_the_observer_marks_only_inside_its_own_launch_directory_and_never_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("RENEWAL_STAGES", raising=False)
+    native_window.mark("observer_loaded")  # no directory: nothing happens
+    arm = tmp_path / "arm"
+    arm.mkdir()
+    made = [native_window.launcher_channel(arm, tmp_path / "launcher.py", tmp_path / "next.py", tmp_path, "t") for _ in range(2)]
+    try:
+        stages, other = (pathlib.Path(env["RENEWAL_STAGES"]) for _, _, env in made)
+        assert stages.parent == arm / "observer" and stages.is_dir() and other != stages  # each launch has its own
+        monkeypatch.setenv("RENEWAL_STAGES", str(stages))
+        native_window.mark("window_before_show")
+        monkeypatch.setenv("RENEWAL_STAGES", str(stages / "missing" / "deeper"))
+        native_window.mark("window_created")
+        assert [path.name for path in stages.iterdir()] == ["window_before_show"] and not list(other.iterdir())
+    finally:
+        for channel, child, _ in made:  # both ends of every channel
+            child.close()
+            channel.conn.close()
+
+
+class _Child:
+    """The launcher's end of the private channel: nothing but a descriptor number and a context."""
+    def fileno(self):
+        return 99
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Launcher:
+    def __init__(self, pid, code=None):
+        self.pid, self.code = pid, code
+
+    def poll(self):
+        return self.code
+
+
+def _session_arm(tmp_path, monkeypatch, *launchers):
+    """An Arm whose launchers, channel and window are inert: start_session and run execute unchanged, no native call.
+    ``arm.saved`` keeps the opening list of every checkpoint; ``arm.stage_dirs`` each launch's marker directory."""
+    arm = object.__new__(renewal.Arm)
+    arm.root, arm.app, arm.out, arm.tag, arm.sha = tmp_path / "arm", tmp_path / "arm/app", tmp_path, "t", "s"
+    arm.servers, arm.openings, arm.facts, arm.gaps, arm.task_ids, arm.project = [], [], {}, [], {}, {}
+    arm.checks = {phase: dict.fromkeys(names) for phase, names in renewal.PHASES.items()}
+    arm.tree, arm.env, arm.model, arm.win, arm.launcher, arm.generation = {"src": tmp_path, "seed": tmp_path}, {}, None, None, None, None
+    arm.quit_requested, arm.settled, arm.phase, arm.stage_dirs, arm.given, arm.saved = False, True, "prepare", [], [], []
+    arm.app.mkdir(parents=True)
+    arm.checkpoint = lambda: arm.saved.append(json.dumps(arm.result()["opening"], sort_keys=True))
+    queue = list(launchers)
+
+    def channel(*args):
+        arm.stage_dirs.append(tmp_path / f"arm/stages-{len(arm.stage_dirs)}")
+        arm.stage_dirs[-1].mkdir(parents=True)
+        return object(), _Child(), {"RENEWAL_STAGES": str(arm.stage_dirs[-1])}
+
+    def popen(argv, **kwargs):
+        arm.given.append(kwargs)
+        return queue.pop(0)
+
+    monkeypatch.setattr(renewal, "launcher_channel", channel)
+    monkeypatch.setattr(renewal, "RoomWindow", lambda *args: None)
+    monkeypatch.setattr(renewal.subprocess, "Popen", popen)
+    return arm
+
+
+def _serves(arm, port):
+    """The launcher takes its PID lock, and its child server binds and answers ready."""
+    def ready(previous):
+        (arm.app / "ouroboros.pid").write_text(str(arm.launcher.pid), encoding="utf-8")
+        arm.servers.append({"pid": port, "birth": "b", "port": port})
+        return arm.servers[-1]
+    return ready
+
+
+def test_a_launcher_that_never_serves_still_leaves_its_opening_in_the_report(tmp_path, monkeypatch):
+    launcher = _Launcher(4242, -6)
+    arm = _session_arm(tmp_path, monkeypatch, launcher)
+    def exited(previous):
+        (arm.stage_dirs[0] / "observer_loaded").touch()
+        raise RuntimeError("the launcher exited -6 while its server was awaited")
+    arm.wait_generation = exited
+    with pytest.raises(RuntimeError):
+        arm.start_session(tmp_path / "launcher.py")
+    stderr = arm.given[0]["stderr"]
+    assert stderr.closed and arm.openings[0].stderr.is_file()  # a regular file, never a pipe or the null device
+    assert arm.given[0]["stdin"] is renewal.subprocess.DEVNULL and arm.given[0]["stdout"] is renewal.subprocess.DEVNULL
+    report = arm.result()
+    assert report["opening"][0]["exit"] == {"signal": 6} and report["opening"][0]["stages"] == ["spawned", "observer_loaded"]
+    assert json.loads(arm.saved[-1]) == report["opening"]  # frozen and checkpointed at the failure, before anything else
+    assert report["facts"] == {}  # the old surface still says nothing; the record stands on its own
+    assert renewal.judge({"arms": {"baseline": report, "candidate": report}})["verdict"] == "INCONCLUSIVE"
+
+
+def test_an_opening_is_frozen_at_its_first_open_and_later_activity_cannot_change_it(tmp_path, monkeypatch):
+    first, second = _Launcher(4242), _Launcher(4343)  # the first launcher is still running at its boundary
+    arm = _session_arm(tmp_path, monkeypatch, first, second)
+    def opened():
+        (arm.stage_dirs[-1] / "window_before_show").touch()
+        return True
+    arm.open_main = opened
+    arm.wait_generation = _serves(arm, 1)
+    assert arm.start_session(tmp_path / "launcher.py") is True
+    boundary = json.dumps(arm.result()["opening"][0], sort_keys=True)
+    assert json.loads(boundary)["exit"] is None and "server_ready" in json.loads(boundary)["stages"]
+    assert json.loads(arm.saved[-1])[0] == json.loads(boundary)  # checkpointed at the boundary itself
+    log = tmp_path / "arm/data/logs/launcher.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(f"{LOG_TIME} [INFO] launcher: Starting agent: x y (port=1)\n{LOG_TIME} [ERROR] launcher: "
+                   "Another instance already running.\n", encoding="utf-8")  # later lines, a later marker and stderr
+    (arm.stage_dirs[0] / "window_created").touch()
+    with arm.openings[0].stderr.open("ab") as stream:
+        stream.write(b"Fatal Python error: later\n")
+    first.code = -6
+    arm.servers.append({"pid": 9, "birth": "later", "port": 1})  # a later Restart's generation
+    arm.openings[0].ready = False
+    arm.wait_generation = _serves(arm, 2)
+    assert arm.start_session(tmp_path / "relaunch.py") is True  # a second opening, with its own stderr file and markers
+    assert json.dumps(arm.result()["opening"][0], sort_keys=True) == boundary
+    assert arm.openings[0].freeze(99) is arm.openings[0].frozen and arm.openings[0].record(99) == json.loads(boundary)
+    later = arm.result()["opening"][1]
+    assert later["ordinal"] == 1 and later["exit"] is None and later["error_classes"] == []
+    assert "window_created" not in later["stages"] and "server_spawn_logged" not in later["stages"]  # nothing of the first's
+
+
+def test_a_failed_first_opening_ends_the_arm_before_any_later_control(tmp_path, monkeypatch):
+    arm = _session_arm(tmp_path, monkeypatch, _Launcher(4242))  # running, but its window was never observed
+    calls = []
+    def later(name):
+        def reached(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(name + " must not run after a first opening that failed")
+        return reached
+    def refuse():
+        raise RuntimeError("main room unavailable")
+    def teardown():
+        calls.append("quit")
+        arm.settled = True
+        return True
+    arm.prepare, arm.open_main, arm.quit = lambda: None, refuse, teardown
+    arm.wait_generation = _serves(arm, 1)
+    for name in ("create_project", "seed_exchange", "pending", "start_tasks", "transition", "stage", "fixture", "relaunch",
+                 "peer_project", "help", "apply", "trigger_restart", "generation_step"):
+        setattr(arm, name, later(name))
+    arm.run()
+    assert calls == ["quit"]  # the one ordinary teardown, and nothing from the later scenario
+    assert arm.phase == "first launch" and arm.launcher is not None
+    assert arm.gaps[:2] == ["open room (RuntimeError)", "first launch stopped (RuntimeError: the first window was not "
+                            "observed; no later control was sent)"]
+    assert not arm.root.exists()  # teardown removed the arm's files; the first opening survives them
+    opening = arm.result()["opening"]
+    assert len(opening) == 1 and opening[0]["exit"] is None and opening[0]["stages"] == [
+        "spawned", "pid_lock_held", "server_process_bound", "server_ready"]
+    assert json.loads(arm.saved[-1]) == opening
+    assert not any(value for phase in arm.checks.values() for value in phase.values())  # no check was ever measured
 
 
 def _import_staged(path, name):

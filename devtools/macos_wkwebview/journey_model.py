@@ -8,6 +8,9 @@ A held request is bound to a server generation only through the requesting proce
 parent chain and birth (``host_processes``) — never through the binding file's arrival view and
 never through a receive time. A request whose requester cannot be resolved stays unattributed;
 the arm's checks treat an untied arrival as missing evidence, never as silence or continuity.
+
+The pure verdicts over the journey's own facts live beside it: continuation, owner pause, settled view and the
+Send receipts (``receipt``, ``history_verdict``, ``once_verdict``), none of which does I/O.
 """
 from __future__ import annotations
 
@@ -101,6 +104,74 @@ def reconcile_view(label, old, sampled, final, checks, measured, same_view):
 
 
 FIXTURE_BUTTON = "Open the sample page"
+
+
+FRAME_FIELDS = ("type", "content", "client_message_id", "sender_session_id", "chat_id", "project_id", "reply_to")
+
+
+def same_frame(wire, entries):
+    if not wire or not wire.get("client_message_id") or not wire.get("sender_session_id"):
+        return None
+    frames = [entry["frame"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("frame"), dict)
+              and entry["frame"].get("client_message_id") == wire["client_message_id"]]
+    return len(frames) == 1 and {k: frames[0][k] for k in FRAME_FIELDS if k in frames[0]} == {
+        k: wire[k] for k in FRAME_FIELDS if k in wire}
+
+
+def receipt(history, wire, *, room=None):
+    """Count both a repeat of the original id and a repeat under a new id. Never infer identity from text."""
+    if not wire or not wire.get("client_message_id") or not wire.get("sender_session_id") or not history or (
+            history.get("window") or {}).get("complete") is not True:
+        return None
+    rows = [r for r in history["messages"] if r.get("role") == "user"
+            and (r.get("client_message_id") == wire["client_message_id"] or r.get("text") == wire["content"])]
+    if room is not None and len(rows) == 1:
+        row = rows[0]
+        if not all(row.get(k) for k in ("row_address", "client_message_id", "sender_session_id")) or row.get("ingress_accepted") is None:
+            return None
+    exact = [r for r in rows if r.get("client_message_id") == wire["client_message_id"]
+             and r.get("sender_session_id") == wire["sender_session_id"] and r.get("text") == wire["content"]
+             and r.get("ingress_accepted") is True and r.get("row_address")]
+    if room is not None:
+        def addressed(row):
+            reply = row.get("reply_to") or {}
+            return (row["row_address"].startswith(f"row:{room}@") and reply.get("address") == wire.get("reply_to")
+                    and (not reply or (reply.get("chat_id") == room and not reply.get("unresolved"))))
+        exact = [row for row in exact if addressed(row)]
+    return {"count": len(rows), "addresses": [r["row_address"] for r in exact]}
+
+
+def send_writes(initial, current):
+    if initial != [1, 0] or not isinstance(current, list) or len(current) != 2:
+        return None
+    if current[0] > 1 or current[1] > 0:
+        return False
+    return True if current == initial else None  # a missing positive control cannot prove silence
+
+
+def frame_addressed(wire, project, room, text, reply):
+    """The outgoing frame itself names its room, project, text and quote: identity, never a guess."""
+    return bool(wire) and wire.get("type") == "chat" and wire.get("content") == text \
+        and wire.get("project_id") == project and wire.get("chat_id") == room and wire.get("reply_to") == reply
+
+
+def history_verdict(saved, main, *, accepted_address=None):
+    """What this arm's own complete HTTP history reads say about one Project Send: a duplicate, a leak to
+    Main or a row lost from its previously accepted address is a fact about the server, and no later view
+    un-proves it. None while a read is missing; the frame and the page's counter never decide this."""
+    lost = saved is not None and accepted_address is not None and saved["addresses"] != [accepted_address]
+    if (main and main["count"]) or lost or (saved and saved["count"] and (saved["count"] != 1 or len(saved["addresses"]) != 1)):
+        return False
+    return True if saved and saved["addresses"] and main else None
+
+
+def once_verdict(history, writes, addressed=True):
+    """The canonical history verdict combined with the page's wire counter and the captured frame: one
+    accepted addressed room row, nothing in Main, one wire write. None while any read is missing; a
+    demonstrated duplicate, leak or misaddressed row is False even when another read is still missing."""
+    if history is False or not addressed or (writes is not None and writes > 1):
+        return False
+    return True if history is True and writes == 1 else None
 
 
 def fixture_page(port: int, tag: str, page_path: str | None = None) -> str:
