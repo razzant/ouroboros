@@ -941,7 +941,8 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
             if isinstance(run, dict) and run.get("authority") == "host_root":
                 run.update(superseded_by_revision=True, superseded_reason="working_recovery_new_execution")
         # ``acceptance_decision`` is written no more; a pre-fold checkpoint's own does not carry over.
-        for key in ("acceptance_decision", "review_decision", "root_phase_checkpoint", "task_completion"):
+        for key in ("acceptance_decision", "review_decision", "root_phase_checkpoint", "task_completion",
+                    "authoring_handover_incomplete"):
             trace.pop(key, None)
     from ouroboros.task_pacing import restore_cost_ceiling
 

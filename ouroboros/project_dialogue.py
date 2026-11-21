@@ -790,7 +790,7 @@ TASK_CAUSE_PHRASES = {
     "provider_unavailable": "The task could not get a usable model answer, so it could not finish",
     "accounting_wait_expired": "Accounting access did not recover within this turn’s wait window",
     "delivery_control_degraded": "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
-    "authoring_handover_incomplete": "The replacement model stopped before resuming tool work.",
+    "authoring_handover_incomplete": "The saved result records an incomplete model handover.",
     "configured_actor_first_undetermined": "First coding attempt: outcome unknown.",
     "configured_actor_first_failed": "First coding attempt failed.",
     "configured_actor_first_cancelled": "First coding attempt cancelled.",
