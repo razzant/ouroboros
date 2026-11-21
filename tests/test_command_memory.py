@@ -971,3 +971,53 @@ def test_show_gives_user_bus_without_a_login_session(monkeypatch):
     cm._show("show", "user@1.service")  # system scope keeps the inherited env untouched
     assert "XDG_RUNTIME_DIR" not in seen["env"]
     assert "DBUS_SESSION_BUS_ADDRESS" not in seen["env"]
+
+
+def _bus_denied(monkeypatch):
+    def deny(*a):
+        raise cm.subprocess.CalledProcessError(1, ["systemctl"], stderr="Failed to connect to bus: Permission denied")
+
+    monkeypatch.setattr(cm, "_show", deny)
+
+
+def _kernel_tree(tmp_path, monkeypatch, unit_controllers="cpu memory pids", unit_oom="0",
+                 mgr_controllers="cpu memory pids", mgr_oom="0"):
+    unit = tmp_path / "cg" / "u" / "ouroboros.service"
+    unit.mkdir(parents=True)
+    (unit / "cgroup.controllers").write_text(unit_controllers + "\n", encoding="ascii")
+    (unit / "memory.oom.group").write_text(unit_oom + "\n", encoding="ascii")
+    (unit.parent / "cgroup.controllers").write_text(mgr_controllers + "\n", encoding="ascii")
+    (unit.parent / "memory.oom.group").write_text(mgr_oom + "\n", encoding="ascii")
+    cgroup_tree(tmp_path, monkeypatch, "0::/u/ouroboros.service/runtime\n")
+    monkeypatch.setattr(cm, "_unit_dir", lambda _cgroup: unit)
+    monkeypatch.setattr(host_memory, "physical_memory", lambda: MemorySnapshot(TOTAL, 40 * GIB))
+    (tmp_path / "proc" / "meminfo").write_text("SwapTotal: 0 kB\n", encoding="utf-8")
+    return unit
+
+
+def test_a_denied_user_bus_reads_the_same_layout_from_the_kernel(tmp_path, monkeypatch):
+    """Run 44959707977: inside the packaged user service the user bus answered EACCES while the
+    layout was in force; the probe must read that layout from the kernel, not refuse the host."""
+    _kernel_tree(tmp_path, monkeypatch)
+    _bus_denied(monkeypatch)
+    assert isinstance(cm._probe(), cm.Enabled)
+
+
+def test_the_kernel_fallback_refuses_group_kill_and_undelegated_memory(tmp_path, monkeypatch):
+    unit = _kernel_tree(tmp_path, monkeypatch, unit_oom="1")
+    _bus_denied(monkeypatch)
+    assert cm._probe().code == "unit_policy"
+    (unit / "memory.oom.group").write_text("0\n", encoding="ascii")
+    (unit / "cgroup.controllers").write_text("cpu pids\n", encoding="ascii")
+    assert cm._probe().code == "unit_policy"
+    (unit / "cgroup.controllers").write_text("cpu memory pids\n", encoding="ascii")
+    (unit.parent / "cgroup.controllers").write_text("cpu pids\n", encoding="ascii")
+    assert cm._probe().code == "unit_policy"
+
+
+def test_the_kernel_fallback_without_readable_cgroup_files_stays_retryable(tmp_path, monkeypatch):
+    unit = _kernel_tree(tmp_path, monkeypatch)
+    (unit / "cgroup.controllers").unlink()
+    _bus_denied(monkeypatch)
+    state = cm._probe()
+    assert state.code == "systemctl_unreadable" and state.transient

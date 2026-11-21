@@ -59,4 +59,4 @@ Only a measured birth/command mismatch retires other owned custody, journalled f
 
 ### Test runs
 
-Lanes/`safe_test`: `ProcessContainer`, scrubbed temporary roots (`test_environment.py`). Passed-test `tmp_path` goes after its processes; a marker keeps its folder; private-copy records join its task (PERSISTENCE).
+Lanes/`safe_test`: `ProcessContainer`, scrubbed roots (`test_environment.py`); a passed test's `tmp_path` goes after its processes, a marker keeps its folder; private-copy records join its task (PERSISTENCE).
