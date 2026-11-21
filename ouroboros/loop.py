@@ -474,8 +474,6 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
         else:
             resumed = (*route, cost_ceiling, False, False, False)
             apply_current(tools._ctx)
-            from ouroboros.place_reply import seed_no_send
-            seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
         if carried is not None:
             carried.reentered(tools._ctx, messages)
         from ouroboros.subagent_bootstrap import append_startup_receipt

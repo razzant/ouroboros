@@ -1,7 +1,7 @@
 """One-shot facts at the finish door and the answer they returned (leaf of ``loop_delivery``).
 
 The pre-delivery notice, a red check, children's results and a non-blocking result review's outcome each return an
-answer once. Like the routeless note they leave the next answer fresh: prose after them is delivered as written,
+answer once. Like an owner follow-up they leave the next answer fresh: prose after them is delivered as written,
 without a selection only ``finish_task`` could make (on the stand Qwen3.5-9B repeated its report instead, and its
 turn never ended). Three rules keep that honest for every model:
 

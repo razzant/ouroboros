@@ -258,20 +258,6 @@ def test_the_resident_page_carries_the_revision_of_the_bytes_shown(tmp_path, sto
         f"\nRevision of this workpad: {_sha(raw)}.\n"
 
 
-def test_a_presence_workpad_read_is_a_pure_read_not_possible_speech():
-    """SPEC §10, verified on the base first: ``may_speak`` counted a workpad read as words for the place."""
-    from ouroboros.place_reply import may_speak
-    from ouroboros.tool_capabilities import PURE_READ_TOOLS, READ_ONLY_PARALLEL_TOOLS
-
-    ctx = types.SimpleNamespace(task_metadata={})
-    assert may_speak(ctx, {"function": {"name": "workpad_read", "arguments": "{}"}}) is False
-    assert "workpad_read" in PURE_READ_TOOLS and "workpad_read" not in READ_ONLY_PARALLEL_TOOLS  # no new parallelism
-    assert may_speak(ctx, {"function": {"name": "workpad_write", "arguments": "{}"}}) is False  # a receipt write, as before
-    # K17: the other half: a call that may put words in the place still counts as speech.
-    for name, arguments in (("send_message", '{"text": "hello"}'), ("run_shell", '{"cmd": "echo hello"}')):
-        assert may_speak(ctx, {"function": {"name": name, "arguments": arguments}}) is True, name
-
-
 def test_scope_refusals_carry_the_resolvers_own_code(tmp_path, store):
     """The project scope's refusal kind comes from its resolver (``_project_scope``), never from its text."""
     from ouroboros.tools.project_journal import _project_scope, _resolve_project_id, _workpad_write
