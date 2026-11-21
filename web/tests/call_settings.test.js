@@ -1,7 +1,7 @@
 import './fixtures/call_modules.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-const { callSettingsHtml, scheduleSave, autosaves } = await import('../../skills/live_conversation/ui/call_settings.js');
+const { callSettingsHtml, mountCallSettings, scheduleSave, autosaves } = await import('../../skills/live_conversation/ui/call_settings.js');
 
 const catalog = { id:'fixture:voice', label:'Fixture engine', privacy:'Synthetic audio stays here.', models:[
     {id:'first', label:'First model', default:true, vision:false, voices:[{id:'quiet',label:'Quiet'}], honours:['pause'],
@@ -108,4 +108,27 @@ test('only the declared call fields save themselves; device choices stay local',
     }
     assert.equal(autosaves(''), false);
     assert.equal(autosaves('microphone'), false);
+});
+
+test('Calls keeps the host lock and locks its own placeholders until the catalog is read', async () => {
+    const field = { disabled: false }, save = { disabled: false }, status = {};
+    const fields = { querySelectorAll: () => [field] };
+    const form = Object.assign(new EventTarget(), { dataset: { extensionSettingsBlocked: '1' },
+        querySelector: selector => ({ '.form-grid': fields, 'button[type="submit"]': save, '[data-extension-settings-status]': status })[selector] });
+    const blocked = mountCallSettings(form, { read() { assert.fail('the host still owns the blocked form'); } });
+    await blocked.ready;
+    blocked.dispose();
+    assert.equal(form.dataset.extensionSettingsBlocked, '1');
+
+    delete form.dataset.extensionSettingsBlocked;
+    const waiting = mountCallSettings(form, { read: async () => ({ error: 'No catalog yet' }) });
+    try {
+        assert.equal(field.disabled, true);
+        assert.equal(save.disabled, true);
+        assert.equal(form.dataset.extensionSettingsBlocked, '1');
+        await waiting.ready;
+        assert.equal(field.disabled, true);
+        assert.equal(save.disabled, true);
+        assert.match(status.textContent, /Open this page again to retry/);
+    } finally { waiting.dispose(); }
 });

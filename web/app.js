@@ -227,7 +227,7 @@ function commitPage(pageName, options = {}) {
         document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
         document.getElementById(`page-${pageName}`)?.classList.add('active');
         state.activePage = pageName;
-        window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));
+        window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName, reveal: Boolean(options.reveal) } }));
         updateUnreadBadge();  // Main's number shows only away from Main
     }
     // Main pressed again while it is the page shown is an opening; shown from elsewhere it is a return (enterMain).
@@ -241,6 +241,7 @@ function commitPage(pageName, options = {}) {
 async function openSettings(path = '', options = {}) {
     return settingsControls ? settingsControls.open(path, options) : showPage('settings');
 }
+const openExtensions = (path = '', options = {}) => (skillsControls ? skillsControls.open(path, options) : showPage('skills'));
 
 async function openDashboardTab(tabName, options = {}) {
     return showPage('dashboard', { ...options, key: `dashboard:${tabName}`,
@@ -535,12 +536,12 @@ onLayoutChange((layout) => {
     syncNavigationState();
 });
 
-// A page pressed in the sidebar. Settings pressed while it is shown (settings.js `pressedAgain`): beside the list a
+// A page pressed in the sidebar. Settings or Extensions pressed while it is shown (`pressedAgain`): beside the list a
 // first-level page stays as it stands and a deeper level returns to its section's first-level page; in one column the
 // list comes back. Pressed in the open drawer it closes the drawer, as every other place pressed there does.
 function pressNavPage(name) {
     const section = name === 'dashboard' ? dashboardControls
-        : name === 'settings' && state.activePage === 'settings' ? settingsControls : null;
+        : state.activePage === name ? { settings: settingsControls, skills: skillsControls }[name] : null;
     void showPage(name, { map: true, enter: () => section?.pressedAgain() });
 }
 document.querySelectorAll('[data-nav-page]').forEach(btn => {
@@ -620,7 +621,7 @@ const ctx = {
     state,
     showPage,
     onReadingLatest: () => void acknowledgeMainAfterPaint(),
-    openSettings,
+    openSettings, openExtensions,
     openDashboardTab,
     isProjectOpening: () => projectPanelOpeningSince > 0,
     stateSnapshots,
@@ -1377,7 +1378,7 @@ initActivity({ ...ctx, mount: document.getElementById('dashboard-panel-activity'
 initConsciousnessDashboard({ ...ctx, mount: document.getElementById('dashboard-panel-consciousness') });
 initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
 const disposeStorage = initStorage({ ...ctx, mount: document.getElementById('dashboard-panel-storage') });
-skillsControls = initSkills(ctx);
+skillsControls = initSkills({ ...ctx, layers });
 initWidgets(ctx);
 initCircles(ctx);
 const updateStatus = initUpdateStatus(ctx);

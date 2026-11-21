@@ -5,7 +5,7 @@ it: `docs/DESIGN.md` "References and actions". Rows are sorted by text so that t
 the same thing sit together: when your diff adds a row, read its neighbours.
 
 351 controls with fixed text in 318 rows, 209 distinct texts;
-231 more controls build their text at run time and are not listed.
+233 more controls build their text at run time and are not listed.
 
 ## Fixed control text
 
@@ -176,7 +176,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | More: legacy base address | `(no class)` | modules/settings_connections.js | 1 |
 | More: processing, prompt cache, requests at once | `(no class)` | modules/model_roles.js | 1 |
 | More: subagent limits and folders | `(no class)` | modules/subagents_settings.js | 1 |
-| More: timeouts, import, refresh | `(no class)` | modules/mcp_settings.js | 1 |
+| More: timeout, import, refresh | `(no class)` | modules/mcp_settings.js | 1 |
 | More: translations | `(no class)` | modules/settings_language.js | 1 |
 | Move | `files-context-item` | modules/files.js | 1 |
 | Next page | `btn btn-default btn-sm` | modules/logs_raw.js | 1 |
@@ -339,6 +339,7 @@ An owner intent that has a door is raised by exactly one module (`ouro:open-proj
 |---|---|
 | `ouro:dashboard-subtab-shown` | modules/dashboard.js ×3 |
 | `ouro:extension-settings-mounted` | modules/settings_extension_forms.js ×2 |
+| `ouro:extension-settings-unmounted` | modules/settings_extension_forms.js |
 | `ouro:language-changed` | modules/i18n.js |
 | `ouro:layout-changed` | theme.js |
 | `ouro:mcp-status-updated` | modules/mcp_settings.js |
@@ -352,7 +353,7 @@ An owner intent that has a door is raised by exactly one module (`ouro:open-proj
 | `ouro:panic` | modules/chat_activity.js |
 | `ouro:project-created` | modules/work_portal.js |
 | `ouro:quiz-reply` | modules/quiz_submission.js |
-| `ouro:settings-page-shown` | modules/settings.js |
+| `ouro:settings-page-shown` | modules/section_levels.js |
 | `ouro:settings-updated` | modules/settings_controls.js ×2, modules/settings_extension_forms.js |
 | `ouro:skill-lifecycle` | modules/speech_providers.js, modules/utils.js |
 | `ouro:task-continued` | modules/task_continue.js |
