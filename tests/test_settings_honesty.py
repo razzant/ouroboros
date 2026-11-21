@@ -506,6 +506,14 @@ def test_worker_cap_applies_now_to_the_pool_without_changing_actor_snapshot_poli
             assert not response.json().get("next_task_changed") and not response.json().get("restart_required")
             assert acting_room({}, {}) == room  # real pool reader follows the save, even inside an old actor scope
             assert snapshot.settings[OWNER_CAP_KEY] == 2 and snapshot.environ[OWNER_CAP_KEY] == "2"
+        # The per-root subagent number: subagent admission and assignment run in this (the server's) process, which
+        # projects every save into its environment, so they read the saved number at once, as the pool reads its cap.
+        per_root = "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"
+        assert setting_effect(per_root) == "now" and _next_task_setting(per_root) is False
+        for value, number in ((4, 4), ("", None), (2, 2)):
+            response = client.post("/api/settings", json={per_root: value})
+            assert response.status_code == 200 and response.json()["immediate_changed"] is True, response.text
+            assert config.get_max_active_subagents_per_root() == number
 
 
 def test_metadata_covers_added_settings_but_never_tokens_a_new_secret(isolated_settings, monkeypatch):

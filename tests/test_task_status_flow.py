@@ -2356,13 +2356,15 @@ def test_configured_zero_subagent_depth_truly_disables_delegation(tmp_path, monk
     assert enqueued and enqueued[0]["id"] == "root-at-0"
 
 
-def test_other_bounded_int_settings_keep_their_min_of_one(monkeypatch):
-    """``min_value`` defaults to 1, so the depth fix does not leak into sibling settings."""
-    from ouroboros.config import _bounded_positive_int_setting, SETTINGS_DEFAULTS
+def test_other_bounded_int_settings_keep_their_min_of_one(monkeypatch, tmp_path):
+    """``min_value`` defaults to 1, so the depth fix does not leak into sibling settings: the Presence gate, which
+    still reads the bounded integer, takes its default for a 0 (a gate built with 0 would hold 1)."""
+    from ouroboros import presence_runner
+    from ouroboros.config import SETTINGS_DEFAULTS
 
+    monkeypatch.setattr(presence_runner, "_GATES", {})
     monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "0")
-    assert _bounded_positive_int_setting("OUROBOROS_PRESENCE_MAX_ACTIVE", hard_max=20, default=int(
-        SETTINGS_DEFAULTS["OUROBOROS_PRESENCE_MAX_ACTIVE"])) == int(SETTINGS_DEFAULTS["OUROBOROS_PRESENCE_MAX_ACTIVE"])
+    assert presence_runner._configured_gate(tmp_path)._max_active == int(SETTINGS_DEFAULTS["OUROBOROS_PRESENCE_MAX_ACTIVE"])
 
 
 @pytest.mark.parametrize(("raw", "read"), [
@@ -2499,13 +2501,18 @@ def test_scheduling_soft_cap_counts_acting_children_but_hard_cap_counts_all(
         assert ("max_active_subagents" in meta) is (number is not None), "no number: the feed names none"
 
 
-def test_the_queue_notice_names_the_number_that_decided_under_the_lock(tmp_path, monkeypatch):
-    """The owner's number is read again under the queue lock; the notice and feed name that read, not the first."""
+@pytest.mark.parametrize("reads, decided", [([10, 2, 1], 1), ([1, 1, None], None)])
+def test_the_queue_notice_names_the_number_that_decided_under_the_lock(tmp_path, monkeypatch, reads, decided):
+    """The owner's number is read again under the queue lock; the notice, the feed and the tree's advisory name that
+    last read, not an earlier one, in both directions (a number written, a number removed)."""
     from supervisor import events, events_schedule_task, workers
 
-    reads = []  # the first read admits freely; the owner wrote 1 before the re-checks under the lock
+    seen = []  # each read returns the next value; reads past the list repeat its last
     monkeypatch.setattr(events_schedule_task, "get_max_active_subagents_per_root",
-                        lambda: reads.append(1) or (10 if len(reads) == 1 else 1))
+                        lambda: seen.append(1) or reads[min(len(seen), len(reads)) - 1])
+    recorded = []
+    monkeypatch.setattr(events_schedule_task, "_record_delegation_constraint",
+                        lambda root, **kw: recorded.append(kw))
     running = {"r1": {"task": {"id": "r1", "root_task_id": "root", "delegation_role": "subagent"}, "worker_id": 0}}
     slots = {0: SimpleNamespace(busy_task_id="r1", active_capacity=True), -1: SimpleNamespace(busy_task_id=None)}
     monkeypatch.setattr(workers, "WORKERS", slots)
@@ -2522,9 +2529,15 @@ def test_the_queue_notice_names_the_number_that_decided_under_the_lock(tmp_path,
         "depth": 1, "root_task_id": "root", "parent_task_id": "root", "delegation_role": "subagent",
         "memory_mode": "forked", "drive_root": drive, "child_drive_root": drive,
     }, ctx)
-    assert len(reads) > 1, "the number was read again under the lock"
-    assert "queued behind active subagent cap 1;" in sent[0][0]
-    assert sent[0][1]["progress_meta"]["max_active_subagents"] == 1
+    assert len(seen) >= len(reads), "the number was read again under the lock"
+    meta = sent[0][1]["progress_meta"]
+    if decided is None:
+        assert "queued behind" not in sent[0][0] and not meta.get("queued_behind_active_cap") and not recorded
+        assert "max_active_subagents" not in meta
+    else:
+        assert f"queued behind active subagent cap {decided};" in sent[0][0] and meta["queued_behind_active_cap"]
+        assert meta["max_active_subagents"] == decided
+        assert [row["scope"] for row in recorded] == [{"max_children": decided}]
 
 
 def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, monkeypatch):

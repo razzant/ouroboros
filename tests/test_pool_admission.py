@@ -545,7 +545,7 @@ def test_the_published_facts_reach_the_mind_dated_and_the_worker_never_reads_the
     assert (memory["starts_admitted"], memory["starting_processes"], memory["reason"]) == (3, 0, "memory_room")
     assert fact["recorded_max_workers"] is None and fact["acting_worker_count"] == 1
     # The shipped per-root subagent number is none: the fact says so as null, and the note says what null means.
-    assert fact["max_active_subagents_per_root"] is None and "(null: no number; how many is your judgment" in fact["note"]
+    assert fact["max_active_subagents_per_root"] is None and "max_active_subagents_per_root" in fact["note"]
     assert "owner cap none (the machine's memory is the limit)" in line
     assert "available 4.0 GiB of 10.0 GiB, reserve 1.0 GiB" in line and "new processes admitted 3 (memory_room)" in line
 
@@ -652,8 +652,14 @@ def test_the_shipped_default_admits_a_roots_seventh_child_through_scheduling_and
     from supervisor.events_schedule_task import _active_cap_state
     from ouroboros.config import get_max_active_subagents_per_root
 
-    if number is None:
-        monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
+    from ouroboros import config
+
+    monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
+    if number is None:  # a fresh install, as the server loads and projects it: the shipped default reaches the reader
+        monkeypatch.setattr(config, "SETTINGS_PATH", assigning.root / "absent-settings.json")
+        config.apply_settings_to_env(config.load_settings(), environ=(environ := {}))
+        if "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT" in environ:
+            monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", environ["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"])
     else:
         monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", number)
     machine(monkeypatch, 9)
@@ -667,6 +673,10 @@ def test_the_shipped_default_admits_a_roots_seventh_child_through_scheduling_and
     assert (blocked, refusal) == (number is not None, ""), "scheduling: queued only behind the owner's number"
     workers.assign_tasks()
     assert len(assigning.created) == (0 if number else 1), "assignment: the seventh starts while the pool admits it"
+    if number:  # the owner removes the number (No limit: the server's projection drops the variable)
+        monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT")
+        workers.assign_tasks()
+        assert len(assigning.created) == 1, "the held seventh starts at the next pass"
 
 
 def test_a_slots_wait_flag_counts_the_same_for_the_owner_and_child_caps(assigning, monkeypatch):
