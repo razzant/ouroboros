@@ -353,8 +353,10 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
     """
     from supervisor import queue
 
+    # The retry is the attempt its owner names from here, as every assignment binds it: its first frame
+    # (``task_started``), its addressed frames and a host terminal never claim the dead attempt's number.
     task["_execution_owner"] = {**dict(task.get("_execution_owner") or {}), "lane": LANE_CONVERSATION,
-                                "executor": EXECUTOR_WORKER}
+                                "executor": EXECUTOR_WORKER, "task_attempt": int(task.get("_attempt") or 1)}
     meta = _awaiting_row(task, attempt=int(task.get("_attempt") or 1), client_message_id=prior.get("client_message_id"),
                          reply_expected=prior.get("reply_expected"), fresh_identity=prior.get("fresh_identity"))
     meta["_unpublished"] = True

@@ -247,11 +247,11 @@ def test_a_dispatched_row_with_saved_work_is_held_and_resumes_not_failed(tmp_pat
     assert load_task_result(tmp_path, "saved")["status"] == "scheduled"  # nonterminal, never FAILED
 
     # The existing Resume door revalidates the saved source: unreadable keeps the hold, valid releases it.
-    monkeypatch.setattr(task_admission, "_working_resume_granted", lambda *_a, **_k: False)
     refused = queue.resume_budget_paused_task("saved")
     assert refused["ok"] is False and refused["error"] == "dispatch_outcome_unknown"
+    assert refused["refusal_basis"] == "saved_work_unverified"
     assert "_budget_pause" in workers.PENDING[0]
-    monkeypatch.setattr(task_admission, "_working_resume_granted", lambda *_a, **_k: True)
+    monkeypatch.setattr(task_admission, "working_resume_refusal", lambda *_a, **_k: "")
     assert queue.resume_budget_paused_task("saved")["ok"] is True
     assert "_budget_pause" not in workers.PENDING[0] and workers.PENDING[0]["_working_recovery"]
 

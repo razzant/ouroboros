@@ -500,6 +500,10 @@ test('chat replays settled rows through the one seam, not a card-opening detail 
     const seamOwner = chat.slice(chat.lastIndexOf('function ', chat.indexOf('syncSettledItems(')));
     const ownerName = seamOwner.slice('function '.length, seamOwner.indexOf('('));
     assert.match(summary, new RegExp(`${ownerName}\\(\\s*record, msg\\)`), 'the replayed row reaches the seam-owning path');
+    assert.match(summary, /\bnoteTaskDetails\(record, msg\)/);
+    // A task detail can start the late Continue read (an unclean root): its write goes through the same seam.
+    const details = chat.slice(chat.indexOf('function noteTaskDetails'), chat.indexOf('function noteTaskDetails') + 300);
+    assert.match(details, /syncSettledItems\(record, detail, \{ write: withStableViewport, stored \}\);/);
 });
 
 

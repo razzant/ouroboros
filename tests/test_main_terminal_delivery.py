@@ -357,24 +357,41 @@ def test_every_terminal_delivery_id_requires_durable_chat_before_ack(tmp_path, m
     assert len(frames) == 1
 
 
-@pytest.mark.parametrize("state,path", [("unknown", ""), ("exhausted", ""), ("exhausted", "saved/answer.md")])
-def test_main_mirror_qualifies_source_delivery_without_mutating_result_axes(tmp_path, monkeypatch, state, path):
-    from ouroboros import terminal_projection
+@pytest.mark.parametrize("state,save_copy", [("unknown", False), ("exhausted", False), ("exhausted", True)])
+def test_main_mirror_qualifies_source_delivery_without_mutating_result_axes(tmp_path, monkeypatch, state, save_copy):
     from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_finalization import prepare_terminal_send_event, register_final_answer_owed
     from tests._cancel_intents_shared import DeliveryBus
 
     project = create_project(tmp_path, "source", name="Source")
     bind_task_to_project(tmp_path, "root", project["id"], origin={"absent": "system"})
+    task = {"id": "root", "chat_id": project["chat_id"]}
+    answer = "Full authored answer"
+    path = ""
+    if state == "exhausted":
+        final = prepare_terminal_send_event(tmp_path, task, answer, {"terminal_origin": "model_final"},
+            {"type": "send_message", "task_id": "root", "chat_id": task["chat_id"], "text": answer},
+            presence=False, custody_audit={})
+        assert register_final_answer_owed(task, final, env_drive_root=tmp_path) == "registered"
+        monkeypatch.setattr("ouroboros.utils.in_worker_process", lambda: True)
+        if not save_copy:
+            monkeypatch.setattr("ouroboros.observability.preserve_salvaged_output", lambda *_: "")
+        delivery._retire_exhausted(tmp_path, [final])
+        [failed] = delivery.terminal_answer_receipts(tmp_path, "root")["exhausted"]
+        path = failed["preserved_path"]
+        assert bool(path) == save_copy
+    else:
+        # Only the source read failed. Registering the Main mirror is still available.
+        monkeypatch.setattr(delivery, "terminal_answer_receipts",
+                            lambda *_: {"source": "terminal_delivery_registry", "registry": "unreadable", "state": "unknown"})
     write_task_result(tmp_path, "root", "completed", root_task_id="root", project_id=project["id"],
-                      chat_id=project["chat_id"], result="Full authored answer", terminal_origin="model_final")
+                      chat_id=task["chat_id"], result=answer, terminal_origin="model_final")
     axes = load_task_result(tmp_path, "root").get("outcome_axes")
-    monkeypatch.setattr(terminal_projection, "_delivery_disposition",
-                        lambda *a: {"state": state, "preserved_path": path})
     bus = DeliveryBus()
     assert settle_terminal_projection(tmp_path, "root", event_queue=bus) == SETTLEMENT_DEFERRED
     mirror = bus.get_nowait()
     assert mirror["system_type"] == "project_completion_summary"
-    assert mirror["progress_meta"]["completion_answer"] == "Full authored answer"
+    assert mirror["progress_meta"]["completion_answer"] == answer
     reason = mirror["progress_meta"]["completion_reason"]
     assert reason.count("Source Project:") == 1
     assert "could not be confirmed" in reason if state == "unknown" else "attempts ran out" in reason
@@ -382,6 +399,11 @@ def test_main_mirror_qualifies_source_delivery_without_mutating_result_axes(tmp_
         assert path in reason
     elif state == "exhausted":
         assert "no copy" in reason
+    [card] = [row for row in chat_rows(tmp_path) if row.get("summary_id") == "task-terminal:root"]
+    assert card["reason_detail"] in reason and card["reason_detail"] in mirror["progress_meta"]["completion_notice"]["detail"]
+    if state == "exhausted":
+        assert card["terminal_delivery"] == {"state": state, "delivery_id": final["delivery_id"],
+                                             "chat_id": task["chat_id"], "preserved_path": path}
     assert load_task_result(tmp_path, "root").get("outcome_axes") == axes
 
 

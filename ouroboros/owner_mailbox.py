@@ -899,7 +899,7 @@ def mailbox_drain_ended(task_drive: pathlib.Path, task_id: str) -> bool:
 # Receipt vocabulary for a message written into a task's mailbox. A write proves only
 # that the row is durable; "read" is proven later by the recipient loop's acknowledgement
 # (``mail_read_state``), never claimed at write time.
-MAIL_QUEUED = "queued"  # the recipient has not started; it reads the row when it starts
+MAIL_QUEUED = "queued"  # requested or scheduled at observation, including a task awaiting readmission
 MAIL_DELIVERED = "delivered"  # a live drain reads it at its next checkpoint
 MAIL_RETAINED_UNREAD = "retained_unread"  # its drain ended: the result keeps it unread
 

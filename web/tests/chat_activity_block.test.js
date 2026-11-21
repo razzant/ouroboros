@@ -1112,6 +1112,77 @@ for (const calls of [undefined, 0]) test(`rounds alone never manufacture tool ev
     } finally { g.close(); }
 });
 
+test('an open attempt keeps the live count its journal states, then its own scalar', () => {
+    const f = fixture();
+    try {
+        f.log({ type: 'task_started', task_attempt: 1 });
+        f.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'c1' });
+        assert.match(f.meta(), /1 tool call/, 'the selected attempt\'s empty store does not hide the running count');
+        f.log({ type: 'tool_call_started', tool: 'web_search', tool_call_id: 'c2' });
+        f.log({ type: 'tool_call_finished', tool: 'web_search', tool_call_id: 'c2', duration_sec: 0.4 });
+        assert.match(f.meta(), /2 tool calls/, 'the line follows the invocation journal while the attempt runs');
+        f.log({ type: 'task_metrics_event', task_attempt: 1, tool_calls: 7, rounds: 2 });
+        assert.match(f.meta(), /7 tool calls/, 'the attempt\'s addressed scalar replaces the journal view');
+        f.log({ type: 'task_started', task_attempt: 2 });
+        assert.match(f.meta(), /2 tool calls/, 'the two observed invocations remain, not the earlier estimate of seven');
+        f.log({ type: 'task_metrics_event', task_attempt: 2, tool_calls: 3 });
+        assert.match(f.meta(), /3 tool calls/, 'a newer attempt\'s scalar fences the older attempt\'s numbers');
+    } finally { f.close(); }
+});
+
+// The host records the facts of an attempt in a `task_summary` row after the worker has sent its own
+// estimate; either may arrive first, and a measured zero must be what Details shows either way.
+for (const attempt of [2, undefined]) {
+    for (const order of ['estimate, then record', 'record, then estimate']) {
+        test(`a recorded rounds count beats the attempt estimate: ${attempt === undefined ? 'unnumbered' : attempt}, ${order}`, () => {
+            const f = fixture();
+            try {
+                const address = attempt === undefined ? {} : { task_attempt: attempt };
+                const estimate = () => f.log({ type: 'task_metrics_event', ...address, tool_calls: 4, rounds: 2 });
+                // The host facts row of the same attempt: this run got no usable model answer, so it recorded 0.
+                const recorded = () => f.emit('chat', { task_id: TASK, role: 'system', system_type: 'task_summary',
+                    ...address, text: '', tool_calls: 4, rounds: 0, outcome_final: false, summary_kind: 'host_task_facts' });
+                if (order === 'estimate, then record') { estimate(); recorded(); } else { recorded(); estimate(); }
+                assert.match(f.facts(), /<dt>Rounds<\/dt><dd>0 · usable solve responses<\/dd>/);
+                assert.doesNotMatch(f.facts(), /<dt>Rounds<\/dt><dd>2/);
+                assert.doesNotMatch(f.meta(), /round/);
+            } finally { f.close(); }
+        });
+    }
+}
+
+test('the attempt keeps its live estimates until its record, and a later record stands', () => {
+    const f = fixture();
+    try {
+        f.log({ type: 'task_started', task_attempt: 1 });
+        f.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'c1' });
+        f.log({ type: 'task_metrics_event', task_attempt: 1, tool_calls: 4, rounds: 2 });
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>2 · usable solve responses<\/dd>/, 'a live estimate counts before any record');
+        f.log({ type: 'task_metrics_event', task_attempt: 1, tool_calls: 4, rounds: 3 });
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>3 · usable solve responses<\/dd>/, 'the attempt keeps counting up while it runs');
+        f.emit('chat', { task_id: TASK, role: 'system', system_type: 'task_summary', task_attempt: 1, text: '',
+            tool_calls: 4, rounds: 3, outcome_final: false, summary_kind: 'host_task_facts' });
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>3 · usable solve responses<\/dd>/, 'an agreeing record changes nothing');
+        f.emit('chat', { task_id: TASK, role: 'system', system_type: 'task_summary', task_attempt: 1, text: '',
+            tool_calls: 4, rounds: 0, outcome_final: false, summary_kind: 'host_task_facts' });
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>0 · usable solve responses<\/dd>/, 'a later recorded statement stands');
+    } finally { f.close(); }
+});
+
+test('a new attempt starts with no recorded count of its own', () => {
+    const f = fixture();
+    try {
+        f.log({ type: 'task_started', task_attempt: 1 });
+        f.emit('chat', { task_id: TASK, role: 'system', system_type: 'task_summary', task_attempt: 1, text: '',
+            tool_calls: 4, rounds: 0, outcome_final: false, summary_kind: 'host_task_facts' });
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>0 · usable solve responses<\/dd>/);
+        f.log({ type: 'task_started', task_attempt: 2 });
+        assert.doesNotMatch(f.facts(), /<dt>Rounds/, 'the earlier attempt record does not follow the card');
+        f.log({ type: 'task_metrics_event', task_attempt: 2, tool_calls: 4, rounds: 2 });
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>2 · usable solve responses<\/dd>/, 'the new attempt counts itself');
+    } finally { f.close(); }
+});
+
 test('known zero stays in Details, missing counts stay absent, and replay cannot lower a current count', () => {
     const f = fixture();
     try {

@@ -98,8 +98,8 @@ def _interrupted_check(ended: BaseException, timeout: Any, *, started_ts: float,
 def _publish_verification(ctx: ToolContext, text: str, receipt: dict, *, compared: bool, detail: str = "") -> str:
     """Publish the recorded criterion verdict beside the call's own outcome (#1585).
 
-    Only after the receipt is durable. The check ran (or timed out): ``status`` is the
-    receipt's pass/fail and exit, signal and timeout stay on the process-facts channel.
+    Only after the receipt is durable. ``status`` is its pass/fail for a run or a file
+    observation; exit, signal and timeout stay on the process-facts channel.
     ``matched`` is published only where a comparison was evaluated (``compared``): never
     for a timeout, a check with no ``expected``, or bytes_equal without a byte verdict.
     New receipts store null in these cases; historical records stay unchanged. The
@@ -111,6 +111,8 @@ def _publish_verification(ctx: ToolContext, text: str, receipt: dict, *, compare
     fact = {key: receipt[key] for key in ("status", "contract_kind", "expected_match", "check_rendering",
                                           "criterion_id", "criterion_source") if receipt.get(key)}
     fact.update(check=_bounded(receipt.get("check"), 200), receipt_ts=receipt["ts"])
+    if receipt["contract_kind"] == "artifact_observation":
+        fact["paths_named"] = bool(receipt["paths"])
     if compared:
         fact["matched"] = bool(receipt["matched"])
     if detail:
@@ -316,12 +318,11 @@ def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[str
         candidate, refused = _confine_artifact_path(ctx, raw)
         if refused:
             return "refused_out_of_scope", refused
-        if candidate is None:
-            continue
-        name = str(raw or "").strip()
-        seen.append(name)
-        if not candidate.exists():  # a relative name resolves under the active workspace: say where the host looked
-            missing.append(name if pathlib.Path(name).is_absolute() else f"{name} (resolved as {candidate})")
+        if candidate is not None:
+            name = str(raw or "").strip()
+            seen.append(name)
+            if not candidate.exists():  # a relative name resolves under the active workspace: say where the host looked
+                missing.append(name if pathlib.Path(name).is_absolute() else f"{name} (resolved as {candidate})")
     if not seen:
         return "fail", "no artifact_paths given"
     if missing:
@@ -933,7 +934,8 @@ def _verify_and_record(
                 "the active profile can read). Receipt recorded."
             )
         verdict = "OBSERVED" if obs_status == "observed" else "FAIL"
-        return f"verify_and_record [artifact_observation] {verdict}: {detail}. Host-attested receipt recorded."
+        text = f"verify_and_record [artifact_observation] {verdict}: {detail}. Host-attested receipt recorded."
+        return _publish_verification(ctx, text, receipt, compared=False, detail=detail) if obs_status == "fail" else text
 
     # no_visible_machine_contract: an honest escape hatch — no host run, the agent's
     # best proxy + residual risk is recorded as a receipt and judged by a reviewer.

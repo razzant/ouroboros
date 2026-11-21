@@ -27,7 +27,8 @@ one made for a run:
   (``state/delegate_observation/<run_id>.json``, about 300 bytes; ``read_observation``): written
   only when the run's state or question changed, or the engine stopped or resumed answering it
   (the outage class above), with the time that began, never once per read; removed once the run
-  settled or left the held set (a new body sweeps what an earlier one left).
+  settled or left the held set (a new body sweeps what an earlier one left). A reader holding no body
+  (a worker's roster) says it in past words only (``recorded_activity``).
 
 A frame reaches the owner as its worker's progress frame does (``Agent._emit_progress``): one
 ``send_message`` progress event on the supervisor's bus, with the task's chat and lineage.
@@ -413,21 +414,62 @@ def run_activity(observation: Any) -> Optional[bool]:
     return False if run_state == "queued" or run_state in TERMINAL_STATES else None
 
 
-def current_activity(root: Any, task_id: str, run_id: str, invocation_id: str = "") -> Optional[bool]:
-    """Whether a held run works now by the body's latest read: the same run, task and (when given)
-    invocation, read within a few ticks; anything else is None (unknown)."""
-    from ouroboros.delegate_collection import body_runtime
+def _names(fact: Any, task_id: str, run_id: str, invocation_id: str) -> bool:
+    """Whether an observation, current or dated, names this task's run and (when given) its invocation."""
+    return (fact.get("task_id") == str(task_id) and fact.get("run_id") == str(run_id)
+            and (not invocation_id or fact.get("invocation_id") == str(invocation_id)))
 
-    runtime = body_runtime(root)
-    fact = runtime.observation(run_id) if runtime is not None else {}
+
+def _observed_activity(runtime: Any, task_id: str, run_id: str, invocation_id: str) -> Optional[bool]:
+    if runtime is None:
+        return None
     try:
-        current = "at" in fact and time.monotonic() - float(fact["at"]) <= _OBSERVATION_CURRENT_SEC
+        fact = runtime.observation(run_id)
+        current = "at" in fact and 0 <= time.monotonic() - float(fact["at"]) <= _OBSERVATION_CURRENT_SEC
+    except (OSError, RuntimeError):
+        log.debug("Delegated run observation unavailable for %s", run_id, exc_info=True)
+        return None
     except (TypeError, ValueError):
-        current = False
-    if (not current or fact.get("task_id") != str(task_id)
-            or (invocation_id and fact.get("invocation_id") != str(invocation_id))):
+        return None
+    if not current or not _names(fact, task_id, run_id, invocation_id):
         return None
     return run_activity(fact)
+
+
+def current_activities(root: Any, runs: Iterable[tuple]) -> dict:
+    """Read only the addressed (task, run, invocation) facts from the existing body observer."""
+    if not runs:
+        return {}
+    from ouroboros.delegate_collection import body_runtime
+
+    try:
+        runtime = body_runtime(root)
+    except (OSError, RuntimeError):
+        log.debug("Delegated run observer unavailable", exc_info=True)
+        runtime = None
+    return {key: _observed_activity(runtime, *key) for key in runs}
+
+
+def current_activity(root: Any, task_id: str, run_id: str, invocation_id: str = "") -> Optional[bool]:
+    """Whether the same task's held run and (when given) invocation was observed working within a few ticks."""
+    from ouroboros.delegate_collection import body_runtime
+
+    return _observed_activity(body_runtime(root), task_id, run_id, invocation_id)
+
+
+def recorded_activity(root: Any, task_id: str, run_id: str, invocation_id: str = "") -> Optional[bool]:
+    """What the body's dated record of this task's run and (when given) invocation last said of its work, for a
+    reader with no body of its own (a worker): True working, False waiting. A record is written only on a change and
+    proves no recent read, so this is the PAST, never present evidence. None: no readable record, one naming
+    another task, run or invocation, the engine not answering when it was written, or a run that had ended (a
+    finished run is not a waiting one)."""
+    from ouroboros.delegate_custody import TERMINAL_STATES
+
+    record = read_observation(root, run_id)[0]
+    if (record is None or not _names(record, task_id, run_id, invocation_id)
+            or str(record.get("run_state") or "") in TERMINAL_STATES):
+        return None
+    return run_activity(record)
 
 
 def announce_working(entry: Any) -> None:

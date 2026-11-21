@@ -156,7 +156,7 @@ test('the live progress path forwards every progress field the endpoint emits an
     // (settled_card.js) and hands it WHOLE to updateSubagentCardFromEvent. Forgetting the
     // delegation keys in that frame keeps a log-channel-only card at "no run yet"
     // forever — the exact defect family this file was written for.
-    assert.match(chat, /updateSubagentCardFromEvent\(terminalChildFrame\(childId, info, evt\)/,
+    assert.match(chat, /updateSubagentCardFromEvent\(terminalChildFrame\(childId, info, evt, phase\)/,
         'routeSubagentTerminalToCard must pass the whole synthesized frame to updateSubagentCardFromEvent');
     const settled = moduleFile('settled_card.js');
     const frameBuilders = settled.split('export function terminalChildFrame').slice(1)

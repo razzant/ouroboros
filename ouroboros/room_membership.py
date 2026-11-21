@@ -247,13 +247,28 @@ def reply_target_room(row: Mapping[str, Any], project_chat_ids, rooms: Callable[
     return chat if home == TARGET_ROOM and chat in project_chat_ids else 0
 
 
+def stamped_room_echo(row: Mapping[str, Any], entry_chat: int) -> bool:
+    """Whether a stored row is an accepted web echo whose persisted ``kind: "room_echo"`` stamp limits
+    its display, replay included, to the room it was written in (CLIENT_CONTRACT §5; the live twin is
+    ``chat_activity.mainThreadAccepts``). The producer writes the stamp only on an accepted inbound web
+    row outside Main, so Main is never a stamped row's *guessed* room: a reservation lost after the
+    acceptance leaves the row in its written room instead of resurfacing it in Main. The stamp grants
+    no routing authority — unstamped legacy and external-transport rows keep their implicit Main
+    mirror, a row written to Main stays Main's, and a Reply-target appearance (``reply_target_room``)
+    is untouched."""
+    return (entry_chat != 1 and row.get("kind") == "room_echo"
+            and row.get("direction") == "in" and row.get("source") == "web")
+
+
 def row_rooms(entry_chat: int, row: Mapping[str, Any], project_chat_ids, rooms: Callable[..., int]) -> FrozenSet[int]:
     """Every room the room rule puts one stored row in, as chat ids (binding-origin copies apart).
 
     ``rooms`` is the room rule (``projects_registry.RoomResolver``), the one the live bus addresses
     by, so a task's rows replay where its frames went: a later binding moves ordinary task speech.
     Host rows about an act keep their issuing room; work speech written elsewhere keeps that room
-    too and joins its work's room. Private Presence contact (its notice, question and their answers)
+    too and joins its work's room. An accepted web echo keeps its persisted display stamp
+    (``stamped_room_echo``): a reservation lost after the acceptance never guesses it into Main.
+    Private Presence contact (its notice, question and their answers)
     is Main's and its work's Project's, never a place room's: one row, wherever it is shown. A place's
     rows stay its room's; the host's Done row of work it started also stands in the Project that work
     lives in, as every root's does."""
@@ -279,7 +294,8 @@ def row_rooms(entry_chat: int, row: Mapping[str, Any], project_chat_ids, rooms: 
         found.add(bound or entry_chat)
     if not bound and entry_chat not in project_chat_ids and entry_chat != 1:
         found.add(entry_chat)
-    if entry_chat != HIDDEN_CHAT_ID and entry_chat not in project_chat_ids and (lifecycle or not bound):
+    if (entry_chat != HIDDEN_CHAT_ID and entry_chat not in project_chat_ids and (lifecycle or not bound)
+            and not stamped_room_echo(row, entry_chat)):  # a stamped echo keeps its written address, replay included
         found.add(1)
     extra = bound_room_chat(rooms, row) if speech else reply_target_room(row, project_chat_ids, rooms)
     if extra in project_chat_ids:

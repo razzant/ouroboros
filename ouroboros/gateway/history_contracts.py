@@ -8,7 +8,7 @@ reads a room's saved messages for a word search (``gateway/chat_search.py``). Th
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from ouroboros.gateway.attachment_contracts import ChatAttachmentView
 from ouroboros.gateway.reference_contracts import ChatReplyReference
@@ -121,6 +121,25 @@ class PlaceHistoryFacts(TypedDict, total=False):
     non_text: List[Dict[str, str]]  # the connector's {kind, description} beside the words (kind state_change: a change), never speech
 
 
+class HistoricalTerminal(TypedDict, total=False):
+    """Facts frozen on one published ending. Its publication time and observed end time are separate."""
+
+    status: Required[str]
+    phase: Required[Literal["done", "warn", "error", "cancelled"]]
+    ts: Required[str]
+    provenance: Required[Literal["canonical_task_result_after_finalization"]]
+    model_execution: Dict[str, Any]
+    task_attempt: int
+    terminal_time: Dict[str, Any]
+    terminal_delivery: Dict[str, Any]
+    wake_summary: str
+    suggested_name: str
+    schedule_name: str
+    place_origin: Dict[str, Any]
+    wake_silent: bool
+    quiet_effective: bool
+
+
 class ChatHistoryMessage(TypedDict, total=False):
     """One ``GET /api/chat/history`` row. Every row has the six required keys; a stored row also
     has ``history_id`` and ``history_position``. Live frames call ``text`` ``content``.
@@ -175,8 +194,26 @@ class ChatHistoryMessage(TypedDict, total=False):
     quiz: ChatHistoryQuiz
     card: ChatHistoryCard
     summary_kind: str
-    historical_terminal: Dict[str, Any]
-    current_outcome: Dict[str, Any]  # the current terminal outcome projection; distinct from historical_terminal
+    status: str
+    task_terminal_status: str
+    task_phase: str
+    task_attempt: int
+    task_outcome: Union[str, Dict[str, Any]]  # a legacy status or the recorded ending
+    historical_terminal: HistoricalTerminal
+    current_outcome: Dict[str, Any]  # separately scoped by its own task_attempt and terminal_time when known
+    terminal_time: Dict[str, Any]
+    terminal_delivery: Dict[str, Any]  # scope="task" for unbound debt, preserved_path=None for an unverified copy
+    reason_code: str
+    outcome_axes: Dict[str, Any]
+    _result_text_present: bool
+    delegated_runs_unreconciled: List[str]
+    review_projection: Dict[str, Any]
+    wake_summary: str
+    suggested_name: str
+    schedule_name: str
+    place_origin: Dict[str, Any]
+    wake_silent: bool
+    quiet_effective: bool
     model_waits: Dict[str, Any]  # system_type task_model_wait: wait_id -> the wait's latest revision
     lifecycle_virtual: bool  # the running skill operation, rebuilt on every read, never stored
     review_group: Dict[str, Any]  # folded skill review attempts of one task-bound group
@@ -387,7 +424,7 @@ class ChatSearchResponse(TypedDict, total=False):
 
 __all__ = [
     "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
-    "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
+    "ChatHistoryQuiz", "ChatHistoryCard", "HistoricalTerminal", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
     "ChatSearchAttachment", "ChatSearchLink", "ChatSearchQuestion", "ChatSearchCandidate", "ChatSearchSpan",
     "ChatSearchResponse",

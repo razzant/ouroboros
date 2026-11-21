@@ -26,16 +26,17 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     latch would fail every launch. The latch names the LOGICAL root; task may
     be its current retry (#1730). A Continue whose earlier attempt's writers
     all still run leaves the Pause for its own writer hold, which starts it
-    once they settle (owner, 1 Nov); an unknown outcome still refuses. An
-    admitted root whose saved source this observation already found unusable
-    (``safe``: assignment's own source check) can never be handed over: its
-    Resume keeps that typed refusal in the same write, which lends nothing, so
-    its own Resume asks next instead of children hidden behind it. Queue lock held.
+    once they settle (owner, 1 Nov). If the replay check refused an admitted
+    root, persist that refusal and its observed basis with the fence release.
+    The root's own Resume addresses it next. Queue lock held.
     """
     from ouroboros.owner_pause import FENCE_RELEASED, launch_lock, read_fence, set_fence_state
     import copy
     from supervisor.events_budget import (
         BUDGET_HOLD_KEY, hold_continuation_writers, hold_root_resume_descendants, project_writer_wait,
+    )
+    from ouroboros.work_stop import (
+        clear_refusal, current_stop, refuse_continuation, release_refusal, stop_record, unsafe_replay_response,
     )
 
     task_id, root_id = str(task.get("id") or ""), str(fence.get("root_task_id") or task.get("id") or "")
@@ -43,9 +44,9 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     admitted = "owner_pause_blockers" in observation
     safe, error = observation["safe"], observation["unsafe_error"]
     if not safe and not admitted:
-        return {"ok": False, "error": error, "action": "cancel_or_new_run"}
+        return unsafe_replay_response(observation)
     refused = error if not safe and "_working_recovery" in task else ""
-    from ouroboros.work_stop import clear_refusal, current_stop, refuse_continuation, release_refusal, stop_record
+    evidence = {"refusal_basis": observation["refusal_basis"]} if refused and observation.get("refusal_basis") else {}
     if refusal := release_refusal(current_stop(task, {
             "owner": observation["authority"]["owner_fence"], "budget": q.BUDGET_ROOT_FENCES}), control_actor()):
         return refusal
@@ -87,7 +88,7 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
         clear_refusal(task)
         if refused:  # rollback restores the row: the refusal stands only with this published Resume
             refuse_continuation(task, stop_record(refused, held_at=utc_now_iso(), by=control_actor(),
-                                                  detail="its saved work was unusable at this Resume"))
+                                                  binding=evidence))
         wait = hold_continuation_writers(task, predecessor, writers) if writers and not refused else None
         if members:
             hold_root_resume_descendants(q, root_id, fence, grant, actor_id=task_id)
@@ -118,6 +119,6 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
                    {"ts": utc_now_iso(), "type": "owner_pause_resumed", "task_id": task_id,
                     "root_task_id": root_id, "fence_id": str(fence.get("fence_id") or ""),
                     "grant_id": grant["grant_id"], "same_generation": True, "never_started": not admitted, **held,
-                    **({"continuation_refused": refused} if refused else {})})
+                    **({"continuation_refused": refused, **evidence} if refused else {})})
     return {"ok": True, "task_id": task_id, "root_task_id": root_id, "same_generation": True,
             "owner_pause_released": True, "never_started": not admitted, "grant_id": grant["grant_id"], **held}

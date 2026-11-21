@@ -197,9 +197,11 @@ def _write_failure_result(
 ) -> str:
     """Write failure result for a crashed/orphaned task.
 
-    Returns the FINAL persisted status: if the task already reached a terminal state, the monotonic
-    guard preserves it and that existing status is returned (so the UI event matches disk);
-    otherwise the written failure status.
+    Returns the FINAL persisted status: a task that already reached a terminal state keeps its whole
+    row, and that status is returned (so the UI event matches disk); otherwise the written failure
+    status. The read below only spares work: the reducer lets a rewrite with the SAME terminal status
+    through, so a writer that settles the task before this write's transaction wins there, in the
+    projector, which leaves its row untouched.
 
     ``stop_source`` is the typed cause a known stop door passes (the owner's Restart, a graceful
     server shutdown). It lands as ``cancel_origin`` — the field a settled cancel intent records —
@@ -213,7 +215,7 @@ def _write_failure_result(
     try:
         from ouroboros.task_results import (
             STATUS_FAILED, STATUS_COMPLETED, STATUS_REJECTED_DUPLICATE,
-            STATUS_CANCELLED, load_task_result, write_task_result,
+            STATUS_CANCELLED, load_task_result, observed_cancel_axes, write_task_result,
         )
         # STATUS_INTERRUPTED is not final; it is written before requeue.
         _FINAL_STATUSES = {STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE, STATUS_CANCELLED}
@@ -226,11 +228,29 @@ def _write_failure_result(
         f_cost_fields = _pool().reconstruct_task_cost(str(task_id), fields=True)
         cause = (_recorded_cancel_fields(task_id, stop_source=stop_source, reason=reason)
                  if stop_source or final_status == STATUS_CANCELLED else {})
+        def keep_settled_row(current, fields):
+            # The read above leaves a gap before this transaction, and the reducer lets a rewrite with the SAME
+            # terminal status through: a writer that settled the row meanwhile keeps its whole row (result, cause,
+            # author, stop origin). A live row's leftover code is no cause here: the cancel states its own.
+            if current.get("status") in _FINAL_STATUSES:
+                return None
+            pause = current.get("resource_limit")
+            pause = pause if isinstance(pause, dict) else {}
+            standing = current.get("reason_code") == "budget_exhausted" and pause.get("status") == "paused_before_dispatch"
+            lifted = pause.get("status") == "resumed" and pause.get("scope") == "global"  # what the explicit Resume leaves
+            if final_status != STATUS_CANCELLED or not (standing or lifted) or not pause.get("paused_at"):
+                return fields  # no dated record of a global budget pause, standing or kept by a Resume: nothing is guessed
+            # An observation only, never the cause and never read by Continue: the budget pause this work recorded, standing
+            # or lifted since (the explicit Resume keeps its dated record whole, sets ``resumed`` and clears the code; a held
+            # selection replaces it with identities only, so nothing is claimed). No attempt is named: the record carries none.
+            return {**fields, "outcome_axes": observed_cancel_axes(fields["outcome_axes"], earlier_stop="budget_exhausted")}
+
         stored = write_task_result(
             _pool().DRIVE_ROOT,
             task_id,
             final_status,
             strict_existing_dict=True,
+            _field_projector=keep_settled_row,
             result=reason,
             reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
             outcome_axes=terminal_outcome_axes(

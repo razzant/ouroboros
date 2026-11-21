@@ -58,6 +58,24 @@ def prepare_result_retention(parent: Path, child: Path, task_id: str,
     return copied, state
 
 
+def retain_late_result(parent: Path, task_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Keep a settled result only its child drive holds — another attempt's, or the same attempt's rejected
+different ending — as exact bytes in the canonical store
+    (``artifacts.store_actor_source_bytes``: write-once by digest, flushed) and return the record the row keeps
+    (``late_attempt_results``). The copy is read back and verified before the record exists, so nothing certifies a
+    missing copy; a failure raises and the drive stays unadopted. Its files and calls keep their own owners."""
+    from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+
+    attempt = result.get("task_attempt")
+    named = type(attempt) is int and attempt >= 0
+    ref = store_actor_source_bytes(
+        parent, task_id, category="context_checkpoints", source_id=f"late-result-a{attempt}" if named else "late-result",
+        data=json.dumps(result, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"), extension="json",
+        fsync=True)
+    read_actor_source_bytes(parent, task_id, ref, retained=False)  # size and digest verified; raises if the copy is absent
+    return {**({"task_attempt": attempt} if named else {}), "status": str(result.get("status") or ""), "source_ref": ref}
+
+
 def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str, Any]) -> int:
     """Carry a child-local ``source_handles/test-evidence`` to the same canonical relpaths; files placed.
 
