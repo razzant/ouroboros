@@ -158,6 +158,17 @@ def work_kind(metadata: Any) -> str:
     return WORK_KIND_CONSCIOUSNESS
 
 
+FOCUS_TRANSPORT_KEY = "focus_transport"
+FOCUS_ROUTE_FIELDS = ("provider", "account_id", "conversation_id", "thread_id")
+
+
+def focus_evidence(focus: Any) -> Any:
+    """Use the focus facts in evidence, including for a saved focus that carried transport inside it."""
+    if isinstance(focus, Mapping) and "transport" in focus:
+        return {key: value for key, value in focus.items() if key != "transport"}
+    return focus
+
+
 def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = False,
                                   owner_basis: Any = None) -> Dict[str, Any]:
     """Copy host origin by value, never the wake identity itself.
@@ -177,6 +188,12 @@ def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = 
     for key in ("focus", "schedule_writer_kind", "origin_wake_task_id"):
         if key in source:
             inherited[key] = deepcopy(source[key])
+    focus = inherited.get("focus")
+    transport = source.get(FOCUS_TRANSPORT_KEY) or (focus.get("transport") if isinstance(focus, Mapping) else None)
+    if isinstance(transport, Mapping):
+        inherited[FOCUS_TRANSPORT_KEY] = deepcopy(transport)
+    if "focus" in inherited:
+        inherited["focus"] = focus_evidence(focus)
     if wake_cause(source):
         inherited["origin_wake_task_id"] = str(source.get("task_id") or source.get("origin_wake_task_id") or "")
     if kind == WORK_KIND_OWNER:
@@ -228,7 +245,8 @@ def stamp_scheduled_work(task: Dict[str, Any], record: Mapping[str, Any], raw_me
         writer_kind = work_kind({"owner_ingress": record.get("source") == "owner", **legacy})
     from copy import deepcopy
     if "writer_origin" in record:
-        for key in ("initiator", "usage_category", "consciousness_autonomy", "consciousness_cause", "origin_wake_task_id", "focus"):
+        for key in ("initiator", "usage_category", "consciousness_autonomy", "consciousness_cause",
+                    "origin_wake_task_id", "focus", FOCUS_TRANSPORT_KEY):
             task["metadata"].pop(key, None)
     task["metadata"].update(deepcopy(record.get("writer_origin") or {}))
     task["metadata"].update(work_kind=writer_kind, schedule_writer_kind=writer_kind)

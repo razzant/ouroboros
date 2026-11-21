@@ -170,27 +170,28 @@ def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str) -
     return True
 
 
+def snapshot_acceptance_roots(rows):
+    roots = set()
+    if not isinstance(rows, list):
+        return roots, True
+    for fence in rows:
+        if not isinstance(fence, dict):
+            return roots, True
+        status = fence.get("status")
+        if status in ("active", "sealed"):
+            if not (root := str(fence.get("root_task_id") or "")):
+                return roots, True
+            # A saved author stop closes its own admission, not its children.
+            if status != "sealed" or fence.get("outcome") != "author_stop":
+                roots.add(root)
+    return roots, False
+
+
 def restore_queue_fences(
     raw_acceptance: Any, raw_budget: Any,
 ) -> tuple[set[str], bool, bool]:
     """Validate snapshot fences and restore the small root-budget admission map."""
-    malformed_acceptance = not isinstance(raw_acceptance, list)
-    fenced_roots: set[str] = set()
-    if not malformed_acceptance:
-        for fence in raw_acceptance:
-            if not isinstance(fence, dict):
-                malformed_acceptance = True
-                break
-            status = str(fence.get("status") or "")
-            root_id = str(fence.get("root_task_id") or "")
-            if status in {"active", "sealed"}:
-                if not root_id:
-                    malformed_acceptance = True
-                    break
-                # A saved author stop closes its own admission, not its children.
-                # Pre-terminal shutdown and cancel custody are restored separately.
-                if status != "sealed" or fence.get("outcome") != "author_stop":
-                    fenced_roots.add(root_id)
+    fenced_roots, malformed_acceptance = snapshot_acceptance_roots(raw_acceptance)
     malformed_budget = not isinstance(raw_budget, list)
     restored: Dict[str, Dict[str, Any]] = {}
     if not malformed_budget:
@@ -200,8 +201,7 @@ def restore_queue_fences(
                 break
             root_id = str(fence.get("root_task_id") or "").strip()
             fence_id = str(fence.get("fence_id") or "").strip()
-            status = str(fence.get("status") or "")
-            if status in {"active", "paused"}:
+            if fence.get("status") in ("active", "paused"):
                 if not root_id or not fence_id:
                     malformed_budget = True
                     break

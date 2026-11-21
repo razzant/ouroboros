@@ -250,8 +250,7 @@ def test_the_not_attached_line_speaks_the_install_language(tmp_path, monkeypatch
     """The bridge composes these lines itself (the not-attached line and the picker's own lines), so
     one message reads its own text table in the install's language; target labels and file names
     stay as the host and the owner gave them."""
-    from ouroboros import dialogue_store, i18n_memory as memory
-    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros import i18n_memory as memory
 
     plugin, api = _setup(tmp_path, monkeypatch)
     data = tmp_path / "data"
@@ -268,13 +267,8 @@ def test_the_not_attached_line_speaks_the_install_language(tmp_path, monkeypatch
     asyncio.run(handle({"annotation_type": "routing_ack", "status": "delivered", "target": "t1",
                         "attachment_manifest": rejected}))
     assert [row[1] for row in _Rec.sent] == ["Не приложено к задаче: отчёт.pdf"]
-    picker = {"annotation_type": "routing_ack", "status": "needs_manual_target", "attachment_manifest": rejected,
-              "options": [{"task_id": f"t{n}", "label": f"Work {n}"} for n in range(1, 10)]}
-    asyncio.run(handle(picker))
-    assert "Ответьте номером" not in _Rec.sent[-1][1]
-    receipt = dialogue_store.append(data, "chat", {"chat_id": 1, "direction": "out", "type": "routing_options",
-                                                   "ts": "2026-10-16T12:00:00Z", "text": "1. Work 1"})
-    asyncio.run(handle({**picker, "row_address": format_address(row_address(receipt.row))}))
+    asyncio.run(handle({"annotation_type": "routing_ack", "status": "needs_manual_target", "attachment_manifest": rejected,
+                        "options": [{"task_id": f"t{n}", "label": f"Work {n}"} for n in range(1, 10)]}))
     assert _Rec.sent[-1][1].splitlines() == [
         "Куда отправить последнее сообщение:", *[f"{n}. Work {n}" for n in range(1, 9)], "…и ещё 1 в веб-чате.",
         "Ответьте номером или выберите вариант в веб-чате.", "Не приложено к задаче: отчёт.pdf"]

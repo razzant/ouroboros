@@ -5,7 +5,8 @@ import { apiClient, fetchJson } from './api_client.js';
 import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { sourceMark } from './model_source_mark.js';
-import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
+import { bindSourcePickers } from './source_picker.js';
+import { createScopedModelCatalog, modelSlotCatalogQuery, catalogReadNote, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
 import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, settingsReadMessage, settingsSnapshot, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { HAND_WRITTEN, rowsOf } from './settings_rows.js';
@@ -16,6 +17,7 @@ import { parseModelSource, composeModelSource, apiConnections, configuredApiProv
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, modelPriceWords, withoutPrice, tierPriced,
     KEY_PROBLEM_WORDS, PRICE_UNKNOWN, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
+import { modelCatalog } from './model_catalog_store.js';
 import { windowWords } from './chat_model_routes.js';
 import { fmt, translateString } from './i18n.js';
 import { revealNewRow } from './ui_helpers.js';
@@ -117,7 +119,7 @@ export const MAIN_FOLLOW_NOTE = 'Running work that follows Main switches at its 
  *  `only` (`{ slot, index }`) draws one role alone, as a form of labelled fields (a role's page in Settings): its
  *  source may always return to the role it follows, and a fallback past the saved ones is a new, unsaved one. */
 export function createModelRolesEditor({ hostId, store = claudexorStatus,
-    doc = () => document, onChange = () => {}, catalogFetch = fetchJson, showContext = true, mainNote = false, only = null } = {}) {
+    doc = () => document, onChange = () => {}, catalogFetch = fetchJson, supportsScopes, legacyCatalog = () => modelCatalog.catalog(), readApiCatalog = null, apiCatalogAllowed = () => true, showContext = true, mainNote = false, only = null } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     let slots = [];
     let offeredSlots = [];  // every slot in contract order; a `managed` one (a deployment's checker) is shown, never a row
@@ -134,8 +136,23 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     let disposeChoosers = () => {};
     let validationAttempted = false;
     let processingPreference = '', processingTouched = false;
-    const catalogs = new Map();
-    const requests = new Map();
+    let sources = null;
+    let connectionLists = {};
+
+    const catalogs = createScopedModelCatalog({
+        supportsScopes: () => supportsScopes?.(settings) ?? true,
+        legacyCatalog,
+        fetchCatalog: (url, init) => url.includes('?provider_id=') && readApiCatalog
+            ? readApiCatalog(url, init) : catalogFetch(url, init),
+        onUpdate(query, data) {
+            if (destroyed) return;
+            if (query === 'view=sources') sources = data;
+            else if (!visibleRows().some(row => catalogKey(row) === query || (query === 'provider_id=local' && row.local))) return;
+            updateCatalogViews();
+        },
+    });
+    const descriptors = () => sources?.model_sources ?? catalog.model_sources;
+    const visibleRows = () => only ? [soleRow()].filter(Boolean) : rows;
     const responseEdits = new WeakSet();
     const host = () => getDoc()?.getElementById(hostId);
 
@@ -218,11 +235,13 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return selected ? composeModelSource(selected.source, selected.model) : '';
     }
     function sourceId(row) { const source = effectiveSource(row); return source.startsWith('subscription:') ? source.slice(13) : ''; }
-    function catalogKey(row) { return JSON.stringify([sourceId(row), row.account]); }
+    function catalogKey(row) {
+        return modelSlotCatalogQuery(effectiveSource(row), row.account);
+    }
     // A saved source whose key is gone stays selectable and labelled; discovery
     // only widens the list, it never rewrites the owner's assignment.
     function sourceGroupsFor(row, facts = {}) {
-        return modelSourceGroups({ sources: catalog.model_sources, providers: apiProviders, connections, providerProfiles, current: row.source,
+        return modelSourceGroups({ sources: descriptors(), providers: apiProviders, connections, providerProfiles, current: row.source,
             inheritLabel: `Uses ${inheritName(row)}`, offerInherit: Boolean(only) && !['main', 'fallback'].includes(row.slot.slot), ...facts });
     }
     // A saved API source that cannot send says why under its row; the select keeps it chosen.
@@ -236,12 +255,25 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const keys = row.slot.slot === 'main' ? mainChoice.map((id) => connections.find((entry) => entry.id === id)?.label || id) : [];
         return keys.length > 1 ? `Main is not set yet. Choose the key it uses: ${keys.slice(0, -1).join(', ')} or ${keys.at(-1)}.` : '';
     }
-    const onMaintenanceSettled = () => {
-        for (const row of new Map(rows.map(row => [catalogKey(row), row])).values()) void refreshRow(row, {force: true});
-    };
+    function refreshCatalogs({ force = true, descriptors = true, subscriptionsOnly = false, joinPending = false } = {}) {
+        if (destroyed) return;
+        const reads = descriptors ? [catalogs.read('view=sources', { force, joinPending })] : [];
+        const shown = new Map(visibleRows().map(row => [catalogKey(row), row]));
+        for (const row of shown.values()) {
+            if (!subscriptionsOnly || sourceId(row)) reads.push(refreshRow(row, { force, joinPending }));
+        }
+        return Promise.all(reads);
+    }
+    const onMaintenanceSettled = () => refreshCatalogs({ descriptors: Boolean(only) || !showContext, subscriptionsOnly: true });
     function itemsFor(row) {
-        return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
-            : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
+        const source = effectiveSource(row);
+        const scoped = catalogs.get(catalogKey(row));
+        if (!row.local && Object.hasOwn(connectionLists, source)) return connectionLists[source];
+        if (row.source === 'inherit' && !sourceId(row)) return [];
+        const items = scoped?.items ?? catalog.items;
+        return items.filter(item => !item.use_local && parseModelSource(item.value || item.id).source === source
+            && (!sourceId(row) || !row.account || item.credential_profile_id === row.account
+                || (scoped && !item.credential_profile_id)));
     }
     // A fallback with no tier of its own keeps its caller's (model_slots.task_processing_preference): Main's or a lead's.
     const mainTier = () => (rows.find((entry) => entry.slot.slot === 'main')?.processing_preference
@@ -325,12 +357,14 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (slot.managed) return fixedGroupHtml(slot);
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
             const local = matching[0]?.local || false;
+            // What the role does, said once and visibly under its name (the contract's note; Fallback's own sentence).
+            const note = slot.slot === 'fallback' ? 'Tried in this order when the acting model refuses, cannot be reached or loses its answer. A wait starts only when none of them answers.' : slot.note;
             return `<section class="model-role-group" data-model-role-group="${escapeHtml(slot.slot)}">
-                <div class="model-role-head"><h4 title="${escapeHtml(slot.note || '')}">${escapeHtml(slot.label.replace(/ Model$/, ''))}</h4>
+                <div class="model-role-head"><h4>${escapeHtml(slot.label.replace(/ Model$/, ''))}</h4>
                     ${slot.settingsToggleId ? `<label class="local-toggle ui-field ui-field-inline"><input class="ui-checkbox" id="${escapeHtml(slot.settingsToggleId)}" type="checkbox" data-model-local aria-label="${escapeHtml(slot.label)} local runtime" ${local ? 'checked' : ''}> Local</label>` : ''}
                     ${slot.slot === 'fallback' ? '<button type="button" class="btn btn-default" data-model-add>Add fallback</button>' : ''}
                 </div>
-                ${slot.slot === 'fallback' ? '<p class="model-role-copy">Tried in this order when the acting model refuses, cannot be reached or loses its answer. A wait starts only when none of them answers.</p>' : ''}
+                ${note ? `<p class="model-role-copy ui-field-help" data-model-role-note>${escapeHtml(note)}</p>` : ''}
                 ${matching.map((row, index) => rowHtml(row, index, matching.length)).join('')}
                 ${mainNote && slot.slot === 'main' ? `<p class="model-role-copy" id="${escapeHtml(hostId)}-main-note" data-main-follow-note>${escapeHtml(MAIN_FOLLOW_NOTE)}</p>` : ''}
             </section>`;
@@ -339,9 +373,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             processingPreference = event.target.value; processingTouched = true; changed(); updateCatalogViews();
         });
         bindRows(element);
-        disposeChoosers = bindModelChoosers(element);
+        const unbindModels = bindModelChoosers(element);
+        const unbindSources = bindSourcePickers(element);
+        disposeChoosers = () => { unbindModels(); unbindSources(); };
         updateCatalogViews();
-        for (const row of only ? [soleRow()].filter(Boolean) : rows) void refreshRow(row);
+        for (const row of visibleRows()) void refreshRow(row);
     }
 
     function updateCatalogViews() {
@@ -366,8 +402,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             }
             row.responseIdentity = responseIdentity;
             const source = node.querySelector('[data-model-role-source]');
-        const sourceHtml = selectHtml('', sourceGroupsFor(row, {
-                catalogKnown: catalog.sources_read_state === 'ok', accountsKnown: store.accountsKnown,
+            const sourceHtml = selectHtml('', sourceGroupsFor(row, {
+                catalogKnown: (sources?.read_state ?? catalog.sources_read_state) === 'ok', accountsKnown: store.accountsKnown,
                 hasConfiguredAccounts: accountRows(store.snapshot || {}).length > 0,
             }), sourceChoice(row.source));
             const options = sourceHtml.slice(sourceHtml.indexOf('>') + 1, sourceHtml.lastIndexOf('</select>'));
@@ -376,25 +412,28 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             account.hidden = !sourceId(row);
             const accountField = node.querySelector('[data-model-role-account-field]');
             if (accountField) accountField.hidden = account.hidden;
-            const credentialHarness = catalog.model_sources.find((entry) => entry.id === sourceId(row))?.credentialHarness || '';
+            const credentialHarness = descriptors().find((entry) => entry.id === sourceId(row))?.credentialHarness || '';
             const accountHtml = selectHtml('', [{ options: profileOptionsFor(profiles[credentialHarness], row.account, { accountsKnown: store.accountsKnown && Boolean(credentialHarness), labelled: Boolean(only) }) }], row.account);
             const accountOptions = accountHtml.slice(accountHtml.indexOf('>') + 1, accountHtml.lastIndexOf('</select>'));
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
                 ...withoutPrice(item, { tiered: tieredProcessing(row), media: row.slot.slot === 'vision' }),
                 value: parseModelSource(item.value || item.id).model,
-            }))), row.local ? [] : catalogPrograms(catalogs.get(catalogKey(row)), {source: sourceId(row), profile: row.account, sources: catalog.model_sources}));
+            }))), row.local ? [] : catalogPrograms(catalogs.get(catalogKey(row)), {source: sourceId(row), profile: row.account, sources: descriptors()}));
             if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(row.windowPreview);
             if (showContext) node.querySelector('[data-processing-summary]').textContent = processingIntentLabel(row.processing_preference, processingPreference);
             if (showContext) node.querySelector('[data-processing-capability]').textContent = processingCapabilityNote(row.processing_preference || processingPreference, currentItem(row)?.processing,
-                catalog.model_sources.find((source) => source.id === sourceId(row))?.processingPreferences);
+                descriptors().find((source) => source.id === sourceId(row))?.processingPreferences);
             const status = node.querySelector('[data-model-role-status]');
             const rowCatalog = catalogs.get(catalogKey(row));
             // A subscription row reports its own account read in full; an API row
             // sits under the section banner, so it keeps to the compact form. An
             // API row whose own catalog (OpenRouter's) states a price says it.
-            const own = Boolean(sourceId(row) && rowCatalog);
-            const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !own });
+            const own = Boolean(rowCatalog);
+            const sourceIssue = sources?.errors?.some(error => error.code === 'scoped_catalog_unsupported')
+                ? 'This core lists all models together. Press Read again in Models. '
+                : sources && ['failed', 'transport'].includes(sources.read_state) ? 'Subscription sources could not be read. ' : '';
+            const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !sourceId(row) });
             // A model stored with its ` (local)` label runs on the local lane, as the runtime reads it (slot_lane_label).
             const local = row.local || / \(local\)$/.test(String(row.model || ''));
             const choosing = !local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
@@ -412,12 +451,13 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             // unknown window is omitted. Where it comes from stays in the fold below.
             const routed = !local && !keyNote(row) && !note && Boolean(row.model);  // the line is about the model's own route
             // A local role may keep a cloud id in its slot: its window is the local model's own row, never that id's.
-            const listed = local ? catalog.items.find((item) => item.use_local) : currentItem(row);
+            const listed = local ? (catalogs.get('provider_id=local')?.items ?? catalog.items).find(item => item.use_local) : currentItem(row);
             const size = local || (routed && !(sourceId(row) && unlisted)) ? windowWords(row.windowPreview?.window?.tokens
                 || listed?.max_context_window || listed?.context_window) : '';
             const sized = size && fmt('{window} window', { window: size });
-            status.textContent = !sized ? plain : routed && !sourceId(row) ? `${price || translateString(PRICE_UNKNOWN)} · ${sized}`
+            const modelFacts = !sized ? plain : routed && !sourceId(row) ? `${price || translateString(PRICE_UNKNOWN)} · ${sized}`
                 : `${translateString(plain)} ${sized}.`;
+            status.textContent = (translateString(sourceIssue.trim()) + ' ' + modelFacts).trim();
             // A price or a window is composed through the translation seam: the overlay leaves such a line alone.
             if (price || sized) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
@@ -431,33 +471,15 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         }
     }
 
-    async function refreshRow(row, { force = false } = {}) {
-        if (!sourceId(row) || destroyed) return;
+    function refreshRow(row, { force = false, joinPending = false } = {}) {
+        if (destroyed) return;
         const key = catalogKey(row);
-        if (requests.has(key)) {
-            if (force) requests.get(key).again = true;
-            return requests.get(key).promise;
-        }
-        if (!force && catalogs.has(key)) return;
-        const query = new URLSearchParams({ source_id: sourceId(row) });
-        if (row.account) query.set('credential_profile_id', row.account);
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
-        const promise = Promise.resolve().then(() => catalogFetch(`/api/model-catalog?${query}`, { cache: 'no-store', signal: controller.signal }))
-            .then((data) => { if (!destroyed) {
-                if (!Array.isArray(data?.items)) throw new Error(data?.error || 'Model catalog response has no model list');
-                catalogs.set(key, mergeModelCatalog(catalogs.get(key), data));
-                if (Array.isArray(data.model_sources)) catalog.model_sources = mergeModelCatalog(catalog, data).model_sources;
-            } })
-            .catch((error) => { if (!destroyed) catalogs.set(key, mergeModelCatalog(catalogs.get(key), {
-                read_state: 'transport', errors: [{ error: error.message || String(error) }],
-            })); })
-            .finally(() => {
-                clearTimeout(timer); const again = requests.get(key)?.again; requests.delete(key); updateCatalogViews();
-                if (again && !destroyed) void refreshRow(row, {force: true});
-            });
-        requests.set(key, { promise, controller });
-        return promise;
+        if (!key) return;
+        if ((row.local || / \(local\)$/.test(row.model)) && readApiCatalog && apiCatalogAllowed())
+            void catalogs.read('provider_id=local', { force, joinPending });
+        if (!sourceId(row) && (!readApiCatalog || !apiCatalogAllowed()
+            || !apiProviders.some(provider => provider.id === effectiveSource(row)))) return;
+        return catalogs.read(key, { force, joinPending });
     }
 
     async function responseLimit(row, node, apply = false) {
@@ -516,7 +538,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (!node) continue;  // a role's page draws one row
             node.querySelector('[data-model-local]')?.addEventListener('change', (event) => {
                 rows.filter((entry) => entry.slot === row.slot).forEach((entry) => { entry.local = event.target.checked; });
-                changed(row.slot.slot); updateCatalogViews();
+                changed(row.slot.slot); updateCatalogViews(); void refreshRow(row);
             });
             node.querySelector('[data-model-role-source]').addEventListener('change', (event) => {
                 row.source = sourceFromChoice(event.target.value); row.model = ''; row.account = ''; row.context = 0;
@@ -550,7 +572,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 if (!row.model && !['main', 'fallback'].includes(row.slot.slot)) row.source = 'inherit';
                 if (row.model.includes('::')) Object.assign(row, parseModelSource(row.model));
                 changed(row.slot.slot); updateCatalogViews();
-                for (const item of rows) void refreshRow(item);
+                for (const item of visibleRows()) void refreshRow(item);
             });
             node.querySelector('[data-model-role-account]').addEventListener('change', (event) => {
                 row.account = event.target.value; changed(row.slot.slot); updateCatalogViews(); void refreshRow(row);
@@ -583,7 +605,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const slot = slots.find((entry) => entry.slot === group.dataset.modelRoleGroup);
             group.querySelector('[data-model-local]')?.addEventListener('change', (event) => {
                 rows.filter((row) => row.slot === slot).forEach((row) => { row.local = event.target.checked; });
-                changed(); updateCatalogViews();
+                changed(); updateCatalogViews(); for (const row of visibleRows()) void refreshRow(row);
             });
             group.querySelector('[data-model-add]')?.addEventListener('click', () => {
                 const row = rowState(slot, '', rows.filter((entry) => entry.slot === slot).length);
@@ -634,12 +656,13 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 listener: updateCatalogViews });
             render();
         },
+        refreshCatalogs,
+        resetCatalogs() { catalogs.reset(); sources = null; connectionLists = {}; },
+        adoptSources(data) { sources = data; updateCatalogViews(); },
         adoptCatalog(data = {}, { connectionCatalogs } = {}) {
-            // The wizard supplies its already-merged general snapshot plus unsaved server reads.
+            // The wizard supplies its already-merged general snapshot plus explicitly read connection lists.
+            connectionLists = connectionCatalogs || {};
             catalog = connectionCatalogs ? withConnectionCatalogs(data, connectionCatalogs) : mergeModelCatalog(catalog, data);
-            if (Array.isArray(data.items)) {
-                for (const row of rows) void refreshRow(row, { force: true });
-            }
             updateCatalogViews();
         },
         collect,
@@ -660,7 +683,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             globalThis.window?.removeEventListener?.('ouro:language-changed', updateCatalogViews);
             destroyed = true; disposeStatus?.(); disposeStatus = null;
             disposeChoosers();
-            for (const request of requests.values()) request.controller.abort();
+            catalogs.dispose();
         },
     };
 }
@@ -923,13 +946,7 @@ function mountModels(container, { path, ctx }) {
         } else if (head && !hit('[data-setting-door]')) ctx.openSettings(`models/role/${head.dataset.entryId}`);
     };
     container.addEventListener('click', onClick);
-    // The catalogue is the providers' and costs a network read: it is asked at the owner's first touch of the page
-    // after each showing, so a page that is merely shown (Settings lands on it) reads nothing but settings.
-    let catalogAsked = false;
-    const askCatalog = () => { if (!catalogAsked) { catalogAsked = true; void refreshModelCatalog(); } };
-    container.addEventListener('pointerdown', askCatalog, { passive: true });
-    container.addEventListener('focusin', askCatalog);
-    const onShown = (event) => { if (event.detail?.path === path) { catalogAsked = false; void read(); } };
+    const onShown = (event) => { if (event.detail?.path === path) void read(); };
     const onSaved = (event) => { if (event.detail?.source === 'settings-row') void read(); };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     globalThis.window?.addEventListener('ouro:settings-updated', onSaved);
@@ -955,7 +972,7 @@ function mountRole(container, { path, ctx }, slot, index) {
         <section class="ui-card settings-card models-role">${modelRolesHost(hostId)}</section>`;
     let dirty = false;
     let readFallbacks = '';
-    const editor = createModelRolesEditor({ hostId, mainNote: true, only: { slot, index, actions: SAVE_ROW },
+    const editor = createModelRolesEditor({ hostId, supportsScopes: doc => doc._meta?.setup_contract?.scopedModelCatalogs === true, readApiCatalog: fetchJson, mainNote: true, only: { slot, index, actions: SAVE_ROW },
         onChange: () => { dirty = true; container.querySelector('[data-editor-discard]')?.removeAttribute('hidden'); setResult(container.querySelector('[data-editor-result]'), {}); } });
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
     // A typed form keeps its fields while the page around them follows the read (a key added in Accounts, a new Main);
@@ -995,21 +1012,26 @@ function mountRole(container, { path, ctx }, slot, index) {
         if (hit('[data-editor-save]')) void save(hit('[data-editor-save]'));
         else if (hit('[data-editor-discard]')) { dirty = false; void read(); }
     };
-    const onCatalog = (event) => editor.adoptCatalog(event.detail);
-    // The catalogue this role's model list comes from, read after the settings: when the page opens and whenever it is
-    // shown again (a return, a reconnect). Opening and the shell's "shown" for it are one read.
-    const accountCatalog = watchAccountModelCatalog();
-    let catching = null;
-    const catchUp = () => (catching ||= read().then(() => { accountCatalog.arm(); return refreshModelCatalog(); }).finally(() => { catching = null; }));
-    const onShown = (event) => { if (event.detail?.path === path) void catchUp(); };
+    const accountCatalog = watchAccountModelCatalog(({ firstConfirmation }) =>
+        editor.refreshCatalogs({ subscriptionsOnly: true, joinPending: firstConfirmation }));
+    let reading = null, shownOnce = false;
+    // The shell announces the first opening as it mounts. Join that read; on return or reconnect
+    // read settings again even if a catalog from the previous showing is still answering.
+    const catchUp = (force = false) => (reading ||= read().then(() => {
+        accountCatalog.arm();
+        void editor.refreshCatalogs({ force });
+    }).finally(() => { reading = null; }));
+    const onShown = (event) => {
+        if (event.detail?.path !== path) return;
+        void catchUp(shownOnce);
+        shownOnce = true;
+    };
     container.addEventListener('click', onClick);
-    globalThis.document?.addEventListener('settings-model-catalog:updated', onCatalog);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
     void catchUp();
     return { unsaved: () => dirty, unmount() {
         container.removeEventListener('click', onClick);
-        globalThis.document?.removeEventListener('settings-model-catalog:updated', onCatalog);
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
         accountCatalog.dispose();
         editor.destroy();

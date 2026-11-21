@@ -129,6 +129,7 @@
 
 /**
  * @typedef {Object} SetupContract
+ * @property {boolean=} scopedModelCatalogs
  * @property {number} version
  * @property {'web'|'desktop'} hostMode
  * @property {SetupStep[]} steps
@@ -175,13 +176,14 @@
  */
 
 /**
- * `settings_setup_contract.consciousness_offer`: the Summary's optional, unticked Consciousness row.
+ * `settings_setup_contract.consciousness_offer`: the setup's Consciousness step (its words: `first_run_words`).
  * @typedef {Object} SetupConsciousnessOffer
- * @property {boolean} offered  // setup has never completed on this install; a completed setup shows no row
- * @property {?boolean} enabled  // the control as the state shows it; null = unknown
+ * @property {boolean} offered  // the next boot mints a first state and setup never completed here; else no step (`stepOrder`)
+ * @property {?boolean} enabled  // the control as a state shows it; null on an offered step (the switch starts on) or unknown
  * @property {'observe'|'act'|'full'} autonomy
  * @property {number} dailyUsd  // rolling-24h recorded-spend allowance; subscription quota is separate
  * @property {number} maxTasks  // how many of its own tasks may run at once; 0 = it starts none
+ * @property {Object.<string,string>} words  // gloss, off, on, meaning, subscriptionCost, door (and choice, kept for older pages)
  */
 
 /**
@@ -197,7 +199,7 @@
  * @property {string} secretPlaceholder  // a prefilled credential that is configured holds this marker
  * @property {SetupContract} contract
  * @property {SetupInitialState} initialState
- * @property {SetupConsciousnessOffer} consciousnessOffer  // display; a ticked row sends the ordinary Start after the save
+ * @property {SetupConsciousnessOffer} consciousnessOffer  // display; the switch's position rides the completion request
  * @property {?SettingsDeploymentPolicy} deployment  // Settings' `_meta.policy_state.deployment`; null unmanaged
  */
 
@@ -429,7 +431,7 @@
  * @property {string=} ts
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
- * @property {(number|null)=} telegram_room_chat_id  // owner-bot room decision, separate from the physical Telegram chat
+ * @property {(number|null)=} telegram_room_chat_id  // the owner bot's Reply only: its Project's turn, or null when refused
  * @property {boolean=} unresolved
  */
 

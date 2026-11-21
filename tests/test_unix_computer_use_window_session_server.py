@@ -277,7 +277,6 @@ def test_the_manifest_declares_the_server_for_a_task_session():
                                      "runtime": "agent_python", "entry": "window_session_server.py",
                                      "task_session": True, "browser_policy": False}]
     assert entry_problem(SKILL, "window_session_server.py") == ""
-    assert manifest.version == "0.7.3"  # one unreleased change with the one-shot window capture
     assert _load("unix_window_session_server_name", SKILL / "window_session_server.py").SERVER_NAME == SERVER_ID
 
 

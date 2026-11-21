@@ -126,10 +126,15 @@ def release_opened(txn, *, restored_tasks=()):
         maintenance_jobs.record_in(txn, JOB, **{JOB_FIELD: {**state, "floor": position}})
 
 
-def task_written(txn, task_id, columns):
-    """A task can wake retirement only for its own physical inputs or managed import obligations."""
+def task_written(txn, task_id, columns, *, current=None, document=None):
+    """A task can wake retirement only for its own physical inputs or managed import obligations; its saved states
+    for exact return are ``saved_state_retirement``'s to owe, a running work's too (``current``, ``document``)."""
+    from ouroboros.saved_state_retirement import task_written as saved_states_written
     from ouroboros.task_status import SETTLED_STATUSES
-    if txn.root is None or columns.get("status") not in SETTLED_STATUSES:
+    if txn.root is None:
+        return
+    saved_states_written(txn, task_id, columns, current, document)
+    if columns.get("status") not in SETTLED_STATUSES:
         return
     if (txn.get_row("custody_marks", task_id) or {}).get("managed_imports"):
         # An import can end before START and leave no filesystem retirement input. Its terminal
@@ -196,6 +201,7 @@ def run(root, should_stop):
     from ouroboros.extension_reconcile_queue import prune_failed_reconcile_markers
     from ouroboros.headless import prune_task_trees
     from ouroboros.review_thread_retention import retire_finished_review_threads
+    from ouroboros.saved_state_retirement import prune_worked_copies
     from ouroboros.skill_uninstall_state import sweep_uninstalled_skill_state
     from ouroboros.startup_task_files import startup_tree_exclusions
     from ouroboros.tools.services import prune_service_logs
@@ -215,7 +221,8 @@ def run(root, should_stop):
         steps = [("delegate_state", sweep_settled_delegate_state),
                  ("skill_state", sweep_uninstalled_skill_state), ("code_intel", prune_stale_code_intel_roots),
                  ("failed_reconcile", prune_failed_reconcile_markers), ("agent_media", prune_agent_media_uploads),
-                 ("call_wire", prune_call_wire_journals), *steps, ("bytecode", prune_stale_bytecode)]
+                 ("call_wire", prune_call_wire_journals), ("worked_copies", prune_worked_copies), *steps,
+                 ("bytecode", prune_stale_bytecode)]
         # Read the durable gate again immediately before source retirement. A fresh child
         # must never substitute its empty memory for the server's recovery result.
         with store.open_store(root, write=False) as txn:

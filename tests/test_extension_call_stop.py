@@ -673,7 +673,7 @@ def test_a_message_in_parts_keeps_its_outcome_beside_the_refusal(
 @pytest.mark.parametrize("failure", ["", "helper_failure", "target_lost"])
 def test_actual_key_keeps_stop_and_independent_failure_distinct(tmp_path, monkeypatch, task_ctx, failure):
     """Real host Stop and dispatcher; every desktop read/input uses mac's subprocess test double."""
-    from tests._unix_computer_use import KEYNOTE, SAFARI, inputs, mac, receipt
+    from tests._unix_computer_use import SAFARI, inputs, mac, receipt
     from ouroboros.owner_pause import tool_handoff
     from ouroboros.tools import extension_dispatch
 

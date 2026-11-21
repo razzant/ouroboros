@@ -175,7 +175,7 @@ def get_tools() -> List[ToolEntry]:
                         "directive": {"type": "string", "enum": list(DELEGATION_CONSTRAINT_DIRECTIVES)},
                         "scope": {},
                         "rationale": {"type": "string"},
-                        "created_by": {"type": "string"},
+                        "created_by": {"type": "string", "description": "Display label. The host records the emitting task."},
                     },
                 },
             }},

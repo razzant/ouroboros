@@ -55,7 +55,9 @@ from ouroboros.tools.control_delegation import (
 from ouroboros.tools.control_events import _SCHEDULE_EMIT_LOCK, _emit_control_event
 from ouroboros.tools.control_subagent_spec import (
     _INTERNAL_SCHEDULE_OPTIONS,
+    SCHEDULE_REFUSAL,
     _validated_schedule_fields,
+    one_refusal,
     schedule_subagent_param_names,
 )
 from ouroboros.tool_access import canonical_data_root, folderless_scratch_dir
@@ -337,6 +339,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
         f"{worker_note}{pool_note}{profile_note}{leaf_scope_note}{write_note}{legacy_note}{access_note}{inputs_note}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
+        f"{emission.get('held_note') or ''}"
     )
 
 
@@ -776,21 +779,37 @@ def _schedule_resource_intent(ctx: ToolContext, metadata: Dict[str, Any], worksp
     return dict(metadata.get("resource_intent") or {})
 
 
+def _route_refusal(fields: Dict[str, Any], route: Dict[str, Any]) -> tuple[str, str]:
+    """``(text, reason)`` naming every requested field the selected row cannot take, else ``("", "")``. These depend
+    on the route, so they are named together once it is selected, never before (``_shape_problems``); one reads as it
+    always did, under its own code."""
+    if route.get("kind") == "agent_session":
+        return "", ""
+    found = [(code, problem) for wanted, code, problem in (
+        (fields.get("delegated_mode"), "delegated_mode_unsupported",
+         "mode requires an agent_session row; API children keep their ordinary task execution."),
+        ("attachment_paths" in fields or "attachment_import" in fields, "attachment_paths_unsupported",
+         "engine document attachment needs an agent_session row; API children read inherited inputs through "
+         "read_file(root='artifact_store'). Omit attachment_paths."),
+        (fields.get("directory_strategy") == "copy" or fields.get("workspace") == "in_place", "",
+         "directory_strategy=copy is unsupported for native/API children, which use shared files directly; select an "
+         "agent_session actor for copy or workspace=in_place."),
+    ) if wanted]
+    if len(found) == 1:
+        code, problem = found[0]
+        return (f"⚠️ {code}: {problem}" if code else SCHEDULE_REFUSAL + problem), code
+    return (one_refusal([f"{code}: {problem}" if code else problem for code, problem in found]) if found else "",
+            ",".join(code for code, _problem in found if code))
+
+
 def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, **params: Any) -> str:
     allowed_params = schedule_subagent_param_names() | HIDDEN_LEGACY_SCHEDULE_PARAMS
     unsupported = sorted(str(key) for key in params if key not in allowed_params)
-    if unsupported:
-        bad = ", ".join(unsupported)
-        return _publish_scheduling_refusal(
-            ctx, "error", "TOOL_ARG_ERROR", "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): "
-            f"{bad}. Use the strict schema: subagent_id, objective, expected_output, "
-            "optional role/context/constraints/memory_mode/workspace_root/effort and (for mutative children) "
-            "write_surface/write_root/protected_paths_grant/external_tool_grants.")
     internal = dict(internal or {})
     if set(internal) - _INTERNAL_SCHEDULE_OPTIONS:
         raise TypeError(f"_schedule_task: unknown internal scheduling option(s): "
                         f"{sorted(set(internal) - _INTERNAL_SCHEDULE_OPTIONS)}")
-    fields, arg_error = _validated_schedule_fields(params, ctx=ctx)
+    fields, arg_error = _validated_schedule_fields(params, ctx=ctx, unsupported=unsupported)
     if arg_error:
         return _publish_scheduling_refusal(
             ctx, "error", "TOOL_ARG_ERROR", arg_error, reason=fields.get("reason", ""))
@@ -824,19 +843,9 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     except SubagentSelectionError as exc:
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR", f"⚠️ {exc.code}: {exc.detail}", reason=exc.code)
     route = configured_subagent.get("route") if isinstance(configured_subagent.get("route"), dict) else {}
-    if fields.get("delegated_mode") and route.get("kind") != "agent_session":
-        return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR",
-            "⚠️ delegated_mode_unsupported: mode requires an agent_session row; API children keep their ordinary task execution.",
-            reason="delegated_mode_unsupported")
-    if ("attachment_paths" in fields or "attachment_import" in fields) and route.get("kind") != "agent_session":
-        return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR",
-            "⚠️ attachment_paths_unsupported: engine document attachment needs an agent_session row; API children "
-            "read inherited inputs through read_file(root='artifact_store'). Omit attachment_paths.",
-            reason="attachment_paths_unsupported")
-    if (fields.get("directory_strategy") == "copy" or fields.get("workspace") == "in_place") and route.get("kind") != "agent_session":
-        return _publish_scheduling_refusal(
-            ctx, "error", "TOOL_ARG_ERROR",
-            "⚠️ TOOL_ARG_ERROR (schedule_subagent): directory_strategy=copy is unsupported for native/API children, which use shared files directly; select an agent_session actor for copy or workspace=in_place.")
+    route_refusal, route_reason = _route_refusal(fields, route)
+    if route_refusal:
+        return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR", route_refusal, reason=route_reason)
     requested_model_lane = "auto"  # bounded historical projection only
     requested_executor = "harness" if route.get("kind") == "agent_session" else "native"
     current_depth, depth_error = _context_task_depth(ctx)
@@ -982,6 +991,9 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "resource_intent": resource_intent,
     }
     owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract)}  # the owner's words, by value
+    from ouroboros.held_notes import carried_situation  # my situation names, by value, where the install records claims
+
+    held_origin, held_note = carried_situation(ctx, canonical_data_root(ctx), declared=bool(declared_words_fact(child_contract)))
     child_facts = {
         **({"execution_timeout_sec": execution_left} if execution_left is not None else {}),
         "objective": objective,
@@ -1014,7 +1026,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "ts": utc_now_iso(),
         "write_surface": requested_surface,
         "resource_intent": resource_intent,
-        "origin_metadata": {**consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}), **owner_origin,
+        "origin_metadata": {**consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}), **owner_origin, **held_origin,
                             **({"evolution_root_task_id": metadata.get("evolution_root_task_id") or root_task_id}
                                if metadata.get("evolution_root_task_id") or metadata.get("evolution_transaction") else {})},  # tree origin: consciousness label/level + owner words
         **presence_binding_authority_metadata(metadata, task_contract=getattr(ctx, "task_contract", None)),  # never speaker
@@ -1069,7 +1081,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "configured_subagent": configured_subagent, "parent_cognitive_route": parent_cognitive_route,
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),
-        "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"),
+        "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"), "held_note": held_note,
         "write_root": (task_constraint.get("write_root") or "", "caller" if str(params.get("write_root") or "").strip()
                        else "host-minted coop tree" if str(effective_write_root or "").strip() else "parent workspace"),
     })

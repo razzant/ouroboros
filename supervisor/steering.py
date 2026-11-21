@@ -148,7 +148,7 @@ def _refusal_row(ctx: Any, evt: Dict[str, Any], target: str, target_label: str, 
     It replies to the act's own owner message, never to the target task's origin.
     """
     from ouroboros.project_dialogue import routing_refusal_cause
-    from supervisor.events_project_routing import _routing_notice_address
+    from supervisor.events_project_routing import _routing_notice_reply
     from supervisor.message_bus import notification_chat_route
 
     chat = notification_chat_route(evt.get("chat_id"))
@@ -158,7 +158,7 @@ def _refusal_row(ctx: Any, evt: Dict[str, Any], target: str, target_label: str, 
         ctx.send_with_budget(
             chat, f"{target_label or 'Task'} · {routing_refusal_cause('steer_task', status, reason, None)}",
             role="system", system_type="steer_not_delivered", task_id=target,
-            progress_meta={"routing_notice_carrier": "system", **_routing_notice_address(ctx, evt)},
+            progress_meta={"routing_notice_carrier": "system", "reply_to": _routing_notice_reply(ctx, evt)},
         )
     except Exception:
         log.warning("steer refusal row failed for %s", target, exc_info=True)

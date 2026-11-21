@@ -7,6 +7,7 @@ import { ACCOUNTS_UNSUPPORTED_STATUS, claudexorStatus, accountRows, familyLabel 
 import { LOGIN_CARD_FULL, SIGN_IN_SCOPE_NOTE, createLoginCardController } from './harness_login_cards.js';
 import { familyStatus } from './harness_accounts.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
+import { bindFamilyPrograms } from './model_program.js';
 import {
     availableSubagentsEditorHost,
     createAvailableSubagentsEditor,
@@ -82,14 +83,6 @@ export function connectedHarnesses(snapshot) {
             .map((row) => String(row.harness || '')),
     );
     return AGENT_FAMILIES.map((f) => f.harness).filter((harness) => passed.has(harness));
-}
-
-export function harnessAccountCount(snapshot, harness) {
-    return accountRows(snapshot).filter(
-        (row) => row.harness === harness
-            && row?.enabled !== false
-            && String(row?.status?.verification || '') === 'passed',
-    ).length;
 }
 
 export function familyLabels(harnesses, snapshot, { catalogKnown = false } = {}) {
@@ -546,7 +539,7 @@ export function ladderHtml() {
     `;
 }
 
-export function familyRowHtml(family, { status, connected = false, connectable = true }) {
+export function familyRowHtml(family, { status, connected = false, connectable = true, program = '' }) {
     // Equivalent rows (docs/DESIGN.md §6): no family gets extra weight for being
     // first or already connected — only its status text and its action change.
     // An engine on the retired account model gets no Connect: no connection
@@ -562,6 +555,7 @@ export function familyRowHtml(family, { status, connected = false, connectable =
                 <span class="agent-family-purpose">${family.harness === 'codex' ? 'Models + agents · Recommended' : 'Agents'}</span>
                 </span>
                 <span class="agent-family-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</span>
+                ${program}
             </span>
             ${connectable ? `<button type="button" class="btn btn-default" data-agent-connect="${escapeHtml(family.harness)}">
                 ${escapeHtml(connected ? 'Add another' : 'Connect')}
@@ -574,6 +568,7 @@ export function familyListHtml(snapshot, {
     accountsKnown = true,
     accountsUnsupported = false,
     catalogKnown = false,
+    programLine = () => '',
 } = {}) {
     const connected = new Set(accountsKnown ? connectedHarnesses(snapshot) : []);
     return AGENT_FAMILIES.map((family) => familyRowHtml({
@@ -583,6 +578,7 @@ export function familyListHtml(snapshot, {
         status: familyStatusText(snapshot, family.harness, { accountsKnown, accountsUnsupported }),
         connected: connected.has(family.harness),
         connectable: !accountsUnsupported,
+        program: programLine(family.harness),
     })).join('');
 }
 
@@ -639,11 +635,12 @@ export function createAgentsStep({
     onChange = () => {},
     previewPayload = () => ({}),
     previewTransport = (payload) => apiClient.previewOnboardingSubagents(payload),
-    onSubagentsChange = () => {},
+    onSubagentsChange = () => {}, readApiCatalog, apiCatalogAllowed, supportsScopes,
     providerProfiles = {},
     onSetupPreview = () => {},
     onPreviewStatus = () => {},
     onStatus = () => {},
+    maintenanceApi = apiClient,
 } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const state = {
@@ -682,17 +679,21 @@ export function createAgentsStep({
             mode: LOGIN_CARD_FULL,
             doc: getDoc,
             ...(fetchImpl ? { fetchImpl } : {}),
-            onSettled: () => { store.refresh(); paint(); },
+            onSettled: () => { store.refresh(); void programs.read(); paint(); },
         });
     }
 
     let login = createLogin();
+    // Each family's program line (docs/DESIGN.md §7), the same one an opened model chooser shows.
+    const programs = bindFamilyPrograms({ harnesses: AGENT_FAMILIES.map((f) => f.harness), store, api: maintenanceApi,
+        visible: () => isVisible() && Boolean(el('agents-family-list')), onChange: () => paint() });
     const subagents = createAvailableSubagentsEditor({
         hostId: 'onboarding-available-subagents',
         doc: getDoc,
         win: () => getDoc()?.defaultView,
         store,
         onChange: onSubagentsChange,
+        readApiCatalog, apiCatalogAllowed, supportsScopes,
         baseline: 'generated',
     });
 
@@ -776,11 +777,11 @@ export function createAgentsStep({
                 accountsKnown: known,
                 accountsUnsupported: unsupported,
                 catalogKnown: Boolean(store.catalogKnown),
+                programLine: programs.line,
             });
             if (html !== state.listHtml) {
                 state.listHtml = html;
-                list.innerHTML = html;
-                bindConnectButtons(list);
+                rebuildList(list, html);
             }
         }
         const note = el('agents-status-note');
@@ -803,13 +804,18 @@ export function createAgentsStep({
         login?.render();
     }
 
-    function bindConnectButtons(list) {
-        list.querySelectorAll('[data-agent-connect]').forEach((button) => {
-            button.addEventListener('click', () => {
-                if (state.disposed) return;
-                ensureLogin().start(button.getAttribute('data-agent-connect'), '');
-            });
-        });
+    // A rebuild keeps the focused Connect or Update: the same control of the same family takes it back (docs/DESIGN.md
+    // principle 6), so a line arriving for one family never drops a keyboard reader off another's button.
+    function rebuildList(list, html) {
+        const active = getDoc()?.activeElement;
+        const control = list.contains(active) && ['data-agent-connect', 'data-program-action'].find((name) => active.hasAttribute(name));
+        const family = control && active.closest('[data-agent-family]')?.dataset.agentFamily;
+        list.innerHTML = html;
+        list.querySelectorAll('[data-agent-connect]').forEach((button) => button.addEventListener('click', () => {
+            if (!state.disposed) ensureLogin().start(button.getAttribute('data-agent-connect'), '');
+        }));
+        programs.bind(list);
+        if (family) list.querySelector(`[data-agent-family="${family}"] [${control}]`)?.focus({ preventScroll: true });
     }
 
     function adopt(view) {
@@ -821,9 +827,10 @@ export function createAgentsStep({
         const statusChanged = statusSignature !== state.previewStatusSignature;
         state.previewStatusSignature = statusSignature;
         state.connected = next;
+        programs.observe();
         paint();
-        onStatus();
         if (changed) onChange([...state.connected]);
+        onStatus({ catalogChanged: changed || statusChanged });
         if (changed || statusChanged) refreshSubagentsPreview({ force: statusChanged });
     }
 
@@ -848,6 +855,7 @@ export function createAgentsStep({
         }
         // A remount rebuilds the DOM the wizard just replaced.
         state.listHtml = null;
+        programs.observe({ remount: true });
         paint();
         subagents.mount();
         // The wizard's API keys are typed on the Accounts step, so the provider
@@ -911,6 +919,7 @@ export function createAgentsStep({
         state.disposed = true;
         login?.detach();
         subagents.destroy();
+        programs.dispose();
         if (state.unsubscribe) state.unsubscribe();
         state.unsubscribe = null;
         if (state.pageHideBound && state.pageHideTarget?.removeEventListener) {
@@ -939,7 +948,8 @@ export function createAgentsStep({
         get accountsKnown() { return accountsKnown(); },
         get reads() { return store.reads; },
         refreshStatus() { return store.refresh(); },
-        adoptCatalog(data) { subagents.adoptCatalog(data); },
+        adoptCatalog: subagents.adoptCatalog, adoptSources: subagents.adoptSources, refreshCatalogs: subagents.refreshCatalogs,
+        resetCatalogs() { subagents.resetCatalogs(); },
         get availableSubagents() { return subagents.setting; },
         get allowEmptyReviewPool() { return subagents.allowEmptyReviewPool; },
         setProcessingPreference(value) { subagents.setProcessingPreference(value); },

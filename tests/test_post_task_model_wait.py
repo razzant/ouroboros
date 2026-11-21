@@ -381,7 +381,7 @@ def test_promotion_outer_wrapper_propagates_typed_control_and_ordinary_failure_a
     from ouroboros import post_task_evolution as promotion
 
     monkeypatch.setattr(config, "get_post_task_evolution_enabled", lambda: True)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setattr(config, "get_post_task_evolution_cadence", lambda: "llm")
     monkeypatch.setattr(promotion, "_eligible", lambda *_: True)
     monkeypatch.setattr(promotion, "_is_canonical_run", lambda *_: True)
@@ -544,7 +544,7 @@ def test_budget_refusal_inside_the_promotion_chooser_degrades_the_checkpoint(pha
     f = phase
     monkeypatch.setattr("ouroboros.post_task_evolution.maybe_promote", f.real_promote)
     monkeypatch.setattr(config, "get_post_task_evolution_enabled", lambda: True)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setattr(config, "get_post_task_evolution_cadence", lambda: "llm")
     monkeypatch.setattr(promotion, "_eligible", lambda *_: True)
     monkeypatch.setattr(promotion, "_is_canonical_run", lambda *_: True)
@@ -623,7 +623,7 @@ def _real_promotion_chooser(monkeypatch, f):
 
     monkeypatch.setattr("ouroboros.post_task_evolution.maybe_promote", f.real_promote)
     monkeypatch.setattr(config, "get_post_task_evolution_enabled", lambda: True)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setattr(config, "get_post_task_evolution_cadence", lambda: "llm")
     monkeypatch.setattr(promotion, "_eligible", lambda *_: True)
     monkeypatch.setattr(promotion, "_is_canonical_run", lambda *_: True)

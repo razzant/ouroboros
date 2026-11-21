@@ -3,7 +3,7 @@
 // Words come from the server's codes through tr(); a client never derives a state, mark or control.
 
 /**
- * The owner's cited words, bounded for publication (CLIENT_CONTRACT §5); text stays authored.
+ * The owner's cited words or pressed label, bounded for publication (CLIENT_CONTRACT §5). Text stays authored.
  * @typedef {Object} CitedModelWords
  * @property {string} text
  * @property {boolean} clipped  // the durable citation is longer than this published span
@@ -14,7 +14,7 @@
  * @property {string} model
  * @property {boolean} use_local
  * @property {CitedModelWords=} cited
- * @property {string} basis  // main | a role it follows | room | owner | owner_words | mind | fallback | place | circle
+ * @property {string} basis  // main | a role it follows | room | owner | owner_words | owner_press | mind | fallback | place | circle
  */
 /**
  * The route a work acts on and its chooser (`lead` on a work and on its activity row). A departure names the

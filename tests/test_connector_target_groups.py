@@ -279,11 +279,13 @@ def test_the_emitted_conversation_has_its_own_author_and_one_call_is_one_send(tm
 
 def test_an_older_host_refuses_a_2_5_connector_before_import_read_tools_included(tmp_path, monkeypatch):
     """minimum_api: a host serving 2.4 refuses the payload at negotiation, before its module is imported, so no tool
-    of it (its read included) runs with its groups ignored. The 2.4 surface is 2.5's: no method was added."""
+    of it (its read included) runs with its groups ignored. Neither 2.4 nor 2.5 offered the running call's Stop."""
     from ouroboros.contracts import plugin_api as papi
 
     recorded = papi.PLUGIN_API_SURFACE_FINGERPRINTS["2.4"]
     monkeypatch.setattr(papi, "PLUGIN_API_VERSION", "2.4")
+    monkeypatch.setattr(papi, "ALWAYS_AVAILABLE_CAPABILITIES", papi.ALWAYS_AVAILABLE_CAPABILITIES - {"get_stop_state"})
+    monkeypatch.delattr(papi.PluginAPI, "get_stop_state")
     assert papi.plugin_api_surface_fingerprint() == recorded
     monkeypatch.setattr(papi, "PLUGIN_API_SURFACE_FINGERPRINTS", {"2.4": recorded})
     loaded_now, _registry, _root, _payload = _mailer(tmp_path, monkeypatch,

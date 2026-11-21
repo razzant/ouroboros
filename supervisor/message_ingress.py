@@ -243,10 +243,11 @@ def _chat_record(
             from ouroboros.settings_integrity import effective_subagents_mode
 
             record["message_accepted_at"] = utc_now_iso()
+            sent = (message_meta or {}).get("reply_to") if source == "skill:telegram" else None
+            room = sent.get("telegram_room_chat_id") if isinstance(sent, dict) else None  # the turn's room, not this chat
             try:
-                reply = (message_meta or {}).get("reply_to")
-                room = reply.get("telegram_room_chat_id", chat_id) if source == "skill:telegram" and isinstance(reply, dict) else chat_id
-                if room is not None and effective_subagents_mode(task={"chat_id": room}, drive_root=root) == "swarm":
+                if effective_subagents_mode(task={"chat_id": room if type(room) is int and room > 0 else chat_id},
+                                            drive_root=root) == "swarm":
                     record["subagents_mode"] = "swarm"
             except Exception:
                 log.debug("Subagents label unavailable for the inbound row", exc_info=True)
@@ -284,10 +285,7 @@ def _chat_record(
             record["execution_transport"] = dict(meta["execution_transport"])
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
-            origin_transport: dict = {}
-            meta["reply_to"] = origin_reply(root, task_id, transport=origin_transport)
-            if origin_transport and record_type in {"photo", "video", "document", "links", "quiz", "card"} and not transport:
-                record["transport"] = origin_transport
+            meta["reply_to"] = origin_reply(root, task_id)
         for key in ("reply_to", "relay"):
             if isinstance(meta.get(key), dict) and meta[key]:
                 record[key] = dict(meta[key])
@@ -295,6 +293,10 @@ def _chat_record(
             record["reply_to_relay"] = str(meta["reply_to_relay"])
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
+        if meta.get("card_press"):
+            from ouroboros.card_store import late_press_ref
+            if press := late_press_ref(meta["card_press"]):
+                record["card_press"] = press
         if meta.get("late_answer"):
             from ouroboros.owner_quiz import late_answer_ref
             accepted_answer = late_answer_ref(meta["late_answer"])
@@ -500,29 +502,28 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     chat_id = int(message["chat_id"])
     message_id = str(message["client_message_id"])
     source = str(message["source"])
-    logged = text.strip() or str(message.get("image_caption") or "").strip() or attachment_placeholder(
+    from ouroboros.card_store import late_press_ref
+    task_metadata = message.get("task_metadata") or {}
+    press = late_press_ref(task_metadata.get("card_press"))
+    late_answer = late_answer_ref(task_metadata.get("late_answer"))
+    logged = (text if press or late_answer else text.strip()) or str(message.get("image_caption") or "").strip() or attachment_placeholder(
         message.get("image_base64"), message.get("task_metadata")
     )
     if not logged:
         raise ValueError("message is empty")
-    from ouroboros.chat_references import ingress_reply, telegram_reply_room
+    from ouroboros.chat_references import TELEGRAM_SOURCE, ingress_reply, telegram_reply_room
     reply = ingress_reply(drive_root, message.get("task_metadata") or {})
-    transport = message.get("transport")
-    if (not reply and source == "skill:telegram" and isinstance(transport, dict)
-            and transport.get("reply_target_unlinked") is True):
-        reply = {"address": "", "unresolved": True, "telegram_room_chat_id": None}
-    if reply and source == "skill:telegram":
-        from ouroboros.store import StoreError
-
-        try:
-            room = telegram_reply_room(drive_root, reply, chat_id)
+    if reply and source == TELEGRAM_SOURCE:  # the owner bot's Reply: its room, decided once on its accepted row
+        transport = message.get("transport") if isinstance(message.get("transport"), dict) else {}
+        try:  # ``owner_message_id``: the bridge names a bot message as the target, never his own words
+            room = telegram_reply_room(root, reply, chat_id, bubble="owner_message_id" in transport)
         except (OSError, ValueError, StoreError):
-            room = None  # the accepted row keeps this unresolved decision for dispatch
-        reply["telegram_room_chat_id"] = room
+            room = None  # unreadable is refused, never guessed to be this conversation
+        if room != 0:
+            reply = {**reply, "telegram_room_chat_id": room}
     if reply:  # a replayed obligation dispatches the same reference
         message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
-    late_answer = late_answer_ref((message.get("task_metadata") or {}).get("late_answer"))
     placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
@@ -536,7 +537,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                     client_message_id=message_id, sender_label=str(message.get("sender_label") or ""),
                     transport=message.get("transport"), drive_root=root,
                     message_meta={"attachments": refs, "text_placeholder": placeholder, "reply_to": reply,
-                                  **({"late_answer": late_answer} if late_answer else {}),
+                                  **({"late_answer": late_answer} if late_answer else {}), **({"card_press": press} if press else {}),
                                   "execution_transport": (message.get("task_metadata") or {}).get("execution_transport")},
                     dispatch=obligation(name, text, message))
             finally:
@@ -551,6 +552,8 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             # The row an earlier delivery landed (or the race lost by a hair): rejoin it, or take its owed dispatch.
             rejoin_or_refuse(row, source, logged, refs, reply,
                             execution_transport=(message.get("task_metadata") or {}).get("execution_transport"))
+            if saved_press := late_press_ref(row.get("card_press")):
+                message["task_metadata"] = {**(message.get("task_metadata") or {}), "card_press": saved_press}
             saved_answer = late_answer_ref(row.get("late_answer"))
             if saved_answer:
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "late_answer": saved_answer}

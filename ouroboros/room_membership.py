@@ -149,12 +149,6 @@ def reply_target(rooms: Any, ref: Mapping[str, Any]) -> tuple:
     carry (a row in Main with its task: my notice or question, or its answer) is read again at its exact
     address: the target proven private Presence contact follows its work, as a Reply saved now does
     (owner choice, every such Reply); one unreadable is ``TARGET_UNKNOWN``; any other "none" stays none."""
-    telegram_room = ref.get("telegram_room_chat_id")
-    if "telegram_room_chat_id" in ref:
-        task = str(ref.get("task_id") or "")
-        if type(telegram_room) is int and telegram_room > 0:
-            return TARGET_ROOM, task, telegram_room
-        return TARGET_UNKNOWN, task, _ref_chat(ref)
     home = ref.get("target_home")
     if home is None:
         return _saved_target(rooms, ref)

@@ -48,7 +48,7 @@ export const STORAGE_GROUPS = [
 const PLACE_WORDS = {
     model_calls: { label: 'Model call records', why: 'The exact prompts and answers behind every decision. Kept; this screen cannot delete them.', parts: true },
     engine: { label: 'Agent engine', why: 'Kept by the engine. Not a cache.', split: true },
-    task_results: { label: 'Task results and files', why: 'Kept with each task.' },
+    task_results: { label: 'Task results and files', why: 'Kept with each task. The states a work saved to continue from are removed {days} days after the work finishes or moves on to a newer one, unless you asked Ouroboros to keep that work.' },
     archives: { label: 'Archives', why: 'Kept. Rotated logs and backups.' },
     memory_skills: { label: 'Memory, notes and skills', why: 'Kept until you delete that project or skill.' },
     project_folders: { label: 'Project folders', why: 'Your project files. Not deleted here.' },
@@ -71,6 +71,7 @@ const words = (place) => PLACE_WORDS[place?.id] || { label: String(place?.id || 
 // on every answer): one plain line; unknown, unavailable and unsupported are said as such, never as zero.
 const JOB_WORDS = {
     runtime_retirement: 'Retirement',
+    saved_states: 'Saved states for exact return',
     custody_trash: 'Deleting moved folders',
     evidence_packing: 'Evidence packing',
     record_compression: 'Compression',

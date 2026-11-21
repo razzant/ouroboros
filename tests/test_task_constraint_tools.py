@@ -177,7 +177,6 @@ def test_cross_skill_writer_uses_payload_refusal_and_keeps_selected_write(tmp_pa
 
 
 def test_light_mode_allows_constrained_str_replace_editor_payload_edit(tmp_path, monkeypatch):
-    from ouroboros import config as cfg
     from ouroboros.tools.registry import ToolRegistry
 
     ctx, skill = _ctx(tmp_path)
@@ -186,7 +185,7 @@ def test_light_mode_allows_constrained_str_replace_editor_payload_edit(tmp_path,
     _admit_repair(ctx, skill)
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
 
     result = registry.execute(
         "edit_text",
@@ -206,7 +205,6 @@ def test_light_mode_allows_constrained_str_replace_editor_payload_edit(tmp_path,
 
 
 def test_light_mode_allows_normal_skill_str_replace_without_repair_constraint(tmp_path, monkeypatch):
-    from ouroboros import config as cfg
     from ouroboros.tools.registry import ToolRegistry
 
     repo = tmp_path / "repo"
@@ -218,7 +216,7 @@ def test_light_mode_allows_normal_skill_str_replace_without_repair_constraint(tm
     target = skill / "plugin.py"
     target.write_text("VALUE = 1\n", encoding="utf-8")
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
 
     result = registry.execute(
         "edit_text",
@@ -231,7 +229,6 @@ def test_light_mode_allows_normal_skill_str_replace_without_repair_constraint(tm
 
 
 def test_light_mode_blocks_normal_skill_sidecar_str_replace(tmp_path, monkeypatch):
-    from ouroboros import config as cfg
     from ouroboros.tools.registry import ToolRegistry
 
     repo = tmp_path / "repo"
@@ -243,7 +240,7 @@ def test_light_mode_blocks_normal_skill_sidecar_str_replace(tmp_path, monkeypatc
     sidecar = skill / ".ouroboroshub.json"
     sidecar.write_text('{"version":"1"}\n', encoding="utf-8")
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
 
     result = registry.execute(
         "edit_text",
@@ -256,7 +253,6 @@ def test_light_mode_blocks_normal_skill_sidecar_str_replace(tmp_path, monkeypatc
 
 
 def test_review_excluded_skill_dirs_stay_blocked_in_light_mode(tmp_path, monkeypatch):
-    from ouroboros import config as cfg
     from ouroboros.tools.registry import ToolRegistry
 
     repo = tmp_path / "repo"
@@ -268,7 +264,7 @@ def test_review_excluded_skill_dirs_stay_blocked_in_light_mode(tmp_path, monkeyp
     target = target_dir / "dep.js"
     target.write_text("VALUE = 1\n", encoding="utf-8")
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
 
     result = registry.execute(
         "edit_text",
@@ -296,7 +292,6 @@ def test_data_write_blocks_review_excluded_skill_dirs(tmp_path, monkeypatch):
 
 
 def test_light_mode_allows_skill_payload_write_file(tmp_path, monkeypatch):
-    from ouroboros import config as cfg
     from ouroboros.tools.registry import ToolRegistry
 
     repo = tmp_path / "repo"
@@ -306,7 +301,7 @@ def test_light_mode_allows_skill_payload_write_file(tmp_path, monkeypatch):
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("# alpha\n", encoding="utf-8")
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
 
     result = registry.execute(
         "write_file",
@@ -324,7 +319,6 @@ def test_light_mode_allows_skill_payload_write_file(tmp_path, monkeypatch):
 
 
 def test_light_mode_allows_repair_edit_text_with_skill_payload_root(tmp_path, monkeypatch):
-    from ouroboros import config as cfg
     from ouroboros.tools.registry import ToolRegistry
 
     ctx, skill = _ctx(tmp_path)
@@ -333,7 +327,7 @@ def test_light_mode_allows_repair_edit_text_with_skill_payload_root(tmp_path, mo
     _admit_repair(ctx, skill)
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
 
     result = registry.execute(
         "edit_text",
@@ -353,7 +347,6 @@ def test_light_mode_allows_repair_edit_text_with_skill_payload_root(tmp_path, mo
 
 
 def test_light_mode_still_blocks_repo_str_replace_without_repair_constraint(tmp_path, monkeypatch):
-    from ouroboros import config as cfg
     from ouroboros.tools.registry import ToolRegistry
 
     repo = tmp_path / "repo"
@@ -362,7 +355,7 @@ def test_light_mode_still_blocks_repo_str_replace_without_repair_constraint(tmp_
     drive.mkdir()
     (repo / "README.md").write_text("VALUE = 1\n", encoding="utf-8")
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
 
     result = registry.execute(
         "edit_text",

@@ -239,6 +239,26 @@ test('Settings says under Main, before Save, what a new Main does to running wor
     assert.ok(!rendered(false).includes('data-main-follow-note'), 'the wizard and the wait card never show it');
 });
 
+test('each role says what it serves once, visibly under its name, never as a hover title', () => {
+    const rendered = (slots) => {
+        const host = inertNode();
+        const editor = createModelRolesEditor({ hostId: 'roles', doc: { getElementById: () => host }, showContext: false });
+        editor.load({ OUROBOROS_MODEL: 'openai::main' }, { ...contract, ...(slots ? { modelSlots: slots } : {}) });
+        editor.destroy();
+        return String(host.innerHTML);
+    };
+    const html = rendered();
+    const group = (slot) => html.slice(html.indexOf(`data-model-role-group="${slot}"`)).split('</section>')[0];
+    const light = contract.modelSlots.find((slot) => slot.slot === 'light');
+    assert.match(light.note, /Memory consolidation/);
+    assert.ok(group('light').includes(`<p class="model-role-copy ui-field-help" data-model-role-note>${light.note}</p>`));
+    assert.doesNotMatch(html, /<h4 title=/, 'touch and keyboard readers never meet a hover-only caption');
+    for (const slot of contract.modelSlots) assert.equal(group(slot.slot).split('data-model-role-note').length, 2, `${slot.slot}: one note`);
+    assert.match(group('fallback'), /data-model-role-note>Tried in this order/);
+    // A host whose role carries no note (the wait card's picker) draws none.
+    assert.ok(!rendered([{ slot: 'main', settingKey: 'model', inputId: 'wait-model', label: 'Model' }]).includes('data-model-role-note'));
+});
+
 test('a kept fallback preserves its unfinished field while source choices follow a new settings read', async (t) => {
     const { Stub, world, settle } = await import('./helpers/settings_dom.js');
     const { env } = world(t);

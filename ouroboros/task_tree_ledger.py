@@ -684,12 +684,24 @@ def tree_ledger_attention_after(
 def open_delegation_constraints(root_id: str) -> List[Dict[str, Any]]:
     """Unresolved delegation constraints for a task tree.
 
-    A constraint is resolved by a later decision row carrying
-    payload.decision="overridden" for the same payload.constraint_id. Malformed
-    rows are ignored by consumers (coordination must fail open).
+    New decisions address the emitter as well as the constraint ID. Historical
+    decisions addressed every earlier constraint with that ID in the tree. Ignore
+    malformed records so an unreadable coordination hint cannot block admission.
     """
 
-    rows = tree_ledger_rows(root_id)
+    return _open_constraints(tree_ledger_rows(root_id))
+
+
+def delegation_constraint_emitters(root_id: str, constraint_id: str) -> dict[str, bool]:
+    """Each author of this ID, including closed holds so replay cannot select a different author."""
+    rows = [row for row in tree_ledger_rows(root_id) if isinstance(row.get("payload"), dict)
+            and str(row["payload"].get("constraint_id") or "").strip() == constraint_id]
+    opened = {row.get("task_id") for row in _open_constraints(rows)}
+    return {row["task_id"]: row["task_id"] in opened for row in rows
+            if row.get("kind") == DELEGATION_CONSTRAINT_KIND and row.get("task_id")}
+
+
+def _open_constraints(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     constraints: List[Dict[str, Any]] = []
     for row in rows:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -697,10 +709,12 @@ def open_delegation_constraints(root_id: str) -> List[Dict[str, Any]]:
         if not constraint_id:
             continue
         if str(row.get("kind") or "") == "decision" and str(payload.get("decision") or "").strip().lower() == "overridden":
+            emitter = payload.get("constraint_task_id")
             constraints = [
                 existing for existing in constraints
                 if str((existing.get("payload") if isinstance(existing.get("payload"), dict) else {}).get("constraint_id") or "").strip()
                 != constraint_id
+                or (emitter is not None and existing.get("task_id") != emitter)
             ]
             continue
         if str(row.get("kind") or "") == DELEGATION_CONSTRAINT_KIND:
@@ -730,4 +744,5 @@ __all__ = [
     "tree_ledger_tail_digest",
     "tree_ledger_attention_after",
     "open_delegation_constraints",
+    "delegation_constraint_emitters",
 ]

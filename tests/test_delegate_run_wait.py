@@ -14,68 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._budget_pause_exact_helpers import _loop_ctx
+from tests._run_wait_shared import _NANNY, _asks, _body, _ended, _nanny, _notices, _run, reads as reads
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines  # noqa: F401
-
-_NANNY = "nanny"
-
-
-def _run(root, run_id, task_id=_NANNY):
-    from ouroboros import delegate_custody as custody, delegate_custody_current as current
-
-    assert custody.emit(root, custody.STARTED, {
-        "run_id": run_id, "invocation_id": f"invoke-{run_id}", "task_id": task_id, "root_task_id": task_id,
-        "route": "route", "source": "delegate_start", "access": "readonly"})
-    return current.run(root, run_id)
-
-
-def _ended(root, run_id, state="succeeded"):
-    from ouroboros import delegate_custody_current as current
-    from ouroboros.delegate_collection import observe_run
-
-    assert observe_run(root, current.run(root, run_id), {"summary": {"runId": run_id, "state": state}, "lastSeq": 9})
-
-
-def _asks(root, run_id, question="q1"):
-    from ouroboros import delegate_custody_current as current
-    from ouroboros.delegate_collection import observe_run
-
-    assert observe_run(root, current.run(root, run_id), {"summary": {"runId": run_id, "state": "running"}, "lastSeq": 3,
-        "pendingInteractions": [{"interactionId": question, "questions": [{"id": "pick", "question": "Which?"}]}]})
-
-
-def _nanny(root, task_id=_NANNY):
-    from ouroboros.task_results import write_task_result
-
-    write_task_result(root, task_id, "running", root_task_id=task_id, chat_id=0)
-    ctx, limit = _loop_ctx(root, task_id)
-    ctx.task_metadata, ctx._loop_mailbox_seen_ids = {"root_task_id": task_id}, set()
-    limit.tool_schemas, limit.round_idx, limit.llm_trace = [], 2, {"tool_calls": []}
-    (root / "logs").mkdir(exist_ok=True)
-    return ctx, limit
-
-
-@pytest.fixture
-def reads(monkeypatch):
-    """The one addressed read a wake makes: a terminal for an ended run, its question set, else a quiet state."""
-    from ouroboros import delegate_custody_current as current
-
-    made = []
-
-    def observe(ctx, run_id, since_seq, gateway=None):
-        made.append((run_id, since_seq))
-        run = current.run(ctx.drive_root, run_id)
-        if run is not None and run.terminal_state:
-            return json.dumps({"status": "terminal", "run_id": run_id, "state": run.terminal_state, "last_seq": 9})
-        if run is not None and run.pending_interaction_ids:
-            return json.dumps({"status": "waiting_on_user", "run_id": run_id, "state": "running", "last_seq": 3,
-                               "pending_interactions": [{"interaction_id": iid, "questions": [{"id": "pick"}]}
-                                                        for iid in run.pending_interaction_ids]})
-        return json.dumps({"status": "no_progress", "run_id": run_id, "state": "running", "last_seq": since_seq})
-
-    monkeypatch.setattr("ouroboros.tools.delegate._read_run", observe)
-    return made
-
 
 def _armed(result):
     from ouroboros.delegate_shared import delegate_payload
@@ -89,14 +29,6 @@ def _pending(ctx, run_id):
     state = ds._load_state(ctx, run_id)
     return (state.get("pending_wake") or {}).get("wake_id", ""), (state.get("last_acknowledged_wake") or {}).get(
         "wake_id", "")
-
-
-def _notices(limit):
-    return [row["content"] for row in limit.messages if "[BEGIN_TASK_WAIT_OUTPUT]" in str(row.get("content"))]
-
-
-def _body(notice):
-    return json.loads(notice.split("[BEGIN_TASK_WAIT_OUTPUT]\n", 1)[1].rsplit("\n[END_TASK_WAIT_OUTPUT]", 1)[0])
 
 
 @pytest.mark.parametrize("continuation", [True, False])
@@ -758,3 +690,176 @@ def test_read_coverage_of_a_wake_source_rides_the_continuation(tmp_path, monkeyp
     owner_wait.restore_continuation_state(SimpleNamespace(_ctx=restored), state, [], {}, {}, set())
     assert not delegate_output._covered_whole(key, 50, 99, 100) and delegate_output._covered_whole(key, 99, 100, 100)
     assert "wake:other|path|sha" not in delegate_output._READ_COVERAGE
+
+
+def _review_run(root, *, run_id="review-leaf", wave="review-wave", operation="review-operation",
+                surface="multi_model_review", task_id=_NANNY, requested=True):
+    from ouroboros import delegate_custody as custody
+
+    token = f"invocation-{run_id}"
+    common = {"task_id": task_id, "root_task_id": task_id, "invocation_id": token, "route": "route",
+              "source": "review_substrate", "surface": surface, "slot_id": "seat", "operation_id": operation,
+              "review_wave_id": wave, "review_slot_id": "seat"}
+    if requested:
+        assert custody.emit(root, custody.START_REQUESTED, {**common, "idempotency_key": token,
+            "request": {"prompt": "synthetic review"}})
+    assert custody.emit(root, custody.STARTED, {**common, "run_id": run_id, "ledger_root": str(root)})
+    return run_id
+
+
+def _ordinary_wait(ctx, tool, runs):
+    from ouroboros.tools import delegate
+    from ouroboros.tools.control_task_results import await_messages_entry
+
+    entry = (next(entry for entry in delegate.get_tools() if entry.name == tool)
+             if tool == "delegate_wait" else await_messages_entry())
+    return entry.handler(ctx, runs=runs)
+
+
+@pytest.fixture
+def no_review_wait_effects(monkeypatch, stub_delegate_engines):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("A review wait or exact settled collection tried to observe a leaf or dispatch a reviewer")
+
+    for name in ("ouroboros.tools.delegate._read_run", "ouroboros.delegate_supervision._wait_in_slot",
+                 "ouroboros.review_substrate.run_review_request", "ouroboros.review_substrate.ReviewCoordinator.run",
+                 "ouroboros.llm.LLMClient.chat", "ouroboros.claudexor_daemon.ensure_owned_gateway",
+                 "ouroboros.gateways.claudexor.ClaudexorGateway"):
+        monkeypatch.setattr(name, forbidden)
+
+
+@pytest.mark.parametrize("tool", ["delegate_wait", "await_messages"])
+@pytest.mark.parametrize("surface,attempt_tool,collector", [
+    ("change", "review_change", "review_change"),
+    ("commit_gate", "commit_reviewed", "commit_reviewed"),
+])
+def test_review_wait_redirect_binds_original_collector(tmp_path, no_review_wait_effects, monkeypatch, tool, surface,
+                                                      attempt_tool, collector):
+    """Even a mixed selector parks nothing. Its reference resolves in the actual collector, not a mock router."""
+    from ouroboros import review_ledger, review_state
+    from ouroboros.tools.review_change import _handle_review_change
+    from ouroboros.tools.review_collection import resolve_reference
+
+    ctx, _ = _nanny(tmp_path)
+    ctx.repo_dir = tmp_path
+    review = _review_run(tmp_path)
+    _run(tmp_path, "ordinary-leaf")
+    row = {"seat_id": "seat", "operation_id": "review-operation", "status": "responded"}
+    exact = review_ledger.ReviewLedgerRecord(
+        record_id="review-exact", task_id=_NANNY, surface=surface, review_wave_id="review-wave",
+        verdict={"aggregate": "PASS"}, rows=[row], brief={"dispute_input": {}})
+    review_ledger.write_record(tmp_path, exact)
+    # Same owner, wave and slot are not enough: the other operation must not get the pointer.
+    review_ledger.write_record(tmp_path, review_ledger.ReviewLedgerRecord(
+        record_id="review-neighbor", task_id=_NANNY, surface=surface, review_wave_id="review-wave",
+        verdict={"aggregate": "FAIL"}, rows=[{**row, "operation_id": "another-operation"}]))
+    attempt = review_state.CommitAttemptRecord(
+        ts="2026-01-01T00:00:00+00:00", commit_message="test", status="reviewed", task_id=_NANNY,
+        repo_key=review_state.make_repo_key(tmp_path), tool_name=attempt_tool, attempt=3, paid=True,
+        review_retry_key="review-wave", review_record_id=exact.record_id,
+        triad_raw_results=[{"slot_id": "seat", "operation_id": "review-operation", "status": "ok"}])
+    review_state.update_state(tmp_path, lambda state: state.record_attempt(attempt))
+
+    with monkeypatch.context() as reads:
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("Wait redirect searched historical attempts or archived review segments")
+
+        reads.setattr(review_state, "_load_state_unlocked", forbidden)
+        reads.setattr(review_ledger, "_index_segments", forbidden)
+        if tool == "delegate_wait":  # the named checkpoint address works even if the hot index no longer lists it
+            ctx._left_review_wait = {"task_id": _NANNY, "retry_key": "review-wave", "record_id": exact.record_id}
+            reads.setattr(review_ledger, "task_record_page", forbidden)
+        response = json.loads(_ordinary_wait(ctx, tool, ["ordinary-leaf", review]))
+    assert response["reason"] == "review_panel_owns_run" and response["slept"] is False
+    assert [run["run_id"] for run in response["review_runs"]] == [review]
+    assert "No selected source was waited on" in response["detail"]
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    assert not getattr(ctx, "_owner_wait_requested", None)
+    assert not (tmp_path / "state/delegate_supervision" / f"{_NANNY}.json").exists()
+
+    recipe = response["review_runs"][0]["collection"]
+    assert recipe["status"] == "collect_existing" and recipe["tool"] == collector
+    assert set(recipe["arguments"]) == {"review_reference"}
+    _, original, retained = resolve_reference(ctx, recipe["arguments"]["review_reference"],
+                                              commit=collector == "commit_reviewed")
+    assert original.attempt == 3 and original.paid and retained["record_id"] == exact.record_id
+    if collector == "review_change":
+        result = json.loads(_handle_review_change(ctx, **recipe["arguments"]))
+        assert result["record_id"] == exact.record_id and result["aggregate"] == "PASS"
+        assert result["reused"] is True and result["cost"] == {"usd": 0.0, "unknown": False}
+
+    ordinary = json.loads(_ordinary_wait(ctx, tool, ["ordinary-leaf"]))
+    assert ordinary["reason"] == "sleep_armed"
+
+
+def test_reviewer_wait_without_continuation_owner_returns_a_gap_instead_of_waiting(tmp_path, no_review_wait_effects):
+    from ouroboros.delegate_supervision import delegate_wait_entry
+
+    ctx, _ = _nanny(tmp_path)
+    ctx.owner_wait_callback = None
+    legacy = _review_run(tmp_path, requested=False)
+    response = _armed(delegate_wait_entry(ctx, run_id=legacy))
+    gap = response["review_runs"][0]["collection"]
+    assert response["reason"] == "review_panel_owns_run" and response["slept"] is False
+    assert gap["status"] == "reference_unavailable" and "review_reference" not in gap
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+
+
+@pytest.mark.parametrize("selector", ["foreign-review", "unknown-run"])
+@pytest.mark.parametrize("tool", ["delegate_wait", "await_messages"])
+def test_ordinary_wait_unknown_or_foreign_review_does_not_offer_a_reference(tmp_path, no_review_wait_effects, tool,
+                                                                          selector):
+    ctx, _ = _nanny(tmp_path)
+    _review_run(tmp_path, run_id="foreign-review", task_id="other-task")
+    response = _ordinary_wait(ctx, tool, [selector])
+    if tool == "delegate_wait":
+        assert json.loads(response)["reason"] == (
+            "run_not_owned" if selector == "foreign-review" else "run_ownership_unknown")
+    else:
+        assert "not delegated runs of this task" in response
+    assert "review_reference" not in response and "review_runs" not in response
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+
+
+def test_review_wait_wrong_wave_never_offers_a_guessed_reference(tmp_path, no_review_wait_effects):
+    from ouroboros.review_ledger import ReviewLedgerRecord, write_record
+
+    ctx, _ = _nanny(tmp_path)
+    review = _review_run(tmp_path)
+    write_record(tmp_path, ReviewLedgerRecord(record_id="not-exact", task_id=_NANNY, surface="change",
+        verdict={"aggregate": "FAIL"}, review_wave_id="different-wave",
+        rows=[{"seat_id": "seat", "operation_id": "review-operation"}]))
+    response = json.loads(_ordinary_wait(ctx, "await_messages", [review]))
+    gap = response["review_runs"][0]["collection"]
+    assert gap["status"] == "reference_unavailable" and gap["reader"]["tool"] == "review_status"
+    assert "not-exact" not in json.dumps(response)
+
+
+def test_review_wait_skill_offers_exact_free_reader_not_a_skill_review_reissue(tmp_path, no_review_wait_effects):
+    from ouroboros.review_ledger import ReviewLedgerRecord, write_record
+
+    ctx, _ = _nanny(tmp_path)
+    review = _review_run(tmp_path, surface="skill_review")
+    write_record(tmp_path, ReviewLedgerRecord(record_id="skill-exact", task_id=_NANNY, surface="skill",
+        verdict={"aggregate": "FAIL"}, review_wave_id="review-wave",
+        rows=[{"seat_id": "seat", "operation_id": "review-operation"}]))
+    response = json.loads(_ordinary_wait(ctx, "delegate_wait", [review]))
+    action = response["review_runs"][0]["collection"]
+    assert action["status"] == "read_existing" and action["surface"] == "skill"
+    assert action["tool"] == "query_data" and action["arguments"] == {
+        "op": "json", "kind": "review_ledger", "ids": ["skill-exact"]}
+
+
+def test_review_wait_plan_offers_free_plan_read_without_an_ask(tmp_path, no_review_wait_effects):
+    from ouroboros import plan_record
+
+    ctx, _ = _nanny(tmp_path)
+    review = _review_run(tmp_path, surface="plan_review")
+    # Keep ordinary plan-record readers exercised; synthetic seats are already settled so no provider is needed.
+    plan_record.append_ask(tmp_path, _NANNY, {"ask_id": "ask-1", "revision": None,
+        "retry_key": "review-wave", "participants": [
+            {"seat_id": "seat", "status": "failed", "operation_id": "review-operation"}]})
+    response = json.loads(_ordinary_wait(ctx, "await_messages", [review]))
+    action = response["review_runs"][0]["collection"]
+    assert action == {"status": "read_existing", "surface": "intention", "ask_id": "ask-1",
+                      "tool": "plan_task", "arguments": {}}

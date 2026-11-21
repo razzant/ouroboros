@@ -45,7 +45,6 @@ def real_settings(role_ui, tmp_path, monkeypatch):
     data_dir.mkdir()
     monkeypatch.setattr(cfg, "DATA_DIR", data_dir)
     monkeypatch.setattr(cfg, "SETTINGS_PATH", data_dir / "settings.json")
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "advanced")
     monkeypatch.setattr(gw, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(gw, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     for key in (*cfg.SETTINGS_DEFAULTS, CONNECTIONS_KEY, "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
@@ -73,6 +72,7 @@ def real_settings(role_ui, tmp_path, monkeypatch):
 
     cfg.reset_runtime_mode_baseline_for_tests()
     try:
+        cfg.initialize_runtime_mode_baseline("advanced")
         with TestClient(app) as client:
             role_ui["page"].route("**/api/settings", forward)
             role_ui["page"].route("**/api/owner/safety-model", forward)

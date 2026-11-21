@@ -15,7 +15,7 @@ subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.docu
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
-  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages open a turn in the host-resolved room; the reference does not select a worker. Quiz answers use the web card's decision ingress.
+  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never instructions to running work; a Reply to a Project's card or notice opens its own turn in that Project. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
   token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
@@ -35,7 +35,9 @@ this integration's 10 MiB download cap) can be sent to Ouroboros, with or withou
 caption; replies, photos, videos, documents, typing state, subagent cards, quiz
 cards, and opt-in notifications are mirrored back to that owner. A helper's own final report
 stays in the app, where its card shows it; Ouroboros's answer speaks for it, while a helper's
-message to you, question or file still comes here. Telegram's typing
+message to you, question or file still comes here. A helper's card and its notices for work begun
+from this chat also come in Telegram-only mode, from a Project room too, but only through the bot and
+chat that took the message that began it; the card quotes nothing. Telegram's typing
 indicator stays on while a reply you asked for, mirrored to this chat, is actively
 being prepared by Ouroboros or a working helper; it stops for Pause, Stop now and
 after the answer, and a question waiting for you, a model-access wait or background work
@@ -57,16 +59,20 @@ renamed Project updates its worker bubble. Long messages repeat the label on eac
 part; a caption that no longer fits goes out as full text before its media.
 Quizzes keep the label through answers and edits.
 
-The bridge remembers every mirrored part, including media and completion
-notices, in a bounded durable message map. Replying passes its host row or work
-reference through normal chat and opens a turn in the target's Main or Project room.
-The same bot in the same Telegram chat answers the exact owner message, even the
-latest. A reply about a subagent's card uses that child's Telegram card when known.
-Unknown or expired reply targets are reported rather than routed elsewhere;
-Telegram must accept the native anchor when one is specified. If Telegram definitely
-rejects a missing child card before any part is delivered or uncertain, the bridge
-can reply to the owner's original message in the same bot and chat. A resumed
-delivery keeps the recorded anchor for all remaining parts.
+The bridge remembers every mirrored part, including media, completion notices
+and helper cards (also after an edit), in a bounded durable message map. A Reply
+to the owner's own message, or to a message of this conversation or Main, stays an
+ordinary turn here, its quote a reference Ouroboros interprets. A Reply to a
+Project's card or notice opens its own turn in that Project; a target that is gone
+or retired is refused and never lands in Main. A Reply to a bot message that no map,
+helper-card index or open question knows is refused here, never guessed. Answers to
+an earlier owner message from this Telegram chat use a native reply; answers to its
+latest owner message stay unquoted. A Project Reply's turn (its answer, questions,
+media, cards and typing) stays in the bot and chat that took the Reply, as does any
+notice about it. The turn answers with a strict native reply on the card he pressed,
+however old, else on the card of the helper the replied notice is about, else on his
+message; its parts keep that anchor, and only when Telegram definitely says the card
+is gone before any part arrived does the owner's own message take its place, once.
 Relay success stays silent; a host-reported failure arrives as one line. A relayed row quotes the owner's words verbatim as
 plain text, under where he wrote them and with the file names, above the note; a
 note between works that quotes none of his words stays in its room.
@@ -185,7 +191,7 @@ edits to the bot that polled or sent: a newly chosen server or another bot's tok
 read from its oldest pending update, and a batch already handled is not handled again.
 Records saved before 1.4.3 name no bot and anchor nothing: a reply at an old card's
 number (one of the last 50) stays here, pointing to the card, even if another
-message was meant; another reply to an old message stays here, with a note. A
+message was meant; another reply to an old message is refused here, with a note. A
 batch unconfirmed at the upgrade may repeat a turn.
 
 Version 1.4.1 declares `secret_fields` (`botToken` → `TELEGRAM_BOT_TOKEN`), so setup can

@@ -10,25 +10,25 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 |---|---|---:|---:|
 | D01 | Agent core & main loop | 68 | 0 |
 | D02 | LLM client, routing & providers | 52 | 0 |
-| D03 | Context assembly, fit & compaction | 43 | 0 |
+| D03 | Context assembly, fit & compaction | 44 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 58 | 0 |
 | D06 | Review stack | 101 | 0 |
 | D07 | Delegation, subagents & Claudexor | 113 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 80 | 0 |
-| D09 | Cancellation, owner control & process custody | 28 | 0 |
+| D09 | Cancellation, owner control & process custody | 29 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 122 | 0 |
+| D11 | Gateway, server & Web UI | 123 | 0 |
 | D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 74 | 0 |
-| D15 | Memory, knowledge, consciousness & self-evolution | 41 | 0 |
+| D15 | Memory, knowledge, consciousness & self-evolution | 42 | 0 |
 | D16 | Observability, usage accounting & cost | 32 | 0 |
-| D17 | Projects, workspaces & task results | 60 | 0 |
+| D17 | Projects, workspaces & task results | 61 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1061** | **0** |
+| **total** | | **1066** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -334,6 +334,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 
 ### D03 — Context assembly, fit & compaction
 
+- `ouroboros/arrival_notes.py`
 - `ouroboros/capability_evidence.py`
 - `ouroboros/chronicle_lead.py`
 - `ouroboros/context.py`
@@ -771,6 +772,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 
 ### D09 — Cancellation, owner control & process custody
 
+- `ouroboros/answer_facts.py`
 - `ouroboros/cancel_intents.py`
 - `ouroboros/custody_owed.py`
 - `ouroboros/launch_custody.py`
@@ -950,6 +952,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/question_answers.py`
 - `ouroboros/record_compression.py`
 - `ouroboros/room_reader.py`
+- `ouroboros/saved_state_retirement.py`
 - `ouroboros/server_auth.py`
 - `ouroboros/server_boot.py`
 - `ouroboros/server_entrypoint.py`
@@ -1107,6 +1110,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/dialogue_provenance.py`
 - `ouroboros/evolution_checkpoints.py`
 - `ouroboros/evolution_fingerprint.py`
+- `ouroboros/held_notes.py`
 - `ouroboros/improvement_backlog.py`
 - `ouroboros/knowledge.py`
 - `ouroboros/knowledge_edits.py`
@@ -1226,6 +1230,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/work_domain.py`
 - `ouroboros/work_skill_payloads.py`
 - `ouroboros/workspace_admission.py`
+- `ouroboros/workspace_capture_result.py`
 - `ouroboros/workspace_executor.py`
 - `ouroboros/workspace_executor_paths.py`
 - `ouroboros/workspace_file_outputs.py`

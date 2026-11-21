@@ -170,3 +170,224 @@ def test_a_call_opening_row_names_itself_on_its_live_echo():
     owner = {**opening, "role": "user", "system_type": ""}
     owner.pop("host_fact")
     assert "row_client_message_id" not in projection_fields(owner), "the owner's own row keeps its id alone"
+
+
+# --- the owner bot's Reply: one room decision on its accepted row, one physical address for its own turn ------------
+
+def _reply_world(root):
+    """A Project whose converted root has an admitted helper, as the room rule reads them."""
+    from ouroboros import projects_registry as pr
+    from ouroboros.task_results import write_task_result
+
+    project = pr.create_project(root, "reply-room", name="Reply room")
+    write_task_result(root, "project-root", "running", root_task_id="project-root", chat_id=1)
+    pr.bind_task_to_project(root, "project-root", project["id"], origin={"absent": "system"})
+    write_task_result(root, "helper", "running", delegation_role="subagent", parent_task_id="project-root",
+                      root_task_id="project-root", chat_id=1)
+    return project
+
+
+def _bot_message(bridge, root, address, *, mid, text="About this", own=False):
+    """The owner bot's message 'mid' as /chat/inject accepts it from the bundled bridge: a Reply to a bot message
+    names his own message in its transport (``owner_message_id``), a Reply to his own words does not."""
+    facts = {"owner_message_id": mid} if address and not own else {}
+    row, _ = message_bus.accept_local_message(
+        bridge, root, text, chat_id=42, user_id=42, client_message_id=f"tg:123:42:{mid}", source="skill:telegram",
+        transport={"kind": "telegram", "conversation_id": "42", "bot_id": "123", **facts},
+        **({"task_metadata": {"reply_to": address}} if address else {}))
+    return row
+
+
+def _drain(bridge):
+    return [bridge._inbox.get_nowait() for _ in range(bridge._inbox.qsize())]
+
+
+@pytest.mark.parametrize("target, expected", [
+    ("own_words", "ordinary"), ("own_words_unread", "ordinary"), ("answer_here", "ordinary"), ("web_main", "ordinary"),
+    ("project_card", "project"), ("helper_notice", "project"),
+    ("missing_card", "refused"), ("unresolved_here", "refused"), ("unresolved_elsewhere", "refused"),
+    ("retired_project", "refused"),
+])
+def test_the_owner_bots_reply_takes_its_room_once_on_its_accepted_row(tmp_path, monkeypatch, target, expected):
+    from ouroboros import projects_registry as pr
+    from ouroboros.task_results import write_task_result
+
+    bridge, _echoes = _web_bridge(tmp_path, monkeypatch)
+    project = _reply_world(tmp_path)
+    room = project["chat_id"]
+    if target == "own_words":
+        address = format_address(row_address(_bot_message(bridge, tmp_path, "", mid=10, text="My earlier words")))
+    elif target == "answer_here":
+        write_task_result(tmp_path, "telegram-turn", "completed", chat_id=42)
+        address = format_address(row_address(message_bus.log_chat("out", 42, 0, "An answer here", task_id="telegram-turn")))
+    elif target == "web_main":
+        address = format_address(row_address(message_bus.log_chat("out", 1, 0, "A web answer")))
+    elif target in ("project_card", "retired_project"):
+        address = "task:project-root"
+    elif target == "helper_notice":
+        address = format_address(row_address(message_bus.log_chat(
+            "system", room, 0, "The helper stopped", task_id="helper", record_type="terminal_incident",
+            message_meta={"role": "system", "system_type": "terminal_incident"})))
+    elif target == "missing_card":
+        address = "task:gone"
+    else:  # a row the store cannot read now: his own words stay his, a bot message is never placed by its numbers
+        address = f"row:{room if target == 'unresolved_elsewhere' else 42}@2026-11-20T00:00:00Z#000000000000"
+    if target == "retired_project":
+        pr.begin_project_deletion(tmp_path, project["id"])
+        pr.complete_project_deletion(tmp_path, project["id"])
+    _drain(bridge)
+    reference = _bot_message(bridge, tmp_path, address, mid=50, own=target.startswith("own_words"))["reply_to"]
+    assert reference["address"] == address
+    if expected == "ordinary":
+        assert "telegram_room_chat_id" not in reference, "a quote of this conversation or Main, never a destination"
+    else:
+        assert reference["telegram_room_chat_id"] == (room if expected == "project" else None)
+    [queued] = _drain(bridge)
+    assert queued["task_metadata"]["reply_reference"] == reference, "the dispatch reads the decision the row keeps"
+    if expected == "project":
+        pr.begin_project_deletion(tmp_path, project["id"])  # a later change of the room is the dispatch's to see
+    again, rejoined = message_bus.accept_local_message(
+        bridge, tmp_path, "About this", chat_id=42, user_id=42, client_message_id="tg:123:42:50",
+        source="skill:telegram", transport={"kind": "telegram", "conversation_id": "42"},
+        task_metadata={"reply_to": address})
+    assert rejoined and again["reply_to"] == reference, "a redelivery rejoins; the decision is never taken again"
+
+
+def test_only_the_accepted_exact_reply_gives_its_turn_a_physical_address(tmp_path, monkeypatch):
+    from ouroboros.chat_references import exact_reply_transport, origin_reply, proven_address, telegram_root_address
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import write_task_result
+
+    bridge, _echoes = _web_bridge(tmp_path, monkeypatch)
+    project = _reply_world(tmp_path)
+    exact = _bot_message(bridge, tmp_path, "task:helper", mid=50)
+    plain = _bot_message(bridge, tmp_path, "", mid=51, text="Just words")
+    address = {"kind": "telegram", "conversation_id": "42", "bot_id": "123"}
+    assert exact_reply_transport(exact) == {**address, "host_address": "reply", "exact_reply": {"owner_message_id": 50}}
+    assert exact_reply_transport(plain) == {}, "an ordinary message keeps the room's binding, as before"
+    assert exact_reply_transport({**exact, "source": "skill:other"}) == {}, "another connector's fields grant nothing"
+    ref = build_owner_message_ref(chat_id=42, client_message_id="tg:123:42:50", ts=exact["ts"], text=exact["text"])
+    transport = {}
+    assert origin_reply(tmp_path, "exact-turn", {"origin_message_ref": ref}, transport=transport)["address"] == \
+        format_address(row_address(exact))
+    assert (transport["host_address"], transport["exact_reply"]["owner_message_id"]) == ("reply", 50)
+    # A helper of a tree that began there learns where the phone is: kind, chat and bot, never his message's anchor.
+    write_task_result(tmp_path, "exact-turn", "running", chat_id=project["chat_id"], origin_message_ref=ref)
+    assert telegram_root_address(tmp_path, "exact-turn") == {**address, "host_address": "root"}
+    write_task_result(tmp_path, "web-turn", "running", chat_id=project["chat_id"])
+    assert telegram_root_address(tmp_path, "web-turn") == {}
+    # A row accepted before the bridge sent its bot proves one only by its bot-qualified id, in exact agreement.
+    before = {"kind": "telegram", "conversation_id": "42", "sender_label": "Telegram (Owner)"}
+    for client_message_id, proven in (("tg:123:42:52", address), ("tg:42:53", {}), ("tg:123:43:54", {})):
+        assert proven_address({**plain, "client_message_id": client_message_id, "transport": before}) == proven
+    assert proven_address({**plain, "transport": {**plain["transport"], "bot_id": "999"}}) == {}, "its id names 123"
+    assert proven_address({**plain, "chat_id": 1}) == {}, "accepted in another chat than the one it names"
+
+
+def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None):
+    """The accepted row through the owner router, as server.py hands it over: (turns, follow-ups, receipts).
+    ``live``: the live roots each chat may address (``addressable_roots``), by chat id."""
+    from types import SimpleNamespace
+
+    from ouroboros import server_owner_routing as routing
+    from ouroboros.project_dialogue import build_owner_message_ref
+
+    [queued] = _drain(bridge)
+    started, followups, receipts = [], [], []
+
+    def running_work(*_args, **_kwargs):
+        pytest.fail("the owner bot's words are never a running Project work's input")
+
+    monkeypatch.setattr(routing, "_route_project_chat_to_running_task", running_work)
+    monkeypatch.setattr(routing, "_route_main_followup",
+                        lambda _ctx, chat, *_args, **_kwargs: followups.append(chat) or open_turn)
+    monkeypatch.setattr(routing, "addressable_roots", lambda _ctx: SimpleNamespace(
+        rows=lambda chat=None: [dict(root) for root in (live or {}).get(chat, [])], gap=None))
+    monkeypatch.setattr(routing, "_decision_turn_metadata", lambda _ctx, _room, _cmid, meta, _roots: meta)
+    monkeypatch.setattr(routing, "_record_routing_receipt", lambda _bridge, _ctx, **fields: receipts.append(fields))
+    monkeypatch.setattr("ouroboros.owner_relay.carry_row_at_receipt", lambda *_args, **_kwargs: None)
+    source = build_owner_message_ref(chat_id=42, client_message_id=row["client_message_id"], ts=row["ts"],
+                                     text=row["text"])
+    ctx = SimpleNamespace(DRIVE_ROOT=root, handle_chat_direct=lambda *args, **kwargs: started.append((args, kwargs)))
+    routing._route_owner_message(bridge, ctx, {
+        "chat_id": 42, "text": row["text"], "log_text": row["text"], "image_caption": "", "image_data": None,
+        "client_message_id": row["client_message_id"], "task_constraint": None, "origin_message_ref": source,
+        "task_metadata": {**(queued.get("task_metadata") or {}), "_host_operation": True},
+        "source": "skill:telegram", "received_at": row["ts"]})
+    return started, followups, receipts
+
+
+@pytest.mark.parametrize("conversation", ["new", "open"])
+def test_plain_words_and_a_reply_to_words_stay_one_conversation(tmp_path, monkeypatch, conversation):
+    bridge, _echoes = _web_bridge(tmp_path, monkeypatch)
+    _reply_world(tmp_path)
+    earlier = _bot_message(bridge, tmp_path, "", mid=10, text="Check the parser")
+    _drain(bridge)
+    open_turn = "turn-open" if conversation == "open" else ""
+    outcomes = {}
+    for kind, address, mid in (("plain", "", 11), ("reply", format_address(row_address(earlier)), 12)):
+        row = _bot_message(bridge, tmp_path, address, mid=mid, text="and on Windows too", own=True)
+        if address:
+            assert row["reply_to"]["address"] == address and row["reply_to"]["role"] == "user"
+            assert "telegram_room_chat_id" not in row["reply_to"], "the quote rides along; it routes nothing"
+        started, followups, receipts = _route(bridge, tmp_path, monkeypatch, row, open_turn=open_turn)
+        outcomes[kind] = ([(args[0], kwargs["task_metadata"].get("project_id", "")) for args, kwargs in started],
+                          followups, [receipt["action"] for receipt in receipts])
+    turns = [] if open_turn else [(42, "")]
+    saved = ["mailbox_delivery"] if open_turn else []
+    assert outcomes["plain"] == outcomes["reply"] == (turns, [42], saved), "the same physical conversation, alike"
+
+
+@pytest.mark.parametrize("target", ["project", "retired"])
+def test_a_confirmed_project_reply_opens_its_own_turn_there_and_an_unavailable_one_is_refused(tmp_path, monkeypatch,
+                                                                                            target):
+    from ouroboros import projects_registry as pr
+
+    bridge, _echoes = _web_bridge(tmp_path, monkeypatch)
+    project = _reply_world(tmp_path)
+    row = _bot_message(bridge, tmp_path, "task:helper", mid=50, text="Why did it stop?")
+    assert row["reply_to"]["telegram_room_chat_id"] == project["chat_id"]
+    if target == "retired":  # retired after its acceptance: the dispatch reads its room again
+        pr.begin_project_deletion(tmp_path, project["id"])
+    live = {project["chat_id"]: [{"task_id": "project-root"}], 42: [{"task_id": "telegram-turn"}]}
+    started, followups, receipts = _route(bridge, tmp_path, monkeypatch, row, open_turn="turn-open", live=live)
+    assert followups == [], "never this chat's running turn, nor the helper it asked about"
+    carried = {tid: [entry for entry in _mail(tmp_path, tid) if entry.get("host_carried")]
+               for tid in ("project-root", "telegram-turn")}
+    if target == "retired":
+        assert started == [] and [(r["chat_id"], r["status"], r["reason"]) for r in receipts] == [
+            (42, "project_unavailable", "reply_target_unavailable")]
+        assert carried == {"project-root": [], "telegram-turn": []}, "no Project, no context for anyone"
+        return
+    [(args, kwargs)] = started
+    assert args[0] == project["chat_id"] and kwargs["task_metadata"]["project_id"] == project["id"]
+    assert kwargs["task_metadata"]["origin_message_ref"]["client_message_id"] == "tg:123:42:50"
+    assert kwargs["task_metadata"]["reply_reference"]["telegram_room_chat_id"] == project["chat_id"]
+    assert receipts == []
+    # The Project's other live root hears it as context, read where he wrote it; his private chat's turn does not.
+    [context] = carried["project-root"]
+    assert carried["telegram-turn"] == [] and context["host_carried"] == {"went_to": "routed:head"}
+    assert [(row["client_message_id"], row["chat_id"]) for row in context["owner_rows"]] == [("tg:123:42:50", 42)]
+    assert context["relay"]["quotes"][0]["source"]["chat_id"] == 42
+
+
+def _mail(root, task_id):
+    """The entries a work's mailbox holds."""
+    from ouroboros.owner_mailbox import _mailbox_path, mailbox_lines
+
+    path = _mailbox_path(root, task_id)
+    return [json.loads(line) for line in mailbox_lines(path.read_text(encoding="utf-8"))] if path.exists() else []
+
+
+def test_a_reply_accepted_before_this_version_keeps_the_ordinary_path(tmp_path, monkeypatch):
+    """Work begun before the update dispatches as it was accepted: a reference without the decision routes nothing."""
+    bridge, _echoes = _web_bridge(tmp_path, monkeypatch)
+    _reply_world(tmp_path)
+    row = _bot_message(bridge, tmp_path, "task:helper", mid=50)
+    [queued] = _drain(bridge)
+    reference = {key: value for key, value in queued["task_metadata"]["reply_reference"].items()
+                 if key != "telegram_room_chat_id"}
+    bridge._inbox.put({**queued, "task_metadata": {**queued["task_metadata"], "reply_reference": reference}})
+    started, followups, receipts = _route(bridge, tmp_path, monkeypatch, row)
+    assert followups == [42] and receipts == []
+    assert [(args[0], kwargs["task_metadata"].get("project_id", "")) for args, kwargs in started] == [(42, "")]

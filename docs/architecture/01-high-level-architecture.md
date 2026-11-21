@@ -63,7 +63,7 @@ supervisor/ — background thread inside server.py (§5)
   consciousness_carriers.py — settles an own-clock wake from its carrier's terminal (§6 Background consciousness)
   owner_pause_control.py — owner Pause fence, member wake, tree settlement (§6)
   continuation_admission.py, tree_census.py — owner Continue admission: replay first, predecessor claim; the writer census memo (§6 Owner Continue)
-  sleep_wake.py — cold model-sleep wake with a typed `sleep_wake` grant, vetoed by holds (§6)
+  sleep_wake.py — exact wake grants for ready sleeps and readable technical waits (§6)
   restart_retention.py — stop retention and restart/update-abort return authority (§5, §9)
   queue_transitions.py, task_ownership.py — the root admission seal (stored as `acceptance_fences`), Resume, evolution stop, fenced Project deletion; ownership reads precede the queue lock (§5, §6)
   terminal_delivery.py, terminal_cascade.py, terminal_supersession.py — delivery-id dedupe, byte receipts, bounded outbox (ouroboros/terminal_outbox.py); one owner message per settled cascade (§5, §10)
@@ -106,7 +106,7 @@ ouroboros/ — agent core and shared runtime (§6)
   packaged_cli.py, packaged_cli_install.py — packaged desktop CLI bridge and its command-shim installer
   agent.py — task orchestrator; a loop crash is projected from captured evidence or an explicit `loop_evidence_unavailable`, never invented counters (§6 Task lifecycle)
   startup_historical_audit.py — explicit seal-audit child in its own process group (`python -m ouroboros.startup_historical_audit`; §2; docs/MODEL_SEND_OBSERVABILITY.md)
-  maintenance.py, maintenance_jobs.py, maintenance_retirement.py, plan_collection_job.py, record_compression.py, temp_sweep.py — the maintenance child's history-sized jobs and durable `job:<name>` facts (§5)
+  maintenance.py, maintenance_jobs.py, maintenance_retirement.py, plan_collection_job.py, record_compression.py, saved_state_retirement.py, temp_sweep.py — maintenance child jobs, `job:<name>` facts (§5)
   focus.py — authored focus with typed source ref; no dialogue or path escapes
   agent_startup_checks.py — agent-boot verification (warning-only health) and native-host adoption for self-restart (§2)
   agent_task_pipeline.py — task execution pipeline: result, artifacts, frozen cost snapshot, the review lens, root-only post-task work (§6 Task lifecycle)
@@ -128,7 +128,7 @@ ouroboros/ — agent core and shared runtime (§6)
   loop.py — the LLM tool loop, finalization nudges and the FINAL ANSWER candidate (§6 Task lifecycle)
   late_review_marks.py — a review settled after its author could receive it (a plan reply, a left wave), kept in its room's view until the mind releases it (§6 Review stack)
   result_material.py — what a task produced, exact copies (§6 Result review)
-  owner_source.py — resolves owner chat/quiz/mailbox membership; action meaning belongs to Main (§6 Owner routing verbs)
+  owner_source.py, answer_facts.py — resolves owner chat/quiz/mailbox membership and answer frames; action meaning belongs to Main (§6 Owner routing verbs)
   delivery_seal.py — the root admission seal at an author stop, re-exported from `loop`; stored names keep the former fence's (§6 Result review)
   review_price.py — the measured price of one review by one reviewer row, from the usage ledger (§6 Result review; §7 Review pool)
   loop_llm_call.py — single-round LLM call, current-call event producer and usage accounting
@@ -202,7 +202,7 @@ ouroboros/ — agent core and shared runtime (§6)
   openai_chat_custom.py, openai_chat_dispatch.py — direct-OpenAI Chat function→custom codec and its dispatch policy: custom first, exact-dialect fallback, task-local `none` last
   request_wire_contract.py, request_wire_resolution.py, request_wire_receipts.py, request_wire_attempt.py, request_wire_custom_validation.py, request_wire_recovery.py, request_wire_temperature.py, effort_evidence.py — exact-route wire compatibility (§6 Context fitting, retry, and compaction; §10 invariant 13)
   anthropic_native_custody.py, openai_responses_custody.py — same-route replay custody: whole Anthropic reasoning blocks, whole Responses turns
-  reasoning_artifacts.py — sealed-vs-portable reasoning-artifact classification, fail-closed; `SIGNED_PORTABLE` is a decaying external fact, extended only by a fresh cross-provider replay probe (inventory: docs/DEVELOPMENT.md)
+  reasoning_artifacts.py — sealed-vs-portable reasoning-artifact classification, fail-closed; `SIGNED_PORTABLE` is a decaying external fact, extended only by a fresh cross-provider replay probe
   llm_observability.py — public call projections persisted; private sidecars stripped from durable records
   llm_probe.py — Provider Test, non-generating reachability; no chat retry, fallback or learning
   merge_receipts.py — task-owned PR merge intent, GitHub readback, durable receipt (§6)
@@ -222,7 +222,7 @@ ouroboros/ — agent core and shared runtime (§6)
   chronicle_import.py, memory_nomination_receipts.py, memory_inventory.py — `legacy` records: one model-free import of prior dialogue memory (nominations as marks) or a transfer; what is open or folded (§6)
   consolidator.py, memory_fallback.py — Light transport, one signed draft per root with wakes OFF; no knowledge writes (§6)
   memory.py — scratchpad, identity, chat history
-  knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, text_change.py, memory_publication.py, memory_texts.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/workpad/registry: origin-stamped history row, then atomic replacement (§6)
+  knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, held_notes.py, text_change.py, memory_publication.py, memory_texts.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/workpad/registry: origin-stamped history row, then atomic replacement (§6); heads of the active global notes whose recorded claims meet a focus's situation names (a helper's: those its scheduler carried), and of the active global notes those heads link (one hop), captured once per work (held_notes.py)
   project_facts.py — project_id resolution and per-project knowledge under `projects/<id>/knowledge`, isolated from `memory/knowledge`
   task_tree_ledger.py — append-only `data/task_trees/<root>/blackboard.jsonl`: ephemeral swarm coordination (`tree_note`/`tree_read`), mirrored into the project journal at root completion
   projects_registry.py, project_admission.py, project_closure.py, project_folder.py — registry lifecycle, admission, reversible closure and the folder door (§6 Project registry and lease)
@@ -252,12 +252,12 @@ ouroboros/ — agent core and shared runtime (§6)
   context_layout.py — doc-layout SSOT; `book_navigation` in Low/Nano, full ARCHITECTURE in Max; reduction relocates, never silently truncates (§6 Context fitting)
   reference_books.py — ordered book reader/validator; free worktree balance vs cached official merge-base, unknown if unavailable, nonblocking (DEVELOPMENT "Documentation contract")
   local_model_server.py — read-only local formatter measurement and serving-process probe
-  context_compaction.py, context_source_view.py, context_renewal.py, context_health.py — atomic compaction, source-address recovery, same-task renewal, provenance capsules, transactional apply; health invariants: own delegated obligations full, all foreign work one exact-source pointer (§6 Context fitting)
+  context_compaction.py, context_source_view.py, context_renewal.py, context_health.py, arrival_notes.py — atomic compaction, source-address recovery, same-task renewal, dated provenance capsules named at arrival, transactional apply; health invariants: own delegated obligations full, all foreign work one exact-source pointer (§6 Context fitting)
   context_runtime_facts.py, engine_facts.py — the runtime section's fact builders
   headless.py, history_retention.py — child-drive isolation, answer/file adoption, workspace patches, memory export; typed `sensitive_blocked` exclusions (§6 Headless finalization; §10)
   task_custody.py, owner_keep.py, review_thread_retention.py — the one child-drive deletion owner (`settle_child_drive`) and per-task custody lock; one task's Keep; archived reviewer threads and gated release (§6 Headless finalization)
-  headless_status.py — lifecycle vocabulary shared by the headless owners
-  workspace_patch_rules.py, workspace_patch_capture.py — patch-exclusion rules (env/cache, junk, lockfiles, credential-shaped names); the patch artifact and its manifest
+  headless_status.py — shared headless lifecycle states
+  workspace_patch_rules.py, workspace_patch_capture.py, workspace_capture_result.py — env/cache, junk, lockfile and credential-name exclusions; patch/manifest I/O
   workspace_copies.py — git-copy source/baseline identity and own-body policy (§6 Delegated subagents)
   coop_checkpoint.py — quiescent checkpoint commits of cooperative trees from a mutative child's `write_root`; a root mid merge/rebase/cherry-pick/revert is skipped (§5)
   delegate_output.py, delegate_directory.py, workspace_file_outputs.py — retained terminal JSON with physical-task reads; directory apply/discard and ordinary-folder results with exact before/after identities (§6 Terminal products)

@@ -996,7 +996,7 @@ def api_task_artifact(request: Request):
         return json_error("artifact not found", 404, task_id=task_id, artifact=name)
     (index, _path, relative), _order, artifact = min(matches, key=lambda item: (item[0][0], item[1]))
     return serve_task_file(drive_root, stores[index], relative, name, recorded_identity(artifact), task_id=task_id,
-                           mutable=not artifact.get("immutable"))
+                           mutable=not artifact.get("immutable"), head_only=request.method == "HEAD")
 
 
 def _record_cascade_incident(task_id: str, kind: str, detail: str = "") -> None:

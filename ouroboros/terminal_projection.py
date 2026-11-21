@@ -337,13 +337,6 @@ def _append_project(root: Any, tid: str, task: dict, event: dict, *,
         return False
     row = _project_row(tid, effective, {key: event[key] for key in ("ts", "chat_id") if key in event}, ready,
                        delivery=delivery)
-    if is_root:
-        from ouroboros.chat_references import origin_reply
-
-        transport: dict = {}
-        origin_reply(root, tid, effective, transport=transport)
-        if transport:
-            row["transport"] = transport
     appended = False
     # A readiness minted in this very call has no row yet: nothing to scan for.
     existing_row = None if minted_now or not is_root else _already_in_chat(root, row)

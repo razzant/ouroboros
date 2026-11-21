@@ -32,31 +32,6 @@ def test_fresh_telegram_panic_failure_is_not_retried(tmp_path, monkeypatch):
     assert 'not confirmed' in client.sent[0][1]
 
 
-def test_panic_reply_dispatches_without_touching_conversation_state(tmp_path, monkeypatch):
-    plugin = _load_plugin(tmp_path)
-    forbidden = []
-
-    def touched(*args):
-        forbidden.append(args)
-        raise AssertionError("Panic must not consult or record ordinary chat state")
-
-    monkeypatch.setattr(plugin, "_owner_message_seen", touched)
-    monkeypatch.setattr(plugin, "_owner_ingress_fields", touched)
-    monkeypatch.setattr(plugin, "_POLL_GENERATION_STARTED", 100)
-    inject = AsyncMock()
-    monkeypatch.setattr(plugin, "_inject", inject)
-    client = FakeTelegramClient("fake")
-    asyncio.run(plugin._handle_owner_message(FakeApi(tmp_path), client, {
-        "message": {"text": "/panic", "date": 200, "message_id": 3,
-                    "chat": {"id": 7}, "from": {"id": 8},
-                    "reply_to_message": {"message_id": 2}},
-    }, 1, "strict", "en"))
-    inject.assert_awaited_once()
-    payload = inject.await_args.args[1]
-    assert (payload["text"], payload["user_id"], payload["chat_id"]) == ("/panic", 8, 7)
-    assert "reply_to" not in payload and not forbidden and not client.sent
-
-
 @pytest.mark.parametrize("mode", ["strict", "safe_commands", "full_access"])
 def test_genuine_owner_panic_bypasses_ordinary_command_mode(tmp_path, monkeypatch, mode):
     plugin = _load_plugin(tmp_path)

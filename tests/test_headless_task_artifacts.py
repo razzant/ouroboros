@@ -343,7 +343,8 @@ def test_a_failed_terminal_file_preparation_stamps_the_artifact_axis_with_its_bu
     assert row["outcome_axes"]["objective"] == {"status": "not_evaluated", "source": "none"}
 
 
-def test_effective_result_preserves_workspace_patch_kind_with_child_drive(tmp_path):
+def test_effective_result_preserves_workspace_patch_kind_with_child_drive(tmp_path, monkeypatch):
+    from pathlib import Path
     from ouroboros.artifacts import copy_file_to_task_artifacts
     from ouroboros.cli import _patch_from_result
     from ouroboros.task_results import STATUS_COMPLETED
@@ -395,17 +396,14 @@ def test_effective_result_preserves_workspace_patch_kind_with_child_drive(tmp_pa
     assert patch_artifacts[0]["kind"] == "workspace_patch"
     assert any(item.get("kind") == "user_file" for item in effective.get("artifacts") or [] if isinstance(item, dict))
 
-    class FakeClient:
-        def __init__(self):
-            self.paths = []
+    from tests._task_file_http import task_file_client, use_cli_http
 
-        def get_bytes(self, path):
-            self.paths.append(path)
-            return b"diff --git a/tracked.txt b/tracked.txt\n"
+    with task_file_client(parent) as http:
+        client, _ = use_cli_http(monkeypatch, http)
+        public = http.get(f"/api/tasks/{task_id}").json()
+        expected_patch = Path(patch_artifacts[0]["path"]).read_bytes().decode("utf-8")
+        assert _patch_from_result(client, task_id, public, strict=True) == expected_patch
 
-    client = FakeClient()
-    assert _patch_from_result(client, task_id, effective, strict=True).startswith("diff --git")
-    assert client.paths == [f"/api/tasks/{task_id}/artifacts/workspace.patch"]
 
 
 def test_repeated_directory_capture_keeps_its_registered_output_store(tmp_path):

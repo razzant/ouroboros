@@ -192,6 +192,7 @@ export function reasonText(reason) {
     if (!code || !text) return text;
     if (Number.isInteger(reason.count)) return COUNTED_REASONS[code] ? COUNTED_REASONS[code](reason.count) : text;
     if (reason.by?.text) return `${tr(`work.because.${code}`, text)}: ${String(reason.by.text)}`;
+    if (code === 'technical_pause' && text !== 'After a technical problem') return tx(text);
     if (code === 'sleeping' && Array.isArray(reason.wake)) return sleepText(reason.wake) || text;
     // A silence dated by the host reads with its time: the date is the fact (owner 09.11).
     if (code === 'no_progress' && clock(reason.since)) return fmt('No recorded progress since {time}', { time: clock(reason.since) });

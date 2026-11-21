@@ -81,9 +81,9 @@ brew install --cask razzant/ouroboros/ouroboros
 - On Fedora or RHEL, download the generic `.rpm` above and run `sudo dnf install ./ouroboros-*.x86_64.rpm`. RED OS 8 has its own `red80` package.
 - On another x86_64 distribution, download the AppImage, make it executable with `chmod +x Ouroboros-*.AppImage`, and run it. Git must already be installed.
 
-To run tasks, choose a connected Codex account as the Main model source, configure a supported remote provider API key, or use a local GGUF model. Claude Code and Cursor subscriptions can run delegated coding and review; they are not Main model sources. The first-run wizard guides model access, review policy, and budget setup.
+To run tasks, choose a connected Codex account as the Main model source, configure a supported remote provider API key, or use a local GGUF model. Claude Code and Cursor subscriptions can run delegated coding and review; they are not Main model sources. The first-run wizard guides accounts and models, access, background consciousness, and budget setup.
 
-Spending limits: out of the box, new paid work stops once known spend reaches $200 in total, or $50 for one task and its helpers; charges already in flight can pass a limit. Background consciousness stays off until you start it, and then has $20 for each 24 hours. Settings changes all three.
+Spending limits: out of the box, new paid work stops once known spend reaches $200 in total, or $50 for one task and its helpers; charges already in flight can pass a limit. Background consciousness starts with the setup wizard's switch, which is on unless you turn it off (without the wizard it stays off until you start it), and then has $20 for each 24 hours. Settings changes all three.
 
 <details>
 <summary>Optional CLI included with desktop downloads</summary>
@@ -455,7 +455,9 @@ sudo apt-get install -y dpkg-dev rpm   # rpm provides rpmbuild
 bash scripts/build_linux_packages.sh
 ```
 
-Output: `dist/ouroboros_<VERSION>_amd64.deb`, `dist/ouroboros-<VERSION>-1.x86_64.rpm` and `dist/ouroboros-<VERSION>-1.red80.x86_64.rpm` (RED OS 8). All three declare Git as a runtime dependency and install to `/opt/ouroboros` with a `/usr/bin/ouroboros` symlink, a desktop entry, and an opt-in systemd user unit. Portable Python builds the launcher, but the bundled native payload also carries Jammy libraries: its native-window and launcher-side behaviour targets glibc 2.35 and the Jammy graphics stack, not an invariant portable-Python glibc floor. `bash scripts/smoke_linux_packages.sh official <deb> <rpm> <red80-rpm>` installs all three through `apt` or `dnf` in Ubuntu 22.04 and Fedora 42 containers, resolves Git, verifies the installed unit, and checks both the real CLI and a bounded desktop-launcher start; this lane gates the release. Swap `official` for `vendor` to repeat the check on Astra Linux 1.8 and RED OS 8 images from the vendors' own registries — that lane runs informationally in CI, so an outage at a third-party registry cannot block a tagged release.
+Output: `dist/ouroboros_<VERSION>_amd64.deb`, `dist/ouroboros-<VERSION>-1.x86_64.rpm` and `dist/ouroboros-<VERSION>-1.red80.x86_64.rpm` (RED OS 8). All three declare Git as a runtime dependency and install to `/opt/ouroboros` with a `/usr/bin/ouroboros` symlink, a desktop entry, and an opt-in systemd user unit. Portable Python builds the launcher, but the bundled native payload also carries Jammy libraries: its native-window and launcher-side behaviour targets glibc 2.35 and the Jammy graphics stack, not an invariant portable-Python glibc floor. `bash scripts/smoke_linux_packages.sh official <deb> <rpm> <red80-rpm>` installs all three through `apt` or `dnf` in Ubuntu 22.04 and Fedora 42 containers, resolves Git, verifies the installed unit, and checks both the real CLI and a bounded desktop-launcher start; this lane gates the release.
+
+`astra <deb>` and `redos <red80-rpm>` check the pinned Astra Linux 1.8 and RED OS 8 images. Locally, `vendor <deb> <rpm> <red80-rpm>` runs Astra Linux first and RED OS second. Local runs use an exact cached image when available. A cache miss uses Docker’s ordinary registry TLS and can fail while the vendor serves an incomplete or incorrect chain. CI reports each vendor independently. Only its GitHub-hosted RED OS image download uses the pinned issuing CA for `registry.red-soft.ru`. Both vendor checks are informational.
 
 ### Windows (.zip)
 

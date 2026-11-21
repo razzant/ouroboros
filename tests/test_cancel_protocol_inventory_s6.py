@@ -181,7 +181,7 @@ TERMINAL_WRITERS = {
     # Monetary refresh projects fields under the result lock and preserves its
     # current terminal status; it cannot publish a lifecycle transition.
     ('supervisor/events_task_done.py::_refresh_terminal_task_cost', 'current["status"]'): 'dynamic',
-    ('supervisor/queue_snapshot.py::_restore_pending', 'STATUS_CANCELLED'): 'terminal',
+    ('supervisor/queue_snapshot.py::_restore_retained', 'STATUS_CANCELLED'): 'terminal',
     ('supervisor/queue_snapshot.py::_refuse_restore_invalid_fences', 'STATUS_CANCELLED'): 'terminal',
     # Explicit calendar expiry retains pending custody until the result and delivery are durable.
     ('supervisor/queue_timeouts.py::_settle_pending_deadline', '"failed"'): 'terminal',
@@ -220,7 +220,7 @@ NO_DELIVERABLE_LANES = {
         'cancelled before it ever started: no answer exists',
     'supervisor/workers.py::_settle_cancelled_pending_row':
         'dropped before assignment; the salvage receipt belongs to custody',
-    'supervisor/queue_snapshot.py::_restore_pending':
+    'supervisor/queue_snapshot.py::_restore_retained':
         'restore-time reconciliation of a task cancelled while the server was down',
     'supervisor/queue_snapshot.py::_refuse_restore_invalid_fences':
         'the invalid-acceptance-fence refusal moved out of restore_pending_from_snapshot (#1196): '

@@ -130,7 +130,7 @@ def _written_paths(ctx: Any, root: Any, task_id: str, effect: Dict[str, Any]) ->
     if isinstance(call, dict) and call:
         from ouroboros.artifacts import materialize_tool_args_source
 
-        full, complete, _gap = materialize_tool_args_source(root, call)
+        full, complete, _gap = materialize_tool_args_source(root, call, task_id=task_id)
         args = full if complete and isinstance(full, dict) else args
     named = [str(args["path"])] if isinstance(args.get("path"), str) and args["path"] else []
     for entries in (args.get("files"), args.get("edits")):

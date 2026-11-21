@@ -627,6 +627,7 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "project_scope_conflict": "the task already belongs to another project",
     "missing_task_or_project": "no task or project was named",
     "project_unavailable": "the project is no longer available",
+    "reply_target_unavailable": "the message or card you replied to is unavailable",
     "private_owner_source_invalid": "its owner answer could not be verified",
     "private_owner_source_unavailable": "its owner answer could not be read",
     # Historical routing-card refusal codes, retained for receipt replay.

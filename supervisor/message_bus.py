@@ -133,6 +133,14 @@ def notification_chat_route(*candidates: Any) -> Optional[int]:
     return None
 
 
+def _owner_id() -> int:
+    """The owner's id a media row records; 0 when the state cannot say."""
+    try:
+        return int(load_state().get("owner_id") or 0)
+    except Exception:
+        return 0
+
+
 def init(drive_root, chat_bridge: "LocalChatBridge") -> None:
     global DATA_DIR, _BRIDGE
     DATA_DIR = drive_root
@@ -273,8 +281,9 @@ class LocalChatBridge:
         """
         chat_id = coerce_chat_identity(msg.get("chat_id", (msg.get("chat") or {}).get("id")), 1)
         transport = msg.get("transport")
-        if isinstance(transport, dict) and transport and chat_id != 1:
-            self._chat_transports[chat_id] = dict(transport)
+        if isinstance(transport, dict) and transport and chat_id != 1:  # never the host's marks (chat_references)
+            self._chat_transports[chat_id] = {key: value for key, value in transport.items()
+                                              if key not in ("exact_reply", "host_address")}
         else:
             self._chat_transports.pop(chat_id, None)
 
@@ -350,6 +359,8 @@ class LocalChatBridge:
         record that copies the fact carries it. Panic uses the server's independent
         emergency owner; ordinary ingress is a dict put, no lock or I/O."""
         clean_text = str(text or "").strip()
+        if isinstance(accepted_source_row, dict) and (accepted_source_row.get("late_answer") or accepted_source_row.get("card_press")):
+            clean_text = accepted_source_row["text"]  # an accepted card submission retains the edges of entered values
         caption_text = str(image_caption or "").strip()
         image_b64 = str(image_base64 or "").strip()
         if not clean_text and caption_text:
@@ -488,8 +499,7 @@ class LocalChatBridge:
         routing_token: str = "",
         cause: str = "", reasoning_effort: str = "",
         project_name: str = "", target_task_ids=None, target_titles=None,
-        routing_notice_carrier: str = "", reply_to: Optional[Dict[str, Any]] = None,
-        transport: Optional[Dict[str, Any]] = None,
+        routing_notice_carrier: str = "", reply_to: Optional[Dict[str, Any]] = None, transport: Optional[dict] = None,
     ) -> None:
         """Emit a typed routing receipt without creating an assistant bubble.
 
@@ -497,7 +507,8 @@ class LocalChatBridge:
         their existing outbound subscription.  ``text`` stays empty and ``suppress_bubble`` is
         explicit, so legacy transports do not invent a human-visible mirror message.
         ``routing_notice_carrier`` names the selected carrier of the act's owner notice, this ACK or
-        the System row (never delivery proof); ``reply_to`` is the owner message this ACK's notice answers.
+        the System row (never delivery proof); ``reply_to`` is the owner message this ACK's notice answers, and
+        ``transport`` where it answers him when not this chat's binding (``chat_references.decided_reply_address``).
         """
         payload = {
             "type": "message_annotation",
@@ -536,7 +547,12 @@ class LocalChatBridge:
             ]
         if self._broadcast_fn and not is_a2a_chat_id(chat_id):
             self._broadcast_fn(payload)
-        picker_address = {}
+        if not is_a2a_chat_id(chat_id):
+            publish_event(CHAT_OUTBOUND, {
+                **payload,
+                "text": "",
+                "transport": transport or self.chat_transport(chat_id),
+            })
         if (
             str(status or "") == "needs_manual_target"
             and isinstance(options, list) and options
@@ -559,20 +575,10 @@ class LocalChatBridge:
                 lines.extend(f"{index}. {label}" for index, label in enumerate(shown, 1))
                 if len(labels) > len(shown):
                     lines.append(f"…and {len(labels) - len(shown)} more in the web chat.")
-                stored = log_chat(
+                log_chat(
                     "out", int(chat_id or 0), 0, "\n".join(lines),
                     source="routing_picker", record_type="routing_options",
                 )
-                if stored:
-                    from ouroboros.chat_references import projection_fields
-
-                    picker_address["row_address"] = projection_fields(stored)["row_address"]
-        if not is_a2a_chat_id(chat_id):
-            publish_event(CHAT_OUTBOUND, {
-                **payload, **picker_address,
-                "text": "",
-                "transport": self.chat_transport(chat_id) if transport is None else transport,
-            })
 
     def send_chat_action(
         self,
@@ -654,14 +660,10 @@ class LocalChatBridge:
             msg["download_url"] = download_url
         if download_url_compat:
             msg["download_url_compat"] = download_url_compat
-        try:
-            owner_id = int(load_state().get("owner_id") or 0)
-        except Exception:
-            owner_id = 0
         stored = log_chat(
             "out",
             int(chat_id or 0),
-            owner_id,
+            _owner_id(),
             caption or "Photo attachment",
             ts=msg["ts"],
             task_id=str(task_id or ""),
@@ -671,8 +673,8 @@ class LocalChatBridge:
             download_url_compat=download_url_compat,
             caption=str(caption or ""),
         )
+        from ouroboros.chat_references import delivery_transport, projection_fields
         if stored:
-            from ouroboros.chat_references import projection_fields
             msg.update(projection_fields(stored))
         stamp_project_thread(DATA_DIR, msg)
         if self._broadcast_fn:
@@ -682,7 +684,7 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
             **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
-            "transport": (stored or {}).get("transport") or self.chat_transport(chat_id),
+            "transport": delivery_transport(DATA_DIR, self.chat_transport(chat_id), task_id),
             "caption": str(caption or ""),
             "image_base64": b64_str,
             "mime": str(mime or ""),
@@ -720,14 +722,10 @@ class LocalChatBridge:
             msg["download_url"] = download_url
         if download_url_compat:
             msg["download_url_compat"] = download_url_compat
-        try:
-            owner_id = int(load_state().get("owner_id") or 0)
-        except Exception:
-            owner_id = 0
         stored = log_chat(
             "out",
             int(chat_id or 0),
-            owner_id,
+            _owner_id(),
             caption or "Video attachment",
             ts=msg["ts"],
             task_id=str(task_id or ""),
@@ -737,8 +735,8 @@ class LocalChatBridge:
             download_url_compat=download_url_compat,
             caption=str(caption or ""),
         )
+        from ouroboros.chat_references import delivery_transport, projection_fields
         if stored:
-            from ouroboros.chat_references import projection_fields
             msg.update(projection_fields(stored))
         stamp_project_thread(DATA_DIR, msg)
         if self._broadcast_fn:
@@ -748,7 +746,7 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
             **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
-            "transport": (stored or {}).get("transport") or self.chat_transport(chat_id),
+            "transport": delivery_transport(DATA_DIR, self.chat_transport(chat_id), task_id),
             "caption": str(caption or ""),
             "video_base64": b64_str,
             "mime": str(mime or ""),
@@ -801,14 +799,10 @@ class LocalChatBridge:
             "chat_id": int(chat_id or 0),
             "task_id": str(task_id or ""),
         }
-        try:
-            owner_id = int(load_state().get("owner_id") or 0)
-        except Exception:
-            owner_id = 0
         stored = log_chat(
             "out",
             int(chat_id or 0),
-            owner_id,
+            _owner_id(),
             caption or f"📎 {safe_name}",
             ts=ts,
             task_id=str(task_id or ""),
@@ -820,8 +814,8 @@ class LocalChatBridge:
             size_bytes=size_bytes,
             download_url_compat=download_url_compat,
         )
+        from ouroboros.chat_references import delivery_transport, projection_fields
         if stored:
-            from ouroboros.chat_references import projection_fields
             msg.update(projection_fields(stored))
         stamp_project_thread(DATA_DIR, msg)
         if self._broadcast_fn:
@@ -831,7 +825,7 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
             **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
-            "transport": (stored or {}).get("transport") or self.chat_transport(chat_id),
+            "transport": delivery_transport(DATA_DIR, self.chat_transport(chat_id), task_id),
             "caption": str(caption or ""),
             "file_base64": b64_str,
             "mime": str(mime or ""),
@@ -870,17 +864,13 @@ class LocalChatBridge:
             "chat_id": int(chat_id or 0),
             "task_id": str(task_id or ""),
         }
-        try:
-            owner_id = int(load_state().get("owner_id") or 0)
-        except Exception:
-            owner_id = 0
         stored = log_chat(
-            "out", int(chat_id or 0), owner_id, safe_title, ts=ts,
+            "out", int(chat_id or 0), _owner_id(), safe_title, ts=ts,
             task_id=str(task_id or ""), record_type="links", feed=True,
             actions=validated, title=safe_title,
         )
+        from ouroboros.chat_references import delivery_transport, projection_fields
         if stored:
-            from ouroboros.chat_references import projection_fields
             msg.update(projection_fields(stored))
         stamp_project_thread(DATA_DIR, msg)
         if self._broadcast_fn:
@@ -890,7 +880,7 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
             **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
-            "transport": (stored or {}).get("transport") or self.chat_transport(chat_id),
+            "transport": delivery_transport(DATA_DIR, self.chat_transport(chat_id), task_id),
             "title": safe_title,
             "actions": validated,
             "ts": ts,
@@ -993,12 +983,8 @@ class LocalChatBridge:
                                 if row.get("chat_id") == int(chat_id)), None)
             except Exception:
                 log.debug("Quiz project lookup failed", exc_info=True)
-        try:
-            owner_id = int(load_state().get("owner_id") or 0)
-        except Exception:
-            owner_id = 0
         stored = log_chat(
-            "out", int(chat_id or 0), owner_id, payload["question"], ts=ts,
+            "out", int(chat_id or 0), _owner_id(), payload["question"], ts=ts,
             task_id=str(task_id or ""), record_type="quiz", feed=True,
             client_message_id=f"quiz_publication:{task_id}:{qid}",
             require_write=True,
@@ -1012,8 +998,8 @@ class LocalChatBridge:
                 **({"host_facts": str(host_facts)} if host_facts else {}),
             },
         )
+        from ouroboros.chat_references import delivery_transport, projection_fields
         if stored:
-            from ouroboros.chat_references import projection_fields
             from ouroboros.room_appearances import frame_rooms  # a private contact's question: its Project's too
             msg.update(projection_fields(stored), **frame_rooms(DATA_DIR, stored))
             from ouroboros.owner_quiz import mark_published
@@ -1025,8 +1011,7 @@ class LocalChatBridge:
                 msg["question_delivery"] = delivery
         if self._broadcast_fn:
             self._broadcast_fn(msg)
-        quiz_transport = (stored or {}).get("transport") or self.chat_transport(chat_id)
-        from ouroboros.chat_references import projection_fields
+        quiz_transport = delivery_transport(DATA_DIR, self.chat_transport(chat_id), task_id)
         from ouroboros.secret_requests import transport_hint
 
         publish_event(CHAT_QUIZ, {
@@ -1043,7 +1028,6 @@ class LocalChatBridge:
             "assumption": payload["assumption"],
             "state": str(state or "open"),
             "ts": ts,
-            **(projection_fields(stored) if stored else {}),
             **lifecycle,
             **({"materials": materials} if materials else {}),
             **({"host_facts": str(host_facts)} if host_facts else {}),
@@ -1146,9 +1130,7 @@ class LocalChatBridge:
                 log.debug("quiz_state broadcast failed", exc_info=True)
         # The WebSocket reaches only the SPA. Transport skills need the same
         # lifecycle fact to edit an already delivered card without a reload.
-        from ouroboros.chat_references import telegram_origin_transport
-
-        quiz_transport = telegram_origin_transport(DATA_DIR, task_id) or self.chat_transport(chat_id)
+        quiz_transport = self.chat_transport(chat_id)
         publish_event(CHAT_QUIZ_STATE, {**msg, "transport": quiz_transport})
 
     def push_log(self, event: dict):
@@ -1253,20 +1235,13 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         if narration is not None:
             meta["narration"] = bool(narration)
         meta.setdefault("narration", False)
-        from ouroboros.chat_references import origin_reply, projection_fields, telegram_origin_transport
-        if is_progress:
-            origin_task_id = str(meta.get("root_task_id") or task_id) if meta.get("subagent_event") else task_id
-            if "transport" not in meta and origin_task_id:
-                if progress_transport := telegram_origin_transport(DATA_DIR, origin_task_id):
-                    meta["transport"] = progress_transport
-        else:
-            source_transport: Dict[str, Any] = {}
-            reply = origin_reply(DATA_DIR, task_id, meta if meta.get("origin_message_ref") else None,
-                                 transport=source_transport)
-            if reply:
-                meta.setdefault("reply_to", reply)
-            if source_transport:
-                meta.setdefault("transport", source_transport)
+        from ouroboros.chat_references import helper_card_address, origin_reply, projection_fields
+        exact: Dict[str, Any] = {}  # an accepted exact Reply's own turn answers where it was asked (SKILL.md)
+        origin = meta if meta.get("origin_message_ref") else None
+        if not is_progress and (reply := origin_reply(DATA_DIR, task_id, origin, transport=exact)):
+            meta.setdefault("reply_to", reply)
+            if exact and meta["reply_to"] is reply:  # the turn's own answer, not a row naming another source
+                meta.setdefault("transport", exact)
         progress_meta = meta
         if task_id and DATA_DIR and system_type not in ROOM_FIXED_ROW_TYPES and meta.get("_is_direct_chat") is not True:
             # The one room rule (A4) at the one send seam: a task-addressed host row
@@ -1335,6 +1310,9 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             meta.update(projection_fields(stored), **rooms, **frame_project(DATA_DIR, stored, rooms.get("also_rooms", [])))
         if _text.strip() in ("", "\u200b"):
             return {"chat_id": chat_id}
+        if "transport" not in meta and not get_bridge().chat_transport(chat_id) and (address := helper_card_address(
+                DATA_DIR, meta, role=role, system_type=system_type, is_progress=is_progress)):
+            meta["transport"] = address  # live only, after the rows are written: a room's binding stays its own
         # Budget footers belong in dashboard/status flows, not every chat reply.
         full = _text
 

@@ -125,7 +125,8 @@ function rowsPage(path, { ids, draw, tune = null, bind = null, paint = null, sho
 
 /* ---- Permissions and checks ---------------------------------------------------------------------------------------- */
 
-/** The rows as this installation's policy and Safety facts leave them (pure; `rows` are the page's copies). */
+/** The rows as this installation's policy, Safety facts and stored review cap leave them (no state of its own: `rows`
+ *  are the page's copies, and the cap's row keeps the extra option an earlier call gave it). */
 export function tunePermissionRows(rows, settings, row = (id) => rows.find((each) => each.id === id)) {
     applyPolicyToRows(rows, settings, rowById);
     const facts = safetyFacts(settings || {});
@@ -135,6 +136,17 @@ export function tunePermissionRows(rows, settings, row = (id) => rows.find((each
     second.meta = settings ? `${facts.secondCheck}${facts.unmeasured ? ' · not measured yet: no replay of real checks exists' : ''}` : '';
     // An organization's Supervisor is said, never offered for change: its two rows lead nowhere.
     for (const each of [supervisor, second]) each.control = facts.fixed ? { kind: 'custom' } : structuredClone(rowById(each.id).control);
+    // A stored cap the strip does not offer (a 4 migrated from the retired acceptance-pass setting, or written through
+    // the API or the settings file) is one more option, in its numeric place and chosen. It stays offered while the
+    // page is open: choosing another keeps the way back to it, and the row's Undo.
+    const cycles = row('OUROBOROS_REVIEW_MAX_CYCLES');
+    const offered = rowById(cycles.id).control.options;
+    const offStrip = (value) => /^[1-9]\d*$/.test(value) && !offered.some((option) => option.value === value);
+    const stored = String(settings?.[cycles.keys[0]] ?? '');
+    const extra = offStrip(stored) ? stored : cycles.control.options.map((option) => option.value).find(offStrip);
+    const before = (option) => Number(option.value) < Number(extra);
+    cycles.control.options = !extra ? structuredClone(offered)
+        : [...offered.filter(before), { value: extra, label: extra }, ...offered.filter((option) => !before(option))].map((option) => ({ ...option }));
     return rows;
 }
 
@@ -150,9 +162,8 @@ const mountPermissions = rowsPage('permissions', {
                 after: note('data-safety-skips role="status"') + note('data-safety-spares role="status" hidden') + note('data-safety-exits hidden')
                     + note('data-safety-organization-rules hidden', 'Your organization’s rules apply too; its administrator sets them.') })
             + card({ title: 'Who checks its results', lead: 'Reviewers are other models that read finished work.',
-                rows: rows('OUROBOROS_TASK_REVIEW_MODE', 'permissions:reviewers') })
-            + card({ title: 'Trust it without asking', rows: rows('OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS') })
-            + foldCard('review rounds', rows('OUROBOROS_REVIEW_MAX_CYCLES'));
+                rows: rows('OUROBOROS_TASK_REVIEW_MODE', 'OUROBOROS_REVIEW_MAX_CYCLES', 'permissions:reviewers') })
+            + card({ title: 'Trust it without asking', rows: rows('OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS') });
     },
     paint: (container, settings) => {
         const facts = safetyFacts(settings || {});

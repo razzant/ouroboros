@@ -947,19 +947,11 @@ def effective_task_result(
 ) -> Dict[str, Any]:
     """Merge parent result, child-drive result, and active queue state.
 
-    Every read is pure (TZ-1 A): no file copy, hash, registration or manifest
-    write. Child files reach the canonical store only through copy-back and
-    ``task_custody.settle_child_drive``. The default read adds the artifact VIEW
-    (``task_custody.store_artifact_view``: recorded canonical rows, the task's
-    OWN child stores' recorded rows and stat-only ``measured: False`` listings)
-    plus the task-tree disposition lookup. ``materialize_artifacts=False`` (the
-    historical name) is the "status/cost projection only" read: no view, no
-    disposition lookup and no sha-bearing/disposition claims; its ``artifacts``
-    are the raw recorded rows. Read-only display surfaces (chat history
-    annotation, ``api_tasks_list``, the SSE follow loop, ``api_logs_tail``
-    discovery) pass ``False``; child-result consumers (join_ledger,
-    wait_*/get_task_result, api_task_get/artifact, prune) keep the ``True``
-    default. The orphan reconciler decides and persists on a ``False`` read.
+    Pure read: only copy-back and settlement publish child files into the canonical store.
+    The full view adds store_artifact_view (recorded identities, stat-only listings)
+    and the task-tree disposition. A status/cost read (materialize_artifacts=False)
+    keeps raw artifact rows and omits both projections. Display and orphan reconciliation
+    use this cheap form; joins, wait/get, task detail, download and prune use the full view.
     ``_events_index`` optionally shares ONE parsed events-tail across a batch of
     rows (the task-list request), so N stale-running rows cost one tail read
     instead of N; ``None`` keeps the per-call read for single-row callers.
@@ -1042,12 +1034,14 @@ def effective_task_result(
     merged = dict(result)
     child_result: Dict[str, Any] = {}
     child_text = ""
+    producer_drive = None
     if not cancellation_blocks_child_result(result):
         from ouroboros.install_identity import StoreForeign
+        from ouroboros.workspace_capture_result import read_replica
 
         for child_drive in _child_drive_candidates(result):
             try:
-                child_result = load(child_drive, task_id) or {}
+                child_result, producer_drive = read_replica(drive_root, task_id, result, child_drive, load)
             except StoreForeign:  # another install's drive: this install keeps only its own row
                 child_result = {}
             if child_result:
@@ -1065,20 +1059,22 @@ def effective_task_result(
             and copied_child_status in FINAL_STATUSES
             and parent_status == copied_child_status
         )
-        preserve_parent_terminal = (
-            (parent_status in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE} and not copied_child_terminal)
-            or (parent_status in FINAL_STATUSES and child_status not in FINAL_STATUSES)
+        parent_owns_terminal = (
+            parent_status in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE}
+            and not copied_child_terminal
         )
-        preserve_parent_retry = (
+        stale_replica = (
             child_status not in FINAL_STATUSES
             and parent_status not in {STATUS_REQUESTED, STATUS_SCHEDULED, STATUS_RUNNING}
         )
-        parent_authoritative_fields = (
-            {"status", "result", "error", "ts"}
-            if preserve_parent_terminal or preserve_parent_retry
-            else set()
-        )
-        parent_authoritative_fields = parent_authoritative_fields | _parent_workspace_artifact_lifecycle_fields(result)
+        parent_authoritative_fields = set()
+        if parent_owns_terminal or stale_replica:
+            parent_authoritative_fields.update(("status", "result", "error", "ts"))
+            producer_drive = None
+        if producer_drive is None:
+            parent_authoritative_fields |= _parent_workspace_artifact_lifecycle_fields(result)
+        else:
+            merged.pop("artifact_bundle", None)  # a legacy producer may publish only its status and file rows
         # Pool assignment can rebind a paused direct turn before its old child
         # replica receives the new start. Owner and its attempt remain one fact.
         if "execution_owner" in result:
@@ -1101,10 +1097,6 @@ def effective_task_result(
             merged[key] = value
         merged.setdefault("child_drive_root", child_text)
         merged.setdefault("headless_child_drive_root", child_text)
-        metadata = merged.get("metadata") if isinstance(merged.get("metadata"), dict) else {}
-        merged_is_workspace = bool(str(merged.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip())
-        if merged_is_workspace and child_status in FINAL_STATUSES and (parent_status not in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE} or copied_child_terminal):
-            merged = _normalize_workspace_artifact_status(merged)
 
     merged = _normalize_workspace_artifact_status(merged)
 
@@ -1194,6 +1186,7 @@ def effective_task_result(
         merged["execution_observation"].update(
             source="effective_task_result", reason="projected_terminal", basis=terminal_projection)
 
+    merged.pop("workspace_capture", None)  # A published capture view belongs to this read.
     if not materialize_artifacts:
         # Status/cost projection only: no artifact view (no store listing) and no
         # disposition lookup. Strip the legacy mirrored fields so a False row
@@ -1204,6 +1197,11 @@ def effective_task_result(
         if isinstance(projected.get("artifact_bundle"), dict) and projected["artifact_bundle"].get("status"):
             projected["artifact_status"] = normalize_outcome_axes(projected)["artifacts"]["status"]
         return projected
+    from ouroboros.workspace_capture_result import capture_publication
+    producer = child_result if producer_drive is not None else result
+    publication = capture_publication(drive_root, task_id, producer, producer_drive=producer_drive, replica=child_result)
+    if publication is not None:
+        merged["workspace_capture"] = publication
     try:
         from ouroboros.outcomes import artifact_bundle_from_result
         from ouroboros.task_custody import own_child_drives, store_artifact_view
@@ -1213,15 +1211,19 @@ def effective_task_result(
         # view copies, hashes and registers nothing.
         child_rows = {}
         for drive in own_child_drives(drive_root, task_id, store_row=result):
-            rows = (load_task_result(drive, task_id) or {}).get("artifacts")
+            rows = (child_result if drive == producer_drive else (load_task_result(drive, task_id) or {})).get("artifacts")
             child_rows[drive / "task_results" / "artifacts" / task_id] = rows if isinstance(rows, list) else []
         recorded = [item for item in (merged.get("artifacts") or []) if isinstance(item, dict)]
         listed = store_artifact_view(drive_root, task_id, recorded, child_rows)
+        if publication and not listed:
+            publication["read_error"] = "current capture has no artifact records"
         if listed:
             merged["artifacts"] = listed
             merged["artifact_bundle"] = artifact_bundle_from_result(merged)
             merged["artifact_status"] = merged["artifact_bundle"].get("status")
-    except Exception:
+    except Exception as exc:
+        if publication:
+            publication["read_error"] = f"artifact records unavailable: {exc}"
         log.debug("Artifact view unavailable for %s", task_id, exc_info=True)
     return _project_child_result_disposition(pathlib.Path(drive_root), merged)
 
@@ -1342,16 +1344,16 @@ def find_child_tasks(
     scope: str = "subtree",
     materialize_artifacts: bool = True,
     settled: Iterable[str] = (),
+    placement_reads: Optional[TaskReads] = None,
 ) -> List[Dict[str, Any]]:
     """Project matching subagents, including retry lineage and live queue rows.
 
     Subtree includes direct children OR members of the named root; direct scope
     includes only children of parent_task_id. A leaf must not absorb siblings.
-    ``settled`` names tasks the caller needs no row of (a sleeper's readiness check: its cursor holds their
-    ends): a lineage row of one that no retry or supersession pointer redirects (its effective row is its own) and
-    that no queued row names is not fetched, and comes back as ``{"task_id": id}`` alone unless another row projects
-    that id; unread, its role and parent are unproven (only its own row is that proof). Every other row is
-    projected as without ``settled``.
+    A sleeper's ``settled`` IDs need only stubs unless a queue or retry points to them.
+    An unread stub proves neither role nor parent; any full projection for that ID wins.
+    With placement_reads, Logs follows only canonical effective IDs (including the
+    queue envelope ID for a missing document). It never overlays unadmitted replicas.
     """
     parent = str(parent_task_id or "").strip()
     root = str(root_task_id or "").strip()
@@ -1360,72 +1362,64 @@ def find_child_tasks(
     unread = {str(task_id) for task_id in settled if str(task_id or "")}
     skipped: set = set()
 
+    def belongs(row):
+        return row.get("delegation_role") == "subagent" and (
+            (parent and str(row.get("parent_task_id") or "") == parent) or
+            (not direct_only and root and str(row.get("root_task_id") or "") == root))
+
     # One queue read serves the overlay below and seeds the store's lineage closure: a queued item
     # naming the parent or root may carry its parent/role only in the queue. The store returns this
     # lineage alone (``select_lineage``) in ``task_id`` order, so the retry projection and the
     # last-row-wins fold below are deterministic. Lineage-less live rows reappear in the overlay.
-    snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
+    drive_root = pathlib.Path(drive_root)
+    snapshot = placement_reads.queue_snapshot(drive_root) if placement_reads else _load_queue_snapshot(drive_root)
     queued = [(status, item, item["task"] if isinstance(item.get("task"), dict) else {})
               for group, status in (("pending", STATUS_SCHEDULED), ("running", STATUS_RUNNING))
               for item in snapshot.get(group) or [] if isinstance(item, dict)]
     unread -= {str(item.get("id") or task.get("id") or "") for _status, item, task in queued}  # read as ever
-    members = {identity for _status, item, task in queued
-               if (parent and str(task.get("parent_task_id") or "").strip() == parent)
-               or (not direct_only and root and str(task.get("root_task_id") or "").strip() == root)
-               for identity in (item.get("id") or item.get("task_id"), item.get("id") or task.get("id"))}
-    selected = select_lineage(pathlib.Path(drive_root), parent, root, direct_only=direct_only, queue_members=members,
+    if placement_reads:
+        members = {item.get("id") or item.get("task_id") or task.get("id")
+                   for _, item, task in queued if belongs(task)}
+    else:
+        members = {identity for _status, item, task in queued
+                   if (parent and str(task.get("parent_task_id") or "").strip() == parent)
+                   or (not direct_only and root and str(task.get("root_task_id") or "").strip() == root)
+                   for identity in (item.get("id") or item.get("task_id"), item.get("id") or task.get("id"))}
+    selected = select_lineage(drive_root, parent, root, direct_only=direct_only, queue_members=members,
                               **({"unread": unread, "skipped": skipped} if unread else {}))
-    events_index = _EventsTailIndex(pathlib.Path(drive_root))
+    events_index = None if placement_reads else _EventsTailIndex(drive_root)
     rows: Dict[str, Dict[str, Any]] = {}
-    for row in (
-        effective_task_result(
-            pathlib.Path(drive_root), item,
-            materialize_artifacts=materialize_artifacts,
-            _events_index=events_index,
-        )
-        for item in selected
-    ):
+    for item in selected:
+        row = (placement_reads.effective(str(item.get("task_id") or "")) if placement_reads else
+               effective_task_result(drive_root, item, materialize_artifacts=materialize_artifacts,
+                                     _events_index=events_index))
         tid = str(row.get("task_id") or "")
-        if not tid or tid == excluded:
-            continue
-        if str(row.get("delegation_role") or "") != "subagent":
-            continue
-        if parent and str(row.get("parent_task_id") or "") == parent:
-            rows[tid] = row
-        elif not direct_only and root and str(row.get("root_task_id") or "") == root:
+        if tid and tid != excluded and belongs(row):
             rows[tid] = row
 
     for status, item, task in queued:
+        if not belongs(task):
+            continue
+        if placement_reads:
+            tid = str(item.get("id") or item.get("task_id") or task.get("id") or "")
+            row = placement_reads.effective(tid) or dict(task, task_id=tid)
+            tid = str(row.get("task_id") or "")
+            if tid and tid != excluded:
+                rows[tid] = row
+            continue
         tid = str(item.get("id") or task.get("id") or "")
         if not tid or tid == excluded:
             continue
-        if str(task.get("delegation_role") or "") != "subagent":
-            continue
-        if parent and str(task.get("parent_task_id") or "") == parent:
-            row = dict(task)
-        elif not direct_only and root and str(task.get("root_task_id") or "") == root:
-            row = dict(task)
-        else:
-            continue
+        row = dict(task)
         row.setdefault("task_id", tid)
+        # A queue-only member may have a stored result and cost despite missing lineage.
+        existing = rows.get(tid) or load_effective_task_result(
+            drive_root, tid, materialize_artifacts=materialize_artifacts)
+        if existing:
+            status = _merge_queue_status(existing.get("status"), status, row)
+            row = {**existing, **{key: value for key, value in row.items() if value and not existing.get(key)}}
         row["status"] = status
-        existing = rows.get(tid, {})
-        if not existing:
-            # Queue lineage can recover a row skipped by the prefilter;
-            # retain its disk cost, result and artifacts as well.
-            existing = load_effective_task_result(
-                pathlib.Path(drive_root), tid, materialize_artifacts=materialize_artifacts
-            )
-        if not existing:
-            rows[tid] = row
-            continue
-        combined = dict(existing)
-        for key, value in row.items():
-            if key == "status":
-                combined["status"] = _merge_queue_status(str(existing.get("status") or ""), str(value or ""), row)
-            elif not combined.get(key) and value:
-                combined[key] = value
-        rows[tid] = combined
+        rows[tid] = row
     for tid in skipped - {excluded}:
         rows.setdefault(tid, {"task_id": tid})
     return sorted(rows.values(), key=lambda item: (str(item.get("ts") or ""), str(item.get("task_id") or "")))

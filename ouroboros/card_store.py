@@ -11,6 +11,7 @@ ingress and the pin endpoints from the server. Reads never write.
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import re
 import uuid
@@ -129,7 +130,8 @@ def find_submission(record: Dict[str, Any], request_id: str) -> Optional[Dict[st
 
 
 def record_submission(root: Any, card_id: str, *, request_id: str, action_id: str, label: str,
-                      values: Optional[Dict[str, Any]], once: bool, revision: int) -> Dict[str, Any]:
+                      values: Optional[Dict[str, Any]], once: bool, revision: int,
+                      form_title: str = "", bubble_label: str = "") -> Dict[str, Any]:
     """Record one owner press of the card drawn at ``revision``, idempotent on ``request_id``.
 
     Returns ``{"record", "submission", "duplicate"}``; ``{"record", "stale"}`` (the current
@@ -157,6 +159,8 @@ def record_submission(root: Any, card_id: str, *, request_id: str, action_id: st
             return None
         # The author and title the press was made on: a retry after a replace still reaches them.
         submission = {"request_id": request_id, "action_id": action_id, "label": label,
+                      **({"form_title": form_title} if form_title else {}),
+                      **({"bubble_label": bubble_label} if bubble_label else {}),
                       **({"values": values} if values is not None else {}), "at": utc_now_iso(), "delivered": "owed",
                       "task_id": str(current.get("task_id") or ""), "title": str(current.get("title") or "")}
         submissions.append(submission)
@@ -201,12 +205,33 @@ def acknowledge_press(root: Any, card_id: str, request_id: str) -> None:
         _update(_card_path(root, card_id), mutate)
 
 
-def late_press_ref(value: Any) -> Optional[Dict[str, str]]:
+def owner_press_text(label: str, values: Optional[Dict[str, Any]]) -> str:
+    """What the owner's own message says for a late press: the pressed label, then each value."""
+    lines = [label]
+    for key, value in (values or {}).items():
+        shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        lines.append(f"{key}: {shown}")
+    return "\n".join(lines)
+
+
+def press_snapshot(submission: Dict[str, Any]) -> Dict[str, Any]:
+    """The fields of the accepted submission that a reader needs after the card is replaced or pruned."""
+    return {"label": submission.get("label") or submission.get("action_id") or "",
+            **{k: submission[k] for k in ("form_title", "bubble_label") if submission.get(k)},
+            "title": submission.get("title") or "", "values": dict(submission.get("values") or {})}
+
+
+def late_press_ref(value: Any) -> Optional[Dict[str, Any]]:
     """Typed provenance of a press whose card's author no longer holds it: ``{task_id, card_id, request_id}``."""
     if not isinstance(value, dict):
         return None
     ref = {key: str(value.get(key) or "").strip() for key in ("task_id", "card_id", "request_id")}
-    return ref if ref["task_id"] and ref["request_id"] and valid_card_id(ref["card_id"]) else None
+    if not (ref["task_id"] and ref["request_id"] and valid_card_id(ref["card_id"])):
+        return None
+    snapshot = value.get("submission")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("label"), str) and isinstance(snapshot.get("values"), dict):
+        return {**ref, "submission": press_snapshot(snapshot)}
+    return ref
 
 
 def press_wait(row: Dict[str, Any]) -> str:

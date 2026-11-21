@@ -332,44 +332,29 @@ def test_a_reply_never_takes_a_reference_from_another_bots_message(world):
     world.run(steps)
     by_text = {row["text"]: row for row in world.rows()}
     assert by_text["a reply to the first bot"]["reply_to"]["address"] == world.address(0)
-    assert "a reply to the new bot's message 100" not in by_text
+    assert "a reply to the new bot's message 100" not in by_text, "another bot's number names nothing here"
     assert "not routed" in world.bots.bot(B).methods("sendMessage")[-1]["text"]
 
 
-def test_native_replies_belong_to_the_sending_bot_including_latest(world):
-    from ouroboros.chat_references import origin_reply
-    from ouroboros.project_dialogue import build_owner_message_ref
-
-    def reply(index, text):
-        row = world.rows()[index]
-        source = build_owner_message_ref(chat_id=42, client_message_id=row["client_message_id"],
-                                         ts=row["ts"], text=row["text"])
-        transport = {}
-        reference = origin_reply(world.data, "", {"origin_message_ref": source}, transport=transport)
-        assert transport["bot_id"] in (A_ID, B_ID)
-        return {"chat_id": 1, "text": text, "reply_to": reference, "transport": transport}
-
+def test_native_reply_and_latest_owner_belong_to_the_sending_bot(world):
     async def steps():
         await world.deliver(A, _owner(900, "A early"), _owner(901, "A latest"))
         await world.deliver(B, _owner(5, "B early"), _owner(6, "B latest"))
-        world.use(A_ROTATED)
-        await world.outbound(reply(0, "to A's early"))
+        early_a, early_b, latest_b = world.reference(0), world.reference(2), world.reference(3)
+        world.use(A)
+        await world.outbound({"chat_id": 1, "text": "to A's early", "reply_to": early_a})
         world.use(B)
-        await world.outbound(reply(0, "A's row, B must not send"))
-        world.plugin.merge_settings(world.state, {"TELEGRAM_CHAT_ID": "43"})
-        await world.outbound(reply(2, "bot B cannot send to chat 43"))
-        world.plugin.merge_settings(world.state, {"TELEGRAM_CHAT_ID": "42"})
-        await world.outbound(reply(2, "to B's early"))
-        await world.outbound(reply(3, "to B's latest"))
+        await world.outbound({"chat_id": 1, "text": "A's row, B sends", "reply_to": early_a})
+        await world.outbound({"chat_id": 1, "text": "to B's early", "reply_to": early_b})
+        await world.outbound({"chat_id": 1, "text": "to B's latest", "reply_to": latest_b})
 
     world.run(steps)
-    sent_a = world.bots.bot(A_ROTATED).methods("sendMessage")
+    sent_a = world.bots.bot(A).methods("sendMessage")
     sent_b = {form["text"]: form for form in world.bots.bot(B).methods("sendMessage")}
     assert [form.get("reply_to_message_id") for form in sent_a] == ["900"]
-    assert set(sent_b) == {"to B's early", "to B's latest"}
-    assert sum("Original Telegram bot or chat is unavailable" in message for _, message in world.api.logs) == 2
+    assert "reply_to_message_id" not in sent_b["A's row, B sends"]
     assert sent_b["to B's early"]["reply_to_message_id"] == "5"
-    assert sent_b["to B's latest"]["reply_to_message_id"] == "6"
+    assert "reply_to_message_id" not in sent_b["to B's latest"], "B's own latest, below A's old numbers"
 
 
 def test_subagent_card_and_silent_progress_edit_only_their_own_bots_bubble(world):
@@ -433,7 +418,7 @@ def test_a_reply_answers_only_the_polling_bots_card_and_settles_that_card(quiz_w
         await make_quiz(QUESTION)
         # B's own message 100 is no card, even if A's card has that number here.
         world.bots.bot(B).sent.add(100)
-        await world.deliver(B, _owner(30, "just a remark", reply=100))
+        await world.deliver(B, _owner(30, "just a remark", reply=100))  # refused: no map of B knows it
         assert world.texts() == [] and _quiz_block(world)["state"] == "open"
         await world.deliver(B, _owner(31, "postgres, in my words", reply=200))
 
@@ -576,7 +561,7 @@ def test_a_token_saved_while_polling_moves_polling_to_its_bot_and_keeps_each_bot
     refs = world.refs()["bots"]
     assert refs["messages"][f"{B_ID}:42:50"]["client_message_id"] == f"tg:{B_ID}:42:50"
     assert refs["messages"][f"{B_ID}:42:200"]["row_address"] == "row-b"
-    assert "latest_owner" not in refs  # Telegram message order is no longer a routing input
+    assert refs["latest_owner"] == {f"{B_ID}:42": 50}
 
 
 def test_a_token_saved_during_a_long_send_stops_it_and_never_moves_its_parts(world):
@@ -609,7 +594,7 @@ def test_the_notifier_scopes_its_mirror_to_the_token_it_sends_with(world):
     assert "messages" not in world.refs()
 
 
-def test_the_panic_path_forwards_only_the_authenticated_emergency_request(world):
+def test_the_panic_path_names_the_bot_that_polled_it(world):
     inject = AsyncMock()
     world.plugin._inject = inject
     world.plugin._POLL_GENERATION_STARTED = 1
@@ -622,8 +607,7 @@ def test_the_panic_path_forwards_only_the_authenticated_emergency_request(world)
         }, 1, "full_access", "en")
 
     world.run(steps)
-    inject.assert_awaited_once_with(world.api, {"text": "/panic", "chat_id": 42, "user_id": 42, "source": "telegram"})
-    assert not (Path(world.api.get_state_dir()) / "message_refs.json").exists()
+    assert inject.await_args.args[1]["client_message_id"] == f"tg:{B_ID}:42:7"
 
 
 # --- 8: what was stored stays readable and is never rewritten; a botless record anchors nothing --
@@ -660,11 +644,12 @@ def test_stored_rows_and_references_stay_as_they_were_and_no_bot_inherits_them(w
     assert resolve_reply(world.data, world.address(0))["snippet"] == "stored before the upgrade"
     refs = world.refs()
     assert refs["messages"] == _LEGACY_REFS["messages"] and refs["latest_owner"] == _LEGACY_REFS["latest_owner"]
+    # A matching number proves no ownership: the reply is refused here, never routed on a guess.
     (note,) = world.bots.bot(A).methods("sendMessage")
-    assert "not routed" in note["text"]
+    assert "not routed" in note["text"] and int(note["reply_to_message_id"]) == 9
 
 
-def test_only_a_reply_with_a_known_message_gets_routed(world):
+def test_only_a_reply_to_a_message_this_bot_knows_reaches_the_host(world):
     async def steps():
         _seed_legacy_refs(world)
         world.use(A)
@@ -715,8 +700,9 @@ def test_botless_bubbles_are_not_edited_by_a_named_bot(world):
 _CANARY = "fixture-secret-canary-value"
 
 
-def test_a_reply_to_an_evicted_secret_card_does_not_enter_main(world):
-    """Once the receipt ages out, an unrecognized explicit reply must not become ordinary input."""
+def test_a_reply_to_a_card_no_longer_remembered_is_refused_not_sent(world):
+    """The local hold exists only while a record says a card was there (the file keeps its last 50
+    cards); past that, a reply to that bot message is refused here like any message no map knows."""
     async def steps():
         await world.deliver(A, _owner(90, "a reply to an evicted card", reply=77))
 
@@ -986,6 +972,7 @@ def test_references_of_all_bots_share_the_newest_thousand_in_one_order(maps):
     assert state._message_ref(maps.api, bots[1], 42, 2)["row_address"] == f"{bots[1]}-2"
     assert state._message_ref(maps.api, bots[2], 42, 1)["row_address"] == "updated"
     assert list(state._message_refs(maps.api, bots[1]))[:2] == ["42:2", "42:3"]
+    assert stored["bots"]["latest_owner"] == {f"{bot}:42": 334 for bot in bots}
     assert json.dumps(stored["messages"]) == json.dumps(legacy["messages"]), "the old map keeps its bytes"
     assert stored["latest_owner"] == legacy["latest_owner"]
     assert list(state._message_refs(maps.api, "")) == ["42:1"], "a token naming no bot still reads only the old map"

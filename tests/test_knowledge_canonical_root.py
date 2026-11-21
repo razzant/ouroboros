@@ -38,7 +38,7 @@ def _note(summary: str) -> str:
 
 def _receipt(reply: str) -> dict:
     assert reply.startswith("✅"), reply
-    return json.loads(reply.split("\n", 1)[1])
+    return json.loads(reply.split("\n", 2)[1])
 
 
 def _read_previous(registry: ToolRegistry, ref: dict) -> str:

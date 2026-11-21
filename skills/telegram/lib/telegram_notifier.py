@@ -19,9 +19,8 @@ from .telegram_api import (
     _LOCALIZED_TEXTS,
 )
 from .telegram_poll_binding import bot_id
-from .telegram_token import _report_failure, accepted_token, binding_for
+from .telegram_token import accepted_token, binding_for
 from .telegram_state import (
-    TelegramDestinationUnavailable,
     _data_dir,
     _jsonl_tail,
     _load_runtime_state,
@@ -85,7 +84,7 @@ async def _push_notification(
         client = TelegramClient(
             token, trust_env=trust_env,
             proxy=telegram_proxy(state_dir),
-            **(_mirror_options(api, bot_id(token), event, chat_id) if token and event is not None else {}),
+            **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
             api_base_url=telegram_api_base(state_dir),
             files_dir=telegram_files_dir(state_dir),
             binding=binding, generation=generation,
@@ -103,9 +102,6 @@ async def _push_notification(
     except TelegramTransportError as exc:
         api.log("debug", f"Telegram notify failed: {exc}")
         return "transient", exc
-    except TelegramDestinationUnavailable as exc:
-        _report_failure(api, "notification", exc)
-        return "skipped", exc
     except TelegramRequestRejected as exc:
         if exc.transient:
             api.log("debug", f"Telegram notify failed: {exc}")
@@ -267,8 +263,7 @@ def _routing_notice_text(event: Dict[str, Any], lang: str) -> Tuple[str, bool]:
         lines.extend(f"{index}. {label}" for index, label in enumerate(labels, 1))
         if len(options) > len(labels):
             lines.append(texts.format("routing_more_targets", count=len(options) - len(labels)))
-        if event.get("row_address"):
-            lines.append(texts["routing_reply_with_number"])
+        lines.append(texts["routing_reply_with_number"])
     names = [str(row.get("label") or "file") for row in event.get("attachment_manifest") or []
              if isinstance(row, dict) and row.get("status") == "rejected"]
     if names:

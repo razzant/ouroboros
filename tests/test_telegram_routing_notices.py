@@ -180,9 +180,9 @@ def test_a_refused_steer_of_an_owner_message_is_one_line_replying_to_that_messag
     [ack] = phone.acks()
     assert ack["reply_to"] == reference_from_row(row) and ack["routing_notice_carrier"] == "routing_ack"
     assert phone.rows() == []
-    # A separate ordinary answer to the same input keeps that exact anchor too.
+    # Control: an ordinary answer to the same latest message stays an unquoted neighbour.
     asyncio.run(phone.plugin._make_outbound(phone.api)({"text": "On it.", "reply_to": ack["reply_to"]}))
-    assert phone.sent()[-1]["reply_to_message_id"] == 50
+    assert "reply_to_message_id" not in phone.sent()[-1]
 
 
 @pytest.mark.parametrize("reason", _EVERY_REFUSAL)
@@ -386,38 +386,6 @@ def test_no_accepted_owner_row_means_no_reply_anchor(phone, monkeypatch):
     assert "reply_to" not in phone.acks()[0]
 
 
-def test_unreadable_owner_row_does_not_authorize_a_routing_notice_to_current_bot(phone, monkeypatch):
-    from ouroboros.store import StoreError
-    from supervisor.events_project_routing import _routing_notice_address
-
-    row = phone.owner(77)
-
-    def unavailable(*args, **kwargs):
-        raise StoreError("unavailable")
-
-    monkeypatch.setattr("supervisor.message_ingress.accepted_chat_message", unavailable)
-    _refuse("target_unknown", phone, monkeypatch)
-    _steer(phone, row["client_message_id"])
-    assert not phone.sent()
-    assert _routing_notice_address(phone.ctx, row)["transport"] == {"origin_unresolved": True}
-
-
-def test_routing_ack_keeps_the_accepted_transport_of_another_connector(phone, monkeypatch):
-    from ouroboros.event_bus import CHAT_OUTBOUND
-    from supervisor import message_bus as bus
-
-    source = {"kind": "other_connector", "conversation_id": "original"}
-    row = bus.log_chat("in", 42, 42, ASK, source="skill:other_connector",
-                       client_message_id="other:opening", transport=source)
-    phone.bridge.activate_update_transport({"chat_id": 42, "transport": {**source, "conversation_id": "new"}})
-    outbound = []
-    monkeypatch.setattr(bus, "publish_event", lambda topic, event: outbound.append(event) if topic == CHAT_OUTBOUND else None)
-    _refuse("target_unknown", phone, monkeypatch)
-    _steer(phone, row["client_message_id"])
-    [ack] = [event for event in outbound if event.get("annotation_type") == "routing_ack"]
-    assert ack["transport"] == source
-
-
 def test_a_landed_act_says_nothing_but_a_file_it_could_not_attach(phone, monkeypatch):
     from supervisor.events_project_routing import _emit_routing_receipt
 
@@ -529,16 +497,76 @@ def test_a_picker_gets_no_invented_reason_and_one_message_with_its_files(phone):
               "Reply with a number, or tap an option in the web chat.")
     [sent] = phone.sent()
     assert sent["text"] == f"{picker}\nNot attached to the task: оглавление.docx" and sent["reply_to_message_id"] == 50
-    from ouroboros.chat_references import resolve_history_row
-
-    state = sys.modules[phone.plugin.__package__ + ".lib.telegram_state"]
-    reply = state._owner_ingress_fields(phone.api, "", 42, {
-        "message_id": 51, "text": "2", "reply_to_message": {"message_id": 101},
-    }, 51)["reply_to"]
-    selected, _ = resolve_history_row(phone.data, reply)
-    assert selected["type"] == "routing_options" and "2. New task in Export" in selected["text"]
-    asyncio.run(phone.plugin._make_outbound(phone.api)({**ack, "row_address": reply,
-                                                       "cause": "Not started: the attachments could not be staged",
+    asyncio.run(phone.plugin._make_outbound(phone.api)({**ack, "cause": "Not started: the attachments could not be staged",
                                                        "target_label": "Export"}))
     assert phone.sent()[-1]["text"] == (f"Export · Not started: the attachments could not be staged\n{picker}"
                                         "\nNot attached to the task: оглавление.docx")
+
+
+@pytest.mark.parametrize("mirror_progress", ["off", "on"])
+def test_phone_notice_uses_available_translation(phone, monkeypatch, mirror_progress):
+    from ouroboros import i18n_memory
+    from ouroboros.pause_notices import notice_text
+    from tests.test_telegram_i18n import _seed
+
+    text = notice_text({"reason": "authority", "cause": "dispatch_fence_invalid"})
+    translated = "Задача ждёт исправную запись допуска."
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+    try:
+        _seed(phone.data, "ru", {text: {"text": translated}})
+        assert i18n_memory.tr(text, "ru", drive_root=phone.data) == translated
+        settings = {
+            "TELEGRAM_CHAT_ID": "42",
+            "TELEGRAM_MIRROR_MODE": "all",
+            "TELEGRAM_MIRROR_PROGRESS": mirror_progress,
+        }
+        monkeypatch.setattr(plugin, "_load_settings", lambda _: settings)
+        event = {
+            "text": text,
+            "task_id": "root",
+            "role": "system",
+            "system_type": "task_pause_notice",
+            "narration": False,
+            "card_row": "timeline",
+            "card_row_id": "pause:root:authority",
+            "pause_reason": "authority",
+        }
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        delivered = [sent["text"] for sent in phone.sent()]
+        assert delivered == ([translated] if mirror_progress == "on" else [])
+    finally:
+        plugin.telegram_i18n.configure(None)
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_queued_technical_notice_uses_the_translation_under_its_original_receipt(phone, monkeypatch, legacy):
+    from ouroboros import obligations, pause_notices
+    from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.task_results import write_task_result
+    from tests.test_telegram_i18n import _seed
+
+    row = {"reason": "authority"}
+    identity = "pause:task:episode-1"
+    if not legacy:
+        row["cause"] = "dispatch_fence_invalid"
+        identity = "pause:task:authority"
+    phrase = pause_notices.notice_text(row)
+    translated = "Задача ждёт восстановления записи."
+    prepare_startup_state(phone.data)
+    write_task_result(phone.data, "task", "running", chat_id=42, pause_notices={identity: row})
+    obligations.add(phone.data, "pause_notices", "task")
+    phone.plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+    try:
+        _seed(phone.data, "ru", {phrase: {"text": translated}})
+        settings = {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "all", "TELEGRAM_MIRROR_PROGRESS": "on"}
+        monkeypatch.setattr(phone.plugin, "_load_settings", lambda _: settings)
+        pause_notices.reconcile_pause_notices(phone.data)
+        pause_notices.reconcile_pause_notices(phone.data)
+        [saved] = [rec for rec in phone.rows() if rec.get("system_type") == "task_pause_notice"]
+        assert saved["card_row_id"] == identity and saved["content"] == phrase
+        assert [sent["text"] for sent in phone.sent()] == [translated]
+    finally:
+        phone.plugin.telegram_i18n.configure(None)

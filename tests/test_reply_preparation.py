@@ -112,18 +112,6 @@ def test_only_the_owners_root_is_expected_and_children_never_name_a_chat(world):
     assert state["roots"] == ["owner-turn"] and _chats(world) == [1]
 
 
-def test_unknown_origin_does_not_hide_an_independent_reply_in_the_same_room(world):
-    from ouroboros.project_dialogue import build_owner_message_ref
-
-    first = _pooled(world, "unknown-origin")
-    first["task"]["origin_message_ref"] = build_owner_message_ref(
-        chat_id=42, client_message_id="tg:missing", ts="2026-10-16T12:00:00Z", text="Hello")
-    _pooled(world, "ordinary")
-    assert reply_preparation(world.root)["chats"] == [
-        {"chat_id": 1, "transport": {"origin_unresolved": True}}, {"chat_id": 1, "transport": {}},
-    ]
-
-
 def test_a_direct_final_ends_preparation_before_the_slow_store_through_the_real_producer(world, monkeypatch):
     """Answer first: the real final crosses the supervisor's send seam while the result
     store is still blocked; from that moment the turn prepares nothing, even when the

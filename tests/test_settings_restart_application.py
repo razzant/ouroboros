@@ -20,7 +20,7 @@ from ouroboros.server_entrypoint import bound_service_socket
 @pytest.fixture
 def applied(monkeypatch):
     monkeypatch.setattr(server_process, "_applied_restart_settings", {})
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    config.initialize_runtime_mode_baseline("advanced")
     manager = local_model.LocalModelManager()
     monkeypatch.setattr(local_model, "_manager", manager)
     saved = dict(config.SETTINGS_DEFAULTS)
@@ -29,6 +29,16 @@ def applied(monkeypatch):
         "OUROBOROS_SKILLS_REPO_PATH", "OUROBOROS_UI_DIR",  # the last: server_web.ServedUI.apply
     )}, server_host_source="settings")
     return saved, manager
+
+
+def test_reader_imported_under_the_applied_mode_sees_the_next_boot(applied, monkeypatch):
+    from ouroboros.config import get_runtime_mode
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    assert get_runtime_mode() == "advanced"
+    config.reset_runtime_mode_baseline_for_tests()
+    config.initialize_runtime_mode_baseline()
+    assert get_runtime_mode() == "pro"
 
 
 def test_server_pending_truth_survives_reload_revert_and_environment_save(applied, monkeypatch):

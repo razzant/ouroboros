@@ -460,7 +460,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             if action in ("start", "on", "1", "stop", "off", "0"):
                 from ouroboros.consciousness import OWNER_STOP
 
-                on = action in ("start", "on", "1")  # the owner's door: app, Telegram and onboarding all send /bg
+                on = action in ("start", "on", "1")  # the owner's door: the app, Telegram and a custom setup page send /bg
                 result = ctx.consciousness.start() if on else ctx.consciousness.stop(source=OWNER_STOP)
                 reply(f"🧠 {result}")
             else:
