@@ -10,6 +10,7 @@ rule is retried unchanged.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable
 
 from ouroboros.tools.tool_result import (
@@ -112,3 +113,32 @@ def repair_call_available(ctx: Any, tool: str) -> bool:
                 and (ceiling is None or len(grants) == 1 and not grants[0].bindings))
     except ValueError:  # an unreadable carrier proves nothing
         return False
+
+
+def read_end_spelling(ctx: Any, path: str, start_line: Any, max_lines: Any,
+                      end_line: Any, end_char: Any) -> tuple[Any, str, str]:
+    """``(max_lines, note, refusal)`` for read_file's ``end_line``/``end_char``, outside its schema.
+
+    ``end_line`` is the inclusive last line of the window. ``end_char`` could count from the window
+    or from the file, so it is refused with the call that reads the window's characters.
+    """
+    def number(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    start = number(start_line, 1)
+    call = f"read_file(path={json.dumps(path)}, start_line={start}, "
+    if end_char is not None:
+        return max_lines, "", argument_refusal(ctx, "TOOL_ARG_ERROR", [
+            f"end_char={end_char!r} could count from the window or from the file; max_chars counts the window's "
+            f"characters after start_char: {call}max_chars=<characters>), with start_line=1 for the file's"],
+            effect="Nothing was read.")
+    want = number(end_line, 0) - start + 1
+    if want < 1 or max_lines not in (None, want):
+        conflict = (f"is before start_line={start}" if want < 1 else
+                    f"asks for {want} lines from start_line={start}, max_lines={max_lines!r} for another number")
+        return max_lines, "", argument_refusal(ctx, "TOOL_ARG_ERROR", [
+            f"end_line={end_line!r} {conflict}; {call}max_lines=<lines>)"], effect="Nothing was read.")
+    return want, f"end_line={end_line!r} read as max_lines={want} from start_line={start}", ""

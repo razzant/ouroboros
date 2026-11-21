@@ -490,11 +490,12 @@ def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any]) -> st
 
     _normalize_tool_call_args(entry, args)
     public_params = set(_entry_public_params(entry))
-    # A handler may name a bounded set of execution-only legacy parameters.  They
-    # remain absent from its model-visible schema and are therefore usable only by
-    # callers replaying the former wire shape through this real registry path.  The
-    # handler still owns deterministic migration/refusal; this generic seam neither
-    # chooses a route nor special-cases a tool name.
+    # A handler may name a bounded set of execution-only parameters outside its
+    # model-visible schema: a former wire shape, or another spelling with exactly one
+    # meaning.  They stay absent from the schema, so only callers that send them
+    # reach the handler, through this real registry path.  The handler still owns
+    # the deterministic translation, named in its result, or a refusal naming the
+    # ready call; this generic seam neither chooses a route nor special-cases a tool name.
     hidden_legacy = {
         str(name)
         for name in (getattr(entry.handler, "_hidden_legacy_params", ()) or ())

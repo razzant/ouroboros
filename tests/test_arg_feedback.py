@@ -146,3 +146,58 @@ def test_a_refusal_names_a_repair_call_only_where_the_caller_may_make_it(tmp_pat
     bound = PresenceArgumentBinding(("mode",), "static", static_value="warm")
     ctx.task_contract = ceiling(PresenceToolGrant("await_messages", (bound,)))
     assert not repair_call_available(ctx, "await_messages")
+
+
+def _file_registry(tmp_path, monkeypatch):
+    """A real registry over an external project workspace (no body candidate in between)."""
+    import ouroboros.safety as safety
+    from tests._workspace_git import git_repository
+
+    monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
+    system, project = git_repository(tmp_path / "system"), git_repository(tmp_path / "project")
+    registry = ToolRegistry(repo_dir=system, drive_root=tmp_path / "drive")
+    registry.set_context(ToolContext(repo_dir=system, system_repo_dir=system, drive_root=tmp_path / "drive",
+                                     workspace_root=project, workspace_mode="external", task_id="root-task"))
+    return registry, project
+
+
+def test_edit_text_count_one_is_the_single_replacement_and_a_larger_count_names_edit_batch(tmp_path, monkeypatch):
+    """`count` is outside edit_text's schema. count=1 asks for its default and runs, named in the result;
+    any other count asks for counted replacements, refused with the edit_batch call, nothing written."""
+    registry, repo = _file_registry(tmp_path, monkeypatch)
+    (repo / "m.txt").write_text("a a a\n", encoding="utf-8")
+    plain = registry.execute_result("edit_text", {"path": "m.txt", "old_str": "a a a", "new_str": "b a a"})
+    assert plain.status == "ok" and "count=" not in plain.text
+    one = registry.execute_result("edit_text", {"path": "m.txt", "old_str": "b a a", "new_str": "c a a", "count": 1})
+    assert one.status == "ok" and "count=1 ignored: one replacement is edit_text's default" in one.text
+    assert (repo / "m.txt").read_text(encoding="utf-8") == "c a a\n"
+    for count in (3, 0, "all"):
+        refused = registry.execute_result("edit_text", {"path": "m.txt", "old_str": "a", "new_str": "z", "count": count})
+        assert refused.status == "error" and refused.code == "TOOL_ARG_ERROR", refused.text
+        assert 'edit_batch(edits=[{"path": "m.txt", "old_str": <this call\'s old_str>' in refused.text
+        assert ('"count": 3}' if count == 3 else '"count": <occurrences>}') in refused.text
+        assert refused.text.endswith("Nothing was written.")
+    assert (repo / "m.txt").read_text(encoding="utf-8") == "c a a\n"
+
+
+def test_read_file_end_line_reads_its_inclusive_window_and_an_unclear_end_names_the_call(tmp_path, monkeypatch):
+    """`end_line` is outside read_file's schema and has one reading, the inclusive last line, so it reads
+    max_lines = end_line - start_line + 1 and says so. A conflicting max_lines, an end before the start and
+    `end_char` (window or file?) are refused with the ready call; the ordinary call is unchanged."""
+    registry, repo = _file_registry(tmp_path, monkeypatch)
+    (repo / "f.txt").write_text("".join(f"line {n}\n" for n in range(1, 11)), encoding="utf-8")
+    plain = registry.execute_result("read_file", {"path": "f.txt", "start_line": 3, "max_lines": 3})
+    assert "lines 3–5 of 10" in plain.text and "end_line" not in plain.text
+    read = registry.execute_result("read_file", {"path": "f.txt", "start_line": 3, "end_line": 5})
+    assert read.status == "ok" and "lines 3–5 of 10" in read.text and "line 6" not in read.text
+    assert read.text.endswith("end_line=5 read as max_lines=3 from start_line=3")
+    agreeing = registry.execute_result("read_file", {"path": "f.txt", "end_line": 2, "max_lines": 2})
+    assert "lines 1–2 of 10" in agreeing.text
+    for args, says in (({"start_line": 3, "end_line": 5, "max_lines": 9}, "asks for 3 lines from start_line=3"),
+                       ({"start_line": 6, "end_line": 5}, "end_line=5 is before start_line=6"),
+                       ({"start_line": 2, "end_char": 40}, "end_char=40 could count from the window or from the file")):
+        refused = registry.execute_result("read_file", {"path": "f.txt", **args})
+        assert refused.status == "error" and refused.code == "TOOL_ARG_ERROR", refused.text
+        assert says in refused.text and 'read_file(path="f.txt", start_line=' in refused.text
+        assert refused.text.endswith("Nothing was read.") and "line 1\n" not in refused.text
+

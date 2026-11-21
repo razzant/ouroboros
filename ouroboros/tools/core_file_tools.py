@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
-    is_skill_owner_state_target as _policy_is_skill_owner_state_target,
+    is_skill_owner_state_target as _is_skill_owner_state_target,
 )
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
@@ -192,8 +192,7 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
                        "complete_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                        "source_start_char": source_start, "source_end_char": source_start + len(body),
                        "range_basis": "unicode_text_universal_newlines", "source_masked": False})
-    rendered = header + displayed
-    return rendered
+    return header + displayed
 
 
 # The numbered display is deterministic: row k is ``_display_prefix(first_number + k)``
@@ -300,41 +299,30 @@ def _read_source_text(target: pathlib.Path, extent: Optional[Dict[str, Any]]) ->
     return content
 
 
-def _coerce_start_char(start_char: Any = 0) -> int:
+def _int_or(value: Any, default: Any) -> Any:
     try:
-        return max(0, int(start_char))
+        return int(value)
     except (TypeError, ValueError):
-        return 0
+        return default
+
+
+def _coerce_start_char(start_char: Any = 0) -> int:
+    return max(0, _int_or(start_char, 0))
 
 
 def _coerce_max_chars(max_chars: Any = None) -> Optional[int]:
     """A positive character budget for one view; anything else means unbounded."""
-    try:
-        value = int(max_chars) if max_chars is not None else None
-    except (TypeError, ValueError):
-        return None
+    value = _int_or(max_chars, None)
     return value if value is not None and value > 0 else None
 
 
 def _coerce_line_window(start_line: Any = 1, max_lines: Any = 2000) -> tuple[int, int]:
-    try:
-        start_raw = int(start_line)
-    except (TypeError, ValueError):
-        start_raw = 1
-    try:
-        max_raw = int(max_lines)
-    except (TypeError, ValueError):
-        max_raw = 2000
-    return start_raw, max(1, max_raw)
+    return _int_or(start_line, 1), max(1, _int_or(max_lines, 2000))
 
 
 def _is_cognitive_data_path(norm: str) -> bool:
     text = str(norm or "").replace("\\", "/").lstrip("./")
     return text.startswith("memory/") or text in _MEMORY_AT_DRIVE_MEMORY
-
-
-def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) -> bool:
-    return _policy_is_skill_owner_state_target(target, data_root)
 
 
 class _ListingFailure(Exception):
@@ -853,14 +841,22 @@ def _read_file(
     ctx: ToolContext,
     path: str,
     root: str | None = None,
-    max_lines: int = 2000,
+    max_lines: Optional[int] = None,
     start_line: int = 1,
     start_char: int = 0,
     bucket: str = "",
     skill_name: str = "",
     _resolved_binding: ResolvedResourceBinding | None = None,
     max_chars: Optional[int] = None,
+    end_line: Any = None,
+    end_char: Any = None,
 ) -> str:
+    if end_line is not None or end_char is not None:
+        from ouroboros.tools.arg_feedback import read_end_spelling, with_argument_notes
+
+        max_lines, note, refusal = read_end_spelling(ctx, path, start_line, max_lines, end_line, end_char)
+        return refusal or with_argument_notes(ctx, _read_file(
+            ctx, path, root, max_lines, start_line, start_char, bucket, skill_name, _resolved_binding, max_chars), [note])
     # Reset first: a blocked or missing read must never inherit the previous
     # read's extent (the renderer fills `extent` only when it rendered).
     ctx.last_read_view = None
@@ -917,6 +913,9 @@ def _read_file(
     except Exception as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"))
+
+
+setattr(_read_file, "_hidden_legacy_params", ("end_line", "end_char"))
 
 
 @completed_local_read

@@ -738,9 +738,22 @@ def _edit_text(
     force: bool = False,
     edits: List[Dict[str, str]] | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
+    count: object = None,
 ) -> str:
     from ouroboros.tools.tool_resolution import inferred_file_root
 
+    if count is not None:  # outside the schema (DEVELOPMENT 02): only count=1 has one meaning here
+        from ouroboros.tools.arg_feedback import argument_refusal, ignored_argument_note
+
+        if type(count) is int and count == 1 and edits is None:
+            return with_argument_notes(ctx, _edit_text(
+                ctx, path, old_str, new_str, root, bucket, skill_name, force, None, _resolved_binding,
+            ), [ignored_argument_note("count", count, "one replacement is edit_text's default")])
+        repair = ("count belongs inside each edit: edits=[{old_str, new_str, count}]" if edits is not None else
+                  f"edit_text replaces exactly one occurrence; for counted replacements call edit_batch(edits=[{{"
+                  f"\"path\": {json.dumps(path)}, \"old_str\": <this call's old_str>, \"new_str\": <this call's "
+                  f"new_str>, \"count\": {count if type(count) is int and count > 1 else '<occurrences>'}}}])")
+        return argument_refusal(ctx, "TOOL_ARG_ERROR", [f"count={count!r}: {repair}"], effect="Nothing was written.")
     root, root_error = inferred_file_root(ctx, "edit_text", root, [path])
     if root_error:
         return publish_no_effect(ctx, root_error, tool_name="edit_text")
@@ -887,6 +900,8 @@ def _edit_text(
     except Exception as exc:
         return f"⚠️ EDIT_TEXT_ERROR: {type(exc).__name__}: {exc}"
 
+
+setattr(_edit_text, "_hidden_legacy_params", ("count",))
 _MAX_SEARCH_RESULTS = 200
 # Search file-skip helper and caps live in ouroboros.code_search_rg (the search
 # module SSOT); imported with the historical private names used by call sites.
