@@ -1497,7 +1497,8 @@ def test_reasoning_ends_at_its_own_closing_line_and_a_mention_does_not_end_it():
     " ".join("`" * length for length in range(1, 121)) + "\n</think>\nAnswer.",
     "</think> " * 32000,  # review 8 (Fable): a looping small model's closing tags, 288 thousand characters on a line
     "plan\n" + "</think> " * 32000,
-])
+], ids=["one-run", "one-run-then-answer", "growing-runs", "growing-runs-then-answer", "closing-tags",
+        "plan-then-closing-tags"])  # a whole parameter as the id outgrows Windows' 32,767-character environment value
 def test_backtick_runs_are_read_in_linear_time(text):
     """A reply of backtick runs once took minutes in the inline-code scan (a backtracking pattern). An inline span
     still closes at the next run of its own length; a run without a partner is text. The budget is this process's

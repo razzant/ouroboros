@@ -1208,7 +1208,15 @@ def _forward_to_worker(
     if not data:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ TASK_NOT_FOUND: task {tid} is not registered.")))
     if status in FINAL_STATUSES:
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}.")))
+        # The record is on the caller's status root, so get_task_result reads it where the caller may call it
+        # (a not-started promotion answers with its own notice instead, so no read is named for it).
+        from ouroboros.promotion_intent import promotion_intent_notice
+        from ouroboros.tools.arg_feedback import repair_call_available
+
+        read = (f" get_task_result(task_id={tid!r}) reads its result."
+                if repair_call_available(ctx, "get_task_result") and not promotion_intent_notice(tid, data) else "")
+        return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(
+            f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}; the message was not delivered.{read}")))
     # A requested child's mailbox exists in its recorded drive from the request on: its words are
     # read when it starts, or stay in its result as unread mail, the same receipt a queued one gives.
     if status not in (STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED):

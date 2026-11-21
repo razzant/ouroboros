@@ -57,7 +57,7 @@ def test_status_uses_authoritative_runtime_budget_projection(tmp_path, monkeypat
         }
 
     monkeypatch.setattr(plugin, "_load_runtime_state", runtime_state)
-    monkeypatch.setattr(plugin, "_collect_health", lambda _api, _lang: "health")
+    monkeypatch.setattr(plugin, "_collect_health", lambda _api, _lang, _state=None: "health")
     text = asyncio.run(plugin._compile_status_text(Api(), "en"))
     assert "12.5000" in text and "100.00" in text and "ouroboros" in text
     assert "999" not in text and "stale" not in text
@@ -74,7 +74,7 @@ def test_status_marks_unavailable_budget_projection(tmp_path, monkeypatch):
         return {}
 
     monkeypatch.setattr(plugin, "_load_runtime_state", unavailable)
-    monkeypatch.setattr(plugin, "_collect_health", lambda _api, _lang: "health")
+    monkeypatch.setattr(plugin, "_collect_health", lambda _api, _lang, _state=None: "health")
     text = asyncio.run(plugin._compile_status_text(Api(), "en"))
     assert text.count("unavailable") >= 4
 
@@ -90,7 +90,7 @@ def test_status_marks_zero_budget_as_unbounded(tmp_path, monkeypatch):
         return {"spent_usd": 12.5, "budget_limit": 0.0}
 
     monkeypatch.setattr(plugin, "_load_runtime_state", unbounded)
-    monkeypatch.setattr(plugin, "_collect_health", lambda _api, _lang: "health")
+    monkeypatch.setattr(plugin, "_collect_health", lambda _api, _lang, _state=None: "health")
     text = asyncio.run(plugin._compile_status_text(Api(), "en"))
     assert text.count("unbounded") == 2
     assert "Limit: `$0.00`" not in text

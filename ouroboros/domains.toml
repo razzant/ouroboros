@@ -1011,6 +1011,7 @@ D20 = "Presence"
 "ouroboros/record_compression.py" = "D11"  # the maintenance child's job compressing finished records in place
 "ouroboros/terminal_cost_reconciliation.py" = "D11"
 "ouroboros/server_owner_routing.py" = "D11"
+"ouroboros/recovery_turn_facts.py" = "D11"  # the Fault boot recovery turn's facts and words
 "ouroboros/server_process.py" = "D11"
 "ouroboros/server_restart.py" = "D11"
 "ouroboros/server_routing_context.py" = "D11"
