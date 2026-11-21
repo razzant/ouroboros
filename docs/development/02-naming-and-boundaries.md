@@ -78,13 +78,22 @@ safety, budget, transport and evidence expiry. A missing channel is a capability
 host-attested owner-origin root a Main voice; no chat number, Main's included, is owner
 proof.
 
-`prompts/SYSTEM.md` is tier-0 for every Main and task profile in every context mode. It carries identity and tone, the decision loop,
-cross-tool policy, prohibitions and safety invariants stated once, and the memory
-contract (ARCHITECTURE §6 "Durable memory and project focus"). A missing carrier stays a visible gap.
-It never carries how a tool works: parameters, recipes, typed outcomes and "when to
-choose it" belong to the `get_tools()` schemas selected for the acting profile, so
-prompt schema copy drifts and a new tool needs no SYSTEM.md mention. Every prompt change reports its before/after byte size in
-the commit or PR.
+`prompts/SYSTEM.md` is tier-0 for every Main and task profile in every context mode. It
+carries how Ouroboros decides: identity and tone, the decision loop, judgment across
+capabilities, prohibitions and safety invariants stated once, and the memory contract
+(ARCHITECTURE §6 "Durable memory and project focus"). A missing carrier stays a visible gap.
+How one capability works (parameters, recipes, statuses, costs, recovery steps, a surface's
+quirks) lives where its actor reads it before the choice it informs: the schema lead that
+survives the route's projection, the typed result or refusal at the moment of need, or host
+text rendered only while the capability is on (a Runtime field, a role note, the connection
+map, a task-contract field). A lead may say when its own tool fits; other host text, prose
+rendered from code included, states facts and an assigned role's duties, never which choice
+to make. SYSTEM.md is the last home: a clause about one capability stays only while the
+thinnest supported request (a Nano selection, a projection without parameter prose, a child
+without the books) would reach that choice without it, and the commit names the missing
+carrier. A new tool needs no SYSTEM.md mention; a removal names the line its reader still
+reads. Every prompt change reports its before/after byte size and what a behaviour check
+showed, or that none was run, in the commit or PR.
 
 Recoverable tool failures are evidence for the next model turn, not triggers for a
 host-authored recovery workflow: return a typed, redacted result naming the failed
@@ -153,13 +162,8 @@ navigates, `reference_books.book_path_role` classifies,
 `read_text()` substring pin passes vacuously).
 
 Enforcement: `tests/test_reference_book_validation.py` validates book shape; whether an
-entrypoint states a fact of its own is review judgment (CHECKLISTS `architecture_doc`). Residue
-(version stamps, decision codenames, owner codes, Cyrillic, bare issue numbers, "used
-to / previously" narrative) is caught by the shrink-only check in
-`tests/test_docs_sync.py`: the case-sensitive `DOC_RESIDUE_PATTERNS`, outside
-language-tagged fences and the declared skipped subsections ("External facts: unknown
-is not no" and this one); the untagged module-tree fence in ARCHITECTURE §1 is
-scanned.
+entrypoint states a fact of its own is review judgment (CHECKLISTS `architecture_doc`). The shrink-only residue check (including Cyrillic) is
+`tests/test_docs_sync.py::test_resident_docs_residue_only_shrinks`.
 
 Size is pairwise: a change ends each composed book, entrypoint included,
 `BIBLE.md` and the prompts (`prompts/*.md` as one text) no larger than at its
