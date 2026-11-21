@@ -916,6 +916,88 @@ def test_mounted_storage_routes_read_passively_until_the_owner_measures(tmp_path
     assert [json.loads(line)["type"] for line in (data / "logs" / "supervisor.jsonl").read_text().splitlines()] == ["storage_count"]
 
 
+@pytest.mark.parametrize("path, body, owner_name, method, extra", [
+    ("/api/storage/measure", None, "count", "start", {"started": True}),
+    ("/api/storage/measure/cancel", None, "count", "cancel", {}),
+    ("/api/storage/free/preview", None, "free", "preview", {"started": True}),
+    ("/api/storage/free", {"plan": "stale", "groups": ["work_folders"]}, "free", "start",
+     {"started": False, "reason": "preview_outdated"}),
+    ("/api/storage/free/cancel", None, "free", "cancel", {}),
+])
+def test_a_storage_press_waits_for_its_owner_off_the_event_loop(tmp_path, monkeypatch, path, body, owner_name, method, extra):
+    """A press of Count, Stop or a Free tray button waits for its owner in the threadpool: while a page read holds
+    the count's lock across the saved file (a slow disk) or a request holds Free's, the server's event loop goes on
+    serving other requests (a browser Panic arrives through it), and the press then answers as it does unheld."""
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.storage_free import FreeSpace
+
+    data = tmp_path / "data"
+    _write(data / "observability" / "a.bin", 10)
+    save_count(data, _count(data))
+    _fake_spawn(monkeypatch, [])  # a count's child ends at once without a result
+    counter, tray = StorageCounter(), FreeSpace(live=lambda _task: False, offered=())
+    owner = counter if owner_name == "count" else tray
+    reached, holding, let_go = threading.Event(), threading.Event(), threading.Event()
+    real_call, real_load = getattr(owner, method), storage.load_saved
+
+    def call(*args, **kwargs):
+        reached.set()  # the press is at its owner's call
+        return real_call(*args, **kwargs)
+
+    def slow_disk(root):
+        holding.set()
+        assert let_go.wait(30)
+        return real_load(root)
+
+    def free_request():
+        with tray._lock:
+            holding.set()
+            assert let_go.wait(30)
+
+    async def alive(_request):
+        return PlainTextResponse("alive")
+
+    def answered(response):
+        assert response.status_code == 202
+        answer = response.json()
+        assert set(answer) == {"count", "counting", "error", "volume", "retention_days", "free", "removers", *extra}
+        assert {key: answer[key] for key in extra} == extra
+
+    def settle():
+        for thread in (counter._thread, tray._thread):
+            if thread is not None:
+                thread.join(timeout=30)
+                assert not thread.is_alive()
+
+    monkeypatch.setattr(owner, method, call)
+    if owner_name == "count":
+        monkeypatch.setattr(storage, "load_saved", slow_disk)
+    app = Starlette(routes=[*storage_routes(data, repo_dir=tmp_path, owner=counter, free_owner=tray), Route("/alive", alive)])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    with TestClient(app) as client:
+        try:  # the holder: a page read of the saved count, or a Free request holding its lock
+            holder = pool.submit(client.get, "/api/storage") if owner_name == "count" else pool.submit(free_request)
+            assert holding.wait(10)
+            press = pool.submit(client.post, path, json=body)
+            assert reached.wait(10)
+            # blocked direction: the loop serves another request while the press waits for the held lock
+            assert pool.submit(client.get, "/alive").result(timeout=5).text == "alive"
+            assert not press.done()
+        finally:
+            let_go.set()
+            pool.shutdown(wait=True)
+        read = holder.result()  # a holder's own failure surfaces here
+        assert owner_name != "count" or read.status_code == 200, "the page read itself completes"
+        answered(press.result())
+        settle()
+        answered(client.post(path, json=body))  # still-working direction: unheld, the press answers as before
+        settle()
+
+
 # ------------------------------------------------------------- contract
 
 

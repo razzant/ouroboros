@@ -1,5 +1,6 @@
 """Dashboard Storage routes over the one ``ouroboros.storage.count`` owner of this server and the one
-``ouroboros.storage_free.free`` owner of the Temporary space tray."""
+``ouroboros.storage_free.free`` owner of the Temporary space tray. Every owner call runs in the threadpool:
+an owner's lock can be held across a disk read, and this event loop also carries a browser Panic."""
 
 from __future__ import annotations
 
@@ -42,17 +43,17 @@ def storage_routes(data_dir: pathlib.Path, *, repo_dir: Optional[Any] = None,
 
     async def api_storage_measure(_request: Request) -> JSONResponse:
         """Start one complete count in the child, or join the running one; the body is ignored."""
-        return await answer(started=counter.start(data_dir, repo()))
+        return await answer(started=await run_in_threadpool(counter.start, data_dir, repo()))
 
     async def api_storage_measure_cancel(_request: Request) -> JSONResponse:
         """Kill the running count; the saved count stays. Nothing running answers the same way."""
-        counter.cancel()
+        await run_in_threadpool(counter.cancel)
         return await answer()
 
     async def api_storage_free_preview(_request: Request) -> JSONResponse:
         """List, without side effects, what the app's own retirers would remove now; a second
         preview joins the running one and nothing starts while a run runs."""
-        return await answer(started=tray.preview(data_dir, repo()))
+        return await answer(started=await run_in_threadpool(tray.preview, data_dir, repo()))
 
     async def api_storage_free(request: Request) -> JSONResponse:
         """Free exactly the previewed objects: ``{"plan": "<id>", "items": [...]}`` of the pool,
@@ -64,13 +65,13 @@ def storage_routes(data_dir: pathlib.Path, *, repo_dir: Optional[Any] = None,
         except Exception:
             body = None
         body = body if isinstance(body, dict) else {}
-        outcome = tray.start(data_dir, repo(), body.get("plan"), body.get("groups"), body.get("items"),
-                             manual=body.get("manual"), accept_loss=body.get("accept_loss"))
+        outcome = await run_in_threadpool(tray.start, data_dir, repo(), body.get("plan"), body.get("groups"), body.get("items"),
+                                          manual=body.get("manual"), accept_loss=body.get("accept_loss"))
         return await answer(**outcome)
 
     async def api_storage_free_cancel(_request: Request) -> JSONResponse:
         """Stop the listing (nothing is kept) or the run (what was freed stays freed)."""
-        tray.cancel()
+        await run_in_threadpool(tray.cancel)
         return await answer()
 
     async def api_storage_free_items(request: Request) -> JSONResponse:
