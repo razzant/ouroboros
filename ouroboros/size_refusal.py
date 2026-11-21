@@ -74,7 +74,9 @@ FORMS: Tuple[Form, ...] = (
     # Z.ai (docs.z.ai error codes; live refusal 2026-11-20, logs llm_912c35cf3f7c474688b85055e0d4fb0c): HTTP 400,
     # code "1261", message exactly "Prompt too long" — no token numbers. "Prompt too long" (no "is") is also the
     # body the OpenAI SDK prints for any zai:: route, so the form and the 1261 code below reach it on both seams.
-    Form("zai/prompt-too-long", r"^prompt too long", (), "unknown"),
+    # Anchored to the whole sentence: a wording that goes on to state a limit ("Prompt too long; maximum context
+    # length is 80000 tokens") must fall through to the shared vocabulary, whose limit parser keeps the number.
+    Form("zai/prompt-too-long", r"^prompt too long$", (), "unknown"),
 )
 _COMPILED = tuple((form, re.compile(form.pattern, re.I)) for form in FORMS)
 
