@@ -139,9 +139,12 @@ def retire_superseded_at_departure(slot: Any, messages: list, tools: Any, *, dri
 
 
 def retire_host_rows_after_fold(messages: list, receipt: dict, *, observed_messages=(), keep_unit_ids=()) -> list:
-    """Retire unselected superseded host rows inside an applied, checkpointed authored fold."""
+    """Retire unselected superseded host rows inside an applied, checkpointed authored fold, none located before the
+    note it wrote: a fold changes nothing before its first replaced unit."""
     if receipt.get("status") != "applied" or not receipt.get("selection_fingerprint") or not receipt.get("checkpoint_ref"):
         return messages
+    note = "view:" + receipt["selection_fingerprint"]
+    first = next((i for i, row in enumerate(messages) if (compaction._capsule_metadata(row)[1] or {}).get("unit_id") == note), 0)
     def identity(row):
         return compaction.context_reclaim_transcript_sha256(compaction._view_source_messages([row]))
     units = compaction.context_units(observed_messages, scope="dialogue")
@@ -161,7 +164,7 @@ def retire_host_rows_after_fold(messages: list, receipt: dict, *, observed_messa
         if not positions:
             continue  # arrivals have no occurrence in the observed checkpoint
         original = positions.popleft()
-        if i in superseded and original not in protected_positions:
+        if i in superseded and original not in protected_positions and i >= first:
             obsolete.add(i)
             retired_positions.add(original)
     if not obsolete:
