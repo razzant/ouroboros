@@ -645,16 +645,15 @@ def governance_context(
     chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
     chapter_text[DESIGN_PATH] = design_text
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
-    # The design bible alone: its opening lines and numbered principles. The seed and
-    # component recipes follow the principles inside the same Markdown section: stop
-    # where the numbered list ends, not at H2.
+    # The design bible alone: its whole section, principles, seed table and recipes, the
+    # very slice its author carries (``context_layout.design_bible_section``).
+    from ouroboros.context_layout import design_bible_section
+
     bible_path = f"{DESIGN_PATH}#Design bible"
-    bible = None if design_missing else re.search(
-        r"(?ms)^## Design bible\b.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", design_text)
+    bible = None if design_missing else design_bible_section(design_text)
     if bible:
-        last = re.findall(r"(?m)^(\d+)\. ", bible[0])[-1]
-        bible_title = f"{bible_path} (excerpt: principles 1–{last})"
-        chapter_text[bible_path] = bible[0].strip()
+        bible_title = f"{bible_path} (excerpt: the whole section)"
+        chapter_text[bible_path] = bible
     bible_absent = "design bible excerpt unavailable; inspect the named source"
     if design_missing:
         rows.append(_row(DESIGN_PATH, 2, "navigation", 0,
@@ -677,8 +676,8 @@ def governance_context(
     for order, path, title, reason in sorted(candidates):
         if _admit(path, title, chapter_text.get(path, ""), 2, reason) or path != DESIGN_PATH:
             continue
-        # The whole book does not fit this reviewer's share. Its principles are what a
-        # change under web/ is judged by, so they are carried before any chapter chosen
+        # The whole book does not fit this reviewer's share. Its bible is what a
+        # change under web/ is judged by, so it is carried before any chapter chosen
         # by a file name; the heading map still indexes the rest.
         if bible:
             _admit(bible_path, bible_title, chapter_text[bible_path], 2,

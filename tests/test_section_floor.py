@@ -23,7 +23,7 @@ def test_host_ladder_lists_live_producers_and_keeps_only_the_actual_protected_co
     from ouroboros.context_layout import TIER0_ALWAYS_FULL
 
     assert memory_floor.HOST_STEPS == ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
-        "world", "subagents",
+        "design_bible", "world", "subagents",
         "architecture_map", "development_map", "return_facts_words")
     assert section_floor.PROTECTED == TIER0_ALWAYS_FULL
     # The overview joins the protected core by the owner's choice (20.10.2026): never an address.

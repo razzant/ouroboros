@@ -112,12 +112,13 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
 def test_prepared_body_navigation_reaches_compiled_and_direct_requests(tmp_path, monkeypatch, compiled, kind):
     request, row, task, _ctx, live, prepared = _start(tmp_path, monkeypatch, compiled=compiled, kind=kind)
     instructions = request["instructions"]
-    assert "DESIGN NAVIGATION DELIVERY" in instructions
+    assert "DESIGN DELIVERY" in instructions
     assert "Prepared copy heading — lines 3-4" in instructions
-    assert str(prepared) in instructions and str(live) not in instructions.split("DESIGN NAVIGATION DELIVERY", 1)[1]
+    assert str(prepared) in instructions and str(live) not in instructions.split("DESIGN DELIVERY", 1)[1]
     assert "Live target heading" not in instructions and "Installed heading" not in instructions
     assert "Original rule text" not in instructions
     assert "Navigation only" in instructions and "reading or application" in instructions
+    assert "This source has no `## Design bible` section." in instructions  # a book without one says so
     assert sha256(prepared.read_bytes()).hexdigest() in instructions
     assert row["request"] == request  # the actual wire bytes are already in durable custody
     assert request["execution"]["workspaceRoot"] == str(prepared.parent.parent)
@@ -125,10 +126,30 @@ def test_prepared_body_navigation_reaches_compiled_and_direct_requests(tmp_path,
     assert ("HOST TASK CONTRACT AUTHORITY" in instructions) is not compiled
 
 
+def test_session_start_carries_the_design_bible_whole_with_its_digest(tmp_path, monkeypatch):
+    """The session's start request carries the author's view of the prepared copy (rethink C13): its design bible
+    verbatim, the rest of the book by headings and the pinned bytes' SHA-256; other rules stay one read away."""
+    bible = ('## Design bible: "Airy dopamine"\n\n1. **The room is plain.** PRINCIPLE_DELIVERED\n\n**Seed**\n\n'
+             "| Role | Light |\n| --- | --- |\n| Room | SEED_DELIVERED |\n")
+
+    def with_bible(_ctx):
+        (tmp_path / "prepared/docs/DESIGN.md").write_text(
+            "# Design\n\n" + bible + "\n## Prepared copy heading\nOriginal rule text, not navigation.\n", encoding="utf-8")
+
+    request, row, _task, _ctx, live, prepared = _start(tmp_path, monkeypatch, prepare=with_bible)
+    delivered = request["instructions"].split("DESIGN DELIVERY", 1)[1]
+    assert bible.strip() in delivered and '"Airy dopamine" (whole above) — lines 3-12' in delivered
+    assert "Prepared copy heading — lines 13-14" in delivered and "Original rule text" not in delivered
+    assert f"Source bytes SHA-256: {sha256(prepared.read_bytes()).hexdigest()}." in delivered
+    assert "Inlined above: its design bible whole (lines 3-12)" in delivered and "Navigation only" not in delivered
+    assert str(prepared) in delivered and str(live) not in delivered
+    assert row["request"] == request  # pinned in custody: a retry replays these bytes
+
+
 @pytest.mark.parametrize("kind", ["foreign_copy", "unknown"])
 def test_foreign_and_unidentified_workspaces_get_no_body_design(tmp_path, monkeypatch, kind):
     request, row, _task, _ctx, _live, _prepared = _start(tmp_path, monkeypatch, kind=kind)
-    assert "DESIGN NAVIGATION DELIVERY" not in request["instructions"]
+    assert "DESIGN DELIVERY" not in request["instructions"]
     assert not any(f"{name} heading" in request["instructions"] for name in ("Installed", "Live target", "Prepared copy"))
     assert row["request"] == request
 
@@ -179,7 +200,7 @@ def test_retained_delivery_and_canonical_source_survive_design_changes(tmp_path,
     assert compile_external_work_order(task) == canonical and work_order_fingerprint(task) == fingerprint
     projection, reason = work_order_source_projection(task, 0, len(canonical))
     assert reason == "" and projection["text"] == canonical
-    assert "DESIGN NAVIGATION DELIVERY" not in canonical
+    assert "DESIGN DELIVERY" not in canonical
 
 
 def test_nested_body_start_uses_corresponding_private_repo_root(tmp_path):

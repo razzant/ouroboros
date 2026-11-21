@@ -103,9 +103,9 @@ def test_noninline_design_keeps_map_and_direct_source(governance_repo, surface, 
 
 
 def test_a_change_under_web_carries_the_design_bible_when_the_whole_book_does_not_fit(governance_repo):
-    """The reviewer of a change under web/ judges it by the book's principles. A book too long for the reviewer's
-    inline share used to leave it with the heading map alone; the design bible (the opening lines and the numbered
-    principles) is a small part of the book and is carried then, the heading map with it."""
+    """The reviewer of a change under web/ judges it by the book's design bible. A book too long for the reviewer's
+    inline share used to leave it with the heading map alone; the bible, its whole section with the seed and the
+    recipes that follow its principles, is a small part of the book and is carried then, the heading map with it."""
     book = DESIGN_BIBLE + "\n**Seed**\n\nFull design recipes.\n" + DESIGN + "\nA recipe line.\n" * 200_000
     _design(governance_repo, book)
 
@@ -116,8 +116,9 @@ def test_a_change_under_web_carries_the_design_bible_when_the_whole_book_does_no
         return context, rows
 
     context, rows = delivered(1_000_000)
-    assert DESIGN_BIBLE.strip() in context.selected_inline and "principles 1–7" in context.selected_inline
-    assert "Full design recipes." not in context.selected_inline
+    assert DESIGN_BIBLE.strip() in context.selected_inline and "(excerpt: the whole section)" in context.selected_inline
+    assert "Full design recipes." in context.selected_inline  # the seed after the list is the same section
+    assert "Original interaction rule." not in context.selected_inline  # the next section is not
     # A handbook chapter that names the touched file is chosen too; the principles come before it.
     ordered, _ = delivered(1_000_000, touched="web/modules/chat.js")
     assert 0 < ordered.selected_inline.index("Principle 1.") < ordered.selected_inline.index("Widget rules mention chat.js once.")
@@ -164,27 +165,41 @@ def test_python_word_evidence_uses_only_design_bible(governance_repo, window, in
     words = compare_sources([("ouroboros/notice.py", before, after)])
     context = governance_context(governance_repo, surface="triad", touched_paths=["ouroboros/notice.py"],
                                  usable_window_tokens=window, review_words=words, delivery=delivery)
+    bible = DESIGN_BIBLE + '\n**Seed**\n\nFull design recipes.'
     assert "docs/DESIGN.md" not in context.inline_whole_documents
-    assert (DESIGN_BIBLE.strip() in context.selected_inline) is (inline and changed)
-    assert "Full design recipes." not in context.selected_inline
+    assert (bible in context.selected_inline) is (inline and changed)
+    assert "Original interaction rule." not in context.selected_inline
     assert "Interaction meaning" in context.navigation
     if changed:
         row = next(row for row in context.manifest if row["path"] == "docs/DESIGN.md#Design bible")
         assert row["disposition"] == ("inline" if inline else "navigation")
         assert "excerpt" in row["reason"]
-        assert row["chars"] == len(DESIGN_BIBLE.strip())
+        assert row["chars"] == len(bible)
 
 
-def test_bible_excerpt_follows_the_numbered_list_not_a_fixed_count(governance_repo):
+def test_bible_excerpt_is_its_whole_section_wherever_its_list_ends(governance_repo):
+    """The reviewer's bible is the section up to the next heading of its level, fenced lines and the seed table
+    included: the slice its author carries, byte for byte (``context_layout.design_bible_section``)."""
+    from types import SimpleNamespace
+
+    from ouroboros.context_layout import design_bible_section, task_design_navigation
     from ouroboros.review_words import compare_sources
 
     eighth = "8. **Principle 8.** A later rule.\n   Its continuation.\n"
-    _design(governance_repo, DESIGN_BIBLE + eighth + "\n**Seed**\n\nFull design recipes.\n" + DESIGN)
+    seed = "\n**Seed**\n\n| Role | Light |\n| --- | --- |\n| Room | `#ffffff` |\n\n```md\n## Not a heading\n```\nA recipe.\n"
+    text = DESIGN_BIBLE + eighth + seed + DESIGN.removeprefix("# Design\n")
+    source = _design(governance_repo, text)
     words = compare_sources([("ouroboros/notice.py", 'TEXT = "Read the result"', 'TEXT = "Read the updated result"')])
     context = governance_context(governance_repo, surface="triad", touched_paths=["ouroboros/notice.py"],
                                  usable_window_tokens=1_000_000, review_words=words)
-    assert "Its continuation." in context.selected_inline and "principles 1–8" in context.selected_inline
-    assert "Full design recipes." not in context.selected_inline
+    reviewed = dict(context.inline_sections)["docs/DESIGN.md#Design bible (excerpt: the whole section)"]
+    assert reviewed == (DESIGN_BIBLE + eighth + seed).strip() == design_bible_section(source.read_text(encoding="utf-8"))
+    assert "Its continuation." in reviewed and "| Room | `#ffffff` |" in reviewed and "A recipe." in reviewed
+    assert "Original interaction rule." not in reviewed  # the next level-2 section is the rest of the book
+    author = task_design_navigation(SimpleNamespace(repo_dir=governance_repo, system_repo_dir=governance_repo,
+                                                    drive_root=governance_repo.parent / "data", task_metadata={}), {})
+    assert author.section_id == "design_bible"  # the author of this body carries it in its own context
+    assert author.full_text.startswith(reviewed + "\n\n## DESIGN.md (navigation map)")  # one text, byte for byte
 
 
 def test_missing_bible_excerpt_never_falls_back_to_whole_design(governance_repo):

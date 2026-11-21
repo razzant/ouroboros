@@ -84,7 +84,7 @@ def test_genesis_request_gets_index_only_for_shared_inputs(tmp_path, monkeypatch
         tmp_path, monkeypatch, compiled=compiled, kind="foreign_copy", input_sources=input_sources,
         prepare=lambda ctx: _install_skill(ctx.drive_root, "external_guide"))
     assert ("HOST SKILL REFERENCES" in request["instructions"]) is (input_sources == "shared")
-    assert "DESIGN NAVIGATION DELIVERY" not in request["instructions"]
+    assert "DESIGN DELIVERY" not in request["instructions"]
     assert row["request"] == request
     canonical, fingerprint = compile_external_work_order(task), work_order_fingerprint(task)
     if compiled:

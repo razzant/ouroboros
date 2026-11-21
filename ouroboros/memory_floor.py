@@ -843,9 +843,11 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 
 
 # Host producers before the whole-or-outline sections, then the memory walk, all under the same
-# start budget. Running views narrow only under physical pressure or a refusal.
-HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills",
-              "drive_state", "world", "subagents", "architecture_map", "development_map", "return_facts_words")
+# start budget. Running views narrow only under physical pressure or a refusal. The author's design bible
+# (``context_layout.task_design_navigation``) is an ordinary step placed before WORLD and every book map: it takes
+# its navigation before memory takes a shorter telling or a book shortens (item 97, council C13 R3, 21.11.2026).
+HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
+              "design_bible", "world", "subagents", "architecture_map", "development_map", "return_facts_words")
 # Host forms only the window's own start bound takes: my WORLD map stays whole while that bound holds the request with
 # memory at its shortest forms, whatever soft frame the start has (memory audit 15.11.2026, F7); when the bound cannot
 # hold it, it still steps before memory.
