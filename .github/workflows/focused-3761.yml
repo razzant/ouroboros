@@ -1,0 +1,289 @@
+# Focused premerge lane for the original Reply optimization PR #3761.
+# Only this workflow differs from the pinned product parent. The gate drops it
+# before dependency setup and tests. Synthetic fixtures, no model calls.
+
+name: Focused premerge check (#3761)
+
+on:
+  push:
+    branches:
+      - qa/chat-start-3761-20261120
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focused-3761-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Git identities of the product, not of this workflow commit.
+  EXPECTED_BASE_SHA: 1b67be30c583e8ffdfc6bd9e2ca6ed5e23256c67
+  EXPECTED_HEAD_SHA: f006a914d82d5cb6381ce7b32c4c2f2f6414cb8f
+  EXPECTED_TREE_SHA: 41d7cdcb4bde33276d8b557a163c7bbf68447d96
+  # The affected tests and SQLite replacement path execute on both legs.
+  FOCUSED_TESTS: >-
+    tests/test_room_appearances.py
+    tests/test_dialogue_provenance.py
+    tests/test_memory_inventory.py
+    tests/test_room_membership_parity.py
+    tests/test_memory_tail_facts.py
+  # The tests THIS change adds (the real names in the candidate's changed test
+  # module). Each must run on BOTH legs, never skipped. Matched STRICTLY by JUnit
+  # name — the exact test name, or that name plus a `[...]` parametrization/fixture
+  # id suffix — so a longer different name never matches and a parametrized variant
+  # is never hidden. Rename here on renames.
+  MANDATORY_TESTS: >-
+    test_memory_uses_one_reply_version_for_many_legacy_targets_and_rechecks_a_race
+    test_an_append_during_a_missed_pass_costs_no_second_read_and_a_late_target_joins_the_next_one
+    test_a_discarded_race_pass_keeps_its_gap_out_of_the_report_and_finishes_quiet_once
+    test_a_same_path_store_replacement_is_decided_by_identity_alone_not_by_stale_cached_answers
+    test_a_target_imported_between_two_lookups_of_one_pass_is_not_left_absent_by_a_warm_miss
+    test_a_store_replaced_inside_a_captured_pass_is_answered_from_the_replaced_file
+    test_two_legacy_references_to_one_unreadable_address_use_only_their_own_fallbacks_in_either_order
+  # Source modules plus the changed test module, checked by the ruff step.
+  SELECTED_PATHS: >-
+    ouroboros/dialogue_provenance.py
+    ouroboros/memory_inventory.py
+    ouroboros/room_membership.py
+    tests/test_room_appearances.py
+
+jobs:
+  focused:
+    name: focused (${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: linux, interpreter: shipped, journal: WAL}
+          - {os: windows-latest, leg: windows, interpreter: setup-python, journal: PERSIST}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      # No bytecode or pytest cache inside the checkout: the candidate tree stays
+      # exactly the pinned tree.
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # The identity gate runs BEFORE anything is provisioned: a run on an unpinned tree must not spend a runner on dependencies.
+      - name: Gate the candidate identity (pinned QA parent and tree)
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_file=".github/workflows/focused-3761.yml"
+          for literal in "$EXPECTED_BASE_SHA" "$EXPECTED_HEAD_SHA" "$EXPECTED_TREE_SHA"; do
+            case "$literal" in
+              REPLACE_*)
+                echo "::error::the identity literal is still a placeholder ($literal): fill EXPECTED_HEAD_SHA in the parent-pinning config"
+                exit 1
+                ;;
+            esac
+          done
+          if [ "$(git show -s --format='%P' HEAD | wc -w)" -ne 1 ]; then
+            echo "::error::the QA commit must have exactly one parent (the pinned candidate), never zero or a merge"
+            exit 1
+          fi
+          qa_changes="$(git diff --name-status --no-renames HEAD~1 HEAD)"
+          if [ "$qa_changes" != "$(printf 'A\t%s' "$qa_file")" ]; then
+            echo "::error::the QA commit must add exactly $qa_file and change nothing else; it changed:"
+            echo "$qa_changes"
+            exit 1
+          fi
+          parent_sha="$(git rev-parse HEAD~1)"
+          tree_sha="$(git rev-parse 'HEAD~1^{tree}')"
+          echo "qa-commit=$(git rev-parse HEAD) candidate=$parent_sha tree=$tree_sha"
+          if [ "$parent_sha" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "::error::the candidate (QA parent) $parent_sha is not the pinned $EXPECTED_HEAD_SHA"
+            exit 1
+          fi
+          if [ "$tree_sha" != "$EXPECTED_TREE_SHA" ]; then
+            echo "::error::the candidate tree $tree_sha is not the pinned $EXPECTED_TREE_SHA"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+            echo "::error::the checkout is not clean:"
+            git status --porcelain --untracked-files=all
+            exit 1
+          fi
+          # The QA commit added only this file, so dropping it restores the candidate
+          # byte for byte: from here the run executes exactly the pinned code.
+          git reset --hard "$parent_sha" >/dev/null
+          if [ "$(git rev-parse 'HEAD^{tree}')" != "$EXPECTED_TREE_SHA" ]; then
+            echo "::error::the reset tree is not the pinned tree $EXPECTED_TREE_SHA"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+            echo "::error::the candidate tree is not clean:"
+            git status --porcelain --untracked-files=all
+            exit 1
+          fi
+          for path in $FOCUSED_TESTS $SELECTED_PATHS; do
+            if [ ! -f "$path" ]; then
+              echo "::error::the candidate has no $path"
+              exit 1
+            fi
+          done
+          echo "gate: the working tree is the pinned candidate $parent_sha (tree $tree_sha)"
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # Dependencies only, never the project: an installed checkout would let a test
+      # import another tree's code instead of the candidate's.
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - name: The stores run ${{ matrix.journal }} here
+        shell: bash
+        run: python -c "import pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode); sys.exit(mode != sys.argv[1])" ${{ matrix.journal }}
+      - name: Run the focused tests (one process, no xdist, synthetic data only)
+        id: focused_tests
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/focused-3761" "$RUNNER_TEMP/focused-3761-work"
+          # scripts/run_tests.py consumes --evidence-dir itself and forwards the rest
+          # (including --junitxml and --basetemp) verbatim to one pytest process, so the
+          # JUnit lands exactly at the --junitxml path below.
+          python scripts/run_tests.py $FOCUSED_TESTS \
+            --timeout=300 --tb=short -o addopts= -p no:cacheprovider \
+            --junitxml="$RUNNER_TEMP/focused-3761/junit-${{ matrix.leg }}.xml" \
+            --evidence-dir "$RUNNER_TEMP/focused-3761-work/evidence-${{ matrix.leg }}"
+      # The verdict is the JUnit, and it is strict about this lane's own claims: a real
+      # non-empty run, every focused module collected, and EVERY mandatory test executed
+      # on THIS leg — a skip of one is red. Other tests may skip per OS; the skip count is
+      # reported, not treated as failure. pytest's default junit_family is xunit2, where a
+      # testcase carries ONLY name and classname (no `file`/`line`): modules are matched by
+      # their rootdir-relative dotted classname, mandatory tests by exact name with an
+      # optional `[...]` parametrization suffix.
+      - name: Require a real, non-empty JUnit with every mandatory test executed
+        id: junit_verdict
+        if: ${{ always() && steps.setup_python.outcome == 'success' }}
+        shell: bash
+        run: |
+          python - "$RUNNER_TEMP/focused-3761/junit-${{ matrix.leg }}.xml" <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+          path = sys.argv[1]
+          mandatory_names = os.environ["MANDATORY_TESTS"].split()
+          modules = os.environ["FOCUSED_TESTS"].split()
+          def fail(message):
+              print(f"::error::{message}")
+              raise SystemExit(1)
+          if not os.path.exists(path):
+              fail(f"no JUnit report at {path}: the focused step never produced one")
+          root = ET.parse(path).getroot()
+          suites = list(root.iter("testsuite"))
+          tests = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          failures = sum(int(s.get("failures", 0)) for s in suites)
+          errors = sum(int(s.get("errors", 0)) for s in suites)
+          cases = list(root.iter("testcase"))
+          print(f"junit {path}: tests={tests} skipped={skipped} failures={failures} errors={errors}")
+          if tests <= 0:
+              fail("the focused run collected nothing")
+          if failures or errors:
+              fail(f"the focused run is red: failures={failures} errors={errors}")
+          for module in modules:
+              if not module.endswith(".py"):
+                  fail(f"{module} is not a test module path")
+              dotted = module[:-3].replace("/", ".")
+              found = [case for case in cases
+                       if (case.get("classname") or "") == dotted
+                       or (case.get("classname") or "").startswith(dotted + ".")]
+              if not found:
+                  fail(f"{module} was not collected on this leg "
+                       f"(no JUnit testcase with classname {dotted} or {dotted}.*)")
+              print(f"module collected on this leg: {module} ({len(found)} testcase(s))")
+          for mandatory in mandatory_names:
+              found = [case for case in cases
+                       if (case.get("name") or "") == mandatory
+                       or (case.get("name") or "").startswith(mandatory + "[")]
+              if not found:
+                  fail(f"the mandatory test {mandatory} is absent from the JUnit")
+              if any(case.find("skipped") is not None for case in found):
+                  fail(f"the mandatory test {mandatory} was skipped on this leg")
+              print(f"mandatory executed on this leg: {mandatory} ({len(found)} testcase(s))")
+          print(f"gate: {len(modules)} focused modules collected; {len(mandatory_names)} mandatory tests executed")
+          PY
+      - name: Lint the changed Python files (ruff F)
+        if: ${{ runner.os == 'Linux' && steps.setup_python.outcome == 'success' }}
+        shell: bash
+        run: python -m ruff check --select F $SELECTED_PATHS
+      # The repository's own size lane, run exactly as official CI runs it (the whole
+      # tests/ tree with `-m size_ratchet`), pinned to the same literal as the base.
+      # With OURO_SIZE_RATCHET_BASE_REF set and OURO_BOOK_GROWTH_MODE unset the
+      # reference-book growth rule binds (block), matching the owner-PR semantics this
+      # candidate will face. It is the only step that may turn a grown module or book red.
+      - name: Size gate against the pinned base (repository lane, separate)
+        if: ${{ runner.os == 'Linux' && steps.setup_python.outcome == 'success' }}
+        shell: bash
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.EXPECTED_BASE_SHA }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$EXPECTED_BASE_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$EXPECTED_BASE_SHA" || true
+          fi
+          if ! git cat-file -e "$EXPECTED_BASE_SHA^{commit}" 2>/dev/null; then
+            echo "::error::the size gate's base $EXPECTED_BASE_SHA is not in this checkout"
+            exit 1
+          fi
+          python -m pytest tests/ -m size_ratchet -q --tb=short -o addopts= -p no:cacheprovider \
+            --ci-evidence-dir="$RUNNER_TEMP/focused-3761-work/size-${{ matrix.leg }}"
+      # Small public facts only: the JUnit and this summary. basetemp and pytest
+      # evidence dirs live in focused-3761-work/ and are never uploaded.
+      - name: Write the run summary (uploaded)
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/focused-3761"
+          {
+            echo "focused #3761 QA lane — ${{ matrix.leg }}"
+            echo "qa-commit: ${{ github.sha }}"
+            echo "candidate (pinned QA parent): $EXPECTED_HEAD_SHA"
+            echo "candidate tree: $EXPECTED_TREE_SHA"
+            echo "base (size gate): $EXPECTED_BASE_SHA"
+            echo "journal leg: ${{ matrix.journal }} (${{ matrix.interpreter }})"
+            echo "focused step: ${{ steps.focused_tests.outcome }}"
+            echo "junit verdict: ${{ steps.junit_verdict.outcome }}"
+            echo "modules:"
+            printf '  %s\n' $FOCUSED_TESTS
+            echo "mandatory tests:"
+            printf '  %s\n' $MANDATORY_TESTS
+          } > "$RUNNER_TEMP/focused-3761/summary-${{ matrix.leg }}.txt"
+      - name: Upload the small test evidence (JUnit + summary of this run only)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: focused-3761-evidence-${{ matrix.leg }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/focused-3761/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish the result
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "### focused #3761 — ${{ matrix.leg }}"
+            echo ""
+            echo "- qa-commit: ${{ github.sha }} (adds only .github/workflows/focused-3761.yml)"
+            echo "- candidate (pinned QA parent): $EXPECTED_HEAD_SHA"
+            echo "- candidate tree: $EXPECTED_TREE_SHA"
+            echo "- base (size gate): $EXPECTED_BASE_SHA"
+            echo "- focused tests: $FOCUSED_TESTS"
+            echo "- mandatory tests: $MANDATORY_TESTS"
+            echo "- focused step: ${{ steps.focused_tests.outcome }}"
+            echo "- junit verdict (modules collected + mandatory tests executed): ${{ steps.junit_verdict.outcome }}"
+            echo "- journal mode leg: ${{ matrix.journal }} (${{ matrix.interpreter }})"
+          } >> "$GITHUB_STEP_SUMMARY"
