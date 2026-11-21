@@ -349,14 +349,14 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         if (!address) return null;
         const caption = bubble.matches('[data-reply-caption]') ? bubble : null;
         if (caption) bubble = bubble.closest('.chat-bubble');
-        const cardDisplay = bubble.dataset.replyExcerptDisabled === '1';
-        const role = cardDisplay ? 'system' : ROLE_NAMES.find((name) => bubble.classList.contains(name)) || '';
+        // A card display is still its sender's bubble: only its passages are off (`data-reply-excerpt-disabled`).
+        const role = ROLE_NAMES.find((name) => bubble.classList.contains(name)) || '';
         const words = caption?.textContent || bubble.querySelector(':scope > .message')?.textContent
             || bubble.querySelector('.chat-quiz-question')?.textContent || bubble.dataset.rowWords || '';
         const sender = bubble.querySelector(':scope > .sender, :scope > .chat-bubble-voice > .sender');
         return { address, chat_id: chatId, role,
-            author_label: cardDisplay ? authorOf('system') : caption?.dataset.sourceAuthor || sender?.textContent || '',
-            kind: cardDisplay ? 'system' : bubble.querySelector('.chat-quiz-card') ? 'question' : 'message', snippet: replySnippet(words),
+            author_label: caption?.dataset.sourceAuthor || sender?.textContent || '',
+            kind: bubble.querySelector('.chat-quiz-card') ? 'question' : 'message', snippet: replySnippet(words),
             ts: caption ? caption.dataset.sourceTs || '' : bubble.dataset.ts ? new Date(Number(bubble.dataset.ts)).toISOString() : '',
             task_id: bubble.dataset.taskId || '' };
     }

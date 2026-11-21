@@ -529,8 +529,8 @@ def test_grouped_document_quotes_use_the_items_time_live_and_after_reload(projec
         page.get_by_role('button', name='Cancel reply').click()
 
 
-def test_selected_send_keeps_files_and_old_ack_cannot_clear_new_upload(project_chat):
-    page = project_chat["page"]
+def test_selected_send_frees_the_field_and_its_bubble_resends_after_reload(project_chat):
+    page, expect = project_chat["page"], project_chat["expect"]
     project_chat["rows"][:] = [row(1, "Copper lantern")]
     uploads = []
 
@@ -556,32 +556,51 @@ def test_selected_send_keeps_files_and_old_ack_cannot_clear_new_upload(project_c
     send.click()
     page.wait_for_function('sentFrames.length === 1')
     first = page.evaluate('sentFrames[0]')
+    sent_files = [item['filename'] for item in first['attachments']]
+    assert first['reply_to'] and first['reply_excerpt'] and sent_files == [f'{1:032x}_one.txt']
+    # Taken by the socket, the words, the file and the quote leave the field: the next message answers nothing.
+    expect(composer).to_have_value('')
+    expect(page.locator('.attach-name')).to_have_count(0)
+    expect(page.locator('.chat-quote--composer')).to_have_count(0)
     page.evaluate("""f => emit('chat',{role:'system',chat_id:1,system_type:'initialization_notice',
         content:'Not saved yet',client_message_id:f.client_message_id})""", first)
-    assert composer.input_value() == 'Read the attachment.' and page.locator('.attach-name').inner_text() == 'one.txt'
-    send.click()
-    page.wait_for_function('sentFrames.length === 2')
-    assert page.evaluate('sentFrames[1]') == first and uploads == ['one.txt']
+    resend = page.get_by_role('button', name='Send again', exact=True)
+    expect(resend).to_have_count(1)
+
+    # After a reload its bubble still holds the complete send: the same id, words, quote and files, uploaded once.
+    page.reload()
+    expect(composer).to_have_value('')
+    expect(page.locator('.chat-quote--composer')).to_have_count(0)
+    resend.click()
+    page.wait_for_function('sentFrames.length === 1')
+    again = page.evaluate('sentFrames[0]')
+    keys = ('client_message_id', 'content', 'reply_to', 'reply_excerpt')
+    assert {k: again.get(k) for k in keys} == {k: first.get(k) for k in keys}
+    assert [item['filename'] for item in again['attachments']] == sent_files and uploads == ['one.txt']
 
     accept = """f => emit('chat',{type:'chat',role:'user',source:'web',chat_id:1,
         content:f.content,client_message_id:f.client_message_id,ts:'2026-10-01T17:00:30Z',
         ingress_accepted:true,ingress_dispatched:true,reply_to:{address:f.reply_to,excerpt:f.reply_excerpt}})"""
-    page.locator('.attach-remove').click()
+    composer.fill('And this one.')
     files.set_input_files({'name': 'two.txt', 'mimeType': 'text/plain', 'buffer': b'two'})
     page.unroute('**/api/chat/upload', upload)
 
     def upload_with_late_ack(route):
+        # The first message's late acceptance leaves the newer draft and its upload alone.
         page.evaluate(accept, first)
-        assert composer.input_value() == 'Read the attachment.' and page.locator('.attach-name').inner_text() == 'two.txt'
+        assert composer.input_value() == 'And this one.' and page.locator('.attach-name').inner_text() == 'two.txt'
         upload(route)
 
     page.route('**/api/chat/upload', upload_with_late_ack)
     send.click()
-    page.wait_for_function('sentFrames.length === 3')
-    next_frame = page.evaluate('sentFrames[2]')
-    assert next_frame['client_message_id'] != first['client_message_id'] and next_frame['attachments'] != first['attachments']
-    page.evaluate(accept, next_frame)
-    assert composer.input_value() == '' and page.locator('.attach-name').count() == 0
+    page.wait_for_function('sentFrames.length === 2')
+    next_frame = page.evaluate('sentFrames[1]')
+    # The harness coins ids per page load, so after the reload the frame itself tells the two messages apart.
+    assert next_frame['content'].startswith('And this one.') and next_frame['attachments'] != first['attachments']
+    assert not next_frame.get('reply_to') and not next_frame.get('reply_excerpt')
+    expect(composer).to_have_value('')
+    expect(page.locator('.attach-name')).to_have_count(0)
+    expect(resend).to_have_count(0)
 
 
 def test_send_as_new_recovers_the_old_quote_only_when_the_composer_is_free(project_chat):
@@ -595,7 +614,11 @@ def test_send_as_new_recovers_the_old_quote_only_when_the_composer_is_free(proje
     stage.click()
     composer.fill('Was it shipped?')
     page.locator('#chat-send').click()
+    page.wait_for_function('sentFrames.length === 1')
     first, = page.evaluate('sentFrames')
+    # The sent words and quote leave the field; the closing strip is gone before the next quote opens.
+    expect(composer).to_have_value('')
+    expect(page.locator('.chat-quote--composer')).to_have_count(0)
 
     select_contents(bubble(page, new).locator('.message p'))
     stage.click()
@@ -631,6 +654,8 @@ def test_send_as_new_recovers_the_old_quote_only_when_the_composer_is_free(proje
     expect(draft_quote).to_have_text(old['text'])
     assert page.evaluate('sentFrames') == [first], 'preparing does not send'
     page.locator('#chat-send').click()
+    page.wait_for_function('sentFrames.length === 2')
     second = page.evaluate('sentFrames[1]')
     assert second['client_message_id'] != first['client_message_id'] and second['content'] == first['content']
     assert second['reply_to'] == old['row_address'] and second['reply_excerpt'] == first['reply_excerpt']
+    expect(composer).to_have_value('')

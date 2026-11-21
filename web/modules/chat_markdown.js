@@ -445,9 +445,9 @@ function transformRenderedMarkdown(fragment, literal) {
 
 /** Return sanitized, presentation-ready HTML for a chat message, or with
  * `softBreaks` for a delivered document (DESIGN "Document reading"). */
-export function renderChatMarkdown(text, { softBreaks = false } = {}) {
-    // Without the parser the message reads as the author's exact text.
-    const plain = () => escapeText(text).replace(/\n/g, '<br>');
+export function renderChatMarkdown(text, { softBreaks = false, onPlain = null } = {}) {
+    // Without the parser the message reads as the author's exact text; `onPlain` tells the caller it was not rendered.
+    const plain = () => { onPlain?.(); return escapeText(text).replace(/\n/g, '<br>'); };
     const parser = getMarkdownParser(!softBreaks);
     if (!parser || !globalThis.DOMPurify || typeof document === 'undefined') return plain();
     try {

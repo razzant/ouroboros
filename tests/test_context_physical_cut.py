@@ -59,6 +59,28 @@ def test_physical_cut_keeps_fresh_reply_citation_and_never_bisects_an_older_repl
     assert cut == rows and receipt is None
 
 
+def test_physical_cut_takes_an_older_full_source_alone_and_keeps_the_fresh_source_beside_its_selection(tmp_path):
+    """A source is its own host row before its selection: an older one leaves alone (its selection and the words stay a
+    pair); the newest turn's source, selection and words are one protected run."""
+    old_source = bound_host_row('reply_citation', '[Full source from Ouroboros at row:old]\n' + 'An old source.' * 800)
+    old_quote = bound_host_row('reply_citation', 'An old selection.')
+    old_words = bound_host_row('owner_words', 'My old reply.' * 100)
+    fresh_source = bound_host_row('reply_citation', '[Full source from Ouroboros at row:new]\n' + 'A fresh source.' * 800)
+    fresh_quote = bound_host_row('reply_citation', 'A fresh selection.')
+    fresh_words = bound_host_row('owner_words', 'My newest reply.')
+    rows = [*conversation()[:2], old_source, old_quote, old_words, {'role': 'assistant', 'content': 'Earlier answer.'},
+            fresh_source, fresh_quote, fresh_words, {'role': 'assistant', 'content': 'Current tail.'}]
+    total, source = estimate_context_prompt_tokens(rows), estimate_context_prompt_tokens([old_source])
+    kept, receipt = physical_window_cut(rows, drive_root=tmp_path, task_id='source-cut',
+                                       measure=estimate_context_prompt_tokens, usable=total - (source - 400))
+    assert receipt['positions'] == [2], 'the older source goes alone'
+    assert old_quote in kept and old_words in kept and kept[-5:] == rows[-5:]
+    kept, receipt = physical_window_cut(rows, drive_root=tmp_path, task_id='source-cut-more',
+                                       measure=estimate_context_prompt_tokens, usable=total - (source + 20))
+    assert receipt['positions'] == [2, 3, 4], 'the older selection leaves only with its words'
+    assert kept[-5:] == rows[-5:], 'the newest source, selection and words never leave'
+
+
 def test_text_refusal_uses_same_physical_cut_without_changing_round_or_dispatch(tmp_path):
     rows = conversation()
     ctx = SimpleNamespace(messages=rows, accumulated_usage={'_context_refusal_round': 3,

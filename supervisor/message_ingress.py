@@ -675,7 +675,8 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
             "sender_label": str(message.get("sender_label") or ""),
             "sender_session_id": str(message.get("sender_session_id") or ""),
             "client_message_id": client_message_id, "transport": message.get("transport") or {},
-            "chat_id": chat_id, **(projection_fields(row) if row else {}), **frame_rooms(message_bus.DATA_DIR, row),
+            "chat_id": chat_id, **(projection_fields(row, message_bus.DATA_DIR) if row else {}),
+            **frame_rooms(message_bus.DATA_DIR, row),
             **({"subagents_mode": "swarm"} if row and row.get("subagents_mode") == "swarm" else {}),
         })
     return ref
@@ -804,7 +805,7 @@ def handle_web_message(
                 echo["system_type"] = row["system_type"]
             # Positive call-entry evidence, never the acceptance stamp alone; a deferred dispatch is still pending.
             echo.update(delivery_facts(row, thread_id))
-            echo.update(projection_fields(row), **frame_rooms(bus.DATA_DIR, row))  # a Reply a Project also shows
+            echo.update(projection_fields(row, bus.DATA_DIR), **frame_rooms(bus.DATA_DIR, row))  # a Reply a Project also shows
             bus.stamp_project_thread(bus.DATA_DIR, echo)
             self._broadcast_fn(echo)
     finally:

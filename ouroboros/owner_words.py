@@ -789,7 +789,8 @@ def is_answered_card(reply: Any) -> bool:
 
 def reply_target(drive_root: Any, reference: Any) -> Dict[str, Any]:
     """The whole message my human's words reply to, under its author, by the address the door resolved: one
-    sha-checked read. Unreadable: the address alone; a reply to a work card names work, not anyone's words. Its
+    sha-checked read. Unreadable: the address alone (a selected passage that carried its source keeps it); a reply
+    to a work card names work, not anyone's words. Its
     author is signed without the places' owner snapshot on purpose: a target is context, never my human's words."""
     reference = _mapping(reference)
     address = str(reference.get("address") or "")
@@ -812,7 +813,11 @@ def reply_target(drive_root: Any, reference: Any) -> Dict[str, Any]:
     except (StoreError, OSError, ValueError, TypeError):
         row = None
     if not row:
-        return {"address": address, "author": recorded_author, "text": "", **citation, **recorded_role}
+        # A selected passage that arrived with its source by value (a relay's quote) keeps it when history cannot be read.
+        held = reference.get("text")
+        by_value = ({"text": held, **({"attachments": reference["attachments"]} if reference.get("attachments") else {})}
+                    if citation and isinstance(held, str) and held else {})
+        return {"address": address, "author": recorded_author, "text": "", **by_value, **citation, **recorded_role}
     if display := card_reply_display(drive_root, row):
         return {"address": address, "author": "System", "text": display, **citation}
     if citation:

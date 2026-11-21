@@ -385,10 +385,6 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
 
 // What a reload keeps of a sent frame: its words, identity, routing and the refs of uploads the
 // host already stores — never bytes, never the send-time client_surface (an honest gap on resend).
-export function sameExcerpt(left, right) {
-    return Boolean(left && right && left.start_utf16 === right.start_utf16 && left.text === right.text);
-}
-
 const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt'];
 
 function draftUpload(raw) {
@@ -439,7 +435,8 @@ export function placeIngressNote(bubble, note) {
  * history read after a reload does not show the message saved (`reconcile`) — every
  * such bubble says so and offers "Send again": the SAME frame and id, which the host
  * rejoins if it saved the message after all (never a second message) or accepts now,
- * and "Discard", which forgets only this tab's copy. A saved row marked
+ * and "Discard", which forgets only this tab's copy; a selected reply's bubble also offers "Send as new", which
+ * returns its words and quote to an empty composer (`compose`) and sends nothing. A saved row marked
  * `ingress_pending` is the running host's, between its append and its dispatch
  * (or echoed before a deferred dispatch): the frame waits for the next fact. A saved row
  * with neither dispatch fact came from a host process that has since ended (a restart came
@@ -451,8 +448,8 @@ export function placeIngressNote(bubble, note) {
  * instance's `hasPendingWork`, which keeps a Project room holding one hidden instead of
  * destroying it. Nothing here resends by itself or deletes an upload: those stay on the host.
  */
-export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, savedExcerpt = null, storage = null, storageKey = '' }) {
-    const frames = new Map();  // id -> { frame, views, ts, restored, queued }
+export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, storage = null, storageKey = '' }) {
+    const frames = new Map();  // id -> { frame, reply, views, ts, restored, queued }
     const bubbleOf = (id) => [...(root()?.querySelectorAll('.chat-bubble.user[data-client-message-id]') || [])]
         .find((node) => node.dataset.clientMessageId === id) || null;
     let unreadable = false;  // a kept copy this tab cannot read restores nothing, and says so
@@ -460,7 +457,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         const kept = storage && storageKey ? storage.getItem(storageKey) : null;
         for (const entry of kept === null ? [] : JSON.parse(kept)) {
             const frame = keptFrame(entry?.frame);
-            if (frame) frames.set(String(frame.client_message_id), { frame, reply: entry.reply, draft: entry.draft, draftVersion: entry.draftVersion, views: attachmentViews(entry.views),
+            if (frame) frames.set(String(frame.client_message_id), { frame, reply: entry.reply, views: attachmentViews(entry.views),
                 ts: String(entry.ts || ''), restored: true });
             else unreadable = true;
         }
@@ -475,7 +472,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         try {
             if (!frames.size) storage.removeItem(storageKey);
             else storage.setItem(storageKey, JSON.stringify([...frames.values()]
-                .map(({ frame, reply, draft, draftVersion, views, ts }) => ({ frame: keptFrame(frame), reply, draft, draftVersion, views, ts }))));
+                .map(({ frame, reply, views, ts }) => ({ frame: keptFrame(frame), reply, views, ts }))));
         } catch {
             showToast(tr('chat.send_unconfirmed_unkept',
                 'This tab could not keep the unsaved message for a reload. Send again still works until then.'), 'error',
@@ -514,7 +511,18 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         return button;
     }
 
-    // The doubt on its bubble, or a pending saved note after a disconnect, gains the two actions.
+    // Prepares the composer with the owner's own words (a selected reply with its quote) and sends nothing: the saved row
+    // stays as it is, and the owner reads, edits and sends (or does not) from the composer. Short visible words so the
+    // sentence and its actions share one row on a phone; the name stays whole.
+    function sendAsNew(bubble, reply) {
+        const words = () => bubble.querySelector('.message')?.textContent || '';
+        const asNew = action(tr('chat.send_as_new_short', 'Send as new'), 'send_as_new', () => compose(words(), reply?.excerpt ? reply : null));
+        asNew.setAttribute('aria-label', tr('chat.send_as_new', 'Send as a new message'));
+        return asNew;
+    }
+
+    // The doubt on its bubble, or a pending saved note after a disconnect, gains the two actions; a selected reply, which
+    // left the composer when it was sent, a third that brings its words and quote back.
     function mark(id, bubble) {
         const saved = bubble.querySelector('[data-ingress-saved]');
         let note = saved || bubble.querySelector('[data-ingress-unconfirmed]');
@@ -526,15 +534,16 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             note.textContent = `${tr('chat.send_unconfirmed', 'Not confirmed as saved.')} `;
             bubble.insertBefore(note, bubble.querySelector('.msg-time'));
         }
+        const { frame, reply } = frames.get(id);
         note.append(action(tr('chat.send_again', 'Send again'), 'retry', () => retry(id, note)),
+            ...(compose && frame.reply_excerpt ? [sendAsNew(bubble, reply?.reply_to || { address: frame.reply_to, excerpt: frame.reply_excerpt })] : []),
             action(tr('chat.send_discard', 'Discard'), 'discard', () => { forget(id); onDomWrite(() => (clearActions(note, bubble), true)); }));
         placeIngressNote(bubble, note);  // a pending saved note with actions is a row again
         return true;
     }
 
     // Saved by a host process that has since ended: what it did with the row is unknown, and nothing replays it.
-    // The one honest next step is a NEW message: its action prepares the composer with the owner's own words and sends
-    // nothing; the saved row stays as it is, and the owner reads, edits and sends (or does not) from the composer.
+    // The one honest next step is a NEW message (`sendAsNew`).
     function doubtDelivery(bubble, reply) {
         let note = bubble.querySelector('[data-ingress-saved]');
         if (!note) {
@@ -545,13 +554,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         clearActions(note);
         note.dataset.ingressSaved = 'unconfirmed';
         note.textContent = tr('chat.saved_delivery_unconfirmed', 'Saved; delivery not confirmed.');
-        if (compose) {
-            const words = () => bubble.querySelector('.message')?.textContent || '';
-            // Short visible words so the sentence and its action share one row on a phone; the name stays whole.
-            const asNew = action(tr('chat.send_as_new_short', 'Send as new'), 'send_as_new', () => compose(words(), reply?.excerpt ? reply : null));
-            asNew.setAttribute('aria-label', tr('chat.send_as_new', 'Send as a new message'));
-            note.append(asNew);
-        }
+        if (compose) note.append(sendAsNew(bubble, reply));
         placeIngressNote(bubble, note);
         return true;
     }
@@ -566,28 +569,13 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         }
     }
 
-    function matchingDraft(draft, reply, draftVersion) {
-        return [...frames.values()].find(entry => entry.draftVersion === draftVersion && entry.draft === draft
-            && entry.frame.reply_to === reply.reply_to && sameExcerpt(entry.frame.reply_excerpt, reply.reply_excerpt));
-    }
-
     return {
-        track(frame, { views = [], ts = '', queued = false, reply, draft, draftVersion } = {}) {
+        track(frame, { views = [], ts = '', queued = false, reply } = {}) {
             if (isPanicFrame(frame)) return;
             const id = String(frame?.client_message_id || '');
             if (!id) return;
-            frames.set(id, { frame, reply, draft, draftVersion, views: attachmentViews(views), ts, queued });
+            frames.set(id, { frame, reply, views: attachmentViews(views), ts, queued });
             persist();
-        },
-        prepareExcerptRetry(draft, reply, draftVersion) {
-            const entry = matchingDraft(draft, reply, draftVersion);
-            if (!entry) return null;
-            const id = entry.frame.client_message_id;
-            // If an echo settled it during a settings save, this was still a retry, not a fresh message.
-            return () => {
-                if (frames.get(id) === entry && entry.draft !== undefined && !entry.queued)
-                    retry(id, bubbleOf(id)?.querySelector('[data-ingress-unconfirmed]'));
-            };
         },
         /** The socket's offline queue wrote (or dropped) a queued frame: from now on it is this tab's to offer again. */
         flushed(id) {
@@ -601,16 +589,6 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             const id = String(row?.client_message_id || '');
             if (row?.role !== 'user' || row.ingress_accepted !== true || !frames.has(id)) return;
             const bubble = bubbleOf(id);
-            const entry = frames.get(id);
-            if (entry.draft !== undefined) {
-                // The composer's cleanup needs the row's exact reply; an accepted saved row
-                // confirms this id whatever it echoes, so its retry claim ends either way.
-                if (entry.frame.reply_to === row.reply_to?.address
-                    && sameExcerpt(entry.frame.reply_excerpt, row.reply_to?.excerpt))
-                    savedExcerpt?.(entry.draft, entry.frame, entry.draftVersion);
-                delete entry.draft;
-                if (row.ingress_pending) persist();
-            }
             if (row.ingress_dispatched === true) {
                 forget(id);
             } else if (row.ingress_pending === true) {

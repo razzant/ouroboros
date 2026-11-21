@@ -449,7 +449,9 @@ def run_origin(record: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def dialogue_speaker(entry: Mapping[str, Any]) -> str:
+def recorded_speaker_name(entry: Mapping[str, Any]) -> str:
+    """The name a row records for its speaker: its sender label, username or author, else the actor its transport
+    recorded (display name, username, platform id); ``""`` when it records none, never a default."""
     transport = entry.get("transport") if isinstance(entry.get("transport"), Mapping) else {}
     actor = transport.get("actor") if isinstance(transport.get("actor"), Mapping) else {}
     return str(
@@ -460,8 +462,13 @@ def dialogue_speaker(entry: Mapping[str, Any]) -> str:
         or actor.get("username")
         or actor.get("platform_actor_id")
         or actor.get("id")
-        or ("author not recorded" if row_provenance(entry) == "place" else "User")  # "User" is my human's own door
+        or ""
     )
+
+
+def dialogue_speaker(entry: Mapping[str, Any]) -> str:
+    return recorded_speaker_name(entry) or (
+        "author not recorded" if row_provenance(entry) == "place" else "User")  # "User" is my human's own door
 
 
 def recorded_speaker(entry: Mapping[str, Any]) -> str:

@@ -2009,7 +2009,8 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   echo, the bubble says "Not confirmed as saved" with "Send again", which
   resends the same frame and id (the host rejoins it if it was saved after all,
   never a second message), and "Discard", which forgets this tab's copy (never
-  an upload). Nothing resends by itself. In dark, queued bubbles retain opaque readable ink; the queued
+  an upload); a selected reply, which left the composer when sent, adds "Send as
+  new" (below). Nothing resends by itself. In dark, queued bubbles retain opaque readable ink; the queued
   words carry the state. Light retains its existing opacity. The frame is kept, with no count bound,
   until that id's saved echo or history row settles it (a row the running host
   has not yet dispatched keeps it until the host says which): a bubble the feed
@@ -2040,9 +2041,10 @@ A Main reply to a Project row appears there at its time without waking work. Ans
 (owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
 menu, questions their own field. Select words in one message for **Reply to quote** beside them or
 in the native Mac menu alongside Copy and Look Up. On touch, **Select text** opens native handles.
-Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. A refused
-or unconfirmed selected reply keeps its draft; retry reuses its message ID. Send fixes the words, reply and files before
-waiting; a later draft stays.
+Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. Send fixes
+the words, reply and files before waiting. A send refused before the socket or its queue took it keeps the draft; once taken, it frees the
+field for the next message, a passage like any other, and a later draft stays. Its bubble keeps the unconfirmed row: Send again reuses
+the message ID, and a passage's Send as new puts its words and quote back into an empty composer.
 
 Bubbles, strips and relays share quote glass with a 2 px bar and the quoted author’s tint over the
 bubble’s graphite in dark mode. Ouroboros quoting Ouroboros uses its capsule step and readable

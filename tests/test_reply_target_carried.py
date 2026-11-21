@@ -169,10 +169,11 @@ def test_mail_into_running_work_keeps_the_message_it_replies_to(tmp_path, select
     [row] = reader._owner_directives
     assert row["content"].startswith("Yes, but skip step two.") and row["reply_to"]["text"] == source
     if select:
-        [citation] = [m["content"] for m in messages if m.get(HOST_CONTEXT_KIND_KEY) == "reply_citation"]
+        full, citation = [m["content"] for m in messages if m.get(HOST_CONTEXT_KIND_KEY) == "reply_citation"]
         [owner] = [m["content"] for m in messages if m.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND]
-        assert passage in citation and source in citation and "client-reported" in citation
-        assert reference["address"] in citation and "Ouroboros" in citation and "UTF-16 offset 5" in citation
+        assert source in full and reference["address"] in full and "Ouroboros" in full, "the whole source, then the selection"
+        assert passage in citation and "client-reported" in citation
+        assert reference["address"] in citation and "UTF-16 offset 5" in citation
         assert "Yes, but skip step two." in owner and passage not in owner
         assert row["reply_to"]["excerpt"]["text"] == passage
     assert owner_input_revision(reader) == 1, "my human's own words still owe their reply; the target owes none"
@@ -191,6 +192,118 @@ def test_a_relayed_quote_keeps_the_message_it_replies_to(tmp_path):
                             "relay": {"relay_id": "r1"}}, [])
     [row] = receiver._owner_directives
     assert row["carried"] is True and row["reply_to"]["text"] == PROPOSAL
+
+
+@pytest.mark.parametrize("history", ["absent", "unreadable"])
+def test_a_relayed_selection_keeps_the_source_it_carries_when_history_cannot_be_read(tmp_path, monkeypatch, history):
+    """A relay brings the selected message's words and files by value. The receiver reads history again only for
+    what the relay did not bring: an unreadable row never empties what arrived with the quote."""
+    from ouroboros.owner_relay import inject_relay
+    from ouroboros.owner_words import reply_target
+    from ouroboros.store import StoreError
+    from tests.test_owner_relay import context
+
+    full = "Map: **North trail**. Return at dawn."
+    files = [{"name": "map.pdf", "mime": "application/pdf", "size": 55}]
+    address = "row:1@2026-11-04T09:00:00+00:00#0123456789ab"  # the store holds no row of that address
+    held = {"address": address, "author": "Ouroboros", "author_label": "Ouroboros", "role": "assistant", "text": full,
+            "attachments": files, "excerpt": {"text": "North trail", "start_utf16": 5}}
+    if history == "unreadable":
+        def unreadable(*_args, **_kwargs):
+            raise StoreError("history unavailable")
+
+        monkeypatch.setattr("ouroboros.chat_chain.resolve_row", unreadable)
+    for root in (tmp_path, None):
+        target = reply_target(root, held)
+        assert (target["text"], target["attachments"], target["author"], target["excerpt"]) == (
+            full, files, "Ouroboros", held["excerpt"])
+    whole = {key: value for key, value in held.items() if key != "excerpt"}
+    assert reply_target(tmp_path, whole)["text"] == "", "only a selection carries its source by value"
+
+    quoted = {"chat_id": 1, "direction": "in", "ts": "2026-11-04T10:00:00Z", "text": "Which trail?",
+              "client_message_id": "owner-quoted", "reply_to": held}
+    receiver = context(tmp_path)
+    receiver.task_id = "receiver"
+    frames = []
+    inject_relay(receiver, {"owner_rows": [quoted], "source_task_id": "teller", "text": "note",
+                            "relay": {"relay_id": "r1"}}, frames)
+    [row] = receiver._owner_directives
+    assert row["content"] == "Which trail?" and full not in row["content"], "the quoted source is never a new command"
+    assert (row["reply_to"]["text"], row["reply_to"]["attachments"]) == (full, files)
+    frame = frames[0]["content"]
+    assert full in frame and "map.pdf" in frame and f"Sender-selected passage of Ouroboros at {address}" in frame
+
+
+def test_selected_replies_to_one_source_keep_each_citation_and_hold_the_source_once(tmp_path):
+    from ouroboros.chat_references import ingress_reply
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_CITATION_KIND
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.projects_registry import create_project
+    from ouroboros.server_owner_routing import _route_project_chat_to_running_task
+    from tests.test_project_routing_v664 import _ctx
+
+    chat_id = int(create_project(tmp_path, "citation-room")["chat_id"])
+    task = {"id": "work-root", "chat_id": chat_id, "root_task_id": "work-root", "delegation_role": "root",
+            "drive_root": str(tmp_path)}
+    source = "Blue lanterns bloom beside the observatory. Return at dawn. END"
+    address = _proposal(tmp_path, source)["address"]
+    picks = [{"text": "Blue lanterns", "start_utf16": 0}, {"text": "dawn", "start_utf16": source.index("dawn")},
+             {"text": "END", "start_utf16": source.index("END")}]
+    for index, pick in enumerate(picks):
+        reference = ingress_reply(tmp_path, {"reply_to": address, "reply_excerpt": pick})
+        assert _route_project_chat_to_running_task(_ctx(tmp_path, running={"work-root": {"task": task}}), chat_id,
+                                                   f"Question {index}.", f"owner-reply-{index}",
+                                                   task_metadata={"reply_reference": reference}) == "work-root"
+    reader = SimpleNamespace(task_id="work-root", drive_root=tmp_path, budget_drive_root=tmp_path, current_chat_id=chat_id,
+                             task_metadata={}, pending_events=[], event_queue=None, drive_logs=lambda: tmp_path / "logs")
+    messages = []
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "work-root", None, set(), owner_ctx=reader)
+    cited = [m for m in messages if m.get(HOST_CONTEXT_KIND_KEY) == REPLY_CITATION_KIND]
+    bound = [m for m in cited if HOST_TEXT_SHA_KEY in m]
+    frames = [m["content"] for m in cited if HOST_TEXT_SHA_KEY not in m]
+    assert len(frames) == 3, "every selected passage keeps its own citation"
+    for pick, frame in zip(picks, frames):
+        assert f'"{pick["text"]}"' in frame and f"UTF-16 offset {pick['start_utf16']}" in frame
+        assert address in frame, "each names the source it selects from"
+    [full] = [m["content"] for m in bound]
+    assert source in full and "Ouroboros" in full and address in full, "the source's words stand once, under its author"
+    assert cited[0] is bound[0], "the source leads the first selection"
+
+
+def test_a_source_known_with_more_is_shown_whole_again_never_hidden_behind_an_earlier_reading():
+    """One address, several readings: only a host row bound to the very same text (address, author, words, files)
+    stands in for the source. A file known later, a changed row and a look-alike no host bound each show it again."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_CITATION_KIND
+    from ouroboros.loop_round_limits import _append_reply_context
+
+    address = "row:1@2026-11-04T09:00:00+00:00#0123456789ab"
+    files = [{"name": "map.pdf", "mime": "application/pdf", "size": 55}]
+    first = {"address": address, "author": "Ouroboros", "text": "Map: North trail."}
+
+    def pick(word, **more):
+        return {**first, **more, "excerpt": {"text": word, "start_utf16": first["text"].index(word)}}
+
+    def sources(rows):
+        return [row for row in rows if HOST_TEXT_SHA_KEY in row]
+
+    messages = []
+    for target in (pick("Map"), pick("North")):
+        _append_reply_context(messages, target, None)
+    assert len(sources(messages)) == 1 and len(messages) == 3, "the same reading is held once, each selection kept"
+    assert messages[0][HOST_CONTEXT_KIND_KEY] == REPLY_CITATION_KIND and "map.pdf" not in messages[0]["content"]
+
+    _append_reply_context(messages, pick("trail", attachments=files), None)  # its files were unknown at the first reading
+    assert [("map.pdf" in row["content"]) for row in sources(messages)] == [False, True], "the file is not lost"
+    _append_reply_context(messages, pick("Map", attachments=files), None)
+    assert len(sources(messages)) == 2, "and now held in full, once"
+
+    messages[0]["content"] += " (trimmed)"  # a row changed since the host produced it proves nothing
+    _append_reply_context(messages, pick("North"), None)
+    assert len(sources(messages)) == 3 and sources(messages)[-1]["content"] == sources(messages)[0]["content"][:-len(" (trimmed)")]
+
+    lookalike = [{"role": "user", HOST_CONTEXT_KIND_KEY: REPLY_CITATION_KIND, "content": sources(messages)[-1]["content"]}]
+    _append_reply_context(lookalike, pick("North"), None)  # the same words, but no host binding
+    assert len(sources(lookalike)) == 1 and lookalike[0] is not sources(lookalike)[0], "text alone is no identity"
 
 
 def test_native_steering_separates_sender_selection_from_host_reference(tmp_path):

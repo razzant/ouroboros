@@ -252,7 +252,7 @@ test('an owner press is still a whole-row Reply target, not an authored passage'
     f.replies.decorate(comment, owner('row:1@comment#2'));
     assert.equal(excerptBody(press), null);
     assert.equal(excerptBody(comment), comment.querySelector('.message'));
-    assert.equal(f.replies.bubbleRef(press).role, 'system');
+    assert.equal(f.replies.bubbleRef(press).role, 'user', 'it is still the owner\'s bubble: only its passages are off');
     press.querySelector('.chat-message-reply').click();
     assert.deepEqual(f.replies.frameField(), { reply_to: 'row:1@press#1' });
 });

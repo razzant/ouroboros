@@ -221,7 +221,8 @@ async def api_command(request: Request) -> JSONResponse:
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
             visible_task_id = str(body.get("visible_task_id") or "").strip()
-            if visible_task_id:
+            deduped = {"ok": True, "deduped": True, "task_id": visible_task_id}
+            if visible_task_id:  # a repeat of a queued command is answered before any source is read
                 now = time.monotonic()
                 expired = [
                     key for key, ts in _RECENT_VISIBLE_COMMANDS.items()
@@ -230,7 +231,16 @@ async def api_command(request: Request) -> JSONResponse:
                 for key in expired:
                     _RECENT_VISIBLE_COMMANDS.pop(key, None)
                 if visible_task_id in _RECENT_VISIBLE_COMMANDS:
-                    return JSONResponse({"ok": True, "deduped": True, "task_id": visible_task_id})
+                    return JSONResponse(deduped)
+            reply: dict[str, Any] = {}
+            if "reply_excerpt" in body:
+                from ouroboros.chat_references import ingress_reply
+                try:  # a refused command reserves no id, and no lock is held while its source is read
+                    reply = await asyncio.to_thread(ingress_reply, request_drive_root(request), body)
+                except ValueError as exc:
+                    return json_error(str(exc), 400, accepted=False)
+                if visible_task_id in _RECENT_VISIBLE_COMMANDS:  # a twin was queued while this one waited; no await follows
+                    return JSONResponse(deduped)
             send_kwargs: dict[str, Any] = {"broadcast": False, "suppress_chat_log": bool(visible_text)}
             if task_constraint:
                 send_kwargs["task_constraint"] = task_constraint
@@ -240,12 +250,7 @@ async def api_command(request: Request) -> JSONResponse:
             # the true caller here (disclosed non-goal).
             send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", ""),
                                             **({"ui_control": control} if control else {})}
-            if "reply_excerpt" in body:
-                from ouroboros.chat_references import ingress_reply
-                try:
-                    reply = await asyncio.to_thread(ingress_reply, request_drive_root(request), body)
-                except ValueError as exc:
-                    return json_error(str(exc), 400, accepted=False)
+            if reply:
                 send_kwargs["accepted_reply"] = reply
                 send_kwargs["task_metadata"].update(reply_excerpt=reply["excerpt"], reply_reference=reply)
             # Publication precedes readiness. Bind the independent owner, keeping

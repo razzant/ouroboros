@@ -103,14 +103,14 @@ def reference_from_row(row: dict, root=None) -> dict:
             {"project_completion_summary", "task_summary"} else
             "system" if row.get("direction") == "system" else "message")
     role = reply_role(row)
-    body = card_reply_display(root, row)
-    if body:
-        role = kind = "system"
+    body = card_reply_display(root, row)  # the host's account of a card display, for its preview alone: the row is still its sender's
+    from ouroboros.dialogue_provenance import recorded_speaker_name, row_provenance
     from ouroboros.room_membership import reply_target_home
     address = row_address(row)
+    # Only a row from the owner's own door, with no sender recorded, is You: another actor's name or an unrecorded place author is not.
+    sender = recorded_speaker_name(row) or ("author not recorded" if row_provenance(row) == "place" else "You")
     return {"address": format_address(address), "row_sha256": address["row_sha256"], "chat_id": address["chat_id"],
-            "role": role, "author_label": (str(row.get("sender_label") or "You") if role == "user"
-                                             else {"assistant": "Ouroboros", "system": "System"}[role]),
+            "role": role, "author_label": sender if role == "user" else {"assistant": "Ouroboros", "system": "System"}[role],
             "kind": kind, **_preview(body or answer or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
             "target_home": reply_target_home(row)}
@@ -338,4 +338,4 @@ def origin_projection(root, ref):
         row = resolve_owner_message_source(root, ref)
     except StoreError:
         return {}
-    return projection_fields(row) if row else {}
+    return projection_fields(row, root) if row else {}

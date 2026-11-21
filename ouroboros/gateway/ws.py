@@ -424,7 +424,7 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
         elif isinstance(exc, ReplyExcerptNotAuthored):
             reason = "This message has no text you can quote. Clear the quote or select another passage."
         elif isinstance(exc, ClientMessageIdConflict):
-            reason = "This send already belongs to a different message. Return to the draft to send these edits."
+            reason = "This send already belongs to a different message. Send these words as a new message."
         try:
             await websocket.send_text(_initialization_notice(client_message_id, chat_id, reason=reason))
         except Exception:

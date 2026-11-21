@@ -207,9 +207,12 @@ def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_
         with pytest.raises(ReplyExcerptNotAuthored):
             ingress_reply(tmp_path, request)
         reply = resolve_reply(tmp_path, address)
-        assert reply["role"] == "system" and reply["author_label"] == "System"
+        # The bubble is still the owner's: a whole-row Reply names its author as it did; only the preview is the host's account.
+        assert reply["role"] == "user" and reply["author_label"] == "You" and reply["kind"] == "message"
+        assert "wrote no words" in reply["snippet"]
         target = reply_target(tmp_path, reply)
         assert "wrote no words" in target["text"] and "the text of task trail-work" in target["text"]
+        assert target["author"] == "System", "a model reads the account as the host's"
 
 
 def test_selected_reply_preserves_source_author_citation_and_replay_identity(tmp_path, monkeypatch):
@@ -340,3 +343,44 @@ def test_older_reply_with_only_a_short_address_requires_the_source_for_more_digi
     monkeypatch.setattr("ouroboros.chat_references.resolve_history_row", lambda *_: (None, {"state": "absent"}))
     assert same_reply(tmp_path, saved, {"address": short})
     assert not same_reply(tmp_path, saved, {"address": prefix + digest})
+
+
+@pytest.mark.parametrize("fields,expected", [
+    ({"transport": {"actor": {"display_name": "Mira", "platform_actor_id": "42"}}}, "Mira"),
+    ({"transport": {"actor": {"platform_actor_id": "42"}}}, "42"),
+    ({"sender_label": "Sasha", "transport": {"actor": {"display_name": "Mira"}}}, "Sasha"),
+    ({"source": "web"}, "You"),
+    ({"source": "presence:telegram", "transport": {"provider": "telegram"}}, "author not recorded"),
+], ids=["actor-name", "actor-id", "sender-label-first", "owner-door", "unrecorded-place-author"])
+def test_a_replied_row_is_signed_with_the_author_its_record_names(tmp_path, monkeypatch, fields, expected):
+    """Without a ``sender_label`` the actor its transport recorded is the author; only a row of the owner's own door
+    is You, and a place row whose author nothing records is not."""
+    from ouroboros.chat_references import ingress_reply
+
+    _web_bridge(tmp_path, monkeypatch)
+    source = message_bus.log_chat("in", 1, 1, "Meet at noon.", ts="2026-10-01T00:00:00Z", **{"source": "skill:telegram", **fields})
+    whole = resolve_reply(tmp_path, format_address(row_address(source)))
+    assert whole["role"] == "user" and whole["author_label"] == expected
+    selected = ingress_reply(tmp_path, {"reply_to": whole["address"], "reply_excerpt": {"text": "noon", "start_utf16": 8}})
+    assert selected["author_label"] == expected and selected["excerpt"] == {"text": "noon", "start_utf16": 8}
+
+
+def test_a_late_answer_stored_without_its_snapshot_echoes_selectable_as_history_replays_it(tmp_path, monkeypatch):
+    """The card's answer of an older late answer lives in the store: a skill's live echo reads it as history does, so
+    its entered words are selectable at once, not only after a reload."""
+    from ouroboros.owner_quiz import late_answer_owner_text
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    block = {"quiz_id": "trail", "state": "answered", "answered_after_terminal": True,
+             "answered_index": 0, "options": ["Take the ridge"], "comment": "Follow the creek at dawn."}
+    monkeypatch.setattr("ouroboros.owner_quiz.quiz_states", lambda root, task_id: {"trail": block})
+    text = late_answer_owner_text(block)
+    accepted, rejoined = message_bus.accept_local_message(
+        bridge, tmp_path, text, chat_id=1, user_id=1, client_message_id="late-skill", source="skill:telegram",
+        task_metadata={"late_answer": {"task_id": "trail-work", "quiz_id": "trail"}})
+    assert not rejoined and "answer_snapshot" not in accepted["late_answer"]
+    message_bus.record_inbound_message(bridge, bridge._inbox.get_nowait(), chat_id=1, user_id=1,
+                                       client_message_id="late-skill", text=text, ts=accepted["ts"])
+    [history] = [r for r in _history(tmp_path) if r.get("client_message_id") == "late-skill"]
+    assert "reply_excerpt_disabled" not in history
+    assert "reply_excerpt_disabled" not in echoes[-1], "the live echo reads the same store as the replay"

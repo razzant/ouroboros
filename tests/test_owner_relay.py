@@ -558,6 +558,7 @@ def test_a_carried_row_told_on_keeps_the_address_its_store_answers_to(tmp_path, 
         entry, created = write_relay(tmp_path, hop, relay_id=f"onward-{hop}", note="note", quotes=quotes, chat_id=1,
                                      teller_task_id=holder.task_id)
         assert created
+        assert all("carried" not in owned for owned in entry["owner_rows"]), "where it reached the sender stays with the sender"
         holder, frames = context(tmp_path), []
         holder.task_id = hop
         inject_relay(holder, entry, frames)

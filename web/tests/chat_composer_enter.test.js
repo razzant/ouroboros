@@ -269,7 +269,7 @@ function panicBus() {
 // The deferred-save fixture: the room's effort-range save held on a deferred promise, and a ws
 // stub that keeps its handlers, so a send is observed across the settings await and a host row
 // can answer it mid-flight.
-function deferredSaveRoom({ savedReply = null, uploads = null } = {}) {
+function deferredSaveRoom({ savedReply = null, uploads = null, status = 'sent', kept = null } = {}) {
     const pending = [];
     const deleted = [];
     const env = installDom(async (url, options) => {
@@ -284,6 +284,7 @@ function deferredSaveRoom({ savedReply = null, uploads = null } = {}) {
     });
     globalThis.sessionStorage.setItem('ouro_chat_session_id', 'session-me');
     if (savedReply) globalThis.sessionStorage.setItem('ouro_chat_reply', JSON.stringify(savedReply));
+    if (kept) globalThis.sessionStorage.setItem('ouro_chat_unconfirmed', kept);  // a reload: this tab's kept copies
     const handlers = new Map();
     const frames = [];
     let generation = 0;
@@ -292,7 +293,7 @@ function deferredSaveRoom({ savedReply = null, uploads = null } = {}) {
             ws: { readyState: 1 },
             on(type, fn) { if (!handlers.has(type)) handlers.set(type, new Set()); handlers.get(type).add(fn); return () => handlers.get(type).delete(fn); },
             isConnected: () => true,
-            send: (frame) => { frames.push(frame); return { status: 'sent', clientMessageId: `cm-${frames.length}` }; },
+            send: (frame) => { frames.push(frame); return { status, clientMessageId: `cm-${frames.length}` }; },
         },
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
         updateUnreadBadge() {}, chatId: 1, idPrefix: 'chat', mountEl: env.mount,
@@ -310,8 +311,16 @@ function deferredSaveRoom({ savedReply = null, uploads = null } = {}) {
     const rec = env.mount.children[0].children.find((node) => node.classList.contains('chat-toolbar-row'))
         .children.find((node) => node.classList.contains('chat-effort-range'))
         .querySelector('.chat-effort-rec');
+    const pendingNotes = (node) => node?.querySelectorAll('.msg-pending') || [];
     return {
         frames, input, press, settle, deleted, instance,
+        fire(type, payload) { for (const fn of handlers.get(type) || []) fn(payload); },
+        kept: () => JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_unconfirmed') || '[]'),
+        bubble: (id) => document.byId.get('chat-messages').children
+            .find((node) => node.classList.contains('chat-bubble') && node.dataset.clientMessageId === id),
+        notes: (node) => pendingNotes(node).map((note) => note.textContent),
+        actions: (node) => pendingNotes(node).flatMap((note) => note.children.filter((child) => child.tagName === 'BUTTON'))
+            .map((button) => button.textContent),
         type(text) { input.value = text; for (const fn of input.listeners.get('input')) fn(); },
         set(text) { input.value = text; },  // no input event: the draft is untouched, its version stands
         stageFiles(list) { const files = document.byId.get('chat-file-input');
@@ -370,6 +379,33 @@ test('an accepted Panic during the upload stops the pending send and cleans the 
     } finally { f.close(); restoreBus(); }
 });
 
+test('an accepted Panic during a batch upload starts no later file and cleans the completed one', async () => {
+    const restoreBus = panicBus();
+    const releases = [], stored = [];
+    const f = deferredSaveRoom({ uploads: () => new Promise((resolve) => releases.push(resolve)).then(() => {
+        const name = `${String(stored.length + 1).padStart(32, '0')}_${stored.length + 1}.txt`;
+        stored.push(name);
+        return { ok: true, filename: name, display_name: `${stored.length}.txt`, mime: 'text/plain',
+            view: { name: `${stored.length}.txt`, kind: 'file', available: true, size: 3, url: `/api/files/download?upload=${name}` } };
+    }) });
+    try {
+        document.body = new ElementStub('body', document);  // the toast stack's host
+        f.stageFiles([['1.txt', 'text/plain'], ['2.txt', 'text/plain'], ['3.txt', 'text/plain']]);
+        f.type('see the files');
+        f.press();
+        await f.settle();
+        assert.equal(releases.length, 1, 'the first file is uploading');
+        f.firePanic();
+        releases[0]();
+        await f.settle();
+        assert.equal(releases.length, 1, 'no later file starts after the Panic attempt');
+        assert.equal(f.frames.length, 0, 'no chat frame follows it');
+        assert.deepEqual(f.deleted, [stored[0]], 'the completed upload is cleaned up, not orphaned');
+        assert.equal(document.body.children.length, 0, 'a Panic is not reported as an upload error');
+        assert.equal(f.input.value, 'see the files', 'the draft stays for a new submission');
+    } finally { f.close(); restoreBus(); }
+});
+
 test('a message submitted after a Panic is sent; the send the Panic crossed stays abandoned', async () => {
     const restoreBus = panicBus();
     const f = deferredSaveRoom();
@@ -407,7 +443,7 @@ test('a late edit during the settings save still sends the submitted words and k
     } finally { f.close(); }
 });
 
-test('a selected retry whose original id is confirmed during the settings save sends nothing again', async () => {
+test('a sent selected reply frees the field: the next message starts empty and answers nothing', async () => {
     const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
     const f = deferredSaveRoom({ savedReply: reply });
     try {
@@ -415,40 +451,123 @@ test('a selected retry whose original id is confirmed during the settings save s
         f.press();
         await f.settle();
         assert.equal(f.frames.length, 1);
-        assert.equal(f.frames[0].reply_excerpt.text, 'star atlas');
-        f.beginSave();
-        f.set('First note.');
+        assert.equal(f.frames[0].reply_to, reply.address);
+        assert.deepEqual(f.frames[0].reply_excerpt, reply.excerpt);
+        assert.equal(f.input.value, '', 'the socket took the frame: the field is free');
+        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_reply'), null, 'the quote left with its message');
+        assert.equal(f.kept().at(-1).frame.client_message_id, 'cm-1', 'the words and quote wait in their bubble');
+        assert.deepEqual(f.kept().at(-1).frame.reply_excerpt, reply.excerpt);
         f.press();
-        assert.equal(f.frames.length, 1, 'the same-draft Send is a retry, and it waits for the save');
-        f.echo(1, { ingress_dispatched: true, reply_to: { address: reply.address, excerpt: reply.excerpt } });
-        f.resolveSave(true);
         await f.settle();
-        assert.equal(f.frames.length, 1, 'a confirmed id is not sent again');
-        assert.equal(f.input.value, '', 'the confirmed reply consumed its own draft');
-        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_reply'), null);
+        assert.equal(f.frames.length, 1, 'an empty field sends nothing, the unconfirmed message included');
+        f.echo(1, { ingress_dispatched: true, reply_to: { address: reply.address, excerpt: reply.excerpt } });
+        assert.deepEqual(f.kept(), [], 'the saved row ends the doubt');
+        f.type('Second note.');
+        f.press();
+        await f.settle();
+        assert.equal(f.frames.length, 2);
+        assert.equal(f.frames[1].reply_to, undefined, 'the next message answers nothing');
+        assert.equal(f.frames[1].reply_excerpt, undefined);
     } finally { f.close(); }
 });
 
-test('a selected retry confirmed by a saved row without its reply still sends nothing again', async () => {
+test('a selected reply queued offline frees the field, says so on its own bubble and is queued once', async () => {
+    const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
+    const f = deferredSaveRoom({ savedReply: reply, status: 'queued' });
+    try {
+        document.body = new ElementStub('body', document);  // the toast stack's host
+        f.type('First note.');
+        f.press();
+        await f.settle();
+        assert.equal(f.frames.length, 1, 'the Send went to the socket queue');
+        assert.equal(f.input.value, '', 'the queue took the frame: the field is free');
+        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_reply'), null);
+        const bubble = f.bubble('cm-1');
+        assert.ok(bubble.classList.contains('pending'));
+        assert.equal(f.notes(bubble).length, 1, 'the bubble itself says where the message is');
+        assert.match(bubble.innerHTML, /<div class="msg-pending">Queued until reconnect<\/div>/);  // the stub keeps no text nodes
+        assert.ok(bubble.children.some((child) => child.dataset.excerpt === '1'), 'with its quote');
+        f.press();
+        await f.settle();
+        assert.equal(f.frames.length, 1, 'nothing is queued twice');
+        f.fire('close');
+        assert.deepEqual(f.actions(bubble), [], 'the queue will write it: nothing is offered twice');
+        assert.deepEqual(document.body.children.flatMap((stack) => stack.children.map((toast) => toast.textContent)), [],
+            'no toast stands in for the bubble');
+        assert.deepEqual(f.kept().at(-1).frame.reply_excerpt, reply.excerpt, 'a reload still finds it kept');
+        f.fire('outbound_sent', { clientMessageId: 'cm-1', queued: true });
+        assert.equal(bubble.classList.contains('pending'), false, 'written: the queued note leaves');
+        assert.deepEqual(f.notes(bubble), []);
+        f.fire('close');
+        assert.deepEqual(f.actions(bubble), ['Send again', 'Send as new', 'Discard'], 'written but not saved: now in doubt');
+        assert.equal(f.frames.length, 1);
+    } finally { f.close(); }
+});
+
+test('a late saved row of a sent selected reply leaves the newer draft alone, with or without its reply', async () => {
     const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
     const f = deferredSaveRoom({ savedReply: reply });
     try {
         f.type('First note.');
         f.press();
         await f.settle();
-        const first = f.frames[0];
-        f.beginSave();
-        f.set('First note.');
-        f.press();
-        // A saved row an older core echoes without the reply this tab would clean the composer
-        // with still confirms the id: accepted, its dispatch still owed.
+        assert.equal(f.input.value, '');
+        f.type('A newer thought.');
+        // An older core's saved row without the reply (dispatch still owed), then the dispatched row with it.
         f.echo(1, { ingress_pending: true });
-        f.resolveSave(true);
+        assert.equal(f.input.value, 'A newer thought.');
+        assert.equal(f.kept().length, 1, 'accepted, its dispatch still owed: the frame waits');
+        f.echo(1, { ingress_dispatched: true, reply_to: { address: reply.address, excerpt: reply.excerpt } });
+        assert.equal(f.input.value, 'A newer thought.', 'the newer draft is not consumed');
+        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_reply'), null, 'the sent quote does not come back');
+        assert.deepEqual(f.kept(), []);
+        assert.equal(f.frames.length, 1, 'nothing is sent again');
+    } finally { f.close(); }
+});
+
+test('after a reload, Send again resends the same id, quote and files, and Send as new returns words and quote', async () => {
+    const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
+    const stored = `${'0'.repeat(31)}1_plan.txt`;
+    const first = deferredSaveRoom({ savedReply: reply, uploads: () => ({ ok: true, filename: stored, display_name: 'plan.txt',
+        mime: 'text/plain', view: { name: 'plan.txt', kind: 'file', available: true, size: 3, url: `/api/files/download?upload=${stored}` } }) });
+    let kept, sent;
+    try {
+        first.stageFiles([['plan.txt', 'text/plain']]);
+        first.type('With the plan.');
+        first.press();
+        await first.settle();
+        [sent] = first.frames;
+        assert.equal(sent.attachments[0].filename, stored);
+        assert.equal(first.input.value, '');
+        kept = globalThis.sessionStorage.getItem('ouro_chat_unconfirmed');
+    } finally { first.close(); }
+    const f = deferredSaveRoom({ kept });  // the reload: the tab's kept copy, and a first history read without it saved
+    try {
+        for (let i = 0; i < 200 && f.actions(f.bubble('cm-1')).length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+        const bubble = f.bubble('cm-1');
+        assert.ok(bubble, 'the kept message is shown again from its own words');
+        assert.deepEqual(f.actions(bubble), ['Send again', 'Send as new', 'Discard']);
+        bubble.querySelector('.message').textContent = 'With the plan.';  // the stub DOM keeps no bubble words
+        bubble.querySelector('[data-unconfirmed-action="send_as_new"]').click();
+        assert.equal(f.frames.length, 0, 'preparing sends nothing');
+        assert.equal(f.input.value, 'With the plan.');
+        assert.deepEqual(JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_reply')).excerpt, reply.excerpt,
+            'Send as new keeps the selected passage');
+        bubble.querySelector('[data-unconfirmed-action="retry"]').click();
+        const again = f.frames.at(-1);
+        assert.equal(again.client_message_id, 'cm-1', 'the SAME id: the host rejoins a row it saved after all');
+        assert.equal(again.content, sent.content);
+        assert.equal(again.reply_to, reply.address);
+        assert.deepEqual(again.reply_excerpt, reply.excerpt);
+        assert.deepEqual(again.attachments, sent.attachments, 'and the same files');
+        assert.equal(f.input.value, 'With the plan.', 'Send again leaves the prepared draft alone');
+        f.press();
         await f.settle();
-        assert.equal(f.frames.length, 1, 'a confirmed id is not sent again');
-        assert.equal(f.frames[0], first);
-        assert.equal(f.input.value, 'First note.', 'the owner\'s draft stays as the newer draft');
-        assert.deepEqual(JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_reply')).excerpt, reply.excerpt);
+        const fresh = f.frames.at(-1);
+        assert.notEqual(fresh, again);
+        assert.equal(fresh.client_message_id, undefined, 'a new message: the socket mints its id');
+        assert.deepEqual(fresh.reply_excerpt, reply.excerpt);
+        assert.equal(fresh.attachments, undefined, 'the files stayed with the original message');
     } finally { f.close(); }
 });
 

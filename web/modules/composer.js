@@ -6,7 +6,7 @@
 // chips follow the live contributions (composer_plus.js, composer_chips.js). The room (chat.js) mounts the markup,
 // namespaces its ids and shows in its feed what was sent.
 import { bindComposerFileTargets, cleanupUploadedAttachments } from './chat_media.js';
-import { composerText, createComposerAttachments, sameExcerpt } from './chat_attachments.js';
+import { composerText, createComposerAttachments } from './chat_attachments.js';
 import { loadChatInputHistory, saveChatInputHistory, sendPanic } from './chat_activity.js';
 import { isPanicFrame } from './panic.js';
 import { clientSurfaceField } from './client_surface.js';
@@ -178,7 +178,7 @@ export function createPlusMenu({ button, hostItems = [] }) {
  * added (the sent draft rises into it, send_flight.js), and `readingBack()`
  * says whether the owner's own gesture took the room off its newest row (the phone fold reads it: composer_fold.js).
  */
-export function createComposer({ page, byId, ws, replies, unconfirmed, chatSessionId, isMain, chatId, projectId, storeKey,
+export function createComposer({ page, byId, ws, replies, chatSessionId, isMain, chatId, projectId, storeKey,
     refreshState, openSettings = null, onLayout, onSent, readingBack }) {
     const input = byId('input');
     const sendBtn = byId('send');
@@ -319,8 +319,7 @@ export function createComposer({ page, byId, ws, replies, unconfirmed, chatSessi
         const version = draftVersion, reply = replies.echoRow();
         const staged = replies.frameField(reply?.reply_to || null);
         const files = attachments.snapshot(), hasAttachments = files.length > 0;
-        const retry = staged.reply_excerpt && unconfirmed.prepareExcerptRetry(draftValue, staged, version);
-        if (!retry && !text && !hasAttachments) return;
+        if (!text && !hasAttachments) return;
         if (ownerControls.hasPendingSave()) {  // the room's settings land before the next message
             setSendBusy(true, 'Saving');
             try { if (!(await ownerControls.pendingSave())) return; } finally { setSendBusy(false); }
@@ -328,7 +327,6 @@ export function createComposer({ page, byId, ws, replies, unconfirmed, chatSessi
         // Each await can be crossed by a Panic attempt or the room's end: the submitted message
         // stops before further sending, and the newer draft made meanwhile stays untouched.
         if (stopped()) return;
-        if (retry) { retry(); return; }
         let uploadedAttachments = [];
         if (hasAttachments) {
             // Upload at Send; offline queuing orphans files.
@@ -338,10 +336,11 @@ export function createComposer({ page, byId, ws, replies, unconfirmed, chatSessi
             }
             setSendBusy(true, files.length > 1 ? 'Uploading files' : 'Uploading');
             try {
-                uploadedAttachments = await attachments.upload(() => ws.ws?.readyState === WebSocket.OPEN, files);
+                // A Panic attempt or the room's end stops the batch before its next file starts.
+                uploadedAttachments = await attachments.upload(() => !stopped() && ws.ws?.readyState === WebSocket.OPEN, files);
             } catch (e) {
                 await cleanupUploadedAttachments(e.uploaded || []);
-                showToast('Upload error: ' + e.message, 'error');
+                if (!stopped()) showToast('Upload error: ' + e.message, 'error');
                 return;  // staged files and their previews remain so the user can retry
             } finally {
                 setSendBusy(false);
@@ -377,16 +376,12 @@ export function createComposer({ page, byId, ws, replies, unconfirmed, chatSessi
         const draft = current ? draftPlace(input.closest('.chat-field'), input) : null;
         rememberInput(text);
         if (current) {
-            if (frame.reply_excerpt) {
-                attachments.keepUploads(files, uploadedAttachments);
-                saveInputDraft();
-                keepDraftVersion(true);
-            } else {
-                if (hasAttachments) attachments.clear();
-                input.value = '';
-                clearInputDraft();
-                replies.clear();
-            }
+            // The socket or its queue took the frame: the field is free for the next message. What was sent (words, quote,
+            // files, id) waits in its bubble's unconfirmed row (`onSent`), where Send again and Send as new find it.
+            if (hasAttachments) attachments.clear();
+            input.value = '';
+            clearInputDraft();
+            replies.clear();
         } else if (hasAttachments) {
             // The submitted message went out with the files it snapshotted; the newer draft
             // keeps the badges the owner left in it. A badge the message just uploaded keeps
@@ -395,8 +390,7 @@ export function createComposer({ page, byId, ws, replies, unconfirmed, chatSessi
             attachments.keepUploads(files, uploadedAttachments);
             keepDraftVersion(true);
         }
-        flySent({ from: draft, row: onSent({ text, frame, reply, result,
-            ...(frame.reply_excerpt ? { draft: draftValue, draftVersion: version } : {}), views: uploadedAttachments.map((item) => item.view) }) });
+        flySent({ from: draft, row: onSent({ text, frame, reply, result, views: uploadedAttachments.map((item) => item.view) }) });
     }
 
     // Send mode lives on DOM so CSS and click/Enter share one source.
@@ -496,15 +490,6 @@ export function createComposer({ page, byId, ws, replies, unconfirmed, chatSessi
             const draft = input.value.trimEnd();
             composer.setDraft(draft ? `${draft}\n\n${words}` : words);
             composer.focus();
-        },
-        savedExcerpt(draft, frame, version) {
-            const reply = replies.frameField();
-            if (attachments.busy || version !== draftVersion || input.value !== draft || reply.reply_to !== frame.reply_to
-                || !sameExcerpt(reply.reply_excerpt, frame.reply_excerpt)) return;
-            attachments.clear();
-            input.value = '';
-            onInput();
-            replies.clear();
         },
         /** Replace the draft (it is kept for the room like typed words). */
         setDraft(text) {

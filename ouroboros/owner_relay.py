@@ -27,12 +27,16 @@ KIND_RELAY = "relay_entry"
 ROUTED_BY_HEAD = "routed:head"
 
 
+def _uncarried(row) -> dict:
+    """A held row without the carriage fact ``inject_carried`` keeps beside it: where the row reached its holder,
+    which no one it is told on to may inherit."""
+    return {key: value for key, value in (row or {}).items() if not (key == "carried" and isinstance(value, dict))}
+
+
 def owner_source_row(row) -> dict:
     """The host-recorded row a retained copy stands for: without the relay's local annotations (the root it was
-    read from; the carriage fact ``inject_carried`` keeps beside a carried row), so every forward of one row
-    names the address its store answers to."""
-    return {key: value for key, value in (row or {}).items()
-            if key != "_owner_source_root" and not (key == "carried" and isinstance(value, dict))}
+    read from; the carriage fact), so every forward of one row names the address its store answers to."""
+    return {key: value for key, value in _uncarried(row).items() if key != "_owner_source_root"}
 
 
 def owner_row_address(row) -> str:
@@ -253,7 +257,7 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
              "source": {"chat_id": chat_id, "label": labels.get(chat_id, "Main"), "ts": str(row.get("ts") or ""),
                         "address": address or owner_row_address(row),
                         "client_message_id": str(row.get("client_message_id") or "")},
-             "owner_row": copy.deepcopy(row)}
+             "owner_row": copy.deepcopy(_uncarried(row))}
     reply = row.get("reply_to")
     if root and (row.get("late_answer") or isinstance(reply, dict) and reply.get("excerpt")):
         quote["owner_row"].setdefault("_owner_source_root", str(root))

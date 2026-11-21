@@ -168,46 +168,48 @@ test('a queued frame belongs to the socket queue until it is written; a bare sla
     } finally { f.close(); }
 });
 
-test('a restored selected Reply survives an unavailable source and resends the same complete selection', async () => {
+test('a refused selected Reply waits in its bubble with the complete selection; Send again resends it, the field stays the owner\'s', async () => {
     const address = 'row:1@2026-10-16T09:40:00Z#0123456789ab';
     const excerpt = { text: 'Blue lanterns. '.repeat(20) + '\n  END', start_utf16: 18 };
     const savedReply = { address, chat_id: 1, author_label: 'Ouroboros', role: 'assistant', snippet: 'Opening.', excerpt };
     const f = fixture({ savedReply });
     try {
         await f.send('Which lantern?');
-        const first = f.sent.at(-1).frame;
-        f.fire('chat', { role: 'system', system_type: 'initialization_notice', chat_id: 1,
-            content: 'The quoted message is unavailable. Retry or clear the quote.', client_message_id: first.client_message_id });
-        assert.equal(document.byId.get('chat-input').value, 'Which lantern?');
-        assert.deepEqual(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).excerpt, excerpt);
-        await f.send('Which lantern?');
         const frame = f.sent.at(-1).frame;
-        assert.deepEqual(frame, first);
         assert.deepEqual(frame.reply_excerpt, excerpt);
         assert.equal(frame.reply_to, address);
-        assert.deepEqual(f.kept().at(-1).frame.reply_excerpt, excerpt);
+        assert.equal(document.byId.get('chat-input').value, '', 'the field is free for the next message');
+        assert.equal(sessionStorage.getItem('ouro_chat_reply'), null);
         const bubble = f.bubbleOf(node => node.dataset.clientMessageId === frame.client_message_id);
         assert.ok(bubble.children.some(child => child.dataset.excerpt === '1'));
-        f.fire('close');
+        document.byId.get('chat-input').value = 'A newer draft.';
+        f.fire('chat', { role: 'system', system_type: 'initialization_notice', chat_id: 1,
+            content: 'The quoted message is unavailable. Retry or clear the quote.', client_message_id: frame.client_message_id });
+        assert.equal(document.byId.get('chat-input').value, 'A newer draft.', 'a late refusal does not erase the newer draft');
+        assert.deepEqual(f.actions(bubble), ['Send again', 'Send as new', 'Discard']);
+        assert.deepEqual(f.kept().at(-1).frame.reply_excerpt, excerpt);
         bubble.querySelector('[data-unconfirmed-action="retry"]').click();
-        assert.deepEqual(f.sent.at(-1).frame, frame);
+        assert.deepEqual(f.sent.at(-1).frame, frame, 'the SAME frame: id, words and the complete selection');
         f.echo(frame.client_message_id, frame.content, { row_address: 'row:1@new#987654321abc', reply_to: savedReply });
-        assert.equal(document.byId.get('chat-input').value, '');
-        assert.equal(sessionStorage.getItem('ouro_chat_reply'), null);
+        assert.deepEqual(f.kept(), []);
+        assert.equal(document.byId.get('chat-input').value, 'A newer draft.');
     } finally { f.close(); }
 });
 
-test('a late acceptance preserves newly edited words beside the selected citation', async () => {
+test('a late acceptance leaves the newer draft alone and the sent quote does not return to it', async () => {
     const address = 'row:1@2026-10-16T09:40:00Z#0123456789ab';
     const savedReply = { address, role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
     const f = fixture({ savedReply });
     try {
         await f.send('First note.');
         const frame = f.sent.at(-1).frame;
+        assert.equal(document.byId.get('chat-input').value, '');
         document.byId.get('chat-input').value = 'Another observation.';
         f.echo(frame.client_message_id, frame.content, { reply_to: savedReply });
         assert.equal(document.byId.get('chat-input').value, 'Another observation.');
-        assert.deepEqual(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).excerpt, savedReply.excerpt);
+        assert.equal(sessionStorage.getItem('ouro_chat_reply'), null, 'the quote left with the message it was sent in');
         assert.deepEqual(f.kept(), []);
+        await f.send('Another observation.');
+        assert.equal(f.sent.at(-1).frame.reply_to, undefined, 'the next message answers nothing');
     } finally { f.close(); }
 });
