@@ -1014,7 +1014,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # that met the live index unusable or damaged and removed by its rebuild (``ouroboros/evidence_packs.py``,
 # ``DAMAGED_MARK``); the existing evidence-pack row names it.
 # 479 -> 480: the capture reader also names the existing task artifact workspace.patch.
-EXPECTED_SCAN_PATHS = 480
+# 480 -> 481: a closed service's exact private copy, ``observability/service_logs/<sha256>.log``
+# (``tools/services._preserve_service_log``); its own row. The local filename owner in ``launch_custody``
+# now spells one host and one executor family (plain and launch-bound stems share the same suffixes).
+EXPECTED_SCAN_PATHS = 481
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

@@ -7,6 +7,8 @@ import test from 'node:test';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { foldWaitRow, waitEpisode } from '../modules/task_checkpoints.js';
+import { buildTimelineItemHtml } from '../modules/chat_activity.js';
+import { projectResultArtifacts } from '../modules/result_files.js';
 import { causeOf, contextShown, lowMissedOf, mapsOf } from '../modules/context_observation.js';
 
 import {
@@ -58,6 +60,43 @@ test('#931 every typed checkpoint kind names itself; only a kindless one is peri
     // Only a checkpoint with no kind at all is the periodic round self-check.
     assert.equal(taskCheckpointLabel({ round: 30 }), 'Task checkpoint');
     assert.equal(taskCheckpointLabel({ checkpoint_number: 7 }), 'Checkpoint 7 — periodic self-check');
+});
+
+test('live, reopened and Logs service stops keep launch-specific links and a failed neighbour', () => {
+    const driveUrl = (version) => `/api/tasks/task1/artifacts/${version}`;
+    const run = (id, state, revision, files) => ({
+        type: 'task_checkpoint', checkpoint_kind: 'service_stop', task_id: 'task1', card_row_revision: revision,
+        artifact_outputs: '/private/raw-exception',
+        service_stop: { launch_id: `launch-${id}`, name: 'demo',
+            process: { state, returncode: state === 'stopped' ? 0 : null }, journal: { state: 'saved' },
+            outputs: [{ name: 'report.txt', state: files.length ? 'saved' : 'pending', files },
+                { name: 'not-created.txt', state: 'failed', files: [] }] },
+    });
+    const makeFile = (id) => ({ name: 'report.txt', path: `${id}.txt`, download_url: driveUrl(`${id}.txt`) });
+    const pending = run('aa', 'unconfirmed', 1, []);
+    const a = run('aa', 'stopped', 2, [makeFile('a')]);
+    const b = run('bb', 'stopped', 2, [makeFile('b')]);
+    const record = { items: [], expandedLineKeys: new Set() };
+    for (const evt of [pending, a, b, pending, a]) {
+        const summary = summarizeChatLiveEvent(evt);
+        updateLiveTimelineItem(record, summary, { syntheticKey: summary.dedupeKey, headline: summary.headline });
+    }
+    assert.equal(record.items.length, 2);
+    for (const [index, evt] of [a, b].entries()) {
+        const logs = summarizeLogEvent(evt);
+        assert.equal(logs.body, record.items[index].body);
+        assert.match(logs.body, /Stopped · exit 0\nJournal: saved\nreport.txt: saved\nnot-created.txt: not saved/);
+        const html = buildTimelineItemHtml(record.items[index], record);
+        assert.ok(html.includes(`href="${logs.serviceStop.links[0].download_url}" download="report.txt"`));
+        assert.ok(!html.includes('/private/'));
+    }
+    for (const [index, evt] of [pending, a, b].entries()) {
+        mergeHistoricalTimelineItem(record, summarizeChatLiveEvent(evt), { history_id: `row-${index}` }, '');
+    }
+    assert.deepEqual(record.items.map((item) => item.serviceStop.links[0].download_url), [driveUrl('a.txt'), driveUrl('b.txt')]);
+    const versions = ['a', 'b'].map((id) => ({ name: `${id}.txt`, kind: 'service_output_version' }));
+    const files = projectResultArtifacts('task1', [{ name: 'report.txt' }, ...versions]);
+    assert.deepEqual(files.files.map((file) => file.name), ['report.txt']);
 });
 
 test('a lowered start names its recorded reason in the Context capsule\'s own words; a row without one names none', () => {

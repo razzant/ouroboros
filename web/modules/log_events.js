@@ -5,8 +5,8 @@ import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
     failedStepHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase, configuredActorCauseKey, firstAttemptClauseKey } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
-import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
-export { taskCheckpointLabel } from './task_checkpoints.js';
+import { checkpointHasProgressRow, serviceCheckpointFacts, taskCheckpointIdentity, taskCheckpointLabel, waitEpisode } from './task_checkpoints.js';
+export { taskCheckpointLabel, serviceOutputLinksHtml } from './task_checkpoints.js';
 import { coordinatorRouteClause, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
@@ -772,6 +772,10 @@ export function summarizeLogEvent(evt) {
         phase, headline, body, full, meta: meta.filter(Boolean), markdown,
     });
     const about = (name, subject) => [name, subject].filter(Boolean).join(' · ');
+    if (evt.checkpoint_kind === 'service_stop') {
+        const stop = serviceCheckpointFacts(evt);
+        return stop ? { ...view('info', stop.headline, stop), serviceStop: stop } : view('info', taskCheckpointLabel(evt));
+    }
 
     if (evt.is_progress || t === 'send_message') {
         // A delegated run's observation reads from its typed fields (delegated_activity.js), never from its text: what
@@ -1442,6 +1446,10 @@ function summarizeChatLiveEventView(evt) {
         // episodes fold into one receipt row per kind (task_checkpoints.foldWaitRow).
         const lowRetry = evt.checkpoint_kind === 'context_fit_low_retry';
         const wait = waitEpisode(evt);
+        const stop = serviceCheckpointFacts(evt);
+        if (stop) return { ...chatView({ phase: 'info', headline: stop.headline, body: stop.body, fullBody: stop.full,
+            visible: true, receipt: true, dedupeKey: `cardrow|service-stop:${stop.launchId}` }),
+            cardRowRevision: evt.card_row_revision, serviceStop: stop };
         return chatView({
             phase: lowRetry || evt.checkpoint_kind === 'service_finalization_error' ? 'warn' : 'thinking',
             headline: taskCheckpointLabel(evt),
