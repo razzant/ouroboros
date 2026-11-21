@@ -92,7 +92,8 @@ to make. SYSTEM.md is the last home: a clause about one capability stays only wh
 thinnest supported request (a Nano selection, a projection without parameter prose, a child
 without the books) would reach that choice without it, and the commit names the missing
 carrier. A new tool needs no SYSTEM.md mention; a removal names the line its reader still
-reads. Every prompt change reports its before/after byte size in the commit or PR.
+reads. Every prompt change reports its before/after byte size and what a behaviour check
+showed, or that none was run, in the commit or PR.
 
 Recoverable tool failures are evidence for the next model turn, not triggers for a
 host-authored recovery workflow: return a typed, redacted result naming the failed
