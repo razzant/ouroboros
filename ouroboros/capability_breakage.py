@@ -24,8 +24,9 @@ log = logging.getLogger(__name__)
 CHANGE_KIND = "capability_change"
 CHANGE_HEADER = "[CAPABILITY CHANGES]"
 _TOLD = "_capability_breakage_told"  # on the work's ToolContext: the broken facts it was last told, and its reach
-# The health record's own codes for an extension that is not meant to run (extension_liveness).
-_NOT_MEANT_TO_RUN = frozenset({"disabled", "not_extension"})
+# The health record's own codes for an extension that is not meant to run (extension_liveness): off, not an
+# extension, or no such skill (the loader groups the last two alike, extension_loader.reconcile_extension).
+_NOT_MEANT_TO_RUN = frozenset({"disabled", "not_extension", "missing"})
 
 Facts = Dict[str, str]
 

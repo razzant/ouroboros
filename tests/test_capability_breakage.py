@@ -156,3 +156,21 @@ def test_the_start_notice_row_stays_byte_identical_when_a_fold_rebuilds_the_tool
     update_resident_notice(registry, schemas, messages)  # what an applied fold does to the manifest row
     after = [row for row in messages if "[CAPABILITY_OMISSION_MANIFEST]" in str(row.get("content"))]
     assert [json.dumps(row, sort_keys=True) for row in after] == [before]
+
+
+def test_a_skill_not_meant_to_run_is_silent_without_a_lookup_and_an_enabled_blocked_one_is_named(monkeypatch, tmp_path):
+    def no_lookup(_root, name):
+        raise AssertionError(f"looked up {name}")
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", no_lookup)
+
+    def inactive(name, reason):
+        extension_health.health_path(tmp_path, name).write_text(json.dumps({
+            "_schema_version": 1, "skill": name, "status": "inactive",
+            "last_observed": {"status": "inactive", "reason": reason, "ts": "2026-11-21T10:00:00+00:00"}}), encoding="utf-8")
+    for name, reason in (("off", "disabled"), ("prose", "not_extension"), ("gone", "missing")):
+        inactive(name, reason)
+    assert breakage.start_notice_rows(_work(tmp_path), []) == []
+    inactive("stale", "review_stale")
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: SimpleNamespace(enabled=True))
+    assert breakage.start_notice_rows(_work(tmp_path), []) == [{"surface": "skill", "reason": "capability_broken",
+                                                                 "error": "stale: enabled but not live (review_stale) since: unknown"}]
