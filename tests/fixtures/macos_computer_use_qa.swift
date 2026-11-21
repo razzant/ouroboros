@@ -29,7 +29,8 @@
 // every paste action its text view performed, so a chord that arrived but pasted nothing is told apart from
 // one that never arrived. Every pointer and key row carries the event's kCGEventSourceUserData ("tag": the skill marks
 // its own events), mouse rows the button number and click count, wheel rows the deltas AppKit derived; every snapshot
-// names the keys and mouse buttons the session holds down, so a key or button left pressed shows.
+// names the keys and mouse buttons the session holds down, so a key or button left pressed shows. Key rows carry the
+// event's raw CoreGraphics flags; the front role also logs the system key events (media keys) it sees.
 
 import AppKit
 import Carbon.HIToolbox
@@ -252,17 +253,29 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
                 if let ups = NSEvent.addLocalMonitorForEvents(matching: .keyUp, handler: { self.key($0); return $0 }) {
                     monitors.append(ups)
                 }
+                // System key events (media, brightness, keyboard light: NSSystemDefined subtype 8), delivered to this
+                // app or seen going elsewhere; nothing in the fixture acts on them.
+                for (scope, monitor) in [("local", NSEvent.addLocalMonitorForEvents(matching: .systemDefined, handler: {
+                                              self.system($0, "local"); return $0 })),
+                                          ("global", NSEvent.addGlobalMonitorForEvents(matching: .systemDefined, handler: {
+                                              self.system($0, "global") }))] {
+                    if let monitor = monitor { monitors.append(monitor) }
+                    log("system_monitor", ["scope": scope, "installed": monitor != nil])
+                }
             }
             let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDragged,
                                                .rightMouseDown, .rightMouseUp, .rightMouseDragged, .otherMouseDown,
                                                .otherMouseUp, .otherMouseDragged, .scrollWheel]
+            var pointerMonitors = 0  // counted here: other monitors (key-up, system keys) are not pointer observation
             if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { self.pointer($0, "global") }) {
                 monitors.append(global)
+                pointerMonitors += 1
             }
             if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { self.pointer($0, "local"); return $0 }) {
                 monitors.append(local)
+                pointerMonitors += 1
             }
-            log("pointer_monitor", ["installed": monitors.count == 2])
+            log("pointer_monitor", ["installed": pointerMonitors == 2])
         }
         if let keys = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { self.key($0); return $0 }) {
             monitors.append(keys)
@@ -452,12 +465,21 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         // characters: what the event types with its modifiers (a menu matches those); chars_ignoring: the typing plane.
         var row: [String: Any] = ["characters": event.characters ?? "", "chars_ignoring": event.charactersIgnoringModifiers ?? "",
                                   "key_code": Int(event.keyCode), "modifiers": held, "repeat": event.isARepeat,
-                                  "tag": event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0]
+                                  "tag": event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0,
+                                  // the event's own CoreGraphics flags, class bits (Fn, NumericPad) included
+                                  "raw_flags": Int(event.cgEvent?.flags.rawValue ?? 0)]
         if role == "paste" {
             row.merge(["flags": Int(flags.rawValue), "repeat": event.isARepeat, "command_characters": commandCharacters(event.keyCode),
                        "input_source": inputSources(), "first_responder": responder()]) { $1 }
         }
         log(event.type == .keyUp ? "key_up" : "key_down", row)
+    }
+
+    func system(_ event: NSEvent, _ scope: String) {
+        // data1 = key type << 16 | key state << 8 for subtype 8; only read for a system-defined event
+        log("system_event", ["scope": scope, "subtype": Int(event.subtype.rawValue), "data1": event.data1,
+                             "key_type": (event.data1 & 0xffff0000) >> 16, "down": ((event.data1 & 0xff00) >> 8) == 0xa,
+                             "tag": event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0])
     }
 
     /// The target process's windows as AppKit has them: title, windowNumber (the CGWindowID), visible, main, key.

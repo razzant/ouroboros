@@ -18,8 +18,10 @@ because it replaces the clipboard, pastes into the paste fixture under whatever 
 another, on a qualified layout, sends cmd+g and cmd+} there and requires their menu items to fire (cmd+? is judged by
 its event only, its menu recorded), and one waits with until_text for a status the target shows after a single press.
 The input program of #63 (``input_events.js``) has its own cases against a pointer fixture (a scroll view over a large
-document) and the front fixture: a middle click, double and triple click counts, a drag, the wheel each way, mixed
-Unicode text, a held key and the pointer read back; each judges the events the fixture received and their mark.
+document) and the front fixture: a middle and a right click, double and triple click counts, a drag in one call and in
+three (press, move, release), the wheel each way, mixed and 600-character Unicode text (its time recorded), a held key,
+a named arrow with its class flags, a system key and the pointer read back; each judges the events the fixture
+received and their mark.
 The calls run as an owner task's would
 (``work_kind`` owner). A grant the run lacks becomes the skip reason, never a pass.
 Further cases read a named window's rich tree, tell the window an ``observe=true`` action kept from a same-process
@@ -507,6 +509,8 @@ def test_command_a_arrives_as_command_a_however_its_letter_is_cased(host, launch
         if (row["characters"], row["modifiers"], sent.get("method")) != ("a", ["cmd"], "command_chord"):
             problems.append(f"{keys} arrived as {row['modifiers']} + {row['characters']!r}, not Command-A: "
                             f"{json.dumps(row)} (sent {json.dumps(sent.get('cmd'))})")
+        if row.get("tag") != SKILL_TAG:  # the chord program marks its events as the input program does
+            problems.append(f"{keys} arrived without the skill's mark: {json.dumps(row)}")
     after = front.mark("after")
     assert not problems and after["text"] == "", "\n".join(problems) or after
 
@@ -1108,6 +1112,10 @@ def test_a_drag_goes_down_at_its_start_travels_and_comes_up_at_its_end(host, lau
     assert kinds[0] == MOUSE["left_down"] and kinds[-1] == MOUSE["left_up"] and kinds.count(MOUSE["left_dragged"]) >= 1, kinds
     assert set(kinds[1:-1]) == {MOUSE["left_dragged"]}, kinds
     assert _near(rows[0]["at"], start) and _near(rows[-1]["at"], end) and after["buttons_down"] == 0, (rows, after)
+    # The pointer travelled: some dragged point lies well inside the way, not only at its ends.
+    inside = [r["at"] for r in rows[1:-1] if all(abs(r["at"][i] - a) > 10 and abs(r["at"][i] - b) > 10
+                                                 for i, (a, b) in enumerate(zip(start, end)))]
+    assert inside, rows
 
 
 @desktop_only
@@ -1156,7 +1164,10 @@ def test_mixed_text_arrives_whole_as_unicode_events_without_the_clipboard(host, 
         pass  # the comparison below shows what arrived instead
     after = front.mark("after")
     downs = _between(front.rows(), before["t"], after["t"], "key_down")
+    ups = _between(front.rows(), before["t"], after["t"], "key_up")
     assert (sent.get("ok"), sent.get("method"), sent.get("chars_sent")) == (True, "unicode_events", sent.get("chars_total")), sent
+    assert len(downs) == len(ups) == sent["chars_total"] == 16 and not _own_marks(ups), {"downs": downs, "ups": ups}
+    assert [r["key_code"] for r in downs] == [r["key_code"] for r in ups], "each key down has its own key up"
     assert after["text"] == text, {"arrived": after["text"], "sent": text, "receipt": sent}
     assert after["pasteboard_change_count"] == before["pasteboard_change_count"] and not _own_marks(downs), downs
     assert after["keys_down"] == [], after
@@ -1175,6 +1186,7 @@ def test_a_held_key_goes_up_after_its_time_and_stays_up(host, launch):
     downs = [r for r in _between(front.rows(), before["t"], after["t"], "key_down") if not r["repeat"]]
     assert sent.get("ok") is True and sent.get("method") == "cg_events", sent
     assert len(downs) == 1 and downs[0]["key_code"] == up["key_code"] and not _own_marks(downs + [up]), (downs, up)
+    assert downs[0]["characters"] == "a" and up["characters"] == "a", (downs, up)
     assert up["t"] - downs[0]["t"] >= 0.6 - 0.05, {"held_s": up["t"] - downs[0]["t"]}
     assert after["keys_down"] == [], after
 
@@ -1191,3 +1203,107 @@ def test_the_pointer_reads_back_where_move_put_it(host, launch):
     assert _near([read["x"], read["y"]], target), {"read": read, "target": target}
     moved_rows = _received(pointer, held, mark, MOUSE["moved"])
     assert moved_rows and _near(moved_rows[-1]["at"], target) and not _own_marks(moved_rows), moved_rows
+
+
+@desktop_only
+def test_a_named_arrow_carries_its_class_flags(host, launch):
+    """An arrow from a keyboard carries Fn and NumericPad (0xA00000) beside its modifiers; macOS ignores Ctrl+arrow
+    shortcuts without them. shift+left (a selection in the text view; no system shortcut) must arrive with Shift and
+    both class bits in its raw CoreGraphics flags."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    before = front.mark("before")
+    sent = call("key", keys="shift+left", app=f"pid:{front.pid}", raise_policy="never")
+    row = front.wait_for("key_down", after=before["t"], key_code=123)
+    assert sent.get("ok") is True and sent.get("method") == "cg_events", sent
+    assert row["raw_flags"] & 0xA20000 == 0xA20000 and row["modifiers"] == ["shift"] and row["tag"] == SKILL_TAG, row
+    assert front.mark("after")["keys_down"] == []
+
+
+@desktop_only
+def test_a_right_click_arrives_as_button_one(host, launch):
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    before = pointer.mark("before")
+    sent = call("click", x=at[0], y=at[1], raw=True, button="right", app=f"pid:{pointer.pid}", raise_policy="never")
+    pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["right_up"])
+    after = pointer.mark("after")
+    rows = _received(pointer, before, after, MOUSE["right_down"], MOUSE["right_up"], MOUSE["left_down"])
+    assert sent.get("ok") is True, sent
+    assert [(r["type"], r["button"]) for r in rows] == [(MOUSE["right_down"], 1), (MOUSE["right_up"], 1)], rows
+    assert all(_near(r["at"], at) for r in rows) and not _own_marks(rows) and after["buttons_down"] == 0
+
+
+@desktop_only
+def test_a_press_a_move_and_a_release_in_three_calls_are_one_drag(host, launch):
+    """mouse_down, then move (the session holds the button, so the program posts a dragged event), then mouse_up."""
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    start, end = [at[0] - 60, at[1]], [at[0] + 60, at[1] + 30]
+    before = pointer.mark("before")
+    pressed = call("mouse_down", x=start[0], y=start[1], raw=True, app=f"pid:{pointer.pid}", raise_policy="never")
+    held = pointer.mark("held")
+    moved = call("move", x=end[0], y=end[1], raw=True)
+    released = call("mouse_up")
+    pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["left_up"])
+    after = pointer.mark("after")
+    rows = _received(pointer, before, after, MOUSE["left_down"], MOUSE["left_dragged"], MOUSE["left_up"], MOUSE["moved"])
+    assert all(r.get("ok") is True for r in (pressed, moved, released)), (pressed, moved, released)
+    assert held["buttons_down"] & 1, held
+    assert [r["type"] for r in rows] == [MOUSE["left_down"], MOUSE["left_dragged"], MOUSE["left_up"]], rows
+    assert _near(rows[0]["at"], start) and _near(rows[1]["at"], end) and _near(rows[2]["at"], end), rows
+    assert not _own_marks(rows) and after["buttons_down"] == 0, after
+
+
+@desktop_only
+def test_a_system_key_arrives_as_a_system_defined_event(host, launch):
+    """keys-light-toggle, sent twice so a keyboard light (if the runner has one) ends as it was: it changes nothing
+    else on a hosted Mac. The front fixture's system-event monitors (its own and the global one) must see each press
+    and release as subtype 8 with key type 23 and the skill's mark. If the window server consumes media keys before
+    any application monitor, this case fails on observation, not on delivery: the rows recorded say which."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    installed = [r for r in front.rows() if r["event"] == "system_monitor"]
+    assert installed and all(r["installed"] for r in installed), installed
+    before = front.mark("before")
+    sent = [call("key", keys="keys-light-toggle", app=f"pid:{front.pid}", raise_policy="never") for _ in range(2)]
+    time.sleep(0.5)
+    after = front.mark("after")
+    rows = [r for r in _between(front.rows(), before["t"], after["t"], "system_event") if r["subtype"] == 8 and r["key_type"] == 23]
+    assert all(s.get("ok") is True and s.get("method") == "cg_events" for s in sent), sent
+    seen = [r for r in rows if r["scope"] == "local"] or [r for r in rows if r["scope"] == "global"]
+    assert [r["down"] for r in seen] == [True, False, True, False], rows
+    assert all(r["tag"] == SKILL_TAG for r in seen), seen
+
+
+@desktop_only
+def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_path):
+    """600 characters (Latin, Cyrillic, emoji, line breaks) through type_text: the text view holds them all. How long
+    the program took is recorded (wall time of the call, first key event to last in the fixture, the budget the skill
+    gave the program), so that budget is set from this measurement on the runner, not from a guess."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    text = ("Line of text, строка текста 🙂\n" * 30)[:600]
+    before = front.mark("before")
+    sent = call("type_text", text=text, app=f"pid:{front.pid}", raise_policy="never")
+    wall_ms = call.last["wall_ms"]
+    try:
+        front.wait_for("front_text", after=before["t"], timeout=30, text=text)
+    except AssertionError:
+        pass  # what arrived is compared below, after its timing is recorded
+    after = front.mark("after")
+    keys = _between(front.rows(), before["t"], after["t"], "key_down", "key_up")
+    budget = json.loads(sent["cmd"][-1]).get("budget_ms") if sent.get("cmd") else None
+    _evidence(tmp_path, "long_text_timing.jsonl", {"chars": len(text), "chars_total": sent.get("chars_total"),
+                                             "chars_sent": sent.get("chars_sent"), "wall_ms": wall_ms, "budget_ms": budget,
+                                             "fixture_s": (keys[-1]["t"] - keys[0]["t"]) if keys else None,
+                                             "ok": sent.get("ok"), "error": sent.get("error")})
+    log.warning("long text: %s characters, %s ms wall, budget %s ms", len(text), wall_ms, budget)
+    assert sent.get("ok") is True and sent.get("chars_sent") == sent.get("chars_total"), sent
+    assert after["text"] == text, {"arrived": len(after["text"]), "sent": len(text)}
