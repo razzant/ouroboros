@@ -14,6 +14,7 @@ import re
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._phone_touch import touch
 from tests._work_projection_shared import work_fields
 from tests.test_design_system_gate_browser import PROJECTS, rest, save_evidence, seed_page, settle
 
@@ -571,21 +572,6 @@ def test_a_rows_menu_opens_by_right_click_or_keyboard_and_says_the_rows_state(na
     assert facts['keyboard_aria']['row'] == [None, None], facts
     assert facts['kebab_aria']['kebab'] == ['menu', 'true'] and facts['kebab_aria']['row'] == [None, None], facts
     assert facts['kebab_closed']['kebab'] == ['menu', 'false'], facts
-
-
-def touch(page, x, y, hold_ms, move=None):
-    cdp = page.context.new_cdp_session(page)
-    try:
-        cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': x, 'y': y, 'id': 1}]})
-        if move:
-            for step in range(1, 7):
-                cdp.send('Input.dispatchTouchEvent', {'type': 'touchMove', 'touchPoints': [
-                    {'x': x + move[0] * step / 6, 'y': y + move[1] * step / 6, 'id': 1}]})
-                page.wait_for_timeout(16)
-        page.wait_for_timeout(hold_ms)
-        cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
-    finally:
-        cdp.detach()
 
 
 def test_a_long_press_opens_a_rows_menu_on_touch_where_the_dots_take_no_column(chromium_ui, tmp_path):

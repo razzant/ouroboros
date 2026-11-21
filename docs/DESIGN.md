@@ -3547,8 +3547,7 @@ name's capsule opens the work list without a caret, since Telegram's ⌄ stands 
 whole or not at all, as the status word does, so a narrow phone may show the status mark alone (from 360 px; at
 320 px even the mark is cut). The consciousness chip
 becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
-(both are layers); the work list and the consciousness sheet hang under the row at the page's width. With the keyboard
-up the bar stays in the row, in the page's flow as every keyboard room's bar is.
+(both are layers). The work list and consciousness sheet hang below at page width. Typing keeps the same row.
 
 ### A room's edges
 
@@ -3561,8 +3560,9 @@ then tapers to clear within 32 px below the bar on every layout. The composer ha
 its top 32 px. The first row and every landing clear the header's reach; a row under it is not read yet. The top
 effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
 do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
-both themes. With the keyboard up the bar and the composer stand in the page's flow and nothing passes under either: the
-room draws neither edge, and a short keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer
+both themes. While typing in Telegram the feed still passes under both. The newest line and time rest just above the
+measured composer. In a tight room the top extension yields to the feed. Reading history holds the passage in place.
+Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter
 ink over a light veil, still glass beside its neighbours.
@@ -3633,8 +3633,8 @@ chips that scrolls gives its controls the minimum as their own height, so no
 reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so do a
 disclosure's summary and a field. One exception, the folded composer row's last step before Model is cut ("Composer
 owner controls"). In a capsule's open levels on a narrow phone a value
-keeps only its drawn height. Nothing that acts is hidden until hover
-there (a Project row's menu is reached by its long press).
+keeps only its drawn height. Touch actions need no hover: hold a Project row for its menu. Lifting after a hold or swipe
+activates nothing under the finger; the next tap acts immediately.
 A page's strips may scroll sideways inside themselves with the shared fade; code, tables and a bar's
 Files location do too. Text wraps before it widens a column. A pinch only magnifies (owner 23.10): while it
 holds, the room keeps its size and a sideways finger pans the magnified page instead
