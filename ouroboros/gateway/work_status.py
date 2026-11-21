@@ -736,6 +736,9 @@ def said_works(state: Any) -> Optional[List[Dict[str, str]]]:
         key = key if key in ACTIVITY_WORDS else "unknown"
         reasons = [row for row in work.get("because") or () if isinstance(row, Mapping) and row.get("text")]
         first = reasons[0] if reasons else {}
+        # Never the word again (the card's ``workLine``): an answer wait's own reason, compared by its code.
+        if (key == "question" and first.get("code") == "owner_answer") or first.get("text") == ACTIVITY_WORDS[key]:
+            first = {}
         # The code rides when the text is the sentence the window says by ``work.because.<code>``: the code's own one,
         # a counted reason's singular included; a plural count, a wake or a rewritten sentence goes by its text.
         phrase = REASON_TEXT.get(first.get("code")) if first else None

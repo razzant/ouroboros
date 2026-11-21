@@ -65,9 +65,11 @@ def test_health_says_an_unmeasured_pool_is_not_observed_never_zero(tmp_path):
 def test_health_degrades_when_files_missing(tmp_path):
     plugin = _load_plugin()
     api, data = _api_with_data(tmp_path)
-    # no queue/worker files at all → must not raise, queue shows idle
+    # no queue/worker files at all → must not raise; a lost document is unknown, never two zeros
     txt = plugin._collect_health(api, "ru")
-    assert "RUNNING 0" in txt and "PENDING 0" in txt
+    assert "Queue: unknown" in txt and "RUNNING 0" not in txt
+    (data / "state" / "queue_snapshot.json").write_text(json.dumps({"running": [], "pending": []}), encoding="utf-8")
+    assert "Queue: RUNNING 0 · PENDING 0" in plugin._collect_health(api, "ru")  # a read, empty document
 
 
 def test_health_discloses_when_incident_tail_omits_prefix(tmp_path, monkeypatch):
@@ -126,8 +128,12 @@ def test_tasks_list_the_windows_works_and_an_unread_projection_is_unknown(tmp_pa
     lines = txt.splitlines()
     assert lines[0] == "🟡 Report — Working"
     assert lines[1] == "⏸ Migration — Paused: You paused it"
-    assert lines[2] == "❓ Survey — Waiting for your answer: Waiting for your answer"
+    assert lines[2] == "❓ Survey — Waiting for your answer"  # the word is not said again as its reason
     assert lines[3] == "⏳ Digest — Queued"
+    other = health._collect_tasks_text(_works({"name": "Survey", "activity": "waiting", "turn": [{"kind": "question"}],
+                                               "because": [{"code": "model_wait", "text": "Waiting for the model "
+                                                                    "to become available"}]}), "en")
+    assert other == "❓ Survey — Waiting for your answer: Waiting for the model to become available"
     import inspect
     assert "queue_snapshot" not in inspect.getsource(health._collect_tasks_text)
 
@@ -163,11 +169,11 @@ def test_health_queue_line_says_the_windows_works_and_unknown_when_unread(tmp_pa
     api, data = _api_with_data(tmp_path)
     (data / "state" / "queue_snapshot.json").write_text(
         json.dumps({"running_count": 0, "pending_count": 1, "running": [], "pending": []}), encoding="utf-8")
-    assert "Queue: ❔ unknown (RUNNING 0 · PENDING 1)" in plugin._collect_health(api, "en", {})
-    assert "Queue: 🟢 idle" in plugin._collect_health(api, "en", _works())
+    assert "Works: ❔ unknown · Queue: RUNNING 0 · PENDING 1" in plugin._collect_health(api, "en", {})
+    assert "Works: 🟢 idle" in plugin._collect_health(api, "en", _works())
     paused = _works({"name": "a", "activity": "paused"}, {"name": "b", "activity": "paused"},
                     {"name": "c", "activity": "waiting"})
-    assert "Queue: 🟡 2 Paused · 1 Waiting (RUNNING 0 · PENDING 1)" in plugin._collect_health(api, "en", paused)
+    assert "Works: 🟡 2 Paused · 1 Waiting · Queue: RUNNING 0 · PENDING 1" in plugin._collect_health(api, "en", paused)
 
 
 def test_tasks_panel_builds(tmp_path, monkeypatch):
@@ -215,6 +221,69 @@ def test_a_correspondents_presence_turn_is_neither_counted_nor_listed_as_the_own
                    {"name": "Owner turn", "activity": "working"}, {"name": "Project work", "activity": "paused"})
     txt = health._collect_tasks_text(state, "en")
     assert "Owner turn" in txt and "Project work" in txt and "Reply to Anna" not in txt
-    assert "Queue: 🟡 1 Working · 1 Paused" in plugin._collect_health(api, "en", state)
+    assert "Works: 🟡 1 Working · 1 Paused" in plugin._collect_health(api, "en", state)
     only_place = _works({"name": "Reply to Anna", "activity": "working", "place_turn": True})
     assert "idle" in health._collect_tasks_text(only_place, "en")
+
+
+def test_the_tasks_page_stays_within_telegrams_limit_with_its_header(tmp_path):
+    """Telegram drops a message longer than 4096 UTF-16 code units whole: the page with its header and the ``… +N``
+    line stays within it; a page that fits keeps every line."""
+    plugin = _load_plugin()
+    health = sys.modules["tg_ht_test.lib.telegram_health"]
+    units = health._units
+    few = _works(*({"name": f"Work {i}", "activity": "working"} for i in range(3)))
+    header, _ = plugin._build_menu_tasks(few, "safe_commands", "")
+    assert units(header) < 4096 and header.count("— Working") == 3 and "… +" not in header
+    long = _works(*({"name": f"{i} " + "名" * 400, "activity": "paused",
+                     "because": [{"code": "paused_by_owner", "text": "You paused it"}]} for i in range(12)))
+    header, _ = plugin._build_menu_tasks(long, "safe_commands", "")
+    assert units(header) <= 4096 and header.rstrip().splitlines()[-1].startswith("… +")
+    one = _works({"name": "x" * 5000, "activity": "working"})
+    header, _ = plugin._build_menu_tasks(one, "safe_commands", "")
+    assert units(header) <= 4096 and "…" in header
+
+
+def test_an_older_core_without_the_renderer_leaves_the_panels_unknown_and_the_bridge_registering(tmp_path,
+                                                                                                    monkeypatch):
+    """A kept bridge copy over a core without ``said_works``: the plugin still loads and registers its supervised
+    tasks and message subscriptions; only the panels say unknown."""
+    import types as _types
+
+    from tests.test_telegram_bridge_safety import FakeApi
+
+    monkeypatch.setitem(sys.modules, "ouroboros.gateway.work_status", _types.ModuleType("ouroboros.gateway.work_status"))
+    root = Path(__file__).resolve().parents[1] / "skills" / "telegram"
+    pkg = _types.ModuleType("tg_old_core"); pkg.__path__ = [str(root)]
+    monkeypatch.setitem(sys.modules, "tg_old_core", pkg)
+    spec = importlib.util.spec_from_file_location("tg_old_core.plugin", root / "plugin.py")
+    plugin = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, plugin)
+    spec.loader.exec_module(plugin)  # a module-level import of the renderer would fail here
+    health = sys.modules["tg_old_core.lib.telegram_health"]
+    state = _works({"name": "Report", "activity": "working"})
+    assert "unknown" in health._collect_tasks_text(state, "en")
+    api_dir = tmp_path / "state"
+    api_dir.mkdir()
+
+    class Stop(Exception):
+        pass
+
+    class RegistrationApi(FakeApi):
+        tasks, topics = [], []
+
+        def register_supervised_task(self, name, *_a, **_k):
+            self.tasks.append(name)
+
+        def subscribe_event(self, topic, _handler):
+            self.topics.append(topic)
+            raise Stop
+
+    api = RegistrationApi(api_dir)
+    try:
+        plugin.register(api)
+    except Stop:
+        pass
+    assert {"poller", "notifier", "outbox"} <= set(api.tasks) and api.topics == ["chat.outbound"]
+    for name in [key for key in sys.modules if key.startswith("tg_old_core")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)

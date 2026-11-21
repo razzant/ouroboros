@@ -987,7 +987,7 @@ def test_text_surfaces_say_the_works_with_the_cards_words_and_an_unread_projecti
         {"name": "d", "activity": "paused", "because": [{"text": ""}, ws.reason("paused_by_owner")]},
         {"name": "e", "activity": "unheard-of"}]})
     assert [(w["state"], w["word"], w["reason"]) for w in said] == [
-        ("pausing", "Pausing…", ""), ("question", "Waiting for your answer", "Waiting for your answer"),
+        ("pausing", "Pausing…", ""), ("question", "Waiting for your answer", ""),
         ("waiting", "Waiting", ""), ("paused", "Paused", "You paused it"), ("unknown", "Activity unconfirmed", "")]
     # A correspondent's Presence turn is marked by its recorded fact, an owner's work is not.
     marked = ws.said_works({"works_complete": True, "works": [{"name": "p", "activity": "working", "place_turn": True},

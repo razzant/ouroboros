@@ -7,7 +7,6 @@ import time
 from typing import Dict
 
 from ouroboros import i18n_memory as _memory
-from ouroboros.gateway.work_status import said_works
 from ouroboros.queue_observation import load_queue_document, pool_observation_status
 
 from .telegram_api import _LOCALIZED_TEXTS
@@ -16,7 +15,7 @@ from .telegram_state import _data_dir, _jsonl_tail
 
 
 _HEALTH_EN = {
-    "queue": "Queue", "idle": "idle", "workers": "Workers", "not_observed": "not observed",
+    "queue": "Queue", "works": "Works", "idle": "idle", "workers": "Workers", "not_observed": "not observed",
     "disk": "Disk", "logs": "logs", "incidents": "Incidents (1h)", "clean": "clean",
     "free": "free", "tasks_idle": "🟢 idle — nothing running",
     "tasks_unknown": "❔ unknown — the list of works could not be read",
@@ -105,12 +104,14 @@ def _collect_health(api, lang: str = "en", state=None) -> str:
     listed = snap.get("running") if isinstance(snap.get("running"), list) else []
     rc = max(0, int(snap.get("running_count") or 0) - (len(listed) - len(_owner_running(snap))))
     pc = int(snap.get("pending_count") or 0)
+    unread = bool(snap.get("_snapshot_missing") or snap.get("_snapshot_invalid"))  # a lost document is no zero
+    rows = s["unknown"] if unread else f"RUNNING {rc} · PENDING {pc}"
     said = _owner_works(state)  # the window's works: an unread projection is unknown, never idle
     q_icon = "❔" if said is None else "🟢" if not said else "🟡"
     q_state = s["unknown"] if said is None else s["idle"] if not said else " · ".join(
         f"{sum(w['state'] == one['state'] for w in said)} {_chip_word(one, lang)}"
         for one in {w["state"]: w for w in said}.values())
-    out.append(f"⚙️ {s['queue']}: {q_icon} {q_state} (RUNNING {rc} · PENDING {pc})")
+    out.append(f"⚙️ {s['works']}: {q_icon} {q_state} · {s['queue']}: {rows}")
     if snap and pool_observation_status(snap) == "unknown":  # a failed pool measurement is not 0 processes
         out.append(f"👷 {s['workers']}: {s['not_observed']}")
     elif isinstance(snap.get("worker_total"), int):
@@ -139,13 +140,18 @@ def _collect_health(api, lang: str = "en", state=None) -> str:
 def _owner_works(state) -> list | None:
     """The window's works without a correspondent's Presence turn (its recorded ``place_turn``), as the RUNNING count
     leaves it out (``_owner_running``, 02.11 ``99fee149788``); ``None`` when the projection was not read."""
+    try:  # a kept bridge copy over an older core without the renderer: the panels say unknown, the bridge runs
+        from ouroboros.gateway.work_status import said_works
+    except ImportError:
+        return None
     said = said_works(state)
-    return None if said is None else [work for work in said if not work["place_turn"]]
+    return None if said is None else [work for work in said if not work.get("place_turn")]
 
 
 def _chip_word(work: dict, lang: str) -> str:
     """The window's own word: its chip's catalogue entry (``code:task.chip.*``), English when the memory has none."""
-    return _memory.tr("code:" + work["chip_key"], lang, work["word"], drive_root=drive_root()) or work["word"]
+    key = work.get("chip_key")
+    return (_memory.tr("code:" + key, lang, work["word"], drive_root=drive_root()) if key else None) or work["word"]
 
 
 def _reason_words(work: dict, lang: str) -> str:
@@ -159,19 +165,38 @@ _STATE_ICONS = {"working": "🟡", "finalizing": "🟡", "pausing": "🟡", "que
                 "question": "❓", "paused": "⏸", "unknown": "❔"}
 
 
-def _collect_tasks_text(state, lang: str = "en") -> str:
+TELEGRAM_TEXT_LIMIT = 4096  # Telegram's message limit, counted in UTF-16 code units
+
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _collect_tasks_text(state, lang: str = "en", limit: int = TELEGRAM_TEXT_LIMIT) -> str:
     """The works the window shows, from the server's ``/api/state`` body: each work's name, its word and its first
-    reason in the server's own sentences (translated by text). An unread or incomplete projection is unknown."""
+    reason in the server's own sentences. An unread or incomplete projection is unknown. At most twelve lines, and
+    with the ``… +N`` line never past ``limit`` UTF-16 code units (Telegram drops a longer message whole)."""
     s = _HEALTH[lang]
     said = _owner_works(state)
     if said is None:
         return s["tasks_unknown"]
     if not said:
         return s["tasks_idle"]
-    lines = []
+    lines: list = []
     for work in said[:12]:
         reason = f": {_reason_words(work, lang)}" if work["reason"] else ""
-        lines.append(f"{_STATE_ICONS[work['state']]} {work['name'] or '—'} — {_chip_word(work, lang)}{reason}")
+        line = f"{_STATE_ICONS.get(work['state'], '❔')} {work['name'] or '—'} — {_chip_word(work, lang)}{reason}"
+        more = len(said) - len(lines) - 1
+        tail = f"\n… +{more}" if more else ""
+        used = _units("\n".join(lines + [line]) + tail)
+        if used > limit:
+            room = limit - _units("\n".join(lines + [""]) + f"\n… +{len(said) - len(lines)}")
+            if lines or room < 2:
+                break
+            while _units(line) > room - 1:  # one line longer than the page: cut, said with an ellipsis
+                line = line[:-1]
+            line += "…"
+        lines.append(line)
     if len(said) > len(lines):
         lines.append(f"… +{len(said) - len(lines)}")
     return "\n".join(lines)
@@ -181,7 +206,7 @@ def _build_menu_tasks(state, command_mode: str, lang: str = "en") -> tuple[str, 
     """Read-only list of works (``state``: the ``/api/state`` body). No inline mutations (owner inject-minimization)."""
     t = _LOCALIZED_TEXTS[lang]
     title = t["tasks_title"]
-    header = f"{title}\n\n{_collect_tasks_text(state, lang)}"
+    header = f"{title}\n\n" + _collect_tasks_text(state, lang, TELEGRAM_TEXT_LIMIT - _units(f"{title}\n\n"))
     keyboard = [
         [{"text": t["btn_refresh"], "callback_data": "nav:tasks"}],
         [{"text": t["btn_back"], "callback_data": "nav:menu"}],
