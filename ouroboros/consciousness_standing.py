@@ -1,15 +1,28 @@
-"""My human's answerable cards as every own-clock wake shows them, and the card lines its observation prints.
+"""What stands in every own-clock wake while it holds: my human's answerable cards and the standing sections.
 
 A wake's observation is a delta (``consciousness_wake.observe_wake``): each transition reaches one accepted wake.
-After it every wake shows my human's answerable cards (``outstanding_cards``); the card line renderers live here,
-also for the card transitions the observation prints.
+After it every wake shows two inventories instead, in this order: my human's answerable cards (``outstanding_cards``;
+the card line renderers live here, also for the card transitions the observation prints), then the standing sections
+(``STANDING_PRODUCERS``): host facts, each line with its reader, never a waiting class, an instruction or a ranking.
+A section with nothing to say is not printed.
+
+Works that ended without success (``fallen_works``): in each open project (lifecycle active, no ``closed`` record), its
+newest-started work root when that root ended failed or cancelled and ``ended_without_success`` holds. A root that
+starts later in the project (a Continue successor is one) or closing the project takes it off the list; nothing ages
+it out. Presence's own rows (a speaker turn, work acting for a binding) neither stand nor retire; the owner's work
+related to a binding does both. Not covered: works with no project, and a root that fails while a later-started root
+of its project exists. Cost per wake: one index probe per open project and the bodies of the candidates, read by
+primary key in the same snapshot; nothing is stored.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
-from typing import Any, Dict, Mapping, Optional, Tuple
+import json
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
+from ouroboros.consciousness_authority import is_consciousness_origin, wake_cause
 from ouroboros.deadline_utils import ago_text
 
 
@@ -73,6 +86,8 @@ def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, no
 
 
 def _closed_card_line(task_id, quiz_id, block, *, now):
+    """A card closed without an answer (``quiz_closed``), dated by its own ``closed_at``, which a time-bootstrapped
+    window reads too; its actor and reason are never read as an answer."""
     stamp = _parse_iso(block.get("closed_at"))
     when = ago_text(now - stamp) if stamp is not None else "at an unknown time"
     actor = str(block.get("closed_actor") or "unknown actor")
@@ -96,3 +111,173 @@ def outstanding_cards(results: Mapping[str, Dict[str, Any]], *, now: float) -> T
                 cards.append((str(block.get("asked_at") or ""), _card_line(
                     task_id, str(quiz_id), block, now=now, owner_wait=row.get("owner_wait"))))
     return tuple(line for _stamp, line in sorted(cards, reverse=True))
+
+
+# --- standing sections ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StandingSection:
+    """One section: its row ``kind`` (the observation's composition and source rows), title, composition words
+    ``(one, many)`` and lines."""
+
+    kind: str
+    title: str
+    words: Tuple[str, str]
+    lines: Tuple[str, ...]
+
+    def heading(self) -> str:
+        return f"{self.title} ({len(self.lines)}):"
+
+
+@dataclass(frozen=True)
+class StandingFacts:
+    """What a section is computed from in the wake's carrier: the data root, the wake's instant and the project
+    registry its observation read (``None``: unreadable)."""
+
+    root: Any
+    now: float
+    registry: Optional[List[Dict[str, Any]]]
+
+
+FALLEN_KIND = "fallen_work"
+FALLEN_TITLE = "Works that ended without success; nothing has started in their project since"
+FALLEN_WORDS = ("work that ended without success", "works that ended without success")
+FALLEN_STATUSES = ("failed", "cancelled")
+AGENT_TOOL_SOURCE = "agent_tool"  # ``join_ledger`` cancel_task: a focus's own tool stopped it
+
+
+class FallenWork(NamedTuple):
+    task_id: str
+    project_id: str
+    line: str
+
+
+def ended_without_success(row: Any) -> bool:
+    """Whether a task row is a work root that ended without success and was taken up by nobody: failed or cancelled;
+    not stopped by my human (an ``owner_continue.OWNER_STOP_SOURCES`` origin, Panic included, read here: a stopped
+    root's retained budget cause can answer ``hard_limit_reached`` before the offer reads the stop) nor wrapped up at
+    their word (``owner_requested_finalization``); not cancelled by a focus's tool; not a wake (work a wake started
+    is not one); no successor: a Continue past ``bound``, a supersession or a retry under another id. A Continue
+    bound and not yet admitted keeps it (its line names the successor)."""
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION, recorded_cause
+    from ouroboros.owner_continue import OWNER_STOP_SOURCES
+
+    if not isinstance(row, dict) or str(row.get("status") or "") not in FALLEN_STATUSES:
+        return False
+    task_id = str(row.get("task_id") or "")
+    if str(row.get("parent_task_id") or "") or row.get("delegation_role") == "subagent":
+        return False  # a child's work is its root's (``store.ROOT_RESULT_WHERE``)
+    origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
+    if str(origin.get("source") or "") in OWNER_STOP_SOURCES | {AGENT_TOOL_SOURCE}:
+        return False
+    if recorded_cause(row) == REASON_OWNER_REQUESTED_FINALIZATION:
+        return False
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    if is_consciousness_origin(metadata) and wake_cause(metadata):
+        return False
+    if any(str(row.get(key) or "") not in ("", task_id) for key in ("superseded_by", "retry_task_id")):
+        return False
+    claim = row.get("continued_by") if isinstance(row.get("continued_by"), dict) else {}
+    return not (claim.get("successor_task_id") and claim.get("state") != "bound")
+
+
+def open_projects(projects: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
+    """``{project id: name}`` of the open projects among registry rows: lifecycle active and no ``closed`` record."""
+    from ouroboros.project_closure import select_projects
+    from ouroboros.projects_registry import PROJECT_ACTIVE
+
+    active = [row for row in projects if isinstance(row, Mapping) and row.get("lifecycle") == PROJECT_ACTIVE]
+    return {str(row["id"]): str(row.get("name") or row["id"]) for row in select_projects(active, closed=False)
+            if str(row.get("id") or "")}
+
+
+def fallen_line(row: Dict[str, Any], *, project: str, now: float) -> str:
+    """One work, card-like: id, its outcome word and when it ended, its title, its recorded cause, the Continue offer
+    as ``owner_continue.offer_view`` reads it now, the work it continues when its own body records that, its reader;
+    never its summary again (its terminal line carried that once)."""
+    from ouroboros.outcomes import recorded_cause
+    from ouroboros.owner_continue import offer_view
+    from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
+    from ouroboros.terminal_time import terminal_time_fact
+
+    task_id = str(row.get("task_id") or "")
+    stamp = _parse_iso(terminal_time_fact(row).get("occurred_at"))
+    ended = f"ended {ago_text(now - stamp)}" if stamp is not None else "end time not recorded"
+    title = _clip_preview(row.get("description") or row.get("text") or "title not recorded", 100)
+    origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
+    cause = recorded_cause(row) or "not recorded"
+    if origin.get("source"):  # a cancel records its cause as its origin
+        cause += f"; cancel source {origin['source']}"
+    offer = offer_view(row, task_id) or {}
+    if offer.get("eligible"):
+        continuing = f"Continue open ({offer.get('cause') or 'cause not recorded'})"
+    elif offer.get("refusal") == "continuation_unconfirmed":
+        continuing = f"Continue admission unconfirmed (successor {offer.get('successor_task_id')})"
+    else:
+        continuing = f"Continue refused ({offer.get('refusal') or 'not offered'})"
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    of = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
+    lineage = ""
+    if of.get("predecessor_task_id"):
+        lineage = f"; continuation of {of['predecessor_task_id']}" + (f", work {of['work_id']}" if of.get("work_id") else "")
+    outcome = OUTCOME_PHASE_HEADLINE[outcome_phase(row, {})]
+    return (f"- task {task_id} {outcome} in project {project}, {ended}: {title}; cause {cause}; {continuing}{lineage}; "
+            f"get_task_result(task_id='{task_id}')")
+
+
+def fallen_works(root: Any, *, now: float, projects: Iterable[Mapping[str, Any]]) -> List[FallenWork]:
+    """The works that stand, newest-started first: in each open project its newest work root (the partial index
+    ``tasks_project_root_ts``, skipping only Presence's own rows by their typed columns) when it ended failed or
+    cancelled and ``ended_without_success`` holds. Bodies are read only for those candidates, by primary key in the
+    probes' snapshot, and decoded after it closes."""
+    from ouroboros import task_store
+
+    names = open_projects(projects)
+    if not names:
+        return []
+    newest = (f"SELECT task_id, status, ts FROM tasks INDEXED BY tasks_project_root_ts WHERE project_id=? AND "
+              f"{task_store.ROOT_RESULT_WHERE} AND NOT (presence_binding_id IS NOT NULL AND presence_authority_recorded=1) "
+              f"{task_store._NEWEST_ORDER} LIMIT 1")
+    candidates, fetched = [], []
+    with task_store.open_store(root, write=False) as txn:
+        for project_id in names:
+            found = txn.conn.execute(newest, (project_id,)).fetchone()
+            if found is not None and found[1] in FALLEN_STATUSES:
+                candidates.append((found[2] is not None, found[2] or "", str(found[0]), project_id))
+        if candidates:
+            fetched = task_store._fetch(txn, "t.task_id IN (SELECT value FROM json_each(?))",
+                                        (json.dumps(sorted(task_id for _known, _ts, task_id, _p in candidates)),))
+    bodies = dict(task_store._documents(fetched))
+    return [FallenWork(task_id, project_id, fallen_line(bodies[task_id], project=names[project_id], now=now))
+            for _known, _ts, task_id, project_id in sorted(candidates, reverse=True)
+            if ended_without_success(bodies.get(task_id))]
+
+
+def _fallen_section(facts: StandingFacts) -> Optional[StandingSection]:
+    if facts.registry is None:
+        raise LookupError("project registry unreadable")
+    works = fallen_works(facts.root, now=facts.now, projects=facts.registry)
+    return StandingSection(FALLEN_KIND, FALLEN_TITLE, FALLEN_WORDS, tuple(work.line for work in works)) if works else None
+
+
+# The standing sections in their order after the outstanding cards: ``(kind, producer)``, each producer returning its
+# section or ``None``. The own clock's facts are the next entry.
+STANDING_PRODUCERS: Tuple[Tuple[str, Callable[[StandingFacts], Optional[StandingSection]]], ...] = (
+    (FALLEN_KIND, _fallen_section),
+)
+
+
+def standing_sections(facts: StandingFacts, gaps: set) -> Tuple[StandingSection, ...]:
+    """Every producer's section, in order; one that cannot be read is the named gap ``<kind> unreadable: <error>``,
+    never a missing wake."""
+    sections = []
+    for kind, produce in STANDING_PRODUCERS:
+        try:
+            section = produce(facts)
+        except Exception as exc:
+            gaps.add(f"{kind} unreadable: {type(exc).__name__}")
+            continue
+        if section is not None and section.lines:
+            sections.append(section)
+    return tuple(sections)

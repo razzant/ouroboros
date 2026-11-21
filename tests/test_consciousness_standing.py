@@ -1,0 +1,308 @@
+"""What stands in every own-clock wake: the works that ended without success in an open project
+(``consciousness_standing.fallen_works``), beside the outstanding owner cards, in every form of the wake."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from ouroboros import consciousness_standing as standing
+from ouroboros import consciousness_wake as wake
+from ouroboros.owner_continue import OWNER_STOP_SOURCES
+from ouroboros.terminal_time import task_attempt_witness
+from tests._store_shared import read_result, seed_result
+
+T0 = 1_800_000_000.0
+PROJECTS = [{"id": "p1", "name": "Audit", "lifecycle": "active"}]
+
+
+def _iso(ts):
+    return wake._iso(ts)
+
+
+def _root(root, task_id, *, ts, status="failed", project="p1", ended=None, **fields):
+    """A work root as stored: ``ts`` is its start; ``ended`` its recorded terminal instant."""
+    row = {"task_id": task_id, "status": status, "ts": _iso(ts), "updated_at": _iso(ended or ts), "_schema_version": 1,
+           "description": f"do {task_id}", "metadata": {}, "reason_code": "provider_unavailable", **fields}
+    if project:
+        row["project_id"] = project
+    if ended is not None:
+        row["terminal_time"] = {"v": 1, "occurred_at": _iso(ended), "source": "executor_terminal",
+                                "attempt": task_attempt_witness(row)}
+    seed_result(root, task_id, row)
+    return row
+
+
+def _registry(root, *rows):
+    (root / "state").mkdir(exist_ok=True)
+    (root / "state" / "projects.json").write_text(json.dumps({"projects": list(rows)}), encoding="utf-8")
+
+
+def _listed(root, projects=PROJECTS, now=T0):
+    return [work.task_id for work in standing.fallen_works(root, now=now, projects=projects)]
+
+
+def _observe(root, boundary=None, now=T0):
+    return wake.observe_wake(root, boundary=boundary, since=T0 - 3600, now=now, reason="heartbeat")
+
+
+def test_a_failed_root_stands_in_two_consecutive_wakes_while_its_transition_reaches_one(tmp_path):
+    """The transition is the delta it was (once); the fact stands until an act retires it."""
+    _registry(tmp_path, *PROJECTS)
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600, wake_summary="Mail audit: provider down at step 3.")
+    first = _observe(tmp_path)
+    assert any("fell" in line for _kind, _offset, line in first.events)
+    second = _observe(tmp_path, first.boundary, now=T0 + 600)
+    assert second.events == ()
+    for observation, ago in ((first, "10 min ago"), (second, "20 min ago")):
+        assert observation.standing[0].lines == (
+            f"- task fell Failed in project Audit, ended {ago}: do fell; cause provider_unavailable; "
+            "Continue open (provider_unavailable); get_task_result(task_id='fell')",)
+        assert observation.counts()["fallen_work"] == 1
+        text = observation.full_text()
+        assert ("\nWorks that ended without success; nothing has started in their project since (1):\n"
+                f"{observation.standing[0].lines[0]}") in text
+    assert "provider down at step 3" not in second.full_text(), "the summary came once, with the transition"
+    third = _observe(tmp_path, second.boundary, now=T0 + 1200)
+    assert third.events == () and third.counts() == {"fallen_work": 1}
+
+
+def test_the_section_follows_the_outstanding_cards_and_the_composition_counts_it(tmp_path):
+    _registry(tmp_path, *PROJECTS)
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    _root(tmp_path, "asker", ts=T0 - 7200, status="running", project="",
+          owner_quiz={"q1": {"state": "open", "asked_at": _iso(T0 - 60), "question": "Go on?"}})
+    observation = _observe(tmp_path)
+    text = observation.full_text()
+    assert text.index("Outstanding owner cards (1):") < text.index("Works that ended without success")
+    assert observation.composition().endswith("1 outstanding card, 1 work that ended without success")
+
+
+def test_a_root_started_later_in_its_project_takes_it_off_whatever_it_is_about(tmp_path):
+    """Residual named in the map: an unrelated later work retires an earlier failure too."""
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    assert _listed(tmp_path) == ["fell"]
+    _root(tmp_path, "later", ts=T0 - 300, status="running")
+    assert _listed(tmp_path) == []
+
+
+def test_a_root_that_fails_while_a_later_started_root_exists_is_never_listed(tmp_path):
+    """Residual named in the map: the index orders by start, so the newest-started root decides."""
+    _root(tmp_path, "later", ts=T0 - 600, status="completed", ended=T0 - 500)
+    _root(tmp_path, "overlap", ts=T0 - 1800, ended=T0 - 60)
+    assert _listed(tmp_path) == []
+
+
+def test_a_continue_successor_takes_its_predecessor_off_and_a_failed_one_names_it(tmp_path):
+    _root(tmp_path, "fell", ts=T0 - 3600, ended=T0 - 3000)
+    _root(tmp_path, "fell-c1", ts=T0 - 1200, status="running",
+          metadata={"continuation": {"predecessor_task_id": "fell", "work_id": "work-7"}})
+    seed_result(tmp_path, "fell", {**read_result(tmp_path, "fell"), "continued_by": {
+        "successor_task_id": "fell-c1", "state": "admitted", "action_nonce": "n0000001"}})
+    assert _listed(tmp_path) == []
+    _root(tmp_path, "fell-c1", ts=T0 - 1200, ended=T0 - 60,
+          metadata={"continuation": {"predecessor_task_id": "fell", "work_id": "work-7"}})
+    [work] = standing.fallen_works(tmp_path, now=T0, projects=PROJECTS)
+    assert work.task_id == "fell-c1"
+    assert "; continuation of fell, work work-7; get_task_result(task_id='fell-c1')" in work.line
+    _root(tmp_path, "fell-c1", ts=T0 - 1200, ended=T0 - 60, metadata={"continuation": {"predecessor_task_id": "fell"}})
+    assert "; continuation of fell; get_task_result" in standing.fallen_works(tmp_path, now=T0, projects=PROJECTS)[0].line
+
+
+def test_a_bound_continue_stays_listed_and_says_its_admission_is_unconfirmed(tmp_path):
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600,
+          continued_by={"successor_task_id": "fell-c2", "state": "bound", "action_nonce": "n0000002"})
+    [work] = standing.fallen_works(tmp_path, now=T0, projects=PROJECTS)
+    assert "; Continue admission unconfirmed (successor fell-c2);" in work.line
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600,
+          continued_by={"successor_task_id": "fell-c2", "state": "admitted", "action_nonce": "n0000002"})
+    assert _listed(tmp_path) == [], "a confirmed Continue is a successor"
+
+
+@pytest.mark.parametrize("pointer", ["superseded_by", "retry_task_id"])
+def test_a_supersession_or_a_retry_under_another_id_is_a_successor(tmp_path, pointer):
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600, **{pointer: "fell"})  # its own id: attempt metadata
+    assert _listed(tmp_path) == ["fell"]
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600, **{pointer: "fell-r1"})
+    assert _listed(tmp_path) == []
+
+
+def test_closing_the_project_takes_it_off_and_reopening_brings_it_back(tmp_path):
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    closed = {**PROJECTS[0], "closed": {"at": _iso(T0 - 30), "by": "owner", "note": "done"}}
+    assert _listed(tmp_path, [closed]) == []
+    assert _listed(tmp_path, [{**PROJECTS[0], "lifecycle": "deleting"}]) == []
+    assert _listed(tmp_path, PROJECTS) == ["fell"]
+
+
+@pytest.mark.parametrize("source", sorted(OWNER_STOP_SOURCES))
+def test_an_owner_stop_is_excluded_at_entry_even_when_the_offer_would_name_a_budget_first(tmp_path, source):
+    """A budget-paused root my human stopped: ``offer_view`` answers ``hard_limit_reached`` before it reads the
+    stop, so the stop is read on the row itself."""
+    from ouroboros.owner_continue import offer_view
+
+    row = _root(tmp_path, "fell", ts=T0 - 1800, status="cancelled", ended=T0 - 600, reason_code="budget_exhausted",
+                cancel_origin={"source": source})
+    assert offer_view(row, "fell")["refusal"] == "hard_limit_reached"
+    assert _listed(tmp_path) == []
+    _root(tmp_path, "fell", ts=T0 - 1800, status="cancelled", ended=T0 - 600, reason_code="budget_exhausted",
+          cancel_origin={"source": "owner_restart"})
+    [work] = standing.fallen_works(tmp_path, now=T0, projects=PROJECTS)
+    assert "; cause budget_exhausted; cancel source owner_restart; Continue refused (hard_limit_reached);" in work.line
+
+
+@pytest.mark.parametrize("status", ["scheduled", "running", "interrupted", "completed"])
+def test_a_held_live_or_finished_root_is_no_candidate(tmp_path, status):
+    """A Panic hold keeps its work live, never failed or cancelled; a finished one is done."""
+    row = _root(tmp_path, "held", ts=T0 - 1800, status=status, cancel_origin={"source": "panic"})
+    assert _listed(tmp_path) == []
+    assert not standing.ended_without_success({**row, "cancel_origin": {}})
+    _root(tmp_path, "held", ts=T0 - 1800, status="failed")
+    assert _listed(tmp_path) == ["held"]
+
+
+@pytest.mark.parametrize("excluded, fields", [
+    ("wrap_up", {"reason_code": "owner_requested_finalization"}),
+    ("wrap_up_beneath_a_custody_stamp", {"reason_code": "delegated_custody_unreconciled", "outcome_axes": {
+        "execution": {"status": "failed", "reason_code": "owner_requested_finalization"}}}),
+    ("another_focus_tool", {"status": "cancelled", "cancel_origin": {"source": "agent_tool"}}),
+    ("own_clock_wake", {"metadata": {"initiator": "consciousness", "wake_cause": "own_clock"}}),
+    ("focus_wake", {"metadata": {"initiator": "consciousness", "wake_cause": "focus"}}),
+    ("a_child", {"parent_task_id": "parent", "delegation_role": "subagent"}),
+])
+def test_exclusions_at_entry_each_against_the_same_row_without_it(tmp_path, excluded, fields):
+    row = _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600, **fields)
+    assert not standing.ended_without_success(row), excluded
+    if excluded != "a_child":  # a child row is never a probe's root
+        assert _listed(tmp_path) == []
+    plain = {"status": "failed", "reason_code": "provider_unavailable", "metadata": {}}
+    assert standing.ended_without_success({**row, **{key: plain.get(key) for key in fields}})
+
+
+def test_work_a_wake_started_is_listed_it_is_not_the_wake(tmp_path):
+    """``is_consciousness_origin`` holds for everything a wake starts; only the wake itself carries a wake cause."""
+    _root(tmp_path, "mine", ts=T0 - 1800, ended=T0 - 600,
+          metadata={"initiator": "consciousness", "consciousness_cause": "started", "work_kind": "consciousness"})
+    assert _listed(tmp_path) == ["mine"]
+
+
+def test_a_wake_is_admitted_without_a_project_by_construction(tmp_path):
+    """The clock admits ``{Main routing facts, wake_task_metadata}`` (``consciousness._launch``); neither carries a
+    project, and the lane's seed takes a project only from its metadata (``worker_chat_lane._seed_task``)."""
+    from ouroboros.projects_registry import create_project
+    from ouroboros.server_routing_context import main_lane_routing_metadata
+    from supervisor.worker_chat_lane import _seed_task
+    from tests.test_routing_decision import _decision_ctx
+
+    create_project(tmp_path, "racer", name="Racer")
+    facts = main_lane_routing_metadata(_decision_ctx(tmp_path), 1)
+    assert [row["project_id"] for row in facts["main_routing_manifest"]["projects"]] == ["racer"]
+    metadata = {**facts, **wake.wake_task_metadata("act", "heartbeat")}
+    assert "project_id" not in metadata
+    assert "project_id" not in _seed_task(1, "[Wake-up · heartbeat]", None, None, metadata)
+    assert _seed_task(1, "work", None, None, {"project_id": "racer"})["project_id"] == "racer"
+
+
+@pytest.mark.parametrize("carrier", ["presence", "presence_binding_authority"])
+def test_presence_own_rows_neither_stand_nor_retire(tmp_path, carrier):
+    """A speaker turn and work acting for a binding are skipped by their typed columns, in both roles."""
+    binding = {"binding_id": "place-1"}
+    _root(tmp_path, "turn", ts=T0 - 1800, ended=T0 - 600, metadata={carrier: binding})
+    assert _listed(tmp_path) == []
+    _root(tmp_path, "fell", ts=T0 - 3600, ended=T0 - 3000)
+    _root(tmp_path, "turn", ts=T0 - 1800, status="completed", ended=T0 - 600, metadata={carrier: binding})
+    assert _listed(tmp_path) == ["fell"]
+
+
+def test_the_owners_related_work_stands_and_retires(tmp_path):
+    """Related work keeps the binding id with ``presence_authority_recorded = 0``: it is my human's work."""
+    relation = {"presence_binding_relation": {"binding_id": "place-1"}}
+    _root(tmp_path, "related", ts=T0 - 1800, ended=T0 - 600, metadata=relation)
+    assert _listed(tmp_path) == ["related"]
+    _root(tmp_path, "fell", ts=T0 - 3600, ended=T0 - 3000)
+    _root(tmp_path, "related", ts=T0 - 1800, status="completed", ended=T0 - 600, metadata=relation)
+    assert _listed(tmp_path) == []
+
+
+def test_bodies_are_read_only_for_candidates_and_the_line_stays_compact(tmp_path, monkeypatch):
+    from ouroboros import task_store
+
+    projects = [{"id": f"p{index}", "name": f"Project {index}", "lifecycle": "active"} for index in range(6)]
+    _root(tmp_path, "done0", ts=T0 - 900, status="completed", project="p0", ended=T0 - 800)
+    _root(tmp_path, "older0", ts=T0 - 9000, project="p0", ended=T0 - 8000)
+    _root(tmp_path, "fell1", ts=T0 - 1800, project="p1", ended=T0 - 600, description="x" * 400,
+          wake_summary="w" * 900)
+    _root(tmp_path, "stop2", ts=T0 - 1700, status="cancelled", project="p2", cancel_origin={"source": "http_single"})
+    _root(tmp_path, "run3", ts=T0 - 1600, status="running", project="p3")
+    _root(tmp_path, "fell5", ts=T0 - 1500, project="p5", ended=T0 - 300)
+    fetched, real = [], task_store._fetch
+
+    def spy(txn, where="", params=()):
+        fetched.append(json.loads(params[0]))
+        return real(txn, where, params)
+
+    monkeypatch.setattr(task_store, "_fetch", spy)
+    works = standing.fallen_works(tmp_path, now=T0, projects=projects)
+    assert fetched == [["fell1", "fell5", "stop2"]]
+    assert [work.task_id for work in works] == ["fell5", "fell1"]  # newest-started first
+    line = works[1].line
+    assert "w" * 20 not in line and "chars omitted]" in line and len(line) < 300
+
+
+def test_no_open_project_reads_nothing_and_no_section_is_printed(tmp_path, monkeypatch):
+    from ouroboros import task_store
+
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    monkeypatch.setattr(task_store, "open_store", lambda *_a, **_k: pytest.fail("no open project, no probe"))
+    assert standing.fallen_works(tmp_path, now=T0, projects=[]) == []
+    assert standing.fallen_works(tmp_path, now=T0, projects=[{**PROJECTS[0], "lifecycle": "deleting"}]) == []
+    monkeypatch.undo()
+    observation = _observe(tmp_path)  # no registry on this install: an empty one
+    assert observation.standing == () and "fallen_work" not in observation.counts()
+    assert "Works that ended without success" not in observation.full_text()
+
+
+def test_an_unreadable_source_is_a_named_gap_never_a_missing_wake(tmp_path, monkeypatch):
+    from ouroboros import projects_registry, task_store
+    from ouroboros.store import StoreBusy
+
+    _registry(tmp_path, *PROJECTS)
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    monkeypatch.setattr(projects_registry, "list_reserved_projects", lambda _root: (_ for _ in ()).throw(OSError("x")))
+    observation = _observe(tmp_path)
+    assert observation.standing == ()
+    assert {"fallen_work unreadable: LookupError", "project names unreadable: OSError"} <= set(observation.gaps)
+    monkeypatch.undo()
+
+    def busy(*_args, **_kwargs):
+        raise StoreBusy("busy")
+
+    monkeypatch.setattr(task_store, "_fetch", busy)
+    observation = _observe(tmp_path)
+    assert "fallen_work unreadable: StoreBusy" in observation.gaps and observation.standing == ()
+
+
+def test_every_form_of_the_wake_keeps_the_section_and_the_bare_pointer_folds_it(tmp_path):
+    """The projection (the form a wake takes when its observation does not fit) keeps the lines; only the bare
+    pointer, the physical window's last form, folds them to a count with the kind of their rows at the source."""
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    _registry(tmp_path, *PROJECTS)
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    observation = _observe(tmp_path)
+    task = {"id": "wake-standing", "metadata": {}}
+    wake.bind_wake_observation(tmp_path, task, observation, lambda events: events)
+    facts = task["metadata"][wake.WAKE_OBSERVATION_KEY]
+    [line] = observation.standing[0].lines
+    heading = "Works that ended without success; nothing has started in their project since (1):"
+    assert f"\n{heading}\n{line}" in facts["projection_text"]
+    assert line not in facts["pointer_text"]
+    assert facts["pointer_text"].endswith(
+        "\nWorks that ended without success; nothing has started in their project since (1): rows of kind "
+        "fallen_work at the source")
+    assert "then the standing sections, one row per line under its kind" in facts["pointer_text"]
+    assert facts["composition"]["fallen_work"] == 1
+    source = facts["source"]
+    rows = [json.loads(row) for row in read_actor_source_bytes(tmp_path, source["task_id"], source).splitlines()]
+    assert rows[-1] == {"kind": "fallen_work", "line": line}
