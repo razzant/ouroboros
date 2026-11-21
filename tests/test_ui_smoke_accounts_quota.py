@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from tests.settings_browser_helpers import open_settings
-from tests.test_subscription_setup_browser import status_answer
+from tests.test_subscription_setup_browser import scoped_catalog_answer, status_answer
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -36,7 +36,8 @@ def test_accounts_partial_quota_cards(direct_server_with_data):
     snapshot = {
         "daemon": {"state": "running", "engine_version": "3.9.8", "runtime": {"state": "ready"}},
         "harnesses": [{"id": "claude", "display_name": "Claude Code", "status": "ok",
-                       "enabled": True, "models": [{"id": "fable"}]}],
+                       "enabled": True,
+                       "models": [{"id": "fable", "credential_profile_id": profile} for profile in profiles]}],
         "profiles": {"profiles": [{
             "profile": {"harness_id": "claude", "profile_id": profile, "enabled": True},
             "status": {"verification": "passed", "verification_source": "vendor"},
@@ -65,7 +66,17 @@ def test_accounts_partial_quota_cards(direct_server_with_data):
                 requests.append(route.request.method)
                 status_answer(route, snapshot)
 
+            def catalog(route):
+                # Since #3839 a saved agent's card reads its model list from the chosen session's own catalog
+                # (`/api/model-catalog?harness_id=…`); without it the card stops at "model availability not checked"
+                # and never reaches the quota verdict this test pins.
+                if "harness_id=" in route.request.url:
+                    route.fulfill(json=scoped_catalog_answer(route.request.url, {}, snapshot["harnesses"]))
+                else:
+                    route.continue_()
+
             page.route("**/api/claudexor/status**", status)
+            page.route("**/api/model-catalog?**", catalog)
             page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
             page.click('[data-nav-page="settings"]')
             page.wait_for_selector(".settings-shell")

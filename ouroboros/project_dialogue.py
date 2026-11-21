@@ -791,8 +791,14 @@ TASK_CAUSE_PHRASES = {
     "accounting_wait_expired": "Accounting access did not recover within this turn’s wait window",
     "delivery_control_degraded": "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     "authoring_handover_incomplete": "The replacement model stopped before resuming tool work.",
-    "configured_actor_incomplete": "This subagent was set to run as a coding session, and no such run succeeded; its answer came without one.",
-    "configured_actor_unknown": "This subagent was set to run as a coding session; whether that run succeeded is unknown.",
+    "configured_actor_first_undetermined": "First coding attempt: outcome unknown.",
+    "configured_actor_first_failed": "First coding attempt failed.",
+    "configured_actor_first_cancelled": "First coding attempt cancelled.",
+    "configured_actor_first_interrupted": "First coding attempt interrupted.",
+    "configured_actor_first_succeeded": "First coding session finished.",
+    "configured_actor_first_succeeded_source_unverified": "First coding session ended; brief coverage unverified.",
+    "configured_actor_first_refused": "First coding attempt: start refused.",
+    "configured_actor_not_started": "First coding attempt did not start.",
     "delegated_custody_unreconciled": "Some delegated work was never reconciled.",
     # The one non-reason-code key: the task-result FIELD terminal_plan_review_open
     # (task_finalization.terminal_result_fields), a standing limitation of the
@@ -1149,7 +1155,7 @@ def _custody_debt_reason(reason: str, result: Dict[str, Any], event: Dict[str, A
     for source in (result, event):
         axes = source.get("outcome_axes") if isinstance(source.get("outcome_axes"), dict) else {}
         execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
-        typed = str(execution.get("reason_code") or "")  # a stamp read back as the cause names none
+        typed = _code_text(execution.get("reason_code"))  # a stamp read back as the cause names none
         execution_reason = execution_reason or ("" if typed == WARN_DELEGATED_CUSTODY_UNRECONCILED else typed)
     return (execution_reason if reason == WARN_DELEGATED_CUSTODY_UNRECONCILED else reason,
             WARN_DELEGATED_CUSTODY_UNRECONCILED if current_custody_debt(result, event) else "")
@@ -1207,6 +1213,11 @@ def _join_cause_clauses(clauses: List[str]) -> str:
                       for index, c in enumerate(kept))
 
 
+def _code_text(value: Any) -> str:
+    """A reason code is a string; a malformed one (an array...) is no code, never its printed form (twin: log_events.js)."""
+    return value if isinstance(value, str) else ""
+
+
 def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, include_review_details: bool = True,
                         undescribed: Optional[List[str]] = None) -> str:
     """Every simultaneous cause this record holds, as ONE terminated host clause.
@@ -1221,8 +1232,10 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
         ACCEPTANCE_ACCEPTED, ACCEPTANCE_BYPASS_REASON_BY_RAIL, REASON_FINAL_MESSAGE, REASON_OWNER_REQUESTED_FINALIZATION, DETAIL_ONLY_WARNINGS,
         WARN_DELEGATED_CUSTODY_UNRECONCILED, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW, WARN_VERIFICATION_RED, plan_review_awaiting,
     )
-    from ouroboros.tool_error_words import red_check_phrase, residual_tool_errors_phrase
+    from ouroboros.tool_error_words import (
+        configured_actor_cause_key, first_attempt_clause_key, red_check_phrase, residual_tool_errors_phrase)
 
+    first_attempt = ""  # the first coding attempt's proven fact, stated beside a different primary reason
     decision: Dict[str, Any] = {}
     veto: Dict[str, Any] = {}
     objective: Dict[str, Any] = {}
@@ -1239,19 +1252,20 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
         objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else objective
         if isinstance(objective.get("receipt_veto"), dict):
             veto = objective["receipt_veto"]
-        for holder in (source.get("review_status"), axes.get("review")):
-            if isinstance(holder, dict) and isinstance(holder.get("acceptance_decision"), dict):
-                decision = holder["acceptance_decision"]
+        canonical = axes.get("review") if isinstance(axes.get("review"), dict) else None
+        holder = canonical if canonical is not None else source.get("review_status")
+        value = holder.get("acceptance_decision") if isinstance(holder, dict) else None
+        decision = value if isinstance(value, dict) else ({} if canonical is not None else decision)
     status = str(decision.get("status") or "").strip()
     cause = str(decision.get("reason") or "")
-    raw_reason = str(result.get("reason_code") or event.get("reason_code") or "")
+    raw_reason = _code_text(result.get("reason_code") or event.get("reason_code"))
     origin = result.get("cancel_origin") or event.get("cancel_origin")
     phase = outcome_phase(result, event)
     from supervisor.owner_stop import owner_stop_ending
     stopped = owner_stop_ending({"reason_code": raw_reason, "cancel_origin": origin,
                                  "outcome_axes": {"execution": execution}})[1] == "stop"
     reason, custody = _custody_debt_reason(raw_reason, result, event)
-    typed = str(execution.get("reason_code") or "")
+    typed = _code_text(execution.get("reason_code"))
     if reason in {REASON_FINAL_MESSAGE, ""} and typed != WARN_DELEGATED_CUSTODY_UNRECONCILED:
         reason = typed or reason
     author_stop = completion.get("action") == "stop" and execution.get("status") != "cancelled" and not origin
@@ -1281,16 +1295,18 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
         # A stop is the primary cause; the plan clause its exit stamped stands among the limitations below.
         clause = (TASK_CAUSE_PHRASES["author_stop"] if author_stop
                   else TASK_CAUSE_PHRASES["plan_review_awaiting"] if plan_review_awaiting(event, result) and phase == "done" else "")
+        first_attempt = "" if not isinstance((first_terminal := execution.get("actor_first_terminal")), dict) or first_terminal.get("reason") != "initial_execution_display_only" else _cause_phrase(first_attempt_clause_key(reason, execution), undescribed)
     else:
         # A healed debt is never restored here: naming the code again would
         # state a debt the same record shows as empty. The recorded open-review
         # reason speaks through the wave's class when the record names one.
         detail = veto.get("detail") if veto.get("reason") == reason else ""
         from ouroboros.working_checkpoint import delivered_answer_cause
-        key = (_plan_review_key(result, event, reason) if reason == "plan_review_advisory"
-               else delivered_answer_cause({**event, **result}, reason) or reason)
+        key = configured_actor_cause_key(_plan_review_key(result, event, reason) if reason == "plan_review_advisory"
+                                         else delivered_answer_cause({**event, **result}, reason) or reason, execution)
         clause = (" ".join(strip_markdown(str(detail)).split()) if detail
                   else _cause_phrase(key, undescribed))
+        first_attempt = _cause_phrase(first_attempt_clause_key(reason, execution), undescribed)
     # The bypass sentence already names its rail; do not repeat the same cause.
     if review_cause and (reason == review_cause or ACCEPTANCE_BYPASS_REASON_BY_RAIL.get(reason) == review_cause):
         clause = ""
@@ -1317,7 +1333,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     remainder_clause = ("Uncommitted files in the saved candidate could not be checked" if remainder.get("state") == "unknown"
                         else f"{count} uncommitted file{'s' if count != 1 else ''} remain{'s' if count == 1 else ''} in the saved candidate"
                         if remainder.get("state") == "known" and type(count) is int and count > 0 else "")
-    line = _join_cause_clauses([clause, *warning_clauses, _cause_phrase(review_cause, undescribed),
+    line = _join_cause_clauses([clause, first_attempt, *warning_clauses, _cause_phrase(review_cause, undescribed),
                                 _author_stop_rationale(decision, completion), remainder_clause,
                                 str((execution.get("evolution_cleanup") or {}).get("line") or ""),
                                 *_incident_cause_clauses(decision, reason),

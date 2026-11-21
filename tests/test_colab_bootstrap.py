@@ -160,6 +160,24 @@ def test_notebook_launch_keeps_saved_knobs_unless_one_is_explicit(monkeypatch, e
     assert out["OUROBOROS_SERVER_HOST"] == "127.0.0.1"
 
 
+@pytest.mark.parametrize(("environment", "drive", "expected"), [
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "3"}, {}, 3),  # an explicit launch number, on an empty Drive
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "3"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, 3),
+    ({}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, 8),  # not explicit: what Drive saved stays
+    ({}, {}, ""),  # neither: the shipped no number
+    # Spelled as the settings document reads it: blank or an unlimited word is no number, a typo the finite 6.
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": ""}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, ""),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "unlimited"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, ""),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "\u221e"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, ""),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "six"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, 6),
+])
+def test_notebook_launch_passes_an_explicit_per_root_subagent_number_like_the_worker_cap(
+        monkeypatch, environment, drive, expected):
+    monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
+    out = _notebook_launch(monkeypatch, environment=environment, drive=drive)
+    assert out["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"] == expected
+
+
 @pytest.mark.parametrize(("drive", "expected"), [
     ({}, FIRST_LAUNCH),  # a first launch: no Drive document at all
     ({"TOTAL_BUDGET": 999.0}, (999.0, "advanced", "")),  # a document holding one keeps it, the rest are first-launch
@@ -181,12 +199,16 @@ def test_a_drive_document_from_before_the_optional_cap_reads_its_defaults_as_bla
     """Owner decision 09.11, migration A: Colab's first-launch 1 and the form's 10 meant no choice; the launch reads them
     as blank and writes the format marker, so a later 1 or 10 the owner sets stays theirs. Other values stay."""
     from ouroboros.colab_bootstrap import build_colab_settings
-    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY
+    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY, SUBAGENT_CAP_FORMAT_KEY
 
-    drive = {"OUROBOROS_MAX_WORKERS": saved, **({OWNER_CAP_FORMAT_KEY: 1} if marked else {})}
+    per_root = "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"  # its shipped 6 likewise; a marked 6 is the owner's
+    drive = {"OUROBOROS_MAX_WORKERS": saved, per_root: 6,
+             **({OWNER_CAP_FORMAT_KEY: 1, SUBAGENT_CAP_FORMAT_KEY: 1} if marked else {})}
     out = build_colab_settings({}, existing=drive)
     assert out["OUROBOROS_MAX_WORKERS"] == expected and out[OWNER_CAP_FORMAT_KEY] == 1
+    assert out[per_root] == (6 if marked else "") and out[SUBAGENT_CAP_FORMAT_KEY] == 1
     assert build_colab_settings({}, existing=out)["OUROBOROS_MAX_WORKERS"] == expected, "it never repeats"
+    assert build_colab_settings({}, existing=out)[per_root] == (6 if marked else "")
 
 
 def test_a_repeat_launch_through_drive_keeps_the_saved_triple_and_an_app_edit_between_launches(monkeypatch, tmp_path):

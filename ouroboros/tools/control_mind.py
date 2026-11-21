@@ -110,5 +110,7 @@ def mind_tool_entries() -> list:
              "as unfinished (finish_task action=stop), through the same Continue action as the owner's button. "
              "An ordinary finished answer, owner Stop/Panic and hard money/deadline stops refuse. A finite execution budget carries only its recorded unspent "
              "remainder; when that remainder cannot be read the request refuses as execution_budget_unknown "
-             "and starts no successor, never with fresh time. Repeated delivery of this call reuses its one "
+             "and starts no successor, never with fresh time. An interrupted deep self-review saves no midpoint "
+             "and refuses as deep_review_restart_required: request_deep_self_review starts a new one. "
+             "Repeated delivery of this call reuses its one "
              "successor. The outcome arrives in your task mailbox."), _continue_task)]

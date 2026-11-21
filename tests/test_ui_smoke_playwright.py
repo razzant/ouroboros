@@ -3520,7 +3520,10 @@ def test_ui_smoke_window_pagehide_detaches_login_without_lifecycle_http(direct_s
                         const button = {getAttribute: () => 'claude',
                             addEventListener: (_t, fn) => { connect = fn; }};
                         const host = {innerHTML: '', querySelector: () => null};
-                        const list = {innerHTML: '', querySelectorAll: () => [button]};
+                        // The family list stands in for the element the wizard renders: it holds no focus,
+                        // and only its Connect selector reaches the one button this test presses.
+                        const list = {innerHTML: '', contains: () => false, querySelector: () => null,
+                            querySelectorAll: (selector) => selector === '[data-agent-connect]' ? [button] : []};
                         const other = document.createElement('div');
                         const doc = {defaultView: window, getElementById: (id) =>
                             id === 'agents-login-host' ? host

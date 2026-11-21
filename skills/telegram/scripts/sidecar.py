@@ -101,6 +101,9 @@ _RESPONSE_BLOCKED_HEADERS = _HOP_BY_HOP_HEADERS | {
     b"surrogate-control",
 }
 
+# The core's own mark on its builtin /static files (ouroboros/server_web.py BUILTIN_STATIC_CACHE).
+_BUILTIN_STATIC_CACHE = b"private, no-cache, must-revalidate"
+
 _BOOTSTRAP_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -403,6 +406,9 @@ def _request_headers(scope: dict[str, Any]) -> list[tuple[bytes, bytes]]:
         if name in blocked or any(name.startswith(prefix) for prefix in _REQUEST_BLOCKED_PREFIXES):
             continue
         output.append((name, value))
+    if not any(name == b"accept-encoding" for name, _ in output):
+        # The body is relayed raw: the phone's own choice reaches the core, never httpx's default.
+        output.append((b"accept-encoding", b"identity"))
     output.append((_MINIAPP_REQUEST_MARKER, b"1"))
     return output
 
@@ -412,9 +418,13 @@ def _response_headers(
     *,
     core_origin: str,
     public_origin: str,
+    revalidated_static: bool = False,
 ) -> list[tuple[bytes, bytes]]:
+    """Every answer is ``no-store`` except an owner's GET of a builtin ``/static`` file that the core marks
+    ``_BUILTIN_STATIC_CACHE``: that one keeps its revalidation (ETag, 304) and no shared cache may hold it."""
     raw_headers = list(headers)
     blocked = _RESPONSE_BLOCKED_HEADERS | _connection_tokens(raw_headers)
+    keep = revalidated_static and (b"cache-control", _BUILTIN_STATIC_CACHE) in ((n.lower(), v) for n, v in raw_headers)
     output: list[tuple[bytes, bytes]] = []
     for raw_name, raw_value in raw_headers:
         name = raw_name.lower()
@@ -430,14 +440,9 @@ def _response_headers(
                 location = public_origin + location[len(core_origin) :].lstrip("/")
                 value = location.encode("latin-1")
         output.append((name, value))
-    output.extend(
-        [
-            (b"cache-control", b"private, no-store"),
-            (b"pragma", b"no-cache"),
-            (b"expires", b"0"),
-        ]
-    )
-    return output
+    if keep:
+        return [*output, (b"cache-control", _BUILTIN_STATIC_CACHE), (b"cdn-cache-control", b"no-store")]
+    return [*output, (b"cache-control", b"private, no-store"), (b"pragma", b"no-cache"), (b"expires", b"0")]
 
 
 def _plain_response(status_code: int, text: str, *, headers: dict[str, str] | None = None) -> Response:
@@ -905,6 +910,9 @@ class TelegramProxySidecar:
                 upstream.headers.raw,
                 core_origin=self._core_origin,
                 public_origin=public_origin,
+                revalidated_static=upstream_request.method == "GET"  # HEAD describes the uncompressed variant
+                and upstream.status_code in {200, 304}
+                and str(scope.get("path") or "").startswith("/static/"),
             ),
             upstream.aiter_raw(),
             upstream.aclose,

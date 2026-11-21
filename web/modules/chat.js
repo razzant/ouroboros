@@ -39,7 +39,7 @@ import { apiClient, apiFetch, fetchTaskDetail, fetchTaskDetailStrict, isStoreMig
 import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
 import {
-    childReportLabel,
+    childCauseFacts,
     getLogTaskGroupId,
     isGroupedTaskEvent,
     isTerminalTaskDetail,
@@ -1529,23 +1529,25 @@ export function createChatInstance({
 
     // Beyond the 4000-char preview: fetch/cache on expansion, bounded scroll, render while expanded.
     async function fetchFullLineOutput(item, record) {
+        const basis = item.childCause;
         item._fetchingFull = true;
         item.fullReadError = '';
         let changed = false;
         try {
             const resp = await apiFetch(`/api/tasks/${encodeURIComponent(item.fullRef)}`, { cache: 'no-store' });
             const data = resp && typeof resp.json === 'function' ? await resp.json() : resp;
-            // Keep result and trace: the preview can truncate either independently.
-            const result = String((data && data.result) || '').trim();
-            const trace = String((data && data.trace_summary) || '').trim();
-            const report = result && ['done', 'warn'].includes(taskOutcomeSeverity(data))
-                ? childReportLabel(data.status) : '';  // the label the capped body led with
             let full = '';
-            if (result && trace) full = `${report ? `## ${report}` : '[RESULT]'}\n${result}\n\n[TRACE]\n${trace}`;
-            else full = report ? `## ${report}\n${result}` : result || trace;
             if (item.fullField === 'candidate_remainder') {
                 full = readCandidateRemainder(item, data, resp?.ok !== false);
                 changed = true;
+            } else if (data?.result || data?.trace_summary) {
+                const view = summarizeSubagentCardFrame({ ...childCauseFacts(data), subagent_event: data.status,
+                    result: data.result, trace_summary: data.trace_summary, error: data.error }, item.fullRef);
+                full = view?.fullOutput || '';
+                if (full) {
+                    item.fetchedCause = { ...basis, ...view.childCause };
+                    item.fetchedCauseBasis = basis;
+                }
             }
             if (full && item.fetchedFull !== full) {
                 item.fetchedFull = full;
@@ -2029,6 +2031,7 @@ export function createChatInstance({
                     : rejected ? 'rejected'
                         : (severity === 'warn' ? 'completed_warn' : 'completed');
         return Boolean(updateSubagentCardFromEvent({
+            ...childCauseFacts(evt),
             delegation_role: 'subagent',
             parent_task_id: info.parentId,
             subagent_task_id: childId,
@@ -2036,9 +2039,10 @@ export function createChatInstance({
             subagent_event: event,
             review_projection: evt.review_projection,
             model_execution: evt.model_execution,
-            result: evt.result || '',
-            error: evt.error || '',
-            reason_code: evt.reason_code || '',
+            result_truncated: evt.result_truncated,
+            trace_summary_truncated: evt.trace_summary_truncated,
+            // Only text this frame carries.
+            ...Object.fromEntries(['result', 'trace_summary', 'error'].filter((key) => evt[key]).map((key) => [key, evt[key]])),
             ...cardMetaKeys(evt),
         }, evt.ts || evt.timestamp || new Date().toISOString()));
     }

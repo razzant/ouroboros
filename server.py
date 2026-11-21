@@ -38,7 +38,7 @@ from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root
                                          shorten_switch_interval, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
 from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
-from ouroboros.server_web import ServedUI
+from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
 from ouroboros.task_finalization import host_operation_reply_kwargs
@@ -1345,7 +1345,7 @@ async def lifespan(app):
         _shutdown_supervisor_event_bus()
 
 
-app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan), served_ui=served_ui)
+app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan, middleware=TEXT_COMPRESSION), served_ui=served_ui)
 app.app.state.drive_root = pathlib.Path(DATA_DIR)  # type: ignore[attr-defined]
 app.app.state.repo_dir = pathlib.Path(REPO_DIR)  # type: ignore[attr-defined]
 app.app.state.broadcast_ws_sync = broadcast_ws_sync  # type: ignore[attr-defined]
