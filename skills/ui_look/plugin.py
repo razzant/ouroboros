@@ -138,9 +138,11 @@ def pinned_chromium() -> tuple[dict | None, str]:
         return {"engine": "chromium", "executable_path": str(_pinned_chromium(allow_install=False)),
                 "sandbox": chromium_runtime.sandbox_enabled()}, ""
     except Exception as exc:
-        version = getattr(sys.modules.get("ouroboros.chromium_runtime"), "CHROMIUM_VERSION", "")
-        return None, (f"the pinned Chromium {version} is not usable here ({_first_line(exc)}); a browse_page call "
-                      "with engine 'chromium' installs it, this tool never installs a browser").replace("  ", " ")
+        version = getattr(sys.modules.get("ouroboros.chromium_runtime"), "CHROMIUM_VERSION", "") or "build"
+        if "is not installed" in str(exc):  # the browser tools' own lookup found no pinned build
+            return None, (f"the pinned Chromium {version} is not installed where the browser tools look; a "
+                          "browse_page call with engine 'chromium' installs it, this tool never installs a browser")
+        return None, f"the pinned Chromium {version} cannot run here: {_first_line(exc)}"
 
 
 def installed_webkit(data_dir: pathlib.Path) -> str | None:

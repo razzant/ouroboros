@@ -761,7 +761,11 @@ def look(spec: dict, report_path) -> dict:
         plan = {"all": list(names) == ["all"], "pages": [] if list(names) == ["all"] else list(names), "classes": [],
                 "why": ["the places asked for"], "changed": [], "unplaced": [], "named": True}
     elif web_root or served:
-        plan = place_plan(web_root or served, served if web_root else None, spec.get("changed"))
+        try:
+            plan = place_plan(web_root or served, served if web_root else None, spec.get("changed"))
+        except OSError as exc:   # an unreadable web/ folder: say so instead of guessing places
+            plan = {"all": False, "pages": [], "classes": [], "changed": [], "unplaced": [],
+                    "why": [f"the diff could not be read ({_first_line(exc)}), so nothing was looked at"]}
     else:
         plan = {"all": True, "pages": [], "classes": [], "why": ["no web/ folder to read a diff from, so every place"],
                 "changed": [], "unplaced": []}
