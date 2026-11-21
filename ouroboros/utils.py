@@ -1393,23 +1393,45 @@ def is_credential_header_name(key: Any) -> bool:
     return normalized in CREDENTIAL_HEADER_NAMES or is_secret_key_name(normalized)
 
 
-def sanitize_tool_result_for_log(result: str) -> str:
-    """Redact potential secrets before a public or durable projection."""
-    if not isinstance(result, str) or len(result) < 20:
+def sanitize_tool_result_for_log(result: str, *, walk=None, strict: bool = False) -> str:
+    """Redact potential secrets before a public or durable projection. ``walk`` — an internal
+    ``secret_masking.MaskWalk`` — keeps the selected Settings values' occurrences in view while these same rules and the
+    same projection run; None is the established behaviour, byte for byte.
+
+    ``strict`` is the durable diagnostic caller's own choice, not a mode of the rules: a projection that errors or does
+    not answer with a text raises ``secret_masking.MaskingFailed`` (which carries a fixed sentence, never the text or
+    its cause) instead of returning what the last completed step produced, and the short-text cutoff below does not
+    apply — a mask that cannot complete withholds rather than passes anything on. With no ``walk`` and no failure this
+    is the same rule sequence, byte for byte."""
+    if not isinstance(result, str):
+        if strict:
+            from ouroboros.secret_masking import MaskingFailed
+
+            raise MaskingFailed("the conventional redactor was handed a non-text")
         return result
-    redacted = _SECRET_PATTERNS.sub("***REDACTED***", result)
-    redacted = _SECRET_URL_CREDENTIAL_RE.sub(
-        lambda match: match.group(0).split("://", 1)[0] + "://***REDACTED***@",
-        redacted,
-    )
+    if not strict and len(result) < 20:
+        return result
+    from ouroboros.secret_masking import MaskingFailed
+
+    replace = walk.substitute if walk is not None else (lambda pattern, repl, text: pattern.sub(repl, text))
+    redacted = replace(_SECRET_PATTERNS, "***REDACTED***", result)
+    redacted = replace(_SECRET_URL_CREDENTIAL_RE,
+                       lambda match: match.group(0).split("://", 1)[0] + "://***REDACTED***@", redacted)
     try:
         from ouroboros.observability import redact_projection
 
-        projected = redact_projection(redacted).value
+        projected = redact_projection(redacted, walk=walk).value
+    except MaskingFailed:
+        raise  # a walk's refusal is never a licence to show or store the text it could not mask
+    except Exception:
+        if walk is not None or strict:
+            raise MaskingFailed("the conventional redactor did not complete") from None
+        log.debug("Failed to run observability redactor for tool result", exc_info=True)
+    else:
         if isinstance(projected, str):
             return projected
-    except Exception:
-        log.debug("Failed to run observability redactor for tool result", exc_info=True)
+        if strict:
+            raise MaskingFailed("the conventional redactor did not answer with a text")
     return redacted
 
 
