@@ -19,6 +19,11 @@ failed settings replacements and recoveries.
 The record also keeps each companion's last closed failure
 (``companion_recovered``), so a closing whose event could not be appended stays
 readable until that companion's next one.
+It also keeps the permissions the skill itself reported unavailable
+(``permission_refusals``: permission id -> its open refusal's start, code and repair hint):
+a refusal opens when a reported failure says so, keeps its start on repeats, and closes
+when a later success of the skill reports that permission available. It never changes
+the health projection.
 """
 
 from __future__ import annotations
@@ -51,6 +56,7 @@ COMPANION_FAILED = "companion_failed"  # one or more open failures are not exhau
 # companion name -> ts, load_error, optional returncode, failure-class flags, started_at (the start ended or replaced)
 _FAILURES = "companion_failures"
 _RECOVERED = "companion_recovered"  # name -> last closed failure: returncode?, load_error?, failed_at, closed_at, by
+_REFUSALS = "permission_refusals"  # permission id -> open refusal the skill reported: since, code, repair?, where?
 # A failure's write is retried after these waits (only its own monitor thread waits, never a lock holder).
 _EXHAUSTED_WRITE_RETRY_SEC = (0.5, 2.0)
 _RetainedCompanions = Dict[str, str] | Callable[[], Dict[str, str]]
@@ -246,6 +252,7 @@ def _record(drive_root, skill_name, *, status, version=None, sha=None, reason=""
             _FAILURES: failures,
             **({"legacy_companion_failure": legacy_failure} if legacy_failure else {}),
             **({_RECOVERED: recovered} if recovered else {}),
+            **({_REFUSALS: prior[_REFUSALS]} if isinstance(prior.get(_REFUSALS), dict) and prior[_REFUSALS] else {}),
         }, _SCHEMA)
         result.update(record, newly_regressed=newly_regressed)
         written = True
@@ -265,6 +272,53 @@ def _record(drive_root, skill_name, *, status, version=None, sha=None, reason=""
     if projection_changed:
         _notify_health_changed()
     return result, "written" if written else "unchanged"
+
+
+def open_permission_refusals(record: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """The permissions a skill reported unavailable and no later success reported available, by id."""
+    stored = (record or {}).get(_REFUSALS)
+    return {str(name): dict(fact) for name, fact in stored.items() if isinstance(fact, dict)} \
+        if isinstance(stored, dict) else {}
+
+
+def record_permission_observation(drive_root: pathlib.Path, skill_name: str, *,
+                                  refused: Optional[Dict[str, Any]] = None, available: Sequence[str] = ()) -> bool:
+    """Open the refusal of one permission the skill reported unavailable (``refused``: ``permission``, ``code``,
+    ``repair``?, ``where``?), keeping its start while it stays open; close those a success reports ``available``.
+    A change is written under the record's lock; an unchanged observation reads only the stat-cached snapshot.
+    Without a health record there is nothing to attach it to. True when written."""
+    permission = str((refused or {}).get("permission") or "")
+    facts = {key: str(refused[key]) for key in ("code", "repair", "where") if refused and refused.get(key)}
+    closing = set(available) - {permission}
+
+    def changed(current: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        after = {name: fact for name, fact in current.items() if name not in closing}
+        if permission:
+            after[permission] = {"since": str((current.get(permission) or {}).get("since") or utc_now_iso()), **facts}
+        return after
+
+    snapshot = read_extension_health(drive_root, skill_name)
+    held = open_permission_refusals(snapshot)
+    if not snapshot or changed(held) == held:
+        return False
+    written = False
+
+    def _update(prior: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        nonlocal written
+        current = open_permission_refusals(prior)
+        after = changed(current)
+        if not prior or after == current:
+            return None
+        written = True
+        record = {key: value for key, value in prior.items() if key != _REFUSALS}
+        return {**record, _REFUSALS: after} if after else record
+
+    try:
+        update_json_locked(health_path(drive_root, skill_name), _update, strict_existing_dict=True)
+    except Exception:
+        log.debug("Failed to persist a permission observation for %s", skill_name, exc_info=True)
+        return False
+    return written
 
 
 def _notify_health_changed() -> None:

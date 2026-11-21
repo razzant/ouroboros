@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import json
 import pathlib
+import re
 import threading
 import contextvars
 from typing import Any, Dict, Optional
 
 from ouroboros.tools.tool_context import ToolContext
 from ouroboros.tools.tool_result import (
+    _HOST_NOTE_SEPARATOR,
     ToolResult,
     ToolStatus,
     _compose_execute_result_result,
@@ -19,6 +22,13 @@ from ouroboros.tools.tool_result import (
     _structured_failure,
     safety_refusal,
 )
+
+# A skill's own typed words about a completed call (C10/C04 contract): a reported failure's top-level
+# string ``reason`` (its code) and optional ``refusal`` object; a success's ``permissions_available``.
+_REPORT_ID = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_REPAIRS = frozenset({"owner", "retry", "self"})
+_WHERE_CHARS = 200
+_PERMISSIONS_READ = 32
 
 
 def _extension_capability_root(ctx: ToolContext) -> pathlib.Path:
@@ -304,6 +314,77 @@ def _extension_completion(result: str, safety_msg: str, *, handoff: Optional[Dic
                       host_annotations=(*base.host_annotations, note))
 
 
+def _extension_body(result: ToolResult) -> Dict[str, Any]:
+    """The extension's own JSON object (before any host note), else empty."""
+    text = result.producer_text if result.producer_text is not None else result.text
+    stripped = str(text or "").lstrip()
+    if not stripped.startswith("{"):
+        return {}
+    for candidate in dict.fromkeys((stripped, stripped.partition(_HOST_NOTE_SEPARATOR)[0])):
+        try:
+            payload = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _report_id(value: Any) -> str:
+    return value if isinstance(value, str) and _REPORT_ID.fullmatch(value) else ""
+
+
+def extension_report(result: Any) -> Dict[str, Any]:
+    """Meta the host copies from a completed call's body: ``extension_reason`` (``code`` = the string ``reason``,
+    plus the validated ``refusal`` fields) on a reported failure, ``extension_permissions_available`` on a
+    success. Anything else, an unknown key or a malformed value, is ignored: an older skill reads as before."""
+    if not isinstance(result, ToolResult) or not result.meta.get("physical_dispatch"):
+        return {}
+    if result.code == "TOOL_REPORTED_FAILURE":
+        body = _extension_body(result)
+        code = _report_id(body.get("reason"))
+        if not code:
+            return {}
+        refusal = body.get("refusal") if isinstance(body.get("refusal"), dict) else {}
+        reason: Dict[str, Any] = {"code": code}
+        if isinstance(refusal.get("capability_unavailable"), bool):
+            reason["capability_unavailable"] = refusal["capability_unavailable"]
+        if permission := _report_id(refusal.get("permission")):
+            reason["permission"] = permission
+        if refusal.get("repair") in _REPAIRS:
+            reason["repair"] = refusal["repair"]
+        if isinstance(refusal.get("where"), str) and refusal["where"].strip():
+            reason["where"] = " ".join(refusal["where"].split())[:_WHERE_CHARS]
+        return {"extension_reason": reason}
+    if result.code not in ("OK", "OWNER_OPERATION_REFUSED"):
+        return {}
+    body = _extension_body(result)
+    items = body.get("permissions_available") if body.get("ok") is not False else None
+    available = list(dict.fromkeys(name for name in (items[:_PERMISSIONS_READ] if isinstance(items, list) else [])
+                                   if _report_id(name)))
+    return {"extension_permissions_available": available} if available else {}
+
+
+def _with_extension_report(ctx: Any, ext_tool: Dict[str, Any], result: Any) -> Any:
+    """Copy the skill's typed report into the result's meta (never over ``dispatched``/``control_reason``) and
+    date an unavailable permission it names, or the recovery a success reports, in its health record."""
+    report = extension_report(result)
+    if not report:
+        return result
+    reason = report.get("extension_reason") or {}
+    refused = reason if reason.get("capability_unavailable") is True and reason.get("permission") else None
+    available = report.get("extension_permissions_available") or []
+    skill = str(ext_tool.get("skill") or "")
+    if skill and (refused or available):
+        try:
+            from ouroboros.extension_health import record_permission_observation
+
+            record_permission_observation(_extension_capability_root(ctx), skill, refused=refused, available=available)
+        except Exception:  # noqa: BLE001 - a lost observation never changes the call's own result
+            pass
+    return _replace_tool_result(result, meta_updates=report)
+
+
 def _generation_digest_for(ext_tool: Dict[str, Any]) -> str:
     """Published-generation digest this descriptor dispatches against (ABI-9).
 
@@ -351,8 +432,8 @@ def _dispatch_extension_tool_result(
     disclosure gate, calling-convention resolution) is never stamped."""
     digest = _generation_digest_for(ext_tool)
     content_hash = str(ext_tool.get("content_hash") or "")
-    result = _dispatch_extension_tool_untagged(
-        ctx, name, ext_tool, args, **({"handoff": handoff} if handoff is not None else {}))
+    result = _with_extension_report(ctx, ext_tool, _dispatch_extension_tool_untagged(
+        ctx, name, ext_tool, args, **({"handoff": handoff} if handoff is not None else {})))
     if (
         not isinstance(result, ToolResult)
         or not result.meta.get("physical_dispatch")
