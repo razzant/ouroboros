@@ -56,6 +56,8 @@ def test_design_bible_reaches_all_author_modes_and_keeps_common_prefix(tmp_path,
         blocks = plan.projection(mode).system_message()["content"]
         assert all("BIBLE_RULE_DELIVERED" not in block["text"] and "DESIGN.md (navigation map)" not in block["text"]
                    for block in blocks if block.get("cache_control"))
+    assert "from its installed body" not in next(part for part in core.dynamic_head_sections
+                                                 if part.section_id == "design_bible").operative_view
     path.write_text("## Later source revision\n")
     assert {mode: json.dumps(plan.messages_for(mode), ensure_ascii=False) for mode in captured} == captured
 
@@ -143,8 +145,11 @@ def test_the_bible_follows_body_identity_and_a_true_declaration(tmp_path, kind, 
     task = {} if declared is None else {"task_contract": {"context_requires_self_body_docs": declared}}
     view = task_design_navigation(_ctx(env, **ctx), task)
     assert ("BIBLE_RULE_DELIVERED" in view) is delivered
-    # A tree not established as the body reads the installed book under a first line saying whose rules these are.
+    # A tree not established as the body reads the installed book under a first line saying whose rules these are,
+    # in the whole form and in the map a short room leaves (RVD1, Fable N2).
     assert view.startswith("These are the interface rules of Ouroboros itself, from its installed body") is delivered
+    assert getattr(view, "operative_view", "").startswith(
+        "These are the interface rules of Ouroboros itself, from its installed body") is delivered
     assert (str(env.repo_dir / "docs/DESIGN.md") in view) is delivered
     assert "FOREIGN_RULE" not in view and "Foreign lookalike" not in view
 
@@ -180,7 +185,11 @@ def test_explicit_folderless_self_work_points_to_system_source(tmp_path):
     ctx = _ctx(env, project_id="folderless", task_metadata={})
     task = {"context_requires_self_body_docs": True}
     assert task_design_source(ctx, task) == env.repo_dir
-    assert "- Attention" in task_design_navigation(ctx, task)
+    view = task_design_navigation(ctx, task)
+    assert "- Attention" in view
+    # Declared folderless work reads the installed book; it says whose rules these are (RVD1, Astra 4).
+    assert view.startswith("These are the interface rules of Ouroboros itself, from its installed body")
+    assert view.operative_view.startswith("These are the interface rules of Ouroboros itself")
 
 
 def test_explicit_flag_brings_the_installed_bible_without_making_a_room_folder_the_body(tmp_path):

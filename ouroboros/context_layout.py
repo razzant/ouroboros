@@ -129,22 +129,28 @@ def design_bible_section(text: str) -> Optional[str]:
     return found[0] if found else None
 
 
+# The first line of an installed book read for work whose own tree is not established as the body (Fable F3, RVD1 N2).
+INSTALLED_DESIGN = ("These are the interface rules of Ouroboros itself, from its installed body; this work's own tree is "
+                    "not established as that body.")
+
+
 def design_bible_view(text: Optional[str], *, source: str, installed: bool = False) -> str:
     """An author's DESIGN: its design bible whole, the rest of the book by headings and ranges, the exact source.
 
     Only the file's bytes and its path shape it (no time, counter or service state), so the block it rides keeps its
     bytes through a return. A source that cannot be read, or a book without the section, keeps the navigation's own
     honest form (``design_navigation``). ``installed``: the book is the installed body's for work whose own tree is
-    not established as that body (``author_design_source``), and its first line says whose interface it governs."""
+    not established as that body (``author_design_source``), and its first line says whose interface it governs
+    (``INSTALLED_DESIGN``), in every form."""
+    whose = [INSTALLED_DESIGN, ""] if installed else []
     found = None if text is None else _design_bible(text)
     if found is None:
         navigation = design_navigation(text, source=source)
-        return navigation if text is None else navigation + " This source has no `## Design bible` section."
+        return "\n".join([*whose, navigation if text is None else navigation
+                          + " This source has no `## Design bible` section."])
     section, first, last = found
     rest = [(level, f"{title} (whole above)", first, last) if line == first else (level, title, line, end)
             for level, title, line, end in _nav_entries(text) if not first < line <= last]
-    whose = ["These are the interface rules of Ouroboros itself, from its installed body; this work's own tree is "
-             "not established as that body.", ""] if installed else []
     return "\n".join([*whose, section, "", "## DESIGN.md (navigation map)", "", *_nav_lines(rest), "",
                       f"Source: {source}. Use this exact source path when reading; relative paths may address a "
                       f"candidate. Ranges are inclusive. Inlined above: its design bible whole (lines {first}-{last}); "
@@ -227,12 +233,12 @@ def author_design_source(ctx: Any, task: Mapping[str, Any]) -> tuple[pathlib.Pat
     """
     from ouroboros.body_candidate import serving_repo_dir_for
     from ouroboros.context_input_selection import _explicit_self_body_docs_flag
-    from ouroboros.review_body_fact import BODY_FALSE
+    from ouroboros.review_body_fact import BODY_FALSE, BODY_TRUE
 
     root, body = _design_source(ctx, task)
     if root is None and (_explicit_self_body_docs_flag(dict(task)) is True or body != BODY_FALSE):
         return serving_repo_dir_for(ctx), True
-    return root, False
+    return root, root is not None and body != BODY_TRUE  # declared folderless work reads the installed book too
 
 
 # The owner's horizon choice for Low and Nano, still open (item 97, council C13 R4): A, every mode, holds the design
@@ -257,7 +263,7 @@ def task_design_navigation(ctx: Any, task: Mapping[str, Any], *, mode: str = "ma
     except (OSError, UnicodeError):
         text = None
     source = f"`{path}`"
-    navigation = design_navigation(text, source=source)
+    navigation = "\n\n".join([*([INSTALLED_DESIGN] if installed else []), design_navigation(text, source=source)])
     if mode not in DESIGN_BIBLE_MODES:
         return navigation
     view = design_bible_view(text, source=source, installed=installed)

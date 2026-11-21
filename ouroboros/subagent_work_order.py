@@ -481,10 +481,13 @@ def session_design_navigation(ctx: Any, *, target_root: str, source_root: str) -
     from ouroboros.tools.tool_resolution import active_repo_dir_for
     from ouroboros.workspace_copies import same_directory
 
-    source, _prepared = _own_body_source(ctx, target_root, source_root)
+    source, prepared = _own_body_source(ctx, target_root, source_root)
     installed = False
     if source is None and same_directory(target_root, active_repo_dir_for(ctx)):
         source, installed = author_design_source(ctx, _context_task(ctx))
+    elif source is not None and not prepared:  # declared folderless work reads the installed book: say so (RVD1)
+        root, installed = author_design_source(ctx, _context_task(ctx))
+        installed = installed and same_directory(root, source)
     if source is None:
         return ""
     path = source / "docs/DESIGN.md"

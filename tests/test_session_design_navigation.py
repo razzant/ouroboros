@@ -296,3 +296,4 @@ def test_declared_folderless_body_work_keeps_system_source_outside_scratch(tmp_p
     delivered = session_design_navigation(ctx, target_root=str(scratch), source_root=str(prepared))
     assert "System body — lines 3-4" in delivered and str(path) in delivered
     assert "Scratch source" not in delivered and "Prepared scratch" not in delivered
+    assert "These are the interface rules of Ouroboros itself, from its installed body" in delivered  # RVD1, Astra 4
