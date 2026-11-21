@@ -1,10 +1,13 @@
 """Walks of the setup wizard that follow its own step order (the browser tests' shared helper).
 
-The served bootstrap's ``stepOrder`` is the one list of steps the page renders: a root whose first state is still to
-come offers Consciousness between Choose access and Review limits, a root that already has a state does not. A walk
-reads that list instead of counting, so the same test is right on both shapes.
+The served bootstrap's ``stepOrder`` is the one list of steps the page renders. Two steps are optional: Consciousness
+(between Choose access and Skills) while a first state is still to come, and Skills (before Review limits) while this
+data root's starter list never ran. A walk reads that list instead of counting, so the same test is right on every
+shape.
 """
 from __future__ import annotations
+
+from itertools import combinations
 
 _STEP_ORDER = "() => (window.__OURO_ONBOARDING_BOOTSTRAP__ || {}).stepOrder || []"
 
@@ -22,18 +25,24 @@ def walk(page, start: str, end: str) -> None:
         page.click("#next-btn" if clicks > 0 else "#back-btn")
 
 
-def past_consciousness(page) -> None:
-    """Review & start lands on Consciousness where the page offers it; its Continue goes to Summary."""
-    if "consciousness" in step_order(page):
-        page.wait_for_selector("[data-consciousness-step]")
-        page.click("#next-btn")
+QUICK_STEPS = {"consciousness": "[data-consciousness-step]", "skills": '[data-starter-skills="step"]'}
 
 
-WITH_STATE = ["accounts", "models", "review_mode", "budget", "summary"]
-FIRST_STATE = ["accounts", "models", "review_mode", "consciousness", "budget", "summary"]
+def past_quick_steps(page) -> None:
+    """Review & start lands on Consciousness, then Skills, where the page offers them; the last Continue goes to Summary."""
+    for step, selector in QUICK_STEPS.items():
+        if step in step_order(page):
+            page.wait_for_selector(selector)
+            page.click("#next-btn")
+
+
+FIRST_RUN = ["accounts", "models", "review_mode", "consciousness", "skills", "budget", "summary"]
+OPTIONAL = ("consciousness", "skills")
+SHAPES = [[step for step in FIRST_RUN if step not in dropped]
+          for count in range(len(OPTIONAL) + 1) for dropped in combinations(OPTIONAL, count)]
 
 
 def rail_shows_its_steps(page) -> bool:
-    """The rail draws one pill per served step, and the order is one of the wizard's two shapes."""
+    """The rail draws one pill per served step, and the order is one of the wizard's shapes."""
     order = step_order(page)
-    return order in (WITH_STATE, FIRST_STATE) and page.locator(".wizard-step").count() == len(order)
+    return order in SHAPES and page.locator(".wizard-step").count() == len(order)

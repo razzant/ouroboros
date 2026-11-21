@@ -1366,7 +1366,7 @@ textarea::placeholder {
   }
 }
 
-/* A short window: each pill as wide as its own title, so six titles stay on one line where they fit. */
+/* A short window: each pill as wide as its own title, so the rail's titles (seven on a new install) stay on one line where they fit. */
 @media (max-height: 820px) {
   .wizard-steps {
     display: flex;
@@ -1428,7 +1428,7 @@ textarea::placeholder {
   }
 }
 
-/* A rail too narrow for six titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
+/* A rail too narrow for its titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
 @media (max-width: 720px) {
   .wizard-steps {
     display: flex;
@@ -1475,14 +1475,14 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 }
 /* track-migration:end */
 
-/* ---- Starter skills (board B13): one Summary row that opens in place into ONE vertical scroll of categorized
-   cards — two columns, one on a phone; a ticked card takes the wizard's chosen tone. Under the list stay the two
-   public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
-   depend on style.css. */
+/* ---- The Skills step (owner 2026-11-21): one categorized list of cards, as many columns as fit (one on a phone); a
+   ticked card takes the wizard's chosen tone. The page scrolls under the pinned footer like any tall step. Under the
+   list one quiet line says how the hub's skills install. Summary keeps one row back to the step. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
+[data-starter-skills]:empty { display: none; }
 .skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
 .skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.skills-starter-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.skills-starter-sub { display: block; margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* The Consciousness step: its meaning leads as the step's copy; the switch as the wizard's two choices, then what a
    subscription pays with, its limits and its door. */
 .consciousness-step { display: grid; gap: var(--space-2); }
@@ -1499,41 +1499,25 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
   font-weight: 600;
 }
 .skills-starter-change:focus-visible,
-.skills-starter-bulk button:focus-visible,
-.skills-starter-scroll:focus-visible {
+.skills-starter-bulk button:focus-visible {
   outline: 2px solid var(--focus-accent-border);
   outline-offset: 2px;
 }
-.skills-starter-panel { display: grid; gap: var(--space-2); padding-bottom: var(--space-2); min-width: 0; container: starterpanel / inline-size; }
+/* The step holds the reading place itself (onboarding_starter_skills.js readingPlace): an engine's own scroll anchoring
+   would move the page a second time when the hub's skills arrive. */
+.skills-starter-step { overflow-anchor: none; }
+.skills-starter-list { display: grid; gap: var(--space-3); min-width: 0; }
 .skills-starter-bar { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
-.skills-starter-bar p { margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.skills-starter-count { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-starter-bulk { display: inline-flex; align-items: baseline; gap: var(--space-2); color: var(--text-meta); font-size: var(--type-meta); white-space: nowrap; }
-.skills-starter-scroll {
-  max-height: 420px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  min-width: 0;
-  padding: var(--space-1) var(--space-2) var(--space-4);
-  --starter-fade-top: 0px;
-  --starter-fade-bottom: 0px;
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, black var(--starter-fade-top), black calc(100% - var(--starter-fade-bottom)), transparent 100%);
-  mask-image: linear-gradient(180deg, transparent 0, black var(--starter-fade-top), black calc(100% - var(--starter-fade-bottom)), transparent 100%);
-}
-.skills-starter-scroll[data-scroll-above] { --starter-fade-top: 32px; }
-.skills-starter-scroll[data-scroll-below] { --starter-fade-bottom: 32px; }
-.skills-starter-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
-.skills-starter-scroll::-webkit-scrollbar-track { background: transparent; }
-.skills-starter-scroll::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--pill-radius); }
-.skills-starter-group + .skills-starter-group { margin-top: var(--space-4); }
-.skills-starter-group h4 { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
-.skills-starter-group h4 span { margin-left: var(--space-2); color: var(--text-meta); font-weight: 400; }
-.wizard-choice-grid.skills-starter-cards { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: var(--space-2) var(--space-3); }
+.skills-starter-group h3 { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
+.skills-starter-group h3 span { margin-left: var(--space-2); color: var(--text-meta); font-weight: 400; }
+.wizard-choice-grid.skills-starter-cards { grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: var(--space-2) var(--space-3); }
 .wizard-choice.skills-starter-card { display: grid; align-content: start; gap: var(--space-1); padding: var(--space-3); }
 .skills-starter-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--space-2); }
 .skills-starter-head strong { color: var(--text-primary); font-size: var(--type-body); font-weight: 600; overflow-wrap: anywhere; }
 .skills-starter-marks { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
-.skills-starter-desc,
+.skills-starter-pitch,
 .skills-starter-needs {
   padding-left: calc(14px + var(--space-2));
   color: var(--text-meta);
@@ -1541,8 +1525,10 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
   line-height: var(--line-meta);
   overflow-wrap: anywhere;
 }
+/* One line of what it gives; an author's longer description falls back here and the box, never the code, clips it. */
+.skills-starter-pitch { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .skills-starter-needs { font-weight: 500; }
-.skills-starter-trust { display: grid; gap: var(--space-2); padding-top: var(--space-1); }
+.skills-starter-trust { display: grid; gap: var(--space-2); }
 .skills-starter-trust-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .skills-starter-trust-row strong { flex: 1 1 30%; min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
 .skills-starter-trust .selection-pill { padding: 6px 12px; font-size: var(--type-meta); }
@@ -1561,6 +1547,15 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 .skills-mark-glyph { display: inline-flex; }
 .skills-mark svg { width: 14px; height: 14px; flex: 0 0 auto; }
 .ui-chip.skills-chip { padding: 3px 10px; font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 500; }
-@container starterpanel (max-width: 44rem) {
-  .skills-starter-scroll { max-height: 60vh; }
+/* The entrance: each card is a surface that comes, by position and opacity on the sheet curve, a beat after the one
+   before (the twelfth and later together: under a second in all). Only the paint that first shows the cards in an
+   entry carries data-arrive, so a repaint or a refresh never plays it again; the boxes answer from the first frame.
+   Reduced motion shows the list as it ends. */
+@keyframes skills-starter-arrive { from { opacity: 0; transform: translateY(8px); } }
+.skills-starter-list[data-arrive] :is(.skills-starter-card, .skills-starter-group h3) {
+  animation: skills-starter-arrive var(--motion-open) var(--ease-sheet) both;
+  animation-delay: calc(var(--arrive, 0) * 40ms);
+}
+@media (prefers-reduced-motion: reduce) {
+  .skills-starter-list[data-arrive] :is(.skills-starter-card, .skills-starter-group h3) { animation: none; }
 }

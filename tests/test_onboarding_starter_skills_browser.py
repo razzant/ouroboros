@@ -1,4 +1,4 @@
-"""The first-run wizard's Starter skills row through the production wizard.
+"""The first-run wizard's Skills step through the production wizard (owner 2026-11-21).
 
 Reuses the wizard's static-server/API-boundary fixture: the starter list is the gateway's
 `GET /api/onboarding/starter-skills` answer from web/tests/fixtures/skills_v4, and the one atomic
@@ -11,103 +11,129 @@ from pathlib import Path
 
 import pytest
 
-from tests._wizard_walk import past_consciousness
+from tests._wizard_walk import step_order
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
 STARTER = json.loads((Path(__file__).resolve().parents[1] / "web/tests/fixtures/skills_v4/onboarding_starter_skills.json")
                      .read_text(encoding="utf-8"))
+STEP = '[data-starter-skills="step"]'
+ROW = ".skills-starter-row"
 
 
-def _summary(ui, *, answer=STARTER, status=200, width=1360):
+def _skills_step(ui, *, answer=STARTER, status=200, width=1360, route=True):
+    """Review & start, past Consciousness where offered, onto the Skills step."""
     page = ui["page"]
     page.set_viewport_size({"width": width, "height": 900})
-    page.route("**/api/onboarding/starter-skills", lambda route: route.fulfill(
-        status=status, content_type="application/json", body=json.dumps(answer)))
+    if route:
+        page.route("**/api/onboarding/starter-skills", lambda route: route.fulfill(
+            status=status, content_type="application/json", body=json.dumps(answer)))
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_selector("#quick-start-btn:not([hidden])")
+    assert "skills" in step_order(page), "a fresh install's setup offers the step"
     page.click("#quick-start-btn")
-    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
-    page.wait_for_selector(".summary-card")
+    if "consciousness" in step_order(page):
+        page.wait_for_selector("[data-consciousness-step]")
+        page.click("#next-btn")
+    page.wait_for_selector(STEP)
     return page
 
 
 def _completion(ui):
-    return [payload for path, payload in ui["posts"] if path == "/api/onboarding/complete"]
+    for _ in range(200):
+        posted = [payload for path, payload in ui["posts"] if path == "/api/onboarding/complete"]
+        if posted:
+            return posted
+        ui["page"].wait_for_timeout(25)
+    return []
+
+
+def _card(page, item_id):
+    return page.locator(".skills-starter-card", has=page.locator(f'[data-starter-item="{item_id}"]'))
 
 
 @pytest.mark.parametrize("width", [1360, 390])
-def test_starter_row_opens_into_the_categorized_list_and_the_completion_carries_the_choices(subscription_ui, width):
+def test_the_step_lists_the_offer_and_the_completion_carries_the_choices(subscription_ui, width):
     ui = subscription_ui
-    page = _summary(ui, width=width)
-    row = page.locator(".skills-starter-row")
-    row.wait_for()
-    page.wait_for_function("document.querySelector('.skills-starter-row').textContent.includes('ticked')")
-    assert "Starter skills" in row.inner_text()
-    assert "10 · 6 ticked · Change ›" in row.inner_text()
-    assert ("Ticked: telegram, pdf_tools, word_tools, duckduckgo, memory-atlas, anti-slop. 4 more you can tick."
-            in row.inner_text())
-    capture(page, f"starter-row-collapsed-{width}")
-
-    page.locator("[data-starter-toggle]").click()
-    panel = page.locator("[data-starter-panel]")
-    panel.wait_for()
-    heads = [text.split("\n")[0].strip() for text in panel.locator(".skills-starter-group h4").all_inner_texts()]
-    assert heads[0].startswith("Built in — comes with the app"), heads
+    page = _skills_step(ui, width=width)
+    page.wait_for_selector(".skills-starter-card")
+    assert page.locator(".step-title").inner_text() == "Skills"
+    assert "Ouroboros starts with the ticked skills; clear any you do not want." in page.locator(".step-header").inner_text()
+    assert page.locator(".skills-starter-count").inner_text() == "6 of 10 ticked"
+    heads = [text.split("\n")[0].strip() for text in page.locator(".skills-starter-group h3").all_inner_texts()]
     assert [head.rstrip("0123456789").strip() for head in heads] == [
         "Built in — comes with the app", "Messaging", "Documents", "Search & research", "About Ouroboros", "Writing & review"]
-    assert panel.locator(".skills-starter-card.active").count() == 6
-    assert "They install without review — you trust Ouroboros. Skills that need a key wait for it." in panel.inner_text()
-    assert "Needs: OPENROUTER_API_KEY" in panel.inner_text()
-    scroll = panel.locator("[data-starter-scroll]")
-    assert scroll.evaluate("el => getComputedStyle(el).overflowY") == "auto"
-    trust = panel.locator(".skills-starter-trust")
-    assert trust.locator('[data-starter-trust="ouroboros"][data-trust="trusted"]').get_attribute("aria-pressed") == "true"
-    assert trust.locator('[data-starter-trust="ouroboros-community"][data-trust="review"]').get_attribute("aria-pressed") == "true"
-    capture(page, f"starter-row-open-{width}")
+    assert page.locator(".skills-starter-card.active").count() == 6
+    telegram = _card(page, "builtin/telegram").inner_text()
+    assert "Telegram" in telegram and "Chat with Ouroboros from your phone in Telegram" in telegram
+    assert "Needs a Telegram bot token" in telegram and "Built in" in telegram
+    # Without the catalog's words the card keeps the skill's name and its author's text; a key shows in words.
+    assert "unix_computer_use" in _card(page, "builtin/unix_computer_use").inner_text()
+    assert "Uses your OpenRouter API Key" in _card(page, "ouroboros/perplexity").inner_text()
+    assert _card(page, "ouroboros/keenable").locator(".skills-starter-needs").count() == 0
+    trust = page.locator(".skills-starter-trust")
+    assert trust.inner_text().startswith("They install without review — you trust Ouroboros. Skills that need a key wait for it.")
+    assert trust.locator("[data-starter-trust]").count() == 0, "how they install is one quiet line until opened"
+    capture(page, f"skills-step-{width}")
 
     page.locator('[data-starter-item="ouroboros/pdf_tools"]').uncheck()
     page.locator('[data-starter-item="ouroboros/perplexity"]').check()
-    assert "10 · 6 ticked" in row.inner_text()
+    assert page.locator(".skills-starter-count").inner_text() == "6 of 10 ticked"
+    trust.locator("[data-starter-trust-toggle]").click()
+    assert trust.locator('[data-starter-trust="ouroboros"][data-trust="trusted"]').get_attribute("aria-pressed") == "true"
     trust.locator('[data-starter-trust="ouroboros-community"][data-trust="trusted"]').click()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    capture(page, f"skills-step-trust-{width}")
+    page.click("#next-btn")  # Review & start's Continue goes to Summary
+    row = page.locator(ROW)
+    row.wait_for()
+    assert row.inner_text().replace("\n", " ") == "Skills 6 will install · Change"
     page.click("#next-btn")
-    for _ in range(200):
-        if _completion(ui):
-            break
-        page.wait_for_timeout(25)
     payload = _completion(ui)[0]
     assert payload["starter_skills"] == ["builtin/telegram", "ouroboros/word_tools", "ouroboros/duckduckgo",
                                          "ouroboros/perplexity", "ouroboros/memory-atlas", "ouroboros/anti-slop"]
     assert payload["skill_source_trust"] == {"ouroboros": "trusted", "ouroboros-community": "trusted"}
 
 
+def test_summary_change_returns_to_the_step_with_the_ticks_kept(subscription_ui):
+    ui = subscription_ui
+    page = _skills_step(ui)
+    page.locator('[data-starter-all="0"]').click()
+    page.click("#next-btn")
+    page.locator(ROW).wait_for()
+    assert "None will install" in page.locator(ROW).inner_text()
+    page.locator("[data-starter-change]").click()
+    page.wait_for_selector(".skills-starter-card")
+    assert page.locator(".step-title").inner_text() == "Skills"
+    assert page.locator(".skills-starter-card.active").count() == 0
+    page.locator('[data-starter-item="ouroboros/duckduckgo"]').check()
+    page.click("#next-btn")
+    page.locator(ROW).wait_for()
+    assert "1 will install" in page.locator(ROW).inner_text()
+    page.click("#next-btn")
+    assert _completion(ui)[0]["starter_skills"] == ["ouroboros/duckduckgo"]
+
+
 def test_untick_all_installs_nothing_and_an_unreadable_list_keeps_the_host_default(subscription_ui):
     ui = subscription_ui
-    page = _summary(ui)
-    page.locator("[data-starter-toggle]").click()
+    page = _skills_step(ui)
     page.locator('[data-starter-all="0"]').click()
-    page.locator("[data-starter-toggle]").click()
-    assert "Nothing is ticked: no skills install now." in page.locator(".skills-starter-row").inner_text()
+    assert page.locator(".skills-starter-count").inner_text() == "0 of 10 ticked"
     page.click("#next-btn")
-    for _ in range(200):
-        if _completion(ui):
-            break
-        page.wait_for_timeout(25)
+    page.locator(ROW).wait_for()
+    page.click("#next-btn")
     assert _completion(ui)[0]["starter_skills"] == []
 
     ui["posts"].clear()
     page = ui["new_page"]()
     ui["page"] = page
-    page = _summary(ui, answer={"error": "starter list unavailable"}, status=503)
-    page.wait_for_function("document.querySelector('.skills-starter-row').textContent.includes('The default set')")
-    assert "Ouroboros installs the recommended skills after it starts" in page.locator(".skills-starter-row").inner_text()
-    capture(page, "starter-row-unreadable")
+    page = _skills_step(ui, answer={"error": "starter list unavailable"}, status=503)
+    page.wait_for_function("document.querySelector('[data-starter-skills=\"step\"]').textContent.includes('couldn’t be read')")
+    assert "Ouroboros installs the recommended skills after it starts" in page.locator(STEP).inner_text()
+    capture(page, "skills-step-unreadable")
     page.click("#next-btn")
-    for _ in range(200):
-        if _completion(ui):
-            break
-        page.wait_for_timeout(25)
+    assert "The recommended set" in page.locator(ROW).inner_text()
+    page.click("#next-btn")
     payload = _completion(ui)[0]
     assert "starter_skills" not in payload and "skill_source_trust" not in payload, "the host's default list stays"
 
@@ -135,7 +161,9 @@ def starter_ui(request, monkeypatch):
 
 
 @pytest.mark.parametrize('width,theme', [(width, theme) for width in (1280, 390) for theme in ('light', 'dark')])
-def test_fresh_root_offer_arrives_after_summary_preserving_owner_ticks(starter_ui, width, theme):
+def test_the_hub_arrives_on_the_step_keeping_ticks_focus_and_place(starter_ui, width, theme):
+    """The hub's skills join the list while the person is on it: their ticks, the focused box and the card being read
+    stay where they were, and the newcomers join without a second entrance (DESIGN principle 6)."""
     ui = starter_ui
     page = ui['page']
     page.set_viewport_size({'width': width, 'height': 900})
@@ -151,18 +179,17 @@ def test_fresh_root_offer_arrives_after_summary_preserving_owner_ticks(starter_u
             pending.append(route)
 
     page.route('**/api/onboarding/starter-skills', offer)
-    page.goto(ui['url'] + '/onboarding')
-    page.locator('#quick-start-btn:not([hidden])').click()
-    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
-    row = page.locator('.skills-starter-row')
-    row.wait_for()
-    assert 'Reading the Ouroboros hub…' in row.inner_text()
-    assert 'default starter list once it can read the hub' in row.inner_text()
-    page.locator('[data-starter-toggle]').click()
+    page = _skills_step(ui, width=width, route=False)
+    step = page.locator(STEP)
+    assert 'Reading the Ouroboros hub…' in step.inner_text()
+    assert 'default starter list once it can read the hub' in step.inner_text()
     page.locator('[data-starter-item="builtin/telegram"]').uncheck()
-    page.locator('[data-starter-panel]').scroll_into_view_if_needed()
+    box = page.locator('[data-starter-item="builtin/unix_computer_use"]')
+    box.focus()
+    page.evaluate("window.scrollTo(0, 60)")
+    anchor = page.evaluate("() => document.querySelector('[data-starter-card=\"builtin/unix_computer_use\"]').getBoundingClientRect().top")
     engine = ui['engine']
-    capture(page, f'starter-{engine}-{width}-{theme}-reading')
+    capture(page, f'skills-{engine}-{width}-{theme}-reading')
     for _ in range(200):
         if pending:
             break
@@ -172,17 +199,17 @@ def test_fresh_root_offer_arrives_after_summary_preserving_owner_ticks(starter_u
     page.locator('[data-starter-item="ouroboros/duckduckgo"]').wait_for()
     assert not page.locator('[data-starter-item="builtin/telegram"]').is_checked()
     assert page.locator('[data-starter-item="ouroboros/duckduckgo"]').is_checked()
-    assert 'Reading the Ouroboros hub' not in row.inner_text()
-    builtin = page.locator('.skills-starter-card', has=page.locator('[data-starter-item="builtin/telegram"]'))
-    assert builtin.locator('[data-mark="official"]').count() == 1
+    assert 'Reading the Ouroboros hub' not in step.inner_text()
+    assert page.evaluate("document.activeElement?.dataset.starterItem") == 'builtin/unix_computer_use', 'focus stays'
+    top = page.evaluate("() => document.querySelector('[data-starter-card=\"builtin/unix_computer_use\"]').getBoundingClientRect().top")
+    assert abs(top - anchor) <= 1, (anchor, top)
+    assert page.locator('.skills-starter-list[data-arrive]').count() == 0, 'the hub brings no second entrance'
+    assert _card(page, 'builtin/telegram').locator('[data-mark="official"]').count() == 1
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    assert page.locator('[data-starter-panel]').evaluate('el => el.scrollWidth <= el.clientWidth + 1')
-    capture(page, f'starter-{engine}-{width}-{theme}-ready')
-    page.locator('#next-btn').click()
-    for _ in range(200):
-        if _completion(ui):
-            break
-        page.wait_for_timeout(25)
+    capture(page, f'skills-{engine}-{width}-{theme}-ready')
+    page.click('#next-btn')
+    page.locator(ROW).wait_for()
+    page.click('#next-btn')
     assert _completion(ui)[0]['starter_skills'] == ['ouroboros/pdf_tools', 'ouroboros/word_tools',
                                                    'ouroboros/duckduckgo', 'ouroboros/memory-atlas', 'ouroboros/anti-slop']
 
@@ -190,17 +217,16 @@ def test_fresh_root_offer_arrives_after_summary_preserving_owner_ticks(starter_u
 @pytest.mark.parametrize('changed', [False, True])
 def test_finish_while_hub_is_reading_uses_defaults_only_if_ticks_untouched(starter_ui, changed):
     ui = starter_ui
-    page = _summary(ui, answer=_fresh_offer(), width=390)
+    page = _skills_step(ui, answer=_fresh_offer(), width=390)
     if changed:
-        page.locator('[data-starter-toggle]').click()
         page.locator('[data-starter-all="0"]').click()
     else:
-        assert 'default starter list once it can read the hub' in page.locator('.skills-starter-row').inner_text()
-    page.locator('#next-btn').click()
-    for _ in range(200):
-        if _completion(ui):
-            break
-        page.wait_for_timeout(25)
+        assert 'default starter list once it can read the hub' in page.locator(STEP).inner_text()
+    page.click('#next-btn')
+    page.locator(ROW).wait_for()
+    if not changed:
+        assert 'default starter list once it can read the hub' in page.locator(ROW).inner_text()
+    page.click('#next-btn')
     payload = _completion(ui)[0]
     if changed:
         assert payload['starter_skills'] == []
@@ -209,7 +235,7 @@ def test_finish_while_hub_is_reading_uses_defaults_only_if_ticks_untouched(start
     assert payload['skill_source_trust'] == {'ouroboros': 'trusted', 'ouroboros-community': 'review'}
 
 
-def test_summary_still_polls_after_five_minutes_in_earlier_setup(starter_ui):
+def test_the_step_still_polls_after_five_minutes_in_earlier_setup(starter_ui):
     ui = starter_ui
     page = ui['page']
     page.set_default_timeout(60_000)
@@ -231,15 +257,52 @@ def test_summary_still_polls_after_five_minutes_in_earlier_setup(starter_ui):
     assert len(reads) == 1
     page.evaluate('window.setupElapsed = 300_000')
     page.locator('#quick-start-btn').click()
-    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
-    row = page.locator('.skills-starter-row')
-    row.wait_for()
-    assert 'Reading the Ouroboros hub' in row.inner_text()
-    page.wait_for_function("document.querySelector('.skills-starter-row').textContent.includes('10 · 6 ticked')")
+    if 'consciousness' in step_order(page):
+        page.wait_for_selector('[data-consciousness-step]')
+        page.click('#next-btn')
+    step = page.locator(STEP)
+    step.wait_for()
+    assert 'Reading the Ouroboros hub' in step.inner_text()
+    page.wait_for_function("document.querySelector('.skills-starter-count')?.textContent === '6 of 10 ticked'")
     assert len(reads) == 2
-    assert 'Reading the Ouroboros hub' not in row.inner_text()
-    page.locator('[data-starter-toggle]').click()
+    assert 'Reading the Ouroboros hub' not in step.inner_text()
     assert page.locator('[data-starter-item="ouroboros/duckduckgo"]').is_checked()
-    page.locator('[data-starter-panel]').scroll_into_view_if_needed()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    capture(page, f"starter-{ui['engine']}-390-r2-delayed-summary")
+    capture(page, f"skills-{ui['engine']}-390-r2-delayed-step")
+
+
+ARRIVAL = """() => [...document.querySelectorAll('.skills-starter-card')].slice(0, 14).map((el) => {
+    const style = getComputedStyle(el);
+    return {name: style.animationName, delay: parseFloat(style.animationDelay) * (style.animationDelay.endsWith('ms') ? 1 : 1000),
+            duration: parseFloat(style.animationDuration) * (style.animationDuration.endsWith('ms') ? 1 : 1000)};
+})"""
+
+
+@pytest.mark.parametrize('motion', ['no-preference', 'reduce'])
+def test_the_cards_arrive_once_per_entry_and_not_under_reduced_motion(starter_ui, motion):
+    """Entering the step plays one short staggered entrance (each card a surface that comes on the sheet curve, the
+    whole under a second); its boxes answer at once; a repaint never plays it again, leaving and coming back does.
+    Under reduced motion the list stands as it ends."""
+    ui = starter_ui
+    ui['page'].emulate_media(reduced_motion=motion)
+    page = _skills_step(ui)
+    page.wait_for_selector('.skills-starter-card')
+    page.locator('[data-starter-item="ouroboros/keenable"]').check()  # during the entrance: usable at once
+    assert page.locator('[data-starter-item="ouroboros/keenable"]').is_checked()
+    arrival = page.evaluate(ARRIVAL)
+    if motion == 'reduce':
+        assert {card['name'] for card in arrival} == {'none'}, arrival
+    else:
+        assert {card['name'] for card in arrival} == {'skills-starter-arrive'}, arrival
+        delays = [card['delay'] for card in arrival]
+        assert delays == sorted(delays) and delays[0] == 0 and delays[1] > 0, delays
+        assert max(card['delay'] + card['duration'] for card in arrival) < 1000, arrival
+    page.locator('[data-starter-all="1"]').click()  # a repaint: the entrance is not played again
+    assert page.locator('.skills-starter-list[data-arrive]').count() == 0
+    assert {card['name'] for card in page.evaluate(ARRIVAL)} == {'none'}
+    page.click('#next-btn')
+    page.locator(ROW).wait_for()
+    page.locator('[data-starter-change]').click()  # entering again plays it again (unless motion is reduced)
+    page.wait_for_selector('.skills-starter-card')
+    assert page.locator('.skills-starter-list[data-arrive]').count() == 1
+    assert {card['name'] for card in page.evaluate(ARRIVAL)} == ({'none'} if motion == 'reduce' else {'skills-starter-arrive'})
