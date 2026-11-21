@@ -35,22 +35,19 @@ _NO_REF_ACTIONS = frozenset({"merge_base", "identity", "status", "diff"})
 _REVISION_ACTIONS = frozenset({"log", "show", "file", "blame", "rev_parse"})  # ref names their revision
 _SUMMARY_ACTIONS = frozenset({"diff", "show"})  # stat / name_only summarize a comparison or a commit
 _CAPTURE_BYTES = 1024 * 1024
+_CAPTURE_STDERR_BYTES = 64 * 1024
 _CONFIG_LOCATIONS = frozenset({"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"})
 
 
-def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
-    """Capture one local Git read with the inherited Git environment and helpers disabled.
-
-    The user and system config stay read, from the same locations status and diff
-    use: their filters, excludes, autocrlf and safe.directory decide what "clean" means.
-    """
+def _read_git_command(args: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Local, non-interactive object reads; deny transports even on Git predating GIT_NO_LAZY_FETCH."""
     from ouroboros.git_observation import host_git_env
 
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("GIT_") or key in _CONFIG_LOCATIONS}
     env.update({
         "LC_ALL": "C", "LANG": "C", "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_ALLOW_PROTOCOL": "", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0",
     })
     cmd = [
@@ -59,10 +56,20 @@ def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.Complet
         "-c", f"core.hooksPath={os.devnull}",
         "-c", "log.showSignature=false",
     ]
+    return [*cmd, *args], host_git_env(env)
+
+
+def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    """Capture one local Git read with the inherited Git environment and helpers disabled.
+
+    The user and system config stay read, from the same locations status and diff
+    use: their filters, excludes, autocrlf and safe.directory decide what "clean" means.
+    """
     from ouroboros import work_domain
 
+    cmd, env = _read_git_command(args)
     if work_domain.is_work(repo):  # its config, links and objects are the work domain's: read there, flags kept
-        return _capture_work_git(repo, [*cmd, *args], host_git_env(env))
+        return _capture_work_git(repo, cmd, env)
 
     # Drain both pipes concurrently, retaining only bounded prefixes. A large
     # object never first accumulates in communicate()/capture_output memory.
@@ -73,10 +80,10 @@ def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.Complet
             prefix.extend(chunk[:max(0, limit - len(prefix))])
         return bytes(prefix), total - len(prefix)
 
-    with subprocess.Popen([*cmd, *args], cwd=repo, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, env=host_git_env(env)) as process, ThreadPoolExecutor(max_workers=2) as pool:
+    with subprocess.Popen(cmd, cwd=repo, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, env=env) as process, ThreadPoolExecutor(max_workers=2) as pool:
         stdout = pool.submit(drain, process.stdout, _CAPTURE_BYTES)
-        stderr = pool.submit(drain, process.stderr, 65536)
+        stderr = pool.submit(drain, process.stderr, _CAPTURE_STDERR_BYTES)
         try:
             process.wait(timeout=GIT_READ_CAPTURE_TIMEOUT_SEC)
         except subprocess.TimeoutExpired:
@@ -84,9 +91,10 @@ def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.Complet
             process.wait()
             raise
         out, omitted = stdout.result()
-        err, _ = stderr.result()
+        err, err_omitted = stderr.result()
     completed = subprocess.CompletedProcess(cmd, process.returncode, out, err)
     completed.stdout_omitted = omitted
+    completed.stderr_omitted = err_omitted
     return completed
 
 
@@ -101,11 +109,13 @@ def _capture_work_git(repo: pathlib.Path, cmd: list[str], env: dict) -> subproce
         done = work_domain.run(cmd, cwd=str(repo), env=env, stdout=out, stderr=err,
                                timeout=GIT_READ_CAPTURE_TIMEOUT_SEC)
         total = out.seek(0, os.SEEK_END)
+        err_total = err.seek(0, os.SEEK_END)
         out.seek(0)
         err.seek(0)
-        prefix = out.read(_CAPTURE_BYTES)
-        completed = subprocess.CompletedProcess(cmd, done.returncode, prefix, err.read(65536))
+        prefix, diagnostics = out.read(_CAPTURE_BYTES), err.read(_CAPTURE_STDERR_BYTES)
+        completed = subprocess.CompletedProcess(cmd, done.returncode, prefix, diagnostics)
     completed.stdout_omitted = total - len(prefix)
+    completed.stderr_omitted = err_total - len(diagnostics)
     return completed
 
 
@@ -126,13 +136,41 @@ def _run_read_git(repo: pathlib.Path, args: list[str], *, preserve_output: bool 
     return text
 
 
-def _object(repo: pathlib.Path, ref: str, kind: str, *, field: str = "ref") -> str:
+def _exact_oid(repo: pathlib.Path, args: list[str], *, ambiguity: bool = False) -> str:
+    """One Git lookup read as exact bytes: complete output and diagnostics, exit 0, no ambiguous-refname
+    warning when ``ambiguity`` (Git itself reports it; every other diagnostic never blocks), then one
+    full object id and its single terminator."""
+    captured = _capture_read_git(repo, args)
+    if getattr(captured, "stdout_omitted", 0) or getattr(captured, "stderr_omitted", 0):
+        raise RuntimeError("Git revision output or diagnostics were truncated")
+    if captured.returncode or (ambiguity and any(
+        line.startswith(b"warning: refname ") and line.removesuffix(b"\r").endswith(b" is ambiguous.")
+        for line in captured.stderr.split(b"\n")
+    )):
+        raise _git_failure(captured)
+    stdout = captured.stdout
+    if not stdout.endswith(b"\n"):
+        raise ValueError("Git did not resolve one exact object")
+    oid = stdout.removesuffix(b"\r\n" if stdout.endswith(b"\r\n") else b"\n").decode("ascii", "replace")
+    if len(oid) not in (40, 64) or any(c not in "0123456789abcdef" for c in oid):
+        raise ValueError("Git did not resolve one exact object")
+    return oid
+
+
+def _object(repo: pathlib.Path, ref: str, kind: str, *, field: str = "ref", reject_warnings: bool = False) -> str:
     if not ref.strip() or "\x00" in ref or "\n" in ref:
         raise ValueError(f"{field} must be a nonempty local Git revision")
     try:
+        if reject_warnings:
+            # The revision is looked up once as written, in whatever grammar Git reads it, with
+            # core.warnAmbiguousRefs forced on so Git itself reports an ambiguous short ref; only the full
+            # id it names (immutable, never user text) is then typed. No peel operator joins user input.
+            check = ["rev-parse", "--verify", "--end-of-options"]
+            named = _exact_oid(repo, ["-c", "core.warnAmbiguousRefs=true", *check, ref], ambiguity=True)
+            return _exact_oid(repo, [*check, f"{named}^{{{kind}}}"])
         oid = _run_read_git(repo, ["rev-parse", "--verify", "--end-of-options", f"{ref}^{{{kind}}}"])
     except RuntimeError as exc:
-        # Which argument did not resolve and where to look, with Git's whole answer beside it: an absent,
+        # Which argument did not resolve and where to look, with the observed diagnostic: an absent,
         # ambiguous or other-typed object and an unsafe repository read alike from the outside.
         article = "an" if kind[:1] in "aeiou" else "a"
         raise RuntimeError(f"{field}={ref!r} did not resolve to {article} {kind} here (git: {exc}); nothing was read; "
