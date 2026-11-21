@@ -423,9 +423,11 @@ def test_without_a_measured_window_the_bible_still_pays_before_memory(tmp_path, 
     # An owner's Nano budget on an unmeasured route: lowered from above, the first budget that binds takes the bible alone.
     request = fitted(0, "nano", known=False)[0].projection("nano").estimated_tokens
     target, seen = request * 2, None
-    while seen is None or not seen[0]:
+    for _attempt in range(400):  # lowered from above until the budget binds; never a zero target
         monkeypatch.setattr(context_budget, "OWNER_NANO_TARGET_TOKENS", target)
         seen, target = _shown(fitted(0, "nano", known=False)[1]), int(target * 0.99)
+        if seen[0]:
+            break
     rows, steps, text = seen
     assert rows == ["design_bible"] and not steps and "the owner's Nano mode budget" in text
 
