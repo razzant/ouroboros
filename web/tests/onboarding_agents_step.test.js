@@ -9,6 +9,7 @@ import test from 'node:test';
 
 import { createClaudexorStatusStore, familyLabel } from '../modules/claudexor_status_store.js';
 import { compatibleEndpoint, configuredApiProviders } from '../modules/route_editor_primitives.js';
+import { PROVIDER_CARDS } from '../modules/settings_provider_cards.js';
 import {
     AGENT_FAMILIES,
     LADDER_FOOTNOTE,
@@ -390,6 +391,19 @@ test('preview and completion can share one open provider/local/model draft', () 
     assert.equal('OUROBOROS_REVIEW_ENFORCEMENT' in draft, false);
     assert.equal(draft.OUROBOROS_RUNTIME_MODE, 'advanced');
     assert.equal('OUROBOROS_MODEL_HEAVY' in draft, false);
+});
+
+test('the draft carries the built-in compatible key\'s consent beside its address; a consent is no access', () => {
+    const { contract, initialState } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url)));
+    const field = contract.providerFields.find((each) => each.settingKey === 'OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED');
+    assert.deepEqual([field.stateKey, field.group, field.inputType, initialState[field.stateKey]], ['compatibleContinueUnconfirmed', 'more', 'text', ''],
+        'a client that maps the contract\'s fields to the save body sends it, empty until the owner gives one');
+    assert.equal(field.label, PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible').consent.label, 'the box and the contract say it in one sentence');
+    const draftOf = (state) => onboardingSettingsDraft({ state: { ...initialState, ...state }, providerFields: contract.providerFields,
+        budgetFields: contract.budgetFields, modelSlots: contract.modelSlots });
+    assert.equal(draftOf({}).OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED, '');
+    assert.equal(draftOf({ compatibleContinueUnconfirmed: ' http://lab.lan/v1 ' }).OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED, 'http://lab.lan/v1');
+    assert.deepEqual(configuredApiProviders(draftOf({ compatibleContinueUnconfirmed: 'http://lab.lan/v1' })), [], 'an address\'s consent configures no provider');
 });
 
 test('the draft reaches the compatible pair the runtime reads, following each edit', () => {

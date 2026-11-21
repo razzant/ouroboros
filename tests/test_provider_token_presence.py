@@ -427,6 +427,22 @@ def test_native_review_episode_total_reaches_its_llm_usage_row_truthfully(tmp_pa
     assert _persisted_usage(event, tmp_path / "supervisor") == expected
 
 
+def test_capacity_witness_belongs_only_to_the_current_round():
+    from ouroboros.loop_llm_call import _record_round_cache_facts
+
+    accumulated = {}
+    for idx, usage in enumerate(({}, {"capacity_input_tokens": 80_000}, {"capacity_input_tokens": None},
+                                 {"capacity_input_tokens": 0}, {})):
+        native = usage.get("capacity_input_tokens") is not None
+        _record_round_cache_facts(accumulated, usage, round_idx=idx, provider="openai-compatible" if native else "anthropic",
+                                  model="openai-compatible::local" if native else "anthropic::ordinary")
+        facts = accumulated["_last_round_cache_usage"]
+        if usage.get("capacity_input_tokens") is None:
+            assert "capacity_input_tokens" not in facts
+        else:
+            assert facts["capacity_input_tokens"] == usage["capacity_input_tokens"]
+
+
 @pytest.mark.parametrize("raw,round_idx,hit", [
     (FULL, 2, 40 / 165),
     (PARTIAL, 1, None),

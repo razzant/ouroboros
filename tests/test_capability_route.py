@@ -159,10 +159,11 @@ def test_main_probe_does_not_resolve_again_after_metadata_returns(tmp_path, monk
 
 
 @pytest.mark.parametrize('model,settings,fields', [
-    ('openai-compatible::fixture', {'OPENAI_BASE_URL': 'http://127.0.0.1:18080/v1',
-        'OPENAI_API_KEY': 'fixture'}, {'OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_KEY'}),
-    ('openai-compatible::fixture', {'OPENAI_COMPATIBLE_BASE_URL': 'http://127.0.0.1:18080/v1',
-        'OPENAI_COMPATIBLE_API_KEY': 'fixture'}, {'OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY'}),
+    # A compatible dispatch also reads its key's consent for a private server that names no program.
+    ('openai-compatible::fixture', {'OPENAI_BASE_URL': 'http://127.0.0.1:18080/v1', 'OPENAI_API_KEY': 'fixture'},
+        {'OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_KEY', 'OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED'}),
+    ('openai-compatible::fixture', {'OPENAI_COMPATIBLE_BASE_URL': 'http://127.0.0.1:18080/v1', 'OPENAI_COMPATIBLE_API_KEY': 'fixture'},
+        {'OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY', 'OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED'}),
     # Direct OpenAI dispatch reads its key and its connection's API (``OPENAI_API_SURFACE``: Chat or Responses body).
     ('openai::fixture', {'OPENAI_BASE_URL': 'http://127.0.0.1:18080/v1',
         'OPENAI_API_KEY': 'fixture'}, {'OPENAI_API_KEY', 'OPENAI_API_SURFACE'}),

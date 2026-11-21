@@ -459,5 +459,53 @@
   "expected_refusal": null,
   "expected_class": "provider_transient",
   "recognition": "not_size"
+ },
+ {
+  "file": "bodies/stand-ollama-0.40.16-history-protected.body.json",
+  "server": "Ollama",
+  "version": "v0.40.16 (d63b702609c4300a2ca07be2bdb0adb9834725e5)",
+  "provenance": "Real native /api/chat HTTP 400 captured 2026-11-15T21:52:32.815459+00:00, Qwen3.5-9B Q8_0, S7; byte-exact stand/evidence-ollama/history-small-native-protected/response.raw. Synthetic probe input; no user data.",
+  "sha256": "b6ae0388a9b1928b95b90b3dbd84a73a5c41d38cb3707ba23df4f9da9b879e09",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "native_expected_refusal": {
+   "window": 4096,
+   "requested": 20216,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "text:llama.cpp/request-exceeds"
+  },
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/stand-ollama-0.40.16-native-90k.body.json",
+  "server": "Ollama",
+  "version": "v0.40.16 (d63b702609c4300a2ca07be2bdb0adb9834725e5)",
+  "provenance": "Real native /api/chat HTTP 400 captured 2026-11-15T21:55:39.328573+00:00, Qwen3.5-9B Q8_0, S7; byte-exact stand/evidence-ollama/env80k-native-no-truncate90k/response.raw. Configured num_ctx=80000; backend rounds to 80128. The larger physical bound is not usable reserve.",
+  "sha256": "1e5cf91957bbc87c8bc3bff74598b6eb0095a16c47f56e3c9ba2b1af7c6ac2a7",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "native_expected_refusal": {
+   "window": 80128,
+   "requested": 90068,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "text:llama.cpp/request-exceeds"
+  },
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/stand-ollama-0.40.16-grammar-control.body.json",
+  "server": "Ollama",
+  "version": "v0.40.16 (d63b702609c4300a2ca07be2bdb0adb9834725e5)",
+  "provenance": "Real native /api/chat HTTP 400 captured 2026-11-15T21:55:41.646158+00:00, Qwen3.5-9B Q8_0, S7; byte-exact stand/evidence-ollama/generation-boundary-shift-false/response.raw. Synthetic probe input; no user data.",
+  "sha256": "00f95cc6600e8db9a36b757933a8ddcbd569b05394db5e2218e1571dea42f752",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "native_expected_refusal": null,
+  "recognition": "not_size"
  }
 ]

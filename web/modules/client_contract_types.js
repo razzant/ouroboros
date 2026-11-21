@@ -60,7 +60,7 @@
  */
 
 /**
- * One credential or endpoint input; `settingKey` is the settings key it saves into.
+ * One credential, endpoint or consent input; `settingKey` is the settings key it saves into.
  * @typedef {Object} SetupProviderField
  * @property {string} id
  * @property {string} stateKey

@@ -173,8 +173,8 @@ PROVIDER_KINDS: dict[str, KindSpec] = {
         ready=(("credentials",), ("user", "password"))),
     # An empty key is a keyless endpoint; the endpoint itself is what configures it.
     "openai-compatible": KindSpec("OpenAI-compatible endpoint", (
-        ("api_key", "OPENAI_COMPATIBLE_API_KEY", True),
-        ("base_url", "OPENAI_COMPATIBLE_BASE_URL", False)), ready=(("base_url",),)),
+        ("api_key", "OPENAI_COMPATIBLE_API_KEY", True), ("base_url", "OPENAI_COMPATIBLE_BASE_URL", False),
+        ("continue_unconfirmed", "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED", False)), ready=(("base_url",),)),
 }
 # The extra connections, one JSON list (secrets masked by row identity, never exported to env).
 CONNECTIONS_KEY = "OUROBOROS_CONNECTIONS"

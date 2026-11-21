@@ -249,11 +249,13 @@ def test_unknown_items_and_server_transformations_are_disclosed():
 
 def test_provider_usage_cannot_spoof_host_terminal_facts():
     completion, _facts = completion_view(_body(_message("Done.")))
-    completion["usage"]["response_status"] = "incomplete"
+    completion["usage"].update(response_status="incomplete", capacity_input_tokens=123,
+                               reported_model="wrong model", route_notice="wrong route")
     message, usage = LLMClient(api_key="k")._normalize_remote_response(
         {"choices": completion["choices"], "usage": completion["usage"]},
         {**_target(), "api_surface": "chat_completions"}, skip_cost_fetch=True)
     assert "response_status" not in usage and usage_reply_usability(usage, message) == "usable"
+    assert {"capacity_input_tokens", "reported_model", "route_notice"}.isdisjoint(usage)
 
 
 # --- custody -------------------------------------------------------------------------------------------

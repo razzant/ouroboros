@@ -1067,9 +1067,15 @@ class ProviderTestRequest(TypedDict):
     api_key_setting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
 
 
+#: What kept a private compatible Test from sending: consent needed, an address hold, an Ollama to upgrade.
+ProviderTestCode = Literal["ollama_guard_consent", "ollama_guard_held", "ollama_guard_unavailable"]
+
+
 class ProviderTestResponse(TypedDict):
     ok: bool
     error: NotRequired[str]
+    caution: NotRequired[str]  # the request went to a server that named no program, whatever the outcome
+    code: NotRequired[ProviderTestCode]  # with a failed test: why nothing was sent
 
 
 class ExecutorRef(TypedDict, total=False):
@@ -1563,7 +1569,7 @@ __all__ = [
     "LocalModelStatusResponse",
     "McpStatusResponse",
     "ModelCatalogResponse", "OpenAICompatibleModelsResponse",
-    "ProviderTestRequest", "ProviderTestResponse",
+    "ProviderTestRequest", "ProviderTestResponse", "ProviderTestCode",
     "FileBrowserListResponse",
     "ChatHistoryResponse",
     "AttachmentManifestEntry",

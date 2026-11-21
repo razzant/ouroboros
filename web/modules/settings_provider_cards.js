@@ -67,6 +67,11 @@ export const PROVIDER_CARDS = [
             { id: 's-openai-compatible-base-url', rowField: 'base_url', settingKey: 'OPENAI_COMPATIBLE_BASE_URL', label: 'Base URL', placeholder: 'https://provider.example/v1', credential: true, required: true },
             { id: 's-openai-compatible-key', rowField: 'api_key', settingKey: 'OPENAI_COMPATIBLE_API_KEY', secret: true, label: 'API key', placeholder: 'No key' },
         ],
+        // The owner's consent to send to a private server that names no program (ouroboros/llm_ollama_guard.py). It is
+        // stored as the id of the endpoint it covers, so a key whose address changes asks again; drawn on the key's own
+        // page, and a host that does not draw it sends the stored value as loaded.
+        consent: { rowField: 'continue_unconfirmed', settingKey: 'OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED',
+            label: 'Continue via the compatible API without confirmation that history is preserved' },
         note: 'Use this card for custom base URLs. Built-in web search only works with the official OpenAI Responses API, so keep <code>OPENAI_BASE_URL</code> empty when you want <code>web_search</code>.',
     },
     {
@@ -322,6 +327,11 @@ export function connectionFieldsHtml(card, row = {}, { choices = false } = {}) {
     ].join('');
 }
 
+/** A key's consent box, the one control of its intent on a key's page and in setup's rows. It is drawn hidden:
+ *  `paintServerCheck` (connection_server_check.js) offers it where a consent can matter. */
+export const connectionConsentHtml = (card) => (card.consent
+    ? `<label class="accounts-key-consent" hidden><input class="ui-checkbox" type="checkbox" data-connection-consent> <span>${card.consent.label}</span></label>` : '');
+
 /**
  * One API key row (docs/DESIGN.md §6 account-row anatomy): name and status, the meta line, Test /
  * Disable / Remove docked right, then the key's own fields and its quiet result lines. Without `row.uid` it
@@ -350,6 +360,7 @@ export function connectionRowHtml(card, row = {}) {
             </div>
             <div class="connection-fields">
                 <div class="form-row">${fields}</div>
+                ${connectionConsentHtml(card)}
                 <div class="settings-inline-status" data-connection-test-status${builtin ? ` data-provider-test-status="${card.kind}"` : ''} role="status" aria-live="polite" aria-atomic="true"></div>
                 <div class="connection-note" data-connection-cache hidden></div>
                 <div class="connection-note" data-connection-fixed-fields hidden></div>

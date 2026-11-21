@@ -1170,7 +1170,7 @@ test('Summary names a model the local runtime serves as Local, and a cloud one b
 // setup saves the provider's image-capable Vision; an owner's edit and an existing
 // install's saved value, blank included, are what gets saved instead.
 async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, revisit = false,
-    localMode = '', revisitInputs = {}, revisitLocalMode = '', shortcut = false, previews = [] } = {}) {
+    localMode = '', revisitInputs = {}, revisitLocalMode = '', shortcut = false, previews = [], prepare, onAccounts, tests = [] } = {}) {
     const posted = [];
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     let connected = false;
@@ -1179,6 +1179,9 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
         if (String(url) === '/api/onboarding/complete') {
             posted.push(JSON.parse(init.body));
             body = { ok: true, runtime_mode: 'advanced', restart_required: false };
+        } else if (String(url) === '/api/providers/test') {
+            tests.push(JSON.parse(init.body));
+            body = { ok: true };
         } else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
             previews.push(payload);
@@ -1210,10 +1213,12 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
         };
         type(inputs);
         routeLocal(localMode);
+        await onAccounts?.(doc, 1);
         await click('next-btn');   // Accounts → Models.
         type(models);
         if (revisit) {
             await click('back-btn');
+            await onAccounts?.(doc, 2);
             if (shortcut) {
                 connected = true;
                 await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
@@ -1227,7 +1232,7 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
             if (shortcut) assert.match(doc.getElementById('root').innerHTML, /data-consciousness-step/);
         }
         for (let step = 0; step < (shortcut ? 2 : 5); step += 1) await click('next-btn');   // … Consciousness … → Start Ouroboros.
-    }, { fetch, location });
+    }, { fetch, location, prepare });
     assert.equal(posted.length, 1, 'the walk reached the completion POST');
     return posted[0];
 }
@@ -1351,4 +1356,94 @@ test('a fresh local-only setup saves Light and Fallbacks that follow the local M
     const mixed = await finishFromAccounts(FRESH, 'local-fallback-router', { localMode: 'fallback',
         inputs: { ...local, 'openrouter-key': 'sk-or-v1-test-not-a-secret' } });
     assert.deepEqual([mixed.OUROBOROS_MODEL_LIGHT, mixed.OUROBOROS_MODEL_FALLBACKS], [routerDefaults.light, routerDefaults.fallback]);
+});
+
+// The compatible key's consent box on the real wizard, its rows on the editor's DOM stand-in. Setup's draft is read against the
+// draft as it was mounted and a Test against what is stored (the saved state the wizard hands the editor in settings keys): what
+// Start sends is the box's last visible choice, across Back, and a Test adds to what is stored only what the box differs in.
+const LAB = 'http://lab.lan/v1';
+const LAB_ROW = 'http://lab2.lan/v1';
+const STORED = ['a1b2c3d4e5f60718293a4b5c', 'b2c3d4e5f60718293a4b5c6d'];  // inert stand-ins for the stored ids of both addresses
+
+/** One walk of the wizard over a built-in and a named compatible key. `first` and `second` are what a person does to both on the
+ *  visit before Next and the one after Back: tick the box (`true`), clear it (`false`), retype the address (`'address'`) or nothing. */
+async function consentWalk(query, { stored = false, first, second, back = true, test = false }) {
+    const { Stub } = await import('./helpers/settings_dom.js');
+    const { NodeStub } = await import('./dashboard_dom_fixture.js');
+    const row = { kind: 'openai-compatible', name: 'lab', label: 'Lab', base_url: LAB_ROW, ...(stored ? { continue_unconfirmed: STORED[1] } : {}) };
+    const initialState = { ...BOOTSTRAP.initialState, freshInstall: false, compatibleBaseUrl: LAB, connections: [row], automaticModels: [],
+        mainModel: 'openai-compatible::lab-model', compatibleContinueUnconfirmed: stored ? STORED[0] : '' };
+    const proto = NodeStub.prototype;
+    const kept = Object.fromEntries(['value', 'lastElementChild', 'insertAdjacentHTML', 'getBoundingClientRect'].map((key) => [key, Object.getOwnPropertyDescriptor(proto, key)]));
+    Object.defineProperties(proto, {  // the editor's DOM stand-in: rows are parsed markup, a field holds what was typed
+        value: { configurable: true, get() { return this.typed ?? this.attrs.value ?? ''; }, set(text) { this.typed = String(text); } },
+        lastElementChild: { configurable: true, get() { return this.children.at(-1) || null; } },
+        insertAdjacentHTML: { configurable: true, value(_where, html) { const parsed = new Stub('div'); parsed.innerHTML = html; [...parsed.children].forEach((child) => this.appendChild(child)); } },
+        getBoundingClientRect: { configurable: true, value: () => ({ top: 0, left: 0, width: 0, height: 0, right: 0, bottom: 0 }) },
+    });
+    const element = Object.getOwnPropertyDescriptor(globalThis, 'Element');
+    globalThis.Element = NodeStub;  // the editor asks whether a press landed on an element
+    const seen = { ticked: [], offered: [], tests: [] };  // the boxes on return, as [built-in, named]; what each Test sent
+    try {
+        const body = await finishFromAccounts({ ...BOOTSTRAP, initialState }, query, { revisit: back, tests: seen.tests,
+            prepare(doc) { const root = new Stub('div'), byId = doc.getElementById; doc.getElementById = (id) => (id === 'root' ? root : byId(id)); },
+            async onAccounts(doc, visit) {
+                const root = doc.getElementById('root'), panel = root.querySelector('[data-settings-panel="providers"]');
+                const keys = root.querySelectorAll('[data-connection-row]').filter((each) => each.dataset.kind === 'openai-compatible');
+                const rows = [keys.find((each) => each.dataset.builtin === '1'), keys.find((each) => each.dataset.name === 'lab')];
+                const box = (each) => each.querySelector('[data-connection-consent]');
+                if (visit === 2) Object.assign(seen, { ticked: rows.map((each) => box(each).checked), offered: rows.map((each) => !each.querySelector('.accounts-key-consent').hidden) });
+                const act = visit === 1 ? first : second;
+                for (const each of rows) {
+                    const input = act === 'address' ? each.querySelector('[data-connection-field="base_url"]') : box(each);
+                    if (act === 'address') input.value = 'http://other.lan/v1'; else if (act !== undefined) input.checked = act;
+                    if (act !== undefined) await panel.fire('input', { target: input });
+                }
+                if (test && visit === (back ? 2 : 1)) {
+                    for (const each of rows) { await panel.fire('click', { target: each.querySelector('[data-connection-test]') }); await settle(); }
+                }
+            } });
+        return { body, ...seen };
+    } finally {
+        if (element) Object.defineProperty(globalThis, 'Element', element); else delete globalThis.Element;
+        for (const [key, descriptor] of Object.entries(kept)) { if (descriptor) Object.defineProperty(proto, key, descriptor); else delete proto[key]; }
+    }
+}
+
+test('Back keeps the last visible consent choice of the built-in and a named compatible key: Start sends exactly it', async () => {
+    const lab = (body) => [body.OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED, body.OUROBOROS_CONNECTIONS.find((row) => row.name === 'lab').continue_unconfirmed ?? ''];
+    const cases = [  // [what happens, stored, before Next, after Back, the boxes ticked on return, what Start sends]
+        ['given in the first setup', false, true, undefined, [], [LAB, LAB_ROW], false],
+        ['given, kept across Back', false, true, undefined, [true, true], [LAB, LAB_ROW]],
+        ['given, then cleared after Back', false, true, false, [true, true], ['', '']],
+        ['given only after Back', false, undefined, true, [false, false], [LAB, LAB_ROW]],
+        ['given, then the address retyped after Back', false, true, 'address', [true, true], ['', '']],
+        ['a stored one withdrawn, kept across Back', true, false, undefined, [false, false], ['', '']],
+        ['a stored one withdrawn, then given again after Back', true, false, true, [false, false], [LAB, LAB_ROW]],
+        ['a stored one withdrawn only after Back', true, undefined, false, [true, true], ['', '']],
+        ['a stored one, the address retyped after Back', true, undefined, 'address', [true, true], ['', '']],
+        ['a stored one never touched', true, undefined, undefined, [true, true], STORED],
+    ];
+    for (const [what, stored, first, second, ticked, sent, back = true] of cases) {
+        const walked = await consentWalk(`consent-back-${what.replace(/\W+/g, '-')}`, { stored, first, second, back });
+        assert.deepEqual([walked.ticked, lab(walked.body)], [ticked, sent], what);
+    }
+    const withdrawn = await consentWalk('consent-back-offered', { stored: true, first: false });
+    assert.deepEqual(withdrawn.offered, [true, true], 'a withdrawal Start has yet to save stays on the page, to be taken back');
+});
+
+test('a Test in setup adds to what is stored only what its box differs in, whatever the draft held before Back', async () => {
+    const cases = [  // [what happens, stored, before Next, after Back, the consent a Test of the built-in key and of the named key adds]
+        ['given in the first setup', false, true, undefined, [LAB, LAB_ROW], false],
+        ['given only after Back', false, undefined, true, [LAB, LAB_ROW]],
+        ['given before Back, kept', false, true, undefined, [LAB, LAB_ROW]],
+        ['given before Back, cleared', false, true, false, [undefined, undefined]],
+        ['stored, never touched', true, undefined, undefined, [undefined, undefined]],
+        ['stored, withdrawn before Back', true, false, undefined, ['', '']],
+        ['stored, withdrawn and given again', true, false, true, [undefined, undefined]],
+    ];
+    for (const [what, stored, first, second, adds, back = true] of cases) {
+        const { tests } = await consentWalk(`consent-test-${what.replace(/\W+/g, '-')}`, { stored, first, second, back, test: true });
+        assert.deepEqual([tests[0].overrides.OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED, tests[1].overrides.continue_unconfirmed], adds, what);
+    }
 });

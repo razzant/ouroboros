@@ -793,10 +793,33 @@ def prospective_wrapup_attempt_request(
     with request_wire_call_scope():
         # The send's own options, from their one owner: a key the send carries and
         # this copy does not is a different payload, and the admitted answer is refused.
+        wire_options = main_loop_wire_options(model, allow_server_web_search=allow_server_web_search)
+        if target.get("provider") == "openai-compatible":
+            from ouroboros.llm_ollama import prospective_request
+            from ouroboros.llm_ollama_wire import OllamaRouteUnsettledError
+            from ouroboros.llm_routing import configured_window
+
+            try:
+                native = prospective_request(target, llm._normalize_system_message_placement(messages),
+                                             tools, reasoning_effort, MAIN_LOOP_MAX_TOKENS,
+                                             wire_options["stream"], requested=configured_window(target))
+            except OllamaRouteUnsettledError:
+                # Pricing is not generation: a metadata read that unsettles or withholds the send prices the
+                # wrap-up as an unknown reservation instead of failing it; the send itself re-decides its
+                # admission (withheld, an old Ollama, an unreadable store, a transient 429/5xx alike).
+                return _merge_scope(AttemptRequest(
+                    model=model, provider=infer_provider_from_model(model),
+                    prompt_tokens_estimate=prompt_tokens,
+                    max_completion_tokens=MAIN_LOOP_MAX_TOKENS,
+                    processing_preference=processing_preference,
+                    force_unknown_reservation=True,
+                ))[0]
+            if native is not None:
+                return _merge_scope(native)[0]
         candidate = llm._build_remote_candidate(
             target, messages, reasoning_effort, MAIN_LOOP_MAX_TOKENS, "auto", None, tools,
             skip_capability_fetch=True,
-            **main_loop_wire_options(model, allow_server_web_search=allow_server_web_search),
+            **wire_options,
         )
         llm._normalize_payload_cache_ttl(target, candidate)
         anthropic = target.get("provider") == "anthropic"

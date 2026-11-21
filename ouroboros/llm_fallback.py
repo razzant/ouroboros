@@ -20,7 +20,7 @@ import time
 from dataclasses import replace
 from typing import Any, Dict, Optional
 
-from ouroboros.model_concurrency import limit_physical_send
+from ouroboros.llm_ollama import limit_compatible_send
 
 from ouroboros.llm_attempt import (
     _attempt_request,
@@ -67,6 +67,36 @@ def _wire_surface(target: Dict[str, Any]) -> str:
     if target.get("provider") == "anthropic":
         return "messages"
     return OPENAI_API_SURFACES["responses"] if responses_route(target) else OPENAI_API_SURFACES["chat_completions"]
+
+
+def _rediscovers_on_failure(driver: Any) -> Any:
+    """A failed compatible send may mean another program now serves its address: the
+    next send asks again whether it is Ollama (``llm_ollama.forget_rejection``)."""
+    import functools
+    import inspect
+
+    def forget(target: Any, error: Exception) -> None:
+        from ouroboros.llm_ollama import forget_rejection
+        forget_rejection(target, error)
+
+    if inspect.iscoroutinefunction(driver):
+        @functools.wraps(driver)
+        async def driven_async(self: Any, create_fn: Any, kwargs: Any, target: Any) -> Any:
+            try:
+                return await driver(self, create_fn, kwargs, target)
+            except Exception as error:
+                forget(target, error)
+                raise
+        return driven_async
+
+    @functools.wraps(driver)
+    def driven(self: Any, create_fn: Any, kwargs: Any, target: Any) -> Any:
+        try:
+            return driver(self, create_fn, kwargs, target)
+        except Exception as error:
+            forget(target, error)
+            raise
+    return driven
 
 
 def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]:
@@ -435,6 +465,7 @@ class _RecoveryLadderMixin:
         return stripped
 
     @request_wire_scoped
+    @_rediscovers_on_failure
     def _create_chat_completion_with_retries(
         self,
         create_fn: Any,
@@ -468,7 +499,7 @@ class _RecoveryLadderMixin:
             try:
                 result = _execute_candidate(
                     request,
-                    limit_physical_send(target, dispatch),
+                    limit_compatible_send(target, dispatch, self._resolve_remote_target),
                     _candidate_before_dispatch(candidate, request),
                 )
                 note_wire_send_succeeded(last_physical_attempt_capture())
@@ -614,6 +645,7 @@ class _RecoveryLadderMixin:
         return _recover_existing(kwargs, response=resp)
 
     @request_wire_scoped
+    @_rediscovers_on_failure
     async def _create_chat_completion_with_retries_async(
         self,
         create_fn: Any,
@@ -649,7 +681,7 @@ class _RecoveryLadderMixin:
             try:
                 result = await _execute_candidate_async(
                     request,
-                    limit_physical_send(target, dispatch),
+                    limit_compatible_send(target, dispatch, self._resolve_remote_target),
                     _candidate_before_dispatch(candidate, request),
                 )
                 note_wire_send_succeeded(last_physical_attempt_capture())

@@ -62,12 +62,15 @@ def _key(task_id: str, provider: str, model: str, processing_mode: str = "") -> 
 
 
 def stash_task_cache_split(
-    task_id: str, model: str, cached_tokens: int, *, provider: str = "", ttl_seconds: float,
+    task_id: str, model: str, cached_tokens: Optional[int], *, provider: str = "", ttl_seconds: float,
     processing_mode: str = "",
 ) -> None:
     """Remember what one task+provider+model send read from the provider cache."""
     key = _key(task_id, provider, model, processing_mode)
     if not key[0] or not key[2]:
+        return
+    if cached_tokens is None:
+        _SPLITS.pop(key, None)
         return
     if key not in _SPLITS and len(_SPLITS) >= _SPLITS_CAP:
         _SPLITS.clear()

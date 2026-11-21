@@ -74,6 +74,9 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OPENAI_BASE_URL": "",
     "OPENAI_COMPATIBLE_API_KEY": "",
     "OPENAI_COMPATIBLE_BASE_URL": "",
+    # The owner's consent to send to a private compatible server that names no program: a write saves the id of
+    # the endpoint it covers, a base URL given at launch is read as that id (``llm_ollama_guard.consent_token``).
+    "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED": "",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY": "",
     "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://foundation-models.api.cloud.ru/v1",
     "GIGACHAT_CREDENTIALS": "",

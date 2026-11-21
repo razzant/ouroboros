@@ -100,10 +100,11 @@ class _ReviewAttemptHistory:
     incoming_capture: Any = field(default=None, repr=False, compare=False)
 
     def observe(self, error: Any = None) -> None:
-        from ouroboros.transport_custody import stream_incomplete_on_chain
+        from ouroboros.transport_custody import ProviderNotDispatched, stream_incomplete_on_chain
 
         capture = getattr(error, "physical_attempt_capture", None)
-        if capture is None:
+        # A metadata refusal before this attempt acquired physical custody has no capture; the last one is not its fact.
+        if capture is None and not isinstance(error, ProviderNotDispatched):
             capture = usage_accounting.last_physical_attempt_capture()
             if capture is self.incoming_capture:
                 return
@@ -152,7 +153,7 @@ def _review_exception_projection(
     """Project one failed actor while retaining earlier rail custody."""
     from ouroboros.review_execution import ReviewRouteUnavailable
     from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable, UsageAccountingError
-    from ouroboros.transport_custody import stream_incomplete_on_chain
+    from ouroboros.transport_custody import ProviderNotDispatched, stream_incomplete_on_chain
 
     failure_custody = dict(executor_custody or {})
     capture = getattr(exc, "physical_attempt_capture", None)
@@ -212,7 +213,7 @@ def _review_exception_projection(
         "custody_lost" if history.unknown_outcome_seen else route_state
         or ("not_dispatched" if not dispatched and (
             capture_state in {"reserved", "released"}
-            or isinstance(exc, (BudgetExceeded, BillingAuthorityUnavailable, ControlAuthorityUnavailable))
+            or isinstance(exc, (BudgetExceeded, BillingAuthorityUnavailable, ControlAuthorityUnavailable, ProviderNotDispatched))
             or str(getattr(exc, "code", "") or "") == "deadline_exhausted"
         ) else "settled")
     )

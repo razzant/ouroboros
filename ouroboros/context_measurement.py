@@ -70,6 +70,7 @@ class MainFitMeasurement:
     mode_cause: str = ""  # why ``rendered_mode`` is lower than it (``mode_cause``); "" when it is not
     # Low's missed target: the start's request with no memory at all, reply reserve included (``floor.no_memory_tokens``).
     no_memory_tokens: Optional[int] = None
+    requested_load_window: Optional[int] = None
 
     @property
     def probes_reply_reservation(self) -> bool:
@@ -213,6 +214,7 @@ def measure_main_fit(
     measurement = MainFitMeasurement(
         window=window_projection(current, under_way=True),
         view_kind=plan.view_kind,
+        requested_load_window=getattr(plan, "requested_load_window", None),
         route_fp=str(plan.route_fp or ""),
         round_id=str(round_id or ""),
         profile=profile,
