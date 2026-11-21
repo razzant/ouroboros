@@ -76,7 +76,8 @@ export function ordinaryPress(event, doc = globalThis.document) {
 export function bindDocumentSelectionDismissal(doc = globalThis.document, { onPress } = {}) {
     if (!doc?.addEventListener || !doc?.getSelection) return () => {};
     const handler = (event) => {
-        if (!ordinaryPress(event, doc)) return;
+        // A selection's own action consumes it on click, after this capture listener.
+        if (event.target?.closest?.('.chat-reply-selection-action') || !ordinaryPress(event, doc)) return;
         onPress?.();
         const selection = doc.getSelection?.();
         if (!selection || selection.isCollapsed || !selection.rangeCount) return;

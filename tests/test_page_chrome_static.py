@@ -90,13 +90,13 @@ def test_server_navigation_and_chat_static_contracts():
     assert "composerText(text, uploadedAttachments.map(" in composer_source
     assert "attachmentTail(names);" in attachments_source  # every message but the exact /restart command
     assert "list.slice(0, ATTACHMENT_PREVIEW_COUNT)" in attachments_source
-    assert "for (const item of [...pending])" in attachments_source
+    assert "items = pending.slice()" in attachments_source  # a send uploads the files staged when it was submitted
     assert "attachBtn.classList.toggle('uploading', flag)" in attachments_source
     assert "input.readOnly = flag;" in attachments_source
     assert "cleanupUploadedAttachments" in composer_source
     assert "await cleanupUploadedAttachments(e.uploaded || []);" in composer_source
-    assert "await cleanupUploadedAttachments(uploadedAttachments);" in composer_source
-    assert "ws.send(frame, hasAttachments ? { queue: false } : undefined)" in composer_source
+    assert "await cleanupUploadedAttachments(uploadedAttachments.filter(item => !item.reused));" in composer_source
+    assert "ws.send(frame, requireConnection ? { queue: false } : undefined)" in composer_source
     assert "result?.status !== 'sent'" in composer_source
     assert "data-attachment-remove" in attachments_source
     media_source = _read("web/modules/chat_media.js")

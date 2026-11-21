@@ -27,7 +27,7 @@ from ouroboros.anthropic_native_custody import is_replayed_native_content
 from ouroboros._usage_response import (
     _plain, processing_refusal_reason, provider_answer, provider_failure_payload, refusal_conflicts, typed_values,
 )
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, size_refusal
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, size_refusal
 from ouroboros.llm_helper_window import _helper_attempt_context, helper_context_for, priced_for
 from ouroboros.transport_custody import (  # noqa: F401 -- shared with the catalog and native send builders
     apply_processing_preference, attempt_pricing_fields, processing_transport_modes, provider_reported_cost_only,
@@ -604,6 +604,7 @@ def _physical_candidate(payload: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(message, dict):
             message.pop(HOST_CONTEXT_KIND_KEY, None)
             message.pop(HOST_TEXT_SHA_KEY, None)
+            message.pop(REPLY_SOURCE_SHA_KEY, None)
             message.pop(TOOL_RESULT_RECORD_KEY, None)
             message.pop(REVIEW_HISTORY_MESSAGE_KEY, None)
             message.pop(REVIEW_CONTEXT_INDEX_KEY, None)

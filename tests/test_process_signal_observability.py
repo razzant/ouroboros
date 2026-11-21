@@ -420,6 +420,21 @@ def test_verify_timeout_receipt_carries_duration(tmp_path, monkeypatch):
     assert "signal" not in row
 
 
+def test_verify_refused_before_start_records_no_receipt_and_is_a_no_effect_refusal(tmp_path, monkeypatch):
+    from ouroboros.command_memory import CommandMemoryRefused
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, drive = _verify_ctx(tmp_path)
+
+    def refuse(cmd, **kwargs):
+        raise CommandMemoryRefused("under_reserve", "free memory is under the reserve")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", refuse)
+    text = _verify_and_record(ctx, contract_kind="explicit_command", check=["sh", "-c", "true"])
+    assert "under_reserve" in str(text) and "The check was not run" in str(text)
+    assert not list(drive.rglob("verification_receipts.jsonl"))  # a refusal is not a red verdict
+
+
 # ---------------------------------------------------------------------------
 # D6 — both FIXED projections carry the new keys; identity is untouched
 # ---------------------------------------------------------------------------
@@ -477,6 +492,15 @@ def test_accept_summary_carries_latest_disclosure_keys():
     assert "latest_duration_ms" not in plain
     assert "latest_signal" not in plain
     assert "latest_resolved_runtime" not in plain
+
+
+def test_the_memory_fact_is_carried_only_as_a_typed_mapping_by_both_projections():
+    from ouroboros._outcome_receipts import verification_receipt_ledger_row
+    from ouroboros.review_evidence_sections import _accept_verification_summary
+
+    plain = {"status": "pass", "check": "true", "memory_oom": "free text"}  # only the typed mapping is carried
+    assert "memory_oom" not in verification_receipt_ledger_row(plain)
+    assert "latest_memory_oom" not in _accept_verification_summary([plain])
 
 
 def test_reconciliation_and_identity_unchanged_by_disclosure_keys():
@@ -901,3 +925,67 @@ def test_tools_jsonl_row_carries_the_typed_process_facts(tmp_path):
     assert row["exit_code"] == -9
     assert row["signal"] == _KILL_NAME
     assert row["killed_by_host"] is True
+
+
+# ----------------------------------------------------------------------- memory leaf outcome (#3792)
+
+OOM_FACT = {"victim_in_leaf": True, "leaf_local_oom": 1, "commands_local_oom": 1, "unknown": False}
+
+
+def test_memory_oom_is_published_only_from_fixed_typed_members():
+    from ouroboros.tools.process_facts import PROCESS_FACT_KEYS, publish_process_facts
+
+    assert "memory_oom" in PROCESS_FACT_KEYS
+    consume_last_process_facts()
+    facts = publish_process_facts(returncode=-9, started_ts=time.monotonic(),
+                                  memory_oom={**OOM_FACT, "text": "service is alive", "pid": 7})
+    assert facts["signal"] == _KILL_NAME and facts["memory_oom"] == OOM_FACT  # nothing free-form crosses
+    assert consume_last_process_facts()["memory_oom"] == OOM_FACT
+    assert "memory_oom" not in publish_process_facts(returncode=0, started_ts=time.monotonic())
+
+
+def test_sigkill_with_the_fact_has_a_human_reason_and_separate_observations():
+    from ouroboros.tools.process_facts import describe_returncode
+
+    text = describe_returncode(-9, memory_oom=OOM_FACT)
+    assert f"signal={_KILL_NAME}" in text and "out-of-memory kill in its memory group (any process of the group)" in text
+    assert "1 out-of-memory event" in text and text.index("signal=") < text.index("memory:")  # the leader's signal stays its own
+    assert "killed it" not in text  # the group kill is never attributed to the process whose status is shown
+    assert "memory" not in describe_returncode(-9)  # no fact: unchanged
+    plain = describe_returncode(1, memory_oom=OOM_FACT)  # a descendant was the victim, the leader exited by itself
+    assert "signal=" not in plain and "kill in its memory group" in plain
+    assert "memory" not in describe_returncode(1, memory_oom={**OOM_FACT, "victim_in_leaf": False})
+    unknown = describe_returncode(-9, memory_oom={"victim_in_leaf": None, "unknown": True})
+    assert "could not all be read" in unknown and "service" not in unknown
+
+
+class _OomLease:
+    """A memory leaf stand-in whose ``finish`` reports the kernel's OOM counts for the command that just ended."""
+
+    def place(self, pid):
+        pass
+
+    def watch(self, stop=None):
+        return stop or (lambda: None)
+
+    def finish(self, pid):
+        return {**OOM_FACT, "pid": pid}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses sh and the gate shim")
+def test_an_oom_bearing_completed_check_is_stored_and_reaches_both_reviewer_projections(tmp_path, monkeypatch):
+    """The real ``_verify_and_record`` through the gated start: the COMPLETED result carries the memory fact, the stored
+    receipt row keeps it, and that STORED row (not a handcrafted one) is what both reviewer projections read. Dropping the
+    ``memory_oom`` argument where verify publishes the facts fails here."""
+    from ouroboros import command_memory
+    from ouroboros._outcome_receipts import verification_receipt_ledger_row
+    from ouroboros.review_evidence_sections import _accept_verification_summary
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, drive = _verify_ctx(tmp_path)
+    monkeypatch.setattr(command_memory, "begin", lambda *_: _OomLease())
+    _verify_and_record(ctx, contract_kind="explicit_command", check=["sh", "-c", "exit 3"])
+    row = _read_receipts(drive)[-1]
+    assert row["status"] == "fail" and row["returncode"] == 3 and row["memory_oom"] == OOM_FACT
+    assert verification_receipt_ledger_row(row)["memory_oom"] == OOM_FACT
+    assert _accept_verification_summary([row])["latest_memory_oom"] == OOM_FACT

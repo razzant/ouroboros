@@ -140,7 +140,7 @@ class ChronologicalSource(HistorySource):
 
     def _entry(self, row, key, coordinate):
         from ouroboros.chat_references import projection_fields
-        return {**row.row, **projection_fields(row.row), "history_id": row.history_id,
+        return {**row.row, **projection_fields(row.row, self.root), "history_id": row.history_id,
                 "history_position": {"source": self.source, "offset": row.seq},
                 "_history_end": coordinate + 1, "_chrono_key": _public(key)}
 
@@ -204,7 +204,7 @@ class ChronologicalSource(HistorySource):
             rows = ds.probe_rows(self.root, self.source, [("task_id", task_id)], before=self.upper, lower=lower,
                                  limit=_PROBE_ROWS, newest_first=False)
             for row in rows:
-                entry = {**row.row, **projection_fields(row.row), "history_id": row.history_id,
+                entry = {**row.row, **projection_fields(row.row, self.root), "history_id": row.history_id,
                          "history_position": {"source": self.source, "offset": row.seq}}
                 if member(entry):
                     key = reading_key(row.row, row.seq)

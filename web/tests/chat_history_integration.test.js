@@ -716,13 +716,13 @@ test("an owner message links its http(s) address live and from history, and Copy
     const words = 'Read `https://e.com/a?b=1&c=2`, then <b>reply</b>.';
     const link = '<a class="md-link" href="https://e.com/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">'
         + 'https://e.com/a?b=1&amp;c=2</a>';
-    const message = (bubble) => bubble.innerHTML.match(/<div class="message">[\s\S]*?<\/div>/)?.[0];
+    const message = (bubble) => bubble.innerHTML.match(/<div class="message" data-reply-body>[\s\S]*?<\/div>/)?.[0];
     const saved = row('chat:211', words, { role: 'user', client_message_id: 'owner:211', source: 'web' });
     const f = fixture(t);
     await f.refresh();
     f.emit({ ...saved, content: words, history_id: undefined });
     const live = f.bubbles()[0];
-    assert.equal(message(live), `<div class="message">Read \`${link}\`, then &lt;b&gt;reply&lt;/b&gt;.</div>`);
+    assert.equal(message(live), `<div class="message" data-reply-body>Read \`${link}\`, then &lt;b&gt;reply&lt;/b&gt;.</div>`);
     const copied = [];
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => copied.push(text) } });
     t.after(() => delete navigator.clipboard);
@@ -735,6 +735,22 @@ test("an owner message links its http(s) address live and from history, and Copy
     await f.refresh(page([earlier, saved]));
     const replayed = f.bubbles().find((bubble) => bubble.dataset.clientMessageId === 'owner:210');
     assert.equal(message(replayed), message(live), 'history paints the same linked words');
+});
+
+test('Markdown the page could not parse offers no passage, whatever the message says; an owner message still does', async (t) => {
+    // Without the parser the marks show: `**dom** dom dom` puts its second "dom" at 8, a parsed page's third. Coordinates
+    // saved from one reading must not be found in the other (docs/DESIGN.md "Replies").
+    const f = fixture(t);
+    await f.refresh();
+    const mine = row('chat:231', '**dom** dom dom', { role: 'user', client_message_id: 'owner:231', source: 'web' });
+    const hers = row('chat:232', '**dom** dom dom');
+    for (const saved of [mine, hers]) f.emit({ ...saved, content: saved.text, history_id: undefined });
+    const [owner, assistant] = f.bubbles();
+    assert.match(owner.innerHTML, /<div class="message" data-reply-body>/, 'plain owner words have one reading');
+    assert.doesNotMatch(assistant.innerHTML, /data-reply-body/, 'no parser here: no passage of it can be quoted');
+    await f.refresh(page([mine, hers]));
+    assert.doesNotMatch(f.bubbles().find((bubble) => bubble.innerHTML.includes('dom')
+        && !bubble.dataset.clientMessageId).innerHTML, /data-reply-body/, 'history draws the same words the same way');
 });
 
 test("a host reply that names the owner's submission is drawn beside his bubble, not into it", async (t) => {

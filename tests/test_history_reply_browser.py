@@ -181,6 +181,43 @@ def _settled_row(page, target, feed):
 
 
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_main_quote_lands_in_the_project_already_docked_beside_it(direct_server_with_data, browser_engine):
+    from playwright.sync_api import sync_playwright
+
+    data = direct_server_with_data["data_dir"]
+    project = create_project(data, "docked-source", name="Docked source", origin="owner_ui")
+    source = {"chat_id": project["chat_id"], "direction": "out", "ts": "2026-10-01T12:00:00Z",
+              "text": "Copper light, then copper light."}
+    ds.append(data, "chat", source, feed=True)
+    excerpt = {"text": "copper light", "start_utf16": source["text"].index("copper")}
+    ref = {**reference_from_row(source), "excerpt": excerpt}
+    ds.append(data, "chat", {"chat_id": 1, "direction": "out", "ts": "2026-10-01T12:01:00Z",
+                              "text": "Follow the second lamp.", "reply_to": ref}, feed=True)
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 850})
+            page.add_init_script(f"({_OBSERVE_QUOTES})()")
+            _open(page, direct_server_with_data["url"])
+            room_browser._open(page, project["id"])
+            feed = "#pchat-docked-source-messages"
+            _idle(page, feed)
+            page.locator("#pchat-docked-source-input").fill("Keep my project draft.")
+            # The docked Project's scrim takes pointer clicks. Main stays keyboard-accessible beside it.
+            _quote(page, ref["address"]).press("Enter")
+            _landed(page, ref["address"], feed)
+            page.wait_for_function("""([feed, text, start]) => {
+                const selection = getSelection();
+                const r = [...(CSS.highlights?.get('reply-excerpt') || [])][0]
+                    || (selection.rangeCount && selection.getRangeAt(0));
+                return r?.toString() === text && r.startOffset === start && r.startContainer.parentElement.closest(feed);
+            }""", arg=[feed, excerpt["text"], excerpt["start_utf16"]])
+            assert page.locator("#pchat-docked-source-input").input_value() == "Keep my project draft."
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
 def test_exact_cross_room_quote_and_return_preserve_drafts_unread_and_history(direct_server_with_data, browser_engine, tmp_path):
     from playwright.sync_api import sync_playwright
     fixture = seed_reply_history(direct_server_with_data["data_dir"], outside_sidebar=True)
@@ -1654,3 +1691,184 @@ def test_search_lands_on_the_matching_photo_or_file_of_a_group(direct_server_wit
             (shots / f"{browser_engine}-group-marks.json").write_text(json.dumps(landed, indent=2))
             browser.close()
     assert not errors, errors
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_selected_passage_lands_on_second_group_item_from_project(direct_server_with_data, browser_engine):
+    from playwright.sync_api import sync_playwright
+
+    root = direct_server_with_data["data_dir"]
+    project = create_project(root, "group-quotes", name="Group quotes", origin="owner_ui")
+    sources = [{"chat_id": 1, "ts": f"2026-10-01T12:00:0{i}Z", "direction": "out", "type": "document",
+                "task_id": "field-notes", "filename": f"{stem}.txt", "caption": f"The {stem} pier", "text": f"The {stem} pier"}
+               for i, stem in enumerate(("south", "north"))]
+    for source in sources:
+        ds.append(root, "chat", source, feed=True)
+    address = format_address(row_address(sources[1]))
+    excerpt = {"text": "north", "start_utf16": 4}
+    ds.append(root, "chat", {"chat_id": project["chat_id"], "ts": "2026-10-01T12:01:00Z", "direction": "out",
+                              "text": "Read the north note.", "reply_to": {**reference_from_row(sources[1]), "excerpt": excerpt}}, feed=True)
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 850})
+            page.add_init_script(f"({_OBSERVE_QUOTES})()")
+            _open(page, direct_server_with_data["url"])
+            room_browser._open(page, project["id"])
+            _quote(page, address, "#pchat-group-quotes-messages").click()
+            _landed(page, address, "#chat-messages")
+            page.wait_for_function("""address => {
+                const target = document.querySelector('#chat-messages .chat-file-item.is-quote-target');
+                const r = [...CSS.highlights.get('reply-excerpt') || []][0];
+                return target?.dataset.rowAddress === address && target.closest('.is-multiple')
+                    && target.querySelector('.chat-file-name').textContent === 'north.txt'
+                    && target.querySelector('.chat-file-caption').contains(r?.startContainer)
+                    && r.toString() === 'north';
+            }""", arg=address)
+            assert page.evaluate("address => window.__quoteReads.some(r => r.address === address && r.body?.anchor?.state === 'found')", address)
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_selected_reply_keeps_second_rendered_passage_through_reload(direct_server_with_data, browser_engine):
+    from playwright.sync_api import expect, sync_playwright
+
+    phrase = "Silver gate"
+    row = {"chat_id": 1, "direction": "out", "ts": "2026-10-01T12:00:00+00:00",
+           "text": f"🌙 **{phrase}** then [{phrase}](https://example.invalid/atlas)."}
+    ds.append(direct_server_with_data["data_dir"], "chat", row, feed=True)
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        page = browser.new_page(viewport={"width": 1100, "height": 750})
+        try:
+            page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+            page.locator("#chat-input").fill("Keep the night route.")
+            # Native Selection spans the second occurrence. The subsequent real button press includes
+            # the shell's document-capture pointerdown and the browser's usual mousedown default.
+            link = page.locator("#chat-messages .message a", has_text=phrase)
+            link.evaluate("""node => {
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                const selection = getSelection();
+                selection.removeAllRanges(); selection.addRange(range);
+            }""")
+            action = page.get_by_role("button", name="Reply to quote", exact=True)
+            action.wait_for()
+            assert link.evaluate("""link => {
+                const r = getSelection().getRangeAt(0).getBoundingClientRect();
+                link.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, button:2,
+                    clientX:r.left+r.width/2, clientY:r.top+r.height/2}));
+                const api = window.ouroReplyToQuote;
+                const offered = api.available('menu-A');
+                const refused = !api.activate('other-menu');
+                const saved = getSelection().getRangeAt(0).cloneRange();
+                getSelection().removeAllRanges();
+                const stale = !api.activate('menu-A');
+                link.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, button:0}));
+                getSelection().addRange(saved);
+                return offered && refused && stale;
+            }""")
+            assert page.evaluate("() => sessionStorage.getItem('ouro_chat_reply')") is None
+            action.click()
+            strip = page.locator(".chat-quote--composer[data-excerpt]")
+            expect(strip.locator(".chat-quote-text")).to_have_text(phrase, use_inner_text=True)
+            kept = page.evaluate("() => JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
+            assert kept["address"] == format_address(row_address(row))
+            assert kept["excerpt"] == {"text": phrase, "start_utf16": len("🌙 Silver gate then ".encode("utf-16-le")) // 2}
+            page.reload(wait_until="domcontentloaded")
+            strip.wait_for()
+            assert page.locator("#chat-input").input_value() == "Keep the night route."
+            strip.locator(".chat-quote-main").click()
+            page.wait_for_function("""() => {
+                const range = [...(CSS.highlights?.get('reply-excerpt') || [])][0] || (getSelection()?.rangeCount ? getSelection().getRangeAt(0) : null);
+                return !!range?.startContainer.parentElement.closest('a');
+            }""")
+            strip.get_by_role("button", name="Cancel reply").click()
+            assert page.locator("#chat-input").input_value() == "Keep the night route."
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("room,direction", [("main", "in"), ("main", "out"), ("project", "in"), ("project", "out")])
+def test_selected_passage_round_trip(direct_server_with_data, room, direction):
+    """Real mouse, WS acceptance, stored owner row and the reloaded room; only the fixture's LLM is scripted."""
+    from playwright.sync_api import sync_playwright
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    project = create_project(root, "night-atlas", name="Night atlas", origin="owner_ui") if room == "project" else None
+    chat = project["chat_id"] if project else 1
+    prefix = f"pchat-{project['id']}" if project else "chat"
+    passage = ("The violet beacon above the winter quay guides the little survey boat past the shoals. "
+               "A chalk star beside the eastern stair marks the tide gauge that the night crew should read.")
+    opening = f"🌙 {passage} Again, "
+    row = {"chat_id": chat, "direction": direction, "text": opening + passage + " At dawn.", "ts": "2026-10-07T12:00:00Z"}
+    ds.append(root, "chat", row, feed=True)
+    address = format_address(row_address(row))
+    new_words = "Please explain the second observation."
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1100, "height": 750})
+        try:
+            page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_function("() => window.__testSockets.some(s => s.readyState === WebSocket.OPEN)")
+            if project:
+                room_browser._open(page, project["id"])
+            feed = page.locator(f"#{prefix}-messages")
+            body = feed.locator(f'.chat-bubble[data-row-address={json.dumps(address)}] .message[data-reply-body]')
+            body.scroll_into_view_if_needed()
+            # Read glyph edges to aim physical pointer events. Never program the browser's Selection.
+            points = body.evaluate("""(body, passage) => {
+                const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    const start = node.data.lastIndexOf(passage);
+                    if (start < 0) continue;
+                    const glyph = (i, end) => {
+                        const r = document.createRange();
+                        r.setStart(node, i); r.setEnd(node, i + 1);
+                        const box = r.getBoundingClientRect();
+                        return [end ? box.right - 0.2 : box.left + 0.2, box.top + box.height / 2];
+                    };
+                    return [glyph(start, false), glyph(start + passage.length - 1, true)];
+                }
+            }""", passage)
+            assert points
+            page.mouse.move(*points[0])
+            page.mouse.down()
+            page.mouse.move(*points[1], steps=18)
+            page.mouse.up()
+            assert page.evaluate("getSelection().toString()") == passage
+            page.get_by_role("button", name="Reply to quote", exact=True).click()
+            page.locator(f"#{prefix}-input").fill(new_words)
+            page.locator(f"#{prefix}-send").click()
+            saved = feed.locator('.chat-bubble.user[data-row-address]').filter(has_text=new_words)
+            saved.wait_for(timeout=30_000)
+            cmid = saved.get_attribute("data-client-message-id")
+            accepted = ds.accepted_row(root, chat, cmid)
+            assert accepted and accepted.row["text"] == new_words
+            excerpt = {"text": passage, "start_utf16": len(opening.encode("utf-16-le")) // 2}
+            ref = {**reference_from_row(row), "excerpt": excerpt}
+            assert accepted.row["reply_to"] == ref
+            page.reload(wait_until="domcontentloaded")
+            if project and not feed.is_visible():
+                room_browser._open(page, project["id"])
+            saved = feed.locator(f'.chat-bubble.user[data-row-address={json.dumps(format_address(row_address(accepted.row)))}]')
+            quote = saved.locator(".chat-quote[data-excerpt]")
+            jump, expand = quote.locator(".chat-quote-main"), quote.get_by_role("button", name="Show all", exact=True)
+            expand.wait_for(state="visible")
+            target_box, expand_box = jump.bounding_box(), expand.bounding_box()
+            assert target_box and expand_box
+            assert expand_box["x"] - (target_box["x"] + target_box["width"]) >= 7.5  # --space-2, as in the composer
+            expand.click()
+            assert quote.locator(".chat-quote-text").text_content() == passage
+            jump.click()
+            page.wait_for_function("""([address, expected, start]) => {
+                const r = [...(CSS.highlights?.get('reply-excerpt') || [])][0]
+                    || (getSelection().rangeCount ? getSelection().getRangeAt(0) : null);
+                return r?.toString() === expected && r.startOffset === start
+                    && r.startContainer.parentElement.closest('.chat-bubble')?.dataset.rowAddress === address;
+            }""", arg=[address, passage, excerpt["start_utf16"]])
+        finally:
+            browser.close()

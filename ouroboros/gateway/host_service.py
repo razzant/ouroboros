@@ -533,8 +533,13 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
     try:
         from ouroboros.task_status import SETTLED_STATUSES
 
-        if not isinstance(payload.get("reply_to", ""), str):
-            return _json_error("reply_to must be an address string", 400)
+        from ouroboros.chat_references import (ReplyExcerptNotAuthored, ReplyExcerptUnavailable, ingress_reply,
+                                               reply_identity, same_reply)
+
+        try:
+            requested_reply = reply_identity(payload)
+        except ValueError as exc:
+            return _json_error(str(exc), 400)
         text = str(payload.get("text") or "")
         image_caption = str(payload.get("image_caption") or "")
         client_message_id = str(payload.get("client_message_id") or "").strip()[:128]
@@ -569,7 +574,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                 logged = text.strip() or image_caption.strip() or chat_uploads.attachment_placeholder(
                     inline_image, {"chat_attachments": inbound.get("attachments"), "chat_attachment_uploads": incoming})
                 if (not chat_uploads.same_message(inbound, logged, incoming)
-                        or (inbound.get("reply_to") or {}).get("address", "") != payload.get("reply_to", "")):
+                        or not await asyncio.to_thread(same_reply, ctx.data_dir, inbound.get("reply_to") or {}, requested_reply)):
                     return _json_error("client_message_id was already used for a different message", 409)
                 state = await asyncio.to_thread(_operation_state, ctx, accepted)
                 if state["status"] in SETTLED_STATUSES:
@@ -599,6 +604,13 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                         **({"chat_attachments": refs} if refs else {})}
         if payload.get("reply_to"):  # no reference adds nothing to a plain inject's kwargs
             metadata["reply_to"] = payload["reply_to"]
+        if "excerpt" in requested_reply:
+            metadata["reply_excerpt"] = requested_reply["excerpt"]
+            if not client_message_id:  # unnamed injections enter the queue before their chat row is written
+                try:
+                    metadata["reply_reference"] = await asyncio.to_thread(ingress_reply, ctx.data_dir, metadata)
+                except ValueError as exc:
+                    return _json_error(str(exc), 400)
         from supervisor.message_ingress import ui_control_fact
 
         try:  # a skill's control (an inline button) composed this text: the press is the owner's, not the words
@@ -642,12 +654,16 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                         retain_inputs=pending_uploads.pop_all,
                         dispatch=functools.partial(dispatch_accepted_restart, bridge), **message,
                     )
+                except (ReplyExcerptNotAuthored, ReplyExcerptUnavailable) as exc:
+                    return _json_error(str(exc), 400)  # the unnamed path's answer; 409 stays an id conflict
                 except ValueError as exc:
                     return _json_error(str(exc), 409)
             else:
                 # Custody passes BEFORE the handoff: dispatch may enqueue and then raise, so from
                 # here a failure is unknown. The copies stay (an orphan at worst), never deleted
                 # under queued work; the error still answers the skill, nothing is re-dispatched.
+                if "reply_reference" in metadata:
+                    message["accepted_reply"] = metadata["reply_reference"]
                 pending_uploads.pop_all()
                 dispatch_accepted_restart(bridge, text, **message)
         if not wait_for_response:

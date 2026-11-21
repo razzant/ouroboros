@@ -23,8 +23,8 @@ import { markSwarmLabel } from './swarm_presentation.js';
  * read: a host sentence in the install's language, a known host prefix hidden, the owner's literal words without the
  * composer's file-name tail, Ouroboros's (or a Markdown System row's) sanitized Markdown, other System text escaped,
  * a Skill Review's disclosure. `attachments` are the owner's attachment views. Answers `{ rendered, rich, shown,
- * skillReview }`: the `.message` HTML, whether it is rich Markdown (enhanced once mounted), the words Copy keeps and
- * whether the row is a Skill Review.
+ * skillReview, unparsed }`: the `.message` HTML, whether it is rich Markdown (enhanced once mounted), the words Copy
+ * keeps, whether the row is a Skill Review and whether Markdown was left unparsed (no parser: its marks show).
  */
 export function bubbleWords(text, role, { markdown = false, systemType = '', source = '', attachments = [], narration,
     textPlaceholder = false, skillReview: review = null } = {}) {
@@ -37,14 +37,15 @@ export function bubbleWords(text, role, { markdown = false, systemType = '', sou
     // Only the web composer writes the file-name tail; a Telegram/skill caption is kept word for word.
     const shown = attachments.length ? attachmentCaption(text, attachments,
         { placeholder: textPlaceholder === true, composed: source === 'web' }) : text;
+    let unparsed = false;  // Markdown the page could not parse shows its marks: other coordinates than a parsed page's
     const rendered = role === 'user'
         ? linkify(shown)
         : skillReview
             ? renderSkillReviewDisclosure(text, review || null)
             : role === 'system' && markdown !== true
                 ? escapeHtml(painted)
-                : renderChatMarkdown(painted);
-    return { rendered, rich, shown, skillReview };
+                : renderChatMarkdown(painted, { onPlain: () => { unparsed = true; } });
+    return { rendered, rich, shown, skillReview, unparsed };
 }
 
 /**
@@ -72,16 +73,19 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         if (legacyKey) bubble.dataset.messageKey = legacyKey;
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 
-        const { rendered, rich: richMarkdown, shown, skillReview } = bubbleWords(text, role, { markdown, systemType, source,
+        const { rendered, rich: richMarkdown, shown, skillReview, unparsed } = bubbleWords(text, role, { markdown, systemType, source,
             attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview });
         if (skillReview) bubble.classList.add('chat-skill-review');
+        // A passage's coordinates are the parsed words': an unparsed message offers none, nor lands a saved one.
+        const authored = ['user', 'assistant'].includes(role) && !isProgress && opts.textPlaceholder !== true && Boolean(shown)
+            && !unparsed;
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         // Preserve the card's source link in a standalone row.
         bubble.innerHTML = `
             <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta))}</div>
-            <div class="message${richMarkdown ? ' ui-rich-content' : ''}">${rendered}</div>
+            <div class="message${richMarkdown ? ' ui-rich-content' : ''}"${authored ? ' data-reply-body' : ''}>${rendered}</div>
             ${evidenceLinkHtml(opts.evidenceRef)}
             ${pendingHtml}
             ${timeHtml}

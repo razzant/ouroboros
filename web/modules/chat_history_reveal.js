@@ -49,10 +49,14 @@ export function createHistoryReveal({ pager, reading, feed, records, present, ex
             opened.set(record, record.root?.dataset.expanded === '1');
             expand(record);
         };
-        const find = () => [...feed.querySelectorAll('[data-row-address], [data-history-id]')].find(node =>
-            (node.dataset.rowAddress === address || id && node.dataset.historyId === id)
-            && node.dataset.originProjected !== '1'
-            && (!address.startsWith('row:') || !node.closest?.('[data-portal="1"]'))) || null;
+        function find() {
+            const nodes = [...feed.querySelectorAll('[data-row-address], [data-history-id]')].filter(node =>
+                node.dataset.originProjected !== '1' && (!address.startsWith('row:') || !node.closest?.('[data-portal="1"]')));
+            // A gallery tile owns both identities and includes its filename and caption; its wrapper may hold other rows.
+            const matches = nodes.filter(node => node.dataset.rowAddress === address);
+            return matches.find(node => node.matches?.('.chat-gallery-item, .chat-file-item')) || matches[0]
+                || (id && nodes.find(node => node.dataset.historyId === id && !node.dataset.rowAddress)) || null;
+        }
         let target = find();
         if (!target && id) {
             const record = [...records.values()].find(record => record.items?.some(item => item.historyId === id));
