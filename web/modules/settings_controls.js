@@ -626,7 +626,7 @@ const NUMBER_RULE = (min, max) => (min !== null && max !== null ? `Enter a numbe
 const bound = (value) => (value === undefined || value === null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
 
 /** Typed text as the value to send, or the sentence that refuses it here. A bound that may be `unlimited` goes to
- *  the server as typed: it refuses a blank, a zero or a word and says why. */
+ *  the server as typed: it refuses a blank, a zero or a word and says why; one with declared bounds refuses here. */
 function parseTyped(row, text) {
     const control = controlOf(row);
     if (control.kind === 'pair') {
@@ -636,9 +636,10 @@ function parseTyped(row, text) {
     if (control.kind !== 'number') return { value: text };
     const trimmed = String(text ?? '').trim();
     const number = trimmed === '' ? NaN : Number(trimmed);
-    if (control.noLimit) return { value: Number.isFinite(number) ? number : trimmed };
-    if (trimmed === '' && control.empty) return { value: '' };  // a number its row names when empty may be left blank
     const [min, max] = [bound(control.min), bound(control.max)];
+    const unbounded = trimmed === '' || ['unlimited', 'inf', '\u221e'].includes(trimmed.toLowerCase());  // settings_scales.UNLIMITED_ALIASES
+    if (control.noLimit && (unbounded || (min === null && max === null))) return { value: Number.isFinite(number) ? number : trimmed };
+    if (trimmed === '' && control.empty) return { value: '' };  // a number its row names when empty may be left blank
     if (!Number.isFinite(number) || (control.integer && !Number.isInteger(number)) || (min !== null && number < min) || (max !== null && number > max)) return { refuse: NUMBER_RULE(min, max) };
     return { value: number };
 }

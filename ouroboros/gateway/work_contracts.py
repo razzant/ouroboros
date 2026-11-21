@@ -222,6 +222,7 @@ class Work(WorkLeadFields):
     focus: NotRequired[WorkFocus]
     gaps: NotRequired[List[Dict[str, Any]]]
     client_message_id: NotRequired[str]
+    place_turn: NotRequired[bool]  # a correspondent's Presence turn: Telegram's owner list leaves it out
 
 
 class RoomStatus(TypedDict):
