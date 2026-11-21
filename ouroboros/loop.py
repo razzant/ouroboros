@@ -432,7 +432,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._owner_reply_revision = None  # no live reply of an earlier turn answers this turn's owner rows
     ctx._delivery_candidate, ctx._delivery_candidate_revision, ctx._delivery_control_required = None, 0, False
     ctx._delivery_evidence_revision, ctx._delivery_evidence_fingerprint = 0, ""
-    ctx.model_turn_state, ctx._authoring_handover, ctx._pending_model_wait_handover = ModelTurnState(), None, None
+    ctx.model_turn_state, ctx._authoring_handover, ctx._pending_handover_reason = ModelTurnState(), None, None
     ctx.route_wait_on_primary, ctx.active_role_override, ctx._route_facts_pending = False, None, ""
     ctx._round_prep_since = None  # an earlier turn's batch end starts no round of this one (``round_window``)
     ctx._primary_route_observation, ctx._accepted_route_binding, ctx._primary_return_requested = None, None, None

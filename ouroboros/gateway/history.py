@@ -362,15 +362,20 @@ def _annotate_terminal_task_truth(
         from ouroboros.task_status import FINAL_STATUSES
 
         cache = result_cache if result_cache is not None else {}
-        progress_task_ids, result_task_ids = set(), set()
+        progress_task_ids, summary_anchors, child_row_task_ids, result_task_ids = set(), set(), set(), set()
         from ouroboros.tool_call_log import replay_evidence_for_tasks
 
         # Carriers are host projections after physical selection, not synthetic
         # conversation. A user's row keeps its authorship and physical identity.
         represented, tool_counts = {}, {}
         carriers = {}
+        latest_progress_by_task: Dict[str, Dict[str, Any]] = {}
         for message in combined:
             task_id = str(message.get("task_id") or "")
+            if task_id and message.get("is_progress"):
+                previous = latest_progress_by_task.get(task_id)
+                if previous is None or str(message.get("ts") or "") >= str(previous.get("ts") or ""):
+                    latest_progress_by_task[task_id] = message
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
                 continue
             # A room may show a row its task does not live in (Main pins a Project's
@@ -382,6 +387,10 @@ def _annotate_terminal_task_truth(
             progress, summary = bool(message.get("is_progress")), message.get("system_type") == "task_summary"
             if progress:
                 progress_task_ids.add(task_id)
+            if summary:
+                summary_anchors.add(task_id)
+            if str(message.get("delegation_role") or "").lower() == "subagent":
+                child_row_task_ids.add(task_id)
             if progress or summary or message.get("role") in {"assistant", "system"}:
                 result_task_ids.add(task_id)
             if progress or summary:
@@ -437,10 +446,7 @@ def _annotate_terminal_task_truth(
                 legacy_child_meta_by_task[task_id] = child_meta
             status = str(result.get("status") or "")
             checkpoint = result.get("root_phase_checkpoint")
-            synthesis = (
-                str(checkpoint.get("post_task_synthesis") or "")
-                if isinstance(checkpoint, dict) else ""
-            )
+            synthesis = checkpoint.get("post_task_synthesis") if isinstance(checkpoint, dict) else None
             # An open post-task checkpoint still finalizes: plain roots may say completed; split-drive roots wait for copy-back.
             # Cancellation is terminal immediately; without a checkpoint the legacy semantics stand.
             checkpoint_open = post_task_synthesis_is_open(synthesis)
@@ -511,20 +517,13 @@ def _annotate_terminal_task_truth(
                     task_id, result, {}, data_dir,
                 )
 
-        latest_progress_by_task: Dict[str, Dict[str, Any]] = {}
-        for message in combined:
-            task_id = str(message.get("task_id") or "")
-            if not task_id or not message.get("is_progress"):
-                continue
-            previous = latest_progress_by_task.get(task_id)
-            if previous is None or str(message.get("ts") or "") >= str(previous.get("ts") or ""):
-                latest_progress_by_task[task_id] = message
-
         # Answer first (agent_task_pipeline): a root's final is saved before its result is. Until the store
         # answers, its own status is a claim the saved nonterminal result refutes: its card holds Finalizing….
         answered_unstored = {str(m.get("task_id") or "") for m in combined if not m.get("is_progress")
                              and m.get("task_terminal_status") and str(m.get("task_id") or "") in unfinished_tasks}
         anchored = anchored_children or set()
+        # Keep the root's summary as its truth anchor; a child's card can settle from a later progress row.
+        summary_anchors.difference_update(anchored, legacy_child_meta_by_task, child_row_task_ids)
         for message in combined:
             task_id = str(message.get("task_id") or "")
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
@@ -591,14 +590,13 @@ def _annotate_terminal_task_truth(
                 message.update(terminal_receipt_by_task.get(task_id) or {})
             system_type = str(message.get("system_type") or "")
             is_latest = latest_progress_by_task.get(task_id) is message
-            is_summary = system_type == "task_summary"
-            # R6: the card settles from the LAST status-stamped row the client keeps; a later Reviews row carries the summary's canonical truth.
-            if is_summary or (not message.get("is_progress") and message.get("task_terminal_status")) or is_latest:
+            final_row = not message.get("is_progress") and message.get("task_terminal_status")
+            if system_type == "task_summary" or final_row or (is_latest and task_id not in summary_anchors):
                 message.update(terminal_truth_by_task.get(task_id) or {})
             elif system_type == "subagent_terminal_notice" and "delegated_runs_unreconciled" in (truth := terminal_truth_by_task.get(task_id, {})):
                 # Older terminal notices also state the current list, including an explicit [].
                 message["delegated_runs_unreconciled"] = truth["delegated_runs_unreconciled"]
-            if (message.get("is_progress") or is_summary or message.get("system_type") == "task_evidence") and task_id in suggested_name_by_task:
+            if (message.get("is_progress") or system_type in {"task_summary", "task_evidence"}) and task_id in suggested_name_by_task:
                 message["suggested_name"] = suggested_name_by_task[task_id]
             # Floor-symmetric closed lineage window for chat FINALS: strip runs
             # AFTER the legacy setdefault injection above as the LAST writer —

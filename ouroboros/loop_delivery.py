@@ -30,6 +30,7 @@ from ouroboros.conversation_lease import follow_loop_admission
 from ouroboros.delivery_facts import FACTS_NOTED_CONTROL, note_delivery_facts as _note_delivery_facts
 from ouroboros.delivery_facts import noted, note_shown_review, show_replaced_answer
 from ouroboros.finalization_timing import finalization_child_scope
+from ouroboros.loop_nudges import accept_handover_selection
 from ouroboros.observability import timed_phase
 from ouroboros.outcomes import reviewable_effect_projection
 from ouroboros.task_finalization import schedule_report_ctx, set_terminal_host_notice, set_terminal_plan_review_open
@@ -655,6 +656,7 @@ def completion_observation(ctx: Any, trace: dict) -> dict:
     import copy
     from ouroboros.loop_messages import owner_source_sha256
     return {"subject": copy.deepcopy(getattr(ctx, "_acceptance_observation", {})),
+            "model": (getattr(ctx, "_completion_observation", None) or {}).get("model"),  # until another reply answers
             "tool_count": len(trace.get("tool_calls") or []),
             "owner_source_sha256": owner_source_sha256(ctx)}
 
@@ -743,9 +745,10 @@ def record_forced_completion(trace: dict, tool_ctx: Any, response_meta: dict, *,
 
 def carry_forced_selection(tool_ctx: Any, request: dict | None, candidate: Any) -> None:
     """A selected forced request's silence travels with its bytes, as ``consume_completion_request``'s
-    does, so the Place reply gate and the wake outcome read the author's whole act, never half of it."""
+    does. Fresh forced prose leaves no older selection, even when it repeats the same bytes."""
     if candidate is not None and isinstance(request, dict):
         candidate.quiet = bool(request.get("wake_silent"))
+    if tool_ctx is not None:
         tool_ctx._completion_selected = request
 
 
@@ -756,11 +759,9 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed, owner_source_sha256
     tool_ctx = tools._ctx
     request = getattr(tool_ctx, "_completion_request", None)
-    if not isinstance(request, dict):
+    if not isinstance(request, dict) or (request.get("reply_later") and content is None):
         return False
     if request.get("reply_later"):
-        if content is None:
-            return False
         request = {**request, "answer": _loop()._extract_plain_text_from_content(content), "reply_later": False}
     observation = request.get("observation") or {}
     candidate = getattr(tool_ctx, "_delivery_candidate", None)
@@ -1181,18 +1182,29 @@ def _void_presence_completion(tool_ctx: Any, messages: list) -> None:
 
 def resume_delivery_candidate(tools: ToolRegistry, working: dict, schemas: list) -> bool:
     """Restore completion tools and identify an interrupted finalization boundary."""
-    if getattr(tools._ctx, "_delivery_control_required", False):
+    ctx = tools._ctx
+    candidate = getattr(ctx, "_delivery_candidate", None)
+    at_candidate = bool(working and candidate and (working.get("working") or {}).get("boundary") == "candidate")
+    new_id = working and working.get("task_id") != ctx.task_id
+    if at_candidate and new_id and not candidate.quiet and not candidate.control_episode_seen:
+        # The candidate save precedes the first reminder. Only this source execution's last
+        # handover can owe a choice; trace also contains earlier executions' history.
+        rows = (working.get("usage") or {}).get("authoring_handovers") or []
+        selected = (working.get("delivery") or {}).get("_completion_selected") or {}
+        if selected.get("action") == "stop" or (rows and rows[-1].get("status") in {"pending", "incomplete"}):
+            hold_completion_response(candidate.full_text, tools, ctx, ctx._execution_trace)
+    if getattr(ctx, "_delivery_control_required", False):
         completion_schema(tools, schemas)
-    return bool(working and (working.get("working") or {}).get("boundary") == "candidate"
-                and getattr(tools._ctx, "_delivery_candidate", None) is not None)
+        if new_id and candidate and not candidate.quiet:
+            return False  # A new ID keeps the held candidate but must make its own selection.
+    return at_candidate
 
 
 def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: Any, llm_trace: dict,
                                 *, explicit: bool, resumed: bool) -> tuple[bool, Any]:
     """Select/save prose before gates; recovery retains its old evidence binding."""
-    if resumed or explicit:
-        control, content = ("retained" if resumed else "fresh"), content
-    else:
+    control = "retained" if resumed else "fresh"
+    if not (resumed or explicit):
         control, content = _loop()._resolve_delivery_control(content, tools, limit_ctx, llm_trace)
     if control == "retry":
         return False, content
@@ -1284,31 +1296,20 @@ def _no_tool_final_answer(
                 _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
                 tools._ctx._completion_pair_appended = bool(explicit_candidate)
                 return held("review_update")
-            skill_finalization_was_injected = bool(
-                getattr(tools._ctx, "_skill_finalization_injected", False)
-            )
-            handover = getattr(tools._ctx, "_authoring_handover", None)
-            handover_was_prompted = bool(handover and handover.get("recovery_prompted"))
             if _loop()._maybe_inject_finalization_nudges(
                 tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace, content, messages, emit_progress,
+                **({"restored": True} if resume_candidate else {}),
             ):
-                skill_finalization_injected_now = (
-                    not skill_finalization_was_injected
-                    and bool(getattr(tools._ctx, "_skill_finalization_injected", False))
-                )
-                # Completion-only calls do not reset this action nudge or imply work.
-                if skill_finalization_injected_now:
+                cause = _hold_cause(tools._ctx)
+                if cause == "skill_not_finalized":
                     _hold_delivery_for_skill_action(tools, llm_trace)
-                elif handover and not handover_was_prompted and handover.get("recovery_prompted"):
-                    _hold_delivery_for_skill_action(
-                        tools, llm_trace,
-                        control=_AUTHORING_HANDOVER_HOLD_CONTROL,
-                    )
-                elif getattr(tools._ctx, "_completion_hold_cause", "") in ("pre_delivery_notice", "red_check_notice"):
+                elif cause == "authoring_handover":
+                    _hold_delivery_for_skill_action(tools, llm_trace, control=_AUTHORING_HANDOVER_HOLD_CONTROL)
+                elif cause in ("pre_delivery_notice", "red_check_notice"):
                     _note_delivery_facts(tools, limit_ctx, llm_trace)
                 else:
                     _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-                return held("finalization_nudge", _hold_cause(tools._ctx))
+                return held("finalization_nudge", cause)
 
     # Declared service outputs and teardown failures are evidence of the result:
     # finalize them before its review and, when that changes evidence,
@@ -1477,7 +1478,7 @@ def _no_tool_final_answer(
         content = candidate.full_text
     if stopping:
         request = tools._ctx._completion_selected
-        record_stopped_completion(tools, limit_ctx, llm_trace, request, candidate)
+        record_stopped_completion(llm_trace, request, candidate)
         if not _seal_admission_before_delivery(tools, limit_ctx, llm_trace):
             return held("admission_seal")
     from ouroboros.place_reply import prepare_focus_reply, refusal_facts, routeless_note
@@ -1502,6 +1503,7 @@ def _no_tool_final_answer(
     if getattr(tools._ctx, "_owner_message_sent", False): limit_ctx.accumulated_usage["owner_message_sent"] = True
     from ouroboros.swarm_receipt import retain_comparison
     retain_comparison(tools._ctx)
+    accept_handover_selection(tools._ctx, llm_trace)
     return _loop()._handle_text_response(str(content or ""), llm_trace, limit_ctx.accumulated_usage)
 
 
@@ -1592,9 +1594,7 @@ def finish_completed_stop(tools: ToolRegistry, ctx: Any, emit_progress: Any,
     return result
 
 
-def record_stopped_completion(tools: ToolRegistry, ctx: Any, trace: dict, request: dict,
-                              candidate: DeliveryCandidate) -> None:
+def record_stopped_completion(trace: dict, request: dict, candidate: DeliveryCandidate) -> None:
     """A stop is the author's own act, truthful for every task; it grants no approval and buys no review."""
-    del tools, ctx
     trace["task_completion"] = {"action": "stop", "rationale": request["rationale"],
         "answer_sha256": candidate.content_sha256, "source": request.get("source", "finish_task")}

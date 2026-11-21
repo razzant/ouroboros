@@ -18,10 +18,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import budget_pause
 from ouroboros.tool_custody import submit_tool_future
-from ouroboros.config import (
-    NESTED_SETTLEMENT_MARGIN_SEC,
-    load_settings,
-)
+from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC, load_settings
 from ouroboros.deadline_utils import deadline_clamped_timeout_sec
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
@@ -1183,7 +1180,10 @@ def handle_tool_calls(
     results = execute_tool_calls(tool_calls, tools, drive_logs, task_id, stateful_executor, llm_trace)
     errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
                                   fit_candidate=fit_candidate, tool_schemas=tool_schemas, project_results=project_results)
-    if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
+    from ouroboros.loop_nudges import observe_handover_work
+    batch = llm_trace.get("tool_calls", [])[initial_count:]
+    observe_handover_work(tools._ctx, llm_trace, batch)
+    if substantive_tool_calls(batch):
         tools._ctx._skill_finalization_injected = False
     return errors
 

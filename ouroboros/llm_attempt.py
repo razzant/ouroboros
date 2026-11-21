@@ -762,9 +762,8 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 "candidate_context_sha256": request.candidate_context_sha256,
                 "candidate_context_size_bytes": request.candidate_context_size_bytes,
                 "candidate_measurement_kind": request.candidate_measurement_kind,
-                "physical_context": (
-                    dict(vars(request.physical_context)) if request.physical_context is not None else None
-                ),
+                "physical_context": asdict(request.physical_context) if request.physical_context is not None else None,
+                "file_witness": getattr(request.physical_context, "base_prompt_source", None),  # the seal's check only
             },
         )
         host_step("physical_candidate")

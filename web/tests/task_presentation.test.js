@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { clearStickyCardState } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
 import { classifyLiveFrame } from '../modules/notifications.js';
+import { terminalChildFrame } from '../modules/settled_card.js';
 
 import {
     OWNER_STOP_DETAIL_MARKER,
@@ -182,8 +183,14 @@ test('failed child remains a compact local fact without owner-alarm semantics', 
     assert.doesNotMatch(child.fullBody, /Reason: /, 'no machine label in front of the owner sentence');
     assert.equal('ownerAlarm' in child, false);
     assert.equal('notification' in child, false);
+    // The synthesized terminal frame (settled_card.js terminalChildFrame) names its child and keeps the daemon's own
+    // words; its cause code, event and delegation meta are pinned once, in wire_contract.test.js.
     // The route itself is exercised behaviorally (extracted from chat.js and run) in
     // reason_detail.test.js; no exact-spread source regex is pinned here.
+    const built = terminalChildFrame('child-failed', { parentId: 'root-working', role: 'researcher' }, {
+        status: 'failed', error: 'daemon unreachable' });
+    assert.equal(built.subagent_task_id, 'child-failed');
+    assert.equal(built.error, 'daemon unreachable');
 });
 
 test('interrupted child stays retryable with a Working chip and inspectable detail', () => {
@@ -354,16 +361,20 @@ test('task-detail healing keeps the terminal predicate and missing-task summary 
     // Keep the predicate seam without inventing detail states the server never emits.
     assert.match(cancelHeal, /taskDoneIsTerminal\(stored\)/);
 
+    // reconcileMissingManagedTask is callback-based now (readMissingCardDetail), not async;
+    // the seam itself — which branch may finish the card — is what the pins below guard.
     const missingHeal = chatSource.slice(
-        chatSource.indexOf('async function reconcileMissingManagedTask'),
+        chatSource.indexOf('function reconcileMissingManagedTask'),
         chatSource.indexOf('function observeMissingManagedTask'),
     );
+    assert.notEqual(missingHeal, '', 'reconcileMissingManagedTask seam not found — update this test');
     assert.match(missingHeal, /isTerminalTaskDetail\(detail\)/);
     assert.match(missingHeal, /appendTaskSummaryToLiveCard\(\{ \.\.\.detail, task_id: taskId \}\)/);
     // A retained typed historical lifecycle may finish the card only in the
-    // proven-absent result branch after complete fresh activity excluded it.
+    // proven-absent result branch after complete fresh activity excluded it:
+    // the settleMissingTaskRecord call must sit inside that branch, not anywhere else.
     assert.match(missingHeal, /if \(!vouched && detail === null\)/);
-    assert.match(missingHeal, /return settleMissingTaskRecord\(currentRecord\)/);
+    assert.match(missingHeal, /if \(!vouched && detail === null\)[\s\S]*?return settleMissingTaskRecord\(/);
     const fallback = chatSource.slice(chatSource.indexOf('function settleMissingTaskRecord'),
         chatSource.indexOf('function markTaskCancelable'));
     assert.match(fallback, /applyHistoricalModelExecution\(record, historical\)/);

@@ -113,8 +113,10 @@ export function renderEpisodes(el, episodes = []) {
  * this chat sees none of its frames (a Main
  * portal's room): `follow(successorId, predecessor)` may mint its card from the facts it holds.
  * `renamed(record)` hears each name this module sets: the card's one headline owner paints the line under it, and a portal's Project reference names itself again.
+ * `meta(record)` paints an earlier episode's facts again once its heading or disclosed content moved: the heading's own words
+ * (`episodeHeadingWords`) are not said a second time in the Details beneath it.
  */
-export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {}, renamed = () => {} }) {
+export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {}, renamed = () => {}, meta = () => {} }) {
     const predecessors = new Map();  // successor task id -> predecessor task id
 
     function chainOf(taskId) {
@@ -153,15 +155,19 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
             const label = [fmt('Episode {n}', { n: index + 1 }), facts.name,
                 episodeSpan(facts.started, facts.ended), facts.phase && taskPresentation(facts.phase).headline,
                 facts.cause, facts.summary !== facts.name && facts.summary].filter(Boolean).join(' · ');
-            if (disclosure.firstElementChild.textContent !== label) disclosure.firstElementChild.textContent = label;
+            let changed = disclosure.firstElementChild.textContent !== label;
+            if (changed) disclosure.firstElementChild.textContent = label;
+            previous.episodeHeadingWords = [facts.name, facts.summary].filter(Boolean);  // the authored words this heading carries
             const codes = disclosure.querySelector('.chat-episode-codes');
             codes.textContent = reasonCodesNote(facts.codes);
             codes.hidden = !codes.textContent;
-            for (const content of [previous.timelineEl, previous.reviewSummaryEl, previous.reviewsHostEl, previous.subagentsEl]) {
-                if (content && content.parentNode !== disclosure) disclosure.appendChild(content);
+            for (const content of [previous.detailsEl, previous.timelineEl, previous.reviewSummaryEl,
+                previous.reviewsHostEl, previous.subagentsEl]) {
+                if (content && content.parentNode !== disclosure) { disclosure.appendChild(content); changed = true; }
             }
             const position = host.children[index] || null;
             if (position !== disclosure) host.insertBefore(disclosure, position);
+            if (changed) meta(previous);
         }
         host.hidden = false;
     }

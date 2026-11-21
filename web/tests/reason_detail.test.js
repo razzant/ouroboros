@@ -12,6 +12,7 @@ import {
 import { timelineReadFields } from '../modules/chat_history_replay.js';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
+import { noteHandoverAttempt, terminalChildFrame } from '../modules/settled_card.js';
 
 const UNDESCRIBED = 'The recorded reason has no description yet.';
 // The author's stop sentence as a clause (the table's words are review's; the place is pinned here).
@@ -877,24 +878,54 @@ test('a canonical review PASS without a decision does not resurrect the legacy p
         'a truly old record without the canonical axis keeps reading its legacy carrier');
 });
 
-test('the real routeSubagentTerminalToCard forwards cause facts and only the carried text', () => {
+// The live route, evaluated against the REAL frame builder (settled_card.js). Only the chat instance's own
+// furniture is stubbed: the route's body, the frame it hands over and the attempt reconciliation it owns are the
+// shipped ones, so a helper that drops a fact fails here rather than in a re-implementation of it.
+function liveSubagentTerminalRoute({ records = new Map(), onFrame = () => true, onHydrate = () => {} } = {}) {
     const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    const start = chatSource.indexOf('    function routeSubagentTerminalToCard(childId, evt) {');
+    const start = chatSource.indexOf('    function routeSubagentTerminalToCard(childId, evt');
     const end = chatSource.indexOf('\n    function updateLiveCardFromLogEvent(evt) {', start);
-    assert.ok(start > 0 && end > start);
-    let received = null;
-    const route = Function('subagentChildParents', 'taskOutcomeSeverity', 'childCauseFacts', 'cardMetaKeys', 'updateSubagentCardFromEvent',
+    assert.ok(start > 0 && end > start, 'the live route moved — update this test');
+    const parents = new Map([['kid-r', { parentId: 'root', role: 'scout' }], ['kid-s', { parentId: 'root', role: 'scout' }]]);
+    return Function('subagentChildParents', 'liveCardRecords', 'terminalChildFrame', 'updateSubagentCardFromEvent',
+        'noteHandoverAttempt', 'withStableViewport', 'hydrateOpenSettledChild', 'hydrateCardReviews', 'taskDoneIsTerminal',
         `${chatSource.slice(start, end)}\nreturn routeSubagentTerminalToCard;`)(
-        new Map([['kid-r', { parentId: 'root', role: 'scout' }]]), taskOutcomeSeverity, childCauseFacts, cardMetaKeys,
-        (evt) => { received = evt; return true; });
+        parents, records, terminalChildFrame, onFrame, noteHandoverAttempt,
+        () => {},  // the viewport writer: the stored read's own paint, not this witness's business
+        onHydrate, () => {}, taskDoneIsTerminal);
+}
+
+test('the real routeSubagentTerminalToCard forwards cause facts and only the carried text', () => {
+    let received = null;
+    const route = liveSubagentTerminalRoute({ onFrame: (evt) => { received = evt; return true; } });
     assert.equal(route('kid-r', { type: 'task_done', task_id: 'kid-r', status: 'failed',
-        reason_code: 'delegated_custody_unreconciled', delegated_runs_unreconciled: ['run-9'],
-        result: 'partial report', error: 'daemon unreachable', ts: '2026-11-21T10:00:00Z' }), true);
+        reason_code: 'delegated_custody_unreconciled', reason_detail: 'the daemon stopped answering',
+        artifact_status: 'missing', delegated_runs_unreconciled: ['run-9'],
+        result: 'partial report', error: 'daemon unreachable', result_truncated: true,
+        ts: '2026-11-21T10:00:00Z' }), true);
     assert.equal(received.subagent_event, 'failed');
     assert.equal(received.delegation_role, 'subagent');
     assert.equal(received.reason_code, 'delegated_custody_unreconciled');
     assert.deepEqual(received.delegated_runs_unreconciled, ['run-9']);
+    // The cause facts the source stated and the card's own meta carry list does not: they travel only because the
+    // frame builder spreads the shared cause facts, not because a key survived by accident.
+    assert.equal(received.reason_detail, 'the daemon stopped answering');
+    assert.equal(received.artifact_status, 'missing');
     assert.equal(received.result, 'partial report');
     assert.equal('trace_summary' in received, false, 'a text key the frame does not carry is not invented');
     assert.equal(received.error, 'daemon unreachable');
+    assert.equal(received.result_truncated, true, 'the truncation flag travels beside the text it truncates');
+    assert.equal(received.trace_summary_truncated, undefined, 'and no flag is invented for a text the frame does not carry');
+    assert.equal(received._result_text_present, true, 'the source stated a report, and the frame says so');
+});
+
+test('the real route keeps the stored attempt and handover reconciliation of its own card', () => {
+    const record = { finished: false };
+    const route = liveSubagentTerminalRoute({ records: new Map([['kid-s', record]]) });
+    const detail = { type: 'task_done', task_id: 'kid-s', status: 'completed', task_attempt: 2,
+        authoring_handovers: [{ from_model: 'm-one', to_model: 'm-two', status: 'selected' }],
+        result: 'the stored report', ts: '2026-11-21T10:00:00Z' };
+    assert.equal(route('kid-s', detail, true), true);
+    assert.equal(record.handoverAttempt, 2, 'the stored attempt is the card\'s own');
+    assert.deepEqual(record.handoverRows, detail.authoring_handovers, 'the stored handover history is the card\'s own');
 });
