@@ -141,7 +141,9 @@ def owner_door_bound() -> dict:
 def resume_author() -> dict:
     """Who grants a Resume, recorded as its grant's ``by``: a mind's control, else the owner's own door, else nobody
     (the host's own act); a cold Resume's notice names it (``model_sleep.resumer_words``)."""
-    return control_actor() or owner_door_bound()
+    author = control_actor() or owner_door_bound()
+    cited = _OWNER_WORD.get()  # a mind's release carrying the owner's verified word: its grant keeps when he wrote
+    return {**author, "owner_word_at": cited} if author and cited else author
 
 
 @contextmanager

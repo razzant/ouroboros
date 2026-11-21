@@ -696,10 +696,9 @@ def _handle_budget_resume_child(evt: Dict[str, Any], ctx: Any) -> None:
     else:
         # A MODEL-issued selection: the grant additionally requires the live
         # owner-derived Resume grant of the target's own root (never lineage alone).
-        from ouroboros.control_actor import accepting_unknown, mind_control
-        reason = str(evt.get("reason") or "")
-        named = evt.get("accept_unknown")
-        with mind_control(requester, reason), accepting_unknown(named if isinstance(named, list) else (), reason):
+        from supervisor.budget_resume import child_selection_control  # a root's release after Panic reaches it
+        reason, named = str(evt.get("reason") or ""), evt.get("accept_unknown")
+        with child_selection_control(requester, reason, target, named if isinstance(named, list) else ()):
             outcome = resume_budget_paused_task(task_id, selected_by=requester)
     event = {
         "ts": evt.get("ts", utc_now_iso()),
@@ -1180,7 +1179,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *
             or current != observation.get("authority")
             or selection_record(task) != hold):
         return {"ok": False, "error": "selection_authority_changed"}
-    from ouroboros.control_actor import control_actor, observed_control_stop
+    from ouroboros.control_actor import control_actor, observed_control_stop, resume_author
     from ouroboros.work_stop import unsafe_replay_response
     if refusal := release_refusal(observed_control_stop(
             result_root, task, budget=q.BUDGET_ROOT_FENCES, owner=current["owner_fence"]), control_actor()):
@@ -1228,7 +1227,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *
     if writers:
         return resume_into_writer_wait(q, task, writers, predecessor=str(continuation["predecessor_task_id"]),
                                        result_root=result_root, root_task_id=root_task_id)
-    selection = resume_selection(hold, by=control_actor(), selected_at=utc_now_iso(),
+    selection = resume_selection(hold, by=resume_author(), selected_at=utc_now_iso(),
                                  selected_by=str(selected_by or "owner"))
     if not native_read_gap:
         selection['root_resume_basis'] = current['root_resume_basis']

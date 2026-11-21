@@ -1302,3 +1302,78 @@ def test_model_selected_global_pause_cancelled_before_dispatch_keeps_dated_earli
     else:
         assert "paused_at" not in cancelled["resource_limit"]
         assert "earlier_stop" not in normalize_outcome_axes(cancelled)["execution"]
+
+
+def _panic_tree(tmp_path, monkeypatch, root="saved-root"):
+    """A saved tree stopped by Panic: every row holds ``saved_work_hold{door: panic}``; ``second`` is then held
+    sleeping-class (``panic_hold``), so both Panic hold classes stand under one root."""
+    from datetime import datetime, timedelta, timezone
+
+    from supervisor import events_budget as eb
+    from tests.test_state_authority import _prior
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    state.save_state(_prior())
+    _pool_events(workers, monkeypatch)
+    for task_id, parent in ((root, None), ("first", root), ("second", root)):
+        _working_run(tmp_path, workers, task_id, **({"parent": parent} if parent else {}))
+    (tmp_path / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
+    started = datetime.now(timezone.utc) - timedelta(minutes=5)
+    state.update_state(lambda st: st.update(panic_started_at=started.isoformat()))
+    assert _stop_and_boot(q, workers) == 3
+    rows = {t["id"]: t for t in workers.PENDING}
+    assert all(eb.budget_hold_fact(t)["door"] == "panic" for t in rows.values()), rows
+    eb.hold_budget_row(rows["second"], reason=eb.HOLD_PANIC)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: 5.0)
+    return q, state, workers, rows, started
+
+
+@pytest.mark.parametrize("release", ["owner_press", "cited_mind"])
+def test_after_panic_the_roots_model_selects_held_children_once_an_owner_authorised_act_released_the_root(
+        tmp_path, monkeypatch, release):
+    """Emergency Stop Invariant (21 Nov 2026) with owner Q9: a member's Panic hold, of either class, yields to its
+    root's model only when the ROOT's own hold was released after that same Panic by an act the owner authorised:
+    his press on the root, or a mind's release carrying his verified word. The root's live grant records it
+    (``by.actor``/``by.owner_word_at``, ``granted_at``). Under a root still held, or one released before a newer
+    Panic, the child stays held."""
+    from datetime import timedelta
+
+    from ouroboros.control_actor import citing_owner, mind_control, owner_door
+    from supervisor import events_budget as eb
+
+    q, state, workers, rows, started = _panic_tree(tmp_path, monkeypatch)
+    pushed = []
+    ctx = _supervisor_ctx(tmp_path, workers, q, [], pushed)
+
+    def select(child):
+        eb._handle_budget_resume_child({"task_id": child, "requested_by": "saved-root", "reason": "go on"}, ctx)
+        return pushed[-1]
+
+    assert select("first")["error"] == "panic_requires_owner_resume", "under a root still held by that Panic"
+    if release == "owner_press":
+        with owner_door("api_task_resume"):
+            assert q.resume_budget_paused_task("saved-root")["ok"]
+    else:
+        with mind_control("main", "the owner said resume"), citing_owner((started + timedelta(minutes=1)).isoformat()):
+            assert q.resume_budget_paused_task("saved-root")["ok"]
+    by = rows["saved-root"][eb.SELECTION_KEY]["by"]  # the release's durable record the held members bind to
+    assert by.get("actor") == "owner" if release == "owner_press" else by.get("owner_word_at"), by
+    assert select("first")["ok"], pushed[-1]
+    # A newer Panic: the root's release came before it, so the remaining child stays held.
+    state.update_state(lambda st: st.update(panic_started_at=(started + timedelta(hours=1)).isoformat()))
+    assert select("second")["error"] == "panic_requires_owner_resume"
+    state.update_state(lambda st: st.update(panic_started_at=started.isoformat()))
+    assert select("second")["ok"], pushed[-1]
+
+
+def test_a_root_released_without_the_owners_authority_lends_no_panic_release(tmp_path, monkeypatch):
+    """The host's own release of the root (no owner door, no cite) records no owner act on its grant: a child's
+    Panic hold stays."""
+    from supervisor import events_budget as eb
+
+    q, _state, workers, _rows, _started = _panic_tree(tmp_path, monkeypatch)
+    pushed = []
+    ctx = _supervisor_ctx(tmp_path, workers, q, [], pushed)
+    assert q.resume_budget_paused_task("saved-root")["ok"]
+    eb._handle_budget_resume_child({"task_id": "first", "requested_by": "saved-root", "reason": "go on"}, ctx)
+    assert pushed[-1]["error"] == "panic_requires_owner_resume"
