@@ -989,8 +989,11 @@ def owner_state(tmp_path, monkeypatch):
     """An initialized core state of this test's own, its external owner slot known to be empty."""
     from supervisor import state
 
-    for name in ("DRIVE_ROOT", "STATE_PATH", "STATE_LAST_GOOD_PATH", "STATE_LOCK_PATH"):
+    # init/init_state rebind these process-wide (and pin the work-root basis): this test gives them back.
+    for name in ("DRIVE_ROOT", "STATE_PATH", "STATE_LAST_GOOD_PATH", "STATE_LOCK_PATH", "TOTAL_BUDGET_LIMIT",
+                 "_OPENROUTER_DIAGNOSTIC"):
         monkeypatch.setattr(state, name, getattr(state, name))
+    monkeypatch.delenv("OUROBOROS_WORK_ROOT_BASIS", raising=False)
     state.init(tmp_path)
     state.init_state()
     return state

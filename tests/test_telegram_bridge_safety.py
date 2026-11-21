@@ -900,8 +900,11 @@ def host_world(tmp_path, monkeypatch):
 
     data = tmp_path / "data"
     data.mkdir()
-    for name in ("DRIVE_ROOT", "STATE_PATH", "STATE_LAST_GOOD_PATH", "STATE_LOCK_PATH"):
+    # init/init_state rebind these process-wide (and pin the work-root basis): this test gives them back.
+    for name in ("DRIVE_ROOT", "STATE_PATH", "STATE_LAST_GOOD_PATH", "STATE_LOCK_PATH", "TOTAL_BUDGET_LIMIT",
+                 "_OPENROUTER_DIAGNOSTIC"):
         monkeypatch.setattr(state, name, getattr(state, name))
+    monkeypatch.delenv("OUROBOROS_WORK_ROOT_BASIS", raising=False)
     state.init(data)
     state.init_state()
     _seed_token(data, skill="telegram", token="skill-token", permissions=["inject_chat"])
