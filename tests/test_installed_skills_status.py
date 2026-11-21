@@ -71,7 +71,7 @@ def test_enabled_unreviewed_and_off_skills_are_each_named_once_beside_the_cards(
 def test_all_off_still_shows_the_section_and_a_failed_read_says_so(tmp_path, monkeypatch):
     _skill(tmp_path, "quiet", enabled=False)
     section = _section(tmp_path)
-    assert section.full_text.startswith("## Installed Skills (enabled and reviewed)\n")
+    assert section.full_text.startswith("## Installed Skills (enabled and reviewed; then the not-ready and the Off ones)\n")
     assert "- quiet: Purpose of quiet." in section.full_text and "quiet" in section.operative_view
 
     def unreadable(*_args):
