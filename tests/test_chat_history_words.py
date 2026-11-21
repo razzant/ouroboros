@@ -137,8 +137,12 @@ def test_a_candidate_set_past_the_recheck_bound_returns_the_examined_range(tmp_p
     monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 2)
     answer = _read(tmp_path, words=["match"])
     assert "observed=2; total_unknown" in answer
-    assert "recheck_bound: 2 candidate rows re-checked in stored order, through row:1@2026-11-01T10:01:00Z" in answer
+    assert ("recheck_bound: 2 candidate rows re-checked in stored order, from row:1@2026-11-01T10:00:00Z"
+            in answer) and "through row:1@2026-11-01T10:01:00Z" in answer
     assert "match 1" in answer and "match 3" not in answer  # an answer, never a block
+    beyond = re.search(r"continue beyond with offset=0, snapshot=([0-9a-f]{64}:2)", answer).group(1)
+    rest = _read(tmp_path, words=["match"], snapshot=beyond)
+    assert "match 3" in rest and "match 1" not in rest and "this is the last window" in rest
 
 
 def test_a_source_row_is_counted_once_across_fields_and_copies(tmp_path):

@@ -802,6 +802,7 @@ D20 = "Presence"
 "ouroboros/store_import.py" = "D17"
 "ouroboros/maintenance_jobs.py" = "D17"
 "ouroboros/dialogue_store.py" = "D17"
+"ouroboros/dialogue_word_index.py" = "D17"  # disposable word postings inside the dialogue store and their job
 "ouroboros/dialogue_retry.py" = "D17"
 "ouroboros/dialogue_import.py" = "D17"
 "ouroboros/dialogue_positions.py" = "D17"
