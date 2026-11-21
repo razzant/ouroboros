@@ -760,9 +760,9 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         if (map) layers.batch(() => pageNavigation.clear());
         if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
         if (!openOnly) { layers.back('project-toggle'); return; }
+        if (!latest && !(taskId && quizId) && !sourceReveal) return;
         const inst = projectInstances.get(project.id);
         if (sourceReveal) return revealProjectSource(project.id, inst, sourceReveal, navigation);
-        if (!latest && !(taskId && quizId)) return;
         if (!(taskId && quizId)) { projectReveals.delete(project.id); cancelProjectPaint(project.id, inst); } // superseded by notification
         return landInProject(freshProjectRow(project), inst, { taskId, quizId, latest });
     }
