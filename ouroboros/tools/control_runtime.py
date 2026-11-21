@@ -873,13 +873,13 @@ def _set_next_wakeup(ctx: ToolContext, seconds: int | None = None, at: str | Non
     try:
         seen = consciousness_clock.store_choice(interval=interval, at=str(at or "").strip(), target=target, now=now)
     except consciousness_clock.PendingWakeKeepsItsTime as held:
-        return refused(consciousness_clock.pending_refusal(str(at).strip(), held.appointment_at))
+        return refused(consciousness_clock.pending_refusal(str(at).strip(), held.appointment_at, held.next_attempt))
     except StateUnavailable as exc:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=(
             f"⚠️ CAPABILITY_UNAVAILABLE: nothing was stored: runtime state is unavailable ({exc.reason}).")))
     clamp_note = f" (requested {requested} s, clamped into {low}-{high} s)" if interval != requested else ""
     return consciousness_clock.choice_receipt(seen, interval=interval, clamp_note=clamp_note,
-                                              at=str(at or "").strip(), target=target, low=low, high=high)
+                                              at=str(at or "").strip(), target=target, low=low, high=high, now=now)
 
 
 def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "",

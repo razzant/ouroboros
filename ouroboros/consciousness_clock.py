@@ -81,11 +81,12 @@ def consumed_by(record: Any, *, appointment_at: float, now: float) -> bool:
 
 
 class PendingWakeKeepsItsTime(Exception):
-    """Raised inside the state write for a named time at or before the pending appointment: nothing is written."""
+    """Raised inside the state write for a named time at or before the pending appointment: nothing is written.
+    ``next_attempt``: the attempt the clock last stored (a skip or refused admission may have moved it later)."""
 
-    def __init__(self, appointment_at: float) -> None:
+    def __init__(self, appointment_at: float, next_attempt: float = 0.0) -> None:
         super().__init__(appointment_at)
-        self.appointment_at = appointment_at
+        self.appointment_at, self.next_attempt = appointment_at, next_attempt
 
 
 def store_choice(*, interval: Optional[int], at: str, target: Optional[_dt.datetime], now: float) -> Dict[str, Any]:
@@ -102,7 +103,7 @@ def store_choice(*, interval: Optional[int], at: str, target: Optional[_dt.datet
         on = known and enabled is True
         appointment = _seconds(st.get(APPOINTMENT_STATE_KEY)) if on else 0.0
         if target is not None and appointment and target.timestamp() <= appointment:
-            raise PendingWakeKeepsItsTime(appointment)
+            raise PendingWakeKeepsItsTime(appointment, _seconds(st.get(NEXT_WAKE_STATE_KEY)))
         if interval is not None:
             st[INTERVAL_STATE_KEY] = interval
         if target is not None:
@@ -116,16 +117,24 @@ def store_choice(*, interval: Optional[int], at: str, target: Optional[_dt.datet
     return seen
 
 
-def pending_refusal(at: str, appointment_at: float) -> str:
+def _moved(appointment: float, attempt: Any) -> str:
+    """The clause naming a next attempt a skip or refused admission moved away from the appointment, else ""."""
+    return (f" (a skip or refused admission moved its next attempt to {_utc(attempt)})"
+            if attempt and attempt != appointment else "")
+
+
+def pending_refusal(at: str, appointment_at: float, next_attempt: float = 0.0) -> str:
     return (f"⚠️ TOOL_ARG_ERROR (set_next_wakeup): at={at!r} is at or before the wake-up already appointed for "
-            f"{_utc(appointment_at)}, which keeps its time; nothing was stored. To have work done at that moment, "
-            "use schedule_followup(run_at=…); a later at applies once that wake-up ends.")
+            f"{_utc(appointment_at)}, which keeps its time{_moved(appointment_at, next_attempt)}; nothing was stored. "
+            "To have work done at that moment, use schedule_followup(run_at=…); a later at applies once that wake-up "
+            "ends.")
 
 
 def choice_receipt(seen: Dict[str, Any], *, interval: Optional[int], clamp_note: str, at: str,
-                   target: Optional[_dt.datetime], low: int, high: int) -> str:
+                   target: Optional[_dt.datetime], low: int, high: int, now: float) -> str:
     """What the write set, and nothing the alarm will not do: the stored time, MIN and MAX, the pending appointment
-    and, when a skip or refusal moved it, the next attempt."""
+    and, when a skip or refusal moved it, the next attempt. A named time sets a wake only while it is still ahead at
+    a wake's end (``consciousness._next_delay``), so a time a wake-up outlives is said to add none."""
     known, on, record = seen.get("known"), seen.get("on"), seen.get("record")
     state = "off" if known else "unknown (runtime state is recovering)"
     if target is None:  # the rhythm alone: today's receipt, and the named time it leaves standing
@@ -133,22 +142,26 @@ def choice_receipt(seen: Dict[str, Any], *, interval: Optional[int], clamp_note:
                 "(a wake-up already pending keeps its time; a wake-up calling this sets its own next one)." if on else
                 f"OK: consciousness is {state}; the next wake-up interval of {interval} s{clamp_note} is stored for "
                 "when it is enabled.")
-        standing = record.get("at") if isinstance(record, dict) and target_ts(record) is not None else ""
-        return text + (f" The named time {standing} still stands: the next wake-up comes at the earlier of the two."
-                       if standing else "")
+        stored = target_ts(record)
+        if stored is None:
+            return text
+        return text + (f" The named time {record['at']} still stands: from a wake-up's end the next one is appointed "
+                       "at the earlier of the two while it is still ahead." if stored > now else
+                       f" The named time {record['at']} has passed and adds no wake-up; a wake-up appointed after it "
+                       "was stored removes it when it ends.")
     text = f"OK: the named next wake-up time is now {at} ({target.strftime('%Y-%m-%dT%H:%M:%SZ')})."
     if not on:
         text += f" Consciousness is {state}: it is stored for when it is enabled."
     elif seen.get("running"):
-        text += " A wake-up is running: from its end the next one comes at the earlier of the interval and this time."
+        text += " A wake-up is running; what follows applies from its end."
     elif seen.get("appointment"):
-        moved, appointment = seen.get("next_attempt"), seen["appointment"]
-        text += (f" The wake-up appointed for {_utc(appointment)} keeps its time and does not consume it"
-                 + (f" (a skip or refused admission moved its next attempt to {_utc(moved)})"
-                    if moved and moved != appointment else "") + ".")
-    text += (f" Each next wake-up comes no sooner than MIN ({low} s) and no later than MAX ({high} s) after a "
-             "wake-up ends, so a time beyond MAX is reached through intermediate wake-ups; the first wake-up appointed "
-             "after now that ends at or after it consumes it. seconds leaves it standing; a later at replaces it.")
+        text += (f" The wake-up appointed for {_utc(seen['appointment'])} keeps its time and does not consume it"
+                 f"{_moved(seen['appointment'], seen.get('next_attempt'))}.")
+    text += (f" From a wake-up's end the next one is appointed at the earlier of the interval and this time while it "
+             f"is still ahead, no sooner than MIN ({low} s) and no later than MAX ({high} s) after that end: a time "
+             "beyond MAX is reached through intermediate wake-ups, and one a wake-up outlives adds none. A wake-up "
+             "appointed after it was stored that ends at or after it removes it; seconds leaves it standing, a later at "
+             "replaces it.")
     return text + (f" The wake-up interval is now {interval} s{clamp_note}." if interval is not None else "")
 
 
@@ -201,8 +214,8 @@ def own_clock_lines(state: Mapping[str, Any], *, now: float, floor: int, ceiling
                  + ("; this wake was appointed before it was stored, so its end does not" if stood else "")]
     if appointment:
         lines.append(f"- this wake's appointment: {_utc(appointment)} (whether it came on time: the reason line)")
-    lines.append(f"- each next wake-up: no sooner than MIN {floor} s and no later than MAX {ceiling} s after a wake-up "
-                 "ends (owner settings); a named time beyond MAX is reached through intermediate wake-ups")
+    lines.append(f"- each next wake-up is appointed no sooner than MIN {floor} s and no later than MAX {ceiling} s after "
+                 "a wake-up ends (owner settings); a named time beyond MAX is reached through intermediate wake-ups")
     lines.append(_zone_line(state.get(OWNER_ZONE_STATE_KEY), now=now))
     return lines
 

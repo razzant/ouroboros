@@ -15,8 +15,9 @@ from ouroboros import consciousness_clock as clock
 from ouroboros.consciousness import APPOINTMENT_STATE_KEY
 
 NOW = dt.datetime(2026, 11, 21, 2, 0, tzinfo=dt.timezone.utc).timestamp()
-BOUNDS_LINE = ("- each next wake-up: no sooner than MIN 300 s and no later than MAX 3600 s after a wake-up ends "
-               "(owner settings); a named time beyond MAX is reached through intermediate wake-ups")
+# "is appointed": a skip (an exhausted allowance waits for its reset) can start it later than MAX after the end
+BOUNDS_LINE = ("- each next wake-up is appointed no sooner than MIN 300 s and no later than MAX 3600 s after a "
+               "wake-up ends (owner settings); a named time beyond MAX is reached through intermediate wake-ups")
 
 
 @pytest.mark.parametrize(("raw", "problem"), [

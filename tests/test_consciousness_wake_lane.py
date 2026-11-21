@@ -619,7 +619,8 @@ def test_set_next_wakeup_names_a_time_with_its_offset_and_the_pending_wake_keeps
             "consciousness_next_wake_at": pending + 300, "consciousness_own_wake": {"task_id": "w0", "finished": True}}))
         for early in (pending, pending - 600):
             refusal = control._set_next_wakeup(ctx, seconds=600, at=iso(early))
-            assert f"already appointed for {iso(pending)}, which keeps its time" in refusal
+            assert (f"already appointed for {iso(pending)}, which keeps its time (a skip or refused admission "
+                    f"moved its next attempt to {iso(pending + 300)}); nothing was stored.") in refusal
             assert "schedule_followup(run_at=…)" in refusal and stored() == (1800, record)
         later = control._set_next_wakeup(ctx, at=iso(pending + 60))
         assert (f"The wake-up appointed for {iso(pending)} keeps its time and does not consume it (a skip or refused "
@@ -629,8 +630,16 @@ def test_set_next_wakeup_names_a_time_with_its_offset_and_the_pending_wake_keeps
         state.update_state(lambda st: st.update({  # a wake running: its own call, or a Main turn beside it
             "consciousness_appointment_at": now - 30, "consciousness_own_wake": {"task_id": "w1", "finished": False}}))
         running = control._set_next_wakeup(ctx, at=iso(now + 600))
-        assert "A wake-up is running: from its end the next one comes at the earlier of the interval and this time." in running
+        assert " A wake-up is running; what follows applies from its end. From a wake-up's end the next one is " \
+               "appointed at the earlier of the interval and this time while it is still ahead" in running
+        assert "one a wake-up outlives adds none" in running and "comes" not in running  # no promised arrival
         assert stored()[1] == {"at": iso(now + 600), "stored_at": iso(now), "standing_appointment": now - 30}
+        # The rhythm beside a named time: it still stands while ahead; once passed it adds no wake-up.
+        assert "still stands: from a wake-up's end the next one is appointed" in control._set_next_wakeup(ctx, 1800)
+        monkeypatch.setattr(time, "time", lambda: now + 601)
+        passed = control._set_next_wakeup(ctx, 1800)
+        assert f"The named time {iso(now + 600)} has passed and adds no wake-up;" in passed
+        assert "still stands" not in passed and stored()[1]["at"] == iso(now + 600)
 
 
 def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_facts(tmp_path, monkeypatch):

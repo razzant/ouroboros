@@ -520,8 +520,8 @@ def get_tools() -> List[ToolEntry]:
                     "A named time: ISO 8601 with an explicit UTC offset or Z, e.g. 2026-11-21T09:00:00+03:00; a time "
                     "without an offset, or not in the future, is refused, and so is one at or before a wake-up already "
                     "appointed (that one keeps its time). It stands until a wake-up appointed after it was stored ends "
-                    "at or after it, so a time beyond MAX is reached through intermediate wake-ups; seconds leaves it "
-                    "standing, a later at replaces it.")},
+                    "at or after it, so a time beyond MAX is reached through intermediate wake-ups and one a wake-up "
+                    "outlives adds none; seconds leaves it standing, a later at replaces it.")},
             }, "required": []},
         }, _set_next_wakeup),
         ToolEntry("switch_model", {
