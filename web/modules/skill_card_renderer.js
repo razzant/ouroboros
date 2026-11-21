@@ -319,7 +319,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     if (repairing) chip = chipHtml('Asking Ouroboros…', 'neutral', { work: true });
 
     if (skill.lifecycle_virtual) {
-        return { chip, trays, overflow: [], needs: jobFailed, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
+        return { chip, trays, overflow: [], needs: jobFailed, update: false, withdrawn: false, lockReason: '', sourceName, modified, install, reviewing: reviewRunning };
     }
 
     if (untrusted(skill)) {

@@ -101,6 +101,11 @@ test('the page polls while a review of a skill runs, by the review\'s own facts,
     const wordy = { ...idle, lifecycle_pending: true, lifecycle_kind: 'enable', lifecycle_message: 'Reviewing the files before turning on…' };
     assert.match(renderInstalledSkillCard(wordy), />Reviewing the files before turning on…</);
     assert.deepEqual([installedSkillModel(wordy).reviewing, polled(wordy)], [false, false]);
+    // A queue-only card (two folders share the name, so no listed row owns the job) answers the same fact.
+    const virtual = (kind) => mergeLifecycleEvents([{ name: 'notes' }, { name: 'notes' }], [{ target: 'notes', status: 'running', kind }])
+        .find((row) => row.lifecycle_virtual);
+    assert.match(renderInstalledSkillCard(virtual('review')), />Reviewing…</);
+    assert.deepEqual([installedSkillModel(virtual('review')).reviewing, installedSkillModel(virtual('install')).reviewing], [true, false]);
 });
 
 test('the active lifecycle job joins the event stream once', () => {
