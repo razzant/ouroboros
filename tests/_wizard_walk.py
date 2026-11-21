@@ -36,6 +36,16 @@ def past_quick_steps(page) -> None:
             page.click("#next-btn")
 
 
+def untick_starter_skills(page) -> None:
+    """From Summary: back to the Skills step through its row, Untick all, and on to Summary again, so an isolated root
+    installs nothing from the public hub. Where the step is not offered nothing would install, and nothing is done."""
+    if "skills" in step_order(page):
+        page.locator("[data-starter-change]").click()
+        page.locator('[data-starter-all="0"]').click()
+        walk(page, "skills", "summary")
+        page.wait_for_selector(".summary-card")
+
+
 FIRST_RUN = ["accounts", "models", "review_mode", "consciousness", "skills", "budget", "summary"]
 OPTIONAL = ("consciousness", "skills")
 SHAPES = [[step for step in FIRST_RUN if step not in dropped]
