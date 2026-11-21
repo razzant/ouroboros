@@ -292,7 +292,7 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
         meta = f"{kind}{', v' + version if version else ''}{', ' + review_status if review_status else ''}"
         lines.append(f"- {name} ({meta}): {description or 'No description.'}")
         operative.append(lines[-1])
-        for fact in _status_lines(skill_status(skill), _field):
+        for fact in _status_lines(skill_status(skill), _field, skill):
             lines.append(f"  {fact}")
             operative.append(lines[-1])
         if skill.get("review_gate", {}).get("author_accepted"):
@@ -338,9 +338,19 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
 
 
-def _status_lines(status: dict, field: Any) -> List[str]:
+def _first_reason(status: dict, row: dict, field: Any) -> str:
+    """The first reason without the time its grant was last written: block C carries no times (C07)."""
+    from ouroboros.skill_readiness import _grant_stamp
+
+    grants = (row.get("readiness") or {}).get("grant_status") or {}
+    stamp = _grant_stamp(str(grants.get("updated_at") or "")) if isinstance(grants, dict) else ""
+    reason = status["reasons"][0] if status["reasons"] else "unknown"
+    return field(reason.replace(stamp, "") if stamp else reason, 300)
+
+
+def _status_lines(status: dict, field: Any, row: dict) -> List[str]:
     """A card's readiness facts: the first reason it cannot run now (none while it can), then readiness notes."""
-    first = [f"Status: not ready — {field(status['reasons'][0], 300)}"] if status["reasons"] else []
+    first = [f"Status: not ready — {_first_reason(status, row, field)}"] if status["reasons"] else []
     return first + [f"Note: {field(note, 200)}" for note in status["notes"]]
 
 
@@ -356,7 +366,7 @@ def _append_unadmitted(lines: List[str], operative: List[str], rows: List[Any], 
         seen.add(name)
         status, purpose = skill_status(row), field(row.get("description"), 120) or "No description."
         if row.get("enabled"):
-            reason = field(status["reasons"][0], 300) if status["reasons"] else "unknown"
+            reason = _first_reason(status, row, field)
             unadmitted.append((f"- {name} ({field(row.get('type') or 'skill', 40)}): {purpose} "
                                f"Status: not ready — {reason}", f"- {name}: not ready — {reason}"))
         else:

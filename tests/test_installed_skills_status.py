@@ -131,7 +131,10 @@ def test_process_liveness_never_moves_the_bytes_and_configuration_does(tmp_path,
     off = render(_extension(enabled=False, desired_live=False, live_reason="disabled",
                             readiness={"ready": False, "blockers": ["skill_disabled"]}))
     ungranted = render(_extension(desired_live=False, live_reason="missing_grants", readiness={
-        "ready": False, "blockers": ["missing_grants:keys=['MAIL_KEY'],permissions=[]"]}))
+        "ready": False, "grant_status": {"updated_at": "2026-11-06T05:19:00+00:00"}, "blockers": [
+            "missing_grants:keys=['MAIL_KEY'],permissions=[]; MAIL_KEY was granted to an earlier version of this "
+            "skill's files (grant last updated 2026-11-06 05:19 UTC); the files changed since"]}))
+    assert "2026" not in ungranted[0] and "MAIL_KEY was granted to an earlier version of this skill's files;" in ungranted[0]
     assert off != held and "- mail: Mail. (Off: never turned on)" in off[0] and "Status:" not in off[0]
     assert ungranted != held and "  Status: not ready — missing_grants:keys=['MAIL_KEY']" in ungranted[1]
 
