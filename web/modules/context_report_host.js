@@ -1,4 +1,4 @@
-// Beautiful Context on Widgets (DESIGN "A host tool follows the cards"): its one button opens the opaque report frame
+// Beautiful Context on Widgets (DESIGN, Widgets: "Beautiful Context"): its one button opens the opaque report frame
 // (/static/context-report.html) in place below itself and closes it; nothing else on the page touches that frame.
 import { onThemeChange } from './theme_palette.js';
 import { cardThemeValues } from './card_frames.js';

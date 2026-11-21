@@ -2763,12 +2763,8 @@ cards keep their edges rather than taking the shared fade.
   installation; when two windows arrange at once the last change wins. A
   size that failed to save stays on screen and says so under the list until
   a later change saves it; nothing retries on its own.
-- **A host tool follows the cards.** Beautiful Context, the host's reader of a locally saved model
-  request, is not a widget: no skill owns it, it has no ⋮ menu and takes no place in the owner's
-  order. Its one neutral button stands after the cards and the board's save note, and opens or
-  closes its opaque frame in place below itself; the header keeps no controls. The owner's
-  arrangement comes first and a rarely used tool last (§5 "Order by importance and expected use").
-  The frame takes the card's palette at every theme change.
+- **Beautiful Context.** One neutral button stands after the cards and the board's save note and
+  opens its frame in place below itself; the frame follows the card palette.
 
 ### Storage
 
