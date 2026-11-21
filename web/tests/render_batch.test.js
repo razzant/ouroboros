@@ -820,3 +820,104 @@ test('saved-place readiness waits for the Review detail and an expanded line ful
     assert.equal(anchorOwnersReady({ reviewKey: 'reviewAttemptDetail', cardChain: [{ taskId: 'owner' }] }, reviewReady), false);
     assert.equal(anchorOwnersReady({ reviewKey: 'reviewAttemptDetail', cardChain: [{ taskId: 'other' }] }, reviewReady), true);
 });
+
+test('a living card straddling the top edge anchors the visible row below it and never shrinks offscreen', () => {
+    const feed = layoutNode({ height: 750, scroll: 5000 });
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map() });
+    const card = layoutNode({ classes: ['chat-bubble', 'chat-card-bubble'], data: { 'data-history-id': 'card:1' }, y: 1620, height: 520, parent: feed });
+    const following = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:2' }, y: 2154, height: 120, parent: feed });
+    feed.scrollTop = 2000; // card is [-380..140], following is [154..274]
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    assert.equal(anchor.node, following, 'straddling card bubble anchors on the visible message below');
+    // startFrame shrinks the card from 520 px static face to 120 px frame floor
+    card.height = 120;
+    following.y = 1754;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+    assert.equal(feed.scrollTop, 1600);
+    assert.equal(following.getBoundingClientRect().top - feed.getBoundingClientRect().top, 154, 'following row stays stationary');
+    assert.equal(card.getBoundingClientRect().bottom - feed.getBoundingClientRect().top, 140, 'card bottom stays in view without oscillating');
+
+    // When a tall card spans the whole viewport with no following row in view, shrinking clamps its top to 0 instead of above view.
+    feed.children.length = 0;
+    const loneCard = layoutNode({ classes: ['chat-bubble', 'chat-card-bubble'], data: { 'data-history-id': 'card:lone' }, y: 1620, height: 1200, parent: feed });
+    feed.scrollTop = 2000; // loneCard is [-380..820]
+    const loneAnchor = anchors.captureVisibleTimelineAnchor();
+    loneCard.height = 120;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(loneAnchor), true);
+    assert.equal(loneCard.getBoundingClientRect().top - feed.getBoundingClientRect().top, 0);
+});
+
+test('disappearing temporary cards at or straddling the top keep the reference row below stationary without ts collision', () => {
+    const feed = layoutNode({ height: 750, scroll: 5000 });
+    const records = new Map();
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records });
+    const distantSameTs = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:early', 'data-ts': '1700000000' }, y: 200, height: 100, parent: feed });
+    const tempCard = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'temp-1', 'data-ts': '1700000000' }, y: 2010, height: 98, parent: feed });
+    const summary = layoutNode({ data: { 'data-live-summary-button': '1' }, y: 8, height: 40, parent: tempCard });
+    const refRow = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:ref', 'data-ts': '1700000030' }, y: 2122, height: 140, parent: feed });
+    records.set('temp-1', { groupId: 'temp-1', root: tempCard, items: [] });
+    feed.scrollTop = 2000; // tempCard at +10, refRow at +122, distantSameTs far above at -1800
+    assert.equal(distantSameTs.getBoundingClientRect().top, -1800);
+    assert.equal(summary.getBoundingClientRect().top, 18);
+
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    // Temporary card vanishes (record.root.remove()), shifting refRow up by 112 px
+    tempCard.isConnected = false;
+    feed.children.splice(feed.children.indexOf(tempCard), 1);
+    records.delete('temp-1');
+    refRow.y = 2010;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+    assert.equal(refRow.getBoundingClientRect().top - feed.getBoundingClientRect().top, 122, 'reference row stays at +122 px');
+});
+
+test('collapsing an expanded card whose top is above the viewport preserves the visible row below it', () => {
+    const feed = layoutNode({ height: 750, scroll: 5000 });
+    const records = new Map();
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records });
+    const card = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'portal-1', 'data-expanded': '1' }, y: 1700, height: 466, parent: feed });
+    const timeline = layoutNode({ data: { 'data-live-timeline': '1' }, y: 80, height: 370, parent: card });
+    const line = layoutNode({ classes: ['chat-live-line'], data: { 'data-live-line-key': 'line-1' }, y: 230, height: 80, parent: timeline });
+    const refRow = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:after' }, y: 2180, height: 120, parent: feed });
+    records.set('portal-1', { groupId: 'portal-1', root: card, items: [{ lineKey: 'line-1' }] });
+    feed.scrollTop = 2000; // card is [-300..166], line is [10..90], refRow is [180..300]
+
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    assert.equal(anchor.node, line);
+    // Card collapses into a 162 px portal: timeline hides and refRow shifts up by 304 px
+    card.attrs['data-expanded'] = '0';
+    card.height = 162;
+    line.height = 0;
+    refRow.y = 1876;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+    assert.equal(refRow.getBoundingClientRect().top - feed.getBoundingClientRect().top, 180, 'reference row moves 0 px');
+});
+
+test('restoring an anchor never cancels or reverses a scroll the reader made since capture', () => {
+    let writes = 0;
+    const feed = layoutNode({ height: 750, scroll: 8000 });
+    const messages = Object.create(feed);
+    Object.defineProperty(messages, 'scrollTop', {
+        get: () => feed.scrollTop,
+        set: (value) => { writes += 1; feed.scrollTop = value; },
+    });
+    const anchors = createTimelineAnchors({ messagesDiv: messages, liveCardRecords: new Map() });
+    const row = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:keep' }, y: 5050, height: 120, parent: feed });
+    messages.scrollTop = 5000; // row at +50
+    writes = 0;
+
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    // Reader scrolls up 200 px to 4800 (row now at +250); no layout shift above
+    messages.scrollTop = 4800;
+    writes = 0;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+    assert.equal(writes, 0, 'no scrollTop write when only the reader moved');
+    assert.equal(messages.scrollTop, 4800);
+
+    // Reader scrolls down 150 px to 4950 AND a 100 px temporary card above row collapses
+    const anchor2 = anchors.captureVisibleTimelineAnchor(); // captured at 4800 (row at +250)
+    messages.scrollTop = 4950; // reader scrolled +150 (row would be at +100)
+    row.y = 4950; // 100 px collapsed above row
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor2), true);
+    assert.equal(messages.scrollTop, 4850, 'reader +150 scroll preserved while compensating -100 collapse above');
+    assert.equal(row.getBoundingClientRect().top - messages.getBoundingClientRect().top, 100);
+});
