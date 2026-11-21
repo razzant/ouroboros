@@ -9,22 +9,22 @@ and names its enforcement or its absence.
 P7 makes context fit a maintenance constraint, not a line-count aesthetic. Product and
 runtime Python (`devtools/` included) and first-party `web/**/*.js` (vendored and minified
 excluded) target roughly 1000 lines; test modules are outside the module band (their
-function cap stays; the diff pulse states lines per changed test module). The gates read
-exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
-Python and JavaScript: 1600 lines per module (`GIANT_PATHS`), 200,000 canonical
-UTF-8/LF bytes (`BYTE_DEBT`, shrink-only), the 1001–1500 band (`BAND_PATHS`; a new
-entry needs a nonblank rationale), and 300 lines per non-grandfathered runtime-Python
-function (`FUNCTION_DEBT`; `FUNCTION_COUNT_EXCLUDED_FILES` names the skipped files).
+function cap stays). The gates read exact-path debt from
+`ouroboros/size_ratchet_manifest.py`, the same for Python and JavaScript: 1600 lines per
+module (`GIANT_PATHS`), 200,000 canonical UTF-8/LF bytes (`BYTE_DEBT`, shrink-only), the
+1001–1500 band (`BAND_PATHS`; a new entry needs a nonblank rationale), and 300 lines
+per non-grandfathered runtime-Python function
+(`FUNCTION_DEBT`; `FUNCTION_COUNT_EXCLUDED_FILES` names the skipped files).
 A stale or newly oversized entry fails; regenerate with
 `scripts/regenerate_size_ratchet.py` (mechanics: ARCHITECTURE §6 "Review stack").
 Methods over 150 lines or eight parameters are decomposition signals, not gates
 (CHECKLISTS item 11(c); BIBLE P7). Runtime function totals are descriptive, with no
 aggregate ceiling: a repository-wide count penalizes useful decomposition.
 
-Enforcement: manual/tag CI runs `size_ratchet` (ARCHITECTURE §8). Without an event
-base its transition check compares only HEAD's parent, not all intervening commits;
-local qualification must name the contribution base. Local default lanes exclude
-this marker; readiness/health warn and the diff pulse reports growth (BIBLE P3;
+Enforcement: CI's `size_ratchet` lane (ARCHITECTURE §8), against HEAD's parent alone
+with no event base, so local qualification names the contribution base. Local default
+lanes skip it; readiness/health warn; the diff pulse states growth (tests' too) and a
+split's shape: module handles, re-exports, tests' product patches, `git init` (BIBLE P3;
 ARCHITECTURE §6 "Commit preflight").
 
 ### Paying down a size cap
@@ -66,7 +66,7 @@ understand. It is a direction, not a demand for classes or framework surface:
 - **DIP — Dependency Inversion Principle:** policy depends on small host-owned
   contracts, not provider-specific or concrete details.
 
-No class hierarchy, DI container, numeric score, AST analyzer or new review pass
+No class hierarchy, DI container, numeric score or new review pass
 follows. Diff size, line count and file count alone are not findings; CHECKLISTS item
 11(d) says what a finding names (review-only).
 

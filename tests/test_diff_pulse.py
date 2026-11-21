@@ -61,11 +61,12 @@ def test_the_pulse_counts_every_wave_since_the_contribution_base(tmp_path):
     # What the last wave alone shows hides the module wave 1 created.
     assert "custody.py" not in _git(repo, "diff", "--name-only", "HEAD")
 
-    fact, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
+    fact, shape, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
     assert fact.startswith(f"Diff pulse since canonical/ouroboros merge-base {base[:12]}: ")
     assert "files 3, lines +295/-0 (net +295)" in fact
     assert "new files: ouroboros/custody.py, ouroboros/fresh.py;" in fact
     assert fact.endswith("module lines (target 1000, cap 1600): ouroboros/core.py 16 (+6/-0).")
+    assert shape == "Code shape: module handles +0/-0, calls through them +0/-0, re-exports +0/-0."
     assert question == DIFF_PULSE_QUESTION
 
     # The index a commit or a review subject holds: the untracked module is not in it.
@@ -120,9 +121,9 @@ def test_one_shape_and_one_question_for_any_size(tmp_path):
         repo = _body(tmp_path / name)
         _write(repo, "ouroboros/core.py", 10 + grown)
         pulse = diff_pulse(repo)
-        fact, question = pulse.split("\n")
+        fact, shape, question = pulse.split("\n")
         assert question == DIFF_PULSE_QUESTION and "⚠" not in pulse and f"+{grown}/-0" in fact
-        shapes.append(re.sub(r"\d+", "N", re.sub(r"merge-base [0-9a-f]{12}", "merge-base SHA", fact)))
+        shapes.append(re.sub(r"\d+", "N", re.sub(r"merge-base [0-9a-f]{12}", "merge-base SHA", fact + shape)))
     assert shapes[0] == shapes[1]
 
 
@@ -255,6 +256,53 @@ def test_test_lines_are_a_fact_for_any_size_and_no_module_limit_names_them(tmp_p
         assert "⚠" not in pulse and "module lines (target 1000, cap 1600): none; tests:" in pulse
         shapes.append(re.sub(r"\d+", "N", re.sub(r"merge-base [0-9a-f]{12}", "merge-base SHA", pulse)))
     assert shapes[0] == shapes[1]
+
+
+LEAF = '''def _core():
+    """The parent, read at call time."""
+    from ouroboros import core
+
+    return core
+
+
+def step():
+    return _core().x
+'''
+
+
+def test_a_changed_python_source_adds_its_code_shape_and_an_unparsed_one_is_unknown(tmp_path):
+    """Module handles and the calls through them, re-exports, a test's patched product-module names and
+    `git init` runs, since the contribution base (``code_shape_facts``): facts beside the sizes, never a gate."""
+    repo = _body(tmp_path / "body")
+    _write(repo, "ouroboros/leaf.py", 1, LEAF)
+    _write(repo, "ouroboros/facade.py", 1, "from ouroboros.leaf import step  # noqa: F401\n")
+    _write(repo, "tests/test_leaf.py", 1, "def test_step(monkeypatch):\n    pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "leaf")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    _write(repo, "ouroboros/leaf.py", 1, LEAF + "\n\ndef twice():\n    return _core().x + _core().y\n")
+    _write(repo, "ouroboros/again.py", 1, LEAF)  # an untracked new leaf
+    (repo / "ouroboros/facade.py").unlink()
+    _write(repo, "tests/test_leaf.py", 1, 'import subprocess\n\n\ndef test_step(monkeypatch, tmp_path):\n'
+                                          '    monkeypatch.setattr("ouroboros.core.x", 2)\n'
+                                          '    subprocess.run(["git", "init", "-q"], cwd=tmp_path)\n')
+
+    fact, shape, question = diff_pulse(repo).split("\n")
+    assert shape == ("Code shape: module handles +1/-0, calls through them +3/-0, re-exports +0/-1; "
+                     "tests: patched product-module names +1/-0, git init +1/-0.")
+    assert "⚠" not in shape and question == DIFF_PULSE_QUESTION
+    # An edit shows its own files; a file outside Python adds no line.
+    assert "\nCode shape: module handles +0/-0, calls through them +2/-0, re-exports +0/-0.\n" in diff_pulse(
+        repo, ["ouroboros/leaf.py"])
+    assert "Code shape" not in diff_pulse(repo, ["notes.md"])
+    # The index a commit or a review subject holds: the untracked leaf and the unstaged test are not in it.
+    _git(repo, "add", "ouroboros/leaf.py", "ouroboros/facade.py")
+    assert "\nCode shape: module handles +0/-0, calls through them +2/-0, re-exports +0/-1.\n" in diff_pulse(
+        repo, staged=True)
+    # A module that does not parse mid-edit is unknown, never zero.
+    _write(repo, "ouroboros/leaf.py", 1, "def broken(:\n")
+    unknown = "Code shape: module handles, calls through them, re-exports unknown (1 unreadable: ouroboros/leaf.py)."
+    assert unknown in diff_pulse(repo, ["ouroboros/leaf.py"])
 
 
 CODE = {

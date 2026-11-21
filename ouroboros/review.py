@@ -1215,18 +1215,15 @@ def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
     return texts
 
 
-def _suite_facts(
-    root: pathlib.Path, base: str, staged: bool, rows: Mapping[str, tuple[int, int]], new: Iterable[str],
-) -> tuple[str, list[str]]:
-    """The fact line's text on the suite and the sizes of ``rows``, the changed test sources
-    with their added and removed lines: test modules left the module band, not the pulse."""
-    from ouroboros.test_selection import is_test_module
-
-    tests = [path for path in rows if is_test_module(path)]
-    # One `git cat-file --batch` per side: a `git show` per changed test module cost a large PR's commit
-    # fifty seconds of pulse. A spec with whitespace would split in batch input; it is read alone.
-    at_base = _blob_texts(root, [f"{base}:{path}" for path in tests])
-    in_index = _blob_texts(root, [f":{path}" for path in tests]) if staged else {}
+def _change_texts(
+    root: pathlib.Path, base: str, staged: bool, base_paths: list[str], current_paths: list[str],
+) -> tuple[dict[str, str | None], dict[str, str | None]]:
+    """Each path's text at ``base`` and in the candidate (the index when ``staged``, else the worktree),
+    ``None`` where absent or unread. One `git cat-file --batch` a side: a `git show` per changed test
+    module cost a large PR's commit fifty seconds of pulse (a spec with whitespace would split batch
+    input; it is read alone)."""
+    at_base = _blob_texts(root, [f"{base}:{path}" for path in base_paths])
+    in_index = _blob_texts(root, [f":{path}" for path in current_paths]) if staged else {}
 
     def current(path: str) -> str | None:
         if staged:
@@ -1236,18 +1233,30 @@ def _suite_facts(
         except OSError:
             return None
 
+    return ({path: at_base.get(f"{base}:{path}") for path in base_paths},
+            {path: current(path) for path in current_paths})
+
+
+def _suite_facts(
+    rows: Mapping[str, tuple[int, int]], at_base: Mapping[str, str | None],
+    current: Mapping[str, str | None], new: Iterable[str],
+) -> tuple[str, list[str]]:
+    """The fact line's text on the suite and the sizes of ``rows``, the changed test sources
+    with their added and removed lines: test modules left the module band, not the pulse."""
+    from ouroboros.test_selection import is_test_module
+
     added = removed = unreadable = 0
     marks: collections.Counter = collections.Counter()
     sized: list[tuple[int, int, str, str]] = []
     for path, (plus, minus) in rows.items():
-        text = current(path)
+        text = current.get(path)
         if text is not None:
             lines = len(text.splitlines())
             sized.append((minus - plus, -lines, path, f"{path} {lines} (+{plus}/-{minus})"))
         if not is_test_module(path):
             continue
         try:
-            items, had = _declared_tests(at_base.get(f"{base}:{path}") or "", path)
+            items, had = _declared_tests(at_base.get(path) or "", path)
             count, has = _declared_tests(text or "", path)
         except (SyntaxError, ValueError):  # mid-edit text: unread, never counted as none
             unreadable += 1
@@ -1279,9 +1288,11 @@ def diff_pulse(
     reads the index (what a commit or a review subject holds), otherwise the worktree and
     its untracked files. ``paths`` names the modules and books shown (an edit's files);
     omitted, every changed path is. A shown test source adds the suite's facts (declared
-    items, new test modules, ``serial`` marks, recorded test-seconds, its lines). A fact
-    for the mind, never a gate: one shape and one question for any size, and the list
-    bounds are presentation only, counting the rest.
+    items, new test modules, ``serial`` marks, recorded test-seconds, its lines); a shown
+    Python source adds the code-shape line (``code_shape_facts``: module handles and the
+    calls through them, re-exports, a test's patched product-module names and ``git init``
+    runs). A fact for the mind, never a gate: one shape and one question for any size, and
+    the list bounds are presentation only, counting the rest.
     """
     from ouroboros.reference_books import _git_bytes, book_balance_note, contribution_base
 
@@ -1327,12 +1338,26 @@ def diff_pulse(
         more = f" (+{len(items) - limit} more)" if len(items) > limit else ""
         return ", ".join(items[:limit]) + more if items else "none"
 
-    suite = ""
+    suite = shape = ""
     rows = {path: changed[path] for path in shown if path in changed and path.endswith((".py", ".js"))
             and "tests" in pathlib.PurePosixPath(path).parts[:-1]}
+    python = [path for path in shown if path in changed and path.endswith(".py")]
+    at_base, current = _change_texts(root, base, staged, python, list(dict.fromkeys([*rows, *python])))
     if rows:
-        facts, test_sizes = _suite_facts(root, base, staged, rows, new)
+        facts, test_sizes = _suite_facts(rows, at_base, current, new)
         suite = f"; {facts}, test module lines: {listed(test_sizes)}"
+    if python:
+        from ouroboros.code_shape_facts import module_names, pulse_line
+
+        listing = _git_bytes(root, "--no-optional-locks", "ls-tree", "-r", "--name-only", "-z", base)
+        before = None if listing is None else module_names(listing.decode("utf-8", "replace").split("\0"))
+        created = set(new)
+        # A side the file has but that was not read: one held at base, or one given added lines.
+        unread = [path for path in python if at_base[path] is None and path not in created
+                  or current[path] is None and changed[path][0]]
+        after = None if before is None else before | module_names(created)
+        shape = pulse_line([(path, at_base[path], current[path]) for path in python], before, after,
+                           unreadable=unread, limit=limit)
 
     added, deleted = sum(plus for plus, _ in changed.values()), sum(minus for _, minus in changed.values())
     named = f"{upstream.removeprefix('refs/remotes/')} merge-base {merge_base[:12]}"
@@ -1342,7 +1367,7 @@ def diff_pulse(
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
-    return "\n".join(part for part in (fact, book_balance_note(root, shown), DIFF_PULSE_QUESTION) if part)
+    return "\n".join(part for part in (fact, shape, book_balance_note(root, shown), DIFF_PULSE_QUESTION) if part)
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:

@@ -27,7 +27,7 @@ import ast
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple
 
 from ouroboros import work_domain
 from ouroboros.code_intelligence import CodeInventory, _resolve_relative_import
@@ -281,6 +281,16 @@ def _population_resolver(modules: Dict[str, str]):
     return resolve
 
 
+def reexport_imports(tree: ast.Module, lines: List[str]) -> Iterator[ast.ImportFrom]:
+    """The top-level ``from ... import`` statements one of whose lines carries the ``noqa: F401``
+    marker: the re-export convention, read here and by the diff pulse's shape facts."""
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            end = getattr(node, "end_lineno", node.lineno) or node.lineno
+            if any(_NOQA_F401.search(lines[lineno - 1]) for lineno in range(node.lineno, min(end, len(lines)) + 1)):
+                yield node
+
+
 def facade_reexports(
     repo_root: pathlib.Path,
     manifest: DomainManifest | None = None,
@@ -305,15 +315,7 @@ def facade_reexports(
             tree = ast.parse(source, filename=path)
         except SyntaxError:
             continue
-        for node in tree.body:
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            end = getattr(node, "end_lineno", node.lineno) or node.lineno
-            if not any(
-                _NOQA_F401.search(lines[lineno - 1])
-                for lineno in range(node.lineno, min(end, len(lines)) + 1)
-            ):
-                continue
+        for node in reexport_imports(tree, lines):
             base = _resolve_relative_import(
                 pathlib.PurePosixPath(path), node.module or "", int(node.level or 0),
             )
