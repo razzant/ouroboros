@@ -9,11 +9,12 @@ its token (``token``), a pairing link with a one-time code and the code's secret
 - carries the card on the skill's starter item (``starter_connection``);
 - answers the card's token check by calling the declared function of a BUILT-IN skill only, never a hub skill's code
   before its review (``api_connection_identity``);
-- adds the token and the code to the completion's one settings write (``completion_settings``), refusing them from
-  the Telegram Mini App (``guard_completion``): arming a code names the account's owner;
-- records the owner's consent in the starter marker after that write (``record_consent``) and, once the skill is
-  installed, grants the card's keys through the skill lifecycle (enable after grant) and posts its options once to
-  the declared route on loopback (``settle``). Every failure is recorded there; none blocks Start.
+- adds the token and the code to the completion's one settings write (``completion_settings``); the completion's
+  route (``guard_completion``) refuses them from the Telegram Mini App, since arming a code names the account's owner,
+  and once the write is saved records the owner's consent in the starter marker (``record_consent``);
+- once the skill is installed (after the starter run, at once where it already is, or at the next start), grants the
+  card's keys through the skill lifecycle (enable after grant) and posts its options once to the declared route on
+  loopback (``settle``, one run at a time). Every failure is recorded there; none blocks Start.
 """
 from __future__ import annotations
 
@@ -45,6 +46,7 @@ _TOKEN_MAX = 512
 _IDENTITY_TIMEOUT = 8.0  # the declared function's own transport bound; the host waits a little longer
 _POST_TRIES = 12  # the option waits this many beats for the skill's route to answer once it is turned on
 _lock = threading.Lock()
+_SETTLE = threading.Lock()  # one settle at a time: the starter's run, a completion's and a start's never grant twice
 
 
 def _text(value: Any, limit: int = _TEXT_MAX) -> str:
@@ -240,19 +242,37 @@ def completion_settings(body: Dict[str, Any]) -> Dict[str, str]:
 
 
 def guard_completion(endpoint: Callable[[Any], Any]) -> Callable[[Any], Any]:
-    """The completion route, refusing a connection card's values from the Telegram Mini App: a pairing code names the
-    account's owner, the power its own settings refuse there (``request_may_change_owner``)."""
+    """The completion route with its connection cards: their values are refused from the Telegram Mini App before
+    anything is written (a pairing code names the account's owner, the power the skill's own settings refuse there:
+    ``request_may_change_owner``), and once a completion that carried them is saved, the owner's consent is recorded
+    and the cards settle in the background."""
     async def completion(request: Any) -> Any:
-        if str(request.headers.get(MINIAPP_HEADER, "")).strip():
-            from ouroboros.gateway._helpers import request_json_or
+        from ouroboros.gateway._helpers import request_drive_root, request_json_or
+
+        body = await request_json_or(request, {})
+        cards = body.get("connections") if isinstance(body, dict) else None
+        if cards and str(request.headers.get(MINIAPP_HEADER, "")).strip():
             from ouroboros.gateway.owner_settings import unsaved_error
 
-            body = await request_json_or(request, {})
-            if isinstance(body, dict) and body.get("connections"):
-                return unsaved_error("A connection card's token and code are not accepted from the Telegram Mini App; "
-                                     "finish setup in Ouroboros itself.", 403, code="connection_owner_only")
-        return await endpoint(request)
+            return unsaved_error("A connection card's token and code are not accepted from the Telegram Mini App; "
+                                 "finish setup in Ouroboros itself.", 403, code="connection_owner_only")
+        response = await endpoint(request)
+        if cards and _saved(response):
+            drive_root = request_drive_root(request)
+            if await asyncio.to_thread(record_consent, drive_root, cards):
+                settle_later(drive_root)  # an installed skill settles now; a starter run still installing settles after it
+        return response
     return completion
+
+
+def _saved(response: Any) -> bool:
+    """Whether a completion answer says its write landed (success, or saved before a later step failed)."""
+    try:
+        payload = json.loads(bytes(getattr(response, "body", b"") or b"{}"))
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and (payload.get("saved") is True or (payload.get("ok") is True and
+                                                                            getattr(response, "status_code", 0) == 200))
 
 
 # -- after the write: the owner's consent, the grant, the options --------------------------------------------------
@@ -353,22 +373,29 @@ def settle(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None, *,
     from ouroboros.skill_starter import read_marker, write_marker
 
     try:
-        records = [dict(record) for record in read_marker(drive_root).get("connections") or [] if isinstance(record, dict)]
-        for record in records:
-            if record.get("grant") != "pending" and record.get("options_state") != "pending":
-                continue
-            if not _installed(drive_root, str(record.get("skill") or "")):
-                continue
-            if record.get("grant") == "pending":
-                record["grant"] = _grant(drive_root, repo_dir, record)
-                write_marker(drive_root, connections=records)
-            if record.get("options_state") == "pending" and record["grant"] == "granted":
-                record["options_state"] = _post_options(record, post=post, pause=pause)
-                write_marker(drive_root, connections=records)
-        return records
+        with _SETTLE:
+            return _settle_records(drive_root, repo_dir, read_marker, write_marker, post=post, pause=pause)
     except Exception:  # noqa: BLE001
         log.warning("The setup's connection cards could not be settled", exc_info=True)
         return []
+
+
+def _settle_records(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path], read_marker: Callable[..., Any],
+                    write_marker: Callable[..., Any], *, post: Optional[Callable[[str, Dict[str, str]], int]],
+                    pause: Callable[[float], None]) -> List[Dict[str, Any]]:
+    records = [dict(record) for record in read_marker(drive_root).get("connections") or [] if isinstance(record, dict)]
+    for record in records:
+        if record.get("grant") != "pending" and record.get("options_state") != "pending":
+            continue
+        if not _installed(drive_root, str(record.get("skill") or "")):
+            continue
+        if record.get("grant") == "pending":
+            record["grant"] = _grant(drive_root, repo_dir, record)
+            write_marker(drive_root, connections=records)
+        if record.get("options_state") == "pending" and record["grant"] == "granted":
+            record["options_state"] = _post_options(record, post=post, pause=pause)
+            write_marker(drive_root, connections=records)
+    return records
 
 
 def settle_later(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None) -> None:

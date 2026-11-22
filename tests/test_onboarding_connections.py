@@ -111,8 +111,11 @@ def test_the_starter_item_carries_the_card_and_drops_the_code_from_its_prerequis
     assert "connection" not in items["builtin/other"] and items["builtin/other"]["needs_keys"] == ["DEMO_CODE"]
 
 
-def _client(*routes: Route) -> TestClient:
-    return TestClient(Starlette(routes=list(routes)))
+def _client(*routes: Route, drive_root: pathlib.Path | None = None) -> TestClient:
+    app = Starlette(routes=list(routes))
+    if drive_root is not None:
+        app.state.drive_root = drive_root
+    return TestClient(app)
 
 
 def test_the_token_check_runs_the_declared_function_of_a_built_in_skill_and_names_nothing_else(skills):
@@ -152,20 +155,30 @@ def test_finish_saves_the_token_and_code_under_the_declared_keys_and_refuses_any
             cards.completion_settings({"connections": bad})
 
 
-def test_the_telegram_mini_app_cannot_arm_a_code(skills):
-    reached = []
+def test_the_telegram_mini_app_cannot_arm_a_code_and_a_saved_completion_records_the_consent(skills, tmp_path, monkeypatch):
+    reached, settled = [], []
+    answer = {"status": 200, "body": {"ok": True, "status": "saved"}}
 
     async def completion(request):
         reached.append(await request.json())
-        return JSONResponse({"ok": True})
+        return JSONResponse(answer["body"], status_code=answer["status"])
 
-    client = _client(Route("/complete", endpoint=cards.guard_completion(completion), methods=["POST"]))
+    monkeypatch.setattr(cards, "settle_later", lambda drive_root, repo_dir=None: settled.append(drive_root))
+    drive = tmp_path / "data"
+    client = _client(Route("/complete", endpoint=cards.guard_completion(completion), methods=["POST"]), drive_root=drive)
     connections = {"connections": {"demo": {"fields": {"botToken": "1:a", "pairingCode": "c"}}}}
     refused = client.post("/complete", json=connections, headers={cards.MINIAPP_HEADER: "1"})
     assert refused.status_code == 403 and refused.json()["code"] == "connection_owner_only" and reached == []
     assert client.post("/complete", json={"OUROBOROS_MODEL": "x"}, headers={cards.MINIAPP_HEADER: "1"}).status_code == 200
+    assert "connections" not in skill_starter.read_marker(drive) and settled == []
+    # A completion that saved nothing records nothing; one that saved records the owner's consent and settles it.
+    answer.update(status=400, body={"ok": False, "saved": False, "error": "no Main model"})
+    assert client.post("/complete", json=connections).status_code == 400
+    assert "connections" not in skill_starter.read_marker(drive) and settled == []
+    answer.update(status=200, body={"ok": True, "status": "saved"})
     assert client.post("/complete", json=connections).status_code == 200, "the app and browsers pass"
-    assert len(reached) == 2 and reached[-1] == connections
+    assert [record["keys"] for record in skill_starter.read_marker(drive)["connections"]] == [["DEMO_TOKEN", "DEMO_CODE"]]
+    assert settled == [drive] and len(reached) == 3 and reached[-1] == connections
 
 
 def test_after_finish_the_consent_is_kept_then_the_keys_granted_and_the_options_posted_once(skills, tmp_path, monkeypatch):

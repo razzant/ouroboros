@@ -358,16 +358,11 @@ def starter_choice_open(drive_root: pathlib.Path, settings: Dict[str, Any]) -> b
         return False
 
 
-def after_onboarding(drive_root: pathlib.Path, ids: Optional[List[str]], connections: Any = None, *,
+def after_onboarding(drive_root: pathlib.Path, ids: Optional[List[str]], *,
                      repo_dir: Optional[pathlib.Path] = None) -> str:
-    """Run the installer for the owner's ticks once onboarding completed (``None`` = the default list). The
-    connection cards the completion saved are noted first; the installer's run settles them after its installs."""
-    from ouroboros.onboarding_connections import record_consent, settle_later
-
-    record_consent(drive_root, connections)
+    """Run the installer for the owner's ticks once onboarding completed (``None`` = the default list)."""
     state = str(read_marker(drive_root).get("state") or "")
     if state in _LIST_RAN:
-        settle_later(drive_root, repo_dir)  # no installer run follows: an installed skill's card settles now
         return state
     if ids is not None and not ids:
         _write_marker(drive_root, state="done", origin="onboarding", requested=[], results={})

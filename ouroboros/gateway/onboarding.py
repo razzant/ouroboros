@@ -971,7 +971,7 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
             "preset_harnesses": list(preset.connected) if preset else [],
             "subscriptions_connected": subscriptions_connected,
         })
-        after_onboarding(request_drive_root(request), body.get("starter_skills"), body.get("connections"))  # once, in the background
+        after_onboarding(request_drive_root(request), body.get("starter_skills"))  # once, in the background
         payload: Dict[str, Any] = {
             "ok": True,
             "status": "saved",
