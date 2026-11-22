@@ -1019,6 +1019,56 @@ def test_a_promoted_place_root_speaks_a_new_final_after_an_interim_send_or_stays
     assert not room.transport.work
 
 
+@pytest.mark.parametrize("silent", [True, False], ids=["silent", "speech"])
+def test_a_retained_roots_finish_keeps_its_choice_when_the_place_store_breaks_after_validation(room, monkeypatch,
+                                                                                               silent):
+    """Review round 4 (Astra): a retained legacy root's finish is validated while the place store is readable, then the
+    store cannot be read through the result write, so its selection resolves no carrier. An accepted silent finish is
+    never words all the same: the result is quiet with no outward body, and polls after the repair deliver nothing.
+    A non-silent finish of that doorless root with an empty carrier is still its speech, as on the target."""
+    import sys
+
+    from ouroboros import places
+    from ouroboros.tools import control_runtime
+    private, public = "The private notebook entry selected as silent.", "The compiled report, for the room."
+    path, root_id, checks = places.places_path(room.data), "promoted-place-root", []
+    original, read_row, validate = path.read_bytes(), load_task_result, control_runtime.completion_request
+
+    def legacy_source(root, task_id):  # the source turn's bytes from before the migration name only the old binding
+        stored = read_row(root, task_id)
+        if task_id != root_id and stored and "place_id" in stored.get("metadata", {}).get("presence", {}):
+            stored = json.loads(json.dumps(stored))
+            presence = stored["metadata"]["presence"]
+            presence["binding_id"] = presence.pop("place_id")
+        return stored
+
+    def validate_then_lose_store(ctx, arguments):
+        request, error = validate(ctx, arguments)
+        if ctx.task_id == root_id and not checks:
+            checks.append("accepted" if request and not error else "refused")
+            path.write_bytes(b"{")  # unreadable until the root's result is written
+        return request, error
+
+    monkeypatch.setattr(sys.modules[__name__], "load_task_result", legacy_source)  # what promoted_root reads
+    monkeypatch.setattr(control_runtime, "completion_request", validate_then_lose_store)
+    try:
+        root = promoted_root(room, monkeypatch, [finish(silent=True, answer=private) if silent else finish(answer=public)])
+    finally:
+        path.write_bytes(original)
+    metadata = root.stored["metadata"]
+    assert checks == ["accepted"] and "binding_id" in metadata["presence"] and "place_id" not in metadata["presence"]
+    for _ in range(2):  # the store is readable again: the connector polls the root's work
+        room.transport.work[root.id] = "chat:a:1"
+        room.transport.poll()
+    if silent:
+        assert private not in room.transport.texts(), "an explicitly silent finish is never words"
+        assert root.stored.get("wake_silent") is True and len(root.inputs) == 1
+        assert (metadata["presence_outcome"], metadata["presence_result_text"]) == ("silent", "")
+    else:
+        assert (metadata["presence_outcome"], metadata["presence_result_text"]) == ("message", public)
+        assert room.transport.texts().count(public) == 1
+
+
 def test_a_refused_place_root_is_never_told_the_frozen_completion_names(room, monkeypatch):
     """The real loop's refusal round: the flag returns and the next finish is ordinary ``finish_task``."""
     def check(name, subject, **_kw):

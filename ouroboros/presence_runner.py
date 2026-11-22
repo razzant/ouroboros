@@ -179,6 +179,10 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
         # when owed work below turns the outcome into deferred.
         text = str(completion.get("message") or "") if completion.get("outcome") in {"message", "deferred"} else ""
     note = str(completion.get("message") or "") if completion.get("outcome") == "tool_delivered" else ""
+    if silent and not completion.get("quiet") and completion.get("outcome") != "tool_delivered":
+        # An accepted silent finish is never words, whatever the carrier read returned (none from an unreadable
+        # store): the quiet outcome its selection gives it (``place_reply.prepare_focus_reply``), no outward body.
+        completion = {**completion, "outcome": "deferred" if _handoff_ref(ctx) else "silent", "quiet": True}
     if completion.get("quiet"):
         # Not speech, so an owed handoff below polls with an empty body; the mind's own
         # silent words stay its finish note, host text never becomes one.
