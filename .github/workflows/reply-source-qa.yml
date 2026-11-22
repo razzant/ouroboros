@@ -1,0 +1,184 @@
+# Branch-only verification of the corrected product. The product commit contains no workflow changes.
+name: Reply source focused verification
+on:
+  push:
+    branches: [qa/reply-source-2802596de13d]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    env:
+      PRODUCT: eda4e54b66255080281c3033fcdc9c41a6a50df4
+      PRODUCT_TREE: 2802596de13d54a459b4bf39f19cbc471be6f516
+      PRODUCT_BASE: 405705e89f5dd870d7ffef875db913c41066e24c
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind the run to the exact product and base
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$PRODUCT"
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/reply-source-qa.yml
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCT_TREE"
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT_BASE"
+          echo "Product $PRODUCT, tree $PRODUCT_TREE, base $PRODUCT_BASE" >> "$GITHUB_STEP_SUMMARY"
+      - uses: ./.github/actions/setup-python-env
+        id: setup
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Reply, correct quote landing and reduced-motion ring
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/private"
+          python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+          xvfb-run -a python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/ui" -- \
+            python -B -m pytest -o addopts= -n0 -m ui_browser --timeout=120 -q --tb=short \
+            tests/test_history_reply_browser.py::test_main_quotes_the_request_that_started_the_completed_project \
+            tests/test_history_reply_browser.py::test_a_landed_card_answer_keeps_its_ring_in_light_reduced_motion \
+            tests/test_history_reply_browser.py::test_a_reply_to_my_humans_card_answer_reads_their_choice_in_their_voice \
+            tests/test_routing_receipt_browser.py::test_a_routed_message_receipt_reads_the_same_live_and_after_reload \
+            --ci-evidence-dir="$RUNNER_TEMP/evidence/ui" --junitxml="$RUNNER_TEMP/private/ui.xml"
+          python - <<'PY'
+          import hashlib, json, os, shutil, xml.etree.ElementTree as ET
+          from pathlib import Path
+          e = os.environ
+          root = Path(e['RUNNER_TEMP'])
+          html = root/'raw/ui'
+          def one(name):
+              files = list(html.glob(f'run-*/quoted-navigation/*/{name}'))
+              assert len(files) == 1 and files[0].is_file(), name
+              return files[0]
+          cases = ET.parse(root/'private/ui.xml').findall('.//testcase')
+          names = [r.get('name', '') for r in cases]
+          assert len(cases) >= 12 and all(all(r.find(t) is None for t in ('failure','error','skipped')) for r in cases)
+          required = {'test_main_quotes_the_request_that_started_the_completed_project['+g+']' for g in ('quote-shown', 'quote-hidden-directly-above')}
+          required |= {'test_a_landed_card_answer_keeps_its_ring_in_light_reduced_motion['+b+']' for b in ('chromium', 'webkit')}
+          assert all(names.count(n) == 1 for n in required), sorted(required - set(names))
+          landings = {}
+          for phase in ('live-arrival', 'replay'):
+              data = json.loads(one(f'selected-origin-project-{phase}-shown-chromium.json').read_bytes())
+              selected, opened = data['fixture']['selected'], data['facts']['address']
+              assert data['fixture']['arrival'] == phase and data['facts'].get('hidden') is not True
+              assert isinstance(selected, str) and selected.startswith('row:') and len(selected) <= 512 and selected == opened
+              landings[phase] = {'selected': selected, 'opened': opened}
+          assert landings['live-arrival'] == landings['replay']
+          views = {}
+          for name in ('selected-origin-project-replay-shown-chromium.png', 'card-answer-light-reduced-chromium.png', 'card-answer-light-reduced-webkit.png'):
+              src = one(name)
+              dst = root/'evidence/visual'/name
+              dst.parent.mkdir(exist_ok=True)
+              shutil.copyfile(src, dst)
+              views[name] = hashlib.sha256(dst.read_bytes()).hexdigest()
+          data = {'product': e['PRODUCT'], 'tree': e['PRODUCT_TREE'], 'base': e['PRODUCT_BASE'], 'workflow_head': e['GITHUB_SHA'], 'run': e['GITHUB_RUN_ID'], 'attempt': e['GITHUB_RUN_ATTEMPT'], 'cases_passed': len(cases), 'selected_origin': landings, 'synthetic_views': views}
+          (root/'evidence/identity.json').write_text(json.dumps(data, indent=2) + '\n')
+          print(f'{len(cases)} browser cases passed; exact selected row verified before and after reload')
+          PY
+      - name: Ordinary source, history and continuation checks
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/selected" -- \
+            python -B -m pytest -o addopts= -n0 -q --tb=short --ci-evidence-dir="$RUNNER_TEMP/evidence/selected" \
+            tests/test_reply_target_carried.py tests/test_chronicle_tools.py tests/test_root_effort_ingress.py \
+            tests/test_start_task_source_files.py tests/test_dialogue_evidence.py tests/test_owner_words_identity.py \
+            tests/test_unplaced_receipt_source.py tests/test_tool_classification_differential.py \
+            tests/test_context_physical_exposure.py tests/test_continue_quiz_origin.py tests/test_routing_root_snapshot.py \
+            tests/test_docs_sync.py::test_architecture_component_map_covers_every_live_runtime_module
+      - name: Compare the two historical Continue setup failures on both exact commits
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/private" "$RUNNER_TEMP/evidence"
+          py=$(python -c 'import sys; print(sys.executable)')
+          git worktree add --detach --quiet "$RUNNER_TEMP/continue-base" "$PRODUCT_BASE"
+          echo 'Collecting two ordinary Continue cases with the same environment on base and candidate.'
+          for side in base candidate; do
+            repo="$GITHUB_WORKSPACE"
+            ref="$PRODUCT"
+            if [ "$side" = base ]; then repo="$RUNNER_TEMP/continue-base"; ref="$PRODUCT_BASE"; fi
+            test "$(git -C "$repo" rev-parse HEAD)" = "$ref"
+            rc=0
+            (cd "$repo" && "$py" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/continue-$side" -- \
+              "$py" -B -m pytest -p no:cacheprovider -o addopts= -n0 -q --tb=short \
+              tests/test_continue_memory_drive.py::test_a_continued_fork_reads_its_predecessors_memory_export_through_its_lineage \
+              'tests/test_continue_memory_drive.py::test_late_owner_inputs_ride_every_hop_in_each_successors_own_store[forked]' \
+              --junitxml="$RUNNER_TEMP/private/continue-$side.xml") > "$RUNNER_TEMP/private/continue-$side.log" 2>&1 || rc=$?
+            printf '%s\n' "$rc" > "$RUNNER_TEMP/private/continue-$side.rc"
+          done
+          python - <<'PY'
+          import json, os, xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          names = {'test_a_continued_fork_reads_its_predecessors_memory_export_through_its_lineage', 'test_late_owner_inputs_ride_every_hop_in_each_successors_own_store[forked]'}
+          marker = 'ValueError: terminal task source is missing or not settled'
+          outcomes = {}
+          for side in ('base','candidate'):
+              stem = root/'private'/f'continue-{side}'
+              rc = int(stem.with_suffix('.rc').read_text())
+              assert rc in (0, 1), (side, rc)
+              cases = ET.parse(stem.with_suffix('.xml')).findall('.//testcase')
+              assert len(cases) == 2 and {c.get('name') for c in cases} == names
+              observed = {}
+              for c in cases:
+                  assert c.find('error') is None and c.find('skipped') is None
+                  f = c.find('failure')
+                  if f is not None:
+                      details = (f.get('message') or '') + (f.text or '')
+                      observed[c.get('name')] = 'terminal_setup_failed' if marker in details and 'terminal_source_present' in details else 'different_failure'
+                  else:
+                      observed[c.get('name')] = 'passed'
+              assert bool(rc) == any(x != 'passed' for x in observed.values())
+              outcomes[side] = observed
+          outcomes['ok_no_new_failure'] = all(head == 'passed' or (head == 'terminal_setup_failed' and outcomes['base'][n] == head) for n, head in outcomes['candidate'].items())
+          (root/'evidence/continue-setup.json').write_text(json.dumps(outcomes, indent=2) + '\n')
+          print(json.dumps(outcomes))
+          assert outcomes['ok_no_new_failure'], 'Different or candidate-only Continue failure'
+          if 'terminal_setup_failed' in outcomes['candidate'].values():
+              print('::warning::Existing terminal setup failures reproduced on the base and candidate; these two test cases are not a pass.')
+          PY
+      - name: Related client modules
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          node --test --test-reporter=tap web/tests/chat_addressing_card.test.js web/tests/chat_decision.test.js \
+            web/tests/chat_history_integration.test.js web/tests/chat_instance_dom.test.js web/tests/chat_reading_position.test.js \
+            web/tests/chat_reply.test.js web/tests/chat_reply_quote.test.js web/tests/chat_reply_send.test.js web/tests/question_mirrors.test.js
+      - name: Size and book limits on the exact product base
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 12
+        run: |
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/size" -- \
+            env -u GITHUB_EVENT_NAME OURO_SIZE_RATCHET_BASE_REF="$PRODUCT_BASE" python -m pytest -o addopts= -n0 tests/ \
+            -m size_ratchet --ci-evidence-dir="$RUNNER_TEMP/evidence/size" -q --tb=short
+      - name: Retain only the bounded test observations and synthetic views
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reply-source-focused-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/evidence/identity.json
+            ${{ runner.temp }}/evidence/continue-setup.json
+            ${{ runner.temp }}/evidence/ui/results.json
+            ${{ runner.temp }}/evidence/selected/results.json
+            ${{ runner.temp }}/evidence/size/results.json
+            ${{ runner.temp }}/evidence/visual/selected-origin-project-replay-shown-chromium.png
+            ${{ runner.temp }}/evidence/visual/card-answer-light-reduced-chromium.png
+            ${{ runner.temp }}/evidence/visual/card-answer-light-reduced-webkit.png
