@@ -23,7 +23,6 @@ from ouroboros.config import (
 )
 from ouroboros.depth_evidence import parse_task_depth  # noqa: F401
 from ouroboros.memory_texts import edit_properties
-from ouroboros.dialogue_recall import WORDS_DESCRIPTION
 from ouroboros.headless import prepare_task_drive, task_state_dir  # noqa: F401
 from ouroboros.contracts.task_contract import (
     build_task_contract,  # noqa: F401
@@ -428,27 +427,7 @@ def get_tools() -> List[ToolEntry]:
                 "reviewer": {"type": "string", "description": "One enabled catalog row by id or handle; empty = the Main model"},
             }, "required": ["reason"]},
         }, _request_deep_self_review),
-        ToolEntry("chat_history", {
-            "name": "chat_history",
-            "description": "Retrieve live and archived chat messages. Supports exact provenance/date filters, substring search or words, and pagination.",
-            "parameters": {"type": "object", "properties": {
-                "count": {"type": "integer", "default": 100, "description": "How many rows to return. With words, the first of the requested order; otherwise the latest."},
-                "offset": {"type": "integer", "default": 0, "description": "How many rows to skip in that order. Without words, skip that many from the latest."},
-                "search": {"type": "string", "default": "", "description": "Text filter"},
-                "provider": {"type": "string", "default": "", "description": "Exact transport provider"},
-                "account_id": {"type": "string", "default": "", "description": "Exact transport account ID"},
-                "conversation_id": {"type": "string", "default": "", "description": "Exact transport conversation ID"},
-                "thread_id": {"type": "string", "default": "", "description": "Exact transport thread ID"},
-                "actor_id": {"type": "string", "default": "", "description": "Exact platform actor ID"},
-                "date_from": {"type": "string", "default": "", "description": "Inclusive ISO-8601 lower timestamp bound"},
-                "date_to": {"type": "string", "default": "", "description": "Inclusive ISO-8601 upper timestamp bound"},
-                "snapshot": {"type": "string", "default": "", "description": "Opaque snapshot returned by the first page; reuse it with offset to refuse shifted/mixed pages"},
-                "words": {"type": "array", "items": {"type": "string"}, "description": WORDS_DESCRIPTION},
-                "room_id": {"type": "string", "description": "With words: one room's chat id (1 is Main)."},
-                "voice": {"type": "string", "enum": ["owner"], "description": "With words: only rows of my human's own words, a card they answered included."},
-                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first by recorded time; oldest puts an original before its later restatements."},
-            }, "required": [], "additionalProperties": False},
-        }, _chat_history),
+        ToolEntry("chat_history", CHAT_HISTORY_SCHEMA, _chat_history),
         ToolEntry("update_scratchpad", {
             "name": "update_scratchpad",
             "description": "Write working memory (scratchpad): append a timestamped block, or with replaces fold the named blocks (the sha256 after each heading; an "
@@ -615,6 +594,7 @@ from ouroboros.tools.control_routing import (  # noqa: E402, F401 -- intentional
     _start_task,
 )
 from ouroboros.tools.control_runtime import (  # noqa: E402, F401 -- intentional public re-exports
+    CHAT_HISTORY_SCHEMA,
     _chat_history,
     _evolution_restart_block_reason,
     _prepare_self_change,
