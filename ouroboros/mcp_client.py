@@ -63,6 +63,7 @@ log = logging.getLogger(__name__)
 
 try:  # pragma: no cover - import guard exercised by tests via monkeypatch
     from mcp import ClientSession  # type: ignore
+    ClientSession = mcp_catalog.answering_session(ClientSession)  # a call's session says when its server answered
     from mcp.client.sse import sse_client  # type: ignore
     from mcp.client.stdio import StdioServerParameters, stdio_client  # type: ignore
     from mcp.client.streamable_http import streamablehttp_client  # type: ignore
@@ -815,6 +816,8 @@ async def _call_tool_async(
                 # wait_for replaces CancelledError with TimeoutError; carry proof,
                 # not exception-class inference, over that conversion.
                 exc.mcp_unsent_joined = True
+            if returned is not None:  # the server answered; only leaving its session ran out of time
+                exc.mcp_server_answered = True
             raise
 
 
