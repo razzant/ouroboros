@@ -11,6 +11,7 @@
 // closes; and a row that offers Reply can be swiped left to reply (chat_row_swipe.js), with the same Reply.
 import { REPLY_ICON } from './chat_reply.js';
 import { createRowSwipe } from './chat_row_swipe.js';
+import { createGestureTail } from './gesture_tail.js';
 import { haptic } from './haptics.js';
 import { tr } from './i18n.js';
 import { isStackLayout, onLayoutChange } from './layout.js';
@@ -40,7 +41,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
     const doc = feed.ownerDocument;
     let current = null;  // { menu, binding, row }
     let press = null;  // a touch that may become (or became) a long press
-    let swallowClickUntil = 0;
+    const tail = createGestureTail(doc, { mousedown: true });  // the lift must not take focus or activate an item
     let rightPress = null;  // what was selected when a right button went down, before its own default selected a word
 
     const selectedIn = (row) => {
@@ -64,7 +65,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         const copy = row.querySelector(':scope > .chat-message-copy, :scope > .chat-message-actions > .chat-message-copy');
         if (copy) items.push(['copy', tr('code.copy', 'Copy'), () => copy.click(), true]);
         if (touch && replies.canSelect?.(row, point)) items.push(['select-text', tr('chat.reply.select_text', 'Select text'),
-            () => { swallowClickUntil = 0; replies.selectText(row, point); }]);
+            () => { tail.disarm(); replies.selectText(row, point); }]);
         const view = messageRow(row);
         for (const action of view ? actions.actionsFor(view) : []) {
             items.push([action.key, presentAction(action, view).label, () => runMessageAction(action, view, { anchor: row }), true]);
@@ -152,7 +153,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         }
         doc.body.append(menu);
         // A new finger on an item is a deliberate press, even just after the long press lifted.
-        menu.addEventListener('pointerdown', () => { swallowClickUntil = 0; });
+        menu.addEventListener('pointerdown', () => tail.disarm());
         if (lift) { setPress(row, 'lift'); haptic('press'); }
         const binding = bindMenu(menu, { anchor, point, onClose: () => {
             menu.remove();
@@ -167,7 +168,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         const row = rowOf(event.target);
         if (!row) return;
         // A long press already answered (Android also fires contextmenu for it).
-        if (press?.fired || Date.now() < swallowClickUntil || current?.row === row) { event.preventDefault(); return; }
+        if (press?.fired || tail.armed || current?.row === row) { event.preventDefault(); return; }
         // Words the owner selected keep the browser's menu (Copy them). A right button on macOS selects the word under
         // it before this event; that selection is the gesture's own, not the owner's, and goes with the row menu.
         const owned = rightPress?.row === row ? rightPress.selected : selectedIn(row);
@@ -191,12 +192,12 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
     }
 
     function cancelPress() {
-        if (press) {
-            clearTimeout(press.timer);
-            clearTimeout(press.holdTimer);
-            if (pressOf(press.row) === 'hold') setPress(press.row, '');
-        }
+        if (!press) return;
+        clearTimeout(press.timer);
+        clearTimeout(press.holdTimer);
+        if (pressOf(press.row) === 'hold') setPress(press.row, '');
         press = null;
+        for (const [type, handler] of pointerListeners) doc.removeEventListener(type, handler, true);
     }
 
     function onPointerDown(event) {
@@ -213,6 +214,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
             if (!touch.fired && pressOf(row) === 'hold') setPress(row, '');
         }, LONG_PRESS_MS);
         press = touch;
+        for (const [type, handler] of pointerListeners) doc.addEventListener(type, handler, true);
     }
 
     function onPointerMove(event) {
@@ -220,24 +222,23 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
             && Math.hypot(event.clientX - press.x, event.clientY - press.y) > MOVE_TOLERANCE_PX) cancelPress();
     }
 
-    // A touch is captured by its first target, so its end arrives here even when the menu lies under the finger:
-    // the tap that ends a long press is not also a press of whatever is there (a menu item included).
+    // Capture in the document while the touch is tracked: a portalled menu or a detached row can put the
+    // release outside the feed. Only the finger that opened the menu can arm its release guard.
     function onPointerEnd(event) {
-        if (press?.fired && event.pointerId === press.id) swallowClickUntil = Date.now() + 400;
+        if (!press || event.pointerId !== press.id) return;
+        if (press.fired) tail.arm();
         cancelPress();
     }
 
-    function onClickCapture(event) {
-        if (Date.now() >= swallowClickUntil) return;
-        swallowClickUntil = 0;
-        event.preventDefault();
-        event.stopPropagation();
+    function onScroll() {
+        // A waiting hold no longer points at the same place. Reflow under a lifted row still owes its release guard.
+        if (!press?.fired) cancelPress();
     }
 
+    const pointerListeners = [['pointermove', onPointerMove], ['pointerup', onPointerEnd], ['pointercancel', onPointerEnd]];
     const listeners = [['contextmenu', onContextMenu], ['keydown', onKeydown], ['pointerdown', onPointerDown],
-        ['pointermove', onPointerMove], ['pointerup', onPointerEnd], ['pointercancel', onPointerEnd], ['scroll', cancelPress]];
+        ['scroll', onScroll]];
     for (const [type, handler] of listeners) feed.addEventListener(type, handler);
-    doc.addEventListener('click', onClickCapture, true);
     const win = doc.defaultView || globalThis.window;
     const disposeSwipe = createRowSwipe({ feed, icon: REPLY_ICON, replyRef, reply: (ref) => replies.start(ref), win, doc,
         isStack: () => isStackLayout(), isCoarse: () => Boolean(win?.matchMedia?.('(pointer: coarse)')?.matches),
@@ -247,12 +248,12 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         open,
         destroy() {
             cancelPress();
+            tail.disarm();
             close();
             for (const [row, timer] of releases) { clearTimeout(timer); delete row.dataset.rowPress; }
             releases.clear();
             disposeSwipe();
             for (const [type, handler] of listeners) feed.removeEventListener(type, handler);
-            doc.removeEventListener('click', onClickCapture, true);
         },
     };
 }
