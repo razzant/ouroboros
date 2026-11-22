@@ -123,7 +123,7 @@ def test_a_stdio_header_names_the_process_lifetime_its_configuration_gives(regis
     assert full.count("process") == helper.count("process") == 2  # nor on the pinned remote slack
 
 
-@pytest.mark.parametrize("disabled", [(), ("enable_tools",), ("enable_tools", "list_available_tools")])
+@pytest.mark.parametrize("disabled", [(), ("enable_tools",), ("list_available_tools",), ("enable_tools", "list_available_tools")])
 def test_the_map_names_only_the_selectors_this_actor_can_call(registry, disabled):
     _servers()
     registry._ctx.task_contract = {"disabled_tools": list(disabled)}
@@ -622,6 +622,8 @@ def test_a_helper_reads_names_and_an_integrating_focus_reads_descriptions(regist
     assert _connections(None, {"id": "main"}) == ("", "")
 
 
+_LONG_LEAD = ("Get metadata (description, type, unit, integration), available tags and dimensions, and optionally the "
+              "related dashboards and monitors for one metric.")  # past tool_purpose's 120 characters
 _LINK_TYPES = "Get available Jira issue link types (e.g. Blocks, Duplicate, Clones, Relates). For createIssueLink use the name."
 _PURPOSE_ROWS = [
     {"name": "link_types", "description": _LINK_TYPES, "input_schema": {"type": "object", "properties": {}}},
@@ -630,6 +632,14 @@ _PURPOSE_ROWS = [
     {"name": "one_sentence", "description": "Get unread messages across all channels.",
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "no_sentence_end", "description": "Add or update a comment on a Jira issue",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "ie_lower", "description": "Resolve the head, i.e. the latest revision. Return its ID.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "ie_capital", "description": "Pick the default branch, i.e. Main. Then merge into it.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "vs_lower", "description": "Set the folder kind (private vs. shared) on creation. It cannot change later.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "long_lead", "description": _LONG_LEAD + " Use search_datadog_metrics first to find the metric name.",
      "input_schema": {"type": "object", "properties": {}}},
 ]
 
@@ -642,14 +652,20 @@ def test_an_integrating_focus_reads_first_sentences_and_the_listing_returns_the_
 
     _servers(listing={"gitlab": GITLAB, "slack": _PURPOSE_ROWS})
     full, _ = connection_views(registry, helper=False)
-    assert 'list_available_tools(namespace="mcp_<server>") lists the server with every description in full.' in full
+    assert ('list_available_tools(namespace="mcp_<server>") lists the server\'s current catalog with every description '
+            'in full.') in full
     assert "Every tool description begins: Work account only." in full
     assert "- create_issue [not destructive] [not read-only]: Create an issue in a project.\n" in full
     assert "- get_merge_request [read-only]: Read one merge request with its discussion.\n" in full
     assert "It returns every field" not in full and "For createIssueLink" not in full
     assert "- link_types: Get available Jira issue link types (e.g. Blocks, Duplicate, Clones, Relates).\n" in full
     assert "- link_types_plain: Get available link types.\n" in full
-    assert full.endswith("\n- one_sentence: Get unread messages across all channels.")
+    assert "\n- one_sentence: Get unread messages across all channels.\n" in full
+    # A stop before a lowercase word, or closing a run of initials, is not a sentence end.
+    assert "\n- ie_lower: Resolve the head, i.e. the latest revision.\n" in full and "Return its ID" not in full
+    assert "\n- ie_capital: Pick the default branch, i.e. Main.\n" in full and "Then merge" not in full
+    assert full.endswith("\n- vs_lower: Set the folder kind (private vs. shared) on creation.")
+    assert len(_LONG_LEAD) > 120 and f"\n- long_lead: {_LONG_LEAD}\n" in full and "search_datadog_metrics" not in full
     assert "- no_sentence_end: Add or update a comment on a Jira issue\n" in full
     resident = initial_tool_schemas(registry)
     loop_module._setup_dynamic_tools(registry, resident, [])
