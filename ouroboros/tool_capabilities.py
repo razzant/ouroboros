@@ -412,12 +412,12 @@ RESULT_VIEW_PARAMS: dict[str, dict[str, Any]] = {
                            "description": "Chars of the output's tail to show in this turn (see view_head_chars)."},
 }
 
-# Declared range parameters where a non-null value means the caller chose the result's
-# form (a page, a window, a cursor): such a result is a REQUESTED form that may
+# Declared range parameters (and read_file's accepted end_line) where a non-null value means the caller
+# chose the result's form (a page, a window, a cursor): such a result is a REQUESTED form that may
 # use the free room of the frame, not an unsolicited body sharing the eighth.
 EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
     RESULT_VIEW_HEAD_ARG, RESULT_VIEW_TAIL_ARG,
-    "max_chars", "max_lines", "start_char", "end_char", "start_line",
+    "max_chars", "max_lines", "start_char", "end_char", "start_line", "end_line",
     "source_start_char", "source_end_char", "offset", "limit", "tail_lines",
     "from", "to", "start", "after_seq",  # chronicle row bounds and continuation pages
 })

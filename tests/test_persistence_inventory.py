@@ -1021,9 +1021,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``tools/services._preserve_service_log``); its own row. The local filename owner in ``launch_custody``
 # now spells one host and one executor family (plain and launch-bound stems share the same suffixes).
 # 480 -> 481: staged session scratch records its source task in handoff.json.
-# 481 -> 487: the subscription census and its refresh request (``ouroboros/subscription_census.py``), each with
-# its row, and the four ``released`` holders of staged and trashed custody (``ouroboros/payload_release.py``), which
-# the scan already held under the previous pin.
+# 481 -> 485: a saved task file the owner releases is moved to a numbered slot under ``released/`` in the task's
+# custody staging folder and then in its custody trash folder (``payload_release_state._slot``, #3981); both folders
+# already have their row (``state/custody_staging/<id>-<token>/``, ``state/custody_trash/<id>-<token>/``).
+# 485 -> 487: the subscription census and its refresh request (``ouroboros/subscription_census.py``), each with
+# its row.
 EXPECTED_SCAN_PATHS = 487
 
 # Scanned paths that must always be present — guards the scanner itself
