@@ -783,7 +783,13 @@ def test_a_long_telegram_feed_stays_placed_without_scanning_its_rows_on_keyboard
     scene['coverage']['upper']['chat'] = scene['coverage']['spans']['chat']['to'] = len(texts)
     page = telegram_phone(shell_ui, fullscreen=True)
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=scene))
-    page.route('**/api/state', lambda route: route.fulfill(json={'supervisor_ready': True, 'projects': []}))
+    held = None  # the state reads left unanswered while the steps run
+
+    def state(route):
+        if held is None: route.fulfill(json={'supervisor_ready': True, 'projects': []})
+        else: held.append(route)
+
+    page.route('**/api/state', state)
     page.goto(shell_ui['url'])
     feed = page.locator('#chat-messages')
     feed.locator('[data-history-id="chat:239"]').wait_for()
@@ -798,6 +804,12 @@ def test_a_long_telegram_feed_stays_placed_without_scanning_its_rows_on_keyboard
         still(page)
     page.locator('#chat-input').fill('A draft for testing.')
     still(page)
+    # The room reads the state every 3 s on its own clock (app.js pollShownRoomState) and, on a slow runner, inside a
+    # step: its write re-anchors the feed by every row (~1200 reads; a resize asks none). Its next read waits unanswered
+    # across the steps, and none other is asked while it does; whatever a step itself reads still counts.
+    held = []
+    with page.expect_request('**/api/state', timeout=10_000):
+        pass
     samples = feed.evaluate("""async (feed, latest) => {
         const rows = new Set(feed.querySelectorAll(':scope > [data-history-id]'));
         const row = feed.querySelector(`[data-history-id="chat:${latest ? 239 : 179}"]`);
@@ -823,6 +835,9 @@ def test_a_long_telegram_feed_stays_placed_without_scanning_its_rows_on_keyboard
             return {rows: rows.size, rest, steps};
         } finally { Element.prototype.getBoundingClientRect = rect; }
     }""", latest)
+    routes, held = held, None
+    for route in routes:
+        route.fulfill(json={'supervisor_ready': True, 'projects': []})
     facts(f'keyboard-long-feed-{"latest" if latest else "reading"}-{shell_ui["engine"]}', samples)
     assert samples['rows'] == 240
     assert [step['open'] for step in samples['steps'][:4]] == [False, False, False, True], samples
@@ -1246,13 +1261,17 @@ def test_a_long_draft_gets_its_resting_cap_back_after_a_dismissal_without_resize
     assert field.input_value().count('\n') == 11
 
 
-CARET = r"""f => {
+# The caret's line `y` counted from the end (no line after the caret's wraps). `shown`: the reader sees it, the one
+# meaning the field's sizing keeps it by (chat_input_sizing.js caretRowShown); `whole`: its full line box in view.
+CARET = r"""async f => {
+    const { caretRowShown } = await import('/static/modules/chat_input_sizing.js');
     const s = getComputedStyle(f), line = parseFloat(s.lineHeight);
     const start = parseFloat(s.paddingTop), end = parseFloat(s.paddingBottom);
     const rows = Math.round((f.scrollHeight - start - end) / line);
     const y = start + line * (rows - (f.value.slice(f.selectionEnd).split('\n').length - 1) - 1);
     return {top: f.scrollTop, height: f.clientHeight, width: f.getBoundingClientRect().width, extent: f.scrollHeight, y, line,
-        shown: f.scrollTop <= y + 1 && y + line <= f.scrollTop + f.clientHeight + 1,
+        shown: caretRowShown({top: f.scrollTop, height: f.clientHeight}, y, line),
+        whole: f.scrollTop <= y + 1 && y + line <= f.scrollTop + f.clientHeight + 1,
         selection: [f.selectionStart, f.selectionEnd], focused: document.activeElement === f};
 }"""
 
@@ -1275,19 +1294,22 @@ def test_a_widening_telegram_composer_keeps_its_visible_middle_caret(shell_ui, p
     field.evaluate('(f, g) => { f.scrollTop = g.y - parseFloat(getComputedStyle(f).paddingTop); }', field.evaluate(CARET))
     still(page)
     narrow = field.evaluate(CARET)
-    assert narrow['shown'] and narrow['top'] > 0, narrow
+    assert narrow['whole'] and narrow['top'] > 0, narrow
     page.evaluate('window.__viewport(508)')
     still(page)
     wide = field.evaluate(CARET)
     facts(f'composer-caret-widening-{"project" if project_room else "main"}-{shell_ui["engine"]}',
           {'narrow': narrow, 'wide': wide})
     assert wide['width'] > narrow['width'] and wide['y'] < narrow['y'], (narrow, wide)
-    assert wide['shown'] and wide['focused'] and wide['selection'] == narrow['selection'], (narrow, wide)
+    assert wide['whole'] and wide['focused'] and wide['selection'] == narrow['selection'], (narrow, wide)
     assert field.input_value() == text
 
 
+@pytest.mark.parametrize('reveal', ['engine', 'caret-box'])
 @pytest.mark.parametrize('project_room', [False, True], ids=['main', 'project'])
-def test_a_caret_moved_without_an_edit_stays_in_view_when_its_row_narrows_the_field(shell_ui, project_room):
+def test_a_caret_moved_without_an_edit_stays_in_view_when_its_row_narrows_the_field(shell_ui, project_room, reveal):
+    """`caret-box`: the place Linux Chromium's own reveal leaves (its caret box, shorter than the line, at the top
+    edge; the line box 1.3 px above it), made here in every engine: still a caret the reader sees and keeps."""
     page, field, field_id = loaded_telegram_room(shell_ui, project_room, True, [LONG_LINE] * 12)
     field.focus()
     page.evaluate('window.__viewport(250)')
@@ -1297,14 +1319,18 @@ def test_a_caret_moved_without_an_edit_stays_in_view_when_its_row_narrows_the_fi
     for _ in range(10):
         page.keyboard.press('ArrowUp')
     settle(page)
+    if reveal == 'caret-box':
+        field.evaluate('(f, g) => { f.scrollTop = Math.ceil(g.y + 2); }', field.evaluate(CARET))
+        still(page)
     moved = field.evaluate(CARET)
     assert moved['shown'] and moved['selection'][1] < len(WRAPPED_DRAFT) - 60, moved
+    assert reveal == 'engine' or not moved['whole'], moved  # the line box starts above the top edge
     area = '#' + re.sub(r'input$', 'input-area', field_id)
     page.locator(f'{area} .chat-send-inline').evaluate('''b => { b.closest('.chat-send-group').dataset.busy = '1';
         b.disabled = true; b.textContent = b.title = 'Sending'; b.style.minWidth = `${b.offsetWidth + 40}px`; }''')
     still(page)
     narrowed = field.evaluate(CARET)
-    facts(f'composer-caret-unedited-{"project" if project_room else "main"}-{shell_ui["engine"]}',
+    facts(f'composer-caret-unedited-{reveal}-{"project" if project_room else "main"}-{shell_ui["engine"]}',
           {'moved': moved, 'narrowed': narrowed})
     assert narrowed['width'] < moved['width'] and narrowed['y'] > moved['y'], (moved, narrowed)
     assert narrowed['shown'] and narrowed['focused'] and narrowed['selection'] == moved['selection'], (moved, narrowed)
