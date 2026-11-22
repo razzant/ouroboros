@@ -58,6 +58,11 @@ class HostServiceAuthError(Exception):
     """Raised when a skill token cannot be authenticated."""
 
 
+class PermissionWaiting(HostServiceAuthError):
+    """A permission granted to an earlier version of this installation waits for the check of the edited one; its
+    words say so (``skill_grant_scope.waiting_refusal``) and every door returns them."""
+
+
 class _RateLimiter:
     """The one Host Service admission limiter, two policies under one lock.
 
@@ -331,7 +336,7 @@ class HostServiceContext:
         if permission in set(status.get("waiting_permissions") or []):  # granted to earlier files of this install
             from ouroboros.skill_grant_scope import waiting_refusal
 
-            raise HostServiceAuthError(waiting_refusal(skill_name, permission))
+            raise PermissionWaiting(waiting_refusal(skill_name, permission))
         if permission not in granted:
             raise HostServiceAuthError(f"skill {skill_name!r} lacks grant {permission!r}")
 

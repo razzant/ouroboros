@@ -356,3 +356,31 @@ def test_a_key_granted_later_reaches_an_extension_already_loaded_in_process(tmp_
         assert extension_tool_answer(drive, "mailer", "token") == "fixture-secret", "the later grant reached it"
     finally:
         clean_extension_runtime_state()
+
+
+@pytest.mark.parametrize(("permission", "method", "path"), [
+    ("notify_owner", "POST", "/notify"), ("inject_chat", "POST", "/chat/inject"),
+    ("presence", "GET", "/presence/place"), ("call_peer", "POST", "/call/open"),
+])
+def test_a_waiting_permission_is_refused_with_its_reason_at_every_door(root, monkeypatch, permission, method, path):
+    """S15: each Host Service door refuses a use of a permission granted to earlier files with the waiting reason."""
+    from starlette.testclient import TestClient
+
+    from ouroboros.extension_plugin_api import mint_skill_token
+    from ouroboros.gateway.host_service import create_host_service_app
+    from ouroboros.skill_loader import skill_state_dir_path
+
+    folder = root / "skills" / "external" / "demo"
+    manifest(folder, perms=(permission,))
+    grant(root, perms=(permission,))
+    save_enabled(root, "demo", True, actor="owner_ui")
+    manifest(folder, version="2.0.0", perms=(permission,))
+    monkeypatch.setattr("ouroboros.skill_review_status.cyber_authority", lambda: True)
+    assert state(root)["waiting_permissions"] == [permission]
+    token = mint_skill_token(skill_state_dir_path(root, "demo"), "demo", folder)
+    with TestClient(create_host_service_app(root)) as client:
+        response = client.request(method, path, headers={"X-Skill-Token": token})
+        plain = client.request(method, path, headers={"X-Skill-Token": "not-a-token"})
+    assert response.status_code == 403
+    assert "waits for the check of the edited version" in response.json()["error"], response.json()
+    assert "waits for the check" not in json.dumps(plain.json()), "an invalid token keeps the plain refusal"
