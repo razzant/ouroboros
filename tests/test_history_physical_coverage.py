@@ -1,5 +1,5 @@
 """Coverage uses delivered coordinate boundaries of the real history endpoint."""
-from ouroboros import dialogue_import
+from ouroboros import dialogue_import, room_appearances
 from ouroboros.gateway.history_paging import decode_cursor
 from tests.test_chat_history_paging import isolated_runtime, write, row, request, pages  # noqa: F401
 
@@ -48,7 +48,8 @@ def _compatible(page, head):
 def test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_never_other_rows(tmp_path):
     """An archive segment rewritten under the import (its size is not the ledger's) is never
     imported: the pages spanning it name the gap (``chat_segment_unimportable``) and page on
-    past it; an untouched segment imports and leaves no gap."""
+    past it. Main also discloses unfinished appearance derivation, which settles independently;
+    an untouched segment imports and leaves no gap."""
     for root in (tmp_path / 'changed', tmp_path / 'frozen'):
         archives = [root / f'archive/chat_2026090{day}T000000.jsonl' for day in (1, 2)]
         for index, path in enumerate(archives):
@@ -57,12 +58,23 @@ def test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_neve
         dialogue_import.cutover(root)  # the archive is planned, not imported yet
         if root.name == 'changed':
             archives[1].write_bytes(archives[1].read_bytes() + b'{"direction": "in", "text": "written after the plan"}\n')
-    loaded = list(pages(tmp_path / 'changed', n_human='1'))
-    texts = [message['text'] for page in loaded for message in page['messages']]
+    changed = tmp_path / 'changed'
+    deriving = list(pages(changed, n_human='1'))
+    texts = [message['text'] for page in deriving for message in page['messages']]
     assert texts == ['human-2', 'human-0'], 'the changed segment holds no rows the store can vouch for'
+    assert [page['coverage']['spans']['chat']['gaps'] for page in deriving] == [
+        ['appearances_deriving', 'segment_unimportable'], ['appearances_deriving']]
+    assert all('chat_appearances_deriving' in page['window']['truncated_by'] for page in deriving)
+
+    # The import and the appearance pass settle independently. Running the normal pass
+    # must clear its own gap without making the mismatched bytes readable or changing any row.
+    assert room_appearances.run(changed, lambda: False)['state'] == 'done'
+    loaded = list(pages(changed, n_human='1'))
+    assert [page['messages'] for page in loaded] == [page['messages'] for page in deriving]
+    assert all('chat_appearances_deriving' not in page['window']['truncated_by'] for page in loaded)
     # The segment that changed and every segment whose chain place it shifted are gaps on the pages
     # spanning their coordinates; the rows the store already held keep theirs and are still delivered.
-    shifted_from = (tmp_path / 'changed' / 'archive' / 'chat_20260901T000000.jsonl').stat().st_size
+    shifted_from = (changed / 'archive' / 'chat_20260901T000000.jsonl').stat().st_size
     spanning = [page for page in loaded if page['coverage']['spans']['chat']['to'] > shifted_from]
     assert spanning and all(page['coverage']['spans']['chat']['gaps'] == ['segment_unimportable'] for page in spanning)
     assert all('chat_segment_unimportable' in page['window']['truncated_by'] for page in spanning)
@@ -85,7 +97,7 @@ def test_sparse_project_opens_with_its_answer_and_retained_origin_in_one_read(tm
     origin = 'Original request'
     bind_task_to_project(tmp_path, 'sparse-root', project['id'], origin={
         'ref': build_owner_message_ref(chat_id=1, client_message_id='origin',
-            ts='2026-09-01T10:00:00Z', text=origin), 'text': origin})
+            ts='2026-09-01T10:00:00Z', text=origin), 'text': origin, 'snapshot': {'projectable': True}})
     write(tmp_path / 'archive/chat_20260902T000000.jsonl', [row(0, chat_id=project['chat_id'],
         direction='out', text='Later answer', ts='2026-09-02T10:00:00Z')])
     for index in range(5):
@@ -100,20 +112,14 @@ def test_sparse_project_opens_with_its_answer_and_retained_origin_in_one_read(tm
 
 
 def test_legacy_origin_identity_survives_source_label_and_cmid_absence(tmp_path):
-    import json
     from ouroboros.projects_registry import create_project, bind_task_to_project
     from ouroboros.project_dialogue import build_owner_message_ref
 
     project = create_project(tmp_path, 'origin', name='Retained context')
     canonical = row(1, direction='in', source='web', text='Original request', client_message_id='')
     ref = build_owner_message_ref(chat_id=1, client_message_id='', ts=canonical['ts'], text=canonical['text'])
-    # Current admission requires a client id; retained legacy bindings predate it.
     bind_task_to_project(tmp_path, 'origin-root', project['id'], origin={
-        'ref': {**ref, 'client_message_id': 'before-legacy-fixture'}, 'text': canonical['text']})
-    path = tmp_path / 'state/project_task_bindings.json'
-    bindings = json.loads(path.read_text())
-    bindings['bindings']['origin-root']['source_ref']['client_message_id'] = ''
-    path.write_text(json.dumps(bindings))
+        'ref': ref, 'text': canonical['text'], 'snapshot': {'projectable': True}})
     _, first = request(tmp_path, chat_id=str(project['chat_id']))
     fallback = first['messages'][0]
     assert fallback['origin_projected'] and fallback['origin_id']

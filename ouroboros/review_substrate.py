@@ -586,6 +586,8 @@ class ReviewCoordinator:
                         break
             if raw_text.strip() and not slot.retrieves:
                 executor.answer_observer()
+            if isinstance(executor, ReviewSlotExecutor):
+                usage = executor.attempt_costs.project(usage or {})
             actor = ReviewActorRecord(
                 slot_id=slot.slot_id, model=slot.model,
                 status="ok" if raw_text.strip() else "empty", raw_text=raw_text,
@@ -608,6 +610,8 @@ class ReviewCoordinator:
             ) = _review_exception_projection(
                 exc, executor.failure_custody(), attempt_history, retry_state,
             )
+            if isinstance(executor, ReviewSlotExecutor):
+                failure_custody = executor.attempt_costs.project(failure_custody, failed=True)
             actor = ReviewActorRecord(
                 slot_id=slot.slot_id,
                 model=slot.model,
@@ -699,11 +703,15 @@ class ReviewCoordinator:
             from ouroboros.tools.review_helpers import emit_review_usage
 
             session = bool(usage.get("delegated_run_started") or usage.get("delegated_run_id"))
+            # One attempt's own fact states a model it does not know as an explicit ``None``
+            # (``delegate_custody_usage._receipt_route``) and stays unlabelled; a missing key or
+            # empty text is an ordinary reply's, which keeps its seat's label.
+            unknown = "resolved_model" in usage and usage["resolved_model"] is None
             emit_review_usage(
                 self.usage_ctx,
                 # A session row names its OBSERVED model or none: the seat's requested route
                 # label rides the ``claudexor`` receipt, never this field (#1578).
-                model=str(usage.get("resolved_model") or ("" if session else slot.model)),
+                model=str(usage.get("resolved_model") or ("" if session or unknown else slot.model)),
                 provider=str(usage.get("provider") or ""), usage=usage,
                 source=f"review_substrate:{request.surface}",
                 prompt_chars=prompt_chars,

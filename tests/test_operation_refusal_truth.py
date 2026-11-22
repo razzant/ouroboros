@@ -195,11 +195,11 @@ def test_retired_service_is_not_whole_call_no_effect(tmp_path, monkeypatch, fail
     key = services._service_key(ctx, "replace")
     monkeypatch.setitem(services._SERVICES, key, SimpleNamespace(proc=SimpleNamespace(poll=lambda: 0)))
 
-    def retire(*_args, **_kwargs):
+    def retire(_ctx, _name):
         marker.write_text("retired previous record")
         services._SERVICES.pop(key)  # a stop that returned frees the name
-        return "stopped"
-    monkeypatch.setattr(services, "_stop_service", retire)
+        return services.ServiceStop({"service_id": key, "state": "exited"}, services.STOP_CONFIRMED)
+    monkeypatch.setattr(services, "_stop_service_launch", retire)
     monkeypatch.setattr(services, "_executor_can_run_cwd", lambda *_args: True)
 
     def refused(*_args, **_kwargs):

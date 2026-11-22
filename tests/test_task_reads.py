@@ -23,6 +23,36 @@ from ouroboros.task_reads import TaskReads
 from tests._store_shared import read_result, seed_result
 from tests._cases import chosen_rows
 
+
+def test_queue_lookup_indexes_only_this_read_and_keeps_row_precedence(tmp_path, monkeypatch):
+    from ouroboros import task_status
+
+    visited = []
+
+    class Rows(list):
+        def __iter__(self):
+            visited.append(len(self))
+            return super().__iter__()
+
+    snapshot = {"running": Rows([None, {"id": "both", "task": {"title": "first"}},
+                                  {"id": "both", "task": {"title": "duplicate"}}]),
+                "pending": Rows([{"task_id": "both"}, {"task_id": "pending", "task": None}])}
+    monkeypatch.setattr(task_status, "_load_queue_snapshot", lambda root: snapshot)
+    reads = TaskReads(tmp_path)
+    for _ in range(50):
+        assert reads.queue_task_status(tmp_path, "both") == ("running", {"title": "first"})
+        assert reads.queue_task_status(tmp_path, "pending") == ("scheduled", {})
+        assert reads.queue_task_status(tmp_path, "missing") == ("", {})
+    assert visited == [3, 2]  # row work stays one traversal as lookup count grows
+    for task in ("both", "pending", "missing"):
+        assert reads.queue_task_status(tmp_path, task) == task_status._queue_task_status(snapshot, task)
+    monkeypatch.setattr(task_status, "_load_queue_snapshot", lambda root: {"pending": [{"id": "new"}]})
+    assert reads.queue_task_status(tmp_path, "new") == ("", {})
+    assert TaskReads(tmp_path).queue_task_status(tmp_path, "new") == ("scheduled", {})
+    assert reads.queue_task_status(tmp_path / "other-root", "new") == ("scheduled", {})
+    monkeypatch.setattr(task_status, "_load_queue_snapshot", lambda root: {"_snapshot_invalid": True})
+    assert TaskReads(tmp_path).queue_task_status(tmp_path, "new") == ("unknown", {})
+
 TS = "2026-10-16T10:00:00Z"
 BULK = {  # every dropped path, filled so a reader that used one would change the page
     "loop_outcome": {"usage": {"total_rounds": 3, "cost_usd": 9.0, "extra": "U" * 100_000},

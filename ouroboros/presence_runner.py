@@ -71,7 +71,9 @@ def _presence_delivery(outcome: str, text: str, terminal_origin: str, *, legacy:
 
 def presence_result_from_stored(stored: Mapping[str, Any], task_id: str, drive_root=None) -> PresenceTurnResult:
     """One replay projection for cached turns and completed delegated work."""
-    from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL, provider_terminal_body, terminal_notice_text
+    from ouroboros.task_finalization import (
+        TERMINAL_ORIGIN_MODEL_FINAL, provider_terminal_body, schedule_report_run, terminal_notice_text,
+    )
 
     metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
     text = metadata["presence_result_text"] if "presence_result_text" in metadata else stored.get("result")
@@ -89,6 +91,12 @@ def presence_result_from_stored(stored: Mapping[str, Any], task_id: str, drive_r
         str(metadata.get("presence_outcome") or "message"), str(text or ""), origin,
         legacy=str(stored.get("status") or "") == "completed",
     )
+    if schedule_report_run(stored):
+        # #3687: an older schedule's held report is its record, not this place's reply. A
+        # replay never speaks the retained result row, even if an older row recorded it as a reply body.
+        text = ""
+        outcome = ("tool_delivered" if metadata.get("presence_outcome") == "tool_delivered"
+                   else "deferred" if metadata.get("presence_work_ref") else "silent")
     if _terminal_refusal(stored):
         # A refused or unproven attempt has no reply to deliver: the forced rail may
         # still stamp model_final over a round-one draft it salvaged before the quota
@@ -117,9 +125,30 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     ``silent`` is the terminal's own quiet fact (``usage["wake_silent"]``): the candidate that
     actually ended the loop, never an earlier completion request a forced exit outlived."""
     from ouroboros.presence_continuation import _handoff_ref, terminal_output
-    from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS
+    from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS, schedule_report_run
 
     from ouroboros.place_reply import prepare_focus_reply, reply_carrier
+    if schedule_report_run(task):
+        # A legacy schedule's report is retained in the result only. Host facts alone decide whether work is owed;
+        # neither the forced declaration nor a finish note may carry its text to the next turn.
+        from ouroboros.presence_context import confirmed_delivery_receipts
+
+        try:
+            confirmed = confirmed_delivery_receipts(ctx)
+        except Exception:
+            confirmed = frozenset()  # unknown receipts are not a delivery claim and never block the quiet record
+        work_ref = _handoff_ref(ctx)
+        outcome = ("deferred" if work_ref else "tool_delivered" if confirmed else "silent")
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        metadata["presence_outcome"] = outcome
+        metadata["presence_result_text"] = ""
+        if work_ref:
+            metadata["presence_work_ref"] = work_ref
+        task["metadata"] = metadata
+        return {
+            "type": "presence_result", "task_id": str(task.get("id") or ""), "outcome": outcome,
+            "text": "", "message": "", "work_ref": work_ref, "output_ref": "", "ts": utc_now_iso(),
+        }
     carrier = reply_carrier(task.get("metadata") or {})
     if carrier:
         # Ordinary exits have already returned flags to the mind. Forced exits cannot buy a

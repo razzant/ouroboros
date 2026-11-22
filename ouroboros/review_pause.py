@@ -369,10 +369,10 @@ def review_operation_state(owner_id: str) -> str:
 def live_detached_operations(task_id: str) -> List[Dict[str, Any]]:
     """The open review operations of ``task_id`` its paused author detached from.
 
-    Their launched reviewers keep running in THIS process, so the author parks
-    warm here and the process stays until each operation closes (after its
-    settlement publication), never released on the settle event alone. Facts
-    only: owner id, surface, paid identity.
+    Their launched reviewers keep running in THIS process, which stays until each
+    operation closes (after its settlement publication), never released on the
+    settle event alone (``local_reviews_settled``). Facts only: owner id, surface,
+    paid identity.
     """
     task_id = str(task_id or "")
     with _LOCK:
@@ -843,8 +843,8 @@ def _settle_left_record(record: Dict[str, Any], seats: List[Dict[str, Any]], *, 
     pending. ``final`` (its author ended and no live drain will collect it) fails every lost seat and names
     that cause. ``None`` when the wave names no record or it cannot be settled; never raises."""
     from ouroboros import review_ledger as ledger
+    from ouroboros.review_records import reported_review_cost
     from ouroboros.triad_review import parse_seat_answers
-
     record_id = str(record.get("record_id") or "")
     if not record_id:
         return None
@@ -860,10 +860,10 @@ def _settle_left_record(record: Dict[str, Any], seats: List[Dict[str, Any]], *, 
         if unknown and (not lost or (not final and (seat.get("usage") or {}).get("custody_state") == START_UNBOUND)):
             continue  # its answer may still arrive, or its live author's collection may still bind its start
         row_parts[slot] = tuple(seat.get("parts") or ("change",))
-        result = {key: seat[key] for key in _SEAT_FACTS if seat.get(key) is not None}
+        result = {key: seat[key] for key in _SEAT_FACTS if seat.get(key) is not None and key != "cost_usd"}
         usage = seat.get("usage") or {}
-        cost = next((v for v in (seat.get("cost_usd"), seat.get("cost_estimate"), usage.get("cost")) if v is not None), None)
-        result.update(slot_id=slot, cost_estimate=cost,
+        cost = next((seat[key] for key in ("cost_usd", "cost_estimate") if seat.get(key) is not None), None)
+        result.update(slot_id=slot, cost_estimate=reported_review_cost(usage if cost is None else {**usage, "cost": cost}),
                       tokens_in=seat.get("tokens_in") or usage.get("prompt_tokens", 0),
                       tokens_out=seat.get("tokens_out") or usage.get("completion_tokens", 0))
         raw = str(seat.get("raw_text") or "")
@@ -883,8 +883,8 @@ def _settle_left_record(record: Dict[str, Any], seats: List[Dict[str, Any]], *, 
         results.append(result)
     try:
         parsed = parse_seat_answers({"results": results}, row_parts)
-        return ledger.settle_from_collected(record.get("canonical_root") or record["drive_root"], record_id,
-                                            [actor.to_dict() for actor in parsed.actor_records])
+        return ledger.settle_from_collected(record.get("canonical_root") or record["drive_root"], record_id, [
+            {**actor.to_dict(), "usage": result.get("usage")} for actor, result in zip(parsed.actor_records, results)])
     except Exception:
         log.warning("left review %s: its record %s stays as it was", record.get("retry_key"), record_id, exc_info=True)
         return None

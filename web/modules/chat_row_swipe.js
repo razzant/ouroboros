@@ -12,8 +12,10 @@
  * the touch begins may be unable to cancel it on iOS (WebKit 184251), and only in the stack layout under a coarse
  * pointer, as the drawer's: elsewhere a touch on the feed never waits. A layout that leaves the stack mid-swipe ends it
  * without a reply. The gesture is tracked on the element it started on, which keeps receiving its touch after a
- * re-render removes it. */
+ * re-render removes it. The click that ends a swipe is not a tap on whatever lies under the finger (gesture_tail.js);
+ * the next touch, pointer or key acts at once. */
 import { BLOCKING_SELECTOR, FIELD_SELECTOR, SIDEWAYS_SELECTOR, chainKeepsGesture } from './drawer_drag.js';
+import { createGestureTail } from './gesture_tail.js';
 import { haptic } from './haptics.js';
 
 export const SWIPE = Object.freeze({
@@ -22,7 +24,6 @@ export const SWIPE = Object.freeze({
     give: 0.5,        // past the reply point the row follows the finger damped...
     giveMax: 32,      // ...approaching this many px more, never reaching them
     settle: 220,      // ms back to rest (style.css)
-    clickGuard: 400,  // ms after a swipe during which the click that ends it is not a tap
     markGap: 12,      // px between the reply mark and the room's right edge
 });
 
@@ -58,12 +59,11 @@ export function createRowSwipe({
     if (!feed || typeof replyRef !== 'function' || typeof reply !== 'function') return () => {};
     let g = null;
     let mark = null;
-    let suppressUntil = 0;
-    const now = () => (typeof win?.performance?.now === 'function' ? win.performance.now() : Date.now());
+    const tail = createGestureTail(doc);
     const settling = new Map();  // row → the timer that ends its settle
 
     function eligible(target, row) {
-        if (!row || !feed.contains(row)) return false;
+        if (!row || row.dataset.selectText || !feed.contains(row)) return false;
         if (target.closest?.(FIELD_SELECTOR) || target.closest?.(SIDEWAYS_SELECTOR) || hasSelection()) return false;
         if (isBlocked() || chainKeepsGesture(target, { win, doc })) return false;
         return true;
@@ -123,9 +123,11 @@ export function createRowSwipe({
     }
 
     function onStart(event) {
-        syncGuard();
         const count = event.touches?.length || 0;
-        if (g) { finish(false); if (count > 1) return; }
+        // A second finger ends the swipe. A lone new touch means the old one's end never came: that finger, and any
+        // click it could send, are gone, and this touch's click is its own.
+        if (g) finish(false, count > 1);
+        syncGuard();
         if (count !== 1 || !isStack() || !isCoarse()) return;
         const touch = event.changedTouches?.[0] || event.touches?.[0];
         const target = event.target;
@@ -171,13 +173,14 @@ export function createRowSwipe({
         }
     }
 
-    // The finger left: past the reply point it replies; the row settles back either way.
-    function finish(byFinger) {
+    // The finger left: past the reply point it replies; the row settles back either way. `withTail`: the click a host
+    // may still fire for this finger is swallowed.
+    function finish(byFinger, withTail = true) {
         const gg = end();
         if (!gg || gg.mode !== 'drag') return;
         settleRow(gg.row);
         hideMark();
-        suppressUntil = now() + SWIPE.clickGuard;
+        if (withTail) tail.arm();
         if (byFinger && gg.armed) reply(gg.ref);
     }
     function onEnd(event) {
@@ -186,14 +189,6 @@ export function createRowSwipe({
     // The system took the touch: back to rest, no reply.
     function onCancel(event) {
         if (g && touchIn(event.changedTouches, g.id)) finish(false);
-    }
-
-    // The click that ends a swipe is not a tap on whatever lies under the finger.
-    function onClick(event) {
-        if (now() >= suppressUntil) return;
-        suppressUntil = 0;
-        event.stopPropagation();
-        event.preventDefault();
     }
 
     // The feed never scrolls under a swiped row (registered up front: see the module comment).
@@ -211,9 +206,9 @@ export function createRowSwipe({
     feed.addEventListener('touchstart', onStart, { passive: true });
     syncGuard();
     const unwatchLayout = onLayout(syncGuard);
-    doc.addEventListener('click', onClick, true);
     return () => {
-        finish(false);
+        finish(false, false);
+        tail.disarm();
         for (const [row, timer] of settling) {
             clearTimeout(timer);
             delete row.dataset.rowSwipe;
@@ -225,6 +220,5 @@ export function createRowSwipe({
         feed.removeEventListener('touchmove', onFeedMove);
         guarded = false;
         unwatchLayout?.();
-        doc.removeEventListener('click', onClick, true);
     };
 }

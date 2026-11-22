@@ -914,6 +914,12 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
             "(contributor-review-isolation.json), never a settings document.",
         ("ouroboros/tools/core.py", "_data_write"):
             "names SETTINGS_PATH only to REFUSE agent writes to it.",
+        ("ouroboros/gateway/owner_settings.py", "commit"):
+            "the closure `_owner_update_settings` hands to its locked commit boundary: it only writes the "
+            "bytes of `to_write`, which the enclosing function already ran through "
+            "`config.prepare_settings_for_persist` (with Main's Ultrafast judge) under the same settings "
+            "lock before defining it. The scan walks nested functions on their own and cannot see that "
+            "the prologue ran in the parent, so the closure is declared here instead of being routed twice.",
         ("ouroboros/colab_bootstrap.py", "write_colab_settings"):
             "writes the generated document for ANOTHER root (the Colab Drive data dir) in "
             "serialize_settings bytes. The prologue proves its ratchets against the value on "

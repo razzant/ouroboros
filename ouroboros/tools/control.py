@@ -358,6 +358,11 @@ def get_tools() -> List[ToolEntry]:
                     "model": {"type": "string", "description": "Model for this new work, with owner_words citing your human's words or their pressed choice. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
                     "model_as_typed": {"type": "boolean", "default": False, "description": "Use the exact typed id despite similar catalog suggestions. The route is unverified; this confirms your choice, not availability."},
                     "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
+                    "owner_source": {"type": "string", "default": "", "description": (
+                        "A held owner_quote_handle: which of your human's messages the new work answers (its Reply, files and source); "
+                        "empty keeps the message this run answers, with its files. A held message's files never refuse the start; "
+                        "a turn's own fresh files stage what they can and refuse it only if none can; others' stay named, not given. "
+                        "Only a root your human started.")},
                 },
                 "required": ["objective", "title"],
             },

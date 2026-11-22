@@ -7,7 +7,6 @@ child admission and explicit (never automatic) selection of earlier children.
 """
 import contextlib
 import copy
-import sys
 import threading
 
 import pytest
@@ -44,11 +43,15 @@ def test_one_identity_read_refuses_unknown_then_resumes_the_tree(
         child.pop("_budget_pause", None)  # the durable fence alone prevents launch
     before = copy.deepcopy(budget_pause.budget_pause_row(host.root, running["id"]))
     latch_before = copy.deepcopy(queue.BUDGET_ROOT_FENCES)
-    real, reads, threads = cancel_intents._validated_single_cancel_target, [], []
+    real, reads, threads = owner_pause.root_actor, [], []
 
     def observe(*args, **kwargs):
-        if (sys._getframe(1).f_code.co_name == "root_actor"
-                and sys._getframe(2).f_code.co_name == "_grant_exact_resume"):
+        # The grant's strict root classification is root_actor's strict mode
+        # ("A grant issuer uses strict"): fault that boundary, not a call-stack
+        # shape budget_resume keeps renaming. Armed only inside the grant's
+        # classification seam below, so every other reader — the Resume
+        # answer's census included — stays real.
+        if kwargs.get("strict"):
             reads.append(args[1])
             if len(reads) == 1 and fault != "readable":
                 if fault == "io":
@@ -75,8 +78,16 @@ def test_one_identity_read_refuses_unknown_then_resumes_the_tree(
                     assert not thread.is_alive()
         return real(*args, **kwargs)
 
+    def classifying(fn):
+        def probed(*args, **kwargs):
+            with monkeypatch.context() as inside:
+                inside.setattr(owner_pause, "root_actor", observe)
+                return fn(*args, **kwargs)
+        return probed
+
     with monkeypatch.context() as transient:
-        transient.setattr(cancel_intents, "_validated_single_cancel_target", observe)
+        from supervisor import budget_resume
+        transient.setattr(budget_resume, "_resume_actor", classifying(budget_resume._resume_actor))
         first = queue.resume_budget_paused_task(running["id"])
     assert reads == ["held"], "one root classification per grant, never a second fence classification"
     if fault != "readable":

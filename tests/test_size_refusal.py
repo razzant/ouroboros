@@ -146,6 +146,281 @@ def test_a_later_failure_clears_the_stamp():
     assert sr.stamped(usage) is None
 
 
+def test_numberless_zai_form_does_not_shadow_a_stated_limit():
+    """"Prompt too long" carries no numbers, but a wording that continues to state a token limit
+    ("Prompt too long; maximum context length is 80000 tokens") must keep it: the numberless form is
+    anchored to the whole sentence, so the shared vocabulary — not the form — reads the numbers.
+    Both bodies pass through the real SDK and the host classifier, as a Main call meets them."""
+    import json as _json
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    verbatim = (ROOT / "bodies/zai-1261.body.json").read_bytes()
+    exc = _sdk_error(400, verbatim)
+    found = sr.from_exception(exc)
+    assert found is not None and found.source == "text:zai/prompt-too-long" and not found.has_numbers
+    assert classify_llm_exception(exc).kind == "context_overflow"
+
+    combined_body = _json.dumps({"error": {"code": "1261",
+                                "message": "Prompt too long; maximum context length is 80000 tokens"}}).encode()
+    exc = _sdk_error(400, combined_body)
+    found = sr.from_exception(exc)
+    assert found is not None and found.source != "text:zai/prompt-too-long"
+    assert found.token_window == 80_000 and found.meaning == "total"
+    assert classify_llm_exception(exc).kind == "context_overflow"
+    assert ce._parse_ctx_limit_number(sr.refusal_sentence({"_last_llm_provider_message": found.upstream})) == 80_000
+
+
+ZAI = {"error": {"code": "1261", "message": "Prompt too long"}}
+ZAI_LIMIT = {"error": {"code": "1261", "message": "Prompt too long; maximum context length is 80000 tokens"}}
+ZAI_RAW, ZAI_LIMIT_RAW = json.dumps(ZAI), json.dumps(ZAI_LIMIT)
+
+
+def _forwarded(raw: str, code="1214", message: str = "Invalid parameter") -> dict:
+    """A gateway's own error carrying an upstream provider's document verbatim (OpenRouter's ``metadata.raw``)."""
+    return {"error": {"code": code, "message": message, "metadata": {"provider_name": "Z.AI", "raw": raw}}}
+
+
+def _sse_frame(raw: str) -> str:
+    return "event: error\ndata: %s\n\ndata: [DONE]\n\n" % raw
+
+
+@pytest.mark.parametrize(("status", "body", "kind"), [
+    # The pair counts on one current object: the refusal itself, its numeric code, a bare JSON forward, an SSE frame.
+    (400, ZAI, "context_overflow"),
+    (400, {"error": {"code": 1261, "message": "Prompt too long"}}, "context_overflow"),
+    (400, _forwarded(ZAI_RAW, code=400, message="Provider returned error"), "context_overflow"),
+    (400, _forwarded(_sse_frame(ZAI_RAW)), "context_overflow"),
+    # ... and never on a document a message cites, the same frame quoted in prose, a neighbouring string, a
+    # ``type`` field or an earlier attempt; no other status is read for size whatever its words say.
+    (400, {"error": {"code": "1214", "message": "Invalid parameter; previous response: " + ZAI_RAW}}, "bad_request"),
+    (400, {"error": {"code": "1214", "message": "Invalid parameter; previous response:\n" + _sse_frame(ZAI_RAW)}},
+     "bad_request"),
+    (400, {"error": {"code": "1261", "message": "see " + ZAI_RAW}}, "bad_request"),
+    (400, {"error": {"code": "1261", "message": "Invalid parameter", "detail": "Prompt too long"}}, "bad_request"),
+    (400, {"error": {"type": "1261", "message": "Prompt too long"}}, "bad_request"),
+    (400, {"error": {"code": "1214", "message": "Invalid parameter",
+                     "metadata": {"previous_errors": [ZAI["error"]]}}}, "bad_request"),
+    (400, {"error": {"code": "1214", "message": "Parameter `messages[0].content.str` is invalid. "
+                                                "Please check the documentation."}}, "bad_request"),
+    (401, ZAI, "auth_error"),
+    # A previous answer the parameter refusal cites states a window of its own (the observed Z.ai 1214 form):
+    # the number is never this attempt's. The same document forwarded bare — the wire's own body, SSE included —
+    # still speaks, and so does the numberless pair.
+    (400, {"error": {"code": "1214", "message": "Invalid parameter; previous response: " + ZAI_LIMIT_RAW}},
+     "bad_request"),
+    (400, {"error": {"code": "1214", "message": "Invalid parameter; previous response:\n" + _sse_frame(ZAI_LIMIT_RAW)}},
+     "bad_request"),
+    (400, _forwarded("previous response: " + ZAI_LIMIT_RAW), "bad_request"),
+    (400, _forwarded(ZAI_LIMIT_RAW, code=400, message="Provider returned error"), "context_overflow"),
+    (400, _forwarded(_sse_frame(ZAI_LIMIT_RAW)), "context_overflow"),
+])
+def test_the_zai_1261_pair_counts_on_one_current_object(status, body, kind):
+    """#3858: "Prompt too long" types nothing alone, and its code completes a refusal only beside its own whole
+    ``message`` on one current, uncited object — a gateway forward included, a citation never."""
+    assert classify_llm_exception(_sdk_error(status, json.dumps(body).encode())).kind == kind
+
+
+@pytest.mark.parametrize(("name", "body"), [
+    ("cited-prose-json-80k",
+     {"error": {"code": "1214", "message": "Invalid parameter; previous response: " + ZAI_LIMIT_RAW}}),
+    ("cited-sse-80k",
+     {"error": {"code": "1214", "message": "Invalid parameter; previous response:\n" + _sse_frame(ZAI_LIMIT_RAW)}}),
+    ("cited-prose-json-80k-forwarded", _forwarded("previous response: " + ZAI_LIMIT_RAW)),
+    ("documented-1214",
+     {"error": {"code": "1214", "message": "Parameter `messages[0].content.str` is invalid. "
+                                           "Please check the documentation."}}),
+])
+def test_a_previous_answer_a_parameter_refusal_cites_teaches_no_window(tmp_path, monkeypatch, name, body):
+    """#3858: Z.ai's 1214 names a malformed request in its own words, and the answer its ``previous response:``
+    carries states a window of that other answer's — so this attempt is no size refusal at any measured size, and
+    the number is not taken even when the route declares that very limit (``context_anchor.cited_limit_refusal``,
+    the secondary step an untyped client refusal reaches). Nothing is stamped as a size fact, so the early rebind
+    (``window_learning``) has nothing to record either."""
+    from ouroboros.context_anchor import cited_limit_refusal
+    from ouroboros.context_window import WindowLimit, WindowRecord
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    exc = _sdk_error(400, json.dumps(body).encode())
+    verdict = classify_llm_exception(exc)
+    assert verdict.kind == "bad_request" and verdict.untyped is False, name
+    usage = {}
+    sr.stamp_failure(usage, exc, verdict)
+    fact = sr.for_usage(usage)
+    assert not fact.has_numbers and fact.token_window == 0, name
+    assert sr.stamped(usage) is None and "size" not in (usage.get("_last_llm_provider_answer") or {}), name
+    plan = _plan()
+    capture = SimpleNamespace(physical_context=SimpleNamespace(route_fp="r"), max_completion_tokens=8192)
+    measurement = SimpleNamespace(route_fp="r", reply_allowance_tokens=8192)
+    assert not cited_limit_refusal(usage, capture, measurement, plan), name
+    plan.window_record = WindowRecord("r", declared=(WindowLimit(80_000, "total", "server_metadata"),))
+    assert not cited_limit_refusal(usage, capture, measurement, plan), name
+    record_refusal(usage, plan)  # the early rebind's own call shape (``learn_window_from_refusal``)
+    assert not ce._read(tmp_path).get("main_windows"), name
+
+
+@pytest.mark.parametrize(("name", "error", "event_type"), [
+    ("cited-prose-json-80k",
+     {"code": "1214", "message": "Invalid parameter; previous response: " + ZAI_LIMIT_RAW}, "provider_body_error"),
+    ("documented-1214",
+     {"code": "1214", "message": "Parameter `messages[0].content.str` is invalid. "
+                                 "Please check the documentation."}, "provider_body_error"),
+    ("bare-raw-own-limit",
+     {"code": "1214", "message": "Invalid parameter",
+      "metadata": {"provider_name": "Z.AI", "raw": ZAI_LIMIT_RAW}}, "remote_context_overflow"),
+    ("direct-numberless", {"code": "1261", "message": "Prompt too long"}, "remote_context_overflow"),
+])
+def test_an_http200_parameter_refusal_is_no_context_overflow(name, error, event_type):
+    """An HTTP 200 body's own error reaches the loop as ``usage['provider_error']`` (``body_error_facts``), and the
+    second point (``loop_llm_call._classify_empty_response``) decides on the same recognition: a window only the
+    cited previous answer states makes no overflow, a document forwarded bare still does."""
+    from ouroboros.llm_attempt import is_size_refusal
+    from ouroboros.loop_llm_call import _classify_empty_response
+
+    facts = body_error_facts(error, False)
+    assert _classify_empty_response({"provider_error": facts}, {})[0] == event_type, name
+    assert is_size_refusal(facts) == (event_type == "remote_context_overflow"), name
+    if event_type == "provider_body_error":
+        assert not facts["answer"].get("untyped"), name  # the typed cause leaves no untyped refusal behind
+
+
+@pytest.mark.parametrize(("name", "body", "window"), [
+    ("direct", ZAI, 0),
+    ("bare-raw", _forwarded(ZAI_RAW, code=400, message="Provider returned error"), 0),
+    ("sse", _forwarded(_sse_frame(ZAI_RAW)), 0),
+    ("child-diagnostic", {"error": {"code": "1261", "message": "Prompt too long",
+                                    "diagnostic": {"type": sr.LLAMA_CPP_TYPE, "n_ctx": 4000,
+                                                   "n_prompt_tokens": 90_000}}}, 0),
+    ("bare-raw-own-limit", _forwarded(ZAI_LIMIT_RAW), 80_000),
+])
+def test_a_zai_1261_pair_keeps_only_its_own_stated_limit(tmp_path, monkeypatch, name, body, window):
+    """The pair is numberless by its form: no child diagnostic, citation or earlier attempt states its window, so the
+    numberless refusal is retry-only and records no observation at any measured size. The same message stating its
+    own limit keeps that limit, and it is recorded."""
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    exc = _sdk_error(400, json.dumps(body).encode())
+    verdict = classify_llm_exception(exc)
+    assert verdict.kind == "context_overflow" and not verdict.untyped, name
+    usage = {}
+    sr.stamp_failure(usage, exc, verdict)
+    fact = sr.for_usage(usage)
+    assert fact.token_window == window and (fact.has_numbers is bool(window)), name
+    record_refusal(usage, _plan(), refused_input=90_000)
+    rows = (ce._read(tmp_path).get("main_windows", {}).get("r") or {}).get("observations", [])
+    assert [row.get("refused") for row in rows] == ([80_000] if window else []), name
+
+
+#: The fourth review's distinguishing scenarios (#3858): the decision about the current refusal must be the same
+#: on the SDK path, the HTTP 200 error body, the owner display and the stored window — never re-read from a quote.
+ZAI_SHORT = "Prompt too long"
+ZAI_CAP = "maximum context length is 80000 tokens"
+ZAI_OLD_CAP = "maximum context length is 4000 tokens"
+ZAI_INVALID = "Parameter `messages[0].content.str` is invalid. Please check the documentation."
+ZAI_OTHER = "Invalid parameter"
+
+
+def _zai_wire(code, message, **other):
+    return json.dumps({"error": {"code": code, "message": message, **other}})
+
+
+def _zai_frames(document):
+    return 'data: {"id":"chatcmpl-fake","choices":[]}\n\nevent: error\ndata: ' + document + '\n\ndata: [DONE]\n\n'
+
+
+@pytest.mark.parametrize(("name", "error", "overflow", "limit", "observed"), [
+    # A plain-text citation after "previous response:" is no party of the 1214 answer, words or numbers.
+    ("plain-reference", {"code": "1214", "message": f"{ZAI_OTHER}; previous response: {ZAI_SHORT}; {ZAI_CAP}"},
+     False, 0, []),
+    ("multiframe-citation", {"code": "1214", "message": ZAI_INVALID + " previous response:\n" + _zai_frames(
+        _zai_wire("1261", ZAI_SHORT + "; " + ZAI_CAP))}, False, 0, []),
+    ("typed-citation", {"code": "1214", "message": ZAI_INVALID + " previous response: "
+                         + _zai_wire("context_length_exceeded", ZAI_CAP)}, False, 0, []),
+    # The same words an earlier attempt spoke change nothing here.
+    ("historic-speaker-same-words", {"code": "1214", "message": ZAI_INVALID + " previous response: "
+     + _zai_wire("1261", ZAI_SHORT + "; " + ZAI_CAP, provider_name="Named"),
+     "metadata": {"provider_name": "Z.AI", "previous_errors": [
+         {"code": "1261", "provider_name": "Named", "message": ZAI_SHORT + "; " + ZAI_CAP}]}}, False, 0, []),
+    # Both observed forms of the 1214 field, backticked or not.
+    ("unbackticked", {"code": "1214", "message": ZAI_INVALID.replace("`", "") + " previous response: "
+     + _zai_wire("1261", ZAI_SHORT + "; " + ZAI_CAP)}, False, 0, []),
+    # A gateway's normalized negative wrapper forwarding the same cited 1214 document.
+    ("gateway-normalized-negative", {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_name": "Z.AI", "raw": _zai_wire("1214", ZAI_INVALID + " previous response: "
+                                                  + _zai_wire("1261", ZAI_SHORT + "; " + ZAI_CAP))}}, False, 0, []),
+    # The wire's own bare forward (raw JSON, SSE included) still speaks, and beats the quoted other number.
+    ("true-bare-forward-plus-quoted-other", {"code": "1214",
+     "message": f"{ZAI_OTHER}; previous response: {ZAI_SHORT}; {ZAI_OLD_CAP}",
+     "metadata": {"provider_name": "Z.AI", "raw": _zai_wire("1261", ZAI_SHORT + "; " + ZAI_CAP)}}, True, 80_000, [80_000]),
+    ("true-current-typed-no-known-phrase", {"code": "1214", "message": ZAI_INVALID, "metadata": {
+        "provider_name": "Z.AI", "raw": _zai_wire("context_length_exceeded", "Input range exceeded")}},
+     True, 0, [90_000]),
+    ("true-current-beats-history", {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_name": "Z.AI", "raw": _zai_frames(_zai_wire("1261", ZAI_SHORT + "; " + ZAI_CAP)),
+        "previous_errors": [{"type": "context_length_exceeded", "provider_name": "Earlier",
+                             "message": ZAI_OLD_CAP}]}}, True, 80_000, [80_000]),
+    # The 1261 pair reads a limit from its own normalized message or its own detail — never an inline diagnostic.
+    ("zai-short-plus-inline-diagnostic", {"code": "1261", "message": ZAI_SHORT + " " + json.dumps(
+        {"note": "Payload too large; " + ZAI_OLD_CAP})}, True, 0, []),
+    ("zai-explicit-plus-inline-diagnostic", {"code": "1261", "message": ZAI_SHORT + "; " + ZAI_CAP + " "
+     + json.dumps({"note": "Payload too large; " + ZAI_OLD_CAP})}, True, 80_000, [80_000]),
+    ("zai-short-message-real-detail", {"code": "1261", "message": ZAI_SHORT, "detail": ZAI_CAP}, True, 80_000, [80_000]),
+    # Retry-only by the actual pair: an OpenAI-compatible typed code with the same words keeps the old anchor.
+    ("ordinary-openai-typed-anchor", {"code": "context_length_exceeded", "message": ZAI_SHORT}, True, 0, [90_000]),
+    ("ordinary-typed-citing-1261", {"code": "context_length_exceeded", "message": ZAI_SHORT,
+     "detail": "previous response: " + _zai_wire("1261", ZAI_SHORT + "; " + ZAI_OLD_CAP)}, True, 0, [90_000]),
+    ("forwarded-sse-citing-zai", {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_name": "Z.AI", "raw": _zai_frames(_zai_wire(
+            "1214", ZAI_INVALID + " previous response: " + _zai_wire("1261", ZAI_SHORT + "; " + ZAI_CAP)))}},
+     False, 0, []),
+    ("genuine-sse-with-diagnostic", {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_name": "Z.AI", "raw": _zai_frames(_zai_wire("1261", ZAI_SHORT, detail="previous diagnostic: none"))}},
+     True, 0, []),
+    ("cloudflare-vllm-envelope", {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_name": "Cloudflare", "raw": json.dumps({"errors": [{"code": 8007, "message": "AiError: AiError: "
+            + (ROOT / "bodies/vllm-0.11.2-input.body.json").read_text(encoding="utf-8").strip() + " (test-only)"}],
+            "success": False})}}, True, 80_000, [80_000]),
+    ("zai-requested-count-only", {"code": "1261", "message": ZAI_SHORT, "type": sr.LLAMA_CPP_TYPE,
+     "n_prompt_tokens": 91_000}, True, 0, []),
+    ("typed-forward-keeps-own-limit", {"code": "1214", "message": ZAI_INVALID + " previous response: "
+     + _zai_wire("context_length_exceeded", ZAI_OLD_CAP, provider_name="Quoted"), "metadata": {
+         "provider_name": "Z.AI", "raw": _zai_wire("context_length_exceeded", ZAI_CAP, provider_name="Current")}},
+     True, 80_000, [80_000]),
+    ("parameter-citing-body-limit", {"code": "1214",
+     "message": ZAI_INVALID + " previous response: Request body too large"}, False, 0, []),
+    ("explicit-zai-versus-child-count", {"code": "1261", "message": ZAI_SHORT + "; " + ZAI_CAP,
+     "diagnostic": {"type": sr.LLAMA_CPP_TYPE, "n_ctx": 4_000, "n_prompt_tokens": 91_000}}, True, 80_000, [80_000]),
+])
+@pytest.mark.parametrize("surface", ["sdk-400", "http200"])
+def test_r4_current_decision_is_one_on_every_surface(tmp_path, monkeypatch, surface, name, error, overflow, limit, observed):
+    from ouroboros.context_anchor import cited_limit_refusal
+    from ouroboros.context_window import WindowLimit, WindowRecord
+    from ouroboros.loop_llm_call import _classify_empty_response
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    usage = {}
+    if surface == "sdk-400":
+        exc = _sdk_error(400, json.dumps({"error": error}).encode())
+        verdict = classify_llm_exception(exc)
+        event, expected = verdict.kind, ("context_overflow" if overflow else "bad_request")
+        sr.stamp_failure(usage, exc, verdict)
+    else:
+        facts = body_error_facts(error, False)
+        event = _classify_empty_response({"provider_error": facts}, {})[0]
+        expected = "remote_context_overflow" if overflow else "provider_body_error"
+        stamp_owner_provider_message(usage, facts)
+    assert event == expected, name
+    fact = sr.for_usage(usage)
+    assert fact.token_window == limit, name
+    plan = _plan()
+    plan.window_record = WindowRecord("r", declared=(WindowLimit(80_000, "total", "server_metadata"),
+                                                     WindowLimit(4_000, "total", "server_metadata")))
+    capture = SimpleNamespace(physical_context=SimpleNamespace(route_fp="r"), max_completion_tokens=8192)
+    measurement = SimpleNamespace(route_fp="r", reply_allowance_tokens=8192)
+    assert not (not overflow and cited_limit_refusal(usage, capture, measurement, plan)), name
+    record_refusal(usage, plan, refused_input=90_000 if overflow else 0)
+    rows = (ce._read(tmp_path).get("main_windows", {}).get("r") or {}).get("observations", [])
+    assert [row.get("refused") for row in rows] == observed, name
+
+
 def test_a_dropped_connection_is_no_size_refusal():
     from ouroboros.loop_llm_call import classify_llm_exception
 
@@ -720,3 +995,37 @@ def test_a_siblings_other_cause_leaves_the_recognised_numbers_on_both_paths():
     via_exception = sr.from_exception(exc)
     via_body = body_error_facts(body, False)["answer"].get("size") or {}
     assert (via_exception.window, via_exception.requested) == (via_body.get("window"), via_body.get("requested")) == (8192, 9000)
+
+
+@pytest.mark.parametrize("earlier", [
+    {"code": "context_length_exceeded", "provider_name": "Earlier",
+     "message": "This model's maximum context length is 80000 tokens. However, you requested 98192 tokens."},
+    {"code": sr.LLAMA_CPP_TYPE, "type": sr.LLAMA_CPP_TYPE, "n_ctx": 80000, "n_prompt_tokens": 91000,
+     "provider_name": "llama.cpp", "message": "Upstream request failed"},
+])
+@pytest.mark.parametrize("current, expected_kind, refused", [
+    ({"code": 400, "message": "Provider returned error"}, "context_overflow", True),
+    ({"code": "rate_limit_exceeded", "message": "Rate limit exceeded upstream"}, "provider_transient", None),
+])
+def test_a_named_earlier_size_code_is_last_resort_for_a_generic_wrapper(earlier, current, expected_kind, refused):
+    """The earlier attempt's named/local code may type an otherwise unexplained generic wrapper, and its subtree
+    never states a number; a known current cause of another kind keeps its classification and takes no number."""
+    body = {"error": {**current, "metadata": {"provider_name": "Current", "previous_errors": [earlier]}}}
+    exc = _sdk_error(400, json.dumps(body).encode())
+    assert classify_llm_exception(exc).kind == expected_kind
+    found = sr.from_exception(exc)
+    if refused is not None:
+        assert (found is not None) is refused
+    assert found is None or found.window == 0  # the earlier attempt's sentence states no number
+    size = body_error_facts(body["error"], False)["answer"].get("size") or {}
+    assert size.get("window", 0) == 0
+
+
+def test_a_normalized_excluded_size_is_no_recognition():
+    """A stamped projection whose only size row is the negative reason is no size refusal; a recognised basis
+    still is one."""
+    from ouroboros.loop_llm_call import _classify_empty_response
+    excluded = {"provider_error": {"answer": {"basis": None, "size": {"source": "excluded"}}}}
+    assert _classify_empty_response(excluded, {})[0] == "provider_body_error"
+    recognised = {"provider_error": {"answer": {"basis": "context_overflow", "size": {"source": "excluded"}}}}
+    assert _classify_empty_response(recognised, {})[0] == "remote_context_overflow"

@@ -194,6 +194,98 @@ test('a failed queued progress read releases the loading or checking phase and r
     }
 });
 
+// The writer's own start (agent.py's live task_started, the log frame task_done also rides) is read once, passively, so
+// a request waiting to run reads as writing without a press; a host retry starts under its own id naming the request
+// as its root. Another task's start, a child's or a replayed one reads nothing.
+test('its own task_started reads the status once, waiting becoming writing without a press', async () => {
+    const reads = [];
+    const apiClient = { updateStatus: () => new Promise((resolve) => reads.push({ resolve })),
+        updateCheck() { assert.fail('a lifecycle cue never checks'); },
+        updateDescription() { assert.fail('a lifecycle cue never asks'); },
+        updateDescribeLatest() { assert.fail('a lifecycle cue never asks'); } };
+    const state = harness(apiClient, status('original', 'scheduled'));
+    const listeners = new Map();
+    const binding = bindUpdateRefreshEvents({
+        ws: { on(event, fn) { listeners.set(event, fn); return () => listeners.delete(event); } },
+        getPhase: state.getPhase, loadStatus: state.loadStatus, reconcileRestart() { assert.fail('not a restart'); },
+        getRequestTaskIds: () => [updateLetterView(state.getStatus()).request?.taskId].filter(Boolean),
+    });
+    const send = (data) => listeners.get('log')({ type: 'log', data, chat_id: 1 });
+    try {
+        assert.equal(updateLetterView(state.getStatus()).note,
+            'The description is not saved yet; its task is waiting to run (task original).');
+        for (const data of [{ type: 'task_started', task_id: 'another' }, { type: 'task_started', task_id: 'original',
+            _historical: true }, { type: 'task_started', task_id: 'helper', root_task_id: 'original', parent_task_id: 'x' }]) {
+            send(data);
+        }
+        assert.equal(reads.length, 0, 'another task, a replayed frame or a child reads nothing');
+        send({ type: 'task_started', task_id: 'original' });
+        assert.equal(reads.length, 1);
+        reads[0].resolve(status('original', 'running'));
+        await tick();
+        assert.equal(updateLetterView(state.getStatus()).note, 'Ouroboros is writing the description (task original).');
+        send({ type: 'task_started', task_id: 'retry-1', root_task_id: 'original' });
+        assert.equal(reads.length, 2, 'a host retry of the request starts under its own id');
+        reads[1].resolve(status('original', 'running'));
+        await tick();
+    } finally { binding.dispose(); }
+});
+
+// An open panel whose writer runs, through the frames the host really sends live: a Pause after the task parked
+// (events_budget.py's budget_scope_paused), its next start and its end. A Pause or Stop request is a durable record
+// with no live frame, so it reads nothing and the words stay those of the last read until the status itself changes;
+// a Stop being carried out shows at the next status read (here a reopen) as the host's pending cancel.
+test('a Pause or Stop of the running writer before its save shows as the host has it, a request apart from the fact', async () => {
+    const reads = [];
+    const apiClient = { updateStatus: () => new Promise((resolve) => reads.push({ resolve })),
+        updateCheck() { assert.fail('a lifecycle cue never checks'); },
+        updateDescription() { assert.fail('a lifecycle cue never asks'); },
+        updateDescribeLatest() { assert.fail('a lifecycle cue never asks'); } };
+    const state = harness(apiClient, status('original', 'running'));
+    const listeners = new Map();
+    const binding = bindUpdateRefreshEvents({
+        ws: { on(event, fn) { listeners.set(event, fn); return () => listeners.delete(event); } },
+        getPhase: state.getPhase, loadStatus: state.loadStatus, reconcileRestart() { assert.fail('not a restart'); },
+        getRequestTaskIds: () => [updateLetterView(state.getStatus()).request?.taskId].filter(Boolean),
+    });
+    const send = (data) => listeners.get('log')({ type: 'log', data, chat_id: 1 });
+    const note = () => updateLetterView(state.getStatus()).note;
+    const answer = async (next) => { reads.at(-1).resolve(next); await tick(); };
+    const writing = 'Ouroboros is writing the description (task original).';
+    const stopping = status('original', 'running');
+    stopping.letter.request.cancel_state = 'pending';
+    try {
+        assert.equal(note(), writing);
+        for (const data of [
+            { type: 'owner_pause_requested', task_id: 'original', root_task_id: 'original', fence_id: 'f1', owner_visible: true },
+            { type: 'cancel_intent', event: 'requested', task_id: 'original', request_id: 'r1' },
+            { type: 'budget_scope_paused', task_id: 'another', task_type: 'task', root_task_id: 'another' },
+            { type: 'budget_scope_paused', task_id: 'original', task_type: 'task', _historical: true }]) {
+            send(data);
+        }
+        assert.equal(reads.length, 0, 'a durable request, another task or a replayed frame reads nothing');
+        assert.equal(note(), writing, 'a Pause or Stop request is not a pause or a stop');
+        // The Pause took effect: the parked task waits to run (its door says it is paused).
+        send({ type: 'budget_scope_paused', task_id: 'original', task_type: 'task', root_task_id: 'original' });
+        assert.equal(reads.length, 1);
+        await answer(status('original', 'scheduled'));
+        assert.equal(note(), 'The description is not saved yet; its task is waiting to run (task original).');
+        send({ type: 'task_started', task_id: 'original' });
+        assert.equal(reads.length, 2);
+        await answer(status('original', 'running'));
+        assert.equal(note(), writing);
+        // A Stop is carried out: the next status read (a reopen of the panel) shows the host's pending cancel.
+        state.loadStatus({ fetchRemote: false });
+        assert.equal(reads.length, 3);
+        await answer(stopping);
+        assert.equal(note(), 'The description is not saved yet; its task has been asked to stop (task original).');
+        send({ type: 'task_done', task_id: 'original', root_task_id: 'original', status: 'cancelled' });
+        assert.equal(reads.length, 4);
+        await answer(status('original', 'cancelled'));
+        assert.equal(note(), 'The last description task was stopped without saving a description.');
+    } finally { binding.dispose(); }
+});
+
 // An explicit check that fails while a status notice queued behind it: the notice's newer read is shown (its writer
 // included), and the check's own failure stays in the transient slot the panel says it from, until a later check
 // that completes. Both a thrown failure and an answer that says check_ok:false.

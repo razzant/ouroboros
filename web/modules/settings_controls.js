@@ -259,8 +259,9 @@ function savedOutcome(row, value, data = {}) {
     const changes = data?.changes && typeof data.changes === 'object' ? data.changes : null;
     const entries = row.keys.map((key) => changes?.[key] || null);
     const receipt = entries.some(Boolean);
-    const outcome = { ...base, state: 'saved', withheld: entries.find((entry) => entry?.withheld)?.withheld || '' };
-    if (data?.no_changes === true || (changes && !receipt && data.receipt !== 'unavailable')) outcome.state = 'unchanged';
+    const noChange = data?.no_changes === true || (changes && !receipt && data.receipt !== 'unavailable');
+    const outcome = { ...base, state: noChange ? 'unchanged' : 'saved', code: noChange ? 'no_changes' : '',
+        withheld: entries.find((entry) => entry?.withheld)?.withheld || '' };
     if (receipt && !outcome.withheld) {
         // A key the receipt does not name did not change: it was what the last read showed, and nothing of it landed.
         const now = currentValue(row);
@@ -556,7 +557,7 @@ const entryId = (entry) => String(entry?.id || entry?.subagent_id || entry?.slug
 
 /**
  * Change one entry of a list setting (`MCP_SERVERS`, `OUROBOROS_SUBAGENTS`, ...): a fresh read, the one entry
- * changed (`change`: fields to merge, a function of the entry, or null to remove it), then that key posted with the
+ * changed (`change`: fields to merge, a function of the entry and observed token, or null to remove it), then that key posted with the
  * read's token as `if_unchanged`. A list that changed meanwhile is refused and never retried here. The
  * `empty_review_pool` refusal asks the owner and repeats the same body with the flag. `shown` is the list on screen
  * for a list never saved, written whole; `checker` is the editor's adapter for a roster change that must go through
@@ -574,10 +575,10 @@ export function writeEntry(key, id, change, { confirmed = false, ask = openConfi
         const index = stored.list.findIndex((entry) => entryId(entry) === String(id));
         const before = index < 0 ? null : stored.list[index];
         if (!before && typeof change !== 'function') return { ...unchanged(row), state: 'changed_elsewhere' };
-        const after = typeof change === 'function' ? change(before) : change === null ? null : { ...before, ...change };
+        const token = fresh._meta?.tokens?.[key];
+        const after = typeof change === 'function' ? await change(before, token) : change === null ? null : { ...before, ...change };
         const next = after === null || after === undefined ? stored.list.filter((_, i) => i !== index)
             : index < 0 ? [...stored.list, after] : stored.list.map((entry, i) => (i === index ? after : entry));
-        const token = fresh._meta?.tokens?.[key];
         const body = { [key]: stored.wrap(next), ...(token ? { if_unchanged: { [key]: token } } : {}) };
         const post = (sent) => attempt(row, sent[key],
             () => checker?.({ key, id, body: sent, fresh }) ?? apiClient.saveSettings(sent, { headers: APP_SETTINGS_ORIGIN }));
@@ -626,7 +627,7 @@ const NUMBER_RULE = (min, max) => (min !== null && max !== null ? `Enter a numbe
 const bound = (value) => (value === undefined || value === null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
 
 /** Typed text as the value to send, or the sentence that refuses it here. A bound that may be `unlimited` goes to
- *  the server as typed: it refuses a blank, a zero or a word and says why. */
+ *  the server as typed: it refuses a blank, a zero or a word and says why; one with declared bounds refuses here. */
 function parseTyped(row, text) {
     const control = controlOf(row);
     if (control.kind === 'pair') {
@@ -636,9 +637,10 @@ function parseTyped(row, text) {
     if (control.kind !== 'number') return { value: text };
     const trimmed = String(text ?? '').trim();
     const number = trimmed === '' ? NaN : Number(trimmed);
-    if (control.noLimit) return { value: Number.isFinite(number) ? number : trimmed };
-    if (trimmed === '' && control.empty) return { value: '' };  // a number its row names when empty may be left blank
     const [min, max] = [bound(control.min), bound(control.max)];
+    const unbounded = trimmed === '' || ['unlimited', 'inf', '\u221e'].includes(trimmed.toLowerCase());  // settings_scales.UNLIMITED_ALIASES
+    if (control.noLimit && (unbounded || (min === null && max === null))) return { value: Number.isFinite(number) ? number : trimmed };
+    if (trimmed === '' && control.empty) return { value: '' };  // a number its row names when empty may be left blank
     if (!Number.isFinite(number) || (control.integer && !Number.isInteger(number)) || (min !== null && number < min) || (max !== null && number > max)) return { refuse: NUMBER_RULE(min, max) };
     return { value: number };
 }
@@ -842,7 +844,7 @@ function commitTyped(row, text, ctx) {
 /**
  * Wire the rows drawn in `container`: a typed value, a switch and a select commit on `change` (for a field: leaving it
  * or Enter); a strip option and "No limit" on the press. Each row shows its result line and its Undo. `ctx.rows` names
- * descriptors that are not in settings_rows.js; `ctx.ask` stands in for the confirm dialog; `ctx.openDoor(row)` takes
+ * descriptors that are not in settings_rows.js; `ctx.ask` stands in for the confirm dialog; `ctx.openDoor(row, opener)` takes
  * a door's press; `ctx.onPaint(settings, row, node)` paints the row's own control and words from the document whenever
  * it holds no pending custom choice or draft. Answers `{ paint, leave, dispose }`: `paint()` after a fresh read (it never
  * touches a focused or typed field), `leave()` when the page is left (a result the owner saw ends there), `dispose()`
@@ -906,7 +908,7 @@ export function bindSettingRows(container, ctx = {}) {
             void commitValue(row, 'unlimited', ctx);
         } else if (hit('[data-setting-value]')) {
             void commitValue(row, hit('[data-setting-value]').dataset.settingValue, ctx);
-        } else if (hit('[data-setting-door]')) ctx.openDoor?.(row);
+        } else if (hit('[data-setting-door]')) ctx.openDoor?.(row, hit('[data-setting-door]'));
     };
     // A `choices` group as a radio group: the arrows, Home and End move between its options. A press chooses, never
     // the arrow itself: a choice is written at once and may ask first.

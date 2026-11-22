@@ -188,11 +188,26 @@ def test_the_fact_rides_the_physical_context_into_the_ledger_row():
 
 
 def test_real_sends_leave_the_fact_on_their_ledger_rows(main_call):
-    """Through the loop's own dispatch and the real usage store: first request, an extension, a rewritten start."""
+    """Through the loop's own dispatch and the real usage store: first request, an extension, a rewritten start.
+
+    The plan's prompt-file witness rides each of these Main sends to its sealed request: the reader finds the file's
+    trace while the leading system text is the captured prompt, and none once that text changed."""
+    import hashlib
+    from dataclasses import replace
+
+    from ouroboros.context_attempt_reader import read_attempt
+    from ouroboros.context_fit import ContextCore
     from tests.test_llm_claudexor import result
 
     ctx, gateway, *_ = main_call
     slot = ctx.tools._ctx
+    prompt = ctx.messages[0]["content"]
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    witness = ("prompts/SYSTEM.md", digest, len(prompt), digest)  # (path, file digest, length, text digest)
+    core = ContextCore(base_prompt=prompt, bible_md="", architecture_md="", development_md="", semi_stable_text="",
+                       dynamic_text="", user_content_json=json.dumps("go"), docs_need_development=False,
+                       base_prompt_source=witness)
+    ctx.context_fit_plan = replace(ctx.context_fit_plan, core=core)
 
     def send(round_idx):
         ctx.round_idx = round_idx
@@ -207,9 +222,13 @@ def test_real_sends_leave_the_fact_on_their_ledger_rows(main_call):
     send(2)
     ctx.messages[0] = {**ctx.messages[0], "content": "another capture of the system text"}
     send(3)
-    facts = [(row.get("physical_context") or {}).get("prefix") for row in dispatched_attempts(ctx.drive_root)]
+    rows = dispatched_attempts(ctx.drive_root)
+    facts = [(row.get("physical_context") or {}).get("prefix") for row in rows]
     assert [fact["departs"] for fact in facts] == ["first", "append", "system"]
     assert (facts[2]["index"], facts[2]["of"]) == (0, 1) and "base_at" in facts[1] and "from_route" not in facts[2]
+    traces = [read_attempt(ctx.drive_root, ctx.task_id, row["attempt_id"])[0]["file_trace"] for row in rows]
+    assert [trace if trace == "not_recorded" else [(row["source_path"], row["source_sha256"]) for row in trace]
+            for trace in traces] == [[("prompts/SYSTEM.md", digest)], [("prompts/SYSTEM.md", digest)], "not_recorded"]
 
 
 def test_one_reader_names_the_class_in_the_providers_own_order():

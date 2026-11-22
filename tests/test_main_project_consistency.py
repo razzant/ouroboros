@@ -429,10 +429,12 @@ def _sender_chat(sender, room_chat):
 def owner_turn(root, monkeypatch, chat_id, source):
     """One owner message through the real bridge ingress: (direct Main turns, routing receipts)."""
     import server
+    from supervisor.state import load_state
     from tests.test_project_routing_v664 import _ctx, _ImmediateThread
 
     direct, receipts = [], []
     ctx = _ctx(root, direct=lambda *_a, **_k: direct.append(True))
+    ctx.load_state = load_state  # ingress must see the persisted owner binding, as it does in the supervisor
     monkeypatch.setattr("ouroboros.server_owner_routing.threading", SimpleNamespace(Thread=_ImmediateThread))
 
     class Bridge:
