@@ -535,3 +535,40 @@ def test_a_package_that_cannot_be_checked_fails_strict_readers_and_is_a_named_ga
     finally:
         locked.chmod(mode)
     assert sorted(skill.name for skill in discover_skills(tmp_path, strict=True)) == ["kept", "locked"]
+
+
+def test_a_session_start_keeps_the_readable_guidance_and_says_which_folder_it_could_not_read(tmp_path, monkeypatch):
+    """A connected session's start names the folder whose instructions are missing (RV3 R3-6), so it can ask the
+    host; the readable always-in-context texts stay; readable again, nothing is said."""
+    import os
+
+    from ouroboros.skill_catalogue import session_skill_index
+
+    for bucket, name in (("external", "neighbour"), ("clawhub", "restricted")):
+        folder = tmp_path / "skills" / bucket / name
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\nversion: '1'\ntype: instruction\n"
+                                         f"always_in_context: true\n---\n{name.upper()}_BODY\n", encoding="utf-8")
+        (tmp_path / "state" / "skills" / name).mkdir(parents=True)
+        save_enabled(tmp_path, name, True, actor="owner_ui")
+        [loaded] = [skill for skill in discover_skills(tmp_path) if skill.name == name]
+        (tmp_path / "state" / "skills" / name / "review.json").write_text(
+            json.dumps({"status": "pass", "content_hash": loaded.content_hash}), encoding="utf-8")
+    hidden = (tmp_path / "skills" / "clawhub").resolve()
+    real_iterdir = pathlib.Path.iterdir
+
+    def iterdir(self):
+        if self.resolve() == hidden:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    os.utime(hidden)  # the folder changed: the walk reads again
+    index = session_skill_index(SimpleNamespace(drive_root=tmp_path))
+    assert "NEIGHBOUR_BODY" in index and "RESTRICTED_BODY" not in index
+    assert "HOST SKILL REFERENCES unavailable for these folders, which could not be read: " in index
+    assert "clawhub (PermissionError); ask the host for relevant instruction files there." in index
+    monkeypatch.setattr(pathlib.Path, "iterdir", real_iterdir)
+    os.utime(hidden)
+    whole = session_skill_index(SimpleNamespace(drive_root=tmp_path))
+    assert "NEIGHBOUR_BODY" in whole and "RESTRICTED_BODY" in whole and "unavailable" not in whole
