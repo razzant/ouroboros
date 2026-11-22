@@ -8,8 +8,9 @@
 // pointer; default: the page's own (pointer: coarse)), target (24 px, under a coarse pointer 44 px),
 // touch (3 px gap), nearMiss (3 px), limit (examples kept per kind; facts.counts has every total).
 // A target is small when either side of its reach is under `target`: its box with the positioned ::before
-// or ::after a page extends it with (a shared hit-area recipe), cut by what clips it. Under a fine pointer a
-// link inside running text is exempt (WCAG 2.5.8); under a finger it is not (it takes the hit area too).
+// or ::after a page extends it with (a shared hit-area recipe), cut by what clips it; a scroller's edge is a
+// scroll position, not a cut. Under a fine pointer a link inside running text is exempt (WCAG 2.5.8); under a
+// finger it is not (it takes the hit area too).
 // Returns {viewport, facts, findings: [{kind, message, where, value}]}. Kinds: page-overflow,
 // container-overflow, text-clipped, text-truncated, text-clipped-by-ancestor, text-covered,
 // pinned-over-content, controls-touching, controls-overlap, target-small, text-tiny, edges-near-miss,
@@ -59,16 +60,22 @@
     const clips = new Map();
     const toTop = b => { const x = { left: offset.x + b.left * scale, top: offset.y + b.top * scale, width: b.width * scale, height: b.height * scale };
       x.right = x.left + x.width; x.bottom = x.top + x.height; return x; };
-    const clipOf = el => {   // rect: what every clip leaves; fixed: what only a clip that never scrolls leaves
+    // rect: what every clip leaves; fixed: what clips that never scroll leave below the nearest scroller on each axis;
+    // span: how much of that scroller shows (scrolling brings the rest of what it holds into view).
+    const clipOf = el => {
       const p = el.parentElement;
-      if (!p || win.getComputedStyle(el).position === 'fixed') return { rect: frameClip, anc: ALL, fixed: ALL, by: null };
+      if (!p || win.getComputedStyle(el).position === 'fixed') return { rect: frameClip, anc: ALL, fixed: ALL, span: { x: 1e9, y: 1e9 }, by: null };
       if (clips.has(p)) return clips.get(p);
       let c = clipOf(p);
       const pcs = win.getComputedStyle(p);
       if (p !== doc.body && p !== doc.documentElement && (clipsX(pcs) || clipsY(pcs))) {
-        const pr = toTop(p.getBoundingClientRect()), keepX = /hidden|clip/.test(pcs.overflowX), keepY = /hidden|clip/.test(pcs.overflowY);
-        const kept = { left: keepX ? pr.left : -1e9, right: keepX ? pr.right : 1e9, top: keepY ? pr.top : -1e9, bottom: keepY ? pr.bottom : 1e9 };
-        c = { rect: cut(c.rect, pr), anc: cut(c.anc, pr), fixed: cut(c.fixed, kept), by: p };
+        const pr = toTop(p.getBoundingClientRect()), fixed = { ...c.fixed }, span = { ...c.span };
+        for (const [axis, lo, hi, size, mode, more] of [['x', 'left', 'right', 'width', pcs.overflowX, p.scrollWidth - p.clientWidth],
+          ['y', 'top', 'bottom', 'height', pcs.overflowY, p.scrollHeight - p.clientHeight]]) {
+          if (/auto|scroll/.test(mode) && more > 1) { span[axis] = Math.min(span[axis], cut(pr, fixed)[size]); fixed[lo] = -1e9; fixed[hi] = 1e9; }
+          else if (/hidden|clip/.test(mode)) { fixed[lo] = Math.max(fixed[lo], pr[lo]); fixed[hi] = Math.min(fixed[hi], pr[hi]); }
+        }
+        c = { rect: cut(c.rect, pr), anc: cut(c.anc, pr), fixed, span, by: p };
       }
       clips.set(p, c); return c;
     };
@@ -84,7 +91,7 @@
       if (raw.width < 1 || raw.height < 1) continue;
       const full = toTop(raw), clip = clipOf(el), vis = cut(full, clip.rect), byAnc = cut(full, clip.anc);
       if (vis.width < 1 || vis.height < 1) continue;
-      const item = { el, cs, win, doc, full, vis, byAnc, clipBy: clip.by, clipRect: clip.rect, clipFixed: clip.fixed, prefix, offset, scale, sel: path(el, prefix),
+      const item = { el, cs, win, doc, full, vis, byAnc, clipBy: clip.by, clipRect: clip.rect, clipFixed: clip.fixed, clipSpan: clip.span, prefix, offset, scale, sel: path(el, prefix),
         onScreen: vis.bottom > 0 && vis.top < vh && vis.right > 0 && vis.left < vw };
       if (el.tagName === 'IFRAME') {
         let inner = null; try { inner = el.contentDocument; } catch (e) { inner = null; }
@@ -206,10 +213,11 @@
       r.right = Math.max(r.right, full.right - (border('Right') + rt) * k); r.bottom = Math.max(r.bottom, full.bottom - (border('Bottom') + b) * k);
     }
     r.width = r.right - r.left; r.height = r.bottom - r.top;
-    // Where the control's own box is cut, a scroller's cut is a scroll position, not a size; a clip that never
-    // scrolls (overflow hidden or clip) cuts it for good, so the part it leaves is the reach.
+    // Where the control's own box is cut, a scroller's cut is a scroll position, not a size: the reach is what clips
+    // that never scroll (overflow hidden or clip) leave of it below its nearest scroller, up to what that scroller shows.
     const shown = cut(r, c.clipRect), kept = cut(r, c.clipFixed);
-    return { w: c.vis.width < full.width - 1 ? kept.width : shown.width, h: c.vis.height < full.height - 1 ? kept.height : shown.height };
+    return { w: c.vis.width < full.width - 1 ? Math.min(kept.width, c.clipSpan.x) : shown.width,
+             h: c.vis.height < full.height - 1 ? Math.min(kept.height, c.clipSpan.y) : shown.height };
   };
   const inText = c => {   // an inline link whose block holds words besides its own: a link inside a sentence
     if (!/^inline/.test(c.cs.display)) return false;
