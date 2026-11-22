@@ -1341,19 +1341,16 @@ function summarizeChatLiveEventView(evt) {
     }
 
     if (evt.is_progress || t === 'send_message') {
-        // A skill lifecycle row's end is its typed phase (skill_lifecycle_queue); only a row written before that fact
-        // was stamped (May 2026) is still read from its words.
-        const lifecyclePhase = typeof evt.lifecycle?.phase === 'string' ? evt.lifecycle.phase
-            : (/\s—\s(completed|failed)\b/i.exec(progressText.full)?.[1] || '').toLowerCase();
-        const lifecycleTerminal = String(evt.task_id || '').startsWith('skill_lifecycle_')
-            && ['completed', 'failed'].includes(lifecyclePhase);
+        // A row with its typed `lifecycle` fact was read above; an older skill lifecycle row ends at the word after its dash.
+        const ended = String(evt.task_id || '').startsWith('skill_lifecycle_')
+            ? (/\s—\s(completed|failed)\b/i.exec(progressText.full)?.[1] || '').toLowerCase() : '';
         // Voice, not wording (P5): the worker stamps `narration` on every note; a
         // host note is a typed fact, never a text match. Both stay visible rows; only
         // narration is promoted (title, collapsed line). ABSENT = predates the fact.
         const narration = evt.narration === true || evt.narration === undefined;
         const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
         return chatView({
-            phase: lifecycleTerminal ? (lifecyclePhase === 'failed' ? 'lifecycle_error' : 'done') : 'working',
+            phase: ended === 'failed' ? 'lifecycle_error' : ended ? 'done' : 'working',
             // An empty note is no narration: a placeholder would become the card title as if said (#1369).
             headline: note.preview || '',
             fullHeadline: note.full || '',

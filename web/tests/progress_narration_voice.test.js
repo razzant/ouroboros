@@ -667,3 +667,15 @@ test('a refresh ends where a cold load starts, whatever the live card went throu
         assert.deepEqual(await afterRefresh(frames, true), cold, `${story}: live, then refreshed`);
     }
 });
+
+test('a skill lifecycle row ends at its typed fact, and an older row at the word after its dash', () => {
+    const row = (extra) => summarizeChatLiveEvent({ type: 'chat', is_progress: true, role: 'system',
+        task_id: 'skill_lifecycle_install_alpha_job-1', ts: TS, ...extra });
+    // An older row (no `lifecycle` fact): a "failed" in its message is no failed ending.
+    assert.equal(row({ content: 'Skill install: `alpha` — completed — 2 checks failed earlier' }).phase, 'done');
+    assert.equal(row({ content: 'Skill install: `alpha` — failed — boom' }).phase, 'lifecycle_error');
+    assert.equal(row({ content: 'Skill install: `alpha` — running' }).phase, 'working');
+    // A row with its fact is read from the fact, whatever its words say.
+    assert.equal(row({ content: 'Skill install: `alpha` — completed', lifecycle: { status: 'failed', phase: 'failed' } }).phase,
+        'lifecycle_error');
+});
