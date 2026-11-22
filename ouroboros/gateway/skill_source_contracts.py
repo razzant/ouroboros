@@ -294,7 +294,8 @@ class StarterConnection(TypedDict, total=False):
     ``{username}`` and ``{code}``. ``title``, ``pitch``, ``steps`` ([{text, link, action}]), ``pairing.hint``,
     ``pairing.note`` and ``options`` ([{key, label, on, off, new_connection}]) are the skill's own words. The card
     checks a token with ``POST /api/onboarding/connection/identity`` and its values ride the completion as
-    ``connections``."""
+    ``connections``. ``needs_allow``: this install grants reviewed skills nothing on its own, so the skill starts
+    only once the owner allows it in Extensions."""
 
     skill: Required[str]
     token: Required[str]
@@ -303,6 +304,7 @@ class StarterConnection(TypedDict, total=False):
     pitch: str
     steps: List[Dict[str, str]]
     options: List[Dict[str, Any]]
+    needs_allow: bool
 
 
 class ConnectionIdentityRequest(TypedDict):

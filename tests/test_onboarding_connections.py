@@ -2,10 +2,11 @@
 
 A fixture skill stands for the Telegram skill: its card reaches the Skills step without its function, keys or
 routes; the token check calls the declared function of a built-in skill only and never echoes the token or the
-address; the completion saves the token alone under its declared key in its one write, keeps the code out of Settings,
-and refuses a card's values from the Telegram Mini App; after the write the owner's consent is recorded, the token key
-granted where reviewed skills are not granted automatically, and the code with the options posted once to the route
-they declare, after which the code leaves the record.
+address, and asks the server a declared reader names; the completion saves the token alone under its declared key in
+its one write, keeps the code out of Settings, and refuses a card's values from the Telegram Mini App; after the write
+the owner's consent is recorded and, once the skill serves, the code with the options is posted once to the route they
+declare, after which the code leaves the record. The card grants nothing: where the install grants reviewed skills
+nothing on its own, the step is told the skill starts once the owner allows it.
 """
 from __future__ import annotations
 
@@ -47,11 +48,18 @@ CARD---
 Demo.
 """
 IDENT = '''
-CALLS = []
+CALLS, BASES, FAIL = [], [], []
+
+
+def base(state_dir):
+    BASES.append(str(state_dir))
+    if FAIL:
+        raise RuntimeError("the skill's settings cannot be read")
+    return "http://127.0.0.1:8081"
 
 
 def check(token, api_base=None, *, timeout=8.0):
-    CALLS.append(timeout)
+    CALLS.append((api_base, timeout))
     if token == "1:boom":
         raise RuntimeError("secret 1:boom at https://api.example.test/bot1:boom/getMe")
     if token.startswith("1:"):
@@ -78,7 +86,8 @@ def _entry(**changes):
     return {"demo": {"fields": {"botToken": "1:abc"}, "code": CODE, "options": {"DEMO_NOTIFY": "on"}, **changes}}
 
 
-def test_the_step_sees_the_card_s_words_but_never_its_function_keys_or_routes(skills):
+def test_the_step_sees_the_card_s_words_but_never_its_function_keys_or_routes(skills, monkeypatch):
+    monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: True)
     seen = cards.starter_connection("demo")
     assert seen == {
         "skill": "demo", "token": "botToken", "title": "Phone via Demo", "pitch": "Chat anywhere",
@@ -86,7 +95,11 @@ def test_the_step_sees_the_card_s_words_but_never_its_function_keys_or_routes(sk
                   {"text": "Paste the token here", "link": "", "action": ""}],
         "pairing": {"link": "https://example.test/{username}?start={code}", "hint": "Scan it", "note": "Finish now"},
         "options": [{"key": "DEMO_NOTIFY", "label": "Send results here", "on": "on", "off": "off", "new_connection": True}],
+        "needs_allow": False,
     }
+    # Where the install grants reviewed skills nothing on its own, the step learns the skill starts once allowed.
+    monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: False)
+    assert cards.starter_connection("demo") == {**seen, "needs_allow": True}
     assert cards.card_keys("demo") == ("DEMO_TOKEN", "DEMO_CODE")
     # A card missing any part the host needs is no card: the skill stays an ordinary row.
     for broken in (CARD.replace("?start={code}", ""), CARD.replace("store: skill_settings, route: settings/save}, link", "store: core, route: settings/save}, link"),
@@ -97,6 +110,9 @@ def test_the_step_sees_the_card_s_words_but_never_its_function_keys_or_routes(sk
         assert cards.declared_card("demo") is None and cards.starter_connection("demo") is None, broken
     _skill(skills, CARD, identity="../outside.py:check")
     assert cards.declared_card("demo") is None
+    for reader in ("../outside.py:base", "base", ""):  # a declared reader out of shape is no card, never the cloud
+        _skill(skills, CARD.replace('identity: "IDENTITY",', f'identity: "IDENTITY", api_base: "{reader}",'))
+        assert cards.declared_card("demo") is None, reader
     _skill(skills, "")
     assert cards.declared_card("demo") is None, "no card declared"
     assert cards.declared_card("nope") is None and cards.declared_card("../demo") is None
@@ -141,6 +157,30 @@ def test_the_token_check_runs_the_declared_function_of_a_built_in_skill_and_name
     os.symlink(outside, module)
     escaped = client.post("/check", json={"skill": "demo", "token": "1:abc"})
     assert escaped.status_code == 500 and "username" not in escaped.text
+
+
+def test_a_declared_reader_names_the_server_the_check_asks_and_a_failing_one_asks_nobody(skills, tmp_path):
+    """``pairing.api_base`` is read like ``identity``: given the skill's state directory (read, never made), its answer
+    is the check's second argument. Without it the check is called as before."""
+    from ouroboros.skill_loader import skill_state_dir_path
+
+    drive = tmp_path / "data"
+    client = _client(Route("/check", endpoint=cards.api_connection_identity, methods=["POST"]), drive_root=drive)
+    assert client.post("/check", json={"skill": "demo", "token": "1:abc"}).json()["ok"] is True
+    module = cards._declared_function(cards.declared_card("demo")).__globals__
+    assert (module["CALLS"], module["BASES"]) == ([(None, 8.0)], []), "no reader declared: the function's own default"
+    _skill(skills, CARD.replace('identity: "IDENTITY",', 'identity: "IDENTITY", api_base: "lib/ident.py:base",'))
+    module = cards._declared_function(cards.declared_card("demo")).__globals__
+    module["CALLS"].clear()
+    assert client.post("/check", json={"skill": "demo", "token": "1:abc"}).json() == {"ok": True, "username": "demo_bot"}
+    state_dir = skill_state_dir_path(drive, "demo")
+    assert module["BASES"] == [str(state_dir)] and module["CALLS"] == [("http://127.0.0.1:8081", 8.0)]
+    assert not state_dir.exists()
+    assert "ident.py" not in str(cards.starter_connection("demo")), "the step never sees a declared function"
+    module["FAIL"].append(True)
+    failed = client.post("/check", json={"skill": "demo", "token": "1:abc"})
+    assert failed.status_code == 500 and "1:abc" not in failed.text
+    assert module["CALLS"] == [("http://127.0.0.1:8081", 8.0)], "a reader that fails sends the token nowhere"
 
 
 def test_finish_saves_the_token_alone_and_refuses_anything_else(skills):
@@ -190,16 +230,14 @@ def test_the_telegram_mini_app_cannot_arm_a_code_and_a_saved_completion_records_
     assert settled == [drive] and len(reached) == 3 and reached[-1] == connections
 
 
-def test_after_finish_the_token_is_granted_and_the_code_posted_once_with_the_options(skills, tmp_path, monkeypatch):
+def test_after_finish_the_code_is_posted_once_the_skill_serves_and_the_card_grants_nothing(skills, tmp_path, monkeypatch):
     drive = tmp_path / "data"
     assert len(cards.record_consent(drive, _entry())) == 1
-    installed, grants, posts = [False], [], []
+    installed, posts = [False], []
     monkeypatch.setattr(cards, "_installed", lambda _drive, _name: installed[0])
-    monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: False)
 
-    def grant(ctx, name, action, **kwargs):
-        grants.append((name, action, kwargs["items"], kwargs["_owner_actor"], kwargs["_enable_after_grant"]))
-        return {"ok": True}
+    def grant(*_a, **_k):
+        raise AssertionError("the card grants nothing: the install's grant, or the owner in Extensions, does")
 
     monkeypatch.setattr("ouroboros.skill_lifecycle_actions.run_skill_action", grant)
     answers = iter([(409, {}), (200, {"ok": True, "owner_ignored": False}), (200, {"ok": True})])
@@ -209,35 +247,22 @@ def test_after_finish_the_token_is_granted_and_the_code_posted_once_with_the_opt
         return next(answers)
 
     record = cards.settle(drive, post=post)[0]
-    assert (record["grant"], record["post"], grants, posts) == ("pending", "pending", [], []), "not installed yet"
-    installed[0] = True  # the starter install's end: granted, but the skill's route does not serve yet
+    assert (record["post"], posts, "grant" in record) == ("pending", [], False), "not installed yet"
+    installed[0] = True  # installed, not serving yet: still loading, or a skill the owner has still to allow
     record = cards.settle(drive, post=post)[0]
-    assert grants == [("demo", "grant", ["DEMO_TOKEN"], "owner_ui", True)], "the token alone; the code needs no grant"
     assert (record["post"], record["code"]) == ("waiting", CODE), "no timer, no retry: the next event posts"
     record = cards.settle(drive, post=post)[0]  # the extension's load
     assert posts == [("/api/extensions/demo/settings/save", {"DEMO_CODE": CODE, "DEMO_NOTIFY": "on"})] * 2, \
         "one body for the route, posted once it serves"
-    assert (record["grant"], record["post"], "code" in record) == ("granted", "posted", False)
+    assert (record["post"], "code" in record) == ("posted", False)
     assert "code" not in skill_starter.read_marker(drive)["connections"][0], "the code leaves the host's record"
     cards.settle(drive, post=post)
-    assert len(grants) == 1 and len(posts) == 2, "settled cards are not settled again"
-    # Where reviewed skills are granted automatically, the install's own grant covers the token.
-    cards.record_consent(drive, _entry())
-    monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: True)
-    assert cards.settle(drive, post=post)[0]["grant"] == "automatic" and len(grants) == 1
+    assert len(posts) == 2, "settled cards are not settled again"
 
 
 def test_failures_are_recorded_never_raised_and_a_refused_post_drops_the_code(skills, tmp_path, monkeypatch):
     drive = tmp_path / "data"
-    cards.record_consent(drive, _entry())
     monkeypatch.setattr(cards, "_installed", lambda _drive, _name: True)
-    monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: False)
-    monkeypatch.setattr("ouroboros.skill_lifecycle_actions.run_skill_action", lambda *a, **k: {"error": "missing grants"})
-    posts = []
-    record = cards.settle(drive, post=lambda path, body: posts.append(path) or (200, {}))[0]
-    assert record["grant"].startswith("failed: missing grants") and record["post"] == "pending" and posts == []
-    assert record["code"] == CODE, "a skill that cannot run keeps its code for a later grant"
-    monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: True)
     cards.record_consent(drive, _entry())
     refused = cards.settle(drive, post=lambda path, body: (400, {}))[0]
     assert refused["post"] == "failed: the route answered 400" and "code" not in refused
@@ -250,12 +275,9 @@ def test_failures_are_recorded_never_raised_and_a_refused_post_drops_the_code(sk
     assert waiting["post"] == "waiting" and waiting["code"] == CODE, "a route not serving yet is tried again at the next run"
 
     def boom(*_a, **_k):
-        raise RuntimeError("lifecycle down")
+        raise RuntimeError("route down")
 
-    monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: False)
-    monkeypatch.setattr("ouroboros.skill_lifecycle_actions.run_skill_action", boom)
-    cards.record_consent(drive, _entry())
-    assert cards.settle(drive, post=lambda path, body: (200, {})) == []  # logged by type, never raised
+    assert cards.settle(drive, post=boom) == []  # logged by type, never raised
 
 
 def test_a_skill_finishing_its_load_in_the_server_settles_the_cards_waiting_for_it(tmp_path, monkeypatch):

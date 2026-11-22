@@ -252,7 +252,7 @@ def schedule_starter(drive_root: pathlib.Path, ids: Optional[List[str]], *, orig
             log.warning("Starter skill installation failed", exc_info=True)
         from ouroboros.onboarding_connections import settle
 
-        settle(drive_root, repo_dir)  # a card whose skill is now installed: its grant and options (never raises)
+        settle(drive_root)  # a card whose skill is now installed: its one post (never raises)
 
     thread = threading.Thread(target=_run, daemon=True, name="starter-skills")
     with _THREADS_LOCK:
@@ -327,7 +327,7 @@ def at_startup(drive_root: pathlib.Path, settings: Dict[str, Any], *, provider_r
             return "retrying"
         from ouroboros.onboarding_connections import settle_later
 
-        settle_later(drive_root, repo_dir)  # a card's grant or options a stop interrupted
+        settle_later(drive_root)  # a card's post a stop interrupted
         return state
     except Exception:
         log.warning("Starter skill startup work failed", exc_info=True)

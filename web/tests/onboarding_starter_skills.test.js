@@ -448,6 +448,20 @@ test('each failure says only its own cause and never blocks; a token the service
     assert.doesNotMatch(words.unreachable, /accept/);
 });
 
+test('where the install grants skills nothing on its own, the card says the skill starts once allowed, never «connects»', async () => {
+    const { host } = await cardStep(withCard({ ...CARD, needs_allow: true }), () => ({ status: 'ok', username: 'my_ouro_bot' }));
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    paste(host, TOKEN);
+    await settle();
+    const card = cardOf(host.innerHTML);
+    assert.match(text(card), /@my_ouro_bot Scan it with your phone’s camera, then press Start in Telegram\. Telegram starts after you allow it in Extensions\. On this device\? Open @my_ouro_bot /);
+    assert.doesNotMatch(text(card), /the bot answers once Ouroboros starts|connects when you finish setup/, 'the skill’s note would promise what this install does not do');
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    assert.match(text(cardOf(host.innerHTML)), /^Phone via Telegram @my_ouro_bot · starts after you allow it in Extensions Change$/);
+    assert.equal(normalizeConnection(CARD).allow, false);
+    assert.equal(normalizeConnection({ ...CARD, needs_allow: 'true' }).allow, false, 'only the host’s own true');
+});
+
 test('the host’s identity check: its two causes, its answer and anything else as a check that did not run', async () => {
     const answer = (status, body) => async (url, init) => {
         assert.equal(url, '/api/onboarding/connection/identity');

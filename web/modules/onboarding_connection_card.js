@@ -17,7 +17,8 @@ const text = (value) => String(value ?? '').trim();
 const fieldWords = (name) => text(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().replace(/^./, (first) => first.toUpperCase());
 
 /** The declaration as the card reads it, or null when it lacks a skill, a token field or a link with both of its
- * places. Steps, a title, a pitch, a hint and a note beside the QR and options are the skill's own words. */
+ * places. Steps, a title, a pitch, a hint and a note beside the QR and options are the skill's own words; `allow` is
+ * the host's: this install grants skills nothing on its own, so the skill starts once allowed in Extensions. */
 export function normalizeConnection(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const pairing = raw.pairing && typeof raw.pairing === 'object' ? raw.pairing : {};
@@ -25,7 +26,7 @@ export function normalizeConnection(raw) {
     const card = { skill: text(raw.skill), token: text(raw.token), link };
     if (!card.skill || !card.token || !link.includes('{username}') || !link.includes('{code}')) return null;
     return {
-        ...card, title: text(raw.title), pitch: text(raw.pitch), hint: text(pairing.hint), note: text(pairing.note),
+        ...card, title: text(raw.title), pitch: text(raw.pitch), hint: text(pairing.hint), note: text(pairing.note), allow: raw.needs_allow === true,
         steps: (Array.isArray(raw.steps) ? raw.steps : []).map((step) => ({ text: text(step?.text), link: https(step?.link), action: text(step?.action) }))
             .filter((step) => step.text),
         options: (Array.isArray(raw.options) ? raw.options : []).filter((option) => text(option?.key) && text(option?.label))
@@ -68,6 +69,8 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
     const settled = () => (card.check && card.check.token === token() ? card.check : null);
     const link = (account) => declaration.link.replace('{username}', encodeURIComponent(account)).replace('{code}', encodeURIComponent(card.code));
     const saved = () => Boolean(token()) && settled()?.status !== 'refused';
+    // Where the install grants nothing on its own, the skill starts only once allowed: that, never «connects».
+    const later = declaration.allow ? 'starts after you allow it in Extensions' : 'connects when you finish setup';
 
     async function run() {
         const value = token();
@@ -103,7 +106,8 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             <div class="skills-connection-facts">
                 <strong data-connection-account>@${escapeHtml(account)}</strong>
                 ${declaration.hint ? `<span${own(true)}>${escapeHtml(declaration.hint)}</span>` : ''}
-                ${declaration.note ? `<span${own(true)}>${escapeHtml(declaration.note)}</span>` : '<span>It connects when you finish setup.</span>'}
+                ${declaration.allow ? `<span data-connection-allow>${escapeHtml(`${service} ${later}.`)}</span>`
+                    : declaration.note ? `<span${own(true)}>${escapeHtml(declaration.note)}</span>` : '<span>It connects when you finish setup.</span>'}
                 <span>On this device? <a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer" data-connection-link>Open @${escapeHtml(account)}</a></span>
                 ${optionsHtml()}
             </div>
@@ -121,7 +125,7 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
     function standing() {
         const state = settled();
         if (!token()) return '';
-        if (state?.status === 'ok') return `@${state.username} · connects when you finish setup`;
+        if (state?.status === 'ok') return `@${state.username} · ${later}`;
         if (state?.status === 'refused') return `${service} did not accept the token`;
         return state?.status === 'checking' ? 'Checking the token…' : 'Token not checked · saved when you finish';
     }
