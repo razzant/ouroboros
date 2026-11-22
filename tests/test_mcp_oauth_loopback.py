@@ -772,3 +772,16 @@ def test_a_repeated_sign_in_refusal_keeps_the_open_states_start_and_a_later_one_
         asyncio.run(mcp_oauth.current_token(cfg))
     assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "refresh_rejected",
                                      "since": "2026-11-19T21:07:00+00:00"}  # a new state after the sign-in: its own start
+
+
+@pytest.mark.parametrize(("code", "cleared"), [("MCP_AUTH_REQUIRED", True), ("MCP_TIMEOUT", False)])
+def test_a_completed_sign_in_clears_a_sign_in_refusal_but_not_a_transport_failure(monkeypatch, tmp_path, code, cleared):
+    from ouroboros import mcp_catalog
+
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    mcp_catalog.publish(cfg, mcp_catalog.attempt_envelope(cfg, None, at="2026-11-22T10:00:00+00:00", items=[],
+                                                          complete=True))
+    assert mcp_catalog.record_call(cfg, ok=False, code=code, method="echo", at="2026-11-22T10:00:01+00:00")
+    started = asyncio.run(mcp_oauth.begin(cfg))
+    assert asyncio.run(mcp_oauth.complete(cfg, state=_state_of(started), code="c", iss="https://auth.example"))["ok"]
+    assert (mcp_catalog.latest_call(cfg) is None) is cleared, mcp_catalog.latest_call(cfg)

@@ -587,6 +587,9 @@ async def complete(cfg: Any, *, state: str, code: str = "", iss: Optional[str] =
                    tokens=_tokens(token, None, pending.get("scope")),
                    sign_in={"state": SIGNED_IN, "since": utc_now_iso()})
         _save(cfg, doc)
+    from ouroboros import mcp_catalog  # after the sign-in lock: the two locks never nest
+
+    mcp_catalog.clear_sign_in_refusal(cfg)  # its calls were refused for the sign-in that just happened
     return {"ok": True, "server": cfg.id, "scope": doc["tokens"]["scope"] or ""}
 
 

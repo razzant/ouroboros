@@ -273,6 +273,25 @@ def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
         return False
 
 
+def clear_sign_in_refusal(cfg: Any) -> bool:
+    """After the owner signed in: forget a call record whose open series is the sign-in requirement (a transport
+    failure stays, its server may still be down). True when it was removed; a busy lock is a writer's newer mark."""
+    from ouroboros import store
+
+    if (latest_call(cfg) or {}).get("code") != "MCP_AUTH_REQUIRED":
+        return False
+    try:
+        with store.name_lock(config.DATA_DIR, f"mcp/calls/server-{cfg.id}.lock", timeout_sec=0):
+            data = read_json_dict(calls_path(cfg.id)) or {}
+            if (data.get("server_id"), data.get("identity")) != (cfg.id, identity(cfg)) or (
+                    data.get("latest_call") or {}).get("code") != "MCP_AUTH_REQUIRED":
+                return False
+            calls_path(cfg.id).unlink(missing_ok=True)
+            return True
+    except store.StoreBusy:
+        return False
+
+
 class CatalogReader:
     """One manager's stat cache, bounded by its current configured servers."""
 
