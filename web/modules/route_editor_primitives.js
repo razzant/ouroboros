@@ -20,7 +20,10 @@ export const DEFAULT_API_PROVIDER = 'openrouter';
 export const EFFORT_CHOICES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const PROCESSING_PREFERENCE_KEY = 'OUROBOROS_PROCESSING_PREFERENCE';
 export const MODEL_PROCESSING_PREFERENCES_KEY = 'OUROBOROS_MODEL_PROCESSING_PREFERENCES';
-export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];  // Settings never hold Ultrafast (an older reader refuses it)
+export const MODEL_ACCOUNTS_KEY = 'OUROBOROS_MODEL_ACCOUNTS';
+// The tiers a role or the global setting may hold. Main alone may also hold Ultrafast, asked first (an older version
+// cannot read it): its page and its sheet offer it where its route lists it (processing_choice.js).
+export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];
 /** Fast, Ultrafast and Flex (`economy`) send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
 export const tierPriced = (preference) => preference === 'fast' || preference === 'economy' || preference === 'ultrafast';
 
@@ -36,10 +39,12 @@ export function processingIntentLabel(value, inherited = '', { helper = false } 
     return helper ? `The work's tier, else ${global}` : global;
 }
 
-export function processingSelectHtml(attrs, selected, { global = false, helper = false } = {}) {
+/** `choices`: the tiers to offer as `{ value, label }` (a role's own route decides them, processing_choice.js `tierChoices`). */
+export function processingSelectHtml(attrs, selected, { global = false, helper = false,
+    choices = PROCESSING_CHOICES.map((value) => ({ value, label: processingLabel(value) })) } = {}) {
     return selectHtml(attrs, [{ options: [
         { value: '', label: global ? 'Keep route defaults' : helper ? 'The work\'s tier, else the global setting' : 'Use global setting' },
-        ...PROCESSING_CHOICES.map((value) => ({ value, label: processingLabel(value) })),
+        ...choices,
     ] }], selected || '');
 }
 
@@ -49,12 +54,6 @@ export function processingDetailsHtml(attrs, selected, inherited = '', { helper 
         <label class="ui-field">Processing ${processingSelectHtml(attrs, selected, { helper })}</label>
         <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.${helper
             ? ' Without one of its own, a new subagent takes the tier of the work that starts it; a review seat takes the global setting.' : ''}</div></details>`;
-}
-
-export function processingCapabilityNote(preference, capability, transportPreferences) {
-    if (preference && Array.isArray(transportPreferences) && !transportPreferences.includes(preference)) return `${processingLabel(preference)} processing is not advertised by this transport. Ordinary service remains available.`;
-    return preference && Array.isArray(capability?.modes) && !capability.modes.includes(preference)
-        ? `${processingLabel(preference)} is not advertised for this route. Ordinary service may be used; the model and effort stay the same.` : '';
 }
 
 /** Display only an existing execution receipt, keeping requested and observed separate. */

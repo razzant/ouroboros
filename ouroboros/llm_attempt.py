@@ -24,14 +24,21 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from ouroboros.anthropic_native_custody import is_replayed_native_content
-from ouroboros._usage_response import provider_answer, typed_values
+from ouroboros._usage_response import (
+    _plain, processing_refusal_reason, provider_answer, provider_failure_payload, refusal_conflicts, typed_values,
+)
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, size_refusal
 from ouroboros.llm_helper_window import _helper_attempt_context, helper_context_for, priced_for
 from ouroboros.opencode_go import is_go_chat_route
+from ouroboros.transport_custody import (  # noqa: F401 -- shared with the catalog and native send builders
+    apply_processing_preference, attempt_pricing_fields, processing_transport_modes, provider_reported_cost_only,
+    submitted_processing_mode,
+)
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
 from ouroboros.transport_custody import (  # noqa: F401 -- consumers import these two scopes through this module
-    ProviderNotDispatched, is_loopback_base_url, physical_attempt_tracker, single_physical_send,
+    ProcessingNotStarted, ProviderNotDispatched, is_loopback_base_url,
+    is_processing_refusal, physical_attempt_tracker, single_physical_send,
     single_physical_send_active, single_send_claim, track_physical_attempts)
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
@@ -319,53 +326,7 @@ def _applied_payload_cache_ttl(payload: Dict[str, Any]) -> Optional[str]:
     return "default" if breakpoints else None
 
 
-def submitted_processing_mode(target: Dict[str, Any], payload: Dict[str, Any]) -> str:
-    """Read the actual native carrier, never infer execution from requested intent."""
-    provider = target.get("provider")
-    if provider in {"openai", "openrouter"}:
-        extra = payload.get("extra_body")
-        value = (extra["service_tier"] if isinstance(extra, dict) and "service_tier" in extra
-                 else payload.get("service_tier"))
-    elif provider == "anthropic":
-        value = payload.get("speed")
-    elif provider == "claudexor":
-        options = payload.get("options") or {}
-        value = options.get("processingPreference") or options.get("serviceTier")
-    else:
-        value = None
-    return value if isinstance(value, str) else ""
-
-
-def apply_processing_preference(target: Dict[str, Any], payload: Dict[str, Any]) -> None:
-    """Project already captured advisory intent before sealing this send copy.
-
-    These are provider protocol fields, not a model eligibility table. Explicit
-    native options win; unknown transports retain their ordinary request shape.
-    A retry already carries its replacement native mode and is never re-resolved.
-    """
-    preference = target.get("processing_preference")
-    if not preference:
-        return
-    if submitted_processing_mode(target, payload):
-        target["processing_native_origin"] = "native_override"
-        return
-    provider = target.get("provider")
-    if preference == "ultrafast" and provider in {"openai", "openrouter", "anthropic"}:
-        return  # no documented native field: honestly not submitted, never an invented service tier
-    if provider in {"openai", "openrouter"}:
-        payload["service_tier"] = {
-            "standard": "default", "fast": "priority", "economy": "flex",
-        }[preference]
-    elif provider == "anthropic":
-        # Messages has no synchronous Economy speed. Its explicit ordinary
-        # projection preserves the advisory request without inventing a tier.
-        payload["speed"] = "fast" if preference == "fast" else "standard"
-    else:
-        return
-    target["processing_native_origin"] = "preference"
-
-
-def attach_processing_receipt(target: Dict[str, Any], usage: Dict[str, Any]) -> None:
+def attach_processing_receipt(target: Dict[str, Any], usage: Dict[str, Any], *, attempt_ids: list[str] | None = None) -> None:
     """Project the matching terminal attempt; never reconstruct a pre-fallback mode."""
     from ouroboros._usage_response import processing_receipt
 
@@ -377,6 +338,14 @@ def attach_processing_receipt(target: Dict[str, Any], usage: Dict[str, Any]) -> 
     usage.pop("effort_resolution", None)
     if matched and capture.effort is not None:
         usage["effort"] = copy.deepcopy(capture.effort)
+    if provider in {"openai", "openrouter", "anthropic"}:
+        usage.pop("processing", None)  # An API usage extension is not a native session receipt.
+        received_id = attempt_ids[-1] if attempt_ids else target.get("received_attempt_id")
+        matched = matched and capture.attempt_id == received_id
+    usage.pop("provider_reported_cost_only", None)
+    reported_only = capture.provider_reported_cost_only if matched else provider_reported_cost_only(target)
+    if reported_only or (matched and target.get("received_unpriced_add_on")):
+        usage["provider_reported_cost_only"] = True
     requested = (capture.processing_preference if matched
                  else str(target.get("processing_preference") or ""))
     submitted = capture.submitted_processing_mode if matched else ""
@@ -390,16 +359,12 @@ def processing_contract_headers(target: Dict[str, Any], payload: Dict[str, Any])
     headers = dict(target.get("contract_headers") or {})
     if target.get("provider") == "anthropic" and payload.get("speed") == "standard":
         betas = [value.strip() for value in headers.get("anthropic-beta", "").split(",")
-                 if value.strip() != "fast-mode-2026-02-01"]
+                 if value.strip() not in ("", "fast-mode-2026-02-01")]
         if betas:
             headers["anthropic-beta"] = ",".join(betas)
         else:
             headers.pop("anthropic-beta", None)
-    if target.get("provider") == "anthropic" and (
-        payload.get("speed") == "fast" or (
-            "speed" not in payload and target.get("processing_preference") == "fast"
-        )
-    ):
+    if target.get("provider") == "anthropic" and payload.get("speed") == "fast":
         betas = [value.strip() for value in headers.get("anthropic-beta", "").split(",") if value.strip()]
         if "fast-mode-2026-02-01" not in betas:
             betas.append("fast-mode-2026-02-01")
@@ -407,63 +372,42 @@ def processing_contract_headers(target: Dict[str, Any], payload: Dict[str, Any])
     return headers
 
 
-class ProcessingNotStarted(ProviderNotDispatched):
-    """A provider-owned processing refusal proving this generation never began."""
-
-    def __init__(self, error: BaseException, *, reason: str):
-        super().__init__(str(error))
-        self.processing_reason = reason
-        for name in ("body", "code", "type", "status_code", "response"):
-            if hasattr(error, name):
-                setattr(self, name, getattr(error, name))
-
-
 def processing_refusal(target: Dict[str, Any], payload: Dict[str, Any],
                        error: BaseException) -> BaseException:
-    """Normalize only a documented native refusal; socket/stream errors stay unknown.
-
-    Dedicated Flex resource refusal and unsupported request fields precede
-    generation. Generic quota, overload, timeout and stream failures do not.
-    """
-    if getattr(error, "stream_incomplete", False) or isinstance(error, ProviderNotDispatched):
+    """Only an uncontradicted native refusal proves generation never started."""
+    if isinstance(error, (ProcessingNotStarted, ProviderNotDispatched)):
         return error
-    if (target.get("processing_preference") not in {"fast", "economy"}
-            or target.get("processing_native_origin") != "preference"):
+    mode = submitted_processing_mode(target, payload)
+    if mode not in {"priority", "fast", "flex", "ultrafast"}:
         return error
     response = getattr(error, "response", None)
     status = getattr(error, "status_code", None) or getattr(response, "status_code", None)
-    body = getattr(error, "body", None)
-    if body is None and response is not None and callable(getattr(response, "json", None)):
-        try:
-            body = response.json()
-        except (ValueError, TypeError):
-            return error
-    native_error = body.get("error", body) if isinstance(body, dict) else None
-    if not isinstance(native_error, dict):
-        return error
-    provider, mode = target.get("provider"), submitted_processing_mode(target, payload)
-    reason = ""
-    if (provider == "anthropic" and mode == "fast" and status == 429
-            and native_error.get("type") == "rate_limit_error"):
-        reason = "capacity"
-    elif provider in {"openai", "openrouter"} and mode in {"priority", "fast", "flex"}:
-        if mode == "flex" and status in {400, 429, 503} and native_error.get("code") in {
-            "resource_unavailable", "unsupported_service_tier",
-        }:
-            reason = "capacity"
-        elif (status == 400 and native_error.get("code") == "unsupported_parameter"
-              and native_error.get("param") == "service_tier"):
-            reason = "unsupported"
+    body = provider_failure_payload(error)
+    reason = processing_refusal_reason(target.get("provider"), mode, status, body)
+    if not reason and response is not None and getattr(error, "body", None) is not None:
+        reason = processing_refusal_reason(target.get("provider"), mode, status, _plain(response))
+    if not reason and status == 200 and getattr(error, "stream_prior_usage", None) is not None:
+        # A Chat SSE body may carry the same typed error and separate status as JSON.
+        # Read it for billing; an SSE terminal is not proof of pre-generation rejection.
+        native_error = body.get("error") if isinstance(body, dict) else None
+        body_status = native_error.get("status_code") if isinstance(native_error, dict) else None
+        if type(body_status) is int:
+            reason = processing_refusal_reason(target.get("provider"), mode, body_status, body)
+            if reason:
+                error.status_code = body_status
     if reason:
+        if refusal_conflicts(error):
+            error.processing_refusal_conflict = True
+            return error
         normalized = ProcessingNotStarted(error, reason=reason)
-        normalized.body = copy.deepcopy(body)
+        normalized.body = copy.deepcopy(getattr(error, "body", None) or body)
         return normalized
     return error
 
 
 def reasoning_strip_retry_allowed(exc: BaseException) -> bool:
     """A 400 may omit replay unless an existing refusal/overflow path owns it."""
-    if getattr(exc, "stream_incomplete", False) or isinstance(exc, ProcessingNotStarted):
+    if getattr(exc, "stream_incomplete", False) or is_processing_refusal(exc):
         return False
     if is_size_refusal(exc) or _is_provider_policy_refusal(exc):  # the loop's size recovery owns it
         return False
@@ -563,6 +507,22 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
 CANDIDATE_CONTEXT_KEYS = ("system", "messages", "tools", "functions", "instructions", "input")
 
 
+def _provider_receipt_binding(target: Dict[str, Any]) -> dict | None:
+    """Private attempt identity. OpenRouter owns its existing generation-price binding."""
+    from ouroboros.openai_responses import responses_route
+    from ouroboros.openrouter_cost import binding_for_target
+
+    provider = target.get("provider")
+    if provider == "openrouter":
+        return binding_for_target(target)
+    key = target.get("api_key")
+    if not isinstance(key, str) or not key or not processing_transport_modes(target):
+        return None
+    surface = "messages" if provider == "anthropic" else ("responses" if responses_route(target) else "chat.completions")
+    return {"endpoint": target["base_url"].rstrip("/"), "api_surface": surface,
+            "credential_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest()}
+
+
 def _attempt_request(
     target: Dict[str, Any],
     payload: Dict[str, Any],
@@ -599,7 +559,6 @@ def _attempt_request(
     })
     from ouroboros.send_clock import record_candidate, split_clock_note
     from ouroboros.vision_routing import note_candidate_images
-    from ouroboros.openrouter_cost import binding_for_target
 
     # The same bytes carry the Main clock line; its clock-free twin identifies
     # the candidate across two samples (the forced-final admission predicate).
@@ -628,9 +587,10 @@ def _attempt_request(
         context_window_tokens_exact=measured.get("context_window"),
         processing_preference=str(target.get("processing_preference") or ""),
         submitted_processing_mode=submitted_processing_mode(target, payload),
+        **attempt_pricing_fields(target, payload),
         processing_basis=copy.deepcopy(target.get("processing_basis")),
         effort=effort_request_facts(target, payload),
-        provider_receipt_binding=binding_for_target(target),
+        provider_receipt_binding=_provider_receipt_binding(target),
         opencode_go=is_go_chat_route(target.get("provider"), target.get("base_url")),
         candidate_clock_free_sha256=(
             hashlib.sha256(_canonical_candidate_bytes(clock_free)).hexdigest()

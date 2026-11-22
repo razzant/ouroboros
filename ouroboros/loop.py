@@ -157,6 +157,21 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
     return result
 
 
+def _finish_tool_tail(limit_ctx, tools, emit_progress, *budget):
+    """A completed batch's tail. A finish it selected (or a restored one, still staged) is ready work: it meets the
+    candidate's fresh evidence, then only money that is actually gone, then its own gates, and returns without the
+    budget tail buying a wrap-up or a pause over it; held, the full budget decision precedes the next send. Any other
+    batch keeps the budget decision first and has nothing to finalize."""
+    staged = getattr(tools._ctx, "_completion_request", None)
+    if not (getattr(tools._ctx, "_completion_selected", None) or isinstance(staged, dict) and not staged.get("reply_later")):
+        return (_finish_tool_round_budget(limit_ctx, *budget)
+                or _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, after_tools=True))
+    _prepare_post_tool_budget_context(tools, limit_ctx, limit_ctx.llm_trace, *budget[2:])
+    return (_finish_tool_round_budget(limit_ctx, *budget, context_prepared=True, ready_finish=True)
+            or _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, after_tools=True)
+            or _finish_tool_round_budget(limit_ctx, *budget, context_prepared=True))
+
+
 # Bounded staleness for the two DECIDING cost surfaces (ceiling check,
 # milestone note): a round can block 900s in wait_tasks while children spend,
 # and the pacing refresh covers only deadline-less tasks — such a round pays
@@ -647,13 +662,10 @@ def run_llm_loop(
 
             if pending_tool_budget:
                 pending_tool_budget = False
-                budget_result = _finish_tool_round_budget(
-                    limit_ctx, budget_remaining_usd, cost_ceiling, active_model, active_use_local, active_effort)
-                if budget_result is not None:
-                    return budget_result
-                final_result = _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, after_tools=True)
-                if final_result is not None:
-                    return final_result
+                tail_result = _finish_tool_tail(limit_ctx, tools, emit_progress, budget_remaining_usd, cost_ceiling,
+                                                active_model, active_use_local, active_effort)
+                if tail_result is not None:
+                    return tail_result
                 continue
 
             if pending_no_tool_budget:

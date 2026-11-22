@@ -10,13 +10,16 @@ belong to ``openrouter_cost`` and the accounting writer, never normalization.
 from __future__ import annotations
 
 import logging
+import re
 from math import isfinite
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from ouroboros.provider_models import normalize_model_identity
 from ouroboros.config import runtime_setting
 from ouroboros.net_transport import requests_verify_kwargs
 
+if TYPE_CHECKING:
+    from ouroboros.pricing import PartialEndpointCatalog, PriceRows
 
 # The moved warnings keep the logger identity they were emitted under.
 log = logging.getLogger("ouroboros.llm")
@@ -123,7 +126,7 @@ def openrouter_price_row(model: Dict[str, Any]) -> Optional[Tuple[Optional[float
 def _number(value: Any) -> bool:
     try:
         return isfinite(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -250,9 +253,45 @@ def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Opt
         return {}
 
 
+def _charge_condition(pricing: Any) -> str:
+    """What one endpoint's ``pricing`` says beyond its readable token rates: '' when they price every call;
+    ``unpriced`` when the base or any input-length tier lacks a readable input or output rate, states any figure
+    that is unreadable or non-finite (never read as zero), or charges a unit the token estimator
+    does not count (such as a request, image or search), or reasoning at its own rate; ``unknown``
+    when the schedule itself cannot be read (no object, a tier that is no object, a time window, a flag). Its
+    published rates still show what it is dearer than; neither prices a call."""
+    overrides = pricing.get("overrides") if isinstance(pricing, dict) else None
+    overrides = [] if overrides is None else overrides
+    if not isinstance(pricing, dict) or not isinstance(overrides, list) or not all(
+            isinstance(tier, dict) for tier in overrides):
+        return "unknown"
+    stated = [pricing, *overrides]
+    if any(str(key).startswith("utc_") for part in stated for key in part) or any(
+            isinstance(value, bool) for part in stated for value in part.values()):
+        return "unknown"
+    for part in (pricing, *({**pricing, **tier} for tier in overrides)):
+        given = {key: value for key, value in part.items() if key not in ("overrides", "min_prompt_tokens")
+                 and value is not None}
+        if not all(_number(value) for value in given.values()):
+            return "unpriced"  # an unreadable or non-finite charge is no free one
+        figures = {key: float(value) for key, value in given.items()}
+        if "prompt" not in figures or "completion" not in figures:
+            return "unpriced"
+        token_fields = {"prompt", "completion", "input_cache_read", "input_cache_write", "input_cache_write_1h",
+                        "internal_reasoning", "discount"}  # discount is metadata on the published rates
+        if any(value != 0 for key, value in figures.items() if key not in token_fields):
+            return "unpriced"
+        if figures.get("internal_reasoning", 0) not in (0, figures["completion"]):
+            return "unpriced"
+        if not (figures["prompt"] or figures["completion"]) and any(
+                value > 0 for key, value in figures.items() if key not in ("prompt", "completion")):
+            return "unpriced"
+    return ""
+
+
 def _endpoint_pricing_schedule(pricing: Any, source: dict):
     """Retain exact endpoint rates and prompt overrides; malformed prices stay unknown."""
-    from decimal import Decimal, InvalidOperation
+    from decimal import Decimal
     from math import isfinite
     from ouroboros.pricing import PricingSchedule
 
@@ -263,7 +302,7 @@ def _endpoint_pricing_schedule(pricing: Any, source: dict):
             number = Decimal(str(value))
             result = float(number * 1_000_000)
             return result if number >= 0 and isfinite(result) else None
-        except (InvalidOperation, TypeError, ValueError, OverflowError):
+        except (ArithmeticError, TypeError, ValueError):
             return None
 
     def row(values):
@@ -288,16 +327,68 @@ def _endpoint_pricing_schedule(pricing: Any, source: dict):
     return PricingSchedule(base, tuple(tiers), cache_write_1h=base.cache_write_1h, source=source)
 
 
-def fetch_openrouter_endpoint_pricing(model: str, *, timeout_sec: float = 5.0) -> Dict[str, Tuple[Optional[float], ...]]:
-    """Read one model's endpoint tariffs, preserving the complete potential route pool.
+# The endpoints API's ``service_tier`` words (null, ``flex``, ``priority``, ``ultrafast``: no other is documented) as
+# host processing modes (``model_slots.CALL_TIERS``). Null is the endpoint's ordinary tier, Standard; an absent field,
+# another word or a non-string is an unknown tier, never Standard. A tag (``…/fast``) is a name, never a tier.
+OPENROUTER_ENDPOINT_TIERS = {"flex": "economy", "priority": "fast", "ultrafast": "ultrafast"}
 
-    Tier tags and prices are provider facts from the documented endpoints API.
-    Status is retained as evidence, never used to erase an expensive endpoint;
-    a temporary outage cannot turn a tariff into an execution prohibition.
+# Routing shortcuts that sort one model's endpoint list and admit a tier into the sort, never narrowing it:
+# ``:nitro`` admits Priority endpoints, ``:floor`` Flex ones. Their tariffs are the model's.
+_POOL_SHORTCUTS = frozenset({"nitro", "floor"})
+
+# A public OpenRouter model slug as its endpoints API names one: ``author/slug``, nothing a route head could hide.
+_PUBLIC_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:~-]*")
+
+
+def openrouter_endpoint_mode(endpoint: Any) -> Optional[str]:
+    """The host mode one endpoint record's own ``service_tier`` names, or None when it names none it can be read as."""
+    if not isinstance(endpoint, dict) or "service_tier" not in endpoint:
+        return None
+    native = endpoint["service_tier"]
+    return "standard" if native is None else OPENROUTER_ENDPOINT_TIERS.get(native) if isinstance(native, str) else None
+
+
+def _openrouter_route_model(model: str) -> str:
+    """An OpenRouter route's model as written (``openrouter[@name]::`` folded), '' for any other route."""
+    from ouroboros.provider_models import parse_model_route
+
+    route = parse_model_route(str(model or "").strip())
+    return route.model.strip() if route.valid and route.kind == "openrouter" and not route.local else ""
+
+
+def openrouter_pool_sort(model: str) -> str:
+    """The route's sort shortcut, ``nitro`` or ``floor``, or ''."""
+    _base, colon, variant = _openrouter_route_model(model).rpartition(":")
+    return variant if colon and variant in _POOL_SHORTCUTS else ""
+
+
+def openrouter_endpoint_slug(model: str) -> str:
+    """The slug OpenRouter's endpoints API lists a route under, or '' when it is no public OpenRouter slug.
+
+    An OpenRouter route's model, a sort shortcut dropped (``openrouter_pool_sort``). Any other head, a ``::`` left
+    inside (an unknown kind stays an opaque id: ``parse_model_route``) or a character no public slug has is none,
+    so nothing private is sent to the public catalogue, and its case is kept: two spellings are two models."""
+    slug = _openrouter_route_model(model)
+    if openrouter_pool_sort(model):
+        slug = slug.rpartition(":")[0]
+    return slug if "::" not in slug and _PUBLIC_SLUG.fullmatch(slug) else ""
+
+
+def fetch_openrouter_endpoint_pricing(model: str, *, timeout_sec: float = 5.0) -> PriceRows | PartialEndpointCatalog:
+    """Read one model's endpoint tariffs. Unbound rows leave only uniquely bound peers as partial evidence.
+
+    Tier words and prices are provider facts from the documented endpoints API: each row's source keeps the
+    endpoint's own ``service_tier`` only where the record states it as null or a string, ``processing`` the host
+    mode it reads as (``openrouter_endpoint_mode``; absent when unknown), ``unpriced`` where its token rates cannot
+    price a call (``_charge_condition``) and only otherwise ``price``, the figure a picker may show
+    (``openrouter_catalog_price``, no cache tier). Status is retained as evidence, never used to erase an
+    expensive endpoint; a temporary outage cannot turn a tariff into an execution prohibition.
     """
     from urllib.parse import quote
+    from ouroboros.pricing import PartialEndpointCatalog
     import requests
 
+    model = openrouter_endpoint_slug(model)
     author, separator, slug = model.partition("/")
     if not separator or not author or not slug:
         return {}
@@ -309,19 +400,35 @@ def fetch_openrouter_endpoint_pricing(model: str, *, timeout_sec: float = 5.0) -
         endpoints = payload.get("endpoints")
         if payload.get("id") != model or not isinstance(endpoints, list):
             return {}
-        rows = {}
+        bound, seen = {}, set()
+        incomplete = False
         for endpoint in endpoints:
             tag = endpoint.get("tag") if isinstance(endpoint, dict) else None
-            if not isinstance(tag, str) or not tag or tag in rows or endpoint.get("model_id") != model:
-                return {}  # An unbound/omitted row cannot certify a pool upper estimate.
-            suffix = tag.rsplit("/", 1)[-1] if "/" in tag else ""
-            tier = "priority" if suffix in {"fast", "priority"} else "flex" if suffix == "flex" else "default"
-            source = {"provider": "openrouter", "model": model, "endpoint_tag": tag,
-                      "service_tier": tier, "url": url, "status": endpoint.get("status"),
+            if not isinstance(tag, str) or not tag.strip() or endpoint.get("model_id") != model:
+                incomplete = True
+            elif tag in seen:
+                incomplete = True
+                bound.pop(tag, None)  # No unique endpoint behind this tag, regardless of row order.
+            else:
+                seen.add(tag)
+                bound[tag] = endpoint
+        rows = {}
+        for tag, endpoint in bound.items():
+            mode, pricing = openrouter_endpoint_mode(endpoint), endpoint.get("pricing")
+            condition = _charge_condition(pricing)
+            price = None if condition else openrouter_catalog_price({"id": tag, "pricing": pricing})
+            native = endpoint.get("service_tier")
+            source = {"provider": "openrouter", "model": model, "endpoint_tag": tag, "url": url,
+                      "status": endpoint.get("status"),
+                      **({"service_tier": native} if "service_tier" in endpoint and (
+                          native is None or isinstance(native, str)) else {}),
+                      **({"processing": mode} if mode else {}), **({"price": price} if price else {}),
+                      **({"unpriced": True} if condition else {}),
                       # The endpoint's declared token limits, kept beside its tariff (``pricing.declared_token_limits``).
                       **{key: endpoint[key] for key in ("context_length", "max_prompt_tokens") if endpoint.get(key) is not None}}
-            rows[tag] = _endpoint_pricing_schedule(endpoint.get("pricing"), source)
-        return rows
+            # An unreadable schedule shows no rates at all; an unpriced one still shows what it is dearer than.
+            rows[tag] = _endpoint_pricing_schedule(None if condition == "unknown" else pricing, source)
+        return PartialEndpointCatalog(rows) if incomplete and rows else rows
     except (requests.RequestException, TypeError, ValueError, AttributeError) as error:
         log.warning("Failed to fetch OpenRouter endpoint pricing for %s: %s", model, error)
         return {}

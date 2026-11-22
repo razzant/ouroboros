@@ -177,7 +177,7 @@
  * @property {Object} modelAccounts
  * @property {Object} modelContextWindows
  * @property {string} processingPreference
- * @property {Object} modelProcessingPreferences
+ * @property {Object} modelProcessingPreferences  Role tiers; only `.main` may also be `ultrafast`
  * @property {string[]} automaticModels Model-slot stateKeys neither the document nor an operator's variable sets.
  */
 
@@ -230,7 +230,7 @@
  * @property {import('./api_types.js').AvailableSubagentsSettingsMeta=} available_subagents
  * @property {SettingsPolicyState=} policy_state
  * @property {SettingsRestartState=} restart_state Component application and source uncertainty.
- * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
+ * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string,revision?:string}[]=} connections Every API connection as the picker shows it, with its opaque revision.
  * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
  * @property {string[]=} known_spend_gaps What spends money the limits cannot count: roles whose route has no known price.
  * @property {Array<{name: string, condition: string}>=} partly_counted_spend What they count only under a price condition (`off_peak_usd`, `usd`).
@@ -805,6 +805,7 @@
  * @property {string=} model  // kind "model" only: the raw route, its source included
  * @property {boolean=} use_local  // kind "model" only
  * @property {string=} project_id
+ * @property {MainBindingConditions=} if_unchanged  // Main only: the binding read the owner chose on
  */
 /**
  * A room follows Main or chooses a route; following is a reference, never the same model pinned.
@@ -835,10 +836,21 @@
  */
 
 /**
+ * `GET /api/settings` read tokens of Main's binding as the owner was shown it, compared under the writer's lock.
+ * @typedef {Object} MainBindingConditions
+ * @property {string} OUROBOROS_MODEL
+ * @property {string} USE_LOCAL_MAIN
+ * @property {string} OUROBOROS_MODEL_ACCOUNTS
+ * @property {string} OUROBOROS_MODEL_PROCESSING_PREFERENCES
+ * @property {string=} ultrafast  // confirmed JSON [model, local, pin, store, fingerprint]; Auto binds no membership
+ * @property {string=} connection  // the shown `_meta.connections[].revision` of the route's API connection
+ */
+/**
  * A room's processing tier for its new owner work, or Main's own without `project_id`; '' is Default.
  * @typedef {Object} OwnerChatProcessingRequest
  * @property {""|"standard"|"fast"|"economy"|"ultrafast"} processing
  * @property {string=} project_id
+ * @property {MainBindingConditions=} if_unchanged  // Main Ultrafast only
  */
 /**
  * A Project's answer carries its tier; Main's own carries Main's tier, what it was, and what Default resolves to.
@@ -847,8 +859,8 @@
  * @property {string} project_id  // '' for Main
  * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} processing_choice  // Project response
  * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} previous_processing_choice
- * @property {""|"standard"|"fast"|"economy"=} main_processing  // Main response: Main's own tier (a Settings value)
- * @property {""|"standard"|"fast"|"economy"=} previous_main_processing
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} main_processing  // Main response: Main's own tier (a Settings value)
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} previous_main_processing
  * @property {""|"standard"|"fast"|"economy"=} processing_default  // what Default resolves to
  */
 

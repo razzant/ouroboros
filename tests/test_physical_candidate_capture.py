@@ -84,6 +84,7 @@ def _scope(root: Path, task_id: str = "task-physical") -> ua.UsageScope:
 def _target():
     return {
         "provider": "openai",
+        "base_url": "https://api.openai.com/v1",
         "usage_model": "openai/gpt-5.2",
         "resolved_model": "gpt-5.2",
     }

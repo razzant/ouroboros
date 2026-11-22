@@ -880,7 +880,7 @@ class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     available_subagents: AvailableSubagentsSettingsMeta
     policy_state: SettingsPolicyState
     restart_state: SettingsRestartState
-    connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
+    connections: list[Dict[str, Any]]  # every API connection as the picker shows it, with its opaque ``revision`` (owner_settings)
     main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
     known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.spend_coverage)
     partly_counted_spend: list[Dict[str, str]]  # {name, condition}: counted only under a price condition (the same)

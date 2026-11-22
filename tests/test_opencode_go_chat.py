@@ -560,7 +560,8 @@ def test_named_picker_and_provider_test_use_the_connection_catalog(url, address)
         return httpx.Response(200, json={"data": [{"id": "example-model", "name": "Example"}]})
 
     async def load():
-        loader = dict(_provider_specs(connection_settings(url)))["openai-compatible@go-connection"]
+        loader, = (loader for source, loader in _provider_specs(connection_settings(url))
+                   if source["id"] == "openai-compatible@go-connection")
         async with httpx.AsyncClient(transport=httpx.MockTransport(peer)) as client:
             return await loader(client)
 

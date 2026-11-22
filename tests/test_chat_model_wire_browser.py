@@ -165,7 +165,7 @@ def test_a_rooms_model_mains_write_and_a_queued_works_model_reach_the_provider(d
             main_row = popover["groups"][0]["rows"][0]
             assert popover["title"] == "Model for this work · follows Main" and popover["acts"] == [], popover
             assert (main_row["row"], main_row["id"], main_row["facts"], main_row["selected"]) == ("main", "Main", "this work follows Main", True), popover
-            assert popover["scope"] == f"Default · Standard · {QUEUED_SCOPE}", ("the tier strip says when it applies", popover)
+            assert popover["scope"] == f"Default · {QUEUED_SCOPE}", ("the tier strip says when it applies", popover)
             page.click(f"{_row(QUEUED)} .chat-model-cell")
             page.wait_for_function("(words) => [...document.querySelectorAll('.toast')].some((toast) => toast.innerText.includes(words))",
                                    arg=AT_START, timeout=20_000)
@@ -228,7 +228,10 @@ def test_a_rooms_model_mains_write_and_a_queued_works_model_reach_the_provider(d
             assert json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == MAIN, "nothing is written before he confirms"
             page.click(".confirm-dialog [data-confirm-ok]")
             page.wait_for_function("() => document.querySelector('#chat-model-mode .chat-capsule-value').textContent === 'mock-other'", timeout=20_000)
-            assert writes[-1] == ("owner/chat-model", {"kind": "model", "model": OTHER, "use_local": False}), writes
+            where, body = writes[-1]
+            assert set(body.pop("if_unchanged")) == {"OUROBOROS_MODEL", "USE_LOCAL_MAIN", "OUROBOROS_MODEL_ACCOUNTS",
+                                                     "OUROBOROS_MODEL_PROCESSING_PREFERENCES"}, writes
+            assert (where, body) == ("owner/chat-model", {"kind": "model", "model": OTHER, "use_local": False}), writes
             assert _state(page)["main_route"] == {"model": OTHER, "use_local": False}
             saved = json.loads(settings_path.read_text(encoding="utf-8"))
             assert saved["OUROBOROS_MODEL"] == OTHER, saved["OUROBOROS_MODEL"]

@@ -181,12 +181,15 @@ class _OperationWait(TaskModelWait):
             for wait_id in waiting:
                 row, canonical = self.waits.get(wait_id) or {}, stored.get(wait_id)
                 action = canonical.get("pending_action") if isinstance(canonical, dict) else None
-                if (not isinstance(action, dict) or row.get("state") != "waiting"
+                if not isinstance(action, dict):
+                    continue
+                control_id = f"model_wait:{wait_id}:{action.get('request_id') or ''}"
+                if (row.get("state") != "waiting"
                         or canonical.get("state") != "waiting" or canonical.get("task_attempt") != self.attempt
                         or canonical.get("model_wait_owner_id") != self.owner_id
-                        or str(action.get("request_id") or "") in self.seen_controls):
+                        or control_id in self.seen_controls):
                     continue
-                self.seen_controls.add(str(action.get("request_id") or ""))
+                self.seen_controls.add(control_id)
                 if action.get("action") == "auto_continue":
                     row["auto_continue"] = action["auto_continue"]
                     row["_check_now"] = action["auto_continue"]

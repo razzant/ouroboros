@@ -657,8 +657,8 @@ def _catalog_fetch(settings, monkeypatch):
         return []
 
     monkeypatch.setattr(gw_models, "_fetch_openai_compatible_model_catalog", fetch)
-    for name, spec in gw_models._provider_specs(dict(settings)):
-        if name == "openai-compatible":
+    for source, spec in gw_models._provider_specs(dict(settings)):
+        if source["id"] == "openai-compatible":
             asyncio.run(spec(None))
     return [(key, base) for provider, key, base in sent if provider == "openai-compatible"]
 

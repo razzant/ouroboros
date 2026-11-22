@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.cost_projection import CostPresentation
-from ouroboros.gateway.work_contracts import ChatModelRoute
+from ouroboros.gateway.work_contracts import (  # the owner's model and tier choices live with the routes they name
+    ChatModelChoice, ChatModelRoute, MainBindingConditions, OwnerChatModelRequest, OwnerChatModelResponse,
+    OwnerChatProcessingRequest, OwnerChatProcessingResponse,
+)
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -393,51 +396,6 @@ class OwnerEffortRangeRequest(TypedDict):
 class OwnerSubagentsModeRequest(TypedDict):
     mode: Literal["off", "auto", "swarm"]
     project_id: NotRequired[str]
-
-
-class OwnerChatModelRequest(TypedDict):
-    """A Project follows Main or chooses a model; without project_id this writes Main itself."""
-
-    kind: Literal["main", "model"]
-    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
-    use_local: NotRequired[bool]  # kind ``model`` only
-    project_id: NotRequired[str]
-
-
-class ChatModelChoice(TypedDict):
-    """A room follows Main or chooses a route; a reference is never the same model pinned."""
-
-    kind: Literal["main", "model"]
-    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
-    use_local: NotRequired[bool]  # kind ``model`` only
-
-
-class OwnerChatModelResponse(TypedDict):
-    ok: bool
-    project_id: str
-    model_choice: NotRequired[ChatModelChoice]  # Project response
-    previous_model_choice: NotRequired[ChatModelChoice]
-    main_route: NotRequired[ChatModelRoute]  # Main response
-    previous_main_route: NotRequired[ChatModelRoute]
-    account: NotRequired[Literal["kept", "auto", "none"]]
-    window_reset: NotRequired[bool]
-
-
-class OwnerChatProcessingRequest(TypedDict):
-    """A room's processing tier for new owner work, or Main's own without project_id; ``""`` is Default. Ultrafast is a room's only."""
-
-    processing: Literal["", "standard", "fast", "economy", "ultrafast"]
-    project_id: NotRequired[str]
-
-
-class OwnerChatProcessingResponse(TypedDict):
-    ok: bool
-    project_id: str
-    processing_choice: NotRequired[Literal["", "standard", "fast", "economy", "ultrafast"]]  # Project response
-    previous_processing_choice: NotRequired[Literal["", "standard", "fast", "economy", "ultrafast"]]
-    main_processing: NotRequired[Literal["", "standard", "fast", "economy"]]  # Main response: Main's own tier (a Settings value)
-    previous_main_processing: NotRequired[Literal["", "standard", "fast", "economy"]]
-    processing_default: NotRequired[Literal["", "standard", "fast", "economy"]]  # what Default resolves to
 
 
 class OwnerSafetyModeRequest(TypedDict):
@@ -984,6 +942,7 @@ __all__ = [
     "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
+    "MainBindingConditions",
     "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "OwnerChatModelResponse", "OwnerChatProcessingRequest", "OwnerChatProcessingResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
     "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceModelRoute", "PlaceSummary", "PlaceDisconnectRequest",
