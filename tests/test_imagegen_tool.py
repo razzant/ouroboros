@@ -586,8 +586,8 @@ def test_registered_and_parallel_control_reaches_loop_owner(monkeypatch, ctx, pa
         raise error
     registry.override_handler(name, handler)
     calls = [{"id": f"control-{i}", "function": {"name": name, "arguments": "{}"}} for i in range(2 if parallel else 1)]
-    # The image catalog is no inert read (its engine gateway can publish a file): two calls run one at a time.
-    assert execution.call_segments([name] * len(calls)) == [[i] for i in range(len(calls))]
+    if parallel:  # the pool rail: the response runs as the legacy pool, with the real registry and wrapper
+        monkeypatch.setattr(execution, "legacy_pool_response", lambda names: True)
     with pytest.raises(type(error)) as caught:
         execution.handle_tool_calls(calls, registry, ctx.drive_root / "logs", ctx.task_id,
                                     object(), [], {"tool_calls": []}, lambda _: None)

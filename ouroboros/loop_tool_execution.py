@@ -1247,13 +1247,13 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
                 "result_meta": _extract_result_metadata(fn_name, result, True),
             }
         from ouroboros.tools.extension_dispatch import extension_call_scope
-        before = confirmed_delivery_receipts(tools._ctx)
+        before = confirmed_delivery_receipts(tools._ctx) if legacy else frozenset()  # else read per segment below
         with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
             timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
             from ouroboros.place_reply import note_dispatch
             note_dispatch(tools._ctx, llm_trace, tc, bound=True)
             result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
-        if legacy:  # elsewhere the segment carries what it confirmed (below)
+        if legacy:
             attach_confirmed_receipts(result, confirmed_delivery_receipts(tools._ctx) - before)
         return result
 
@@ -1297,7 +1297,7 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
 
     control: Optional[BaseException] = None
     for segment in [list(range(len(tool_calls)))] if legacy else call_segments(names):
-        before = confirmed_delivery_receipts(tools._ctx)
+        before = frozenset() if legacy else confirmed_delivery_receipts(tools._ctx)
         if len(segment) > 1:
             pool(segment)
         raised = [idx for idx in (outcomes if legacy else sorted(outcomes)) if idx in segment and not outcomes[idx][0]
