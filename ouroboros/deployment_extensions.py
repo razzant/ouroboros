@@ -362,7 +362,12 @@ def requirement_state(drive_root: Any, row: Any, *, skills: Optional[list] = Non
     if undeclared := _undeclared(row, skill.manifest):
         return {**base, **_gap("settings_undeclared", f"It does not read {', '.join(undeclared)}, which your "
                                                       "organization sets for it (env_from_settings).")}
-    return {**base, **_liveness_gap(runtime_state_for_loaded_skill(skill, root, skills=skills))}
+    state = runtime_state_for_loaded_skill(skill, root, skills=skills)
+    gap, grants = _liveness_gap(state), state.get("grant_status") or {}
+    pending = [key for key, _value in row.settings if key in (grants.get("pending_keys") or [])]
+    if gap["state"] == "met" and pending:  # running without a value the organization fixes for it is no requirement met
+        gap = _gap("grants", f"It needs your grant for {', '.join(pending)}.")
+    return {**base, **gap}
 
 
 def state_rows(drive_root: Any, *, skills: Optional[list] = None) -> list:
