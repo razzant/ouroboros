@@ -325,7 +325,7 @@ def test_past_the_bound_the_scan_answers_whole_and_says_why(tmp_path, monkeypatc
     monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 4)
     broad = _read(tmp_path, words=["plum"])
     assert "total=6" in broad and "plum 5" in broad and "plum 0" in broad
-    assert "Read by scan of every row: 6 posting candidates exceed the re-check bound of 4" in broad
+    assert "Read by scan of every row: more posting candidates than the re-check bound of 4" in broad
     assert "recheck_bound" not in broad and not re.search(r"snapshot=[0-9a-f]{64}:", broad)
 
 
@@ -466,3 +466,18 @@ def test_a_runtime_without_fts5_beside_a_postings_table_keeps_every_dialogue_pat
     with ds.transaction(held, write=False) as conn:
         assert not dwi.generation(conn)["usable"]
 
+
+
+
+@needs_fts5
+def test_collection_stops_one_past_the_bound(tmp_path):
+    from ouroboros.dialogue_words import parse
+
+    for n in range(9):
+        _say(tmp_path, f"2026-11-01T00:0{n}:00Z", f"plum {n}")
+    dwi.run(tmp_path, lambda: False)
+    with ds.transaction(tmp_path, write=False) as conn:
+        capped = dwi.candidates(conn, parse(["plum"]), upper=1 << 62, limit=4)
+        whole = dwi.candidates(conn, parse(["plum"]), upper=1 << 62, limit=9)
+    assert capped.more and capped.seqs == [] and capped.posted == 5  # never more than bound + 1 ids
+    assert not whole.more and len(whole.seqs) == 9 and whole.posted == 9

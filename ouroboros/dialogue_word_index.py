@@ -142,7 +142,7 @@ class Candidates(NamedTuple):
     dirty: int
     uncovered: int
     generation: str
-    plan: str  # what the snapshot binds: the generation, its marks and its dirty set
+    more: bool  # more candidates than the caller's ``limit``: ``seqs`` is then empty and the caller scans
 
 
 # The rows no posting covers yet: each chat unit from the ledger, then its rows at or above its mark through the
@@ -153,27 +153,31 @@ _UNCOVERED = ("SELECT d.seq FROM import_ledger l CROSS JOIN dialogue d INDEXED B
               "AND d.stream='chat' AND d.seq < ?")
 
 
-def candidates(conn: sqlite3.Connection, query: Any, *, upper: int) -> Optional[Candidates]:
+def candidates(conn: sqlite3.Connection, query: Any, *, upper: int, limit: Optional[int] = None
+               ) -> Optional[Candidates]:
     """The candidate coordinates on this read connection, or ``None`` when the reader must scan (no FTS5, no
     sound generation, a first pass not finished yet, an expression the table refuses). During the first build
-    every unposted row would be a candidate and the postings window would move under each posted chunk."""
+    every unposted row would be a candidate. With ``limit`` at most ``limit + 1`` posting ids are collected, and
+    more candidates than ``limit`` answer ``more`` with no coordinates."""
     if not fts5_available():
         return None
     try:
         facts = generation(conn)
         if not facts or not facts["sound"] or facts["built_epoch"] < 0:
             return None  # a generation whose first full pass has not finished is the job's, not a reader's
-        posted = {seq for (seq,) in conn.execute("SELECT rowid FROM dw_post WHERE dw_post MATCH ? AND rowid < ?",
-                                                 (match_expression(query), int(upper)))}
+        cap = -1 if limit is None else int(limit) + 1
+        posted = {seq for (seq,) in conn.execute(
+            "SELECT rowid FROM dw_post WHERE dw_post MATCH ? AND rowid < ? LIMIT ?",
+            (match_expression(query), int(upper), cap))}
         dirty = {seq for (seq,) in conn.execute("SELECT seq FROM dw_dirty WHERE seq < ?", (int(upper),))}
         uncovered = {seq for (seq,) in conn.execute(_UNCOVERED, (int(upper),))}
-        marks = conn.execute("SELECT coalesce(group_concat(segment || ':' || next_ord, ','), '') FROM "
-                             "(SELECT * FROM dw_mark ORDER BY segment)").fetchone()[0]
     except sqlite3.Error:
         log.debug("word postings unreadable; the reader scans", exc_info=True)
         return None
-    return Candidates(sorted(posted | dirty | uncovered), len(posted), len(dirty), len(uncovered),
-                      str(facts["generation"]), f"{facts['generation']}|{marks}|{len(dirty)}")
+    found = posted | dirty | uncovered
+    more = limit is not None and len(found) > int(limit)
+    return Candidates([] if more else sorted(found), len(posted), len(dirty), len(uncovered),
+                      str(facts["generation"]), more)
 
 
 # ---- the maintenance child ------------------------------------------------------------------------

@@ -182,18 +182,18 @@ def _scan(memory: Any, room: Optional[int], keep: Callable[[Dict[str, Any]], boo
 def _posted(memory: Any, query: WordQuery) -> Optional[Dict[str, Any]]:
     """The postings path for a read of every room: the candidates below a frozen upper bound in one short read,
     then their original rows in pages, each its own short read. ``None``: no sound postings here; ``{"handover":
-    n}``: n candidates exceed ``RECHECK_BOUND``. In both cases the caller scans."""
+    True}``: more candidates than ``RECHECK_BOUND``. In both cases the caller scans."""
     from ouroboros import dialogue_store as ds, dialogue_word_index as dwi
 
     root = pathlib.Path(memory.drive_root)
     upper = ds.stream_end(root, "chat")
     imported = ds.range_coverage(root, "chat", upper=upper)
     with ds.transaction(root, write=False) as conn:
-        found = dwi.candidates(conn, query, upper=upper)
+        found = dwi.candidates(conn, query, upper=upper, limit=RECHECK_BOUND)
     if found is None:
         return None
-    if len(found.seqs) > RECHECK_BOUND:
-        return {"handover": len(found.seqs)}
+    if found.more:  # collection stopped past the bound: the scan answers whole
+        return {"handover": True}
     pairs: List[Tuple[int, Dict[str, Any]]] = []
     for at in range(0, len(found.seqs), _CHUNK):
         chunk = found.seqs[at:at + _CHUNK]
@@ -472,7 +472,7 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
     else:
         read = _scan(memory, room, judge)
         if handover:
-            read["path"] += f": {handover} posting candidates exceed the re-check bound of {RECHECK_BOUND}"
+            read["path"] += f": more posting candidates than the re-check bound of {RECHECK_BOUND}"
     coverage = read["coverage"]
     seen, hits_all = set(), []
     for seq, row in sorted(read["pairs"], key=lambda pair: time_key(pair[1], pair[0]), reverse=newest):
