@@ -1119,7 +1119,7 @@ def test_the_exchange_counts_only_the_words_of_my_human_and_mine_in_rooms_they_r
         assert dialogue_store.owner_exchange(tmp_path) == (True, True)
 
 
-@pytest.mark.parametrize("kind", ["document", "photo", "video", "links", "model_narration"])
+@pytest.mark.parametrize("kind", ["document", "photo", "video", "links", "card", "model_narration"])
 def test_what_the_message_bus_delivers_for_me_and_my_spoken_words_in_a_call_are_messages_of_mine(tmp_path, kind):
     """A first message of mine may be a file with my caption, a links card or what I said in a live call: each is a
     message of mine to my human; what the call heard (System) is not, nor a file in the hidden partition."""
@@ -1131,6 +1131,29 @@ def test_what_the_message_bus_delivers_for_me_and_my_spoken_words_in_a_call_are_
     assert dialogue_store.owner_exchange(tmp_path) == (False, False)
     _said(tmp_path, ("10:02", "out"), kind=kind)
     assert dialogue_store.owner_exchange(tmp_path) == (False, True)
+
+
+def test_a_living_card_i_show_my_human_is_a_message_of_mine(tmp_path, monkeypatch):
+    """``show_card`` may be my first message: the supervisor's real delivery of its card into Main is a message of mine
+    to my human; the same delivery into the hidden partition is not."""
+    from types import SimpleNamespace
+
+    from ouroboros import dialogue_store
+    from ouroboros.card_store import write_card
+    from supervisor import card_delivery, message_bus, state
+
+    (tmp_path / "state").mkdir()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_id": 1})
+    monkeypatch.setattr(card_delivery, "publish_event", lambda *a, **k: None)
+    frames = []
+    bridge = SimpleNamespace(broadcast=frames.append, chat_transport=lambda chat: {})
+    for chat_id, expected in ((0, (False, False)), (1, (False, True))):
+        record = write_card(tmp_path, chat_id=chat_id, task_id="first-task", title="Your setup",
+                            fallback_text="I can help connect the repository.", kind="components", body={"components": []})
+        assert card_delivery.send_card(bridge, record, chat_id, task_id="first-task", interactive=False) == (True, "ok")
+        assert frames[-1]["role"] == "assistant" and frames[-1]["row_address"]
+        assert dialogue_store.owner_exchange(tmp_path) == expected, chat_id
 
 
 def test_a_no_while_the_history_is_still_importing_is_unknown_and_a_yes_stands(tmp_path):

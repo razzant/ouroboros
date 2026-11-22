@@ -1019,9 +1019,10 @@ def newest_owner_candidates(root: Any, *, before: int, limit: int) -> List[Row]:
 # are A2A traffic and ``places.conversation_chat_id`` puts correspondents' place rooms at 2**40 and above.
 _OWNER_ROOMS = (1, (1 << 40) - 1)
 # What I write to my human besides an untyped answer: send_user_message's rows, my questions, what the message bus
-# delivers for me (a photo, a video, a document with my caption, a links card) and my retained words of a live call.
+# delivers for me (a photo, a video, a document with my caption, a links card), a living card I show (``show_card``)
+# and my retained words of a live call.
 _MY_MESSAGE_KINDS = ("proactive_message", "main_notice", "relay_reply", "quiz", "photo", "video", "document", "links",
-                     "model_narration")
+                     "card", "model_narration")
 _BOTH_WROTE: set = set()  # stores (path, file identity) where both have written: that answer never turns back
 
 
