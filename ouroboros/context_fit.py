@@ -763,12 +763,13 @@ class RouteQuestion:
                 return self.answer
         return timed("fit.route", self.resolver, {**task, "route_start_read": True}, allow_fetch=allow_fetch)
 
-    def again(self, task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
-        """The same question at the fit's usual point (the horizon guard). When the early answer came from a read that
-        failed, the question is read anew: the failure that read wrote in this build answers nothing here."""
+    def again(self, task: Dict[str, Any], *, failed: bool = False) -> Tuple[Dict[str, Any], Any]:
+        """The same question at the fit's usual point (the horizon guard, or a start whose route named no window). When
+        the early answer came from a read that failed, or the fit names its first answer failed (``failed``), the
+        question is read anew: the failure that read wrote in this build answers nothing here."""
         task = {**task, **self.route_fields}
         early, self.early = self.answer, False
-        failed = isinstance(early, tuple) and len(early) == 2 and getattr(early[1], "read", "") == "failed"
+        failed = failed or isinstance(early, tuple) and len(early) == 2 and getattr(early[1], "read", "") == "failed"
         return timed("fit.route", self.resolver, {**task, "route_read_again": True} if failed else task, allow_fetch=True)
 
 
@@ -1335,10 +1336,14 @@ def build_context_fit_plan(
         # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
         # the same frame is not repeated unless it was refused. A start whose route named no window asks it once more
         # before its first send (F1 #10): a window then known is walked like any answer, an answer that still names none
-        # (or failed) keeps the first; no bound is guessed.
+        # (or failed) keeps the first; no bound is guessed. A first answer whose read failed, live or as the probe's
+        # ten-minute record of that failure (``status`` failed), is read anew, never answered from that record; a route
+        # with no metadata source (``unprobeable``, no failed read) is not read again.
+        failed = not state.known_window and "failed" in (getattr(state.evidence, "status", ""),
+                                                         getattr(state.evidence, "read", ""))
         with another_pass():  # a repeat by design, not work done again (``context_health`` names only the latter)
-            late = frame(*answer(lambda: route_resolver.again(task) if early else timed(
-                "fit.route", route_resolver, task, allow_fetch=True)))
+            late = frame(*answer(lambda: route_resolver.again(task, failed=failed) if early else timed(
+                "fit.route", route_resolver, {**task, "route_read_again": True} if failed else task, allow_fetch=True)))
             if guard or late.known_window:
                 if refused is not None or late.walked != state.walked:
                     contents, initial_mode, delivered = walk(late)

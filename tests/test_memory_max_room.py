@@ -340,3 +340,24 @@ def test_a_start_without_a_known_window_asks_once_more_and_is_never_a_held_max(m
     assert asked == 2 and kept.start == ("max", "unmeasured") and kept.route_fp == "r" and kept.model == "test"
     held, asked = build(known)
     assert asked == 1 and held.start == ("max", "")  # a known window is asked once
+
+
+@pytest.mark.parametrize("ask", ["direct", "beside the build", "at the usual point"])
+def test_an_unknown_window_whose_read_failed_is_read_anew_not_from_its_record(monkeypatch, ask):
+    """Review round 1 (Carbon 1): the second ask of a start whose route named no window reads the route anew when the
+    first read failed, live (``read`` failed) or as the probe's ten-minute record of that failure (``status`` failed),
+    whichever way the fit asks: its own resolver, a question answered beside the build (a Claudexor route) or one asked
+    at the usual point (another route). A route with no metadata source (unprobeable, no failed read) is not read
+    again: its record is its answer."""
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(cf, "_route_key", lambda _task: "engine-route" if ask == "beside the build" else None)
+    task = {"id": "room01", "usage_category": "consciousness"}
+    for status, read, again in (("failed", "", True), ("unprobeable", "failed", True), ("unprobeable", "", False)):
+        asked = []
+
+        def resolver(asked_task, *, allow_fetch, status=status, read=read):
+            asked.append(bool(asked_task.get("route_read_again")))
+            return {"provider": "test", "model": "test"}, ce.CapabilityEvidence(0, status, "none", "r", read=read)
+        route = resolver if ask == "direct" else cf.RouteQuestion(task, resolver)
+        plan = cf.build_context_fit_plan(None, _core(), task, preferred_mode="max", route_resolver=route)
+        assert plan.start == ("max", "unmeasured") and asked == [False, again], (status, read)
