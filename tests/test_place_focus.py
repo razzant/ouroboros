@@ -1109,6 +1109,30 @@ def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, mon
     assert carrier_now(frozen) == {}, "a frozen-ceiling run keeps its forced declaration as its outward choice (owner Q4)"
 
 
+@pytest.mark.parametrize("legacy", [False, True], ids=["place", "legacy_binding"])
+def test_a_refused_doorless_root_can_choose_the_silence_its_refusal_offers(focus, monkeypatch, legacy):
+    """Review round 2 (Astra 6): Safety refuses a doorless root's automatic reply and the refusal offers
+    ``finish_task(action="finish", silent=true)``; the finish door accepts that silence for a retained legacy binding as
+    for a place carrier, since both name the conversation the run answers (``carrier_now``)."""
+    from ouroboros.place_reply import prepare_focus_reply, refusal_facts
+    from ouroboros.tools.control_runtime import completion_request
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (False, "Synthetic refusal."))
+    task = promoted(task_for(focus))
+    if legacy:
+        presence = task["metadata"]["presence"]
+        presence["binding_id"] = presence.pop("place_id")
+        task["metadata"].pop("focus", None)
+    ctx = ToolRegistry(repo_dir=root, drive_root=root)._ctx
+    ctx.task_id, ctx.task_metadata, ctx.task_contract = task["id"], task["metadata"], task["task_contract"]
+    assert prepare_focus_reply(ctx, "Synthetic answer") == (False, "Synthetic refusal.")
+    assert 'finish_task(action="finish", silent=true)' in refusal_facts(ctx)
+    request, error = completion_request(ctx, {"action": "finish", "silent": True, "answer": "Private note."})
+    assert (error, request is not None) == ("", True)
+
+
 class _Death(BaseException):
     """The worker dies right after a working save; nothing after it runs."""
 
