@@ -44,7 +44,7 @@ def _blob_id(data: bytes) -> str:
 
 
 def _repo(tmp_path: pathlib.Path):
-    """An unborn repository (the run's world: ``git init --template=`` under the isolated environment)."""
+    """A copy of the run's template-free unborn repository, and the environment the staging reads use."""
     return git_repository(tmp_path / "repo", unborn=True), isolated_git_env()
 
 
