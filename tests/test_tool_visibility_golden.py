@@ -168,6 +168,29 @@ class _Manager:
 @contextlib.contextmanager
 def catalog(name: str, spec: dict, root: pathlib.Path):
     """The one catalog state a context reads, undone after it; credentials and backends present unless it says not."""
+    from ouroboros import extension_loader
+    from ouroboros import extension_registry_state as state
+
+    # The process-global extension registry is this context's own: whatever an earlier test in this
+    # worker left there is set aside first and put back afterwards (in place: modules hold the dicts).
+    assert extension_loader._tools is state._tools and extension_loader._extensions is state._extensions
+    with state._lock:
+        held = dict(state._tools), dict(state._extensions)
+        state._tools.clear()
+        state._extensions.clear()
+    try:
+        with _catalog_patches(name, dict(spec), root) as registry:
+            yield registry
+    finally:
+        with state._lock:
+            state._tools.clear()
+            state._tools.update(held[0])
+            state._extensions.clear()
+            state._extensions.update(held[1])
+
+
+@contextlib.contextmanager
+def _catalog_patches(name: str, spec: dict, root: pathlib.Path):
     from ouroboros import extension_loader, mcp_client
     from ouroboros import extension_registry_state as state
     from ouroboros.tools import extension_dispatch, github, search
@@ -443,3 +466,22 @@ def test_a_description_edit_does_not_move_the_record(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ToolRegistry, "_load_modules", reworded)
     assert _against_main(_snapshots(tmp_path / "after", names)) == before
+
+
+def test_a_descriptor_another_test_left_behind_stays_out_of_the_record(tmp_path):
+    """The record reads only its own catalog: a live-looking descriptor an earlier test in this worker left in the
+    process-global extension registry (here a second tool of the record's own skill) neither enters it nor is lost."""
+    from ouroboros import extension_loader
+    from ouroboros import extension_registry_state as state
+
+    clean = _snapshots(tmp_path / "clean", {"main"})["main"]
+    stray = extension_loader.extension_surface_name(EXT_SKILL, "leaked")
+    with state._lock:
+        state._tools[stray] = {"name": stray, "skill": EXT_SKILL, "description": "left by another test",
+                               "schema": {"type": "object", "properties": {}}}
+    try:
+        assert _snapshots(tmp_path / "dirty", {"main"})["main"] == clean
+        assert stray in state._tools, "the other test's state is put back"
+    finally:
+        with state._lock:
+            state._tools.pop(stray, None)
