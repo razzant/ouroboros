@@ -781,3 +781,25 @@ def test_settled_money_reaches_the_rendered_card_and_survives_reload(tmp_path, m
             page.screenshot(path=replay_shot)
         print(json.dumps({"ending": ending, "engine": engine, "relation": relation, "live": live,
                           "reloaded": room["facts"](task_id)}, ensure_ascii=False))
+
+
+@pytest.mark.parametrize("state,code,asks", [
+    ("failed", "vendor_limit_rejected", True), ("failed", "subscription_window_exhausted", True),
+    ("failed", "credential_pool_exhausted", True), ("failed", "rate_limited", False),  # a plain rate limit
+    ("failed", "internal_error", False), ("succeeded", "", False),
+])
+def test_a_run_settled_on_a_limit_code_asks_the_subscription_census_for_a_read(tmp_path, monkeypatch, state, code,
+                                                                               asks):
+    """The settlement seam itself (``record_terminal_money``): each limit code leaves the census duty's request, an
+    ordinary failure or a success does not."""
+    from ouroboros import claudexor_daemon, config
+    from ouroboros import subscription_census as census
+    from ouroboros.delegate_collection import record_terminal_money
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    entry = start(tmp_path)
+    summary = {"state": state, "spendUsd": 0, **({"failure": {"code": code}} if code else {})}
+    record_terminal_money(tmp_path, entry, {"summary": summary})
+    assert entry.settled
+    assert (census.request_mtime() is not None) is asks
