@@ -1,0 +1,536 @@
+name: 'Model recovery R15 follow-up qualification (synthetic Linux QA)'
+# Branch-only diagnostics: pinned base/candidate, synthetic data and no live provider calls.
+on:
+  push:
+    branches: ['qa/model-recovery-p01-r15-20261122']
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      BASE: '907c144a53d1b2a76949b68a4012348d873f9ad0'
+      PRODUCT: '1d6317ac1fedbf6ba62a3f6787f1a9764dc076e0'          # single-parent commit ON BASE whose tree is PRODUCT_TREE; rebase still pending
+      PRODUCT_TREE: 'dd25df960aa64372fcad6b714031f36f1aad4eaa'
+      CARRIER_SHA256: '37f4b0f98b7690b217f87ef8636eb5ffee6a4287271989dc1bae8d9168432c32'   # sha256 of git show <diagnostic HEAD>:.github/qa/claudexor-emitted-cases.json
+      WITNESS_SHA256: 'c410b12ad3eedf33782a21f08da17b2b05c1af3c058bfb1c8253a933374339ae'   # sha256 of git show <diagnostic HEAD>:.github/qa/test_claudexor_emitted_witness.py
+      PYTHONDONTWRITEBYTECODE: '1'
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind diagnostic HEAD to one product commit to one base
+        id: subject
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/r15/images"
+          require_equal() {
+            if [[ "$2" != "$3" ]]; then
+              echo "::error::Subject binding mismatch: $1"
+              printf 'expected:\n%s\nactual:\n%s\n' "$3" "$2" | tee -a "$RUNNER_TEMP/r15/binding.txt"
+              exit 1
+            fi
+          }
+          if ! [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$PRODUCT" =~ ^[0-9a-f]{40}$ && "$PRODUCT_TREE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Subject binding mismatch: BASE, PRODUCT and PRODUCT_TREE must be 40 lowercase hex characters'
+            exit 1
+          fi
+          require_equal 'checked-out HEAD is the pushed commit' "$(git rev-parse HEAD)" "$GITHUB_SHA"
+          require_equal 'HEAD has exactly one parent, the pinned product' "$(git rev-list --parents -n 1 HEAD)" "$GITHUB_SHA $PRODUCT"
+          require_equal 'product has exactly one parent, the pinned base' "$(git rev-list --parents -n 1 "$PRODUCT")" "$PRODUCT $BASE"
+          require_equal 'product tree is the pinned tree' "$(git rev-parse "$PRODUCT^{tree}")" "$PRODUCT_TREE"
+          # Exactly three branch-only files arrive on top of the product: carrier, witness, this workflow.
+          carrier=.github/qa/claudexor-emitted-cases.json
+          witness=.github/qa/test_claudexor_emitted_witness.py
+          workflow=.github/workflows/qa-model-recovery-r15.yml
+          expected=$(printf 'A\t%s\nA\t%s\nA\t%s' "$carrier" "$witness" "$workflow")
+          require_equal 'file status between product and pushed commit' "$(git diff --name-status --no-renames "$PRODUCT" HEAD)" "$expected"
+          for path in "$carrier" "$witness" "$workflow"; do
+            require_equal "object mode of $path" "$(git ls-tree --format='%(objectmode) %(objecttype)' HEAD -- "$path")" '100644 blob'
+          done
+          git show "HEAD:$carrier" > "$RUNNER_TEMP/r15/claudexor-emitted-cases.json"
+          git show "HEAD:$witness" > "$RUNNER_TEMP/r15/test_claudexor_emitted_witness.py"
+          # The retained fixture must be the published old bytes, byte for byte.
+          require_equal 'carrier SHA-256' "$(sha256sum "$RUNNER_TEMP/r15/claudexor-emitted-cases.json" | cut -d' ' -f1)" "$CARRIER_SHA256"
+          require_equal 'witness SHA-256' "$(sha256sum "$RUNNER_TEMP/r15/test_claudexor_emitted_witness.py" | cut -d' ' -f1)" "$WITNESS_SHA256"
+          git checkout --detach "$PRODUCT"
+          require_equal 'checked-out product tree' "$(git rev-parse 'HEAD^{tree}')" "$PRODUCT_TREE"
+          require_equal 'checked-out product is clean' "$(git status --porcelain --untracked-files=all)" ''
+          printf 'diagnostic %s\nproduct %s\ntree %s\nbase %s\nbranch %s\n' \
+            "$GITHUB_SHA" "$PRODUCT" "$PRODUCT_TREE" "$BASE" "${GITHUB_REF_NAME}" > "$RUNNER_TEMP/r15/subject.txt"
+          cat "$RUNNER_TEMP/r15/subject.txt"
+          printf 't0=%s\n' "$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Install the repository's locked test dependencies
+        id: python
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+
+      - name: Compare close-to-failure nodes on subject and on base
+        id: compare
+        timeout-minutes: 14
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          runner_py=$(python -c 'import sys; print(sys.executable)')
+          [[ "$runner_py" == /* && -x "$runner_py" ]]
+          # group<TAB>node-id<TAB>close-to-failure param ids (comma-separated, '-' for none)
+          cat > "$RUNNER_TEMP/r15/nodes.tsv" <<'TSV'
+          core	tests/test_subscription_main_wait.py::test_ordinary_api_refusal_reaches_the_owner_only_after_configured_routes	401-rejected
+          core	tests/test_subscription_main_wait.py::test_fallback_choice_and_first_request_from_its_saved_round	first_candidate-same-family,first_candidate-cross-family,deferred_owner-same-family,deferred_owner-cross-family,after_choice-same-family,after_choice-cross-family,budget_after_choice-same-family,budget_after_choice-cross-family,accepted-same-family,accepted-cross-family
+          core	tests/test_subscription_main_wait.py::test_forced_wait_switch_reprices_the_request_that_is_sent	switch-to-builtin
+          core	tests/test_subscription_main_wait.py::test_forced_repair_binds_its_own_role_after_a_separate_settled_400	-
+          core	tests/test_unknown_fallback_first.py::test_route_facts_reach_only_the_acting_routes_own_next_round	-
+          core	tests/test_route_choice_connection_wait.py::test_a_gone_connection_walks_the_chain_then_waits_for_the_owner_instead_of_failing	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_a_withdrawn_wrap_up_reads_a_received_failure_once_and_never_sends_again	no-message
+          core	tests/test_native_fallback_binding_acceptance.py::test_cold_restore_waits_for_the_same_operation	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_cold_create_without_receipt_uses_dispatch_evidence	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_cold_processing_refusal_releases_before_ordinary_standard_admission	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_a_native_create_binds_only_its_rounds_own_landed_ready_state	never-lands-first-ready-write-failed,never-lands-stale-earlier-sequence-and-a-changed-view
+          core	tests/test_llm_claudexor.py::test_control_after_observer_wins_over_unverified_create_binding	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_warm_paused_refusal_resumes_without_recounting	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_pause_during_final_receipt_resumes_the_settled_refusal_once	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_a_pause_keeps_the_arrivals_bound_to_its_own_read_for_a_cold_resume	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_a_cold_auth_changed_release_keeps_only_the_reissue_its_own_record_proves_unused	-
+          core	tests/test_native_fallback_binding_acceptance.py::test_a_received_failure_is_met_by_its_rounds_own_call	transient,bad-input,substituted
+          core	tests/test_native_fallback_binding_acceptance.py::test_a_restored_reply_finishes_only_the_owner_input_it_saw	owner-words-while-down
+          core	tests/test_native_fallback_binding_acceptance.py::test_a_restored_temporary_failure_keeps_its_own_place_in_the_burst	its-last-attempt,an-unnumbered-record,a-raised-setting
+          core	tests/test_native_fallback_binding_acceptance.py::test_ready_checkpoint_reads_a_retained_answer_offline	deadline-with-commentary,deadline-with-cut
+          core	tests/test_pause_author_aux_receivers.py::test_warm_resume_restarts_author_wait_while_the_original_review_still_runs	-
+          core	tests/test_auth_changed_reissue.py::test_released_auth_change_answers_from_one_new_operation_on_the_same_route	-
+          core	tests/test_auth_changed_reissue.py::test_a_pause_after_the_refusal_sends_nothing_more	-
+          core	tests/test_wrapup_real_send_parity.py::test_priced_forced_request_matches_the_native_sender	builtin
+          core	tests/test_capability_probe_accounting_v664.py::test_local_capability_probes_take_the_builtin_servers_slot_and_keep_its_count_out	-
+          core	tests/test_capability_probe_accounting_v664.py::test_the_settings_probe_queues_at_the_endpoint_its_own_client_reaches	-
+          core	tests/test_abandoned_model_operation.py::test_older_unbound_attempt_needs_a_retained_receipt	-
+          core	tests/test_model_wait_controls.py::test_pre_round_terminal_order_keeps_cost_after_stop_and_deadline	True-True-False-expected0
+          core	tests/test_benchmark_provenance_v6810.py::test_every_runtime_reason_code_has_a_recorded_truncation_decision	-
+          core	tests/test_gateway_abi3_removals.py::TestAliasProducerFanOutSweep::test_every_alias_key_emission_is_an_allowlisted_internal_plane	-
+          core	tests/test_builtin_skill_source.py::test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits	-
+          structural	tests/test_llm_extraction.py::test_llm_leaf_import_graph_is_acyclic_and_shallow	-
+          structural	tests/test_module_handle_extraction.py::test_the_declared_set_is_exactly_what_the_leaf_reads_through_the_handle	-
+          TSV
+          git worktree add --detach "$RUNNER_TEMP/r15-base" "$BASE"
+          test -z "$(git -C "$RUNNER_TEMP/r15-base" status --porcelain --untracked-files=all)"
+          git diff --exit-code "$BASE" "$PRODUCT" -- pyproject.toml uv.lock
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$PRODUCT"
+          rc=0
+          python - "$RUNNER_TEMP/r15" "$RUNNER_TEMP/r15-base" "$GITHUB_WORKSPACE" "$runner_py" <<'PY' || rc=$?
+          import json, subprocess, sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          temp, base_root, prod_root, runner = (str(a) for a in sys.argv[1:5])
+          temp = Path(temp)
+          spec = []
+          for line in (temp / 'nodes.tsv').read_text(encoding='utf-8').splitlines():
+              if line.strip():
+                  group, node, params = line.split('\t')
+                  spec.append((group, node, [p for p in params.split(',') if p != '-']))
+          files = sorted({node.split('::')[0] for _, node, _ in spec})
+          def parts(node):
+              c = node.split('::')
+              cls = c[1] if len(c) == 3 else ''
+              return c[0][:-3].replace('/', '.') + ('.' + cls if cls else ''), c[-1]
+          def case_status(c):
+              return next((k for k in ('error', 'failure', 'skipped') if c.find(k) is not None), 'passed')
+          def pytest(cwd, args, seconds, evidence):
+              argv = [runner, '-I', '-S', 'scripts/safe_test.py', '--timeout', str(seconds),
+                      '--evidence-dir', str(evidence), '--', runner, '-m', 'pytest',
+                      '-o', 'addopts=', '-p', 'no:cacheprovider', '--continue-on-collection-errors', *args]
+              try:
+                  p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=seconds + 90)
+              except subprocess.TimeoutExpired:
+                  return 124, ''
+              return p.returncode, p.stdout
+          def observe(label, root, gating):
+              root, ev = str(root), temp / 'evidence' / label
+              present = [f for f in files if (Path(root) / f).is_file()]
+              rc_collect, collected, complete = None, set(), False
+              if present:
+                  rc_collect, out = pytest(root, ['--collect-only', '-q', *present], 60, ev / 'collect')
+                  collected = {ln.strip() for ln in out.splitlines()
+                               if ln.strip().startswith('tests/') and '::' in ln.strip()}
+                  complete = rc_collect == 0 and bool(collected)
+              state0 = {}
+              for _, node, _ in spec:
+                  if node.split('::')[0] not in present:
+                      state0[node] = 'absent_file'
+                  elif node in collected or any(c.startswith(node + '[') for c in collected):
+                      state0[node] = None
+                  elif complete:
+                      state0[node] = 'not_collected'
+                  else:
+                      state0[node] = 'collection_incomplete'
+              run_nodes = [n for n, s in state0.items() if s is None]
+              xml, rc_run, cases = temp / ('nodes-%s.xml' % label), None, {}
+              if run_nodes:
+                  rc_run, _ = pytest(root, ['-q', '--tb=line', '--junitxml=%s' % xml, *run_nodes],
+                                     240 if gating else 150, ev / 'run')
+                  try:
+                      for c in ET.parse(xml).iter('testcase'):
+                          cases.setdefault((c.get('classname', ''), c.get('name', '').split('[', 1)[0]), []).append(c)
+                  except (OSError, ET.ParseError):
+                      pass  # rc_run and the empty case map stay; the state below names the unreadable report
+              report_ok = xml.is_file() and bool(cases)
+              out = {}
+              for node, why in state0.items():
+                  if why:
+                      out[node] = {'state': why, 'cases': 0, 'bad': 0, 'ids': []}
+                      continue
+                  mine = [c for k, lst in cases.items() if k == parts(node) for c in lst]
+                  if not mine:
+                      out[node] = {'state': 'not_run' if report_ok else 'report_unreadable',
+                                   'cases': 0, 'bad': 0, 'ids': []}
+                      continue
+                  out[node] = {'state': 'ran', 'cases': len(mine),
+                               'bad': sum(1 for c in mine if any(c.find(k) is not None
+                                        for k in ('failure', 'error', 'skipped'))),
+                               'ids': sorted(c.get('name', '') for c in mine),
+                               'statuses': {c.get('name', ''): case_status(c) for c in mine}}
+              return {'exit_collect': rc_collect, 'exit_run': rc_run, 'complete': complete,
+                      'collected': collected, 'nodes': out}
+          prod, base = observe('product', prod_root, True), observe('base', base_root, False)
+          problems, comparable, new_only, rows = [], 0, 0, []
+          if prod['exit_collect'] != 0:
+              problems.append('candidate collection exited %s: no absence is claimed from it' % prod['exit_collect'])
+          if prod['exit_run'] != 0:
+              problems.append('candidate run exited %s: the collected cases must exit 0' % prod['exit_run'])
+          for group, node, wanted in spec:
+              p, b = prod['nodes'][node], base['nodes'][node]
+              func = node.split('::')[-1]
+              if p['state'] != 'ran':
+                  problems.append('subject %s: %s — required candidate case is not met' % (node, p['state']))
+              elif p['bad']:
+                  problems.append('subject %s: %d of %d cases failed/errored/skipped' % (node, p['bad'], p['cases']))
+              if p['state'] == 'ran' and prod['complete']:
+                  not_collected = [w for w in wanted if node + '[' + w + ']' not in prod['collected']]
+                  not_executed = [w for w in wanted if func + '[' + w + ']' not in p['ids']]
+                  if not_collected or not_executed:
+                      problems.append('subject %s: not collected %s; collected but not executed %s'
+                                      % (node, not_collected, not_executed))
+              p_ids = p.get('ids', [])
+              b_ids = b.get('ids', [])
+              prefix = node + '['
+              p_collected = {func + n[len(node):] for n in prod['collected'] if n == node or n.startswith(prefix)}
+              b_collected = {func + n[len(node):] for n in base['collected'] if n == node or n.startswith(prefix)}
+              if set(p_ids) != p_collected or len(p_ids) != len(set(p_ids)):
+                  problems.append('subject %s: collection, execution or uniqueness mismatch' % node)
+              base_complete = base['complete'] and base['exit_run'] in (None, 0, 1)
+              case_rows = []
+              for case in sorted(p_collected | b_collected | set(p_ids) | set(b_ids)):
+                  p_state = p.get('statuses', {}).get(case, 'not_run' if case in p_collected else 'not_collected')
+                  b_state = b.get('statuses', {}).get(case, 'not_run' if case in b_collected else 'not_collected')
+                  if case in p_ids and case in b_ids:
+                      relation = 'paired'; comparable += 1
+                  elif case in p_ids and base_complete and case not in b_collected:
+                      relation = 'new_only_on_subject'; new_only += 1
+                  elif case in p_ids:
+                      relation = 'base_unobserved'
+                      if not base_complete and case not in b_ids:
+                          b_state = 'unobserved'
+                  else:
+                      relation = 'subject_unavailable'
+                  case_rows.append({'id': node + case[len(func):], 'subject': p_state,
+                                    'base': b_state, 'relation': relation})
+              relations = sorted({c['relation'] for c in case_rows})
+              rows.append({'group': group, 'node': node, 'relation': ', '.join(relations) or 'unobserved',
+                           'subject': {k: p[k] for k in ('state', 'cases', 'bad')},
+                           'base': {k: b[k] for k in ('state', 'cases', 'bad')},
+                           'wanted': wanted, 'cases': case_rows})
+          matrix = {'nodes': rows,
+                    'counts': {'required_selectors': len(rows), 'paired_cases': comparable,
+                               'new_only_on_subject': new_only,
+                               'base_unobserved': sum(c['relation'] == 'base_unobserved'
+                                                      for r in rows for c in r['cases'])},
+                    'exits': {'subject': [prod['exit_collect'], prod['exit_run']],
+                              'base': [base['exit_collect'], base['exit_run']]},
+                    'collection_complete': {'subject': prod['complete'], 'base': base['complete']}}
+          (temp / 'nodes-matrix.json').write_text(json.dumps(matrix, indent=1) + '\n', encoding='utf-8')
+          (temp / 'nodes-reasons.txt').write_text('\n'.join(problems + [
+              'subject exits collect/run %s; base exits collect/run %s; collection complete subject %s base %s'
+              % (matrix['exits']['subject'], matrix['exits']['base'], prod['complete'], base['complete'])]) + '\n',
+              encoding='utf-8')
+          lines = ['# R15 node comparison (subject = pinned product, base = pinned public base)',
+                   'paired cases %d  new-only cases %d  base-unobserved cases %d  required selectors %d' %
+                   (comparable, new_only, matrix['counts']['base_unobserved'], len(rows)),
+                   'collection complete: subject %s base %s; exits(collect,run) subject %s base %s' %
+                   (prod['complete'], base['complete'], matrix['exits']['subject'], matrix['exits']['base']),
+                   '| node | subject | base | relation |', '|---|---|---|---|']
+          for r in rows:
+              lines.append('| %s | %s (%d green of %d) | %s | %s |' % (
+                  r['node'], r['subject']['state'], r['subject']['cases'] - r['subject']['bad'],
+                  r['subject']['cases'], r['base']['state'], r['relation']))
+          (temp / 'nodes-summary.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          print('\n'.join(lines[:3]))
+          if problems:
+              print('\n'.join(problems))
+              raise SystemExit(1)
+          PY
+          if [[ -s "$RUNNER_TEMP/r15/nodes-summary.md" ]]; then
+            cat "$RUNNER_TEMP/r15/nodes-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
+      - name: Apply the code and book size gates against the pinned base
+        id: size
+        timeout-minutes: 3
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.BASE }}
+          OURO_BOOK_GROWTH_MODE: block
+        run: |
+          set -euo pipefail
+          rc=0
+          env -u GITHUB_EVENT_NAME -u GITHUB_REF python -I -S scripts/safe_test.py --timeout 150 \
+            --evidence-dir "$RUNNER_TEMP/r15/evidence/size" -- python -m pytest -q --tb=line \
+            -o addopts= -m size_ratchet tests/ --junitxml="$RUNNER_TEMP/r15/size.xml" || rc=$?
+          python - "$RUNNER_TEMP/r15/size.xml" "$rc" <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          xml, rc = Path(sys.argv[1]), int(sys.argv[2])
+          required = {'test_a_change_does_not_grow_a_reference_book', 'test_a_change_does_not_grow_bible_or_the_prompts',
+                      'test_no_oversized_modules', 'test_size_ratchet_manifest_matches_live_tree',
+                      'test_size_ratchet_transition_against_explicit_base', 'test_no_extremely_oversized_functions',
+                      'test_checked_in_manifest_generator_check_is_exact'}
+          cases, report = [], 'absent'
+          if xml.is_file():
+              try:
+                  cases = list(ET.parse(xml).iter('testcase')); report = 'readable'
+              except (OSError, ET.ParseError):
+                  report = 'unreadable'
+          def why(node):
+              for tag in ('failure', 'error', 'skipped'):
+                  found = node.find(tag)
+                  if found is not None:
+                      text = (found.get('message') or found.text or '').strip().splitlines()
+                      return tag + ': ' + (text[0][:200] if text else '')
+              return ''
+          missing = sorted(required - {c.attrib.get('name', '') for c in cases})
+          bad = [(c.attrib.get('name', ''), why(c)) for c in cases if why(c)]
+          reasons = ['size pytest exit %d, junit %s, cases %d' % (rc, report, len(cases))]
+          reasons += ['absent gate: ' + n for n in missing]
+          reasons += ['%s %s' % (n, m) for n, m in bad[:20]]
+          temp = os.environ['RUNNER_TEMP']
+          Path(xml.parent, 'size-reasons.txt').write_text(
+              '\n'.join(r.replace(temp, '<temp>') for r in reasons) + '\n', encoding='utf-8')
+          print('\n'.join(reasons))
+          assert rc == 0, 'size lane did not exit 0 (see size-reasons.txt)'
+          assert report == 'readable', 'size lane produced no readable junit report'
+          assert not missing, 'size gates absent from the run: %s' % missing
+          assert not bad, 'size gates not green: %s' % [n for n, _ in bad]
+          print('size lane: %d cases, all green' % len(cases))
+          PY
+
+      - name: Replay the 26 emitted-refusal cells against the real product consumer (mock HTTP only)
+        id: replay
+        timeout-minutes: 7
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        env:
+          SUBJECT_OUTCOME: ${{ steps.subject.outcome }}
+          PRODUCT_COMMIT: ${{ env.PRODUCT }}
+        run: |
+          set -euo pipefail
+          test "$SUBJECT_OUTCOME" = success
+          [[ "$PRODUCT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          runner_py=$(python -c 'import sys; print(sys.executable)')
+          [[ "$runner_py" == /* && -x "$runner_py" ]]
+          test ! -e "$RUNNER_TEMP/r15/cells.tsv" && test ! -e "$RUNNER_TEMP/r15/producer.json"
+          git worktree add --detach "$RUNNER_TEMP/r15-replay" "$PRODUCT_COMMIT"
+          cd "$RUNNER_TEMP/r15-replay"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCT_TREE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          witness=tests/test_claudexor_emitted_witness.py
+          [[ ! -e "$witness" && ! -L "$witness" ]]
+          install -m 0644 "$RUNNER_TEMP/r15/test_claudexor_emitted_witness.py" "$witness"
+          test "$(git status --porcelain --untracked-files=all)" = "?? $witness"
+          rc=0
+          "$runner_py" -I -S scripts/safe_test.py --timeout 300 --evidence-dir "$RUNNER_TEMP/r15/evidence/replay" -- \
+            "$runner_py" "$witness" "$RUNNER_TEMP/r15/claudexor-emitted-cases.json" \
+            "$RUNNER_TEMP/r15/cells.tsv" "$RUNNER_TEMP/r15/producer.json" || rc=$?
+          python - "$RUNNER_TEMP/r15/cells.tsv" "$rc" <<'PY'
+          import sys
+          from collections import Counter
+          from pathlib import Path
+          cells, rc = Path(sys.argv[1]), int(sys.argv[2])
+          rows = [ln.rstrip('\n').split('\t') for ln in cells.open(encoding='utf-8') if ln.strip()] if cells.is_file() else []
+          header, data = (rows[0], rows[1:]) if rows[:1] and rows[0][:1] == ['case'] else ([] if rows else [], [])
+          status = Counter(r[2] if len(r) > 2 else 'short_row' for r in data)
+          detail = Counter(r[5] if len(r) > 5 else 'short_row' for r in data if r[2:3] != ['PASS'])
+          reasons = ['witness exit %d' % rc, 'cells %d' % len(data),
+                     'status %s' % dict(status), 'non-pass details %s' % dict(detail)]
+          Path(cells.parent, 'cells-summary.txt').write_text('\n'.join(reasons) + '\n', encoding='utf-8')
+          print('\n'.join(reasons))
+          assert header[:6] == ['case', 'lane', 'status', 'rc', 'observed', 'detail'], header
+          assert len(data) == 26, 'expected 26 cells, found %d' % len(data)
+          bad = [r[:6] for r in data if r[2] != 'PASS']
+          assert rc == 0, 'witness did not exit 0'
+          assert not bad, bad
+          print('26/26 emitted-refusal cells PASS')
+          PY
+
+      - name: Reserve the remaining budget for the optional browser lane
+        id: budget
+        timeout-minutes: 1
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        env:
+          T0: ${{ steps.subject.outputs.t0 }}
+        run: |
+          left=$(( T0 + 1500 - $(date +%s) ))   # this job's own 25-minute ceiling
+          # browsers 240 + ui 300 + outcomes/upload/gate 240 must still fit
+          if [ "$left" -ge 780 ]; then room=yes; else room=no; fi
+          printf 'room=%s\n' "$room" >> "$GITHUB_OUTPUT"
+          printf 'budget left %ss, optional UI lane room %s\n' "$left" "$room" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the pinned browser driver and the chromium engine (reported, not gating)
+        id: browsers
+        timeout-minutes: 4
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && steps.budget.outputs.room == 'yes' }}
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/r15-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node --pinned-chromium chromium
+
+      - name: Observe only the related existing hosted browser cases (reported, not gating)
+        id: ui
+        timeout-minutes: 5
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/r15-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/r15/images
+        run: |
+          xvfb-run -a python -I -S scripts/safe_test.py --timeout 300 --evidence-dir "$RUNNER_TEMP/r15/evidence/ui" -- \
+            python -m pytest -q --tb=short -o addopts= -m 'ui_browser or browser' \
+            tests/test_model_wait_browser.py::test_an_unconfirmed_quota_wait_keeps_its_control_and_promises_no_quota \
+            tests/test_model_wait_browser.py::test_direct_api_wait_never_offers_subscription_login_or_auto_rotation \
+            tests/test_live_conversation_browser.py::test_context_capacity_shows_the_call_detail_and_allows_text \
+            --junitxml="$RUNNER_TEMP/r15/ui.xml"
+
+      - name: Save machine-readable outcomes without test output
+        id: outcomes
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        env:
+          SUBJECT_OUTCOME: ${{ steps.subject.outcome }}
+          PYTHON_OUTCOME: ${{ steps.python.outcome }}
+          COMPARE_OUTCOME: ${{ steps.compare.outcome }}
+          SIZE_OUTCOME: ${{ steps.size.outcome }}
+          REPLAY_OUTCOME: ${{ steps.replay.outcome }}
+          BROWSERS_OUTCOME: ${{ steps.browsers.outcome }}
+          UI_OUTCOME: ${{ steps.ui.outcome }}
+          BUDGET_OUTCOME: ${{ steps.budget.outcome }}
+          BUDGET_ROOM: ${{ steps.budget.outputs.room }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, xml.etree.ElementTree as ET
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'r15'
+          names = ('subject', 'python', 'compare', 'size', 'replay', 'budget', 'browsers', 'ui')
+          gating = ('subject', 'python', 'compare', 'size', 'replay')
+          needs = {'python': ('subject',), 'compare': ('python',), 'size': ('python',), 'replay': ('python',),
+                   'budget': ('python',), 'browsers': ('budget',), 'ui': ('browsers',)}
+          out = {n: {'step_outcome': os.environ.get(n.upper() + '_OUTCOME') or 'unknown',
+                     'gating': n in gating} for n in names}
+          for n in names:
+              if out[n]['step_outcome'] in ('skipped', 'unknown'):
+                  why = [d for d in needs.get(n, ()) if out[d]['step_outcome'] != 'success']
+                  out[n]['not_run_because'] = why or (['optional_lane_out_of_budget']
+                                                      if n in ('browsers', 'ui') and os.environ.get('BUDGET_ROOM') == 'no' else why)
+          matrix = root / 'nodes-matrix.json'
+          out['compare']['matrix'] = json.loads(matrix.read_text(encoding='utf-8'))['counts'] if matrix.is_file() else 'absent'
+          for name in ('size', 'ui'):
+              report, reasons = root / (name + '.xml'), root / (name + '-reasons.txt')
+              entry = {}
+              if not report.is_file():
+                  entry['report'] = 'not_run' if out[name]['step_outcome'] in ('skipped', 'unknown') else 'no_report'
+              else:
+                  try:
+                      cases = list(ET.parse(report).iter('testcase'))
+                  except (OSError, ET.ParseError):
+                      cases, entry['report'] = [], 'unreadable'
+                  if cases:
+                      skipped = sum(1 for c in cases if c.find('skipped') is not None)
+                      bad = sum(1 for c in cases if any(c.find(k) is not None for k in ('failure', 'error', 'skipped')))
+                      entry['report'] = {'cases': len(cases), 'not_passed': bad, 'skipped': skipped}
+                      if name == 'ui':
+                          # a green step that skipped every case is disclosure, not evidence
+                          entry['ui_evidence'] = 'none_all_skipped' if skipped == len(cases) else (
+                              'partial' if skipped else 'observed')
+              if reasons.is_file():
+                  entry['reasons'] = reasons.read_text(encoding='utf-8').splitlines()[:20]
+              out[name].update(entry)
+          if os.environ.get('BUDGET_ROOM') == 'no':
+              out['ui']['ui_evidence'] = 'not_run_by_budget'
+          cells, summary = root / 'cells.tsv', root / 'cells-summary.txt'
+          out['replay']['cells'] = sum(1 for _ in open(cells, encoding='utf-8')) - 1 if cells.is_file() else 'absent'
+          if summary.is_file():
+              out['replay']['cells_summary'] = summary.read_text(encoding='utf-8').splitlines()
+          (root / 'checks.json').write_text(json.dumps(out, indent=1) + '\n', encoding='utf-8')
+          print({k: v['step_outcome'] for k, v in out.items()})
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        id: upload
+        if: ${{ always() }}
+        with:
+          name: model-recovery-r15-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/r15/subject.txt
+            ${{ runner.temp }}/r15/binding.txt
+            ${{ runner.temp }}/r15/nodes.tsv
+            ${{ runner.temp }}/r15/nodes-matrix.json
+            ${{ runner.temp }}/r15/nodes-summary.md
+            ${{ runner.temp }}/r15/nodes-reasons.txt
+            ${{ runner.temp }}/r15/size-reasons.txt
+            ${{ runner.temp }}/r15/cells.tsv
+            ${{ runner.temp }}/r15/cells-summary.txt
+            ${{ runner.temp }}/r15/producer.json
+            ${{ runner.temp }}/r15/ui-reasons.txt
+            ${{ runner.temp }}/r15/checks.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Require every gating stage to succeed
+        id: gate
+        if: ${{ !cancelled() }}
+        env:
+          OUTCOMES: |
+            subject=${{ steps.subject.outcome }}
+            python=${{ steps.python.outcome }}
+            compare=${{ steps.compare.outcome }}
+            size=${{ steps.size.outcome }}
+            replay=${{ steps.replay.outcome }}
+            outcomes=${{ steps.outcomes.outcome }}
+            upload=${{ steps.upload.outcome }}
+            budget_non_gating=${{ steps.budget.outcome }}
+            browsers_non_gating=${{ steps.browsers.outcome }}
+            ui_non_gating=${{ steps.ui.outcome }}
+        run: |
+          set -uo pipefail
+          bad=0
+          printf '| stage | raw outcome |\n|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+          while IFS='=' read -r stage outcome; do
+            [[ -n "$stage" ]] || continue
+            printf '%-22s %s\n' "$stage" "$outcome"
+            printf '| %s | %s |\n' "$stage" "$outcome" >> "$GITHUB_STEP_SUMMARY"
+            case "$stage" in
+              *_non_gating) continue ;;  # reported above; browsers/ui never gate this qualification
+            esac
+            [[ "$outcome" == success ]] || bad=1
+          done <<< "$OUTCOMES"
+          if [[ "$bad" != 0 ]]; then
+            echo '::error::At least one gating stage did not succeed (failed, skipped or unknown). A skipped stage is not a pass.'
+            exit 1
+          fi
