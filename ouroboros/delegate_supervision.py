@@ -39,6 +39,7 @@ import logging
 import pathlib
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from ouroboros import delegate_custody as custody
@@ -641,7 +642,7 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
         key: (str(value)[:600] if isinstance(value, str) else value)
         for key in ("replay_of", "status", "ok", "host_code", "run_id", "state", "last_seq", "reason",
                     "waiting_on_user", "async_questions_only", "continuation", "continuation_note",
-                    "sleep", "cache_horizon_note", "leaf_live_input")
+                    "sleep", "previous_model_response", "cache_horizon_note", "leaf_live_input")
         if (value := payload.get(key)) not in (None, "")
     }
     envelope["supervision_wake_id"] = wake_id
@@ -687,7 +688,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
                if payload.get("ok") is False else {}),
             "run_id": str(payload.get("run_id") or "")[:200],
             **{key: payload[key] for key in ("waiting_on_user", "async_questions_only", "continuation",
-                                             "continuation_note", "sleep", "leaf_live_input") if key in payload},
+                                             "continuation_note", "sleep", "previous_model_response",
+                                             "leaf_live_input") if key in payload},
             "supervision_wake_id": wake_id,
             "coordination_context": {"state": "available_in_full_wake_source"},
             "wake_delivery": envelope["wake_delivery"],
@@ -1048,28 +1050,33 @@ def _leaf_live_input(entry: Any, gateway: Any) -> str:
     return "unknown" if value is None else value
 
 
-def _since_last_model_response_sec(ctx: Any) -> Optional[float]:
-    """Seconds since this task's latest model response was recorded
-    (``_last_llm_call_meta.ts``). A LOWER bound on prompt-cache age: the provider
-    read/wrote the cached prefix before that response finished, so the horizon note
-    built on it can only fire late, never early. Unknown (silent) after a worker
-    loss, whose successor has no recorded send yet."""
-    usage = getattr(ctx, "_accumulated_usage", None)
-    meta = usage.get("_last_llm_call_meta") if isinstance(usage, dict) else None
-    try:
-        import datetime as _dt
+def _previous_model_response(ctx: Any) -> dict[str, Any]:
+    """Snapshot the accepted response's clock and explicit request TTL for replay without the worker."""
+    from ouroboros.llm_attempt import cache_ttl_seconds
 
-        stamp = _dt.datetime.fromisoformat(str((meta or {}).get("ts") or ""))
-        return max(0.0, (_dt.datetime.now(tz=_dt.timezone.utc) - stamp).total_seconds())
-    except (TypeError, ValueError):
-        return None
+    usage = getattr(ctx, "_accumulated_usage", None)
+    if not isinstance(usage, dict):
+        return {}
+    previous = usage.get("_last_round_cache_usage")
+    finished = previous.get("finished_at") if isinstance(previous, dict) else None
+    facts = {}
+    if type(finished) in (int, float):
+        try:
+            facts["finished_at"] = datetime.fromtimestamp(finished, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            pass  # an unusable timestamp proves no response age
+    ttl = str(usage.get("_last_prompt_cache_ttl") or "").strip().lower()
+    if cache_ttl_seconds(ttl) is not None:
+        facts["request_cache_ttl"] = ttl
+    return facts
 
 
 def _publish_wake_facts(ctx: Any, descriptor: dict[str, Any], woke_by: str, payload: dict[str, Any],
                         live_input: str) -> None:
     """Whole-sleep facts at the ONE durable publication point, every status (terminal
     included), before ``pending_wake`` is stored, so a replay repeats the recorded facts
-    exactly: when the wait was armed, how long it slept, in which mode, and what woke it.
+    exactly: when the wait was armed, the time since arming, the mode and what woke it.
+    The previous response's timestamp and request TTL are separate, not cache state.
     A quiet status drops the read's own ``waited_sec``/``quiet_for_sec`` and its generic
     keep-watching/cancel note; a run paused on its question keeps the PAUSED note."""
     armed = descriptor.get("armed_epoch")
@@ -1089,11 +1096,9 @@ def _publish_wake_facts(ctx: Any, descriptor: dict[str, Any], woke_by: str, payl
         else:
             payload.pop("note", None)
     payload.pop("cache_horizon_note", None)
-    from ouroboros.tools.control import cache_horizon_note
-
-    horizon = cache_horizon_note(ctx, _since_last_model_response_sec(ctx))
-    if horizon:
-        payload["cache_horizon_note"] = horizon
+    payload.pop("previous_model_response", None)
+    if previous := _previous_model_response(ctx):
+        payload["previous_model_response"] = previous
     payload["leaf_live_input"] = live_input
 
 

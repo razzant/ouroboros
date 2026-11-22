@@ -1827,3 +1827,121 @@ test('a successful wake is the lifecycle read: the next ticks add no confirming 
     assert.equal(serviceBannerLine(store).text, 'Claudexor ready');
     off(); store.dispose();
 });
+
+// A stalled discovery and fast observations share a virtual clock; either transport may ignore abort.
+function boundedRig(t, answer) {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const rig = { clock: 1000, fullReads: 0, passiveReads: 0 };
+    t.mock.method(Date, 'now', () => rig.clock);
+    rig.store = createClaudexorStatusStore({ doc: fakeDoc(), readLifetimeMs: 60000,
+        fetchImpl: async (url) => {
+            const passive = url.includes('view=quota');
+            if (passive) rig.passiveReads += 1;
+            else rig.fullReads += 1;
+            return answer({ passive, full: rig.fullReads, passiveN: rig.passiveReads });
+        } });
+    rig.off = rig.store.subscribe(() => {}, { visible: () => true });
+    rig.tick = async (n = 1) => { for (let i = 0; i < n; i += 1) { rig.clock += 5000; t.mock.timers.tick(5000); await flush(); } };
+    return rig;
+}
+
+for (const hang of ['fetch', 'body']) {
+    test(`a status ${hang} that never answers settles at its lifetime: the held snapshot stands and the next refresh goes through`, async t => {
+        let phase = 'answer';
+        const held = loginPolicyStatus(['codex']);
+        const rig = boundedRig(t, ({ passive }) => passive ? okResponse(passivePayload(false))
+            : phase === 'answer' ? okResponse(held)
+                : hang === 'fetch' ? new Promise(() => {}) : { ok: true, status: 200, json: () => new Promise(() => {}) });
+        await rig.store.refresh();
+        const kept = rig.store.snapshot;
+        phase = 'hang';
+        const stalling = rig.store.refresh();
+        await rig.tick(12);                       // the 60s lifetime runs out
+        await stalling;
+        assert.deepEqual([rig.store.loading, rig.store.error], [false, 'timed out']);
+        assert.deepEqual(rig.store.snapshot.daemon, kept.daemon, 'the failed full read leaves the last lifecycle intact');
+        assert.deepEqual(rig.store.snapshot.harnesses, kept.harnesses);
+        assert.equal(accountRows(rig.store.snapshot)[0].enabled, false, 'newer passive account data survives');
+        phase = 'answer';
+        await rig.tick();
+        assert.deepEqual([rig.fullReads, rig.store.error], [3, ''], 'the next visible tick retries a failed read');
+        rig.off(); rig.store.dispose();
+    });
+}
+
+test('a queued follow-up demand survives the timed-out read and lands once', async t => {
+    const rig = boundedRig(t, ({ passive, full }) => passive ? okResponse(passivePayload(true))
+        : full === 1 ? new Promise(() => {}) : okResponse(loginPolicyStatus(['codex'])));
+    const stalling = rig.store.refresh();
+    const demand = rig.store.refresh({ afterCurrent: true });      // one queued follow-up read
+    await rig.tick(12);
+    await stalling;
+    assert.equal(rig.fullReads, 2, 'the queued follow-up read lands once the stalled read settles');
+    await demand;
+    assert.equal(rig.fullReads, 2, 'and exactly once');
+    rig.off(); rig.store.dispose();
+});
+
+test('an unresolved disagreement is not an answered observation when its full read times out', async t => {
+    let passive = passiveOf(), phase = 'answer';
+    const rig = boundedRig(t, ({ passive: isPassive }) => isPassive ? okResponse(passive)
+        : phase === 'answer' ? okResponse(loginPolicyStatus(['codex'])) : new Promise(() => {}));
+    await rig.store.refresh();                    // the lifecycle read: running and serving
+    await rig.store.observe();                    // the passive reads agree
+    phase = 'hang';
+    passive = passiveOf(NOT_RUNNING);             // the passive verdict flips: it serves no more
+    await rig.store.observe();                    // the flip asks for its one lifecycle check
+    assert.equal(rig.fullReads, 2);
+    await rig.tick(12);                           // the check runs out of its lifetime
+    assert.equal(rig.store.error, 'timed out');
+    phase = 'answer';
+    await rig.tick();
+    assert.equal(rig.fullReads, 3, 'the pending disagreement can be checked again');
+    rig.off(); rig.store.dispose();
+});
+
+test('an answer that keeps coming after its lifetime, or after disposal, is never committed', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.method(Date, 'now', () => 1000);
+    const held = loginPolicyStatus(['codex']);
+    const late = [];
+    let n = 0;
+    const store = createClaudexorStatusStore({ doc: fakeDoc(), readLifetimeMs: 60000,
+        fetchImpl: async () => { n += 1; return n === 1 ? okResponse(held) : new Promise((resolve) => { late.push(resolve); }); } });
+    // Explicit reads only: every item in `late` belongs to the full read being tested.
+    await store.refresh();
+    const kept = store.snapshot;
+    const stalled = store.refresh();
+    t.mock.timers.tick(60000); await flush();
+    await stalled;
+    late[0](okResponse({ ...held, daemon: { state: 'stale' } }));
+    await flush();
+    assert.equal(store.snapshot, kept, 'the answer that outran its lifetime is rejected');
+    const stalledAgain = store.refresh();         // a second stall, disposed this time
+    store.dispose();
+    await stalledAgain;
+    late[1](okResponse({ ...held, daemon: { state: 'stale' } }));
+    await flush();
+    assert.equal(store.snapshot, kept, 'and a disposed store commits nothing');
+});
+
+test('a passive GET that never answers settles at its lifetime and the next observation reads anew', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.method(Date, 'now', () => 1000);
+    let passiveN = 0;
+    const store = createClaudexorStatusStore({ doc: fakeDoc(), readLifetimeMs: 60000,
+        fetchImpl: async (url) => {
+            if (!url.includes('view=quota')) return okResponse(loginPolicyStatus(['codex']));
+            passiveN += 1;
+            return passiveN === 1 ? new Promise(() => {}) : okResponse(passiveOf());
+        } });
+    const off = store.subscribe(() => {}, { visible: () => true });
+    await store.refresh();
+    const stalling = store.observe();
+    t.mock.timers.tick(60000); await flush();
+    await stalling;
+    assert.equal(passiveN, 1);
+    await store.observe();
+    assert.equal(passiveN, 2, 'the single-flight slot freed: the next observation reads anew');
+    off(); store.dispose();
+});

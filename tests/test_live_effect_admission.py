@@ -285,6 +285,82 @@ def test_a_control_taken_while_an_ordinary_handler_runs_starts_no_later_one(host
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('control', ['none', 'hard-stop', 'stop-drained', 'pause'])
+def test_a_control_taken_while_a_group_runs_starts_no_later_single(host_world, monkeypatch, control):
+    """Two reads of one group are inside their handlers at once; a control taken then lets both finish with their
+    exact results, and the single call after the group meets the same gate before its handler: it never begins."""
+    from ouroboros import owner_pause
+    host = host_world.host
+    host.incoming = queue.Queue()
+    entered, release = [], threading.Event()
+    held = {name: threading.Event() for name in ('get_task_result', 'knowledge_read')}
+    for name, event in held.items():
+        ordinary_tool(host, name, entered, held=event, release=release)
+    ordinary_tool(host, 'send_user_message', entered)
+
+    async def scenario():
+        batch = asyncio.create_task(host.tool_batch([invocation('first', 'get_task_result', task_id='none'),
+                                                     invocation('note', 'knowledge_read', topic='t'),
+                                                     invocation('second', 'send_user_message', text='After?')]))
+        for event in held.values():
+            assert await asyncio.to_thread(event.wait, 30), 'both members of the group are running at once'
+        if control == 'hard-stop':
+            hard_stop_written(host)
+        elif control == 'stop-drained':
+            stop_written(host)
+            drain = asyncio.create_task(host.mailbox())
+            await asyncio.wait({drain}, timeout=10)
+            assert drain.done() and host._end_reason[0] == 'owner_stop'
+        elif control == 'pause':  # the owner's real Pause: the tree's fence, read by the launch gate of every call
+            root_drive, root_id, _task = owner_pause._member_coordinates(host.ctx)
+            owner_pause.install_fence(root_drive, root_id, request_id='pause-while-the-group-ran')
+        release.set()
+        outcome = await outcome_of(batch)
+        assert 'get_task_result finished.' in tool_row(host, 'first') and 'knowledge_read finished.' in tool_row(host, 'note')
+        if control == 'none':
+            assert sorted(entered) == ['get_task_result', 'knowledge_read', 'send_user_message']
+            assert entered[-1] == 'send_user_message', 'the single call starts after the group'
+            return
+        assert sorted(entered) == ['get_task_result', 'knowledge_read'], 'the single call never begins'
+        assert 'NOT STARTED' in tool_row(host, 'second') and 'may have happened' not in tool_row(host, 'second')
+        if control == 'pause':
+            assert not isinstance(outcome, BaseException), 'a Pause refusal is that call\'s row, as before'
+            assert 'OWNER_PAUSE_NOT_STARTED' in tool_row(host, 'second')
+        else:
+            assert_stopped(outcome, {'hard-stop': 'cancelled'}.get(control, 'owner_stop'))
+    asyncio.run(scenario())
+
+
+def test_eight_members_entering_one_launch_gate_at_once_refuse_none_of_each_other(host_world):
+    """Eight reads of one group pass the tree's one launch lock together (a contended lock is retried, never a
+    refusal), all inside their handlers at once, in a response the sequential rule governs; the write after them
+    runs once they returned."""
+    host = host_world.host
+    host.incoming = queue.Queue()
+    names = ['get_task_result', 'knowledge_read', 'knowledge_list', 'list_projects', 'memory_read', 'chat_history',
+             'recent_tasks', 'tree_read']
+    entered, barrier = [], threading.Barrier(len(names), timeout=30)
+
+    def member(name):
+        def handler(ctx, **_):
+            entered.append(name)
+            barrier.wait()  # released only when all eight are inside their handlers
+            return f'{name} finished.'
+        host.tools.override_handler(name, handler)
+    for name in names:
+        member(name)
+    ordinary_tool(host, 'send_user_message', entered)
+    calls = [invocation(f'm{i}', name) for i, name in enumerate(names)] + [invocation('w', 'send_user_message', text='x')]
+
+    async def scenario():
+        outcome = await outcome_of(asyncio.create_task(host.tool_batch(calls)))
+        assert not isinstance(outcome, BaseException), repr(outcome)
+        for i, name in enumerate(names):
+            assert tool_row(host, f'm{i}') == f'{name} finished.', tool_row(host, f'm{i}')
+        assert sorted(entered[:8]) == sorted(names) and entered[8:] == ['send_user_message']
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('control,code', [('none', ''), ('stop-durable', 'finalize_requested'), ('stop-drained', 'owner_stop'),
                                           ('end', '')])
 def test_a_control_taken_while_a_call_tool_runs_starts_no_later_one(host_world, control, code):
@@ -353,11 +429,11 @@ def test_a_control_taken_during_an_ordinary_effect_starts_no_call_tool_after_it(
 
 
 def test_a_parallel_batch_refused_before_it_begins_says_so_for_every_call(host_world, monkeypatch):
-    from ouroboros.loop_tool_execution import _PARALLEL_SAFE_TOOLS, tool_calls_can_run_parallel
+    from ouroboros.tool_capabilities import PARALLEL_SAFE_ENQUEUE_TOOLS, READ_ONLY_PARALLEL_TOOLS, legacy_pool_response
     host = host_world.host
-    names = sorted(_PARALLEL_SAFE_TOOLS & set(host.tools._entries))[:2]
+    names = sorted((READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS) & set(host.tools._entries))[:2]
     calls = [invocation(f'parallel-{name}', name) for name in names]
-    assert tool_calls_can_run_parallel(calls)
+    assert legacy_pool_response(names), 'the response runs as the legacy pool'
     entered = []
     for name in names:
         ordinary_tool(host, name, entered)

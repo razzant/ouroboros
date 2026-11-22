@@ -17,6 +17,11 @@ clicks Commit at a point read off a downscaled screenshot. A fourth, only with `
 because it replaces the clipboard, pastes into the paste fixture under whatever keyboard layout is active (#2589);
 another, on a qualified layout, sends cmd+g and cmd+} there and requires their menu items to fire (cmd+? is judged by
 its event only, its menu recorded), and one waits with until_text for a status the target shows after a single press.
+The input program of #63 (``input_events.js``) has its own cases against a pointer fixture (a scroll view over a large
+document) and the front fixture: a middle and a right click, double and triple click counts, a drag in one call and in
+three (press, move, release), the wheel each way, mixed and 600-character Unicode text (its time recorded), a held key,
+a named arrow with its class flags, a system key and the pointer read back; each judges the events the fixture
+received and their mark.
 The calls run as an owner task's would
 (``work_kind`` owner). A grant the run lacks becomes the skip reason, never a pass.
 Further cases read a named window's rich tree, tell the window an ``observe=true`` action kept from a same-process
@@ -278,16 +283,16 @@ def _between(rows: list[dict], start: float, end: float, *events: str) -> list[d
     return [row for row in rows if start < row["t"] < end and row["event"] in events]
 
 
-def _input_ready(call, *, cliclick: bool = True, **also: str) -> None:
-    """Foreground input needs the grants to post it and cliclick to send it (Command and one character go through
-    osascript, cliclick=False); without them the case is skipped."""
+def _input_ready(call, *, events: bool = True, **also: str) -> None:
+    """Foreground input needs the grants to post it and osascript to run the skill's input program (Command and one
+    character go through the chord program, events=False); without them the case is skipped."""
     grants = _grants(call)
     required = {"accessibility": "trusted", "post_events": "granted", **also}
     lacking = {key: grants.get(key, "absent") for key, value in required.items() if grants.get(key) != value}
     if lacking:
         pytest.skip(f"unsupported here, not passed: this process lacks {lacking} (no grant is requested)")
-    if cliclick and (call("capabilities").get("input") or {}).get("cliclick") is not True:
-        pytest.skip("unsupported here, not passed: cliclick is not installed, so key, type_text and click send nothing")
+    if events and (call("capabilities").get("input") or {}).get("input_events") is not True:
+        pytest.skip("unsupported here, not passed: osascript is missing, so key, type_text and click send nothing")
 
 
 def _hand_front(call, owned: Owned) -> dict:
@@ -485,7 +490,7 @@ def test_command_a_arrives_as_command_a_however_its_letter_is_cased(host, launch
     menu that acts on it); no quit or logout key is ever sent. It is the Command chord program's: the characters the
     event types under Command are "a" in any layout (charactersIgnoringModifiers is the typing plane: "ф" in Russian)."""
     call, _schema = host
-    _input_ready(call, cliclick=False)
+    _input_ready(call, events=False)
     front = launch("front")
     _hand_front(call, front)
     problems: list[str] = []
@@ -504,6 +509,8 @@ def test_command_a_arrives_as_command_a_however_its_letter_is_cased(host, launch
         if (row["characters"], row["modifiers"], sent.get("method")) != ("a", ["cmd"], "command_chord"):
             problems.append(f"{keys} arrived as {row['modifiers']} + {row['characters']!r}, not Command-A: "
                             f"{json.dumps(row)} (sent {json.dumps(sent.get('cmd'))})")
+        if row.get("tag") != SKILL_TAG:  # the chord program marks its events as the input program does
+            problems.append(f"{keys} arrived without the skill's mark: {json.dumps(row)}")
     after = front.mark("after")
     assert not problems and after["text"] == "", "\n".join(problems) or after
 
@@ -591,10 +598,10 @@ def test_command_shortcuts_reach_the_menu_by_the_character_command_gives(host, l
     answer. cmd+? is checked by its event only: one key down with exactly Command and Shift that the layout itself reads
     as ? (its characters, or charactersIgnoringModifiers where the key types under Command alone what it typed with
     Shift: the layout ignored Shift). Whether the app's own Shortcut ? item fires is recorded, not judged: in the guest
-    no ⌘? sent on key code 44 reached it, the base's cliclick included, and what took it is not established. So this
+    no ⌘? sent on key code 44 reached it, the former typing helper of the base included, and what took it is not established. So this
     case does not prove ⌘? reaches an app's command."""
     call, _schema = host
-    _input_ready(call, cliclick=False)
+    _input_ready(call, events=False)
     paste = launch("paste")
     _hand_front(call, paste)
     layout = (paste.mark("layout").get("input_source") or {}).get("layout")
@@ -1021,3 +1028,341 @@ def test_press_and_fresh_tree_timing_block(host, launch, tmp_path):
                               "significance": None}) + "\n")
     assert not problems, "\n".join(problems)
 
+
+
+# --- the input program (input_events.js, #63): what the pointer and front fixtures received ------------------------
+# Each case below calls the skill through the production path and judges only the fixture's own log: the events it
+# received (with the skill's mark in kCGEventSourceUserData), where its document stands, and the keys and buttons the
+# session still holds. Breaking the matching operation of input_events.js fails the case.
+SKILL_TAG = 0x4F55524F  # mac_input.EVENT_TAG, written out: the fixture checks the producer, not the producer's constant
+MOUSE = {"left_down": 1, "left_up": 2, "right_down": 3, "right_up": 4, "moved": 5, "left_dragged": 6,
+         "scroll": 22, "other_down": 25, "other_up": 26}  # NSEvent.EventType raw values
+
+
+def _pointer_fixture(call, launch) -> tuple[Owned, dict, list[int]]:
+    """The pointer fixture handed the front, its snapshot, and the centre of its scroll view (global points)."""
+    _input_ready(call)
+    pointer = launch("pointer")
+    held = _hand_front(call, pointer)
+    x, y, w, h = held["scroll_frame"]
+    return pointer, held, [round(x + w / 2), round(y + h / 2)]
+
+
+def _received(owned: Owned, start: dict, end: dict, *types: int) -> list[dict]:
+    """The pointer events delivered to this fixture (its local monitor) between two marks, of these types."""
+    return [row for row in _between(owned.rows(), start["t"], end["t"], "pointer_event")
+            if row["scope"] == "local" and row["type"] in types]
+
+
+def _own_marks(rows: list[dict]) -> list:
+    """Rows not carrying the skill's mark: someone else's events landed in the case."""
+    return [row for row in rows if row.get("tag") != SKILL_TAG]
+
+
+def _on_segment(point, start, end, slack=2, margin=10) -> bool:
+    """Whether a point lies on the segment start-end (within ``slack`` points of it) and more than ``margin``
+    points from either end."""
+    (px, py), (ax, ay), (bx, by) = point, start, end
+    length = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+    along = ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / length
+    off = abs((px - ax) * (by - ay) - (py - ay) * (bx - ax)) / length
+    return off <= slack and margin < along < length - margin
+
+
+def _pairs(rows: list[dict]) -> list[tuple[int, int]]:
+    """Key rows in time order as (down key code, up key code) pairs; an up before its down, or a second down before
+    the up, breaks the pairing and shows as a mismatch."""
+    ordered = sorted((r for r in rows if r["event"] in ("key_down", "key_up")), key=lambda r: r["t"])
+    return [(a["key_code"] if a["event"] == "key_down" else -1, b["key_code"] if b["event"] == "key_up" else -1)
+            for a, b in zip(ordered[::2], ordered[1::2])]
+
+
+def _near(point, target, slack=1) -> bool:
+    return point is not None and all(abs(a - b) <= slack for a, b in zip(point, target))
+
+
+@desktop_only
+def test_a_middle_click_arrives_as_the_other_button_number_two(host, launch):
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    before = pointer.mark("before")
+    sent = call("click", x=at[0], y=at[1], raw=True, button="middle", app=f"pid:{pointer.pid}", raise_policy="never")
+    pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["other_up"])
+    after = pointer.mark("after")
+    rows = _received(pointer, before, after, MOUSE["other_down"], MOUSE["other_up"], MOUSE["left_down"], MOUSE["right_down"])
+    assert sent.get("ok") is True and sent.get("method") == "cg_events", sent
+    assert [(r["type"], r["button"]) for r in rows] == [(MOUSE["other_down"], 2), (MOUSE["other_up"], 2)], rows
+    assert all(_near(r["at"], at) for r in rows) and not _own_marks(rows) and after["buttons_down"] == 0, (rows, after)
+
+
+@desktop_only
+def test_double_and_triple_click_carry_their_click_count(host, launch):
+    """One double_click and one triple_click call: AppKit reads the click count of each press from the event, so the
+    presses count 1, 2 and 1, 2, 3 (a pause longer than the double-click interval keeps the two calls apart)."""
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    counts = {}
+    for tool in ("double_click", "triple_click"):
+        before = pointer.mark(tool)
+        sent = call(tool, x=at[0], y=at[1], raw=True, app=f"pid:{pointer.pid}", raise_policy="never")
+        time.sleep(1.0)
+        after = pointer.mark(tool + "_after")
+        rows = _received(pointer, before, after, MOUSE["left_down"], MOUSE["left_up"])
+        assert sent.get("ok") is True and not _own_marks(rows), (sent, rows)
+        counts[tool] = [r["clicks"] for r in rows if r["type"] == MOUSE["left_down"]]
+        assert len([r for r in rows if r["type"] == MOUSE["left_up"]]) == len(counts[tool]) and after["buttons_down"] == 0
+    assert counts == {"double_click": [1, 2], "triple_click": [1, 2, 3]}, counts
+
+
+@desktop_only
+def test_a_drag_goes_down_at_its_start_travels_and_comes_up_at_its_end(host, launch):
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    start, end = [at[0] - 80, at[1] - 50], [at[0] + 80, at[1] + 50]
+    before = pointer.mark("before")
+    sent = call("left_click_drag", start_x=start[0], start_y=start[1], end_x=end[0], end_y=end[1], raw=True,
+                app=f"pid:{pointer.pid}", raise_policy="never")
+    pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["left_up"])
+    after = pointer.mark("after")
+    rows = _received(pointer, before, after, MOUSE["left_down"], MOUSE["left_dragged"], MOUSE["left_up"])
+    kinds = [r["type"] for r in rows]
+    assert sent.get("ok") is True and not _own_marks(rows), (sent, rows)
+    assert kinds[0] == MOUSE["left_down"] and kinds[-1] == MOUSE["left_up"] and kinds.count(MOUSE["left_dragged"]) >= 1, kinds
+    assert set(kinds[1:-1]) == {MOUSE["left_dragged"]}, kinds
+    assert _near(rows[0]["at"], start) and _near(rows[-1]["at"], end) and after["buttons_down"] == 0, (rows, after)
+    # The pointer travelled along the way: some dragged point lies on the segment, well away from both ends.
+    assert any(_on_segment(r["at"], start, end) for r in rows[1:-1]), rows
+
+
+@desktop_only
+def test_the_wheel_scrolls_the_document_under_the_pointer_each_way(host, launch):
+    """scroll(direction="down") must show what lies further down: the flipped document's visible origin y grows, and
+    "up" makes it shrink; "right" and "left" do the same with x. The skill posts wheel lines with a negative vertical
+    delta for "down" and a negative horizontal one for "right" (CoreGraphics: positive wheel 1 is up, positive wheel 2
+    is left). Whether the system flips that for natural scrolling is not set or assumed here: each direction is
+    compared with what the opposite call did, and the delta AppKit reported is recorded (``delta``, ``inverted``)."""
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    moved = call("move", x=at[0], y=at[1], raw=True)
+    assert moved.get("ok") is True, moved
+    seen = {}
+    for direction in ("down", "up", "right", "left"):
+        before = pointer.mark(direction)
+        sent = call("scroll", clicks=3, direction=direction, app=f"pid:{pointer.pid}", raise_policy="never")
+        time.sleep(0.8)  # the scroll view settles; every wheel event is logged before the mark below
+        after = pointer.mark(direction + "_after")
+        rows = _received(pointer, before, after, MOUSE["scroll"])
+        assert sent.get("ok") is True and sent.get("method") == "cg_events" and not _own_marks(rows), (sent, rows)
+        seen[direction] = {"events": len(rows), "moved": [a - b for a, b in zip(after["origin"], before["origin"])],
+                           "delta": [r["delta"] for r in rows], "inverted": sorted({r["inverted"] for r in rows})}
+    facts = json.dumps(seen)
+    assert all(seen[d]["events"] == 3 for d in seen), facts
+    assert seen["down"]["moved"][1] > 0 > seen["up"]["moved"][1], facts
+    assert seen["right"]["moved"][0] > 0 > seen["left"]["moved"][0], facts
+    assert seen["down"]["moved"][0] == seen["up"]["moved"][0] == seen["right"]["moved"][1] == seen["left"]["moved"][1] == 0, facts
+
+
+@desktop_only
+def test_mixed_text_arrives_whole_as_unicode_events_without_the_clipboard(host, launch):
+    """Latin, Cyrillic, an emoji with a skin tone (a surrogate pair and its modifier in one event), a combining accent
+    and a line break: the front fixture's text view holds exactly the text sent, under whatever layout the session
+    has, and the clipboard's change count did not move."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    text = "Hi Привет 👋🏽 é\nok"
+    before = front.mark("before")
+    sent = call("type_text", text=text, app=f"pid:{front.pid}", raise_policy="never")
+    try:
+        front.wait_for("front_text", after=before["t"], timeout=10, text=text)
+    except AssertionError:
+        pass  # the comparison below shows what arrived instead
+    after = front.mark("after")
+    downs = _between(front.rows(), before["t"], after["t"], "key_down")
+    ups = _between(front.rows(), before["t"], after["t"], "key_up")
+    assert (sent.get("ok"), sent.get("method"), sent.get("chars_sent")) == (True, "unicode_events", sent.get("chars_total")), sent
+    assert len(downs) == len(ups) == sent["chars_total"] == 16 and not _own_marks(ups), {"downs": downs, "ups": ups}
+    pairs = _pairs(downs + ups)
+    assert len(pairs) == 16 and all(d == u != -1 for d, u in pairs), pairs  # down then its own up, in time order
+    assert after["text"] == text, {"arrived": after["text"], "sent": text, "receipt": sent}
+    assert after["pasteboard_change_count"] == before["pasteboard_change_count"] and not _own_marks(downs), downs
+    assert after["keys_down"] == [], after
+
+
+@desktop_only
+def test_a_held_key_goes_up_after_its_time_and_stays_up(host, launch):
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    before = front.mark("before")
+    sent = call("hold_key", keys="a", duration_ms=600, app=f"pid:{front.pid}", raise_policy="never")
+    up = front.wait_for("key_up", after=before["t"])
+    after = front.mark("after")
+    downs = [r for r in _between(front.rows(), before["t"], after["t"], "key_down") if not r["repeat"]]
+    assert sent.get("ok") is True and sent.get("method") == "cg_events", sent
+    assert len(downs) == 1 and downs[0]["key_code"] == up["key_code"] and not _own_marks(downs + [up]), (downs, up)
+    assert downs[0]["characters"] == "a" and up["characters"] == "a", (downs, up)
+    assert up["t"] - downs[0]["t"] >= 0.6 - 0.05, {"held_s": up["t"] - downs[0]["t"]}
+    assert after["keys_down"] == [], after
+
+
+@desktop_only
+def test_the_pointer_reads_back_where_move_put_it(host, launch):
+    call, _schema = host
+    pointer, held, at = _pointer_fixture(call, launch)
+    target = [at[0] + 37, at[1] - 23]
+    moved = call("move", x=target[0], y=target[1], raw=True)
+    read = call("cursor_position")
+    mark = pointer.mark("after")
+    assert moved.get("ok") is True and read.get("ok") is True, (moved, read)
+    assert _near([read["x"], read["y"]], target), {"read": read, "target": target}
+    moved_rows = _received(pointer, held, mark, MOUSE["moved"])
+    assert moved_rows and _near(moved_rows[-1]["at"], target) and not _own_marks(moved_rows), moved_rows
+
+
+@desktop_only
+def test_a_named_arrow_carries_its_class_flags(host, launch):
+    """An arrow from a keyboard carries Fn and NumericPad (0xA00000) beside its modifiers; macOS ignores Ctrl+arrow
+    shortcuts without them. shift+left (a selection in the text view; no system shortcut) must arrive with Shift and
+    both class bits in its raw CoreGraphics flags."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    before = front.mark("before")
+    sent = call("key", keys="shift+left", app=f"pid:{front.pid}", raise_policy="never")
+    row = front.wait_for("key_down", after=before["t"], key_code=123)
+    up = front.wait_for("key_up", after=before["t"], key_code=123)
+    assert sent.get("ok") is True and sent.get("method") == "cg_events", sent
+    for event in (row, up):  # the class bits ride on the release as on the press
+        assert event["raw_flags"] & 0xA20000 == 0xA20000 and event["modifiers"] == ["shift"] and event["tag"] == SKILL_TAG, event
+    assert front.mark("after")["keys_down"] == []
+
+
+@desktop_only
+def test_a_right_click_arrives_as_button_one(host, launch):
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    before = pointer.mark("before")
+    sent = call("click", x=at[0], y=at[1], raw=True, button="right", app=f"pid:{pointer.pid}", raise_policy="never")
+    pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["right_up"])
+    after = pointer.mark("after")
+    rows = _received(pointer, before, after, MOUSE["right_down"], MOUSE["right_up"], MOUSE["left_down"])
+    assert sent.get("ok") is True, sent
+    assert [(r["type"], r["button"]) for r in rows] == [(MOUSE["right_down"], 1), (MOUSE["right_up"], 1)], rows
+    assert all(_near(r["at"], at) for r in rows) and not _own_marks(rows) and after["buttons_down"] == 0
+
+
+@desktop_only
+def test_a_press_a_move_and_a_release_in_three_calls_are_one_drag(host, launch):
+    """mouse_down, then move (the session holds the button, so the program posts a dragged event), then mouse_up."""
+    call, _schema = host
+    pointer, _held, at = _pointer_fixture(call, launch)
+    start, end = [at[0] - 60, at[1]], [at[0] + 60, at[1] + 30]
+    before = pointer.mark("before")
+    pressed = call("mouse_down", x=start[0], y=start[1], raw=True, app=f"pid:{pointer.pid}", raise_policy="never")
+    released = None
+    try:  # whatever fails in between, the runner's button goes up again for the cases after this one
+        held = pointer.mark("held")
+        moved = call("move", x=end[0], y=end[1], raw=True)
+    finally:
+        released = call("mouse_up")
+    pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["left_up"])
+    after = pointer.mark("after")
+    rows = _received(pointer, before, after, MOUSE["left_down"], MOUSE["left_dragged"], MOUSE["left_up"], MOUSE["moved"])
+    assert all(r.get("ok") is True for r in (pressed, moved, released)), (pressed, moved, released)
+    assert held["buttons_down"] & 1, held
+    assert [r["type"] for r in rows] == [MOUSE["left_down"], MOUSE["left_dragged"], MOUSE["left_up"]], rows
+    assert _near(rows[0]["at"], start) and _near(rows[1]["at"], end) and _near(rows[2]["at"], end), rows
+    assert not _own_marks(rows) and after["buttons_down"] == 0, after
+
+
+@desktop_only
+def test_a_system_key_arrives_as_a_system_defined_event(host, launch):
+    """keys-light-toggle, sent twice so a keyboard light (if the runner has one) ends as it was: it changes nothing
+    else on a hosted Mac. The front fixture's system-event monitors (its own and the global one) must see each press
+    and release as subtype 8 with key type 23 and the skill's mark. If the window server consumes media keys before
+    any application monitor, this case fails on observation, not on delivery: the rows recorded say which."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    installed = [r for r in front.rows() if r["event"] == "system_monitor"]
+    assert installed and all(r["installed"] for r in installed), installed
+    before = front.mark("before")
+    sent = [call("key", keys="keys-light-toggle", app=f"pid:{front.pid}", raise_policy="never") for _ in range(2)]
+    time.sleep(0.5)
+    after = front.mark("after")
+    rows = [r for r in _between(front.rows(), before["t"], after["t"], "system_event") if r["subtype"] == 8 and r["key_type"] == 23]
+    assert all(s.get("ok") is True and s.get("method") == "cg_events" for s in sent), sent
+    seen = [r for r in rows if r["scope"] == "local"] or [r for r in rows if r["scope"] == "global"]
+    assert [r["down"] for r in seen] == [True, False, True, False], rows
+    # The raw word, not only its decoded halves: key type 23 << 16 with state 0xA (down) or 0xB (up) << 8.
+    assert [r["data1"] for r in seen] == [0x170A00, 0x170B00, 0x170A00, 0x170B00], seen
+    assert all(r["tag"] == SKILL_TAG for r in seen), seen
+
+
+@desktop_only
+def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_path, record_property):
+    """600 characters (Latin, Cyrillic, emoji, line breaks) through type_text: the text view holds all 600, and the
+    fixture's own log says how long they took, per marked key down it saw (all 600 on success). The skill's budget allows mac_input.TYPE_MS_PER_CHAR per character
+    beyond a fixed part, so more than that fails here: green means the budget holds on this runner, red that it must be
+    raised (from this measurement, which goes to the job summary and the artifact, not from a guess)."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("front")
+    _hand_front(call, front)
+    text = ("Line of text, строка текста 🙂\n" * 30)[:600]
+    before = front.mark("before")
+    sent = call("type_text", text=text, app=f"pid:{front.pid}", raise_policy="never")
+    wall_ms = call.last["wall_ms"]
+    try:
+        front.wait_for("front_text", after=before["t"], timeout=30, text=text)
+    except AssertionError:
+        pass  # what arrived is compared below, after its timing is recorded
+    after = front.mark("after")
+    keys = _between(front.rows(), before["t"], after["t"], "key_down", "key_up")
+    budget = json.loads(sent["cmd"][-1]).get("budget_ms") if sent.get("cmd") else None
+    _evidence(tmp_path, "long_text_timing.jsonl", {"chars": len(text), "chars_total": sent.get("chars_total"),
+                                             "chars_sent": sent.get("chars_sent"), "wall_ms": wall_ms, "budget_ms": budget,
+                                             "fixture_s": (keys[-1]["t"] - keys[0]["t"]) if keys else None,
+                                             "ok": sent.get("ok"), "error": sent.get("error")})
+    # The time per key the fixture saw: the span of the program's own marked key downs over their number, so a run cut
+    # short (300 of 600 in six seconds) is measured at its real pace, not at half of it.
+    downs = [k for k in keys if k["event"] == "key_down" and k.get("tag") == SKILL_TAG]
+    per_char = round((keys[-1]["t"] - keys[0]["t"]) * 1000 / len(downs), 2) if downs else None
+    record_property("marked_key_downs", len(downs))
+    record_property("ms_per_char", per_char)  # the job summary prints it beside the case
+    record_property("wall_ms", wall_ms)
+    log.warning("long text: %s characters, %s ms wall, %s ms per character, budget %s ms", len(text), wall_ms, per_char, budget)
+    assert sent.get("ok") is True and sent.get("chars_sent") == sent.get("chars_total") == 600, sent
+    assert len(downs) == 600, {"marked_key_downs": len(downs)}  # one marked key down per grapheme reached the fixture
+    assert after["text"] == text, {"arrived": len(after["text"]), "sent": len(text)}
+    from skills.unix_computer_use import mac_input  # the allowance the program's deadline is computed from
+    assert per_char is not None and per_char <= mac_input.TYPE_MS_PER_CHAR, {"ms_per_char": per_char, "budget_ms": budget}
+
+
+@desktop_only
+def test_a_key_sequence_with_characters_types_selects_and_replaces(host, launch):
+    """key("a cmd+a b") goes the sequence path: one lookup of its characters in the target's layout after the switch
+    (typing plane and Command plane), then a, Command-A (the chord program), b, into the paste fixture, whose Edit menu
+    has Select All (the front fixture has no menu, so Command-A does nothing there). Its text view ends with "b": the
+    "a" was typed, selected and replaced."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("paste")
+    _hand_front(call, front)
+    before = front.mark("before")
+    sent = call("key", keys="a cmd+a b", app=f"pid:{front.pid}", raise_policy="never")
+    try:
+        front.wait_for("paste_text", after=before["t"], timeout=10, text="b")
+    except AssertionError:
+        pass  # the comparison below shows what arrived instead
+    after = front.mark("after")
+    downs = _between(front.rows(), before["t"], after["t"], "key_down")
+    assert sent.get("ok") is True and sent.get("steps") == 3, sent
+    assert after["text"] == "b", {"text": after["text"], "downs": downs, "receipt": sent}
+    assert [r["characters"] for r in downs] == ["a", "a", "b"] and downs[1]["modifiers"] == ["cmd"], downs
+    assert not _own_marks(downs) and after["keys_down"] == [], (downs, after)

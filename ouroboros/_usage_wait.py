@@ -466,7 +466,7 @@ def late_settler(reservation, request, extractor, manifest_ref, capture, late_ow
     def settle_late(*, result=None, error=None) -> None:
         try:
             if error is not None:
-                state = ua._terminalize_failed_attempt(reservation, error)
+                state = ua._terminalize_failed_attempt(reservation, error, request)
                 _observe_late_outcome(ua._record_attempt_capture(
                     reservation, request, state, candidate_manifest_ref=manifest_ref, exc=error))
             else:

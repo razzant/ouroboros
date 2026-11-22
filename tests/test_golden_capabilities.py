@@ -22,6 +22,7 @@ from ouroboros.tool_access import user_files_path_block_reason
 from ouroboros.tools.core import _code_search, _list_files, _read_file, _write_file
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools import registry_guard_process
+from tests._workspace_git import git_repository
 
 
 def _posix(rendered: str) -> str:
@@ -63,11 +64,7 @@ def user_files_ctx(tmp_path, monkeypatch):
 @pytest.fixture()
 def repo_ctx(tmp_path):
     """ROOT-principal context over a real git repo (restore/append/read pins)."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True, identity=True)
     drive = tmp_path / "data"
     drive.mkdir()
     return ToolContext(repo_dir=repo, drive_root=drive, task_id="t-golden")
@@ -281,8 +278,7 @@ def test_credential_named_ordinary_source_readable_by_children(tmp_path):
     from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    git_repository(repo, unborn=True)
     (repo / "token_service.py").write_text(
         "def issue_token():\n    return 'ordinary auth logic'\n", encoding="utf-8")
     ctx = ToolContext(

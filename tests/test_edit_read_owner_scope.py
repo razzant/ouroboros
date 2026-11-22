@@ -381,8 +381,8 @@ def _call(call_id, name, arguments):
 
 
 def test_editor_round_runs_in_call_order_and_each_call_sees_the_previous(file_tools):
-    from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls, tool_calls_can_run_parallel
-    from ouroboros.tool_capabilities import FOREGROUND_MUTATIVE_TOOLS
+    from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls
+    from ouroboros.tool_capabilities import FOREGROUND_MUTATIVE_TOOLS, call_segments
 
     registry, ctx, _, _, workspace, data, _ = file_tools
     (workspace / "a.txt").write_text("one\n")
@@ -393,7 +393,10 @@ def test_editor_round_runs_in_call_order_and_each_call_sees_the_previous(file_to
              _call("second", "edit_text", {"path": "a.txt", "old_str": "ONE", "new_str": "AFTER"}),
              _call("after", "read_file", {"path": "a.txt"})]
     disjoint = [calls[1], calls[2]]
-    assert not tool_calls_can_run_parallel(disjoint) and not tool_calls_can_run_parallel(calls)
+    def names(batch):
+        return [call["function"]["name"] for call in batch]
+    # Every call of an editor round runs alone, in order: the reads beside the edits too.
+    assert call_segments(names(disjoint)) == [[0], [1]] and call_segments(names(calls)) == [[0], [1], [2], [3], [4]]
     assert {"write_file", "edit_text", "edit_batch", "apply_patch"} <= FOREGROUND_MUTATIVE_TOOLS
     messages, trace = [], {"tool_calls": []}
     logs = data / "logs"

@@ -178,7 +178,8 @@ def test_a_legacy_unix_remote_choice_on_windows_survives_off_reseed_and_on(data,
             calls.append(("osworld_http", conn, argv, timeout))
             return {"status": 200, "result": {"status": "success", "returncode": 0, "output": "remote-ok"}}
 
-        def ssh(self, conn, command, *, timeout):
+        def ssh(self, conn, command, *, timeout, raw=False):
+            assert raw is True  # remote_exec is the user's own script, for the account's own shell
             calls.append(("ssh_macos", conn, command, timeout))
             return 0, "remote-ok", ""
 
