@@ -387,10 +387,11 @@ def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optiona
         listed["my human's"] += [f"reply reserve {fact['reserve']:,}", f"work room {fact['work']:,}"]
         alone = sorted((part for part in fact["parts"] if part[0] not in grouped),  # core, assignment, then the rest
                        key=lambda part: ("core", "assignment").index(part[0]) if part[0] in ("core", "assignment") else 2)
-        density = float(fact.get("density") or 1.0)  # the needs apply it; the parts are measured tokens
+        density = float(fact.get("density") or 1.0)  # the needs apply it; reserve and work room are window tokens
         text += "; " + "; ".join([f"{whose}: {', '.join(items)}" for whose, items in listed.items()]
                                  + [f"{name} {tokens:,}" for name, tokens in alone]
-                                 + ([f"parts before density {density:.2f}"] if abs(density - 1.0) > 0.005 else []))
+                                 + ([f"parts before density {density:.2f} except reply reserve and work room"]
+                                    if abs(density - 1.0) > 0.005 else []))
     return (f"{text}; my story {fact['story']:,} ({unfolded}) + rooms {fact['room']:,} in ordinary forms, beside a "
             f"Max room of {fact['allowance']:,}")
 

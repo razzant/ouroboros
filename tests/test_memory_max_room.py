@@ -93,7 +93,9 @@ def test_the_measure_reads_each_host_section_by_whose_part_and_adds_up(monkeypat
     dense = cf.build_context_fit_plan(None, core, {"id": "room01", "usage_category": "consciousness"},
         preferred_mode="max", route_resolver=lambda *_a, **_kw: (
             {"provider": "test", "model": "test"}, ce.CapabilityEvidence(2_000_000, "confirmed", "metadata", "room-route")))
-    assert _fact(dense)["density"] == 1.3 and "; parts before density 1.30; " in memory_facts(dense, "max")
+    # Review round 2 (Astra advisory): the clause names what it covers; reply reserve and work room are window tokens
+    assert _fact(dense)["density"] == 1.3 and "; parts before density 1.30 except reply reserve and work room; " in (
+        memory_facts(dense, "max"))
 
 
 def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(monkeypatch):
