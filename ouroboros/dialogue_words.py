@@ -1,4 +1,4 @@
-r"""Words over the conversation: the one tokenization rule and the one predicate (consensus K4.1).
+r"""Words over the conversation: the one tokenization rule and the one predicate.
 
 Pure: no store, no settings, no clock. ``chat_history(words=…)`` (``dialogue_recall``), the descent's
 optional ``words`` and the disposable word postings all read text through this module, so a token a

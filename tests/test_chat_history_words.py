@@ -1,4 +1,4 @@
-"""``chat_history(words=…)``: the words reader over the conversation (``ouroboros/dialogue_recall.py``, K4)."""
+"""``chat_history(words=…)``: the words reader over the conversation (``ouroboros/dialogue_recall.py``)."""
 from __future__ import annotations
 
 import json

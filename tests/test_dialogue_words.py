@@ -1,4 +1,4 @@
-"""The one tokenization rule and the one word predicate (``ouroboros/dialogue_words.py``, consensus K4.1)."""
+"""The one tokenization rule and the one word predicate (``ouroboros/dialogue_words.py``)."""
 from __future__ import annotations
 
 import json

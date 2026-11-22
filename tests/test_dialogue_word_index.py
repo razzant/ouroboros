@@ -1,4 +1,4 @@
-"""Disposable word postings (``ouroboros/dialogue_word_index.py``, consensus K5) and their reader path."""
+"""Disposable word postings (``ouroboros/dialogue_word_index.py``) and their reader path."""
 from __future__ import annotations
 
 import json
@@ -315,3 +315,17 @@ def test_a_bounded_postings_read_examines_the_newest_candidates_and_advances(tmp
     rest = _read(tmp_path, words=["plum"], snapshot=token)
     assert "plum 1" in rest and "plum 0" in rest and "plum 5" not in rest and "this is the last window" in rest
     assert "total=0" in _read(tmp_path, words=["zzz"])  # no candidate at all: nothing left unexamined
+
+
+def test_postings_built_under_other_unicode_data_are_bypassed(tmp_path, monkeypatch):
+    import unicodedata
+
+    _say(tmp_path, "2026-11-01T00:00:00Z", "plum")
+    dwi.run(tmp_path, lambda: False)
+    assert "Read by postings" in _read(tmp_path, words=["plum"])
+    with ds.transaction(tmp_path, write=False) as conn:
+        assert dwi.generation(conn)["generation"].split(":")[1] == unicodedata.unidata_version
+    monkeypatch.setattr(unicodedata, "unidata_version", "0.0.0")
+    with ds.transaction(tmp_path, write=False) as conn:
+        assert dwi.generation(conn)["reason"].startswith("unicode data")
+    assert "Read by scan" in _read(tmp_path, words=["plum"]) and dwi.due(tmp_path, {}, {}, False)

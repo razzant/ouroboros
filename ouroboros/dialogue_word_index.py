@@ -1,4 +1,4 @@
-"""Disposable word postings for the chat stream inside ``state/dialog.sqlite`` (consensus K5).
+"""Disposable word postings for the chat stream inside ``state/dialog.sqlite``.
 
 The postings only PROPOSE candidates: every candidate is decided by ``dialogue_words``' one predicate on the
 original typed fields (``dialogue_recall``). A missing, partial, latched-unusable or unreadable generation, or a
@@ -16,7 +16,8 @@ or the import; no ``user_version`` change, so an older body opens, appends, edit
   so it is uncovered, never lost behind one global high-water mark.
 - ``dw_dirty(seq, rev)``: rows whose text an edit changed after their posting, recorded by the trigger
   ``dw_edit`` inside the editing transaction; always re-read from the original, never deleted until a rebuild.
-- ``dw_meta``: the generation, its ``seen_rev`` witness of ``meta.chat_text_revision`` and ``usable``. The only
+- ``dw_meta``: the generation (``<format>:<Unicode data version>:<uuid>``: the token rule's mark classes come
+  from the running Python's Unicode data, so a body with other data bypasses the postings), its ``seen_rev`` witness of ``meta.chat_text_revision`` and ``usable``. The only
   writer that changes chat text on an existing row (``dialogue_store.revise_text``) updates the body, then
   increments the counter: the trigger requires its witness to equal the counter still unincremented, records
   the row at the next revision and advances the witness. Any other transition (an edit with no counter step, a
@@ -35,6 +36,7 @@ import logging
 import pathlib
 import sqlite3
 import time
+import unicodedata
 import uuid
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
@@ -100,7 +102,10 @@ def generation(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
     revision = _revision(conn)
     triggers = {name for (name,) in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='trigger' AND name IN ('dw_edit','dw_import')")}
+    unicode = str(facts["generation"]).split(":")[1] if str(facts["generation"]).count(":") >= 2 else ""
     reason = ("format" if facts["format"] != FORMAT else "latched unusable" if not facts["usable"]
+              else f"unicode data {unicode or 'unrecorded'} != {unicodedata.unidata_version}"
+              if unicode != unicodedata.unidata_version
               else f"witness {facts['seen_rev']} != chat_text_revision {revision}" if facts["seen_rev"] != revision
               else "trigger missing" if triggers != {"dw_edit", "dw_import"} else "")
     return {**facts, "revision": revision, "sound": not reason, "reason": reason}
@@ -219,7 +224,7 @@ def _install(root: pathlib.Path) -> str:
             conn.execute(statement)
         for statement in _DDL:
             conn.execute(statement)
-        name = f"{FORMAT}:{uuid.uuid4().hex}"
+        name = f"{FORMAT}:{unicodedata.unidata_version}:{uuid.uuid4().hex}"  # tokens depend on the mark classes
         conn.execute("INSERT INTO dw_meta (id, format, generation, seen_rev, usable) VALUES (1, ?, ?, ?, 1)",
                      (FORMAT, name, _revision(conn)))
         return name
