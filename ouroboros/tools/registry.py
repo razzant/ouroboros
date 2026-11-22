@@ -30,33 +30,22 @@ from ouroboros.tool_capabilities import (
 from ouroboros.shell_parse import (
     directory_destination_child_name,  # noqa: F401 — historical facade surface
     is_absolute_path_text,  # noqa: F401 — historical facade surface
-    path_text_is_inside,  # noqa: F401 — historical facade surface
     sequential_effective_cwds,  # noqa: F401 — historical facade surface
     shell_argv,  # noqa: F401 — historical facade surface
-    shell_argv_with_path_tokens,  # noqa: F401 — historical facade surface
     shell_command_string,  # noqa: F401 — historical facade surface
     strip_leading_env_assignments,  # noqa: F401 — historical facade surface
     sudo_noninteractive_violation,  # noqa: F401 — historical facade surface
     unwrap_env_argv,  # noqa: F401 — historical facade surface
 )
 from ouroboros.tools.shell_guards import (
-    PROTECTED_RUNTIME_PATHS_LOWER,  # noqa: F401 — historical facade surface
     interpreter_family,  # noqa: F401 — historical facade surface
     interpreter_inline_code,  # noqa: F401 — historical facade surface
-    interpreter_write_shape,  # noqa: F401 — historical facade surface
-    light_shell_repo_mutation,  # noqa: F401 — historical facade surface
-    non_interpreter_write_shape,  # noqa: F401 — historical facade surface
     parse_porcelain_paths,  # noqa: F401 — historical facade surface
     process_shell_guard_args,  # noqa: F401 — historical facade surface
-    runtime_data_guard_targets,  # noqa: F401 — historical facade surface
-    shell_writer_targets_protected,  # noqa: F401 — historical facade surface
-    workspace_executor_state_write_block,  # noqa: F401 — historical facade surface
     directory_destination_pairs,  # noqa: F401 — historical facade surface
-    writer_target_rows,  # noqa: F401 — historical facade surface
     writer_target_tokens,  # noqa: F401 — historical facade surface
 )
 from ouroboros.tools.deliverables_shell import (
-    direct_deliverable_target_block,  # noqa: F401 — historical facade surface
     lexical_user_files_block_reason,  # noqa: F401 — historical facade surface
 )
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts  # noqa: F401 — historical facade surface
@@ -139,7 +128,6 @@ from ouroboros.tools.tool_resolution import (  # noqa: F401 — re-exported move
     active_repo_dir_for,
     system_repo_dir_for,
 )
-from ouroboros.tools.write_shape import _workspace_write_candidates  # noqa: F401 — historical facade surface
 from ouroboros.tools.registry_guards import (  # noqa: F401 — re-exported moved surface
     _GITHUB_TOKEN_TOOLS,
     _WEB_TOOLS,
@@ -154,19 +142,9 @@ from ouroboros.tools.registry_guards import (  # noqa: F401 — re-exported move
     _stray_skill_payload_failsoft,
 )
 from ouroboros.tools.registry_guard_process import (  # noqa: F401 — re-exported moved surface
-    _COMMAND_HEAD_WRAPPERS,
-    _DENIED_READ_OPTIONS,
-    _NESTED_EXECUTION_MARKERS,
-    _NESTED_EXECUTION_TOKENS,
-    _READ_ONLY_INSPECTION_COMMANDS,
-    _SEARCH_TOOL_EXEC_OPTIONS,
-    _TRUSTED_EXECUTABLE_DIRS,
-    _denied_read_option,
     _format_light_repo_write_note,
     _git_ref_snapshot,
-    _is_pure_read_inspection,
     _light_repo_snapshot,
-    _trusted_read_head,
 )
 
 log = logging.getLogger(__name__)
@@ -207,30 +185,6 @@ from ouroboros.tools.registry_core import (  # noqa: F401 — re-exported moved 
 )
 
 
-
-
-# Commands that can only READ. This is an ALLOWLIST on purpose: an unrecognised
-# command head is treated as executable access, so the enumeration fails CLOSED.
-# (A denylist of "write markers" fails OPEN — every new spelling of a POST walks
-# around it, which is exactly the keyword-gate antipattern BIBLE P5 forbids.)
-# Wrappers that do not themselves act: the real command head follows them.
-# ``git`` reads only through these subcommands.
-# Allowlist MEMBERSHIP IS NOT ENOUGH: several read heads execute or write through their
-# own options. Per command, because short flags are not portable — ``grep -o`` prints
-# matches, ``sort -o`` writes a file. Text reaching here is lowercased, so an upper-case
-# spelling (``git grep -O``, ``fd -X``) collapses onto the same entry.
-# The executable itself must be a bare name or live in a system bin: ``/tmp/evil/grep``
-# and ``./grep`` are shadowing, not inspection.
-
-
-# Spellings that make a shell run a command NESTED inside another one. The read exemption
-# fails closed on all of them: the head-allowlist can only vouch for heads it actually sees,
-# and a nested command's head is not one of them ("echo" vouching for the "curl -X POST" it
-# interpolates). Refusing the CONSTRUCT rather than enumerating the payloads inside it is the
-# point — no list of "what a write looks like" is ever complete (BIBLE P5).
-# Bare tokens the lexer emits for the same constructs (and for a plain subshell). These used to
-# be STRIPPED from the token list before the head was taken, which is precisely how the nested
-# command escaped validation; they are refused instead.
 
 
 # verify_and_record runs the agent's declared `check` like a command, so it must clear the

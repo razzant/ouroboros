@@ -265,9 +265,9 @@ const smallButton = (label, name, action, extra = '') => buttonHtml(label, { ton
 const skipButton = (name, label = 'Skip review') => skipReviewButtonHtml(actionAttrs(name, 'attest_review'), label);
 
 /**
- * One installed skill as owner-facing facts: its run state chip, the attention
- * trays (one sentence + actions each), whether it needs the owner, whether an
- * update waits, and why the switch is locked. Pure over the listing row.
+ * One installed skill as owner-facing facts: its run state chip, the attention trays (one sentence + actions each),
+ * whether it needs the owner, whether an update waits, whether a review of these files runs (`reviewing`, the fact its
+ * Reviewing… chip is drawn from) and why the switch is locked. Pure over the listing row.
  */
 export function installedSkillModel(skill, { reviewing = false, repairing = false, live = {}, pageModules = {} } = {}) {
     const name = String(skill.name || '');
@@ -320,7 +320,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     if (repairing) chip = chipHtml('Asking Ouroboros…', 'neutral', { work: true });
 
     if (skill.lifecycle_virtual) {
-        return { chip, trays, overflow: [], needs: jobFailed, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
+        return { chip, trays, overflow: [], needs: jobFailed, update: false, withdrawn: false, lockReason: '', sourceName, modified, install, reviewing: reviewRunning };
     }
 
     if (untrusted(skill)) {
@@ -486,7 +486,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     if (requiredTrays.length) needs = true;
     const allTrays = [...requiredTrays, ...pageTrays, ...trays];
     return {
-        chip, trays: allTrays.slice(0, 2), overflow: allTrays.slice(2), needs, sourceName, modified, install,
+        chip, trays: allTrays.slice(0, 2), overflow: allTrays.slice(2), needs, sourceName, modified, install, reviewing: reviewRunning || Boolean(install?.pending_update),
         // The switch shows what runs; whether it may be off is the organization's (the toggle refuses it too).
         lockReason: required ? REQUIRED_LOCK : (skill.enabled ? '' : lockReason),
         update: offersChanges(skill) && Boolean(update || withdrawn || install?.update_rejected || install?.pending_update), withdrawn: Boolean(withdrawn),

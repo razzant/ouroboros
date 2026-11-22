@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -1483,6 +1484,25 @@ def test_poll_wraps_metadata_above_pressed_more_on_phone(more_ui):
     assert_at(page.locator(selector), point)
 
 
+def fit_closed_list(page, level, first):
+    """Make the closed list fit the Settings scroller whatever the system's fonts (Ubuntu draws it taller than macOS).
+
+    Measured in a short window where it overflows: the scroller must hold the whole list, and centring the first
+    More must need no scrolling, so that choosing it later lands inside the natural range. The window is 1020 high
+    unless the fonts need more.
+    """
+    content, first_center, height = level.evaluate("""(b, first) => {
+        const r = b.getBoundingClientRect(), m = b.querySelector(first).getBoundingClientRect();
+        return [b.scrollHeight, m.top + m.height / 2 - r.top + b.scrollTop, b.clientHeight];
+    }""", first)
+    assert content > height
+    wanted = math.ceil(max(content, 2 * first_center + 2))
+    window = max(1020, 700 + wanted - height)
+    page.set_viewport_size({"width": 1100, "height": window})
+    page.wait_for_function("([b, h]) => b.clientHeight === h", arg=[level.element_handle(), height + window - 700])
+    page.evaluate(SETTLED)
+
+
 @pytest.mark.parametrize("short_list", [False, True], ids=["long-list", "fits-when-closed"])
 def test_last_more_closes_at_wheeled_position_until_reader_moves(more_ui, short_list):
     from playwright.sync_api import expect
@@ -1491,8 +1511,10 @@ def test_last_more_closes_at_wheeled_position_until_reader_moves(more_ui, short_
     if short_list:
         profiles = ui["fixture"]["status"]["profiles"]["profiles"]
         profiles[:] = [profiles[i] for i in (12, 14, 15, 17, 19)]
-        page.set_viewport_size({"width": 1100, "height": 1020})
+        page.set_viewport_size({"width": 1100, "height": 700})
     level = show_more_page(page, ui)
+    if short_list:
+        fit_closed_list(page, level, row(12) + " [data-resources]")
     selector = row(19) + " [data-resources]"
     last = page.locator(selector)
     natural = level.evaluate("b => b.scrollHeight")
@@ -1598,8 +1620,15 @@ def test_more_press_keeps_point_when_previous_focus_yields(more_ui, prior_focus)
     expect(page.locator(first)).to_be_in_viewport()
     page.mouse.move(*point)
     page.mouse.down()
-    if page.context.browser.browser_type.name == "webkit":
-        expect(level).to_be_focused()  # WebKit focuses the scroller, not the clicked button.
+    # The previous focus yields to the press. Where it goes is the engine's platform convention: macOS WebKit
+    # focuses the scroller (a button takes no focus from a pointer there), Chromium and Linux WebKit the pressed More.
+    expect(before).not_to_be_focused()
+    taken = """([level, more]) => [level, level.querySelector(more)].includes(document.activeElement)"""
+    try:
+        page.wait_for_function(taken, arg=[level.element_handle(), selector], timeout=5000)
+    except Exception as error:
+        active = page.evaluate("() => document.activeElement?.outerHTML.slice(0, 200)")
+        raise AssertionError(f"the press left focus on {active}") from error
     budgets(ui, 12)
     observe(page, ui, 61)
     more = page.locator(selector)

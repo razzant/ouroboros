@@ -12,26 +12,6 @@ from typing import Any, List
 
 EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.\-])/[^\s'\"\\),;\]]+")
 _HTML_CLOSING_TAG_PATH_RE = re.compile(r"/[A-Za-z][A-Za-z0-9:-]*>")
-# A path absolute in WINDOWS grammar: a drive letter plus a separator, or a UNC
-# share. The UNC alternative REQUIRES both segments (`\\server\share`) because a
-# bare `\\`-plus-text is not a path at all — it is the commonest escape idiom in
-# every other language (`s.replace(/\\/g,'/')`, `"a\\b"`, `'\\b'`), and matching it
-# made the light-mode inline fence refuse ordinary `node -e` payloads that named no
-# repo path (v6.89.x). A share segment cannot be spelled by accident.
-# A BACKTICK is deliberately NOT a delimiter, in either grammar. Treating it as one
-# (added and then removed 2026-08-05) closed the template-literal exact-root hole
-# (``rmSync(String.raw`<root>`)`` harvests root+backtick = a sibling, so deleting the
-# exact root is ALLOWED — only the root itself; anything under it still resolves
-# inside) but also newly refused writes to real sibling paths with a literal backtick
-# in the name, which the base allowed. Owner policy: protection may be weakened, never
-# strengthened, and a review-found adjacent hole is disclosed, not fenced. The hole is
-# pinned as disclosed in test_interpreter_family_write_fence.py.
-EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:"
-    r"[A-Za-z]:[\\/][^\s'\"),;\]]+"
-    r"|\\\\[^\s'\"),;\]\\/]+[\\/][^\s'\"),;\]]+"
-    r")"
-)
 POSIX_SHELL_HEADS = frozenset({"sh", "bash", "zsh", "dash", "ash"})
 
 
@@ -125,38 +105,6 @@ def unwrap_env_argv(argv: List[str]) -> List[str]:
     return argv[idx:] if idx < len(argv) else []
 
 
-def env_chdir_operand(argv: List[str]) -> str:
-    """Return an ``env`` wrapper's effective cwd operand, if one is present."""
-    if not argv or pathlib.PurePath(argv[0]).name.lower() != "env":
-        return ""
-    index = 1
-    while index < len(argv):
-        token = str(argv[index])
-        if token == "--":
-            break
-        if token in {"-C", "--chdir"}:
-            return str(argv[index + 1]) if index + 1 < len(argv) else ""
-        if token.startswith("--chdir="):
-            return token.split("=", 1)[1]
-        if token in {"-u", "--unset", "--argv0"}:
-            index += 2
-            continue
-        if token == "-S" or token.startswith("--split-string="):
-            break
-        if token.startswith("-") or ("=" in token and not token.startswith("=")):
-            index += 1
-            continue
-        break
-    return ""
-
-
-def interpreter_reads_program_from_stdin(argv: List[str]) -> bool:
-    """Whether an interpreter argv has no inline body or script-file operand."""
-    return bool(argv) and not any(
-        str(token) != "-" and not str(token).startswith("-") for token in argv[1:]
-    )
-
-
 def sequential_effective_cwds(target_rows: list, initial_cwd: pathlib.Path) -> list[pathlib.Path]:
     """Symlink-resolved cwd in force at the start of each parsed command row."""
     current = pathlib.Path(initial_cwd).resolve(strict=False)
@@ -182,48 +130,6 @@ def directory_destination_child_name(command: str, argv: List[str], source: str)
             return ""
         return "/".join(parts)
     return pathlib.PurePath(source_text).name
-
-
-def replacement_placeholders(argv: List[str]) -> frozenset[str]:
-    """Replacement words are templates, never concrete filesystem targets."""
-    executable = pathlib.PurePath(str(argv[0])).name.lower() if argv else ""
-    placeholders = {"{}"} if executable in {"find", "xargs"} else set()
-    if executable != "xargs":
-        return frozenset(placeholders)
-    index = 1
-    while index < len(argv):
-        token = str(argv[index])
-        if token in {"-I", "--replace"} and index + 1 < len(argv):
-            placeholders.add(str(argv[index + 1]))
-            index += 2
-            continue
-        if token.startswith("--replace="):
-            placeholders.add(token.split("=", 1)[1])
-        elif token.startswith("-I") and len(token) > 2:
-            placeholders.add(token[2:])
-        index += 1
-    return frozenset(item for item in placeholders if item)
-
-
-def replacement_target_uncertain(
-    argv: List[str], targets: List[str], *, write_shaped: bool,
-) -> tuple[List[str], bool]:
-    """Drop template-shaped targets and report when replacement hides a write."""
-    placeholders = replacement_placeholders(argv)
-    uncertain = any(
-        placeholder in str(target)
-        for target in targets for placeholder in placeholders
-    )
-    executable = pathlib.PurePath(str(argv[0])).name.lower() if argv else ""
-    uncertain = uncertain or (
-        executable == "xargs" and write_shaped
-        and any(placeholder in str(token) for token in argv[1:] for placeholder in placeholders)
-    )
-    concrete = [
-        target for target in targets
-        if not any(placeholder in str(target) for placeholder in placeholders)
-    ]
-    return concrete, uncertain
 
 
 def strip_leading_env_assignments(argv: List[str]) -> List[str]:
@@ -443,76 +349,6 @@ def shell_segments(raw_cmd: Any) -> List[List[str]]:
     return segments
 
 
-_HEREDOC_START_RE = re.compile(
-    r"<<-?\s*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)"
-)
-
-
-def shell_segment_rows(raw_cmd: Any) -> List[tuple[List[str], str, tuple[str, ...]]]:
-    """Segments with their leading operator and any visible heredoc program body.
-
-    Literal/static heredoc bodies are removed from shell tokenization and attached
-    to the command that owns the redirection. This lets interpreter guards inspect
-    stdin code without mistaking its lines for independent shell commands.
-    """
-    if not isinstance(raw_cmd, str) or "<<" not in raw_cmd:
-        scrubbed = raw_cmd
-        body_owners: list[tuple[int, str]] = []
-    else:
-        lines = raw_cmd.splitlines()
-        scrubbed_lines = list(lines)
-        pending: list[tuple[int, str]] = []
-        index = 0
-        while index < len(lines):
-            match = _HEREDOC_START_RE.search(lines[index])
-            delimiter = str(match.group("delimiter") or "") if match else ""
-            if not delimiter:
-                index += 1
-                continue
-            end = index + 1
-            strip_tabs = match.group(0).startswith("<<-")
-            while end < len(lines):
-                candidate = lines[end].lstrip("\t") if strip_tabs else lines[end]
-                if candidate == delimiter:
-                    break
-                end += 1
-            if end >= len(lines):
-                index += 1
-                continue
-            body = "\n".join(lines[index + 1:end])
-            for body_index in range(index + 1, end + 1):
-                scrubbed_lines[body_index] = ""
-            owner_lines = [*scrubbed_lines[:index], lines[index][:match.end()]]
-            owner_count = len(shell_segments("\n".join(owner_lines)))
-            if owner_count:
-                pending.append((owner_count - 1, body))
-            index = end + 1
-        scrubbed = "\n".join(scrubbed_lines)
-        body_owners = pending
-
-    tokens = shell_tokens(scrubbed)
-    if tokens is None:
-        tokens = [t for t in str(scrubbed or "").split() if t]
-    rows: List[tuple[List[str], str, tuple[str, ...]]] = []
-    current: List[str] = []
-    leading = ""
-    for token in tokens:
-        if token in _SEGMENT_SEPARATORS:
-            if current:
-                rows.append((current, leading, ()))
-                current = []
-            leading = token
-            continue
-        current.append(token)
-    if current:
-        rows.append((current, leading, ()))
-    for owner, body in body_owners:
-        if 0 <= owner < len(rows):
-            argv, operator, bodies = rows[owner]
-            rows[owner] = (argv, operator, (*bodies, body))
-    return rows
-
-
 # The ONE redirection grammar of this module. A redirection operator is only an
 # operator at the START of a token (after an optional file-descriptor prefix), so
 # `s/>/x/` and `--pretty=<x>` never match, while both the glued (`2>/dev/null`)
@@ -522,7 +358,7 @@ _REDIRECT_OPERATOR_RE = re.compile(
 )
 
 
-def split_redirections(tokens: List[str], *, redirect_tokens: List[str] | None = None) -> tuple[List[str], List[str]]:
+def split_redirections(tokens: List[str]) -> tuple[List[str], List[str]]:
     """Split redirections off a command segment.
 
     Returns ``(argv_without_redirections, output_targets)``. Input redirections
@@ -531,15 +367,13 @@ def split_redirections(tokens: List[str], *, redirect_tokens: List[str] | None =
     the clean operand. Without this split the writer-target lane counted the
     redirect OPERAND as the command's own operand — `cp x y >> log.txt` reported
     `log.txt` and LOST the destination `y`, and a glued `2>/dev/null;` was forged
-    into the path `/dev/null;`. ``redirect_tokens`` optionally receives the
-    exact removed tokens, including input redirects, for local-effect views.
+    into the path `/dev/null;`.
     """
     items = [str(token) for token in (tokens or [])]
     argv: List[str] = []
     targets: List[str] = []
     index = 0
     while index < len(items):
-        start = index
         token = items[index]
         match = _REDIRECT_OPERATOR_RE.match(token)
         if match is None and token.isdigit() and index + 1 < len(items):
@@ -558,8 +392,6 @@ def split_redirections(tokens: List[str], *, redirect_tokens: List[str] | None =
             index += 1
             operand = items[index]
         index += 1
-        if redirect_tokens is not None:
-            redirect_tokens.extend(items[start:index])
         if operator.startswith("<"):
             continue
         if operator == ">&" and (operand == "-" or operand.isdigit()):
@@ -568,74 +400,6 @@ def split_redirections(tokens: List[str], *, redirect_tokens: List[str] | None =
             continue
         targets.append(operand)
     return argv, targets
-
-
-def local_shell_subject(raw_cmd: Any, _depth: int = 0) -> Any:
-    """Local-effect view of SSH argv; execution always keeps the original input.
-
-    OpenSSH sends command/arguments after destination to the remote host
-    (https://man.openbsd.org/ssh). Its options, -E log sink, and every outer
-    redirection remain local. Unknown option syntax retains the original view.
-    Shell wrappers reuse the existing segment/redirection grammar; no remote
-    command is parsed as a local program or assigned a local filesystem path.
-    """
-    if _depth >= 3:
-        return raw_cmd
-    changed = False
-    result: List[str] = []
-    for segment, leading, bodies in shell_segment_rows(raw_cmd):
-        if bodies:
-            return raw_cmd  # an unmodelled stdin program keeps its prior guard
-        if result:
-            result.append(leading or ";")
-        argv = shell_argv(segment)
-        head = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe") if argv else ""
-        if head in POSIX_SHELL_HEADS:
-            body = shell_command_string(argv)
-            local = local_shell_subject(body, _depth + 1) if body else body
-            if local != body:
-                redirects: List[str] = []
-                split_redirections(argv, redirect_tokens=redirects)
-                result.extend([*shell_argv(local), *redirects])
-                changed = True
-                continue
-        if head != "ssh":
-            result.extend(argv)
-            continue
-        redirects = []
-        program, _targets = split_redirections(argv, redirect_tokens=redirects)
-        index = 1
-        logs: List[str] = []
-        valid = True
-        while index < len(program) and program[index].startswith("-"):
-            token = program[index]
-            if token == "--":
-                index += 1
-                break
-            letters = token[1:]
-            if not letters or letters.startswith("-"):
-                valid = False
-                break
-            for position, letter in enumerate(letters):
-                if letter in "BbcDEeFIiJLlmOoPpQRSWw":
-                    value = letters[position + 1:]
-                    if not value:
-                        index += 1
-                        value = program[index] if index < len(program) else ""
-                    if not value:
-                        valid = False
-                    if letter == "E" and value:
-                        logs.extend([">", value])
-                    break
-                if letter not in "46AaCfGgKkMNnqsTtVvXxYyZ":
-                    valid = False
-                    break
-            index += 1
-        if not valid:
-            return raw_cmd
-        result.extend([*program[:index + 1], *logs, *redirects])
-        changed = changed or index + 1 < len(program) or bool(logs)
-    return result if changed else raw_cmd
 
 
 def collect_leading_env(argv: List[str]) -> tuple[dict, List[str]]:
@@ -783,34 +547,6 @@ def is_absolute_path_text(text: Any) -> bool:
         or bool(re.match(r"^[A-Za-z]:[\\/]", value))
         or value.startswith("\\\\")
     )
-
-
-def path_text_is_inside(candidate: Any, root: Any) -> bool:
-    candidate_text = slash_normalize_path_text(candidate).rstrip("/")
-    root_text = slash_normalize_path_text(root).rstrip("/")
-    if not candidate_text or not root_text:
-        return False
-    candidate_key = candidate_text.casefold()
-    root_key = root_text.casefold()
-    return candidate_key == root_key or candidate_key.startswith(root_key + "/")
-
-
-def shell_argv_with_path_tokens(raw_cmd: Any) -> List[str]:
-    tokens = list(shell_argv_with_inline(raw_cmd))
-    raw_texts = [" ".join(str(x) for x in raw_cmd)] if isinstance(raw_cmd, list) else [str(raw_cmd or "")]
-    seen = {str(token) for token in tokens}
-
-    def add_token(value: str) -> None:
-        if value and value not in seen:
-            tokens.append(value)
-            seen.add(value)
-
-    for text in [*raw_texts, *[str(token) for token in tokens]]:
-        for match in embedded_absolute_path_tokens(text):
-            add_token(match)
-        for match in EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(text):
-            add_token(match)
-    return tokens
 
 
 def embedded_absolute_path_tokens(text: Any) -> List[str]:
