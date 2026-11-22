@@ -24,29 +24,42 @@ RECEIPT_ROW_PREFIX = "[Context view receipt]"
 
 
 def receipt_row(notice: dict) -> dict:
-    """The host's receipt row: ``RECEIPT_ROW_PREFIX``, a newline, the notice JSON (its first key ``status``)."""
+    """The host's receipt row: ``RECEIPT_ROW_PREFIX``, a newline, the notice JSON: ``status`` first, then ``note``
+    (the unit id of the note this request wrote) when it wrote one (``receipt_note`` reads it back)."""
     return {"role": "user", "content": RECEIPT_ROW_PREFIX + "\n" + json.dumps(notice, ensure_ascii=False)}
 
 
-_APPLIED_RECEIPT = receipt_row({"status": "applied"})["content"][:-1]  # what an applied fold's receipt row begins with
+def receipt_head(receipt: dict, observed, candidate: list) -> dict:
+    """The receipt row's first fields: ``status``, then ``note`` when this request wrote that note (it is in the
+    candidate and was not in the observed view; a refused request or a transfer that reused a note names none)."""
+    from ouroboros.context_source_view import fold_note_position
+
+    wrote = (observed is not None and fold_note_position(candidate, receipt) is not None
+             and fold_note_position(observed, receipt) is None)
+    return {"status": receipt["status"], **({"note": "view:" + receipt["selection_fingerprint"]} if wrote else {})}
 
 
-def _own_call_arguments(messages: list, index: int):
-    """The arguments of the assistant row at ``index`` when its only call is ``compact_context`` and the next row is
-    that call's result, else None."""
+_WROTE_NOTE = receipt_row({"status": "applied", "note": ""})["content"][:-2]  # the row's head up to the note's id
+
+
+def receipt_note(row) -> str:
+    """The unit id of the note a host receipt row says its applied request wrote ("" otherwise); no JSON is parsed."""
+    content = row.get("content")
+    if not isinstance(content, str) or not content.startswith(_WROTE_NOTE):
+        return ""
+    end = content.find('"', len(_WROTE_NOTE))
+    return content[len(_WROTE_NOTE):end] if end > 0 else ""
+
+
+def _lone_compact_call(messages: list, index: int) -> bool:
+    """The assistant row at ``index`` has ``compact_context`` as its only call and the next row is its result."""
     row = messages[index] if 0 <= index < len(messages) else {}
     calls = row.get("tool_calls") if row.get("role") == "assistant" else None
     if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
-        return None
+        return False
     function, result = calls[0].get("function"), messages[index + 1] if index + 1 < len(messages) else {}
-    if (not isinstance(function, dict) or function.get("name") != "compact_context"
-            or result.get("role") != "tool" or result.get("tool_call_id") != calls[0].get("id")):
-        return None
-    try:
-        arguments = json.loads(function.get("arguments") or "")
-    except (TypeError, ValueError, RecursionError):
-        return None
-    return arguments if isinstance(arguments, dict) else None
+    return (isinstance(function, dict) and function.get("name") == "compact_context"
+            and result.get("role") == "tool" and result.get("tool_call_id") == calls[0].get("id"))
 
 
 def _note_meta(row) -> dict | None:
@@ -55,13 +68,6 @@ def _note_meta(row) -> dict | None:
     blocks = [block for block in content if isinstance(block, dict) and "_context_capsule" in block] if isinstance(
         content, list) else []
     return (blocks[0]["_context_capsule"] if isinstance(blocks[0]["_context_capsule"], dict) else {}) if blocks else None
-
-
-def _note_body(row) -> str:
-    """A note's text after its label line, as ``context_compaction._authored_view`` reads it ("" when unreadable)."""
-    content = row.get("content")
-    text = content[0].get("text") if isinstance(content, list) and content and isinstance(content[0], dict) else None
-    return text.partition("\n")[2] if isinstance(text, str) else ""
 
 
 def _handed_over(row) -> bool:
@@ -77,22 +83,25 @@ def _handed_over(row) -> bool:
 
 def standing_rows(messages: list) -> dict:
     """Positions that stand through an ordinary fold (default selectors), each with the position of the note whose
-    own rows they are (None for the start). One walk; nothing is hashed and only the calls the walk reaches are
-    parsed (it runs whenever a round's facts row is written).
+    own rows they are (None for the start). One walk; no content is hashed or validated and no call is parsed (it
+    runs whenever a round's facts row is written).
 
     The start: every row between the assignment and the model's first answer (or a host source view, whichever comes
     first), typed or not, except capsules and the accounts handed over for the mind to fold (``_handed_over``), which
     an ordinary fold takes as before. Then, in order: a note (a capsule that is not a host source view) is
-    remembered by its text; a start row, owner words or a row that is no unit
-    continue the walk; a lone ``compact_context`` call with its result whose ``working_note`` is a remembered note's
-    text is that note's own call: when the rows after its result, up to the next assistant row, capsule or handed-over
-    account, hold the host's receipt row of an applied fold (``receipt_row``), the call, its result and those rows (the input of
-    the request sent after that fold) stand, owned by that note. A fold that left something foldable between its note
-    and its call, or shared its row with another call, leaves nothing that stands, and neither does a reviewer
-    session's fold, whose notice is not the host's receipt row. Anything else a full fold takes (a tool unit, prose,
-    a host source view, a handed-over account) ends the walk."""
+    remembered by its unit id; a start row, owner words or a row that is no unit continue the walk; a lone
+    ``compact_context`` call with its result is a note's own call when the host's receipt row in its range (up to the
+    next assistant row or capsule) names that note as the one its request wrote (``receipt_note``): the call, its
+    result and the rest of that range (the input of the request sent after that fold) stand, owned by that note,
+    unless something the host will fold later arrived in that round (a handed-over account or a roster note); then
+    that fold leaves nothing that stands. A refused or no-op call, a transfer that reused a note, a fold made before
+    receipts named their note, a fold that left something foldable between its note and its call or shared its row
+    with another call, and a reviewer session's fold (its notice is not the host's receipt row) leave nothing that
+    stands. Anything else a full fold takes (a tool unit, prose, a host source view, a handed-over account) ends the
+    walk."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_ROW_KINDS
     from ouroboros.context_compaction import _is_dialogue_prose_row
+    from ouroboros.peer_roster import ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME
 
     first = next((i for i, row in enumerate(messages) if row.get("role") == "user"), None)
     if first is None:
@@ -108,19 +117,18 @@ def standing_rows(messages: list) -> dict:
         if meta is not None:
             if meta.get("retention") == "source_view":
                 break
-            if _note_body(row).strip():
-                notes[_note_body(row)] = i
+            if meta.get("unit_id"):
+                notes[meta["unit_id"]] = i
         elif not (i in standing or row.get(HOST_CONTEXT_KIND_KEY) in OWNER_ROW_KINDS):
             calls = row.get("role") == "assistant" and bool(row.get("tool_calls"))
             if _handed_over(row) or calls or _is_dialogue_prose_row(row):
-                arguments = (_own_call_arguments(messages, i) if calls and notes else None) or {}
-                note = arguments.get("working_note")
-                owner = notes.get(note.strip()) if isinstance(note, str) and note.strip() else None
-                stop = owner is not None and next((j for j in range(i + 2, len(messages)) if messages[j].get(
-                    "role") == "assistant" or _note_meta(messages[j]) is not None or _handed_over(messages[j])),
-                    len(messages))
-                if owner is None or not any(str(messages[j].get("content") or "").startswith(_APPLIED_RECEIPT)
-                                            for j in range(i + 2, stop)):
+                lone = calls and notes and _lone_compact_call(messages, i)
+                stop = next((j for j in range(i + 2, len(messages)) if messages[j].get("role") == "assistant"
+                             or _note_meta(messages[j]) is not None), len(messages)) if lone else i
+                span = messages[i + 2:stop]
+                owner = next((notes.get(receipt_note(later)) for later in span if receipt_note(later)), None)
+                if owner is None or any(_handed_over(later) or later.get(HOST_CONTEXT_KIND_KEY) in {
+                        ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME} for later in span):
                     break  # what a full fold takes: no later rows stand
                 standing.update(dict.fromkeys(range(i, stop), owner))
                 i = stop

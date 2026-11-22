@@ -690,6 +690,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
     if receipt["status"] != "no_op":
         from ouroboros.artifacts import store_actor_source_bytes
         import hashlib
+        from ouroboros.tools.compact_context import receipt_head
+        head = receipt_head(receipt, proposal["observed"]["messages"] if pending is not None else None, candidate)
 
         raw = json.dumps({"stage": "candidate_materialization", "published": False,
                           "receipt": receipt}, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -698,7 +700,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, ctx.task_id,
                 category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(),
                 data=raw, extension="json")
-            notice = {"status": receipt["status"], "receipt_source": {  # read_file(root, path) reads it as is
+            notice = {**head, "receipt_source": {  # read_file(root, path) reads it as is
                 key: source[key] for key in ("kind", "root", "path", "size", "sha256")}}
             from ouroboros.context_timing import prologue_step
             from ouroboros.observability import promote_task_source_ref
@@ -717,7 +719,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 # ValueError, each for both), so the view names the error itself.
                 notice["receipt_retention_error"] = f"{type(exc).__name__}: {exc}"
         except (OSError, ValueError):
-            notice = {"status": receipt["status"], "receipt_source": "unavailable"}
+            notice = {**head, "receipt_source": "unavailable"}
         if memory_price:
             notice["memory_view"] = memory_price
         if receipt["status"] == "applied":  # what the fold freed and kept; the next request's count measures its re-read

@@ -596,7 +596,9 @@ def _own_call(call_id, arguments):
 
 
 def _fold(tmp_path, monkeypatch, ctx, view, call_id, *, arrivals=(), own=None, root=None, **selector):
-    """One fold the way Main applies it: the mind's call on the view it saw, its result, the boundary."""
+    """One fold the way Main applies it: the mind's call on the view it saw, its result, the boundary. The view's
+    newer rows stand for rounds between two calls, so a roster note an earlier fold held back is no longer held."""
+    ctx._roster_held = False
     record_context_view(ctx, view, [])
     arguments = {"working_note": f"Note written by {call_id}.", **selector}
     response = _compact_context(ctx, **arguments)
@@ -677,6 +679,24 @@ def test_a_full_fold_stands_after_the_start_and_releasing_its_note_or_omitting_i
     # supersedes) and not the standing rounds 1 and 3 before it.
     assert superseded_host_fact([*request, *_long_read("two"), _facts("round 4")]).startswith("superseded host rows 1 ")
 
+
+
+def test_two_notes_with_equal_text_each_own_only_their_folds_rows(tmp_path, monkeypatch):
+    """Ownership follows the note the receipt row names, not the note's text: after a replacement writes a note with
+    the same text as a later note, at an earlier position, replacing either note releases only its own fold's rows."""
+    ctx = SimpleNamespace(active_context_mode="low")
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_long_read("one")], "fold-1", keep_unit_ids=[])
+    n1 = _unit_at(first, 3).unit_id
+    second = _fold(tmp_path, monkeypatch, ctx, [*first, _facts("round 3"), *_long_read("two")], "fold-2",
+                   keep_unit_ids=[])
+    third = _fold(tmp_path, monkeypatch, ctx, [*second, _facts("round 5")], "fold-3", replace_note_ids=[n1],
+                  working_note="Note written by fold-2.")
+    n3, n2 = _notes(third)[:2]
+    assert n3 < n2 and "fold-1" not in _calls(third) and {"fold-2", "fold-3"} <= _calls(third)
+    view = [*third, _facts("round 7"), *_long_read("four")]
+    for replaced, gone, kept in ((n3, "fold-3", "fold-2"), (n2, "fold-2", "fold-3")):
+        out = _fold(tmp_path, monkeypatch, ctx, view, f"merge-{gone}", replace_note_ids=[_unit_at(view, replaced).unit_id])
+        assert gone not in _calls(out) and kept in _calls(out) and "four" in _calls(out), (gone, kept)
 
 def test_the_owners_words_inside_a_folded_stretch_leave_the_fold_standing_and_a_shared_call_row_does_not(
         tmp_path, monkeypatch):
@@ -919,14 +939,15 @@ def test_a_source_view_a_fold_restores_after_earlier_rows_that_stand_stays_folda
     assert units[_unit_at(view, source).unit_id]["eligible"] and "stands" not in units[_unit_at(view, source).unit_id]
     third = _fold(tmp_path, monkeypatch, ctx, [*view, *_long_read("three")], "fold-3", keep_unit_ids=[], root=tmp_path)
     assert third[:source] == request and second[source] not in third and "fold-2" not in _calls(third)
-    # A handed-over account arriving in a fold's own round (a late answer's asker notes) ends that fold's rows.
+    # A handed-over account arriving in a fold's own round (a late answer's asker notes) leaves that fold nothing
+    # that stands, and the next full fold takes the account and the fold's rows.
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
     from ouroboros.main_context_authority import LATE_ANSWER_NOTES_NAME
     late = {"role": "user", HOST_CONTEXT_KIND_KEY: LATE_ANSWER_NOTES_NAME, "content": "[Late answer]\nThe asker's notes."}
     arrived = [*first, late, _facts("round 3")]
-    assert set(range(4, len(first))) <= set(standing_rows(arrived)) and len(first) not in standing_rows(arrived)
+    assert sorted(standing_rows(arrived)) == [2]
     folded = _fold(tmp_path, monkeypatch, ctx, [*arrived, *_long_read("two")], "fold-4", keep_unit_ids=[], root=tmp_path)
-    assert folded[:len(first)] == first and late not in folded
+    assert folded[:4] == first[:4] and late not in folded and "fold-1" not in _calls(folded)
 
 
 def test_a_folds_leftover_rows_after_an_emergency_record_took_its_call_are_not_start_rows(tmp_path, monkeypatch):
@@ -952,18 +973,26 @@ def test_a_folds_leftover_rows_after_an_emergency_record_took_its_call_are_not_s
 
 
 def test_a_reviewer_style_notice_after_an_own_call_stands_nothing_of_that_fold(tmp_path):
-    """A fold's own call followed by a notice that is not the host's receipt row (a reviewer session's fold) leaves
-    nothing of that fold standing; the same rows with the host's receipt row stand (the other direction)."""
-    from ouroboros.tools.compact_context import receipt_row, standing_rows
+    """A fold's own call followed by a notice that is not the host's receipt row (a reviewer session's fold), or by a
+    host receipt row that names no note this request wrote (a transfer that reused a note, a fold made before
+    receipts named their note), leaves nothing of that fold standing; the same rows with the host's receipt row
+    naming the note stand (the other direction). The writer names a note only when the request wrote it."""
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.tools.compact_context import receipt_head, receipt_row, standing_rows
     from tests._working_notes import _note
 
     note = {**_note(tmp_path, "Note written by reviewer."), "role": "assistant"}
     rows = [*_start(), note, _own_call("reviewer", {"working_note": "Note written by reviewer."}),
             {"role": "tool", "tool_call_id": "reviewer", "content": "Working view requested."}]
     reviewer = [*rows, {"role": "user", "content": "[Review context view]\n{}"}, _facts("round 3")]
-    host = [*rows, receipt_row({"status": "applied"}), _facts("round 3")]
-    assert sorted(standing_rows(reviewer)) == [2]
+    note_id = _capsule_metadata(note)[1]["unit_id"]
+    host = [*rows, receipt_row({"status": "applied", "note": note_id}), _facts("round 3")]
+    reused = [*rows, receipt_row({"status": "applied"}), _facts("round 3")]
+    assert sorted(standing_rows(reviewer)) == sorted(standing_rows(reused)) == [2]
     assert sorted(standing_rows(host)) == [2, *range(4, len(host))]
+    receipt = {"status": "applied", "selection_fingerprint": note_id.removeprefix("view:")}
+    assert receipt_head(receipt, _start(), rows) == {"status": "applied", "note": note_id}  # this request wrote it
+    assert receipt_head(receipt, rows, rows) == {"status": "applied"}  # a transfer that reused the observed note
 
 
 from tests.test_review_view_integration import harness as _review_harness  # noqa: E402 -- the recorded plan-review fixture

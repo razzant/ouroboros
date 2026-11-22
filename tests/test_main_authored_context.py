@@ -710,7 +710,7 @@ def test_a_round_that_applies_a_fold_holds_a_changed_roster_back_one_round(main_
     assert not after_last_note(requests[2]) and after_last_note(requests[3])  # held by fold-1, then appended
     assert max(_rosters(requests[4])) > calls_before(requests[4], "read-3")  # no fold: at once
     assert not after_last_note(requests[5])  # held by fold-2
-    assert after_last_note(requests[6])  # fold-3 the next round: appended anyway
+    assert after_last_note(requests[6])  # fold-3 the next round: appended anyway (that fold then stands nothing)
 
 
 def test_four_full_folds_with_a_changing_roster_keep_at_most_two_snapshots_and_each_request(main_loop, monkeypatch):
@@ -726,3 +726,25 @@ def test_four_full_folds_with_a_changing_roster_keep_at_most_two_snapshots_and_e
     assert max(len(_rosters(rows)) for rows in requests) <= 2, [len(_rosters(rows)) for rows in requests]
     folded = requests[2::2]
     assert len(folded) == 4 and all(later[:len(earlier)] == earlier for earlier, later in zip(folded, folded[1:]))
+
+
+def test_six_consecutive_full_folds_with_a_changing_roster_deliver_it_and_never_pin_it(main_loop, monkeypatch):
+    """Six full folds in six consecutive rounds, the roster changing before each: the changed roster reaches the view
+    within one round every time, no roster row ever stands as a fold's own row (a fold whose round holds one leaves
+    nothing standing), and after each fold the view holds at most two roster rows."""
+    from ouroboros.tools.compact_context import standing_rows
+
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    f.run([call("read_file", {"path": "evidence.txt"}, "read-1"), *(bump(call(
+        "compact_context", {"working_note": f"N{n} holds what came before.", "keep_unit_ids": []}, f"fold-{n}"))
+        for n in range(1, 7)), {"content": "done"}])
+    requests = [f.inputs[i]["messages"] for i in range(len(f.inputs))]
+    def versions(rows):
+        return {v for i in _rosters(rows) for v in range(8) if f"at version {v} " in str(rows[i].get("content"))}
+
+    for r in range(2, len(requests) - 1):  # request r is built after reply r - 1 set version r - 1: it or the next
+        assert max(versions(requests[r]) | versions(requests[r + 1])) >= r - 1, (r, versions(requests[r]))
+    for rows in requests:
+        standing = standing_rows(rows)
+        assert not [i for i in _rosters(rows) if standing.get(i) is not None]
+        assert len(_rosters(rows)) <= 2, [len(_rosters(r)) for r in requests]
