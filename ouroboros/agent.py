@@ -50,7 +50,7 @@ from ouroboros.agent_startup_checks import (
 from ouroboros.agent_task_pipeline import (
     emit_task_results, build_review_context,
 )
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, terminal_result_fields
+from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, schedule_report_run, terminal_result_fields
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
@@ -133,6 +133,7 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
         from ouroboros.outcomes import collect_trace_refs, derive_loop_outcome
         from ouroboros.agent_task_pipeline import build_trace_summary
         from ouroboros.task_results import STATUS_FAILED, _TRULY_TERMINAL_STATUSES, write_task_result
+        from ouroboros.terminal_time import source_task_attempt
 
         loop_outcome = derive_loop_outcome(text, usage, llm_trace)
         write_task_result(
@@ -140,6 +141,9 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
             _field_projector=(lambda current, incoming: None if current.get("status") in _TRULY_TERMINAL_STATUSES
                               else incoming) if keep_terminal else None,
             _terminal_observed=True, result=text, reason_code="task_exception", loop_outcome={k: v for k, v in loop_outcome.items() if k != "trace_refs"},
+            # A start that failed before its own record (``_persist_running_record``) left no row naming this attempt, and
+            # copy-back refuses a replica naming none beside a canonical row that does (``replica_attempt_matches``).
+            **({"task_attempt": n} if (n := source_task_attempt(task)) is not None else {}),
             outcome_axes=loop_outcome.get("outcome_axes") or infra_failed_axes(
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
@@ -250,13 +254,6 @@ def _sync_task_project_scope(task: Dict[str, Any], ctx: Any) -> None:
     project_id = str(getattr(ctx, "project_id", "") or "").strip()
     if project_id and not str(task.get("project_id") or "").strip():
         task["project_id"] = project_id
-
-
-# The dispatched harness contract needs the whole CUSTODY verb set: a child that
-# can start a run but not wait on or cancel it is still broken. `delegate_answer`
-# is deliberately NOT part of this preflight — a nanny without it is degraded
-# (questions benign-decline at the engine timeout), never custody-broken, and
-# failing a dispatch over a missing convenience verb would cost real work.
 
 
 @dataclass(frozen=True)
@@ -940,27 +937,23 @@ class OuroborosAgent:
         task_id = str(task.get("id") or "")
         task_meta = subagent_message_meta(self._current_task_metadata, task_id=task_id, event="progress")
         task_meta.update(initiator_meta(self._current_task_metadata))
-        return self._bind_task_progress(
-            task_id, self._current_chat_id, task_meta, task.get("_attempt"),
-        )
+        return self._bind_task_progress(task_id, self._current_chat_id, task_meta, task.get("_attempt"),
+                                        record_only=schedule_report_run(task))
 
     def _bind_task_progress(
         self, task_id: str, chat_id: Optional[int], progress_meta: Optional[Dict[str, Any]] = None,
-        task_attempt: Any = None,
+        task_attempt: Any = None, record_only: bool = False,
     ) -> Callable[[str], Any]:
-        """Keep a task's progress address stable after its worker turn ends."""
+        """Keep a task's progress address stable after its worker turn ends. ``record_only`` is the originating
+        task's own fact (``schedule_report_run``): an older schedule's held report is its record, never narration."""
         def emit_task_progress(text: str, **kwargs: Any) -> None:
+            if record_only and kwargs.get("narration"):
+                return
             # A producer can attach per-row facts; the callback's frozen task provenance still wins after this worker changes tasks.
             meta = dict(kwargs.pop("_progress_meta_override", None) or {})
             meta.update(progress_meta or {})
-            self._emit_progress(
-                text,
-                _task_id_override=task_id,
-                _chat_id_override=chat_id,
-                _progress_meta_override=meta,
-                _task_attempt_override=task_attempt,
-                **kwargs,
-            )
+            self._emit_progress(text, _task_id_override=task_id, _chat_id_override=chat_id, _progress_meta_override=meta,
+                                _task_attempt_override=task_attempt, **kwargs)
 
         return emit_task_progress
 
@@ -1105,11 +1098,13 @@ class OuroborosAgent:
 
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ouroboros.context_fit import MinimumViewUnfit
+        from ouroboros.delegate_resume import finish_selected_answer
+        from ouroboros.terminal_time import source_task_attempt
 
         def finished(text: Any, usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
-            emit_task_results(self.env, self.memory, self.llm, self._pending_events, task, text, usage, llm_trace,
-                              start_time, drive_logs, ctx=ctx, event_queue=self._event_queue)
-            return list(self._pending_events)
+            return finish_selected_answer(ctx, lambda *answer: emit_task_results(  # a forced replacement emits the same way
+                self.env, self.memory, self.llm, self._pending_events, task, *answer, start_time, drive_logs,
+                ctx=ctx, event_queue=self._event_queue), (text, usage, llm_trace), self._pending_events, _worker_immediate_stop)
 
         self._bind_turn(task)
         start_time = self._task_started_ts = _settle_start_origin(task)
@@ -1121,6 +1116,7 @@ class OuroborosAgent:
         self._emit_live_log(
             "task_started",
             task_id=self._current_task_id or "",
+            **({"task_attempt": n} if (n := source_task_attempt(task)) is not None else {}),
             task_type=self._current_task_type,
             task_text=str(task.get("text") or "")[:200],
             direct_chat=bool(task.get("_is_direct_chat")),
@@ -1590,7 +1586,6 @@ from ouroboros.agent_dispatch import (  # noqa: E402, F401 -- intentional public
     _queued_budget_exhausted_message,
     _physical_calls_after_budget_rail,
     _initial_effort_for,
-    model_role_slot_override,
     resolve_dispatch_axes,
     _DELEGATE_VERBS,
     preflight_delegate_visibility,

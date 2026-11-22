@@ -74,6 +74,7 @@ _ADDED_OWNERS = {
     # The owner's optional limit on requests per model, and the one read seam that takes a shipped value saved
     # before either number became optional as not chosen (owner cap 09.11, model limit 13.11).
     "MODEL_CAP_LOCAL": settings_scales,
+    "MODEL_CAP_LEGACY": settings_scales,
     "MODEL_CAP_FORMAT_KEY": settings_scales,
     "model_cap_value": settings_scales,
     "_UNCHOSEN_SAVED": settings_scales,
@@ -118,7 +119,7 @@ _ADDED_OWNERS = {
     "task_processing_preference": model_slots,
     "normalize_processing_preference": model_slots,
     "resolve_processing_preference": model_slots,
-    # A call's tier (Settings' three and the runtime-only Ultrafast) and the tiers /api/state publishes.
+    # Main and call tiers, including Ultrafast, and their /api/state projection.
     "CALL_TIERS": model_slots,
     "normalize_call_tier": model_slots,
     "processing_tiers": model_slots,

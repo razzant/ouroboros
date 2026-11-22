@@ -624,7 +624,10 @@ test('Advanced holds what an installation rarely changes, and About the reset in
     const advanced = await open(t, 'computer/advanced');
     assert.match(advanced.container.textContent, /^Most installations never change these\./);
     assert.deepEqual(advanced.container.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow),
-        ['OUROBOROS_MAX_WORKERS', 'OUROBOROS_UI_DIR', 'OUROBOROS_EXTRA_CA_BUNDLE']);
+        ['OUROBOROS_MAX_WORKERS', 'OUROBOROS_TOOL_TIMEOUT_SEC', 'OUROBOROS_UI_DIR', 'OUROBOROS_EXTRA_CA_BUNDLE']);
+    for (const [key, page] of [['OUROBOROS_TOOL_TIMEOUT_SEC', 'computer/advanced'], ['MCP_TOOL_TIMEOUT_SEC', 'tools']]) {
+        assert.deepEqual(ROWS.filter((row) => row.keys.includes(key)).map((row) => row.page), [page], `${key} has one home`);
+    }
     await advanced.shown();
     assert.equal(advanced.meta('OUROBOROS_UI_DIR'), 'Empty serves the built-in interface.');
     const served = advanced.row('OUROBOROS_UI_DIR').querySelector('[data-served-ui]');

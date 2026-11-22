@@ -105,9 +105,10 @@ CASES = {
     "working_with_review": (
         [_row("wr")], {"wr": _RUNNING}, {}, {"wr": [{"run_id": "run-own-review", "source": "review_substrate"}]},
     ),
-    # The owner's Pause could not confirm the stop of the task's own run: Paused, with that run said unconfirmed.
+    # The owner's Pause could not confirm one run's stop. Another is observed queued on its executor.
     "paused_stop_unknown": (
-        [_row("so", "budget_paused", pause_cause="owner", can_resume=False)], {}, {}, {"so": ["run-s"]},
+        [_row("so", "budget_paused", pause_cause="owner", can_resume=False)], {}, {},
+        {"so": ["run-s", {"run_id": "run-q", "invocation_id": "inv-q"}]},
     ),
     "finalizing_failed": (
         [_row("f", "finalizing", status="failed", outcome_axes={"lifecycle": {"status": "failed"}})],
@@ -260,7 +261,8 @@ def project(name):
     """The ``/api/state`` work fields the server builds for one case."""
     owners, raw, stored, held = CASES[name]
     return work_fields(owners, raw, results=stored, fences={k: {"state": "paused", **v} for k, v in FENCES.items()},
-                       held=held, stops=STOPS, models={"mh": [{"kind": "model_handoff", "attempt_id": "attempt-mh"}]},
+                       held=held, stops=STOPS, activities={("so", "run-q", "inv-q"): False},
+                       models={"mh": [{"kind": "model_handoff", "attempt_id": "attempt-mh", "task_id": "mh"}]},
                        attempts=ATTEMPTS)
 
 

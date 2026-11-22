@@ -31,7 +31,10 @@ _ATTR = {name: re.compile(name + r'="([^"]*)"') for name in ("class", "aria-labe
 # Literal tr fallbacks are fixed host words even though the language is selected at runtime.
 _TRANSLATED = re.compile(r"\$\{(?:escapeHtml\()?tr\((['\"])[^'\"]+\1,\s*(['\"])([^'\"]+)\2\)\)?\}")
 _TAG = re.compile(r"<[^>]+>", re.S)
-_CREATED = re.compile(r"(?:const|let)\s+(\w+)\s*=\s*document\.createElement\('button'\)")
+_CREATED = re.compile(r"(?<![\w.])(\w+)\s*=\s*(?:document|doc)\.createElement\('button'\)")
+_TR_LABEL = r"""tr\(['"][\w.-]+['"],\s*(?P<quote>['"])(?P<label>[^'"\n]+)(?P=quote)\)"""
+# Row menus materialize their [key, label, action] entries as buttons with role=menuitem.
+_MENU_ENTRY = re.compile(r"""\bitems\.push\(\[\s*['"][\w-]+['"],\s*""" + _TR_LABEL + r"\s*,")
 _EVENT = re.compile(r"new CustomEvent\(\s*['\"`](ouro:[\w:.-]+)['\"`]")
 _LITERAL = r"\s*=\s*(['\"])((?:(?!\1).)+)\1"
 _WINDOW = 900  # characters after `createElement('button')` in which its own text and class are set
@@ -121,12 +124,15 @@ def scan_controls(text: str) -> tuple[list[tuple[str, str]], int]:
     for match in _CREATED.finditer(text):
         var = re.escape(match.group(1))
         window = text[match.end(): match.end() + _WINDOW]
-        label = re.search(rf"\b{var}\.textContent{_LITERAL}", window)
+        label = (re.search(rf"\b{var}\.textContent{_LITERAL}", window)
+                 or re.search(rf"\b{var}\.textContent\s*=\s*{_TR_LABEL}\s*;", window))
         classes = re.search(rf"\b{var}\.className{_LITERAL}", window)
         if not label:
             interpolated += 1
             continue
         rows.append((_clean(label.group(2)), _classes(classes.group(2) if classes else "")))
+    if "setAttribute('role', 'menuitem')" in text:
+        rows.extend((match["label"], "(no class)") for match in _MENU_ENTRY.finditer(text))
     for name, params, label_at, template, _span in factories:
         for call in re.finditer(rf"(?<![\w.]){re.escape(name)}\(", text):
             args = [_STRING.match(arg.strip()) for arg in _arguments(text, call.end())]

@@ -10,6 +10,7 @@ import pytest
 from ouroboros import model_send_seal as seals
 from tests import fixtures_usage_store as usage_fixtures
 from tests import test_model_send_seal as seal_fixtures
+from tests._context_reports import _dispatch
 
 
 data_root = seal_fixtures.data_root
@@ -50,7 +51,7 @@ def _recording(monkeypatch, result=None):
 
 
 def test_live_only_sweep_never_loads_archive(data_root, monkeypatch):
-    seal_fixtures._dispatch(data_root, "live")
+    _dispatch(data_root, "live")
     calls = _recording(monkeypatch)
 
     report = seals.reconcile_model_send_seals(data_root)
@@ -103,7 +104,7 @@ def test_each_sweep_rechecks_retained_history_and_keeps_no_stale_answer(data_roo
 
 def test_unknown_history_is_attempted_once_and_forward_checks_continue(data_root, monkeypatch):
     _archive(data_root, 3)
-    live = seal_fixtures._dispatch(data_root, "live-missing-seal")
+    live = _dispatch(data_root, "live-missing-seal")
     pathlib.Path(live["candidate_manifest_ref"]["path"]).unlink()
     calls = _recording(monkeypatch, result=lambda _root, _wanted: None)
 
@@ -116,12 +117,12 @@ def test_unknown_history_is_attempted_once_and_forward_checks_continue(data_root
 
 
 def test_manifest_selection_precedes_live_snapshot(data_root, monkeypatch):
-    seal_fixtures._dispatch(data_root, "selected")
+    _dispatch(data_root, "selected")
     select = seals._seal_manifest_paths
 
     def new_attempt_after_selection(root, limit):
         selected = select(root, limit)
-        seal_fixtures._dispatch(root, "arrived-after-selection")
+        _dispatch(root, "arrived-after-selection")
         return selected
 
     monkeypatch.setattr(seals, "_seal_manifest_paths", new_attempt_after_selection)

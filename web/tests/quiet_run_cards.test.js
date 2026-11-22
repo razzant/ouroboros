@@ -8,6 +8,7 @@ import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixtur
 
 // Retain each parsed row's markup, as in chat_activity_block.test.js.
 const innerHTML = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'innerHTML');
+let observeTimelineMarkup;
 after(() => Object.defineProperty(ElementStub.prototype, 'innerHTML', innerHTML));
 Object.defineProperty(ElementStub.prototype, 'innerHTML', {
     configurable: true,
@@ -15,6 +16,7 @@ Object.defineProperty(ElementStub.prototype, 'innerHTML', {
     set(value) {
         innerHTML.set.call(this, value);
         const html = String(value || '');
+        observeTimelineMarkup?.(html);
         let cursor = 0;
         for (const child of this.children) {
             const index = html.indexOf(`<${child.tagName.toLowerCase()}`, cursor);
@@ -27,8 +29,11 @@ Object.defineProperty(ElementStub.prototype, 'innerHTML', {
 
 const TS = '2026-10-21T12:00:00Z';
 const NOTICE = 'A tool this task used failed';
+const RETAINED_REPORT = 'Retained reference report.';
+const RETAINED_TRACE = 'Only the task trace says this.';
 const cases = [
     ['quiet', { wake_silent: true, quiet_effective: true }, 'Done · no message', ''],
+    ['schedule report', { quiet_effective: true, schedule_report_only: true }, 'Done · no message', ''],
     ['quiet with notice', { wake_silent: true, quiet_effective: false,
         reason_code: 'tool_failure', outcome_axes: { execution: { status: 'degraded', reason_code: 'tool_failure' } } },
     'Done with warnings', NOTICE],
@@ -50,7 +55,10 @@ for (const [name, flags, headline, notice] of cases) {
         assert.equal(censusTaskPhase(null, row).text, headline);
     });
 
-    for (const via of ['log', 'chat', 'history', 'pruned']) test(`${name}: actual card via ${via}`, async () => {
+    const paths = ['log', 'chat', 'history'].map(via => [via, true]);
+    if (name === 'schedule report') paths.push(...paths.map(([via]) => [via, false]));
+    else paths.push(['pruned', true]);
+    for (const [via, withProgress] of paths) test(`${name}: actual card via ${via}${withProgress ? '' : ' without progress'}`, async () => {
         const progress = { task_id: 'check', role: 'assistant', is_progress: true, narration: true,
             text: 'Checking for changes', ts: '2026-10-21T11:59:00Z' };
         const summaryRow = { ...terminal(flags), role: 'system', system_type: 'task_summary',
@@ -63,9 +71,16 @@ for (const [name, flags, headline, notice] of cases) {
         }
         const answer = name === 'ordinary' || name === 'legacy'
             ? { task_id: 'check', role: 'assistant', text: 'The published answer.', ts: TS } : null;
-        const rows = [progress, ...(answer ? [answer] : []), summaryRow];
-        const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-            String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
+        const rows = [...(withProgress ? [progress] : []), ...(answer ? [answer] : []), summaryRow];
+        let reportReads = 0;
+        const { prior, mount } = installDom(async (url, options) => ({ ok: true, json: async () => {
+            if (String(url).startsWith('/api/chat/history')) return { messages: rows };
+            if (String(url) === '/api/tasks/check') {
+                if (options?.cache === 'no-store') reportReads++;  // separate from the card's shared artifact/detail read
+                return { result: RETAINED_REPORT, trace_summary: RETAINED_TRACE };
+            }
+            return { active_direct_turns: [] };
+        } }));
         const handlers = new Map();
         let instance;
         try {
@@ -80,7 +95,7 @@ for (const [name, flags, headline, notice] of cases) {
             const messages = globalThis.document.byId.get('chat-messages');
             if (via === 'history' || via === 'pruned') await instance.refreshHistory({ revision: 1 });
             else {
-                handlers.get('chat')({ ...progress, chat_id: 2, content: progress.text });
+                if (withProgress) handlers.get('chat')({ ...progress, chat_id: 2, content: progress.text });
                 if (answer) handlers.get('chat')({ ...answer, chat_id: 2, content: answer.text });
                 if (via === 'chat') handlers.get('chat')({ ...summaryRow, chat_id: 2, content: summaryRow.text });
                 else handlers.get('log')({ chat_id: 2, data: { ...terminal(flags), type: 'task_done' } });
@@ -90,19 +105,43 @@ for (const [name, flags, headline, notice] of cases) {
             assert.ok(card, 'the task retains its card');
             assert.equal(card.dataset.finished, '1');
             assert.equal(card.querySelector('[data-live-phase]').textContent, headline);
+            assert.equal(reportReads, 0, 'rendering does not open the report');
             card.querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
             const nodes = (node) => [node, ...(node.children || []).flatMap(nodes)];
             const markup = nodes(card).map(node => node.innerHTML || '').join('\n');
             if (notice) assert.ok(markup.includes(notice), 'the notice still shows inside the card');
             else assert.doesNotMatch(markup, /class="chat-live-line-body/, 'no empty answer box');
             if (name === 'quiet') assert.match(markup, /Done · no message/, 'the terminal timeline shares the quiet headline');
+            if (name === 'schedule report') {
+                assert.equal(reportReads, 0, 'Details alone does not open the report');
+                assert.ok(nodes(messages).every(node => !String(node.innerHTML || '').includes(RETAINED_REPORT)),
+                    'the report is absent from the whole transcript before Show full');
+                const key = /data-live-line-toggle="([^"]+)"/.exec(markup)?.[1];
+                assert.ok(key, 'the saved report is available on demand');
+                const timeline = card.querySelector('.chat-live-timeline');
+                const line = { dataset: { liveLineKey: key }, contains: () => false };
+                const header = { matches: () => true };
+                // The stub keeps the original innerHTML string after keyed DOM patches.
+                // Observe the production renderer's new row markup at its parse boundary.
+                const renders = [];
+                observeTimelineMarkup = html => {
+                    if (html.includes(`data-live-line-key="${key}"`)) renders.push(html);
+                };
+                timeline.listeners.get('click')[0]({ stopPropagation() {},
+                    target: { closest: selector => selector === '.chat-live-line.expandable' ? line : header } });
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(reportReads, 1);
+                assert.match(renders.at(-1) || '', /Retained reference report\./);
+                assert.ok(!renders.some(html => html.includes(RETAINED_TRACE)), 'the saved report reader does not render the trace');
+                observeTimelineMarkup = undefined;
+            }
             assert.equal(messages.children.some(node => node.classList.contains('assistant')
                 && !node.classList.contains('typing-bubble')), Boolean(answer), 'only an actual answer gets a bubble');
             // Replaying into the live card cannot erase or duplicate the terminal presentation.
             await instance.refreshHistory({ revision: 2 });
             assert.equal(walkCard(messages, 'check'), card);
             assert.equal(card.querySelector('[data-live-phase]').textContent, headline);
-        } finally { instance?.destroy(); restoreDom(prior); }
+        } finally { observeTimelineMarkup = undefined; instance?.destroy(); restoreDom(prior); }
     });
 }
 

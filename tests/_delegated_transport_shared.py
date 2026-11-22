@@ -9,13 +9,14 @@ autouse, so importing it into a test module re-applies it there.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import httpx
 import pytest
-from ouroboros import subagents
-from ouroboros.config import CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION
-from ouroboros.gateways import claudexor as cx
+from ouroboros import delegate_custody as c, delegate_custody_current as current, subagents
+from ouroboros.config import CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION, CLAUDEXOR_MIN_VERSION, CLAUDEXOR_PROTOCOL_MAJOR
+from ouroboros.gateways import claudexor as cx, claudexor_metadata as metadata
 
 # The technical access the autouse fixture's selected session row captured (#1609).
 # ``None`` keeps the legacy snapshot with no "access" key (workspace_write), which an
@@ -452,3 +453,196 @@ def _delegate_registry(tmp_path, monkeypatch, task_id="t-family"):
     assert {"delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer",
             "delegate_message"} <= set(registry._entries)
     return registry
+
+
+_REAL_GATEWAY = cx.ClaudexorGateway
+ENQUEUE_ERROR = {"message": "fixture turn preflight refused", "code": "fixture_preflight_refusal", "retryable": False,
+                 "requiredActions": [], "context": {}, "failedAt": "2026-11-11T12:37:12.000Z"}
+_LOOKUP_ROW = {"mutability": "read_only", "idempotency": "key_required", "completion": "immediate",
+               "responseSchema": "ControlStartLookupResponse", "parameters": []}
+LOOKUPS = [{"method": "POST", "path": "/v2/runs/lookup", "requestSchema": "ControlRunStartRequest",
+            "applicability": "run", **_LOOKUP_ROW},
+           {"method": "POST", "path": "/v2/threads/:id/turns/lookup", "requestSchema": "ControlThreadTurnRequest",
+            "applicability": "thread", **_LOOKUP_ROW}]  # the engine's catalog rows (sibling INTERFACE.md)
+
+
+class Engine:
+    """One serving store, its accepted commands and thread turns, in Claudexor's wire shapes."""
+
+    def __init__(self, tmp_path, store="store-a", lookup=True):
+        descriptor = tmp_path / "control-api.json"
+        descriptor.write_text("{}", encoding="utf-8")
+        self.endpoint = cx.DaemonEndpoint("127.0.0.1", 1, "secret-token", str(descriptor),
+                                          metadata.descriptor_stamp(descriptor))
+        self.root, self.store, self.lookup = str(tmp_path), store, lookup
+        self.commands, self.turns = {}, {}
+        self.creates, self.lookups, self.paths, self.cancels = [], [], [], []
+        self.lose, self.queue_runs, self.health, self.answer = 0, False, "ok", None
+        self.replace_at_post, self.on_accept = "", None  # the store a POST lands in; a reader inside the POST
+        self.create_refusal = None  # a ControlProblem every creating POST answers with, as the engine's own validation
+
+    def accept(self, key, request, *, run=True, state="running", spend=0.25, failure=None, problem=None):
+        number = len(self.commands) + 1
+        job = f"job-{number}"
+        self.commands[job] = {"store": self.store, "key": key, "body": copy.deepcopy(request), "seq": 2,
+                              "run": f"run-{number}" if run else None, "state": state if run or state != "running"
+                              else "queued", "spend": spend, "failure": failure, "problem": problem,
+                              "text": "the complete answer"}
+        return job
+
+    def _handle(self, job, **turn):
+        """``ControlStartLookupHandle``: runDir/taskId present (null before a run), ``problem`` only when recorded."""
+        row = self.commands[job]
+        return {"jobId": job, "runId": row["run"], "state": row["state"],
+                "runDir": f"/runs/{row['run']}" if row["run"] else None, "taskId": f"task-{job}" if row["run"] else None,
+                **turn, **({"problem": copy.deepcopy(row["problem"])} if row["problem"] else {})}
+
+    def bind_run(self, job, state="running"):
+        command = self.commands[job]
+        command["run"] = command["run"] or "run-" + job.split("-", 1)[1]
+        command["state"], command["seq"] = state, command["seq"] + 1
+        return command["run"]
+
+    def _held(self, key):
+        return next((job for job, row in self.commands.items() if (row["store"], row["key"]) == (self.store, key)), None)
+
+    def _named(self, request):
+        return {"storeId": self.store} if request.headers.get("x-claudexor-store-identity") == "1" and self.store else {}
+
+    def _detail(self, job):
+        row = self.commands[job]
+        summary = {"runId": row["run"], "jobId": job, "state": row["state"], "effectiveAccess": "readonly",
+                   **({"spendUsd": row["spend"], "spendEstimated": False} if row["spend"] is not None else {}),
+                   **({"failure": row["failure"]} if row["failure"] else {})}
+        detail = {"summary": summary, "lastSeq": row["seq"], "pendingInteractions": []}
+        if row["state"] == "succeeded":
+            detail["primaryOutput"] = {"text": row["text"], "bytes": len(row["text"].encode()), "truncated": False}
+        return detail
+
+    def _lookup(self, request, key, path):
+        sent = json.loads(request.read())
+        thread = path.split("/")[3] if path.startswith("/v2/threads/") else ""
+        self.lookups.append((thread or "run", key, sent))
+        if self.answer is not None:
+            return httpx.Response(self.answer[0], json=self.answer[1])
+        if thread:
+            turn = self.turns.get((self.store, thread, key))
+            if turn is None:
+                return httpx.Response(200, json={"status": "not_found", "storeId": self.store})
+            if turn["job"]:
+                return httpx.Response(200, json={"status": "found", "storeId": self.store,
+                                                 "handle": self._handle(turn["job"], threadId=thread, turnId=turn["turn"])})
+            return httpx.Response(200, json={"status": "turn_only", "storeId": self.store, "threadId": thread,
+                                             "turnId": turn["turn"], "runId": turn["run"], "enqueueError": turn["error"]})
+        job = self._held(key)
+        if job is None:
+            return httpx.Response(200, json={"status": "not_found", "storeId": self.store})
+        if self.commands[job]["body"] != sent:
+            return httpx.Response(409, json={"code": "idempotency_conflict", "message": "the key holds another request",
+                                             "retryable": False})
+        return httpx.Response(200, json={"status": "found", "storeId": self.store, "handle": self._handle(job)})
+
+    def __call__(self, request):
+        path, method = request.url.path, request.method
+        self.paths.append((method, path))
+        if path == "/v2/handshake":
+            return httpx.Response(200, json={"protocolMajor": CLAUDEXOR_PROTOCOL_MAJOR, "compatible": True,
+                                             "engine": {"version": CLAUDEXOR_MIN_VERSION}, **self._named(request)})
+        if path == "/v2/agent-capabilities":
+            return httpx.Response(200, json={"harnesses": [{"id": "some-route", "enabled": True, "status": self.health,
+                                                            "accessProfilesSupported": ["readonly"]}]})
+        if path == "/v2/quota":
+            return httpx.Response(200, json={"snapshots": []})
+        if path == "/v2/operations":
+            return httpx.Response(200, json={"operations": LOOKUPS if self.lookup else []})
+        if path == "/v2/projects":
+            return httpx.Response(200, json={"projects": [{"id": "prj-existing", "root": self.root}]})
+        key = request.headers.get("Idempotency-Key")
+        if path == "/v2/runs/lookup" or path.endswith("/turns/lookup"):
+            return self._lookup(request, key, path)
+        if path == "/v2/runs" and method == "POST":
+            self.store, self.replace_at_post = self.replace_at_post or self.store, ""
+            sent = json.loads(request.read())
+            self.creates.append((key, self.store, sent))
+            if self.create_refusal is not None:
+                return httpx.Response(self.create_refusal[0], json=self.create_refusal[1])
+            job = self._held(key) or self.accept(key, sent, run=not self.queue_runs)
+            if self.on_accept is not None:
+                hook, self.on_accept = self.on_accept, None
+                hook(job)
+            if self.lose:
+                self.lose -= 1
+                raise httpx.ConnectError("the reply was lost after the POST was accepted")
+            return httpx.Response(200, json={"jobId": job, "runId": self.commands[job]["run"], "runDir": "/tmp/run",
+                                             **self._named(request)})
+        name = path.split("/")[3]
+        job = next((job for job, row in self.commands.items() if row["store"] == self.store and name in (job, row["run"])),
+                   None)
+        if path.endswith("/control"):
+            self.cancels.append(name)
+            return httpx.Response(200 if job else 404, json={"accepted": True} if job else {"error": "no such run"})
+        if "/artifacts/" in path or job is None:
+            return httpx.Response(404, json={"error": "no such run", "context": {"storeId": self.store}})
+        assert method == "GET" and path == f"/v2/runs/{name}", path
+        return httpx.Response(200, json=self._detail(job))
+
+    def gateway(self):
+        gateway = _REAL_GATEWAY(self.endpoint)
+        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(self),
+                                       headers=dict(gateway._client.headers))
+        gateway.handshake()  # the serving store, as every owned gateway proves it
+        return gateway
+
+
+def _delegating(tmp_path, monkeypatch, **engine):
+    engine = Engine(tmp_path, **engine)
+    _select_transport_access(monkeypatch, "readonly")
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
+    monkeypatch.setattr(cx, "ClaudexorGateway", lambda *_a, **_k: engine.gateway())
+    return _delegate_registry(tmp_path, monkeypatch), engine
+
+
+def _start(registry, retry_of=""):
+    from ouroboros.tools import delegate
+
+    if retry_of:
+        return json.loads(registry.execute_result("delegate_start", {"retry_of": retry_of}).text)
+    return json.loads(delegate._delegate_start(registry._ctx, "Summarize the layout.", max_seconds=120).text)
+
+
+def _lost_start(tmp_path, monkeypatch, **engine):
+    """A real start whose reply was lost after the engine accepted it: only START_REQUESTED names it."""
+    registry, engine = _delegating(tmp_path, monkeypatch, **engine)
+    engine.lose = 1
+    token = _start(registry)["pending_invocation_id"]
+    c._CUSTODY.clear()  # the worker that held the reply is gone
+    return registry, engine, token
+
+
+def _bind_without_state(root, gateway, engine, rid):
+    from ouroboros import delegate_accepted
+    from ouroboros.delegate_custody_reconcile import recovered_custody
+
+    record = {**c.invocation_record(root, "lost"), "invocation_id": "lost"}
+    entry, shape = recovered_custody(root, gateway, record, rid, engine.store)
+    assert delegate_accepted.bind_started(root, entry, shape=shape).durable
+    entry = current.run(root, rid)
+    assert entry.resume_start_state == "unknown"
+    return entry
+
+
+def _rows(root, kind, invocation_id="", **match):
+    """The chain's rows of ``kind`` for one invocation (STARTED, START_FAILED) or one run (``run_id=``: SETTLED)."""
+    return [row for row in c.custody_rows(root) if row["type"] == kind
+            and (not invocation_id or row.get("invocation_id") == invocation_id)
+            and all(row.get(key) == value for key, value in match.items())]
+
+
+def _held(root, invocation_id):
+    return [run for run in current.runs(root).values() if run.invocation_id == invocation_id]
+
+
+def _sweep(root, engine, live=(), *, observe=lambda: True, replay=lambda: True, factory=None):
+    """The admitted startup/periodic sweep's shape: one not-stopping predicate admits the read and the replay."""
+    return c.reconcile_orphaned_runs(root, set(live), gateway_factory=factory or engine.gateway,
+                                     replay_pending=replay, observe_pending=observe)

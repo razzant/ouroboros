@@ -21,6 +21,12 @@ function fixture({ stack = true, coarse = true, blocked = false, selection = '' 
     bubble.rect = { left: 20, top: 200, right: 370, bottom: 280, width: 350, height: 80 };
     const echo = el('div', { className: 'chat-bubble user' }, el('div', { className: 'message', text: 'unsaved echo' }));
     feed.append(bubble, echo);
+    const plus = el('button', { className: 'composer-plus' });  // the composer's +, outside the feed
+    doc.body.append(plus);
+    const pressed = [];
+    for (const [name, node] of [['plus', plus], ['bubble', bubble], ['echo', echo]]) {
+        node.addEventListener('click', () => pressed.push(name));
+    }
     const replied = [];
     const haptics = [];
     const layoutHandlers = [];
@@ -40,8 +46,20 @@ function fixture({ stack = true, coarse = true, blocked = false, selection = '' 
     const move = (target, x, y, extra = {}) => target.emit('touchmove', { touches: touches(x, y), changedTouches: touches(x, y), cancelable: true, ...extra });
     const lift = (target, x, y) => target.emit('touchend', { touches: [], changedTouches: touches(x, y) });
     const cancel = (target, x, y) => target.emit('touchcancel', { touches: [], changedTouches: touches(x, y) });
+    // A new finger's tap, as a host sends it: pointer and touch events, then the mouse events and the click it makes.
+    const tap = (target, { x = 40, y = 760 } = {}) => {
+        const finger = [{ identifier: 2, clientX: x, clientY: y }];
+        const pointer = { pointerType: 'touch', isPrimary: true, pointerId: 2, clientX: x, clientY: y };
+        target.emit('pointerdown', { ...pointer });
+        target.emit('touchstart', { touches: finger, changedTouches: finger });
+        target.emit('pointerup', { ...pointer });
+        target.emit('touchend', { touches: [], changedTouches: finger });
+        target.emit('mousedown', { detail: 1 });
+        return target.emit('click', { detail: 1 });
+    };
     const mark = () => doc.body.children.find((node) => node.classList.contains('chat-row-reply-mark')) || null;
-    return { ...env, feed, bubble, echo, words, code, field, replied, haptics, state, layoutHandlers, dispose, start, move, lift, cancel, mark,
+    return { ...env, feed, bubble, echo, words, code, field, plus, pressed, replied, haptics, state, layoutHandlers, dispose,
+        start, move, lift, cancel, tap, mark,
         close() { dispose(); delete globalThis.window.Telegram; env.restore(); } };
 }
 
@@ -217,6 +235,70 @@ test('the click that ends a swipe is not a tap; dispose releases every listener 
         assert.equal(f.mark(), null);
         assert.equal(f.bubble.dataset.rowSwipe, undefined);
     } finally { f.restore(); delete globalThis.window?.Telegram; }
+});
+
+test('a tap 250 ms after a short swipe acts at once, once, wherever it lands; the swipe\'s own click presses nothing', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture();
+    const listening = () => f.doc.captures.get('click')?.size || 0;
+    try {
+        assert.equal(listening(), 0, 'nothing listens on the document before a swipe');
+        swipe(f, f.words, [12, 30]);  // short of the reply point; the finger moved, so its host sends no click
+        f.lift(f.words, 270, 223);
+        assert.deepEqual(f.replied, []);
+        t.mock.timers.tick(250);
+        assert.equal(f.tap(f.plus).defaultPrevented, undefined, 'the + takes the next finger');
+        assert.deepEqual(f.pressed, ['plus'], 'and opens once');
+        assert.equal(listening(), 0, 'nothing waits once a new finger came');
+        // The same row, tapped again right after its swipe, is a tap of its own too.
+        swipe(f, f.words, [12, 30]);
+        f.lift(f.words, 270, 223);
+        t.mock.timers.tick(250);
+        f.tap(f.words, { x: 200, y: 230 });
+        assert.deepEqual(f.pressed, ['plus', 'bubble']);
+        // A host that does send the swipe's click: that one presses nothing, the next tap acts.
+        swipe(f, f.words, [12, 30]);
+        f.lift(f.words, 270, 223);
+        assert.equal(f.words.emit('click', { detail: 1 }).defaultPrevented, true, 'the swipe\'s own click is not a tap');
+        t.mock.timers.tick(250);
+        f.tap(f.plus);
+        assert.deepEqual(f.pressed, ['plus', 'bubble', 'plus']);
+    } finally { f.close(); }
+});
+
+test('after the system took the touch, a new tap on another target acts (key, assistive and mouse cases: gesture_tail.test.js)', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture();
+    try {
+        swipe(f, f.words, [12, 90]);
+        f.cancel(f.words, 210, 220);
+        assert.deepEqual(f.replied, []);
+        t.mock.timers.tick(250);
+        f.tap(f.plus);
+        assert.deepEqual(f.pressed, ['plus'], 'touchcancel, then a new finger on the +');
+        assert.deepEqual(f.pressed, ['plus'], 'acted once');
+    } finally { f.close(); }
+});
+
+test('a new touch after a swipe whose end never came settles the row and is a tap of its own', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture();
+    try {
+        swipe(f, f.words, [12, 40]);  // the finger's end is lost
+        assert.equal(f.bubble.dataset.rowSwipe, 'drag');
+        t.mock.timers.tick(250);
+        assert.equal(f.tap(f.echo.children[0], { x: 120, y: 300 }).defaultPrevented, undefined);
+        assert.equal(f.bubble.dataset.rowSwipe, 'settle', 'the stranded row goes back');
+        assert.deepEqual(f.pressed, ['echo'], 'the new finger\'s click is its own');
+        // So is the first touch after a layout change nobody announced, with a swipe stranded mid-way.
+        swipe(f, f.words, [12, 40]);
+        f.state.stack = false;
+        t.mock.timers.tick(250);
+        assert.equal(f.tap(f.echo.children[0], { x: 120, y: 300 }).defaultPrevented, undefined);
+        assert.deepEqual(f.pressed, ['echo', 'echo']);
+        assert.equal(f.feed.listeners.get('touchmove')?.size || 0, 0, 'and the docked feed no longer waits for a touch');
+        assert.deepEqual(f.replied, []);
+    } finally { f.close(); }
 });
 
 test('the element the touch started on keeps the finger after a re-render removes it from the feed', (t) => {

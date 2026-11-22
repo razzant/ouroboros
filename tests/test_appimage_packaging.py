@@ -630,6 +630,8 @@ else:
     command = next(line.removeprefix('ExecStart=') for line in unit if line.startswith('ExecStart='))
     assert command == '/opt/ouroboros/Ouroboros --launch-intent automatic'
     assert 'KillMode=control-group' in unit and not any(line.startswith('Restart=') for line in unit)
+    # A command's OOM must end its own leaf, not the service (#3792): the runtime lives in a delegated subgroup.
+    assert {'OOMPolicy=continue', 'Delegate=memory', 'DelegateSubgroup=runtime'} <= set(unit)
     output = tmp_path / 'unit-entry.json'
     subprocess.run([str(installed / 'Ouroboros'), *command.split()[1:]],
                    env={**env, 'TEST_ENTRY_OUTPUT': str(output)}, check=True)

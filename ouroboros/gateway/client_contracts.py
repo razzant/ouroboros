@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.cost_projection import CostPresentation
-from ouroboros.gateway.work_contracts import ChatModelRoute
+from ouroboros.gateway.work_contracts import (  # the owner's model and tier choices live with the routes they name
+    ChatModelChoice, ChatModelRoute, MainBindingConditions, OwnerChatModelRequest, OwnerChatModelResponse,
+    OwnerChatProcessingRequest, OwnerChatProcessingResponse,
+)
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -395,51 +398,6 @@ class OwnerSubagentsModeRequest(TypedDict):
     project_id: NotRequired[str]
 
 
-class OwnerChatModelRequest(TypedDict):
-    """A Project follows Main or chooses a model; without project_id this writes Main itself."""
-
-    kind: Literal["main", "model"]
-    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
-    use_local: NotRequired[bool]  # kind ``model`` only
-    project_id: NotRequired[str]
-
-
-class ChatModelChoice(TypedDict):
-    """A room follows Main or chooses a route; a reference is never the same model pinned."""
-
-    kind: Literal["main", "model"]
-    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
-    use_local: NotRequired[bool]  # kind ``model`` only
-
-
-class OwnerChatModelResponse(TypedDict):
-    ok: bool
-    project_id: str
-    model_choice: NotRequired[ChatModelChoice]  # Project response
-    previous_model_choice: NotRequired[ChatModelChoice]
-    main_route: NotRequired[ChatModelRoute]  # Main response
-    previous_main_route: NotRequired[ChatModelRoute]
-    account: NotRequired[Literal["kept", "auto", "none"]]
-    window_reset: NotRequired[bool]
-
-
-class OwnerChatProcessingRequest(TypedDict):
-    """A room's processing tier for new owner work, or Main's own without project_id; ``""`` is Default. Ultrafast is a room's only."""
-
-    processing: Literal["", "standard", "fast", "economy", "ultrafast"]
-    project_id: NotRequired[str]
-
-
-class OwnerChatProcessingResponse(TypedDict):
-    ok: bool
-    project_id: str
-    processing_choice: NotRequired[Literal["", "standard", "fast", "economy", "ultrafast"]]  # Project response
-    previous_processing_choice: NotRequired[Literal["", "standard", "fast", "economy", "ultrafast"]]
-    main_processing: NotRequired[Literal["", "standard", "fast", "economy"]]  # Main response: Main's own tier (a Settings value)
-    previous_main_processing: NotRequired[Literal["", "standard", "fast", "economy"]]
-    processing_default: NotRequired[Literal["", "standard", "fast", "economy"]]  # what Default resolves to
-
-
 class OwnerSafetyModeRequest(TypedDict):
     kind: NotRequired[Literal["your_work", "consciousness"]]
     mode: Literal["full", "light", "off"]
@@ -732,21 +690,17 @@ class ChatUploadDeleteResponse(TypedDict):
 
 
 class ProjectListResponse(TypedDict):
-    """``GET /api/projects``: active and deleting projects, at most 200, newest message first (``last_message_at``);
-    ``?all=1`` lists every one of them. ``?id=<project_id>`` answers that project while active or deleting,
-    ``?chat_id=<n>`` the active project of that room; either answers none otherwise.
-    Rows are the compact projection ``GET /api/state`` also carries: id, name, pinned, chat_id, working_dir,
-    provenance, last_active_at, last_message_at, lifecycle, optional closed, routing_generation, visible_revision,
-    delete_error and has_thread_activity."""
+    """``GET /api/projects``: up to 200 active/deleting projects by newest message (``?all=1``: all).
+    ``?id=`` selects an active/deleting project, ``?chat_id=`` the room's active project; no match returns none.
+    Same compact rows as ``GET /api/state``: id, name, pinned, chat_id, working_dir, provenance, last_active_at,
+    last_message_at, lifecycle, optional closed, routing_generation, visible_revision, delete_error, has_thread_activity."""
 
     projects: List[ProjectEntry]
 
 
 class ProjectCreateResponse(TypedDict):
-    """``POST /api/projects``: ``project`` is the full registry row. ``project.created`` is false when
-    the id already existed and no source was named: an idempotent repeat that changes nothing and
-    announces nothing. ``init_git_warnings``/``init_git_skipped`` disclose what an ``init_git``
-    attach snapshot left out."""
+    """``POST /api/projects`` returns the full registry row. Existing id and no source: ``created=false``,
+    no change or announcement. ``init_git_warnings``/``init_git_skipped`` name attach-snapshot omissions."""
 
     project: ProjectEntry
     init_git_warnings: NotRequired[List[Any]]
@@ -787,6 +741,11 @@ class ProjectTaskBinding(TypedDict, total=False):
     source_ref: Dict[str, Any]  # the owner message the task came from
     origin_absent: Any  # present instead of source_ref when no origin message is known
     source_text: str
+    source_projectable: bool
+    source_attachments: List[Dict[str, Any]]
+    source_channel: str
+    source_text_placeholder: bool
+    source_input: Dict[str, str | Dict[str, Any]]  # bound card kind, asker, label and exact submitted content/fields
 
 
 class ProjectFromTaskResponse(TypedDict):
@@ -931,8 +890,7 @@ class ScheduleActionRequest(TypedDict):
 
 
 class TaskResumeRequest(TypedDict, total=False):
-    """The optional body of ``POST /api/tasks/{task_id}/resume``: the held calls whose outcome is
-    unknown (a refusal's ``acceptable_unknown``) the owner goes on past, and why. Recorded, never re-run."""
+    """Resume this saved task with the opaque IDs offered in acceptable_unknown and a reason; never reconstruct an ID."""
 
     accept_unknown: List[str]
     reason: str
@@ -964,6 +922,7 @@ class TaskResumeResponse(TypedDict, total=False):
     # once ``blockers`` (that census) settle, unless a newer Pause, Stop or Panic replaces the wait.
     held: bool
     blockers: List[Dict[str, Any]]
+    accepted_start_risks: List[Dict[str, Any]]
     # The still-closed Pause's census settled without these unreadable rows nothing ties to the task:
     # {"rows": [{"task_id", "reason"}] (at most 20), "count"}; ``message`` words them.
     membership_gaps: Dict[str, Any]
@@ -984,6 +943,7 @@ __all__ = [
     "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
+    "MainBindingConditions",
     "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "OwnerChatModelResponse", "OwnerChatProcessingRequest", "OwnerChatProcessingResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
     "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceModelRoute", "PlaceSummary", "PlaceDisconnectRequest",

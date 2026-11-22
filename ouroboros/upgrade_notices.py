@@ -224,7 +224,7 @@ def model_cap_notice(document: Optional[Mapping[str, Any]], settings: Mapping[st
         return ""
     return ('⚙️ "Requests at once per model" held 3 on this install, the number earlier versions saved by themselves. '
             "It now reads as not set: Ouroboros no longer limits API models (the provider's own limits still apply), "
-            "and the built-in local model keeps 3. If 3 was your choice, enter it again in Settings → Models → More.")
+            "and the built-in local model takes one request at a time. If 3 was your choice, enter it again in Settings → Models → More.")
 
 
 def subagent_cap_notice(document: Optional[Mapping[str, Any]], settings: Mapping[str, Any]) -> str:

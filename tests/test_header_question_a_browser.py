@@ -337,16 +337,27 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
     engine = engine_ui['engine']
     page = _open(engine_ui, 1087, 801)
     try:
-        bars = {}
+        extensions = page.locator('#page-skills')
+        rail = extensions.get_by_role('navigation', name='Extensions')
+        installed = rail.locator('[data-extensions-open="installed"]')
+        refresh = extensions.locator('#skills-refresh')
         for name in ('skills', 'files'):
             _goto(page, name)
-            bars[name] = page.evaluate(BAR, name)
-            bar = bars[name]
-            # Two ends on Main's line: the page's tabs or location at the start, its actions at the end.
+            bar = page.evaluate(BAR, name)
             assert bar['lead'] and 'data-lead' in bar['attrs'] and not bar['under'], (name, bar)
             assert bar['height'] == 66 and bar['centres'] and max(bar['centres']) - min(bar['centres']) <= 1, (name, bar)
-            # A browser keeps the same 18px upper inset and content edge as the desktop window.
-            assert abs(bar['centres'][0] - 33) <= 1 and abs(bar['first'] - 20) <= 1, (name, bar)
+            assert abs(bar['centres'][0] - 33) <= 1, (name, bar)
+            if name == 'files':
+                assert abs(bar['first'] - 20) <= 1, bar  # the folder path starts the band
+            else:
+                assert rail.locator('.section-row-title').all_inner_texts() == ['Skills', 'MCP servers', 'Browse', 'Sources']
+                assert installed.is_visible() and installed.get_attribute('aria-current') == 'page'
+                assert extensions.get_by_role('tablist').count() == 0
+                assert extensions.locator('#skills-pane-installed').is_visible()
+                assert refresh.is_visible()
+                end = refresh.evaluate("""el => el.closest('.app-page-header').getBoundingClientRect().right
+                    - el.getBoundingClientRect().right""")
+                assert abs(end - 20) <= 1, end  # the page action ends the band beside the rail
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
             setup_browser.capture(page, f'bar-a-{name}-{engine}-1087')
@@ -408,6 +419,21 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         assert page.evaluate("document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip")
         assert page.locator('#page-costs').is_visible()
         assert page.locator('#page-dashboard [role=tablist]').is_visible()
+
+        _goto(page, 'skills')
+        page.set_viewport_size({'width': 390, 'height': 844})
+        back = extensions.get_by_role('button', name='Back to Extensions', exact=True)
+        back.click()
+        installed.wait_for()
+        header = extensions.locator('.app-page-header')
+        band = header.bounding_box()
+        assert rail.bounding_box()['y'] >= band['y'] + band['height'] - 1
+        assert extensions.locator('#skills-pane-installed').is_hidden()
+        installed.click()
+        assert rail.is_hidden() and extensions.locator('#skills-pane-installed').is_visible()
+        assert header.get_by_role('heading', name='Skills', exact=True).is_visible()
+        assert back.is_visible() and refresh.is_visible()
+        assert page.evaluate(BAR, 'skills')['height'] <= 67
     finally:
         page.close()
 
@@ -703,8 +729,9 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
 
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
-def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine_ui, theme):
-    """Existing toolbar actions compete with navigation just like Files' moved actions."""
+def test_extensions_pages_and_existing_toolbar_survive_a_narrow_content_column(engine_ui, theme):
+    """Extensions (the place whose id stays `skills`): the skill view's actions end the band and stay inside the content
+    column when a sidebar drag narrows it; its pages are the list's rows, never tabs, and each row still opens its page."""
     page = _open(engine_ui, 720, 801)
     try:
         page.unroute('**/api/extensions')
@@ -715,9 +742,10 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
              'update_available': {'digest': str(i) * 64, 'version': '2'}}} for i in (1, 2)], 'live': {}}))
         page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
         _goto(page, 'skills')
+        page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-skills', { detail: { skill: 'update-1' } }))")
         page.locator('#skills-update-all').wait_for()
-        page.evaluate("window.__skillsTabs = document.querySelector('#page-skills .app-tab-strip')")
-        page.locator('#page-skills [data-tab="installed"]').focus()
+        assert page.locator('#page-skills [role="tab"]').count() == 0
+        page.evaluate("window.__skillsViews = document.querySelector('[data-extensions-views]')")
         handle = page.locator('#primary-sidebar > .resize-handle').bounding_box()
         page.mouse.move(handle['x'] + handle['width'] / 2, handle['y'] + handle['height'] / 2)
         page.mouse.down()
@@ -725,50 +753,42 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
         page.mouse.up()
         page.wait_for_function("document.getElementById('content').clientWidth === 320")
         assert page.locator('#page-skills .app-page-title').evaluate("el => getComputedStyle(el).clipPath === 'inset(50%)'")
-        strip = page.locator('#page-skills .app-page-lead .app-tab-strip')
-        assert strip.evaluate('el => el === window.__skillsTabs && el.clientWidth > 80')
-        assert page.evaluate("document.activeElement.dataset.tab === 'installed'")
+        assert page.locator('[data-extensions-views]').evaluate('el => el === window.__skillsViews')
         for selector in ('#skills-update-all', '#skills-refresh'):
             button = page.locator(selector)
             button.scroll_into_view_if_needed()
             assert button.evaluate("el => { const r=el.getBoundingClientRect(), c=document.getElementById('content').getBoundingClientRect(); return r.left >= c.left && r.right <= c.right; }")
             button.click(trial=True)
-        setup_browser.capture(page, f'skills-sidebar-narrow-{engine_ui["engine"]}-{theme}')
-        for name in ('sources', 'browse', 'installed'):
-            button = strip.locator(f'[data-tab="{name}"]')
-            button.click()
-            assert button.get_attribute('aria-selected') == 'true'
+        setup_browser.capture(page, f'extensions-sidebar-narrow-{engine_ui["engine"]}-{theme}')
+        for name, pane in (('sources', '#skills-pane-sources'), ('browse', '#skills-pane-browse'), ('installed', '#skills-pane-installed')):
+            row = page.locator(f'#page-skills [data-extensions-open="{name}"]')
+            if not row.is_visible():  # one column: Back returns to the list, whose row opens the page
+                page.locator('#page-skills [data-shell-back]').click()
+            row.click()
+            page.locator(pane).wait_for(state='visible')
         page.set_viewport_size({'width': 1280, 'height': 801})
-        page.wait_for_function("document.querySelector('#page-skills .app-page-header').hasAttribute('data-lead')")
-        assert page.locator('#page-skills .app-page-lead .app-tab-strip').evaluate('el => el === window.__skillsTabs')
+        page.wait_for_function("document.querySelector('#page-skills .extensions-shell').dataset.sectionView === 'page'")
+        assert page.locator('#page-skills [data-extensions-open="installed"]').get_attribute('aria-current') == 'page'
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
-        # A jump's return is the round Back. The page column decides whether the three tabs share its row.
-        _goto(page, 'settings')
-        page.locator('[data-settings-open="page:skills"]').click()
+        # The page column keeps a single round return and the existing toolbar, above/below 40rem.
         for column in (488, 733):
+            page.set_viewport_size({'width': 1440, 'height': 801})
+            _goto(page, 'settings')
+            page.locator('[data-settings-open="page:skills"]').click()
             page.set_viewport_size({'width': column + 297, 'height': 801})
             page.evaluate("document.documentElement.style.setProperty('--sidebar-width', '296px')")
-            page.wait_for_timeout(150)
+            page.locator('#page-skills [data-extensions-rail]').wait_for(state='visible' if column >= 640 else 'hidden')
             lead = page.locator('#page-skills [data-shell-back]')
             assert lead.get_attribute('aria-label') == lead.get_attribute('title') == 'Back to Settings'
-            assert lead.evaluate('n => !n.textContent.trim() && Math.abs(n.offsetWidth - n.offsetHeight) < 1'), 'round, no word drawn'
-            positions = []
-            for tab in ('installed', 'browse'):
-                strip.locator(f'[data-tab="{tab}"]').click()
-                positions.append(strip.locator('[data-tab="installed"]').bounding_box()['x'])
-                assert strip.locator('.app-tab').evaluate_all("""nodes => nodes.length === 3 && nodes.every(n => {
-                    const r=n.getBoundingClientRect(), p=document.querySelector('#page-skills').getBoundingClientRect();
-                    return r.left >= p.left && r.right <= p.right; })""")
-            assert abs(positions[0] - positions[1]) < 1, 'trailing actions cannot move the tabs under the pointer'
-            below = strip.locator('[data-tab="installed"]').bounding_box()['y'] >= lead.bounding_box()['y'] + lead.bounding_box()['height']
-            assert below == (column == 488), 'only the column too narrow for the return, tabs and short actions takes two lines'
-            if column == 733:
-                back_box, tab_box = lead.bounding_box(), strip.locator('[data-tab="installed"]').bounding_box()
-                assert abs((back_box['y'] + back_box['height'] / 2) - (tab_box['y'] + tab_box['height'] / 2)) <= 1, \
-                    ('one row: Back stands on the tabs\' centre line', back_box, tab_box)
-                assert lead.evaluate("""n => { const h = n.closest('.app-page-header'), r = h.getBoundingClientRect();
-                    return Math.abs(n.getBoundingClientRect().left - (r.left + parseFloat(getComputedStyle(h).paddingLeft))) <= 1; }"""), \
-                    'one row: Back opens it at the band\'s leading inset'
+            assert lead.evaluate('n => !n.textContent.trim() && Math.abs(n.offsetWidth - n.offsetHeight) < 1')
+            assert page.locator('#page-skills [data-shell-back]:visible').count() == 1
+            for selector in ('#skills-update-all', '#skills-refresh'):
+                button = page.locator(selector)
+                assert button.evaluate("el => { const r=el.getBoundingClientRect(), c=document.getElementById('content').getBoundingClientRect(); return r.left >= c.left && r.right <= c.right; }")
+                button.click(trial=True)
+            assert page.locator('#page-skills [role="tab"]').count() == 0
+            lead.click()
+            page.locator('#page-settings.active').wait_for(state='visible')
     finally:
         page.close()
 

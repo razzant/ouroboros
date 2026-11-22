@@ -193,10 +193,9 @@ def test_a_late_row_reaches_a_running_child_and_grandchild_once_each_outside_the
     assert len(_mail(grand)) == 1  # the child's drain over its own children wrote the grandchild nothing more
 
 
-def test_the_first_drain_shows_nothing_the_first_request_holds_and_an_absent_row_whatever_its_age(tmp_path):
-    """Identity, never time: a row whose reference stands in the member's first request renders no words (its
-    room's stamp earns the one host fact line); a row absent from that request is shown once even when it is
-    older than the member's start."""
+def test_a_born_by_value_row_needs_no_parent_copy_and_an_unbound_view_keeps_the_quote(tmp_path):
+    """The scheduled value coalesces at the producer, not as proof of earlier display. A legacy view with
+    no bound projection keeps an arriving quote irrespective of its printed reference or age."""
     root = _root(tmp_path)
     row, address = _late_row(tmp_path)
     _drain(root)  # the root read the row: a helper scheduled now is born with it
@@ -211,9 +210,10 @@ def test_the_first_drain_shows_nothing_the_first_request_holds_and_an_absent_row
                 quotes=[owner_quote(tmp_path, row, address=address)], teller_task_id="root", canonical_root=tmp_path,
                 host_carried={"went_to": ""})
     messages, controls = _drain(born_with, list(request))
-    assert len(messages) == 2 and "owner_carried_addressed" not in controls
+    assert len(messages) == 3 and controls["owner_carried_addressed"] == [address]
+    assert str(messages[2]["content"]) == f"{_carried_line(row, address)}\n{LATEST}"
     assert held_owner_messages(born_with)[address]["carried"]["went_to"] == ""
-    # Under its room's stamp (a birth block that read the row from the room): the one host fact line, no words.
+    # A legacy room stamp by itself still cannot show what the accepted input carried.
     room_read = _child(tmp_path, payload)
     room_read.task_id = payload["id"] + "-room"
     write_relay(room_read.drive_root, room_read.task_id, relay_id=f"carry:{address}", note="", chat_id=1,
@@ -222,10 +222,9 @@ def test_the_first_drain_shows_nothing_the_first_request_holds_and_an_absent_row
     stamped = ow.render_owner_words([ow._row(LATEST, source="room_message", carrier="room", ts=row["ts"],
                                              ref="chat 1 / msg-2")], audience="child", root_task_id="root")
     messages, controls = _drain(room_read, [{"role": "system", "content": stamped}, {"role": "user", "content": payload["text"]}])
-    assert [m["content"] for m in messages[2:]] == [
-        f"[Host fact: the row {address} in your starting words was addressed to this work]"]
+    assert [m["content"] for m in messages[2:]] == [f"{_carried_line(row, address)}\n{LATEST}"]
     assert controls["owner_carried_addressed"] == [address]
-    # The other direction: an older row absent from the first request is shown once, with no time compared.
+    # An older absent row is shown once, with no time compared.
     older, older_address = _late_row(tmp_path, "Before anything else", "msg-0", "2026-10-04T04:00:00+00:00")
     _drain(root)
     assert [entry["msg_id"] for entry in _mail(born_with)][-1] == f"relay:carry:{older_address}:{born_with.task_id}"

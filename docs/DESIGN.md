@@ -450,7 +450,7 @@ a route change clears it. Web search is its own Source and Model:
 Auto lists the routes it may use, a chosen source is strict, and skills, MCP
 and browser tools stay independent.
 
-Tabs are views of one page (Skills: Installed, Browse, Sources), never a section's pages, which are its list
+Tabs are views of one page, never a section's pages, which are its list
 (§10 "A section with pages"); they expose one selected view and one keyboard entry point. Arrow keys and
 Home/End move through available tabs; a tab strip is a strip, so it wraps and never scrolls, and a restored
 tab is already in view. Menus and
@@ -518,18 +518,24 @@ The catalog suggests and never admits: any id can be used as typed. It is read w
 Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the field, then
 closes. A room's pick posts at once and closes; Send waits for it, Panic never does.
 
-**The tier strip** stands at the sheet's foot: `Flex · Standard · Fast` (Flex is the stored `economy`), `Ultrafast` too
-where the route's source and model both list it and never for Main, the scope's own choice filled, `Default` beside
-it while there is one to leave. Default takes Main's tier while the scope follows Main, else the default one, and that
-tier wears a ring; an explicit Standard is a choice, never Default. Under it what the choice applies to and now is
-(`Default · Standard as Main · for new work here and its new subagents without a tier of their own; running work keeps
-its own`; in the Main chat `for Main, 3 running works that follow it and their new subagents`, counting only works on
-Main without a tier of their own; on a card `for this work from its next call and its new subagents …`, its last call's
-deviation in the sheet's head) and, under the mouse or focus before any press (a finger only taps), in a line as tall
-as its tallest, what that tier means on this route: listed, `Not confirmed for <model> here: a provider may serve it
-as Standard`, or `<source> does not list <tier> for <model>: its calls go as Standard`. No tier is refused or waited
-for; a proven refusal before generation continues as Standard, its receipt keeping the tier asked, which the card
-then says. Each work captures its room's tier once at admission; a press writes at once and leaves the sheet open.
+**The tier strip** at the Model sheet's foot offers Flex (`economy`), Standard, Fast and Ultrafast for the current
+model, transport and account: a follower reads Main's pin or Auto on opening, unknown until confirmed; an own model uses Auto.
+Partial evidence reads “some accounts” or “not confirmed”, dotted; a tier the host transport cannot carry, “not sent”.
+Offer new Ultrafast only on a transport known to carry it. Keep saved choices and distinct inherited tiers. Hide
+Standard alone only when inherited processing already means Standard. An own choice is filled, with Default beside
+it; an inherited one wears a ring. With no tier requested the route decides (OpenRouter: its workspace default).
+
+Below, say who takes the choice: a room's new work at admission, Main and work inheriting its tier (even on a
+fallback), a card's work from its next call, and new subagents without their own tier. Hover or focus
+previews in space kept for the longest explanation. A key's rate or range needs a complete priced endpoint list for
+that model and tier, else “Price unknown”. A press saves in place; a proven refusal before generation can continue on
+Standard, and the card shows the receipt.
+
+**Ultrafast for Main asks first** when enabled or moved. Show model, account, known price or uncertainty, and
+scope: Main, inheriting work and fallbacks, new helpers, direct Main review and Safety falling back to Main without an override.
+Before rollback choose Standard or Default. A changed route, pin, account or key invalidates the answer. Auto follows
+its pool. Confirm in Models or switch the waiting task. A role hides redundant Standard-only processing, not a saved
+override or distinct inherited default. An empty Supervisor names its inherited route, account and tier.
 
 Each is a neutral **capsule** of the pills' height — glyph, name, value: `Main gpt-6-astra`, `Subagents Auto`,
 `Context Max`, `Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
@@ -744,22 +750,17 @@ needed restart stays until the row's next result, an edit or leaving its page. A
 is shown; a retained record (Updates, history, `Input saved`) lives with its record, with
 no timer. Toasts and statuses older than this rule are checked against it when touched.
 
-Activity schedule rows use the same factual status rule: `active`, `disabled`,
-`consumed once · history`, `withdrawn` and `deletion pending · work in flight`
-describe lifecycle state, while the adjacent Disable/Enable, Restore and Delete
-controls state the owner action. Lifecycle and the last run's outcome are
-separate facts: the outcome line says the settled word as stored (`completed`,
-`failed`, `cancelled`), `ran · no message` for a quiet run, or `outcome not
-observed yet` until the scheduler has read the settled result, then the run's
-line: a host notice, else the sentence the run wrote for its human (whole),
-else the end of its answer; it never says running, and only the host's own
-observation writes `previous run still open`.
-A consumed one-shot is history whether its task succeeded or failed; the status
-never implies a result. A row is headed by its name; the instruction stays
-readable and expands by touch, and a waiting row says why inline, never in a
-hover-only tooltip. Retained rows (consumed and withdrawn) collapse into one
-disclosure named for what it holds (Finished, Withdrawn) rather than padding the standing list or
-disappearing: history the owner can still open, read and act on. A withdrawn
+Activity rows separate schedule lifecycle (`active`, `disabled`, `consumed once ·
+history`, `withdrawn`, `deletion pending · work in flight`) from actions
+(Disable/Enable, Restore, Delete) and the last run's outcome. The run shows its
+stored `completed`, `failed` or `cancelled`, `ran · no message` if quiet, or
+`outcome not observed yet` until read. Its line is the host notice, else the
+whole authored sentence or answer's end. A legacy report has no excerpt; the
+door opens that run's card in its actual room, and Details reads the saved
+report on demand without posting it. Only the host's observation says
+`previous run still open`. One-shot history implies no result. The row's name
+heads a readable, touch-expandable instruction; waits explain why inline.
+Consumed and withdrawn rows remain actionable under Finished and Withdrawn. A withdrawn
 row says who withdrew it, when and why, and keeps Restore through the retention
 window once no hold remains on it; Restore cancels the withdrawal and brings
 the row back enabled, even if it was paused before, but never re-arms a one-shot
@@ -1111,9 +1112,8 @@ this Project" came to be drawn six ways. The rule is therefore about intents.
   place that is not such a reference (`Load older messages`, `Open widgets`).
   Tabs, toggles, menus and the navigation list keep their own roles; a status
   chip states a fact and is not a destination.
-- A **Main task** is opened by its door, `Open in Main ↗`: words inside the sentence that names the
-  task (`.consciousness-inline-link`). `task_reference.js` builds it and alone raises `ouro:open-task`;
-  its landing is §5 "Dashboard › Consciousness".
+- A **task** has an inline door (`.consciousness-inline-link`): `Open in Main ↗`, or `Open run ↗`
+  for a known Project. `task_reference.js` alone raises `ouro:open-task`; landing uses that room's history.
 - An intent that will be drawn in a second place gets its door first (siblings:
   `docs/inventories/UI_CONTROL_TEXT_INVENTORY.md`).
 
@@ -1521,23 +1521,8 @@ Reviews in their actual nodes.
 
 ### Room work status
 
-Each room's bar has one status, right after its title: the short word in its
-status ink (a turn still preparing adds the start step it stands at, `Preparing ·
-Building context`, and nothing reads `Thinking` before a model call is sent),
-then one mark, as on the sidebar's rows; no frame at rest, a neutral
-tint on hover and while open, a caret when it opens. A working work the host dated as silent
-says so first in its quiet line (a recorded Stop still leads), `No recorded progress since 14:02`, in status ink (no amber, no
-new mark), until its own progress. A work comprises one request, its Continue
-episodes and live subagents, delegated runs or post-answer upkeep. The server's
-single work/room status is worded by the bar, work list, sidebar, cards and tray;
-none decides its own.
-Activity uses the chip's queue words, never raw phase codes, and the work's controls.
-Parked subagents close when their ended root's tree is quiet; a live member keeps
-that tree's paused subagents resumable and may keep amber visible. A
-card without a projected work (a child, Main's owner-action message, a replayed
-card) takes its shape from its census phase through one table pinned to the
-server's `mark_of`, and the owner's move only from proved facts (`can_resume`,
-`requires_owner_action`, its own question). The room says its busiest work:
+The room bar follows its title with a word in status ink and the same mark as the sidebar. A preparing turn adds its step (`Preparing · Building context`); `Thinking` requires a sent model call. At rest the control has no frame; hover/open adds a neutral tint, with a caret when it opens. A host-dated silent work leads its quiet line with `No recorded progress since 14:02` (after a recorded Stop), until its own progress. Keep status ink, no amber or new mark.
+A work comprises a request, its Continue episodes and live subagents, delegated runs or post-answer upkeep. Bar, work list, sidebar, cards and tray render the server's state; a nested card shows its own member and external work. Activity uses the chip's queue words and the work's controls, never raw codes. Parked helpers close when an ended root's tree falls quiet; a live member can keep them resumable and amber visible. Without a projected state (e.g. Main's owner-action message or an old card), map the recorded census phase through the table pinned to `mark_of`. Show an owner move only on `can_resume`, `requires_owner_action` or the card's own question. The room says its busiest work:
 working, then queued, waiting, paused, and its mark is the server's status mark
 (Status marks): moving dots while anything in it runs (a paused work's finishing review too), still dots while it queues or waits on
 something that ends by itself, two bars while paused, a faint ring when
@@ -1759,8 +1744,8 @@ reviews create child tasks or prove execution.
 - Harness marks are monochrome `currentColor` vectors with adjacent visible
   text, identity only, neutral across states, with a generic text-preserving
   fallback; direct API shows as `API`. Claude, Cursor and OpenCode paths come
-  from Simple Icons, Codex/OpenAI from SVGL; names and marks belong to their
-  owners.
+  from Simple Icons, Codex/OpenAI from SVGL, Antigravity from Google's own one-colour mark
+  (`antigravity.google/assets/image/brand/antigravity-icon__one-color.svg`); names and marks belong to their owners.
 
 ### Quiz card
 
@@ -1870,7 +1855,7 @@ value is set (hidden)` (`· could not be read` when its read failed: an earlier 
 granted in Skills`; an enabled reader missing its grant explains that it cannot run after saving until the keys
 are granted), and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
 the enabled readers: they may use the new value at their next call, some keep the old one until disabled and
-re-enabled. Skills › Installed shows an enabled skill's unset (or unreadable) declared secret as one
+re-enabled. Extensions › Skills shows an enabled skill's unset (or unreadable) declared secret as one
 neutral tray with `Open Accounts and keys`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
 refused, the form re-renders as Replace or Save and keeps the draft and focus. Close, Escape and a click outside hide
 the form, but wait for a save in flight, whose reply settles it (both Close buttons and `Enter secret…` are
@@ -1890,9 +1875,9 @@ A chat transport shows such a request as the host's note on where to enter it, w
 
 **Project question mirror.** A Project question's Main copy is its own `buildQuizCard` card, whole as anatomized above, in an assistant bubble at its ask time in the feed, not a section of its own; the Project reference in its voice line opens the exact original, and answers, materials and recovery controls work in Main. It uses the shared ring and `--project` tints; names ellipsize (full titles); the head stays the room's row. History, live pointers and the census share one task/quiz card and lifecycle wording; the canonical current questions only confirm or settle copies the feed holds, never mount them, and an incomplete read withholds only what its typed gaps name. Optional, resumed and terminal-author questions stay answerable until answered or closed; no display/history cap drops them. Replaced questions stay read-only. The owner closes from the card, a model its own or a host-proven continued task line's question, or a finished task's, always with its own reason. Closure records a reason, never an answer/approval. A late answer left delivery-unknown by a restart offers Remove from pending (no resend, never marked delivered). Publication destination stays fixed across Project conversion; current room membership controls display. Explicit materials use registered task artifacts and the existing reader.
 
-A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its subagents within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
+A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its subagents within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable (a row no census names now keeps its message, its controls and Project reference withdrawn); visibility never authorizes login, budget changes or automatic Resume.
 
-One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. A room's mark and Ouroboros's picture turn amber for the same questions; the sidebar feed holds the row of a listed Project whose room is the owner's turn for as long as Main's pill keeps its question (the same reads keep and drop both). Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
+One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. A room's mark and Ouroboros's picture turn amber for the same questions; the sidebar feed holds the row of a listed Project whose room is the owner's turn for as long as Main's pill keeps its question (the same reads keep and drop both). Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens; an action's landing focuses its explicit Resume while a press of it would act — the pill leads to the door, it never sends it. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
 
 A confirmed answer/closure shows its result for five seconds, then retires only the Main copy through message/media disposal without moving the viewport; the Project card stays. Pending canonical delivery keeps the read-only form and a compact pending fact. The interval starts once, including simultaneous form/result delivery. Focus remains during it, then moves to the next Main question or keyboard owner's composer without summoning a touch keyboard. History, reconnect and stale snapshots cannot resurrect settled forms; a settled pointer never mounts unless its delivery is owed. A newly accepted question closed before first exposure publishes only its closed state; an old answer without explicit delivery debt creates no new owner turn.
 
@@ -1919,7 +1904,7 @@ in collapsible original-content sections, never duplicate cards.
 
 **Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint; only painted fading text extends two lines into footer whitespace, without moving Project/time/actions. Short answers have no fade; limitations/details keep the tail above their words. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
 
-History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Model metadata says `Last solve response`, naming the initial request only when the route changed.
+History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Model metadata says `Last solve response`, naming the initial request only when the route changed. `Model handover` shows which routes were involved, whether a successor reply was recorded, and what the successor did: an accepted answer choice or a successful tool call other than schema discovery. An incomplete handover establishes no act. After one reminder, the successor can explicitly select the complete answer or its offered hash. An accepted choice clears the handover warning alone; other failures stay visible. Restoring the same task ID can recover a proved choice; a new task ID must select for itself. Files, Continue and `Model handover` follow one settled stored detail: the census read serves the card, a reveal joins it, an incomplete read is topped up once, and a failed review read keeps its ordinary Retry. An exact row jump opens what it lands in; folded children stay unread, retranslation is local.
 
 History placement is separate from the task's outcome: ordinary
 `Saving task history` and `Task history saved` appear only in task details and
@@ -2009,7 +1994,8 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   echo, the bubble says "Not confirmed as saved" with "Send again", which
   resends the same frame and id (the host rejoins it if it was saved after all,
   never a second message), and "Discard", which forgets this tab's copy (never
-  an upload). Nothing resends by itself. In dark, queued bubbles retain opaque readable ink; the queued
+  an upload); a selected reply, which left the composer when sent, adds "Send as
+  new" (below). Nothing resends by itself. In dark, queued bubbles retain opaque readable ink; the queued
   words carry the state. Light retains its existing opacity. The frame is kept, with no count bound,
   until that id's saved echo or history row settles it (a row the running host
   has not yet dispatched keeps it until the host says which): a bubble the feed
@@ -2024,8 +2010,11 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   running host) says "Saved, not delivered." and keeps Send again: the host
   hands that row over once. A kept message whose saved row a host process before
   a restart took says "Saved; delivery not confirmed." with Send as new, which
-  only puts the words back in the composer as a new message: nothing is
-  replayed. Rows nobody kept stay plain history ("Input saved"). That plain
+  only puts the words back in the composer, after words already typed, as a
+  new message: nothing is replayed. While Send is busy or the composer holds
+  a staged reply or file it asks to finish or clear that draft first; a
+  selected reply returns with its quote, and only into an empty composer.
+  Rows nobody kept stay plain history ("Input saved"). That plain
   saved fact is one quiet tick before the message's time, its words its
   accessible text and a pointer's title: saved, never read or started, so no
   second tick, and a row the host never said is saved shows none; a doubt, an
@@ -2033,25 +2022,30 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 
 ### Replies
 
-Reply addresses a row for Ouroboros to interpret, never routes. A Main reply to a Project message also
-appears there at its time as the same Main message (owner 28.10, A), without telling, waking or resuming
-anything; replies stay in Main. Saved bubbles offer Reply beside Copy and in row menus; work cards in
-menus only, never hover-only. Reply stages the composer's first-line strip (`Replying to`, quoted author,
-one line, ×; Esc cancels). Send carries the address; the host builds the snippet. Questions use their own field.
+Reply quotes a row for Ouroboros to interpret. In the owner’s bundled Telegram chat, a confirmed Project Reply
+opens a turn there; other ordinary Replies stay in the physical conversation (`skills/telegram/SKILL.md`).
+A Main reply to a Project row appears there at its time without waking work. Answers stay in Main
+(owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
+menu, questions their own field. Select words in one message for **Reply to quote** beside them or
+in the native Mac menu alongside Copy and Look Up. On touch, **Select text** opens native handles.
+Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. Send fixes
+the words, reply and files before waiting. A send refused before the socket or its queue took it keeps the draft; once taken, it frees the
+field for the next message, a passage like any other, and a later draft stays. Its bubble keeps the unconfirmed row: Send again reuses
+the message ID, and a passage's Send as new puts its words and quote back into an empty composer.
 
-One quote component serves bubbles, strips and relays: above the text, a 2 px
-bar and tint in the quoted author's ink (the tint lies on the quote glass, so inside a
-dark voice it reads as a shade of graphite cooled or warmed by the quoted author, not as
-a second bubble; inside the dark Ouroboros voice a quote of Ouroboros lies on that voice's
-capsule step, its author in the voice's readable word), one line cut on a word; a photo leads
-with its thumbnail. Pressing a reply quote reveals the exact row, loading its
-bounded page in this room when present, otherwise its available home. Containing
-timelines open and scroll; the line is focused and highlighted below the header.
-A card, portal or retained copy cannot substitute. Refusal/failure preserves the view and newest-following intent; a toast explains why, offering Try again
-only if a retry can differ. New gestures/navigation cancel the read. Only the quoted stream is positioned:
-the other (narration beside owner speech or vice versa) stays unloaded down that chain until `Scroll to
-latest message`. Old sources read no newer messages. Ouroboros quotes its addressee only when not directly
-above; its own card does not count.
+Bubbles, strips and relays share quote glass with a 2 px bar and the quoted author’s tint over the
+bubble’s graphite in dark mode. Ouroboros quoting Ouroboros uses its capsule step and readable
+author ink. Whole-row replies show the host preview. Passages label the sender’s selection and name
+the source author, including for screen readers. Show all expands the text. Photos lead with a thumbnail. Pressing a quote loads the exact row’s
+bounded page here if present, otherwise in its home. Timelines open and scroll to the focused row
+below the header. A passage also highlights its saved range; if it changed, a notice explains why
+only the row is marked. Cards, portals and retained copies cannot substitute. A failed jump keeps
+the view and newest-following intent; its toast offers Try again only for retryable failures.
+New gestures or navigation cancel the read. Only the quoted stream loads: its sibling stays
+unloaded down that chain until `Scroll to latest message`. Reading an old source reads no newer
+messages. Ouroboros quotes its addressee unless directly above, ignoring its own card.
+The answer to a new work replies to the selected row. A saved question answer lands on its recorded
+choice when present, otherwise on the answer line.
 
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
 that it is not a reply and which room wrote to which (`chat_relay_deck.js`):
@@ -2394,9 +2388,9 @@ unconditionally (a Presence turn and a consciousness wake-up are direct turns
 and follow the same rules as any other); open owner attention (a model wait, a
 pending stop, a host-attested Stop the record still offers — the same reading
 the control uses, so a block never stands on a Stop it hides); a child card; a
-review group; a content row; a terminal outcome other than Done. The completion note is not content:
-a turn that ran no tool and finished Done leaves no block — live, after a
-reload and after a reconnect.
+review group; a content row (including a saved schedule report reached via `Details` → `Show full`);
+a terminal outcome other than Done. A bare completion note is not content: a turn without activity
+that finishes Done leaves no block, live, on reload or on reconnect.
 
 Narration leads; routine execution evidence stays compact; exceptions keep their
 explanation and controls. The block's title, collapsed activity line and
@@ -2417,18 +2411,7 @@ narration, a late live row is dropped and renames nothing; a saved narration
 still competes, because history adds its row to the timeline. This never
 changes the earliest transcript anchor, explicit name, child identity or final
 lifecycle.
-A task that ends with a cause states it on the collapsed line in the
-owner's words (the sentence of the durable row and the expanded body), so a
-`Done with warnings` chip never stands beside an unrelated last action; a clean
-ending's own summary replaces the last narration (owner 01.11 10:52, A). The badge means "look at this": a
-residual tool error warns only when it is loud — an effect that did not land, a send or command Safety stopped, a
-tool of unknown kind that ran and failed (MCP and extension tools included), a command killed by a signal or whose declared output never registered. A
-failed read named in `PURE_READ_TOOLS`, a command that ran and failed or timed out, and a call the tool refused for
-its arguments or because it named no tool stay in the details, in the evidence row below. The clause names the first loud failure in plain words (a noun for the step and
-what happened, never a tool name, its result text or a path) and counts the rest of those (`tool_error_words`); a record written before the
-flags keeps its stored word. A check that did not pass is said by its cause, in the words of its "Check did not pass" row where the card has
-one and the receipt holds the same fact, and with how many checks passed after it; its command is in that row. A
-record without that fact says what it cannot tell. Successful tool calls are not rows: they fold
+The collapsed line names the recorded cause in the same words as the durable row and expanded body, so `Done with warnings` never stands beside an unrelated last action. A clean ending's summary replaces the last narration (owner 01.11 10:52, A). The badge means “look at this”. A loud leftover is an undelivered effect, a Safety-stopped send or command, a failed tool of unknown kind (including MCP/extensions), or a command killed by a signal or missing its declared output. Failed `PURE_READ_TOOLS` reads, commands that failed or timed out, argument refusals and unknown tools stay in details. A handled Git/review refusal shows its own warning detail without adding an error. `tool_error_words` names the first loud failure (step noun and what happened, not a tool name, raw result or path) and counts the rest; a row predating the flags keeps its recorded word. For a failed check show its cause as in its “Check did not pass” row if the receipt supports it, and the number of later passes. That row includes the command, if any; file observations have none. Disclose what an older record cannot tell. Successful calls fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
 shows per-tool counts (`read_file ×3 · web_search`), and the phase (`calling`
@@ -2503,19 +2486,18 @@ the label they pressed. This includes the primary's citation while the work runs
 identifies a primary awaiting application. Authored text keeps its exact case and whitespace and is never translated.
 CSS alone clips a long quotation, the shared `Show all` / `Show less` control exposes the complete published span
 by press or tap, and an excerpt marked by the server is labelled as an excerpt. When the next step will run on another route the
-fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work), so a change of
-Main never looks failed while a call in flight finishes. Where the server offers the work's `model` control the
-fact is a quiet capsule in the line's own ink (stronger for a model of the work's own) that opens the Model sheet
-anchored to it, so nothing in the transcript moves: whose model this is first, then the field, the list and this
-work's own tier. The list's Main row is the one way to follow Main, and its facts say so (`this work will follow
-Main`; `this work follows Main` on a follower). A pick or a tier is one act, and its answer says when it applies:
+fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work). Where offered,
+the model capsule opens the anchored sheet without moving the transcript: acting model first, then the field,
+list and tier for the next route and its account, if known. Only the Main row follows Main (`this work will follow Main`;
+`this work follows Main` on a follower). A pick or a tier is one act, and its answer says when it applies:
 `Switches at the next step; the running call finishes.` or, for a queued work, `Applies when it starts.`; a tier
 act moves nothing else (its fallback, wait, account and window stay); new subagents without a tier of their own take
 the tier the work runs on, Main's included, started ones keep theirs.
-After the model the line names a tier other than Standard and, when its newest call was served otherwise, that too
-(`Fast · Fast asked · served Standard`). A refused act is said in the popover in the owner's
-words, by the server's reason; when the server saved the decision and only its delivery failed, `Retry` sends
-the same request again. Without the offered control the fact is plain text: a control is the
+After the model the line names a tier other than Standard and what its newest call came to when that differs:
+`Ultrafast asked · served Fast` (the provider's word), `Fast asked · sent as Standard` (a native setting or the host's
+continuation), `· sent with no tier`, `· served mixed tiers`, `· provider said auto` (no tier's word), `· not
+confirmed` (no field). A refused act is said in the popover by the server's reason; when only its delivery failed,
+`Retry` sends the same request. Without the offered control the fact is plain text: a control is the
 server's decision and is never guessed. A card whose work publishes no such fact (an older record, a child, a
 portal) keeps the line below. On a narrow card the source gives way before the model's name.
 An owner move on a wait card uses ordinary ink, names the unchanged primary it left, and offers the ordinary model
@@ -2660,7 +2642,7 @@ action changes model/account only. Closing the chat disposes view resources
 without claiming it stopped the task; continuation requires the Ouroboros
 process to keep running.
 
-A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary is the whole head (owner 01.11 10:52, A) when the run has no authored name (a wake), else the line under the schedule's name; either way it leads Details as “In its words”, and the answer remains the run's own note when it finishes silently.
+A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary is the whole head (owner 01.11 10:52, A) when the run has no authored name (a wake), else the line under the schedule's name; either way it leads Details as “In its words” (unless that episode's own heading already carries the phrase verbatim), and the answer remains the run's own note when it finishes silently.
 While running, the server supplies Own time, the focus's cause label or the
 schedule's name in that slot; no summary leaves the title in place, with no
 invented sentence. Model waits, controls and temporary model changes last
@@ -2763,24 +2745,26 @@ cards keep their edges rather than taking the shared fade.
   installation; when two windows arrange at once the last change wins. A
   size that failed to save stays on screen and says so under the list until
   a later change saves it; nothing retries on its own.
+- **Beautiful Context.** One neutral button stands after the cards and the board's save note and
+  opens its frame in place below itself; the frame follows the card palette.
 
 ### Storage
 
 Storage leads with **Space used by Ouroboros**, its count's age and growth
 (duration and unreadable items in Details), **Refresh sizes**, the coloured bar and
-five-group legend (owner choice 2026-11-04). **Cleanup** follows: a sentence until a
-check, then **Can be removed**, never the selection; **Selected** is a separate quieter figure. One
+five-group legend. **Cleanup** starts as a sentence; after checking, **Can be removed**
+and the quieter **Selected** remain separate. One
 **Remove N selected items** waits for the whole list and sends exactly those ids;
-hidden rows keep their choice. Copies not verified saved and saved groups have
-one compact row each, deliberately opened, unchecked, with their whole-loss
-confirmation. **Kept** names concrete causes, each item accessible on request.
+hidden rows keep their choice. Copies not verified saved, saved groups and the
+mind's stored-file proposals each have one compact, deliberately opened row,
+unchecked, with loss confirmation; a proposal shows every file, its
+role and loss, and what stays. **Kept** names concrete causes, each item accessible on request.
 An unanswered Remove/Free holds its flow; a lost POST never replays. A refused
 plan offers Check again. Results put problems first and keep every item reachable.
 **Folders** lists every measured place in two columns (one on phones), each opening
 to its reason, removers and parts. Free disk space is secondary, with its own
 reading date: counted size never promises free space. An environment goes whole.
-`Folders of deleted projects` is one read-only fold under the groups (owner choices
-2026-11-01T17:46Z and 22:27Z): no key, share, headline or action. A folder lists
+`Folders of deleted projects` is one read-only fold under the groups: no key, share, headline or action. A folder lists
 under the place already holding its bytes, or as outside the total; a shared one
 is one row, a nested one part of its parent. Not counted yet, not measured yet,
 could not be read, not found and never had a folder stay five answers; a size never
@@ -2820,7 +2804,11 @@ a server entry):
    keep the status wording their own contract requires.
 5. **Meta line** — `--type-meta`, `--text-meta`, on its own line under the
    name. Quantities are stated in human words ("38% used · resets in 2h"), and
-   an instant is humanized. A row never leads with a raw ISO timestamp.
+   an instant is humanized. A row never leads with a raw ISO timestamp. In
+   Settings → Agents, a head says its source, then the whole rate its key
+   publishes (`$4 in / $20 out per 1M tokens`, `free`; never a condition, an
+   unknown or a measured review cost), wrapped, never cut; its description is a
+   second line.
 6. **Actions** — docked right in a slot of their own, legible at rest. An action
    rendered at secondary ink reads as disabled: its label is `--text-primary` (a
    capsule's name and an unchosen option take the secondary ink, bible principle 4).
@@ -3335,13 +3323,14 @@ The column reads from the top: Ouroboros's card, which is Main (its picture, wit
 while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
-with + (New project) at the end of its row; then the Projects, the column's only scroller; then the six sidebar
-sections, Circles, Files, Skills, Widgets, Dashboard and Settings, at the bottom edge, as many to a line as hold
-their names whole (three in a wide sidebar, two at its default width and in the drawer, one where two do not fit),
-each its glyph and its word, the one where you are the strong crimson capsule; and under them the
-foot, the version and the update, above the safe area. The Projects take all the free room between the field and
-the sections; there is no Projects heading, no collapse and no unread total. A Project row is two lines: the name
-and its time, then one line with the row's mark (a name with no such line may take both): the opening words of the
+with + (New project) at the end of its row; then the Projects, the column's only scroller, in the free room (no
+heading, collapse or unread total); then two cards on the bottom edge above the safe area: Circles, Files, Extensions and
+Widgets two to a line, Dashboard and Settings a line each over a hairline and the version; each card one line from a
+475 px sidebar (where four fit), edges shared. A row is its glyph and word, whole on one line (a name wider than the
+card wraps at a space), chosen in the strong crimson. The version is the update check (no Check button; its glyph
+turns while checking), still one beside Up to date or Check failed; the Update capsule, an update under way or an
+install without the check leave it plain. A Project row is two lines: the name and its time, then one line with
+the row's mark (a name with no such line may take both): the opening words of the
 question that waits for the owner, or the sentence that says what waits where it has no words of its own (an action
 only the owner can take, an answer whose delivery is unknown), else what its work is doing; the row's name for
 readers ends with the same words. The list stands beside the room and is never louder than the room's own text: a
@@ -3362,9 +3351,9 @@ all projects. A list that could not be read again says so, with the time of the 
 read answers, nothing is called missing. Neither reads a room's history or marks anything read. A browse keeps its
 rows, sorting on: off the top the first row in view that kept its place holds the reading place, focus its row; a
 find's rows stand while it has words. A Project outside the list opens by its own id; a missing or deleting one
-leaves the room on screen and says so. No label is set in capitals. A short window first compacts rows (fine
-pointer only), then lets the whole column scroll with Ouroboros's card at the top and the sections, the version
-and the update on the bottom edge; a section never becomes an unlabelled icon. One destination is chosen at a
+leaves the room on screen and says so. A short window first compacts rows (fine pointer only), then scrolls the whole
+column, Ouroboros's card at the top and the cards on the bottom edge, or, too short to show a Project between them,
+at its two ends. One destination is chosen at a
 time, its fill alone with no stripe, rule or mark at its edge, and pressing it opens it, never closes it.
 
 ### A navigation row
@@ -3377,13 +3366,13 @@ are this row; a list groups it under a quiet group name, on a phone one card of 
 
 ### A section with pages
 
-Settings and Dashboard hold a list beside the open page: from 40rem
-of the section's box the list is a rail (`--section-rail-w`) and the page stands beside it. The band holds the list's
-controls (Settings' search; on a phone, in the list) and the page's controls. Its chosen row names the page; the heading stays for readers,
-and a deeper Settings level keeps its name. A page is always open: the section's first page the first time
-(Settings: Models), later the last one opened on the device. Narrower, one column shows the list, under the
-section's name led by Ouroboros's picture, or the page, under Back and its name. Choosing a row keeps the list
-where it was and the page arrives on `--motion-fade`. A section's pages are never tabs (§3).
+Settings, Dashboard and Extensions share a list and page layout. From a 40rem section box, the list is a rail
+(`--section-rail-w`) beside its page. The band holds list controls (Settings' search; on phones, in the list) and
+page controls. The chosen row names its page; the heading stays for readers, deeper levels keep their names.
+A page is always open: initially Models in Settings, Skills in Extensions; later the device's last choice.
+Extensions holds Skills, MCP servers, Browse and Sources. Editors open over their lists; Sources’ Publish one jumps to Skills with Back.
+Narrower, the list stands under the section name and Ouroboros's picture, or the page under Back and its name.
+Choosing a row keeps the list's position; the page arrives on `--motion-fade`. Section pages are never tabs (§3).
 
 ### The drawer
 
@@ -3497,8 +3486,8 @@ glyphs (`web/modules/page_icons.js`).
 ### Page header
 
 The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is a round
-Back with the arrow, its destination in its name: the top layer's, peeled one at a time (“Back to
-Settings › Tools”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
+Back with the arrow, its destination in its name: the top layer's, peeled one by one (“Back to
+Extensions › Skills”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
 (Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
 band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
 18px below a browser's top. Rails use the shared fade;
@@ -3519,7 +3508,7 @@ title opens even in an empty Project, starts with it, wrapped. Where the room co
 column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
-Skills keeps its Back, tabs and short actions in one row; below 33rem with a return, 30rem without, tabs sit below. On phones Update stays beside the tabs; Refresh ends the title row.
+In Extensions, Back names the return. Each page owns its actions: Skills keeps Refresh and Update all in the header; MCP controls stay with the server.
 Files keeps location and actions in the band, its divider at the window top; the filter heads the list, which
 scrolls under the shared fade. Circles ends the band with New circle; Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
@@ -3540,8 +3529,7 @@ name's capsule opens the work list without a caret, since Telegram's ⌄ stands 
 whole or not at all, as the status word does, so a narrow phone may show the status mark alone (from 360 px; at
 320 px even the mark is cut). The consciousness chip
 becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
-(both are layers); the work list and the consciousness sheet hang under the row at the page's width. With the keyboard
-up the bar stays in the row, in the page's flow as every keyboard room's bar is.
+(both are layers). The work list and consciousness sheet hang below at page width. Typing keeps the same row.
 
 ### A room's edges
 
@@ -3554,8 +3542,9 @@ then tapers to clear within 32 px below the bar on every layout. The composer ha
 its top 32 px. The first row and every landing clear the header's reach; a row under it is not read yet. The top
 effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
 do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
-both themes. With the keyboard up the bar and the composer stand in the page's flow and nothing passes under either: the
-room draws neither edge, and a short keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer
+both themes. While typing in Telegram the feed still passes under both. The newest line and time rest just above the
+measured composer. In a tight room the top extension yields to the feed. Reading history holds the passage in place.
+Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter
 ink over a light veil, still glass beside its neighbours.
@@ -3626,8 +3615,8 @@ chips that scrolls gives its controls the minimum as their own height, so no
 reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so do a
 disclosure's summary and a field. One exception, the folded composer row's last step before Model is cut ("Composer
 owner controls"). In a capsule's open levels on a narrow phone a value
-keeps only its drawn height. Nothing that acts is hidden until hover
-there (a Project row's menu is reached by its long press).
+keeps only its drawn height. Touch actions need no hover: hold a Project row for its menu. Lifting after a hold or swipe
+activates nothing under the finger; the next tap acts immediately.
 A page's strips may scroll sideways inside themselves with the shared fade; code, tables and a bar's
 Files location do too. Text wraps before it widens a column. A pinch only magnifies (owner 23.10): while it
 holds, the room keeps its size and a sideways finger pans the magnified page instead

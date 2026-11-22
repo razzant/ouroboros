@@ -356,45 +356,10 @@ from ouroboros.external_runs import (  # noqa: E402,F401 -- the pause's historic
     STOP_POLICIES, STOP_POLICY_ALL, STOP_POLICY_OBSERVE, STOP_POLICY_TASK_OWNED,
     episode_fields, held_run_line, observe_task_runs, owner_pause_runs, passed_reviews_notice, task_owned_runs_open,
 )
+from ouroboros.review_operation import drain_local_review_attempts  # noqa: E402
 
 
-def drain_local_review_attempts(task_id: str, *, timeout_sec: float) -> Dict[str, Any]:
-    """Bounded quiescence barrier over THIS task's in-flight review attempts.
-
-    Observation only: the fence already refuses new sends; this waits for the
-    requests that were ALREADY sent to settle through their own custody path
-    (``review_custody`` records each actor and its response reference before
-    signalling the attempt's event). An attempt still open at the bound is
-    recorded by operation id as ``unsettled`` — its durable identity is what the
-    late-result custody adopts when the provider answers after release; it is
-    never marked settled, PASS, failed or refunded here.
-    """
-    settled: List[Dict[str, str]] = []
-    unsettled: List[Dict[str, str]] = []
-    try:
-        from ouroboros import review_custody as rc
-
-        with rc._ACTIVE_LOCK:
-            mine = [entry for entry in rc._ACTIVE.values()
-                    if str(task_id) in str(getattr(entry, "wave_key", "") or "").split("|")
-                    or f"|{task_id}|" in f"|{getattr(entry, 'key', '')}|"]
-    except Exception:
-        log.debug("Review attempt registry unavailable at budget pause", exc_info=True)
-        return {"drained": False, "registry": "unavailable", "settled": settled, "unsettled": unsettled}
-    deadline = time.monotonic() + max(0.0, float(timeout_sec or 0.0))
-    for entry in mine:
-        remaining = max(0.0, deadline - time.monotonic())
-        row = {"operation_id": str(getattr(entry, "operation_id", "") or ""),
-               "key": str(getattr(entry, "key", "") or "")[:120]}
-        if entry.event.wait(remaining):
-            settled.append(row)
-        else:
-            unsettled.append(row)
-    return {"drained": not unsettled, "registry": "ok", "timeout_sec": float(timeout_sec or 0.0),
-            "settled": settled, "unsettled": unsettled}
-
-
-def local_producer_observation(ctx: Any, *, timeout_sec: float) -> Dict[str, Any]:
+def local_producer_observation(ctx: Any, *, timeout_sec: float, spare_detached: bool = False) -> Dict[str, Any]:
     """Fence, then OBSERVE every local producer this task still owns.
 
     Review attempts retain their ``review_custody`` owners; tool futures retain
@@ -403,7 +368,7 @@ def local_producer_observation(ctx: Any, *, timeout_sec: float) -> Dict[str, Any
     ``quiescent`` the task stays fenced/nonterminal and keeps its native worker.
     """
     from ouroboros import custody_owed  # a write still owed is named, never certified; quiescence is physical
-    review = drain_local_review_attempts(str(ctx.task_id), timeout_sec=timeout_sec)
+    review = drain_local_review_attempts(str(ctx.task_id), timeout_sec=timeout_sec, spare_detached=spare_detached)
     tool_futures = drain_local_tool_futures(ctx, timeout_sec=timeout_sec)
     return {
         "dispatch_fence": "closed", "review_attempts": review,
@@ -626,9 +591,9 @@ def _publish_hold(ctx: Any, row: Dict[str, Any]) -> None:
 
 def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: str, scope: str,
                             reason_text: str, root_task_id: str,
-                            local: Dict[str, Any], context_view: tuple | None = None) -> Dict[str, Any]:
+                            local: Dict[str, Any], context_view: tuple | None = None, delivery_candidate: bool = False) -> Dict[str, Any]:
     """Observe external custody, store the ONE continuation source, build the row."""
-    from ouroboros.owner_wait import continuation_state, store_continuation_source
+    from ouroboros.owner_wait import continuation_state, pause_resume_point, store_continuation_source
 
     if rail == RAIL_MODEL_SLEEP:  # its own work only: a sleep never fences or waits for its tree's members
         from ouroboros.model_detach import is_detach
@@ -659,15 +624,7 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
                                  read_error=read_error, stop_policy=policy)
     messages = limit_ctx.messages
     trace = limit_ctx.llm_trace if isinstance(limit_ctx.llm_trace, dict) else {}
-    pending = pending_tool_call_ids(messages)
-    point = {"round_idx": int(limit_ctx.round_idx),
-             "phase": "partial_tool_batch_unknown" if pending else "boundary",
-             "unanswered_tool_call_ids": pending,
-             "unanswered_policy": "not_re_executed_execution_unknown",
-             # Sent model requests whose local wait the owner's Pause abandoned:
-             # their late answers are settled and retained, never adopted.
-             "abandoned_model_attempts": list(getattr(ctx, "_abandoned_model_attempts", None) or []),
-             "budget_tail": getattr(limit_ctx, "budget_tail", "tool")}
+    point = pause_resume_point(limit_ctx, ctx, delivery_candidate=delivery_candidate)
     # The rail already stamped its terminal projection on the live usage, a hold leaves its
     # own transient row there, and the round's started stamp is a monotonic reading the pause
     # would stretch into the round's duration; none may travel into the resumed loop.
@@ -746,7 +703,8 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
 
 
 def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
-                  root_task_id: str = "", context_view: tuple | None = None, cause: str = "") -> None:
+                  root_task_id: str = "", context_view: tuple | None = None, cause: str = "",
+                  delivery_candidate: bool = False, spare_detached_reviews: bool = False) -> None:
     """Fence, save and unwind only after producer quiescence and a stored source.
 
     Unsettled producers/ambiguous transfer retain the worker and typed pausing hold;
@@ -863,7 +821,8 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                 hold["retryable_contention"] |= isinstance(exc, LaunchBusy) and exc.reason == "contention"
         if opened:
             try:
-                local = local_producer_observation(ctx, timeout_sec=_HOLD_POLL_SEC)
+                local = local_producer_observation(ctx, timeout_sec=_HOLD_POLL_SEC, **(
+                    {"spare_detached": True} if spare_detached_reviews else {}))
             except Exception as exc:
                 # An observation that raised proves nothing about quiescence.
                 local = {"quiescent": False, "observation_error": f"{type(exc).__name__}: {exc}"}
@@ -877,7 +836,8 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                     if prepared is None:
                         prepared = _exact_continuation_row(
                             limit_ctx, ctx, pause_id=pause_id, rail=rail, scope=scope,
-                            reason_text=reason_text, root_task_id=root_task_id, local=local, context_view=context_view)
+                            reason_text=reason_text, root_task_id=root_task_id, local=local, context_view=context_view,
+                            delivery_candidate=delivery_candidate)
                         prepared.update(envelope)
                     # A publication that failed is retried with the SAME prepared
                     # snapshot: its custody stop requests and its stored source are
@@ -951,7 +911,7 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
     raise BudgetPauseRequested(row)
 
 
-def enter_owner_pause(limit_ctx: Any) -> None:
+def enter_owner_pause(limit_ctx: Any, *, delivery_candidate: bool = False, allow_warm: bool = True) -> bool:
     """A member's safe boundary under its root's closed owner fence (``owner_pause``).
 
     No model round is bought. While reviewers this member already launched
@@ -966,16 +926,25 @@ def enter_owner_pause(limit_ctx: Any) -> None:
     member that cannot save an exact pause (no continuation owner or durable
     root) HOLDS warm at this boundary instead, buying nothing, until the
     root's Resume releases the fence or its own Stop/Panic/deadline ends the
-    hold. Returns only when the fence is open.
+    hold. Returns only when the fence is open: True when this stack waited under it (a warm
+    park or hold), so a caller holding an answer reads its mail again before the answer leaves.
+
+    ``allow_warm=False`` (a member's retained answer at its first real handoff) skips the
+    warm park even when it is available, its save sparing those live reviewers' attempts
+    (never held for, never ended): a resumed stack could only re-emit the retained
+    text, while the owner's words accepted under this pause must reach the model. The
+    cold pause saves the exact continuation (resume_point phase "candidate"), and the ONE
+    Resume re-enters the loop, where the ordinary owner-input check turns accepted words
+    into a revision round — or, with none, delivers the saved candidate unchanged.
     """
     from ouroboros.model_wait import ModelWaitInterrupted
     from ouroboros.owner_pause import wait_member_fence
 
-    ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
+    ctx, waited = getattr(getattr(limit_ctx, "tools", None), "_ctx", None), False
     while True:
         fence = wait_member_fence(ctx) if ctx is not None else {}
         if not fence:
-            return
+            return waited
         if fence.get("state") == "unknown":
             raise ModelWaitInterrupted("owner_pause_authority_unreadable")
         setattr(ctx, "_owner_pause_fence_id", str(fence.get("fence_id") or ""))
@@ -986,18 +955,21 @@ def enter_owner_pause(limit_ctx: Any) -> None:
         except Exception:
             log.debug("Live review operations unreadable at the owner pause boundary", exc_info=True)
             detached = []
-        if not (detached and (callable(getattr(ctx, "owner_wait_callback", None)) or saves_exact_pause(ctx, RAIL_OWNER_PAUSE))):
+        if not (allow_warm and detached
+                and (callable(getattr(ctx, "owner_wait_callback", None)) or saves_exact_pause(ctx, RAIL_OWNER_PAUSE))):
             break
         from ouroboros.owner_wait import consume_warm_resume, park_owner_pause_warm
 
-        outcome = park_owner_pause_warm(limit_ctx, ctx, fence=fence, detached=detached)
+        outcome = park_owner_pause_warm(limit_ctx, ctx, fence=fence, detached=detached,
+                                       delivery_candidate=delivery_candidate)
         if outcome != "control:owner_resume":
             raise ModelWaitInterrupted(outcome.split(":", 1)[-1] or "owner_pause")
         _hold_until(ctx, limit_ctx.accumulated_usage, "owner_pause_resume_unconsumed",
                     lambda: consume_warm_resume(ctx))
+        waited = True
     # No root argument: ``request_pause`` names the tree the fence above was read from.
-    request_pause(limit_ctx, rail=RAIL_OWNER_PAUSE, scope="root",
-                  reason_text="This task tree was paused.")
+    request_pause(limit_ctx, rail=RAIL_OWNER_PAUSE, scope="root", delivery_candidate=delivery_candidate,
+                  reason_text="This task tree was paused.", spare_detached_reviews=not allow_warm and bool(detached))
     usage = limit_ctx.accumulated_usage
     published = False
     while wait_member_fence(ctx):
@@ -1013,6 +985,7 @@ def enter_owner_pause(limit_ctx: Any) -> None:
                                 **usage["budget_pause_hold"]})
         time.sleep(_HOLD_POLL_SEC)
     usage.pop("budget_pause_hold", None)
+    return True
 
 
 def _hold_until(ctx: Any, usage: Dict[str, Any], reason: str, attempt: Callable[[], Any], *,
@@ -1328,6 +1301,10 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
     external_basis = ("re-observed at this Resume" if fresh_observation is not None
                       else "as recorded at the pause, NOT re-observed")
     external = external_observation.get("runs") or []
+    if grant.get("accepted_start_risks"):
+        from ouroboros.delegate_resume import risk_words
+        messages.append({"role": "user", "content": "[SYSTEM NOTICE]\n" +
+                         "\n".join(risk_words(decision) for decision in grant["accepted_start_risks"])})
     external_lines = "".join(held_run_line(run) for run in external if isinstance(run, dict)) or "\n- none"
     if owner_runs := owner_pause_runs(ctx, row, external_observation):  # an owner Pause's participants (#1562)
         external_basis, external_lines = "its participants, read now", "\n" + owner_runs

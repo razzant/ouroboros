@@ -39,7 +39,7 @@ def _candidate(row: Mapping[str, Any]) -> bool:
     from ouroboros.presence_owner_contact import private_main_row
     from ouroboros.project_dialogue import WORK_SPEECH_ELSEWHERE_TYPES
 
-    return row.get("type") in WORK_SPEECH_ELSEWHERE_TYPES or private_main_row(dict(row)) or (
+    return row.get("logical_room_chat_id") == 1 or row.get("type") in WORK_SPEECH_ELSEWHERE_TYPES or private_main_row(dict(row)) or (
         row.get("direction") == "in" and isinstance(row.get("reply_to"), dict))
 
 
@@ -50,6 +50,8 @@ def write_facts(root: Any, row: Mapping[str, Any]) -> Tuple[Optional[List[str]],
     store's mark for the job, never recorded as needing none."""
     if not _candidate(row):
         return [], []
+    if row.get("direction") == "out" and row.get("logical_room_chat_id") == 1:
+        return (["room:1"] if row.get("chat_id", 1) != 1 else []), []
     from ouroboros.room_membership import appearance_keys, row_rooms
 
     try:
@@ -148,6 +150,9 @@ def owed(root: Any) -> bool:
 
     if not ds.present(root):
         return False
+    with ds.transaction(root, write=False) as conn:
+        if not ds.has_telegram_inbound_index(conn):
+            return True  # older dialogue stores need the index even when all row derivation is current
     below, done, covered = (mark(root), ds.meta(root, ds.APPEARANCES_CONTACT_REPLIES),
                             ds.meta(root, ds.APPEARANCES_COVERED))
     return (below is None or below < ds.stream_end(root, "chat") or bool(_older_imports(root))
@@ -252,6 +257,7 @@ def run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
     start = mark(root)
     with ds.transaction(root, write=True) as conn:  # rows below the mark this pass began under had the older rule
         conn.execute(ds.APPEARANCES_DDL)
+        conn.execute(ds.TELEGRAM_INBOUND_DDL)
         conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", (ds.APPEARANCES_MARK, json.dumps(0)))
         conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
                      (ds.APPEARANCES_CONTACT_REPLIES, json.dumps({"next": 0, "upper": start or 0}, sort_keys=True)))

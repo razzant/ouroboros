@@ -152,12 +152,12 @@ def test_the_pause_carrier_tells_sleep_owner_pause_and_money_apart(tmp_path):
         assert waits[task][0]["reason"] == "spending_limit"
         assert waits[task][0]["kind"] == "budget" and waits[task][0]["since"] == _PAUSED_ISO
         assert waits[task][0]["rail"] == pauses[task]["rail"]
-    assert waits["future"][0]["reason"] == "restore_failed" and waits["future"][0]["release"] == "resume"
+    assert waits["future"][0]["reason"] == "held" and waits["future"][0]["release"] == "resume"
     note = _note(tmp_path)
     assert "sleep (mode=cold, state=paused, wake_at=" in note
     assert "Waiting for Ouroboros or you to resume it" in note
     assert "Spending limit reached" in note
-    assert "Its saved state could not be restored" in note
+    assert "text=Held" in note and "Its saved state could not be restored" not in note
 
 
 def test_a_parked_pause_keeps_the_author_its_tree_fence_declared(tmp_path):

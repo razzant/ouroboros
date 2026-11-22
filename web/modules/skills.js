@@ -1,6 +1,11 @@
-// Skills' Installed view reads the local listing and lifecycle queue without waiting for a source.
-// Browse and Sources own their views; every action keeps its words, confirmation and refusal.
-import { bindPageHeader, bindTabStrip, renderPageHeader, renderTabStrip } from './page_header.js';
+// The skill views of Extensions (extensions.js draws the place): Skills, the installed skills (what Ouroboros can do
+// now), and the skill catalog's Browse (what else it could do, from every connected source) and Sources (where skills
+// come from and how much each place is trusted) are three of its pages, never tabs; MCP servers is its fourth. The
+// views stay one mounted block; the section says which one is on screen (`showView`, `hideViews`). Skills never waits
+// for a source or GitHub: it reads the local listing and the serialized lifecycle queue, and every owner action keeps
+// its own words, confirmation and refusal. Browse and Sources live in their own modules. A skill's own form opens over
+// Skills as a level of the section; Accounts and Permissions open in Settings with Back to Extensions.
+import { createExtensions } from './extensions.js';
 import { bindMenu } from './ui_interactions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
@@ -22,17 +27,13 @@ import {
 import { manifestUnread, opensDetail, plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
+import { readConnectedServers } from './mcp_settings.js';
 import { bindScrollFade } from './scroll_fade.js';
 import {
     boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantReady, renderSkillRepairPrompt,
     reviewTone, reviewReady,
 } from './utils.js';
 
-const SKILLS_TABS = [
-    { value: 'installed', label: 'Installed', pillId: 'skills-tab-pill-installed', tabId: 'skills-tab-installed', panelId: 'skills-pane-installed' },
-    { value: 'browse', label: 'Browse', pillId: 'skills-tab-pill-browse', tabId: 'skills-tab-browse', panelId: 'skills-pane-browse' },
-    { value: 'sources', label: 'Sources', tabId: 'skills-tab-sources', panelId: 'skills-pane-sources' },
-];
 const LIFECYCLE_VISIBLE_STATUSES = new Set(['queued', 'running', 'failed']);
 // What a job's name-level row says of itself while more than one installed folder uses the name, and once the page that
 // read the job beside several folders lists fewer (the queue names no directory, so it cannot say which one it was for).
@@ -47,24 +48,19 @@ const NOTHING_NEEDS_YOU = 'Nothing needs you now.';
 const WORK_POLL_MS = 3000;
 const REVIEW_POLL_MS = 15000;
 
-export function skillsPageTemplate() {
+// The band's end over a skill view: its own actions, where they stood beside the tabs.
+export const SKILLS_ACTIONS = '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button><button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>';
+
+// The three skill views as one block of the section's page column: each view's search row, then their one scroller.
+export function skillsViewsTemplate() {
     return `
-        <section class="page app-page-glass" id="page-skills">
-            ${renderPageHeader({
-                page: 'skills',
-                actionsHtml: '<button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
-                tabsHtml: renderTabStrip({
-                    items: SKILLS_TABS, active: 'installed', dataAttr: 'data-tab', activeClass: 'is-active',
-                    ariaLabel: 'Skills views', stripClass: 'skills-tabs', tabClass: 'skills-tab',
-                }) + '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button>',
-            })}
-            <div class="skills-scroll scroll-fade-y">
-                <div class="skills-search-chrome" data-chrome-pane="installed">
+            <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
                 <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
-                <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
+            <div class="skills-scroll scroll-fade-y">
+                <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed">
                     <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
                     <div id="skills-org-requirements" hidden></div>
                     <div id="skills-list" class="skills-list"></div>
@@ -74,10 +70,9 @@ export function skillsPageTemplate() {
                         <button type="button" class="btn btn-primary btn-sm" data-skills-goto="browse">Browse skills</button>
                     </div>
                 </div>
-                <div class="skills-tab-panel" id="skills-pane-browse" data-pane="browse" role="tabpanel" aria-labelledby="skills-tab-browse" hidden></div>
-                <div class="skills-tab-panel" id="skills-pane-sources" data-pane="sources" role="tabpanel" aria-labelledby="skills-tab-sources" hidden></div>
+                <div class="skills-tab-panel" id="skills-pane-browse" data-pane="browse" hidden></div>
+                <div class="skills-tab-panel" id="skills-pane-sources" data-pane="sources" hidden></div>
             </div>
-        </section>
     `;
 }
 
@@ -387,12 +382,14 @@ async function fetchSkills(signal) {
 }
 
 export function initSkills(ctx = {}) {
-    // A Settings page opened from here leads back to Skills, where it was opened.
-    const page = document.createElement('div');
-    page.innerHTML = skillsPageTemplate();
-    document.getElementById('content').appendChild(page.firstElementChild);
+    // The section draws the place: its list of pages, the band and the page column these views stand in.
+    const section = createExtensions({ ctx, viewsHtml: skillsViewsTemplate(), toolbarHtml: SKILLS_ACTIONS,
+        views: { show: (view) => showView(view), hide: () => hideViews(), placeShown: () => placeShown(),
+            rowsShown: () => readInstalled({ quiet: true, join: true }) },
+        facts: () => sectionFacts() });
 
     const root = document.getElementById('page-skills');
+    const viewsRoot = root.querySelector('[data-extensions-views]');   // the views' own box: their presses stay theirs
     const container = document.getElementById('skills-list');
     const status = document.getElementById('skills-status');
     const requirementsEl = document.getElementById('skills-org-requirements');
@@ -410,8 +407,11 @@ export function initSkills(ctx = {}) {
     let destroyed = false;
     let listingReadController = null;
     let filter = 'all';
+    let requestedSkill = '';
+    let openRequest = 0;
     let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
+    let installedFailed = false;
     let activeMenu = null;
     let sheet = null;
     let sheetPending = null;  // the pending install the open sheet describes: its row key and queue job
@@ -428,24 +428,50 @@ export function initSkills(ctx = {}) {
     let firstStartAsked = false;
     const contributions = getContributions();
     const hostModules = getHostModules();
-    const onPageModuleFacts = () => { if (!destroyed && visible && snapshot) paintInstalled(); };
+    const onPageModuleFacts = () => {
+        if (destroyed || document.hidden || !snapshot) return;
+        if (visible) paintInstalled();
+        else if (section.rowsOnScreen()) section.paintAnswers();
+    };
     const stopContributionFacts = contributions?.onChange?.(onPageModuleFacts);
     const stopHostFacts = hostModules?.onFactsChange?.(onPageModuleFacts);
 
     // ---- shared reads (Browse and Sources reuse them) -------------------------------------------
-    const cache = { sources: null, sourcesValue: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
+    const cache = { sources: null, sourcesValue: null, sourcesError: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
+    const sourceSnapshot = () => ({ rows: cache.sourcesValue, error: cache.sourcesError, problem: cache.sourcesProblem });
+    // Browse says how an entry installs from its catalog entry, conditionally, never from this list: a read that
+    // settles after its cards, a sheet or a dialog opened changes none of their words.
+    function paintSourceFacts() {
+        if (visible && activeTab === 'sources') sourcesView.repaint();
+        section.paintAnswers();
+    }
     const store = {
-        sources(force = false) {
-            if (force || !cache.sources) {
-                cache.sources = skillSourcesApi.list().then((data) => {
-                    const list = Array.isArray(data) ? data : (Array.isArray(data?.sources) ? data.sources : []);
+        // Arriving views join the place's read. An explicit refresh or write can supersede it.
+        sources({ fresh = false, replace = false } = {}) {
+            if (!replace && cache.sources) return cache.sources;
+            if (!fresh && !replace && cache.sourcesValue && !cache.sourcesError) return Promise.resolve(cache.sourcesValue);
+            const current = () => cache.sources === read && !destroyed;
+            const read = skillSourcesApi.list().then((data) => {
+                const list = Array.isArray(data) ? data : data?.sources;
+                if (!Array.isArray(list)) throw new Error('Skill sources response is unavailable.');
+                return { list, data };
+            }).then(({ list, data }) => {
+                if (current()) {
                     cache.sourcesValue = list;
+                    cache.sourcesError = null;
                     cache.sourcesProblem = String(data?.problem || '');
                     cache.sourceSuggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
-                    return list;
-                }).catch((error) => { cache.sources = null; throw error; });
-            }
-            return cache.sources;
+                    paintSourceFacts();
+                }
+                return list;
+            }, (error) => {
+                if (current()) {
+                    cache.sourcesError = error;
+                    paintSourceFacts();
+                }
+                throw error;
+            }).finally(() => { if (cache.sources === read) cache.sources = null; });
+            return (cache.sources = read);
         },
         catalog({ refresh = false } = {}) {
             if (refresh || !cache.catalog) {
@@ -503,7 +529,6 @@ export function initSkills(ctx = {}) {
         && !card.lifecycle_name_level && snapshot.listingTick <= (failureTick(card.lifecycle_job_id) ?? -Infinity) && listedReadyOn(listed, facts);
     const installedByName = () => (snapshot?.rawSkills ? new Map(projected().map((skill) => [skill.name, skill])) : null);
     const cardRowKey = (card) => card.dataset.skillRow || card.dataset.skill;
-    const officialSource = () => (cache.sourcesValue || []).find((source) => source.kind === 'hub' && source.part === 'official') || null;
     // The catalog entry an installed skill came from (its author, full text), when the catalog was read.
     const catalogEntry = (skill) => (cache.catalogValue?.items || [])
         .find((item) => item.source_id === skill?.install?.source?.id && item.name === skill?.name) || null;
@@ -515,6 +540,18 @@ export function initSkills(ctx = {}) {
     };
     const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(),
         contributionVisibility: (name) => contributions?.visibilityForSkill?.(name) || [] });
+
+    // What the section's list says about these views, from reads already made (never a read of its own).
+    function sectionFacts() {
+        return {
+            installed: snapshot?.rawSkills ? snapshot.rawSkills.length : null,
+            installedFailed,
+            needs: snapshot?.rawSkills ? installedFilterCounts(projected(), pageModuleFacts()).needs : 0,
+            working: inFlightCount(lifecycleEventsFromQueue(snapshot?.queue)),
+            sources: Array.isArray(cache.sourcesValue) ? cache.sourcesValue.length : null,
+            sourcesFailed: Boolean(cache.sourcesError),
+        };
+    }
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
@@ -554,9 +591,8 @@ export function initSkills(ctx = {}) {
         updateAllBtn.hidden = !(activeTab === 'installed' && candidates.length >= 2);
         updateAllBtn.textContent = `Update ${candidates.length}`;
         updateAllBtn.setAttribute('aria-label', `Update ${candidates.length} trusted skills`);
-        const pill = document.getElementById('skills-tab-pill-installed');
-        const count = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue));
-        if (pill) { pill.hidden = !count; pill.textContent = count ? String(count) : ''; }
+        // Work in flight and what needs the owner are said by the Skills row of the section's list.
+        section.paintAnswers();
     }
 
     function paintInstalled({ replace = false } = {}) {
@@ -637,7 +673,31 @@ export function initSkills(ctx = {}) {
         hintTimer = 0;
     }
 
-    async function readInstalled({ quiet = false } = {}) {
+    // The rail and a view shown together share one read. Refresh supersedes an older read; a hint (a change, the tab
+    // shown again, the socket reopened) is read once, for the rail and the views alike, after the read on its way has
+    // answered (`scheduleHintRead`): the section asks for its rows only as its list comes on screen (`rowsShown`).
+    let listingOnWay = null;
+    // The listing is wanted while a skill view or the section's list of pages is on screen.
+    const needsListing = () => !destroyed && !document.hidden && (visible || section.rowsOnScreen());
+    const sayLoading = () => { status.dataset.tone = 'muted'; status.textContent = 'Loading installed skills…'; };
+    function readInstalled({ quiet = false, join = false } = {}) {
+        if (join && listingOnWay) {
+            if (!quiet && !snapshot) sayLoading();
+            return listingOnWay;
+        }
+        const read = readListing({ quiet });
+        const settled = listed => {
+            if (listingOnWay !== read) return;
+            listingOnWay = null;
+            if (listed) revealRequestedSkill();
+            requestedSkill = '';  // a failure or an absent skill ends the request too
+        };
+        listingOnWay = read;
+        read.then(settled, () => settled(false));
+        return read;
+    }
+
+    async function readListing({ quiet = false } = {}) {
         if (destroyed) return;
         clearListingTimers();
         const hint = pendingListingHint;
@@ -671,17 +731,21 @@ export function initSkills(ctx = {}) {
             optional.queue = ok ? 'ready' : 'failed';
             if (ok) {
                 const events = lifecycleEventsFromQueue(data);
+                const connected = (job) => job?.kind === 'connect_mcp' && job.status === 'succeeded';
+                const previous = lifecycleEventsFromQueue(next.queue).filter(connected);
+                const justConnected = events.some((job) => connected(job) && !previous.some((old) => old.id === job.id));
                 next.queue = data;
                 next.failureTicks = tickFailures(events, earlierTicks, () => ++readTick);
                 next.visibleIds = visibleJobIds(events);
                 if (next.answeredFailures) next.answeredFailures = carryAnswers(next.answeredFailures, next.failureTicks);
                 // The ambiguity ids follow the queue's visible records, not its failed ones: a job still in flight is still listed.
                 if (next.nameLevelFailures) next.nameLevelFailures = carryAnswers(next.nameLevelFailures, next.visibleIds, writeNameLevelFailures);
+                if (justConnected) readConnectedServers();
             }
             if (snapshot === next) paintInstalled();
             showReads();
         }, () => { if (current()) { optional.queue = 'failed'; showReads(); } });
-        if (!quiet && !snapshot) { status.dataset.tone = 'muted'; status.textContent = 'Loading installed skills…'; }
+        if (!quiet && !snapshot) sayLoading();
         try {
             const listingTick = ++readTick;
             const primary = await withinRequestLifetime(fetchSkills, { signal: controller.signal });
@@ -696,6 +760,8 @@ export function initSkills(ctx = {}) {
         } catch (err) {
             if (!current()) return;
             listingReadState = 'failed';
+            installedFailed = true;
+            section.paintAnswers();
             emptyEl.hidden = true;
             const reason = err?.name === 'StateReadEnded' && err.reason === 'expired' ? 'the request took too long' : err.message || err;
             status.dataset.tone = 'danger';
@@ -714,13 +780,15 @@ export function initSkills(ctx = {}) {
         next.answeredFailures = carryAnswers(snapshot?.answeredFailures ?? readAnsweredFailures(), next.failureTicks);
         next.nameLevelFailures = carryAnswers(snapshot?.nameLevelFailures ?? readNameLevelFailures(), next.visibleIds, writeNameLevelFailures);
         snapshot = next;
+        installedFailed = false;
         paintInstalled({ replace: firstPaint });
         showReads();
         scheduleHintRead();
+        return true;
     }
 
     function scheduleHintRead() {
-        const canRead = () => visible && !destroyed && !document.hidden && listingReadState !== 'pending';
+        const canRead = () => needsListing() && listingReadState !== 'pending';
         // The first hint owns the deadline; newer hints cannot supersede an active read.
         if (!pendingListingHint || hintTimer || !canRead()) return;
         hintTimer = setTimeout(() => {
@@ -1023,7 +1091,6 @@ export function initSkills(ctx = {}) {
         const key = card ? cardRowKey(card) : name;
         const skill = projected().find((row) => installedSkillRowKey(row) === key);
         if (!skill || !opensDetail(skill)) return;
-        const source = (cache.sourcesValue || []).find((row) => row.id === skill.install?.source?.id) || null;
         const catalogItem = catalogEntry(skill);
         const item = catalogItem || {
             id: `installed/${name}`, source_id: skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
@@ -1045,7 +1112,7 @@ export function initSkills(ctx = {}) {
         const titleOf = () => Array.from(container.querySelectorAll(':scope > .skills-card'))
             .find((listed) => cardRowKey(listed) === pendingKey && !listed.hidden)?.querySelector('.skills-card-name') || null;
         sheet = openSkillDetailSheet({
-            item, installed: skill, source, returnFocus: pendingKey ? titleOf : opener, access,
+            item, installed: skill, returnFocus: pendingKey ? titleOf : opener, access,
             readDetail: origin?.id && origin.kind !== 'registry' ? ({ signal } = {}) => skillSourcesApi.item(origin.id, name, { signal }) : null,
         });
         sheetPending = job ? { key: pendingKey, job } : null;
@@ -1062,15 +1129,31 @@ export function initSkills(ctx = {}) {
             return false;
         }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
-        if (action === 'open_widgets') { void ctx.showPage?.('widgets'); return false; }
+        if (action === 'open_widgets') {
+            if (options.opener) void ctx.showPage?.('widgets', { opener: options.opener });
+            else void ctx.showPage?.('widgets');
+            return false;
+        }
         if (action === 'open_secrets') {
             // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
             void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim() });
             return false;
         }
-        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`); return false; }
+        // The skill's own form stays with the skill: a level over Skills; Back returns to its card, to the pressed control
+        // while it still stands, else (an item of the card's menu is gone by then) to the menu's button.
+        if (action === 'open_settings') {
+            const pressed = options.node;
+            section.go(`skill/${encodeURIComponent(name)}`, {
+                opener: () => (pressed?.isConnected && pressed.getClientRects().length ? pressed
+                    : viewsRoot.querySelector(`.skills-card[data-skill="${CSS.escape(name)}"] [data-skill-menu-trigger]`)),
+            });
+            return false;
+        }
         if (action === 'read_findings') { openFindings(name); return false; }
-        if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
+        if (action === 'find_in_browse') {
+            if (await section.open('browse', { opener: options.node }) && visible && activeTab === 'browse') void browse.searchFor(name);
+            return false;
+        }
         if (action === 'review' || action === 'rereview') {
             const ok = await openConfirmDialog({
                 title: `Review ${name}?`,
@@ -1108,7 +1191,10 @@ export function initSkills(ctx = {}) {
         if (action === 'connect_tools') {
             const result = await connectSkillTools(await currentSkill(name));
             if (stillWorking(name, result)) return true;  // not confirmed yet: the card follows its job
-            if (result?.ok) showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            if (result?.ok) {
+                readConnectedServers();
+                showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            }
             return Boolean(result);
         }
         if (action === 'grant') {
@@ -1152,14 +1238,19 @@ export function initSkills(ctx = {}) {
         if (event.target.closest('.skills-menu-item')) closeMenus({ restoreFocus: true });
         const mark = event.target.closest('[data-official-mark]');
         if (mark) {
-            await store.sources().catch(() => null);
-            openOfficialExplanation(mark, (cache.sourcesValue || []).find((source) => source.id === mark.dataset.officialSource) || officialSource());
+            // A Browse card's mark is explained from its own entry. Elsewhere only a mark bound to a source says how
+            // that source installs, from its row as read now; an unbound mark borrows no other source's setting.
+            const entry = mark.closest('.marketplace-card');  // only Browse draws these
+            const bound = entry ? '' : mark.dataset.officialSource;
+            if (bound) await store.sources().catch(() => null);
+            openOfficialExplanation(mark, entry ? browse.officialSource(entry.dataset.item)
+                : (bound && !cache.sourcesError && cache.sourcesValue?.find((row) => row.id === bound)) || null);
             return;
         }
         const goto = event.target.closest('[data-skills-goto]');
-        if (goto) { selectTab(goto.dataset.skillsGoto); return; }
+        if (goto) { void section.open(goto.dataset.skillsGoto, { opener: goto }); return; }
         const chip = event.target.closest('[data-installed-filter]');
-        if (chip) { filter = chip.dataset.installedFilter; paintFilters(snapshot?.rawSkills ? projected() : null); applyInstalledFilter(); return; }
+        if (chip) { requestedSkill = ''; filter = chip.dataset.installedFilter; paintFilters(snapshot?.rawSkills ? projected() : null); applyInstalledFilter(); return; }
         const menuTrigger = event.target.closest('[data-skill-menu-trigger]');
         if (menuTrigger) { openSkillMenu(menuTrigger); return; }
         const actionTarget = event.target.closest('[data-skill-action]');
@@ -1221,45 +1312,92 @@ export function initSkills(ctx = {}) {
     // A findings block is rendered collapsed; its list is built on first open
     // from the row already in memory (`toggle` does not bubble: capture).
     const onToggle = (event) => fillFindingsOnOpen(event.target, snapshot?.rawSkills);
-    const onSearch = () => applyInstalledFilter();
+    const onSearch = () => { requestedSkill = ''; applyInstalledFilter(); };
+
+    function revealRequestedSkill() {
+        if (!requestedSkill || !visible || document.hidden || activeTab !== 'installed') return;
+        // The folder's own card is the skill asked for, and only it moves the owner's search and filter. An attempt of
+        // the name alone is a queue record with nothing installed yet: it is brought into view where it stands.
+        const entry = `.skills-card[data-skill="${CSS.escape(requestedSkill)}"]`;
+        const card = container.querySelector(`${entry}:not([data-lifecycle-virtual])`);
+        if (!card) {
+            const attempt = container.querySelector(entry);
+            if (attempt && !attempt.hidden) attempt.scrollIntoView({ block: 'nearest' });
+            return;
+        }
+        if (card.hidden) {
+            searchInput.value = requestedSkill;
+            applyInstalledFilter();
+            if (card.hidden) {
+                filter = 'all';
+                paintFilters(projected());
+                applyInstalledFilter();
+            }
+        }
+        card.scrollIntoView({ block: 'nearest' });
+    }
+
+    // Opening Skills may already have started a fresh read. A read started before this request
+    // cannot settle it: the requested card may just have been installed. (`beforeOpen` is the read that was the
+    // newest when the request began: each listing read has its own controller.)
+    function requestInstalledSkill(name, beforeOpen) {
+        requestedSkill = name;
+        void readInstalled({ quiet: true, join: listingReadController !== beforeOpen });
+    }
 
     // ---- Browse and Sources ---------------------------------------------------------------------
     const host = {
         installedByName,
         installedSkills: () => (snapshot?.rawSkills ? projected() : null),
+        live: () => snapshot?.live,
         refreshInstalled: () => readInstalled({ quiet: true }),
-        sources: (force) => store.sources(force),
-        sourcesProblem: () => cache.sourcesProblem,
+        sources: store.sources,
+        sourceSnapshot,
         sourceSuggestions: () => cache.sourceSuggestions,
         catalog: (options) => store.catalog(options),
-        // A source change moves the listing's source facts too (a re-added name's id, updates): read both again.
-        reloadAll: async () => { await Promise.all([store.sources(true).catch(() => null), readInstalled({ quiet: true })]); },
-        runInstalledAction: async (name, action) => {
+        // A source change moves the listing's source facts too (a re-added name's id, updates): read both again, and
+        // the catalog under Browse when it is the page on screen (the first-start choice is made over it).
+        reloadAll: async () => {
+            await Promise.all([store.sources({ replace: true }).catch(() => null), readInstalled({ quiet: true })]);
+            if (visible && activeTab === 'browse') await browse.show();
+        },
+        runInstalledAction: async (name, action, options) => {
             try {
-                const changed = await runInstalledAction(name, action);
+                const changed = await runInstalledAction(name, action, options);
                 if (changed !== false) await readInstalled({ quiet: true });
             } catch (err) {
                 if (!err.cancelled) showToast(`${name}: ${err.message || err}`, 'danger');
             }
         },
-        confirmFirstStart: async (sourceId) => {
-            const sources = await store.sources().catch(() => []);
-            if (firstStartAsked || !unconfirmedHubRows(sources).some((row) => !sourceId || row.id === sourceId)) return;
-            firstStartAsked = true;
-            await sourcesView.confirmFirstStart();
+        confirmFirstStart: async (sourceId, canOpen = () => true) => {
+            // Browse and Sources have already requested these facts. A check after a failed visit is not another read.
+            await cache.sources?.catch(() => null);
+            const sources = cache.sourcesError ? [] : cache.sourcesValue || [];
+            if (firstStartAsked || !canOpen() || !unconfirmedHubRows(sources).some((row) => !sourceId || row.id === sourceId)) return;
+            await sourcesView.confirmFirstStart(() => {
+                if (firstStartAsked || !canOpen()) return false;
+                firstStartAsked = true;
+                return true;
+            });
         },
         compare: (item, installed) => openCompareDialog({
             mine: { name: installed?.name, official: installed?.install?.official, source: installedSourceLabel(installed || {}),
                 version: installed?.version, state: installed?.enabled ? 'On' : 'Off', description: installed?.description },
             other: { name: item.name, official: item.official, source: item.source_name, owner: item.owner, version: item.version,
-                popularity: popularityText(item), description: item.description,
-                reviewed: (cache.sourcesValue || []).find((row) => row.id === item.source_id)?.trust !== 'trusted' },
+                popularity: popularityText(item), description: item.description },
         }),
         toast: (message, tone) => showToast(message, tone),
         pageModuleFacts,
-        showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
-        showMadeHere: () => { filter = 'made'; selectTab('installed'); },
-        openSettings: (path, options = {}) => ctx.openSettings?.(path, options),
+        showInstalled: async (name, opener) => {
+            const beforeOpen = listingReadController;
+            if (!await section.open('installed', { opener }) || !visible || activeTab !== 'installed') return;
+            searchInput.value = name;
+            applyInstalledFilter();
+            requestInstalledSkill(name, beforeOpen);
+        },
+        showMadeHere: () => { filter = 'made'; return section.open('installed'); },
+        // Skill sources open here as a level over Sources; the rest of Settings with Back to Extensions.
+        openSettings: (path, options = {}) => section.fromPage(path, options),
     };
     const browse = createSkillBrowse({ pane: document.getElementById('skills-pane-browse'), chrome: document.getElementById('skills-browse-chrome'), host });
     const sourcesView = createSkillSources({ pane: document.getElementById('skills-pane-sources'), host });
@@ -1270,29 +1408,42 @@ export function initSkills(ctx = {}) {
     }
 
     async function showActive({ refresh = false } = {}) {
-        if (activeTab === 'installed') return readInstalled({ quiet: Boolean(snapshot) });
+        if (activeTab === 'installed') return readInstalled({ quiet: Boolean(snapshot), join: true });
+        const view = activeTab;
+        const stillHere = () => !destroyed && visible && !document.hidden && activeTab === view;
         // Browse and Sources need the installed listing for every card's state.
-        const listing = snapshot && !pendingListingHint ? Promise.resolve() : readInstalled({ quiet: Boolean(snapshot) });
+        const listing = snapshot && !pendingListingHint ? Promise.resolve() : readInstalled({ quiet: Boolean(snapshot), join: true });
         if (activeTab === 'browse') await Promise.all([browse.show({ refresh }), listing]);
         else await Promise.all([sourcesView.show({ refresh }), listing]);
-        if (!firstStartAsked) host.confirmFirstStart();
+        if (!firstStartAsked && stillHere()) void host.confirmFirstStart(undefined, stillHere);
     }
 
-    function selectTab(tabName) {
+    // A view is the section's open page (extensions.js calls this when Skills, Browse or Sources comes on screen).
+    function showView(view) {
         closeMenus();
-        activeTab = tabName;
-        tabs.select(tabName);
-        activateTab(tabName);
+        requestedSkill = '';
+        activeTab = view;
+        visible = true;
+        activateTab(view);
         paintChrome();
+        // The retained cards must match the selected filter before the new read answers.
+        if (view === 'installed') applyInstalledFilter();
         showActive();
     }
 
-    const tabs = bindTabStrip(root.querySelector('.skills-tabs'), {
-        dataAttr: 'data-tab', activeClass: 'is-active',
-        onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
-    });
-    // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'), { actions: updateAllBtn });
+    // No view is on screen: another page of the section, a level over a view, or another place.
+    function hideViews() {
+        closeMenus();
+        requestedSkill = '';
+        visible = false;
+        clearTimeout(pollTimer);
+        sheet?.close();
+    }
+
+    // Sources also supplies the trust facts used by the skill views.
+    function placeShown() {
+        store.sources({ fresh: true }).catch(() => null);
+    }
 
     const onRefresh = async () => {
         refreshBtn.disabled = true;
@@ -1310,27 +1461,26 @@ export function initSkills(ctx = {}) {
             }
         }
     };
-    const onPageShown = (event) => {
-        closeMenus();
-        visible = event.detail?.page === 'skills';
-        if (!visible) { clearListingTimers(); sheet?.close(); return; }
-        tabs.select(activeTab);
-        store.sources(true).catch(() => null);
-        showActive();
-    };
     const invalidateInstalled = () => {
         if (destroyed) return;
         // A successful read only consumes the hint it started with.
         pendingListingHint = Symbol();
+        if (!needsListing()) listingOnWay = null;  // on return, read past the change instead of joining a read started before it
         scheduleHintRead();
     };
+    // A lifecycle end reaches this page from the socket and from this window's own actions (contributions.js); health
+    // and a reopened socket come from the socket alone.
+    const offLifecycle = contributions.onLifecycle(invalidateInstalled);
     const stopSync = typeof ctx.ws?.on === 'function' ? [
-        ctx.ws.on('extension_lifecycle', invalidateInstalled),
+        ctx.ws.on('extension_lifecycle', (event) => {
+            if (event?.action === 'connect_mcp') readConnectedServers();
+            invalidateInstalled();
+        }),
         ctx.ws.on('extension_health_changed', invalidateInstalled),
         ctx.ws.on('open', invalidateInstalled),  // a lost hint is recovered by re-reading, not replayed
     ] : [];
     const onVisibilityChange = () => {
-        if (document.hidden) clearListingTimers();
+        if (document.hidden) { ++openRequest; requestedSkill = ''; clearListingTimers(); }
         else schedulePoll();
         invalidateInstalled();
     };
@@ -1338,39 +1488,31 @@ export function initSkills(ctx = {}) {
     refreshBtn.addEventListener('click', onRefresh);
     updateAllBtn.addEventListener('click', updateAll);
     searchInput.addEventListener('input', onSearch);
-    root.addEventListener('click', onClick);
+    viewsRoot.addEventListener('click', onClick);
     container.addEventListener('change', onChange);
     container.addEventListener('toggle', onToggle, true);
-    window.addEventListener('ouro:page-shown', onPageShown);
     document.addEventListener('visibilitychange', onVisibilityChange);
 
     // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
-    // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js).
+    // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js). The
+    // explicit target opens regardless of the device's previously selected page.
     const onOpenSkills = async (event) => {
         const { skill = '', query = '', category = '' } = event?.detail || {};
+        const request = ++openRequest;
+        const beforeOpen = listingReadController;
+        requestedSkill = '';
         closeMenus();
-        if (!await ctx.showPage?.('skills')) return;
-        if (!skill && category) { selectTab('browse'); await browse?.showCategory(category); return; }
-        if (!skill) { selectTab('browse'); await browse?.searchFor(query); return; }
-        selectTab('installed');
-        const entry = `.skills-card[data-skill="${CSS.escape(skill)}"]`;
-        const found = () => container.querySelector(`${entry}:not([data-lifecycle-virtual])`) || container.querySelector(entry);
-        if (found()) return found().scrollIntoView({ block: 'nearest' });
-        const observer = new MutationObserver(() => {
-            if (!found()) return;
-            observer.disconnect();
-            found().scrollIntoView({ block: 'nearest' });
-        });
-        observer.observe(document.getElementById('page-skills'), { childList: true, subtree: true });
-        setTimeout(() => observer.disconnect(), 10000);  // an entry that never comes leaves the page as it is
+        if (!await section.open(skill ? 'installed' : 'browse') || request !== openRequest || destroyed) return;
+        if (!skill && category) { await browse?.showCategory(category); return; }
+        if (!skill) { await browse?.searchFor(query); return; }
+        if (!visible || activeTab !== 'installed') return;
+        requestInstalledSkill(skill, beforeOpen);
     };
     window.addEventListener('ouro:open-skills', onOpenSkills);
     paintFilters(null);
 
-    return { capture() {
-        const tab = activeTab;
-        return () => { if (activeTab !== tab) selectTab(tab); };
-    }, destroy() {
+    // `open` and `pressedAgain` are the app's doors to the section (app.js `openExtensions`, the sidebar's row).
+    return { open: section.open, capture: section.capture, pressedAgain: section.pressedAgain, destroy() {
         destroyed = true;
         clearListingTimers();
         listingReadController?.abort();
@@ -1378,18 +1520,17 @@ export function initSkills(ctx = {}) {
         sheet?.close();
         browse.destroy();
         sourcesView.destroy();
-        tabs.destroy();
-        disposeBar();
+        section.destroy();
         stopSync.forEach((off) => off?.());
+        offLifecycle();
         stopContributionFacts?.();
         stopHostFacts?.();
         refreshBtn.removeEventListener('click', onRefresh);
         updateAllBtn.removeEventListener('click', updateAll);
         searchInput.removeEventListener('input', onSearch);
-        root.removeEventListener('click', onClick);
+        viewsRoot.removeEventListener('click', onClick);
         container.removeEventListener('change', onChange);
         container.removeEventListener('toggle', onToggle, true);
-        window.removeEventListener('ouro:page-shown', onPageShown);
         document.removeEventListener('visibilitychange', onVisibilityChange);
         window.removeEventListener('ouro:open-skills', onOpenSkills);
     } };
