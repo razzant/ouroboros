@@ -542,3 +542,32 @@ def test_a_read_scoped_to_a_room_never_certifies_an_absence_it_could_not_check(t
     mind = str(_chat_history(SimpleNamespace(drive_root=tmp_path, task_metadata={}, pending_events=[], task_id="t"),
                              words=["archive bound"], room_id=alpha))
     assert "observed=0; total_unknown" in mind and "rooms_unreadable" in mind and "total=0" not in mind
+
+
+
+def test_one_strict_registry_read_however_many_bound_tasks_the_hits_hold(tmp_path, monkeypatch):
+    from ouroboros import projects_registry
+    from ouroboros.projects_registry import create_project
+
+    project = create_project(tmp_path, "alpha", name="Alpha")
+    reads = {}
+    for many in (2, 8):
+        bindings = {f"task{n}": {"project_id": project["id"], "project_chat_id": project["chat_id"],
+                                 "chat_id": project["chat_id"]} for n in range(many)}
+        (tmp_path / "state" / "project_task_bindings.json").write_text(json.dumps({"bindings": bindings}),
+                                                                         encoding="utf-8")
+        for n in range(many):
+            _say(tmp_path, f"2026-11-0{many}T10:0{n}:00Z", f"archive{many} bound {n}", chat_id=0, direction="out",
+                 task_id=f"task{n}")
+        real, counted = projects_registry._load, [0]
+
+        def load(root, *args, strict=False, **kwargs):
+            counted[0] += bool(strict)
+            return real(root, *args, strict=strict, **kwargs)
+
+        monkeypatch.setattr(projects_registry, "_load", load)
+        found = _search(tmp_path, f"archive{many}", count=100)
+        monkeypatch.setattr(projects_registry, "_load", real)
+        assert found["total"] == many
+        reads[many] = counted[0]
+    assert reads[8] == reads[2], reads  # never one registry read per bound task
