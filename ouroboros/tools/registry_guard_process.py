@@ -1,4 +1,4 @@
-"""Process/shell guard helpers: self-change tripwires, read-only inspection classification and light-mode repo snapshots.
+"""Process/shell guard helpers: the pre-execution shell check, self-change tripwires and light-mode repo snapshots.
 
 The facade re-exports these definitions so existing imports and monkeypatch
 targets retain the same bindings.
@@ -41,180 +41,6 @@ def _registry():
     from ouroboros.tools import registry
 
     return registry
-
-
-
-
-
-
-
-
-
-
-
-
-_READ_ONLY_INSPECTION_COMMANDS = frozenset({
-    "grep", "egrep", "fgrep", "zgrep", "rg", "ag", "ack", "ripgrep",
-    "cat", "bat", "head", "tail", "less", "more", "nl", "strings",
-    "ls", "find", "fd", "stat", "file", "wc", "sort", "uniq", "cut", "tr", "column",
-    "basename", "dirname", "realpath", "readlink", "diff", "cmp", "jq", "yq",
-    "echo", "printf", "true", "pwd", "date", "tree",
-})
-
-
-_COMMAND_HEAD_WRAPPERS = frozenset({
-    "sudo", "env", "command", "builtin", "exec", "nohup", "time", "nice", "ionice",
-    "stdbuf", "\\",
-})
-
-
-# ``git`` read-only classification: the git_shell_policy SSOT
-# (``_git_subcommand_is_readonly``), shared with the shell git guards and the
-# affordance map — two divergent allowlists disagreed on the same line (#447 A7).
-
-
-_SEARCH_TOOL_EXEC_OPTIONS = frozenset({"--pre", "--pre-glob", "--hostname-bin", "--pager"})
-
-
-_DENIED_READ_OPTIONS: dict = {
-    # find/fd run and delete: -exec/-execdir/-ok/-okdir/-x, -delete, and the -f* writers.
-    "find": frozenset({
-        "-exec", "-execdir", "-ok", "-okdir", "-delete",
-        "-fls", "-fprint", "-fprint0", "-fprintf",
-    }),
-    "fd": frozenset({"-x", "--exec", "--exec-batch"}),
-    "rg": _SEARCH_TOOL_EXEC_OPTIONS,
-    "ripgrep": _SEARCH_TOOL_EXEC_OPTIONS,
-    "ag": _SEARCH_TOOL_EXEC_OPTIONS,
-    "ack": _SEARCH_TOOL_EXEC_OPTIONS,
-    # yq edits the named file in place with -i/--inplace; without this the family
-    # read-carve exempted `yq -i '.OUROBOROS_SAFETY_MODE="off"' settings.json` as
-    # "pure inspection" (jq has no in-place edit and stays a stdout-only read).
-    "yq": frozenset({"-i", "--inplace"}),
-    "sort": frozenset({"-o", "--output", "--compress-program"}),
-    "less": frozenset({"-o", "--log-file", "-k", "--lesskey-file"}),
-    "more": frozenset({"-o"}),
-    "file": frozenset({"-c", "--compile"}),
-    # git: external diff/textconv helpers execute a configured program, -o/--output and
-    # git grep -O write or spawn a pager, --exec-path relocates the git binaries.
-    "git": frozenset({
-        "-c", "--config-env", "--exec-path", "--ext-diff", "--textconv",
-        "-o", "--output", "--open-files-in-pager",
-    }),
-}
-
-
-_TRUSTED_EXECUTABLE_DIRS = frozenset({
-    "/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/opt/homebrew/bin",
-})
-
-
-def _trusted_read_head(token: str) -> str:
-    """The allowlist-comparable command name, or "" when the executable is untrusted."""
-    if "\\" in token:
-        return ""  # a windows/escaped path is not a form we can resolve — fail closed
-    directory, sep, name = token.rpartition("/")
-    if sep and directory not in _TRUSTED_EXECUTABLE_DIRS:
-        return ""
-    return name.removesuffix(".exe")
-
-
-def _denied_read_option(token: str, denied: frozenset) -> bool:
-    """True when an argument spells an execution/mutation option of its command."""
-    if not token.startswith("-") or token in {"-", "--"}:
-        return False
-    name = token.split("=", 1)[0]
-    if name in denied:
-        return True
-    if name.startswith("--"):
-        return False
-    return any(f"-{letter}" in denied for letter in name[1:])  # bundled short cluster
-
-
-_NESTED_EXECUTION_MARKERS = ("$(", "`", "<(", ">(")
-
-
-_NESTED_EXECUTION_TOKENS = frozenset({"$", "(", ")", "<(", ">(", "$("})
-
-
-def _is_pure_read_inspection(text_lower: str) -> bool:
-    """True when EVERY command in a shell line is a read-only source inspection.
-
-    Structural, not keyword-based: the line is split into per-command segments with
-    the shared lexer (``shell_parse.shell_segments``) and each segment's HEAD is
-    matched against an allowlist. An unknown head — any interpreter, HTTP client,
-    or shell — is not an inspection, whatever flags or payload spelling it carries.
-
-    Head membership is NECESSARY, NOT SUFFICIENT (review round 2): an allowed head can
-    still execute through its own options (``find -exec``, ``rg --pre``, git's external
-    diff/textconv) or through what precedes it. So the options are validated per command
-    (``_DENIED_READ_OPTIONS``), a leading environment assignment is REFUSED rather than
-    dropped (``PATH=``/``LD_PRELOAD=``/``GIT_EXTERNAL_DIFF=`` change what actually runs),
-    wrappers may not carry their own flags (``env -i``, ``sudo -e``), and the executable
-    must resolve to a bare name or a system bin. Anything unrecognised stays fail-closed.
-
-    NESTED EXECUTION IS REFUSED BEFORE ANY OF THAT (review round 3). Only the heads the lexer
-    actually surfaces get validated, so a command substitution hid its command from every check
-    above: ``echo "$(curl -X POST .../api/owner/scope-review-floor)"`` presented the allowlisted
-    ``echo``, and the write-shape detector does not recognise an HTTP POST, so the exemption was
-    granted to a line that existed to reach the owner-only endpoint. A quoted substitution is
-    one opaque argument token to the lexer, which is why this is a check on the TEXT and on the
-    tokens, not something the per-segment head walk could have caught.
-    """
-    from ouroboros.shell_parse import shell_segments
-
-    if any(marker in text_lower for marker in _NESTED_EXECUTION_MARKERS):
-        return False
-    segments = shell_segments(text_lower)
-    if not segments:
-        return False
-    for segment in segments:
-        if any(token in _NESTED_EXECUTION_TOKENS for token in segment):
-            return False
-        tokens = [token for token in segment if token]
-        while tokens and tokens[0] in _COMMAND_HEAD_WRAPPERS:
-            tokens = tokens[1:]
-            if tokens and tokens[0].startswith("-"):
-                return False  # a wrapper's own options can rebuild the environment
-        if not tokens:
-            continue  # a bare wrapper executes nothing
-        if "=" in tokens[0] and not tokens[0].startswith(("-", "=")):
-            return False  # leading env assignment: never silently discarded
-        head = _trusted_read_head(tokens[0])
-        if head == "git":
-            from ouroboros.git_shell_policy import (
-                _git_output_file_args,
-                _git_subcommand_and_args,
-                _git_subcommand_is_readonly,
-            )
-
-            subcmd, sub_args = _git_subcommand_and_args(tokens)
-            if not subcmd or not _git_subcommand_is_readonly(subcmd, sub_args):
-                return False
-            if _git_output_file_args(sub_args):
-                return False  # `git log --output=<file>` truncates and writes <file>
-        elif not head or head not in _READ_ONLY_INSPECTION_COMMANDS:
-            return False
-        denied = _DENIED_READ_OPTIONS.get(head)
-        if denied and any(_denied_read_option(token, denied) for token in tokens[1:]):
-            return False
-        if head == "uniq" and sum(1 for t in tokens[1:] if t == "-" or not t.startswith("-")) >= 2:
-            # uniq's SECOND positional operand is its output file ('-' is the
-            # stdin operand, not a flag): `... | uniq - settings.json` writes.
-            return False
-    return True
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
@@ -369,9 +195,7 @@ def _run_shell_post_checks(
     and its snapshot recorded an OSError while reading as "file absent", so the
     restore could UNLINK the live settings.json after a transient read error. The
     light-lane guard below refuses auto-rollback for exactly this reason. Pre-exec
-    guards keep skill owner state (SKILL_STATE_WRITE_BLOCKED on any writeish /
-    non-inspection mention — pure read inspection is carved, #447 A2); the
-    settings.json mention-gates are lexical, so an obfuscated argument-level
+    checks see only explicit write targets, so an obfuscated argument-level
     writer (``S=settings; cat > data/$S.json``) can pass them — the tripwire below
     makes that LOUD (a typed ``tripwire`` fact plus an appended note) without
     re-introducing the unsound rollback. Disclosed residual: the write itself is

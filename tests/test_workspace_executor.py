@@ -24,7 +24,7 @@ import sys
 
 import pytest
 
-from ouroboros.shell_parse import is_absolute_path_text, shell_argv_with_path_tokens
+from ouroboros.shell_parse import embedded_absolute_path_tokens, is_absolute_path_text
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.workspace_executor import map_backend_path, normalize_executor_ref
 
@@ -51,12 +51,12 @@ def test_is_absolute_path_text_is_cross_platform():
 
 
 def test_shell_path_token_extractor_ignores_html_closing_tags():
-    tokens = shell_argv_with_path_tokens(["python3", "-c", "Path('site/index.html').write_text('<h1>ok</h1>')"])
+    tokens = embedded_absolute_path_tokens("python3 -c Path('site/index.html').write_text('<h1>ok</h1>')")
 
     assert "/h1>" not in tokens
-    assert "/etc/passwd" in shell_argv_with_path_tokens("tool:/etc/passwd")
-    assert "/etc/passwd" in shell_argv_with_path_tokens("cat</etc/passwd")
-    assert "/secret>" in shell_argv_with_path_tokens("cat /secret>")
+    assert "/etc/passwd" in embedded_absolute_path_tokens("tool:/etc/passwd")
+    assert "/etc/passwd" in embedded_absolute_path_tokens("cat</etc/passwd")
+    assert "/secret>" in embedded_absolute_path_tokens("cat /secret>")
 
 
 def test_changed_path_covers_directory_entries():
