@@ -65,6 +65,34 @@ def test_a_500_child_cascade_never_evicts_its_own_fence(monkeypatch):
     assert late.get("_admission_blocked") == "root_cancelled"
 
 
+def test_the_cancellation_fence_walks_ancestry_only_for_a_row_with_a_parent(monkeypatch, tmp_path):
+    """Review round 4 (Astra S1): the chooser's gate and ``lane_waits`` ask the fence for every waiting row. After
+    any cascade a root (no parent) gets its answer from its own and its root's ids alone, without building the
+    map of the live queue; every answer stays the same: a cancelled root, its child and grandchild, and the
+    grandchild of a cancelled mid-tree node stay fenced (the node itself is not its own descendant); an independent
+    root and a child of another branch are admitted."""
+    import supervisor.task_lifecycle as tl
+
+    rows = [{"id": "r"}, {"id": "c", "root_task_id": "r", "parent_task_id": "r"},
+            {"id": "g", "root_task_id": "r", "parent_task_id": "c"}, {"id": "free"},
+            {"id": "m", "root_task_id": "s", "parent_task_id": "s"},
+            {"id": "m1", "root_task_id": "s", "parent_task_id": "m"},
+            {"id": "m2", "root_task_id": "s", "parent_task_id": "m1"},
+            {"id": "other", "root_task_id": "s", "parent_task_id": "s"}]
+    queue, _pending = _isolate_queue(monkeypatch, tmp_path, rows)
+    monkeypatch.setattr(tl, "CANCELLED_ROOT_FENCES", {"r": "2026-11-22T00:00:00Z", "m": "2026-11-22T00:00:00Z"})
+    walks = []
+    real = tl._queue_module
+    monkeypatch.setattr(tl, "_queue_module", lambda: walks.append(1) or real())
+    fenced = {row["id"]: tl.root_cancellation_fenced(row, str(row.get("root_task_id") or row["id"])) for row in rows}
+    assert fenced == {"r": True, "c": True, "g": True, "free": False, "m": False, "m1": True, "m2": True,
+                      "other": False}
+    assert len(walks) == 3, "only the rows with a parent that the direct checks did not settle build the map"
+    walks.clear()
+    assert tl.root_cancellation_fenced({"id": "free"}, "free") is False and not walks, "a root walks nothing"
+    assert queue.PENDING and tl.root_cancellation_fenced({"id": "late", "parent_task_id": "m2"}) is True
+
+
 def test_overlapping_cascades_never_evict_each_others_fences(monkeypatch):
     """Pruning may drop only QUIESCENT entries: while several cascades are in
     flight, exceeding the cap must not unfence any of their trees."""

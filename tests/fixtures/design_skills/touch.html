@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Targets under a finger and a mouse</title>
+<!-- measure.js's target rule: a reach the shared hit-area recipe extends, the same reach clipped by a strip that
+     scrolls, a wide control too short for a mouse, a control a wrapper cuts for good beside one a scroller shows in
+     part and one a rail that scrolls inside a clipping shell shows in part, and a link inside a sentence beside one
+     alone in a list. -->
+<style>
+  body { margin: 0; padding: 24px; background: #ffffff; color: #1c2230; font: 16px/1.5 system-ui, sans-serif; }
+  button { height: 34px; padding: 0 16px; border: 1px solid #9aa3b2; border-radius: 17px; background: #f3f4f7; color: #1c2230; font: inherit; }
+  .reach { position: relative; }
+  .reach::after { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)); }
+  .short { height: 20px; width: 160px; }
+  .strip { display: flex; gap: 12px; overflow-x: auto; height: 34px; width: 400px; margin: 24px 0; }
+  .strip button { flex: none; }
+  .mask { height: 22px; width: 160px; overflow: clip; margin: 24px 0; }
+  .mask button, .scroller button, .rail button { height: 48px; }
+  .scroller { height: 64px; width: 240px; overflow-y: auto; margin: 24px 0; }
+  .shell { height: 64px; width: 240px; overflow: hidden; margin: 24px 0; }
+  .rail { height: 64px; overflow-y: auto; }
+  a { color: #1c2230; }
+  section { margin: 24px 0; }
+</style>
+</head>
+<body>
+  <section><button id="reached" class="reach">Save draft</button></section>
+  <section><button id="bare">Cancel this</button></section>
+  <section><button id="short" class="short">Wide but short</button></section>
+  <div class="strip"><button id="clipped" class="reach">Chip one</button><button id="clipped-2" class="reach">Chip two</button></div>
+  <div class="mask"><button id="masked">Cut for good</button></div>
+  <div class="scroller"><div style="height: 40px"></div><button id="scrolled">Half scrolled</button><div style="height: 80px"></div></div>
+  <div class="shell"><div class="rail"><div style="height: 44px"></div><button id="railed">Rail row</button><div style="height: 80px"></div></div></div>
+  <p>Read the <a id="inline" href="#docs">docs</a> before you begin; they explain the rest.</p>
+  <ul><li><a id="listed" href="#more">More</a></li></ul>
+</body>
+</html>

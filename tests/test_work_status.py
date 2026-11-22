@@ -266,6 +266,68 @@ def test_the_projection_names_a_sleeps_helper_from_its_own_census_row():
     assert work["because"][0]["text"] == "Sleeping until the task it chose finishes or a message arrives"
 
 
+def test_a_queued_root_says_the_work_it_stands_behind_by_that_works_name_and_nothing_else():
+    """Owner 21.11.2026 («5A»): beside Queued a quiet line says behind which work the row stands, as the census read
+    it from the queue now (``lane_wait``), by the name that work's own row shows in the same list."""
+    from ouroboros.gateway.state import _raw_work_facts
+    from tests._work_projection_shared import work_fields
+
+    project = {"lane": "project", "task_id": "holder", "project_id": "p"}
+    folder = {"lane": "folder", "task_id": "holder", "project_id": "other", "folder": "/work/shared"}
+    assert _raw_work_facts({"id": "q", "lane_wait": folder})["lane_wait"] == folder  # the census carries the wait
+    assert "lane_wait" not in _raw_work_facts({"id": "q", "_lane_wait": folder, "_folder_wait": folder})
+    holder = row("holder", suggested_name="Add Ollama support")
+    live = {"holder": {"running": True, "suggested_name": "Add Ollama support"}}
+
+    def queued_of(owners, raw):
+        (queued,) = [work for work in work_fields(owners, raw)["works"] if work["activity"] == "queued"]
+        return queued["because"]
+
+    for wait, behind in ((project, {"task_id": "holder", "lane": "project", "name": "Add Ollama support"}),
+                         (folder, {"task_id": "holder", "lane": "folder", "name": "Add Ollama support",
+                                   "folder": "/work/shared"})):
+        assert queued_of([holder, row("q", "queued", chat_id=1)], {**live, "q": {"lane_wait": wait}}) == [
+            {"code": "queued", "text": "behind \u201cAdd Ollama support\u201d", "behind": behind}]
+    # A retried tree (its row is the retry, the wait names the tree) and a holder whose queue row holds no title or
+    # name of its own (the census row's derived name) are named as their work reads in the list.
+    retry = row("holder-r2", original_task_id="holder", root_task_id="holder")
+    retried = {"holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder",
+                             "suggested_name": "Add Ollama support"}, "q": {"lane_wait": project}}
+    assert queued_of([retry, row("q", "queued", chat_id=1)], retried)[0]["behind"]["name"] == "Add Ollama support"
+    # Review round 2 (Astra B3, Carbon A1): a helper queued before its root never lends the work its name, and a
+    # retry named only by its request (its census row's derived name) is named under either id the wait carries.
+    kid = row("kid", "queued", parent_task_id="holder", root_task_id="holder")
+    attempt = row("holder-r2", original_task_id="holder", root_task_id="holder")
+    helped = {"kid": {"parent_task_id": "holder", "root_task_id": "holder", "title": "Scan one file"},
+              "holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder",
+                            "title": "Build index"}, "q": {"lane_wait": project}}
+    assert queued_of([kid, attempt, row("q", "queued", chat_id=1)], helped)[0]["behind"]["name"] == "Build index"
+    by_request = row("holder-r2", original_task_id="holder", root_task_id="holder", suggested_name="Build from source")
+    for held_by in ("holder", "holder-r2"):
+        said = queued_of([by_request, row("q", "queued", chat_id=1)],
+                         {"holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder"},
+                          "q": {"lane_wait": {**project, "task_id": held_by}}})
+        assert said[0]["text"] == "behind \u201cBuild from source\u201d", held_by
+    bare = queued_of([row("holder", suggested_name="Derived from the request"), row("q", "queued", chat_id=1)],
+                     {"holder": {"running": True}, "q": {"lane_wait": project}})
+    assert bare[0]["text"] == "behind \u201cDerived from the request\u201d"
+    # A holder the list does not hold or cannot name, or no wait at all: no cause, as before.
+    for owners, raw in (([row("q", "queued")], {"q": {"lane_wait": project}}),
+                        ([row("holder"), row("q", "queued", chat_id=1)], {"holder": {"running": True},
+                                                                          "q": {"lane_wait": project}}),
+                        ([holder, row("q", "queued", chat_id=1)], live)):
+        assert queued_of(owners, raw) == [{"code": "queued", "text": ""}]
+    # Only Queued says it: a waiting, paused or working row never does; a sleep keeps naming by ``names``.
+    works = {"holder": "Add Ollama support"}
+    for member in (row("t", "queued", project_admission_hold={"label": "Waiting for Project verification"}),
+                   row("t", "budget_paused", pause_cause="owner", can_resume=False), row("t")):
+        said = ws.classify_member(member, {"lane_wait": project}, {}, works)["reasons"]
+        assert all("behind" not in entry and "Add Ollama" not in entry["text"] for entry in said), member["phase"]
+    assert ws.classify_member(row("t", "queued"), {"lane_wait": project}, {}, works)["reasons"][0]["behind"]["lane"] \
+        == "project"
+    assert ws.classify_member(row("t", "queued"), {"lane_wait": project}, works)["reasons"] == [
+        {"code": "queued", "text": ""}], "the sleep's names never name a lane holder"
+
 def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
     owner = {"pause_by": {"actor": "owner"}}
     member = lambda task_id, **raw: ws.classify_member(  # noqa: E731

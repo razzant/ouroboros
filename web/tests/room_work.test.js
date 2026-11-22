@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { cardRowView, createRoomWork, latestRepresentedRoot, workCard } from '../modules/room_work.js';
+import { cardRowView, createRoomWork, latestRepresentedRoot, rowDetailLines, workCard } from '../modules/room_work.js';
 import { createTimelineAnchors } from '../modules/chat_render_batch.js';
 import { markView } from '../modules/status_mark.js';
 import { desiredLiveCardPhase } from '../modules/task_phase_chip.js';
@@ -1290,4 +1290,15 @@ test('navigating from the bottom edge through View question and Back keeps auto-
         if (reading.stick) messages.scrollTop = messages.scrollHeight;
         assert.equal(messages.scrollHeight - messages.scrollTop - messages.clientHeight, 0, 'zero gap after 160 px reply');
     } finally { shade?.destroy(); restoreDom(prior); }
+});
+
+test('a queued row\'s details say behind which work it stands only while it is listed; an ended row never does', () => {
+    // Review round 1 (B2): a row that left the list keeps its place and old facts; its details must not still claim
+    // that it stands behind another work.
+    const queued = SERVER_CASES.queued_behind_folder.works[1];
+    const row = { kind: 'task', confirmed: true, settled: false, view: {}, work: queued };
+    const behind = (lines) => lines.filter(([label]) => label === 'Behind').map(([, words]) => words);
+    assert.deepEqual(behind(rowDetailLines(row)), ['qh keeps the folder /work/shared']);
+    assert.deepEqual(behind(rowDetailLines({ ...row, settled: true })), [], 'an ended row');
+    assert.deepEqual(behind(rowDetailLines({ ...row, confirmed: false })), [], 'an unconfirmed row');
 });

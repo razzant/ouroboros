@@ -19,6 +19,8 @@ from ouroboros.work_stop import SELECTION_KEY, stop_record
 from supervisor.ended_work_helpers import WORK_FINISHED, close_abandoned_helpers
 from supervisor.task_lifecycle import sweep_cancel_intents
 from tests._budget_pause_exact_helpers import _install_queue, _parked, _supervisor_ctx
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 ROOT, CHILD = "work-root", "work-child"
 
@@ -439,14 +441,7 @@ def test_a_real_workspace_patch_is_captured_before_the_cancelled_write(env, tmp_
     """No mock of the capture: a real repository whose saved edit the helper never got to hand in."""
     import subprocess
 
-    workspace = tmp_path_factory.mktemp("helper-workspace")
-    def git(*args):
-        subprocess.run(["git", "-C", str(workspace), "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True, capture_output=True)
-
-    git("init", "-q")
-    (workspace / "note.txt").write_text("base\n", encoding="utf-8")
-    git("add", ".")
-    git("commit", "-qm", "base")
+    workspace = _helper_repository(tmp_path_factory)
     base = subprocess.run(["git", "-C", str(workspace), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     (workspace / "note.txt").write_text("base\nsaved by the paused helper\n", encoding="utf-8")
 
@@ -1310,6 +1305,20 @@ def test_one_custody_read_serves_every_ended_work_with_a_parked_helper(env, monk
     assert sorted(reads) == ["open_held_runs", "pending"]
 
 
+def _lay_helper_repository(folder):
+    """The paused helper's repository: note.txt in one commit "base" by t <t@t> (no author kept in its config)."""
+    workspace = git_repository(folder / "workspace", unborn=True)
+    (workspace / "note.txt").write_text("base\n", encoding="utf-8")
+    world_git(workspace, "add", ".")
+    world_git(workspace, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+
+
+def _helper_repository(tmp_path_factory):
+    """A private copy of that repository, in its own numbered folder."""
+    return clone_repository(world("ended-work-helper-repository", _lay_helper_repository) / "workspace",
+                            tmp_path_factory.mktemp("helper-workspace") / "workspace")
+
+
 def _helper_workspace(env, tmp_path_factory, *, carrier="copy"):
     """A real repository holding the paused helper's saved edit and evidence, and that helper parked with it.
     ``native``: its own registered self_worktree copy; ``split``: it runs on its own child drive under the canonical
@@ -1318,16 +1327,12 @@ def _helper_workspace(env, tmp_path_factory, *, carrier="copy"):
 
     from ouroboros.headless import prepare_task_drive
 
-    workspace = tmp_path_factory.mktemp("helper-workspace")
+    workspace = _helper_repository(tmp_path_factory)
 
     def git(*args):
         return subprocess.run(["git", "-C", str(workspace), "-c", "user.name=t", "-c", "user.email=t@t", *args],
                               check=True, capture_output=True, text=True).stdout.strip()
 
-    git("init", "-q")
-    (workspace / "note.txt").write_text("base\n", encoding="utf-8")
-    git("add", ".")
-    git("commit", "-qm", "base")
     base = git("rev-parse", "HEAD")
     (workspace / "note.txt").write_text("base\nfirst edit\n", encoding="utf-8")
     (workspace / ".review-evidence").mkdir()

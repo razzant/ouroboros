@@ -224,9 +224,21 @@ export function reasonText(reason) {
     if (reason.by?.text) return `${tr(`work.because.${code}`, text)}: ${String(reason.by.text)}`;
     if (code === 'technical_pause' && text !== 'After a technical problem') return tx(text);
     if (code === 'sleeping' && Array.isArray(reason.wake)) return sleepText(reason.wake) || text;
+    // The work a queued one stands behind, by its census name (gateway/work_status.py QUEUED_BEHIND; fixture pins both).
+    if (code === 'queued' && reason.behind?.name) return fmt('behind “{name}”', { name: String(reason.behind.name) });
     // A silence dated by the host reads with its time: the date is the fact (owner 09.11).
     if (code === 'no_progress' && clock(reason.since)) return fmt('No recorded progress since {time}', { time: clock(reason.since) });
     return tr(`work.because.${code}`, text);
+}
+
+/** For a queued work's details: the id of the work it stands behind and the lane the scheduler recorded, its Project
+ *  or a folder by its path; '' for any other work or one without a recorded holder. */
+export function behindWords(work = {}) {
+    const behind = work?.activity === 'queued' ? list(work.because)[0]?.behind : null;
+    if (!behind?.task_id) return '';
+    const lane = behind.lane === 'folder' && behind.folder ? fmt('the folder {path}', { path: String(behind.folder) })
+        : tr('work.behind.project', 'its Project');
+    return fmt('{id} keeps {lane}', { id: String(behind.task_id), lane });
 }
 
 /** A moment in the viewer's clock (epoch seconds or an ISO instant): its time today, its date as well on another day,
@@ -430,8 +442,8 @@ function projectedCardView(work, member) {
     const classes = list(work.turn).length ? 'warn' : finalizing ? 'working finalizing'
         : running && waiting ? 'working waiting' : work.activity;
     // The latest refused Resume in the door's own words explains the word in the card's details (its line keeps the
-    // dated clause alone).
-    const note = resumeAttemptWords(work.last_resume);
+    // dated clause alone); a queued work's details give the id and lane of the work it stands behind.
+    const note = resumeAttemptWords(work.last_resume) || behindWords(work);
     return {
         phase: running ? 'working' : work.activity, text: word, secondary: line, classes,
         tone: waiting ? 'neutral' : 'live', waiting, ...(finalizing ? { finalizing } : {}),

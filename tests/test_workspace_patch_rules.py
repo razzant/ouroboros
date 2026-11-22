@@ -15,11 +15,12 @@ from __future__ import annotations
 import pathlib
 import subprocess
 
+from tests._workspace_git import git_repository
+
 
 def _genesis_repo(root: pathlib.Path, gitignore: str = "") -> pathlib.Path:
     """A freshly created project: one commit, optionally a .gitignore."""
-    root.mkdir()
-    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+    git_repository(root, unborn=True)
     (root / "README.md").write_text("base\n", encoding="utf-8")
     tracked = ["README.md"]
     if gitignore:

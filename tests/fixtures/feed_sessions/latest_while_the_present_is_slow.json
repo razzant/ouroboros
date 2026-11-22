@@ -1,0 +1,17 @@
+{
+  "about": "Far back in a long room, newest pages released: ↓ reaches the end of what is kept at once while the present is still being read, shows it is busy, and follows the present once it lands.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "a": {"name": "Long room", "rows": [{"count": 600, "words": [10, 40]}]}
+  },
+  "events": [
+    {"open": "a"},
+    {"older": true},
+    {"older": true},
+    {"older": true},
+    {"hold": "latest"},
+    {"latest": true},
+    {"release": true},
+    {"arrive": "a", "words": 30}
+  ]
+}
