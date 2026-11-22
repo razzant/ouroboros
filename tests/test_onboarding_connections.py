@@ -266,5 +266,5 @@ def test_a_skill_finishing_its_load_in_the_server_settles_the_cards_waiting_for_
     for server, reason, expected in ((True, "loaded", [tmp_path]), (True, "load_error", []), (False, "loaded", [])):
         calls.clear()
         monkeypatch.setattr(extension_loader, "is_server_process", lambda server=server: server)
-        extension_loader._finalize_extension_reconcile({}, tmp_path, "demo", reason=reason)
+        extension_loader._finalize_extension_reconcile({"skill": "demo"}, tmp_path, None, reason=reason)
         assert calls == expected, (server, reason)
