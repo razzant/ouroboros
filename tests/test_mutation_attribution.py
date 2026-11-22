@@ -5,6 +5,9 @@ import subprocess
 
 import pytest
 
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
+
 
 def _git(root: pathlib.Path, *args: str) -> str:
     result = subprocess.run(
@@ -17,17 +20,18 @@ def _git(root: pathlib.Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _repo(tmp_path: pathlib.Path) -> pathlib.Path:
-    root = tmp_path / "repo"
-    root.mkdir(parents=True)
-    _git(root, "init", "-q")
-    _git(root, "config", "user.email", "tests@example.invalid")
-    _git(root, "config", "user.name", "Tests")
+def _lay_repo(folder: pathlib.Path) -> None:
+    root = git_repository(folder / "repo", unborn=True)
+    world_git(root, "config", "user.email", "tests@example.invalid")
+    world_git(root, "config", "user.name", "Tests")
     (root / "clean.txt").write_text("base\n", encoding="utf-8")
     (root / "dirty.txt").write_text("base\n", encoding="utf-8")
-    _git(root, "add", ".")
-    _git(root, "commit", "-qm", "base")
-    return root
+    world_git(root, "add", ".")
+    world_git(root, "commit", "-qm", "base")
+
+
+def _repo(tmp_path: pathlib.Path) -> pathlib.Path:
+    return clone_repository(world("mutation-attribution-repo", _lay_repo) / "repo", tmp_path / "repo")
 
 
 def test_git_baseline_attributes_only_paths_clean_at_capture(tmp_path):
@@ -778,11 +782,7 @@ def test_trashed_worktree_overflow_is_a_typed_blocker(tmp_path, monkeypatch, sur
 
 
 def _unborn(path: pathlib.Path) -> pathlib.Path:
-    path.mkdir(parents=True)
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "tests@example.invalid")
-    _git(path, "config", "user.name", "Tests")
-    return path
+    return git_repository(path, unborn=True, identity=True)
 
 
 def test_an_unborn_admitted_folder_is_baselined_against_the_empty_tree_beside_the_system_repo(tmp_path):
@@ -922,8 +922,7 @@ def test_git_paths_are_utf8_whatever_the_process_default_encoding(tmp_path, monk
     (root / "файл.txt").write_bytes(b"changed\n")
     (root / "я.txt").write_bytes(b"new\n")
     project = tmp_path / "project"
-    project.mkdir()
-    _git(project, "init", "-q")
+    git_repository(project, unborn=True)
     (project / "я.txt").write_bytes(b"kept\n")
     (project / ".env").write_bytes(b"TOKEN=1\n")
     _git(project, "add", "-A")
