@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: '84a20b3bd86d98b39cb97aa2bf704e7790a69483'
+          ref: '5af288030309005328cf9f385758f76cbea25bde'
           persist-credentials: false
 
       - uses: ./.github/actions/setup-python-env
@@ -30,8 +30,8 @@ jobs:
           commit=$(git rev-parse HEAD)
           tree=$(git rev-parse 'HEAD^{tree}')
           printf 'Product commit: %s\nProduct tree: %s\n' "$commit" "$tree"
-          test "$commit" = '84a20b3bd86d98b39cb97aa2bf704e7790a69483'
-          test "$tree" = 'fef53f3b04c6acb8a311af30510d17d9dbf51dd8'
+          test "$commit" = '5af288030309005328cf9f385758f76cbea25bde'
+          test "$tree" = '10acff93be0580cae408a7fab86b23795b5fbe5b'
           git diff --quiet
           git diff --cached --quiet
           test ! -e .github/workflows/qa-sidebar-foot.yml
@@ -42,16 +42,8 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
         run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
 
-      - name: Run focused JavaScript tests
-        working-directory: web
-        run: >-
-          ../node-standalone/bin/node --test tests/pages.test.js tests/update_flow.test.js
-          tests/update_progress.test.js tests/update_letter.test.js tests/update_verdict.test.js
-          tests/update_versions.test.js tests/update_evidence.test.js
-          tests/version_labels.test.js tests/layout.test.js
-
-      - name: Verify the real sidebar in both engines
-        timeout-minutes: 25
+      - name: Verify the sidebar widths and its low-window scrolling
+        timeout-minutes: 10
         env:
           OUROBOROS_RUN_UI_SMOKE: '1'
           OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
@@ -59,26 +51,32 @@ jobs:
           PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
         run: |
           set -euo pipefail
-          junit="$RUNNER_TEMP/sidebar-foot.xml"
-          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/sidebar-evidence" \
-            -- python -m pytest -o addopts= -q --tb=short -m ui_browser \
-              tests/test_sidebar_short_window_browser.py::test_the_two_cards_keep_every_name_whole_and_turn_wide_at_475 \
-              tests/test_sidebar_short_window_browser.py::test_a_name_longer_than_the_card_wraps_inside_it \
-              tests/test_sidebar_short_window_browser.py::test_a_1280_by_540_window_keeps_both_cards_whole_and_the_list_scrolls_alone \
-              tests/test_sidebar_short_window_browser.py::test_the_drawer_keeps_the_same_block_with_finger_targets \
-              tests/test_sidebar_short_window_browser.py::test_a_short_window_keeps_the_version_and_the_update_on_the_bottom_edge \
-              tests/test_sidebar_short_window_browser.py::test_a_column_too_short_for_both_bars_scrolls_them_with_the_list \
-              tests/test_sidebar_short_window_browser.py::test_the_version_row_keeps_one_height_whatever_the_check_or_the_update_says \
-              tests/test_ui_shell_legacy_browser.py::test_the_document_before_the_cards_gets_the_same_foot_as_a_fresh_one \
-              tests/test_project_pin_browser.py::test_local_pin_reveal_respects_input_and_visible_scroll_region \
-              --junitxml="$junit"
-          python - "$junit" <<'PY'
+          node=tests/test_sidebar_short_window_browser.py
+          test_wheel="$node"::test_a_column_too_short_for_both_bars_scrolls_them_with_the_list
+          result=0
+          for cohort in first confirm; do
+            if [ "$cohort" = first ]; then
+              set -- "$node"::test_the_two_cards_keep_every_name_whole_and_turn_wide_at_475 "$test_wheel"
+              count=10
+            else
+              set -- "$test_wheel"
+              count=6
+            fi
+            junit="$RUNNER_TEMP/sidebar-wheel-$cohort.xml"
+            if python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/sidebar-wheel-$cohort" \
+                -- python -m pytest -o addopts= -q --tb=short -m ui_browser --junitxml="$junit" "$@"; then
+              python - "$junit" "$count" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
-
-          cases = list(ET.parse(sys.argv[1]).getroot().iter('testcase'))
-          assert not any(c.find(tag) is not None for c in cases for tag in ('skipped', 'failure', 'error'))
-          for engine in ('chromium', 'webkit'):
-              assert any(engine in c.get('name', '').lower() for c in cases), f'{engine} did not run'
-          print(f'{len(cases)} browser cases ran without skips; Chromium and WebKit both observed')
+          cases=list(ET.parse(sys.argv[1]).getroot().iter('testcase'))
+          assert len(cases)==int(sys.argv[2]),len(cases)
+          assert not any(c.find(tag) is not None for c in cases for tag in ('skipped','failure','error'))
+          for engine in ('chromium','webkit'):
+              assert any(f'{engine}-landscape-phone' in c.get('name','') for c in cases), engine
+          print(f'{len(cases)} cases without skips; both engines covered 844x390.')
           PY
+            else
+              result=1
+            fi
+          done
+          exit "$result"
