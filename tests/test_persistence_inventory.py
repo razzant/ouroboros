@@ -1024,7 +1024,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 481 -> 485: a saved task file the owner releases is moved to a numbered slot under ``released/`` in the task's
 # custody staging folder and then in its custody trash folder (``payload_release_state._slot``, #3981); both folders
 # already have their row (``state/custody_staging/<id>-<token>/``, ``state/custody_trash/<id>-<token>/``).
-EXPECTED_SCAN_PATHS = 485
+# 485 -> 486: the one-time pass that records the grant decision of skills accepted before decisions were recorded
+# leaves its marker ``state/skills/.grant-decisions.json`` (``skill_acceptance.record_missing_decisions``); the
+# ``state/skills/<name>/`` row names it beside ``.identity-v2.json``.
+EXPECTED_SCAN_PATHS = 486
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
