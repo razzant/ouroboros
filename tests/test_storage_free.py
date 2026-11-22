@@ -3,6 +3,7 @@ retirers with the wait set to zero for the previewed items only, honest removed/
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import json
 import os
@@ -750,6 +751,139 @@ def test_cancel_during_listing_drops_the_plan_and_kills_the_sizing_child(tmp_pat
     view = owner.projection(root)
     assert (view["state"], view["plan"], view["groups"]) == ("idle", None, [])
     assert owner.cancel() is False
+
+
+def test_stop_never_waits_for_a_request_holding_the_lock(tmp_path, monkeypatch):
+    """Panic calls Stop on its own thread before any worker or engine request (``execute_panic_stop``). A page
+    request holding the lock (a preview or run being started over a large plan) from the moment the sizing spawn
+    returns delays neither the child's publication, nor Stop, nor the kill, and the listing settles as stopped."""
+    import ouroboros.startup_historical_audit as audit
+
+    root = tmp_path / "data"
+    probes = _drives(root, [("done", "direct", "completed", OLD)])
+    hold = threading.Event()
+    spawned = _fake_sizer(monkeypatch, hold=hold)
+    owner = _owner(probes)
+    holding, release = threading.Event(), threading.Event()
+    fake = audit.spawn_maintenance_job
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    held = []
+
+    def request():
+        with owner._lock:
+            holding.set()
+            assert release.wait(30)
+
+    def spawn_then_a_request_holds_the_lock(*args, **kwargs):
+        child = fake(*args, **kwargs)  # the child exists from here on
+        held.append(pool.submit(request))
+        assert holding.wait(10)
+        return child
+
+    monkeypatch.setattr(audit, "spawn_maintenance_job", spawn_then_a_request_holds_the_lock)
+    try:
+        assert owner.preview(root, tmp_path) is True
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (spawned and owner._process is spawned[0]):
+            time.sleep(0.01)  # the sizing thread publishes the child right after the spawn returns, with no lock
+        assert spawned and owner._process is spawned[0] and owner._lock.locked(), "published while the request holds the lock"
+        pool.submit(owner.stop).result(timeout=5)  # blocked direction: Stop returns while the request holds the lock
+        assert spawned[0].killed and owner._lock.locked(), "the child is signalled before the request lets go"
+    finally:
+        release.set()
+        hold.set()
+        pool.shutdown(wait=True)
+    held[0].result()
+    _join(owner)
+    view = owner.projection(root)  # still-working direction: the stop settles exactly as the owner's Cancel does
+    assert (view["state"], view["plan"], view["groups"]) == ("idle", None, [])
+    assert owner.preview(root, tmp_path) is False and owner.cancel() is False, "after Stop nothing starts"
+
+
+@pytest.mark.parametrize("press", ["stop", "cancel"])
+def test_a_stop_or_cancel_reaches_a_sizing_child_spawned_moments_before(tmp_path, monkeypatch, press):
+    """Stop or Cancel lands after the sizing child is spawned and before the sizing thread publishes it: only the
+    thread's check after publishing can signal that child (published with no lock, so a flag set before is seen
+    either way), and the listing settles idle."""
+    import ouroboros.startup_historical_audit as audit
+
+    root = tmp_path / "data"
+    probes = _drives(root, [("done", "direct", "completed", OLD)])
+    hold = threading.Event()
+    spawned = _fake_sizer(monkeypatch, hold=hold)
+    owner = _owner(probes)
+    fake = audit.spawn_maintenance_job
+
+    def spawn_then_press(*args, **kwargs):
+        child = fake(*args, **kwargs)
+        getattr(owner, press)()  # nothing is published yet: this can only set the flag
+        return child
+
+    monkeypatch.setattr(audit, "spawn_maintenance_job", spawn_then_press)
+    try:
+        assert owner.preview(root, tmp_path) is True
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (spawned and spawned[0].killed):
+            time.sleep(0.01)
+        # blocked direction: the sizing thread's check after publishing signals the child
+        assert spawned and spawned[0].killed, "the sizing thread rechecks after publishing its child"
+    finally:
+        hold.set()
+    _join(owner)
+    view = owner.projection(root)  # still-working direction: the listing settles as a Cancel leaves it
+    assert (view["state"], view["plan"], view["groups"]) == ("idle", None, [])
+
+
+@pytest.mark.parametrize("closing", ["stop", "generation"])
+def test_a_run_still_being_admitted_is_in_the_census_and_never_starts_once_closed(tmp_path, monkeypatch, closing):
+    """Restart reads ``live_children`` after Stop to decide whether the generation is quiet. A Free press still
+    checking its selection under the lock (a large plan) is named there by its thread; Stop or a closed generation
+    landing meanwhile leaves the run unstarted and the folder in place, while the same press otherwise frees it."""
+    from ouroboros import server_process, storage_free
+
+    root = tmp_path / "data"
+    probes = _drives(root, [("done", "direct", "completed", OLD)])
+    _fake_sizer(monkeypatch)
+    real_ids = storage_free.ordinary_ids
+    inside, release, admitting = threading.Event(), threading.Event(), []
+
+    def checking(plan):  # the selection check of a large plan, under the admission lock
+        admitting.append(threading.current_thread())
+        inside.set()
+        assert release.wait(30)
+        return real_ids(plan)
+
+    monkeypatch.setattr(storage_free, "ordinary_ids", checking)
+
+    def press(close: bool):
+        owner = _owner(probes)
+        view = _preview(owner, root, tmp_path)
+        items = [item["id"] for item in _group(view, "work_folders")["items"]]
+        inside.clear()
+        release.clear()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            answer = pool.submit(owner.start, root, tmp_path, view["plan"], None, items=items)
+            assert inside.wait(10) and owner._lock.locked()
+            census = owner.live_children()
+            if close and closing == "stop":
+                owner.stop()  # returns at once: the press still holds the lock
+            elif close:
+                server_process._supervisor_stop.set()  # the lifespan teardown's first step
+        finally:
+            release.set()
+            pool.shutdown(wait=True)
+            server_process._supervisor_stop.clear()
+        _join(owner)
+        return owner, census, answer.result()
+
+    owner, census, answer = press(close=True)  # blocked direction
+    assert census == [admitting[-1]], "the thread inside the admission is named"
+    assert answer == {"started": False, "reason": "busy"} and owner.projection(root)["state"] == "ready"
+    assert (root / "task_drives" / "done").is_dir() and owner.live_children() == []
+    owner, census, answer = press(close=False)  # still-working direction: the same press frees the folder
+    assert census == [admitting[-1]] and answer == {"started": True, "reason": ""}
+    assert owner.projection(root)["state"] == "done" and not (root / "task_drives" / "done").is_dir()
 
 
 # ------------------------------------------------------------------- B12
