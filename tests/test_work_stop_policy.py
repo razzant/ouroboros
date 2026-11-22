@@ -55,9 +55,8 @@ def test_scopes_keep_independent_member_authority_and_sleep_is_only_waiting():
     task[eb.BUDGET_HOLD_KEY] = stop_record(eb.HOLD_PANIC, held_at="T")
     stop = current_stop(task, {"owner": {"state": "paused", "fence_id": "f"}})
     assert stop["cause"] == "pause" and stop["member_stop"]["cause"] == "panic"
-    assert release_refusal(stop, {"actor": "ouroboros"})["error"] == "panic_requires_owner_resume"
-    assert release_refusal(stop, {}) is None
-    assert current_stop(task)["release"] == "owner"
+    assert release_refusal(stop, {"actor": "ouroboros"}) is None and release_refusal(stop, {}) is None
+    assert current_stop(task)["release"] == "resume"
 
 
 @pytest.mark.parametrize("reason", ["unrecognized_future_name", "restore_refused:source_missing", "malformed_resume_identity"])
@@ -67,7 +66,7 @@ def test_unknown_or_technical_reason_never_creates_a_new_stop(reason):
     prior = copy.deepcopy(task[eb.BUDGET_HOLD_KEY])
     eb.hold_budget_row(task, reason=reason, extra={"pause_id": "p", "grant_id": "g"})
     assert reason_policy(reason)["release"] == "resume"
-    assert task[eb.BUDGET_HOLD_KEY] == prior and current_stop(task)["release"] == "owner"
+    assert task[eb.BUDGET_HOLD_KEY] == prior and current_stop(task)["reason"] == eb.HOLD_PANIC
     assert continuation_refusal(task)["reason"] == reason
     assert "release" not in task["_budget_pause"]["refusal"]
 
@@ -79,7 +78,7 @@ def test_revalidating_a_spent_grant_cannot_release_a_current_panic(tmp_path):
     eb.hold_budget_row(task, reason=eb.HOLD_GRANT_CONSUMED_STALE_ROW, extra={"pause_id": "p", "grant_id": "g"})
     task["_working_recovery"] = {"source_task_id": "root", "from_attempt": 1}
     assert not resume_hold_requires_fence(task, tmp_path)
-    assert not continuation_refusal(task) and current_stop(task)["release"] == "owner"
+    assert not continuation_refusal(task) and current_stop(task)["reason"] == eb.HOLD_PANIC
     assert "_budget_pause_resume" not in task
 
 
@@ -141,7 +140,7 @@ def test_resume_door_stop_and_source_matrix(tmp_path, monkeypatch, source, reaso
     before = copy.deepcopy(task)
     with mind_control("mind", "continue this work") if door == "mind" else nullcontext():
         result = q.resume_budget_paused_task("root")
-    allowed = source != "missing" and not (door == "mind" and reason == eb.HOLD_PANIC)
+    allowed = source != "missing"
     assert result["ok"] is allowed, result
     if allowed:
         assert not current_stop(task) and not continuation_refusal(task)
@@ -149,11 +148,9 @@ def test_resume_door_stop_and_source_matrix(tmp_path, monkeypatch, source, reaso
         assert bool(task.get("_budget_pause_resume")) == (source == "exact")
     else:
         assert task == before
-        if door == "mind" and reason == eb.HOLD_PANIC:
-            assert result["error"] == "panic_requires_owner_resume"
 
 
-def test_pause_cannot_launder_panic_but_owner_can_replace_it(tmp_path, monkeypatch):
+def test_a_pause_replaces_a_panic_hold_and_a_resume_releases_it(tmp_path, monkeypatch):
     from ouroboros.owner_pause import read_fence
     from ouroboros.task_results import write_task_result
     from supervisor.events_mind_controls import _apply
@@ -164,12 +161,12 @@ def test_pause_cannot_launder_panic_but_owner_can_replace_it(tmp_path, monkeypat
     workers.PENDING.append(task)
     write_task_result(tmp_path, "root", "scheduled")
     eb.hold_budget_row(task, reason=eb.HOLD_PANIC)
-    prior = copy.deepcopy(task)
-    for action in ("pause_task", "resume_task"):
-        outcome = _apply({"action": action, "task_id": "root", "actor_task_id": "mind",
-                          "action_nonce": action, "reason": "try this decision"})
-        assert outcome["error"] == "panic_requires_owner_resume"
-        assert task == prior and not read_fence(tmp_path, "root")
+    assert _apply({"action": "pause_task", "task_id": "root", "actor_task_id": "mind",
+                   "action_nonce": "pause", "reason": "hold it"})["ok"]  # the mind's Pause replaces it
+    assert eb.BUDGET_HOLD_KEY not in task and read_fence(tmp_path, "root")
+    assert _apply({"action": "resume_task", "task_id": "root", "actor_task_id": "mind",
+                   "action_nonce": "resume", "reason": "go on"})["ok"]
+    eb.hold_budget_row(task, reason=eb.HOLD_PANIC)
     assert request_owner_pause("root", request_id="owner-replaces")["ok"]
     assert eb.BUDGET_HOLD_KEY not in task
     assert current_stop(task, {"budget": q.BUDGET_ROOT_FENCES})["cause"] == "pause"
@@ -194,10 +191,10 @@ def test_pause_does_not_release_a_different_stop_arriving_during_its_fence_write
 
     monkeypatch.setattr(owner_pause, "install_fence", newer)
     assert request_owner_pause("root", request_id="earlier")["error"] == "selection_authority_changed"
-    assert current_stop(task)["release"] == "owner"
+    assert current_stop(task)["reason"] == eb.HOLD_PANIC
 
 
-def test_panic_sleep_refuses_both_mind_doors_and_owner_releases(tmp_path, monkeypatch):
+def test_a_panic_held_sleep_yields_to_a_minds_resume(tmp_path, monkeypatch):
     from ouroboros import budget_pause as bp, model_sleep
     from supervisor.events_mind_controls import _apply
     from tests._budget_pause_exact_helpers import _fast_hold, _loop_ctx, _quiet_external
@@ -226,12 +223,9 @@ def test_panic_sleep_refuses_both_mind_doors_and_owner_releases(tmp_path, monkey
     task = next(row for row in q.PENDING if row["id"] == "child")
     from supervisor.restart_retention import hold_after_stop
     hold_after_stop(task, tmp_path, eb.HOLD_PANIC)
+    assert current_stop(task)["reason"] == eb.HOLD_PANIC
     assert _apply({"action": "resume_task", "task_id": "child", "actor_task_id": "root",
-                   "action_nonce": "generic", "reason": "wake"})["error"] == "panic_requires_owner_resume"
-    eb._handle_budget_resume_child({"task_id": "child", "requested_by": "root", "reason": "wake"}, sup)
-    assert outcomes[-1]["error"] == "panic_requires_owner_resume"
-    assert current_stop(task)["release"] == "owner"
-    assert q.resume_budget_paused_task("child")["ok"]
+                   "action_nonce": "generic", "reason": "wake"})["ok"]
     assert eb.BUDGET_HOLD_KEY not in task
 
 

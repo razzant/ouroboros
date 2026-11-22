@@ -139,6 +139,7 @@ def _parked_for_resume(row: Dict[str, Any], fences: Dict[str, Any]) -> bool:
         log.debug("The control over %s was not read; it stays", task_id, exc_info=True)
         return False
     return (control["phase"] == "budget_paused" and not control["owner_resumed"] and view.get("release") == "resume"
+            and (view.get("stop") or {}).get("cause") != "panic"  # a Panic hold is kept (the docstring)
             and bool(view.get("resumable")) and not view.get("waiting")
             and str((view.get("refusal") or {}).get("reason") or "") not in _KEPT_REFUSALS
             and pause.get("state") != STATE_RESUME_GRANTED and not _resumed_when_stopped(row, pause))

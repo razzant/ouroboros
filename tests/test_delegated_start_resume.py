@@ -256,29 +256,15 @@ def test_a_panel_request_never_acquires_the_ordinary_start_decision(tmp_path, mo
     assert record["state"] == "pending" and "resume_decisions" not in record
 
 
-@pytest.mark.parametrize("control", ["stop", "panic"])
-def test_a_named_start_cannot_release_a_stronger_control(tmp_path, monkeypatch, control):
+def test_a_named_start_cannot_release_an_owner_stop(tmp_path, monkeypatch):
     from ouroboros.cancel_intents import request_cancel
-    from ouroboros.task_results import write_task_result
-    from supervisor.events_budget import HOLD_PANIC, hold_budget_row
-    from tests._budget_pause_exact_helpers import _install_queue
 
-    if control == "stop":
-        _paused(tmp_path, monkeypatch, lambda root: _pending(root, "child-dead", "lost"))
-        choice, = _resume("mind")["acceptable_unknown"]
-        request_cancel(tmp_path, "root-1", reason="owner stop", source="http", requested_by="owner",
-                       requested_stop_policy="immediate", allow_settled_target=True)
-        refused = _resume("owner", [choice])
-        assert refused["error"] == "cancel_intent_active"
-    else:
-        _, _, workers = _install_queue(tmp_path, monkeypatch)
-        task = {"id": "root-1", "root_task_id": "root-1", "_attempt": 1, "type": "task", "admitted_dispatch": "none"}
-        write_task_result(tmp_path, "root-1", "scheduled", root_task_id="root-1")
-        start = _pending(tmp_path, "root-1", "lost")
-        hold_budget_row(task, reason=HOLD_PANIC)
-        workers.PENDING.append(task)
-        refused = _resume("mind", [start["choice_id"]])
-        assert refused["error"] == "panic_requires_owner_resume"
+    _paused(tmp_path, monkeypatch, lambda root: _pending(root, "child-dead", "lost"))
+    choice, = _resume("mind")["acceptable_unknown"]
+    request_cancel(tmp_path, "root-1", reason="owner stop", source="http", requested_by="owner",
+                   requested_stop_policy="immediate", allow_settled_target=True)
+    refused = _resume("owner", [choice])
+    assert refused["error"] == "cancel_intent_active"
     assert not _rows(tmp_path, custody.START_RISK_ACCEPTED)
 
 

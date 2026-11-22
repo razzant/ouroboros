@@ -359,6 +359,11 @@ def test_a_panic_boot_holds_a_cold_sleeper_before_its_marker_is_consumed(tmp_pat
     (tmp_path / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
     assert queue.restore_pending_from_snapshot() == 1
     assert budget_hold_fact(workers.PENDING[0])["reason"] == HOLD_PANIC
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    time.sleep(1.2)  # its own wake comes due: it is no Resume, and the Panic hold stays
+    assert wake_ready_sleepers(queue)[0]["veto"] == HOLD_PANIC
+    assert budget_hold_fact(workers.PENDING[0])["reason"] == HOLD_PANIC
 
 
 def test_an_ordinary_restart_restores_a_cold_sleep_that_wakes_itself(tmp_path, monkeypatch):

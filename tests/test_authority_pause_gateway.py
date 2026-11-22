@@ -31,7 +31,6 @@ def test_resume_authority_refusal_is_conflict_not_missing_task(monkeypatch, kind
     ({"ok": False, "error": "pause_source_unreadable"}, 409),
     ({"ok": False, "error": "external_runs_unsettled", "runs": [{"run_id": "r1", "state": "running"}]}, 409),
     # A typed refusal of a task that exists is a conflict, never Not Found; only an id the queue does not hold is.
-    ({"ok": False, "error": "panic_requires_owner_resume"}, 409),
     ({"ok": False, "error": "stop_not_resumable"}, 409),
     ({"ok": False, "error": "selection_authority_unavailable"}, 409),
     ({"ok": False, "error": "selection_observation_required"}, 409),

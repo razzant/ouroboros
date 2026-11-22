@@ -859,7 +859,7 @@ def test_a_panic_hold_on_a_held_continue_outlives_its_retired_sender(tmp_path, m
     assert held()["reason"] == "continuation_writer_unsettled"
     if panic:
         assert retained_pending(next(t for t in workers.PENDING if t["id"] == successor), sleep_hold_reason=HOLD_PANIC)
-        assert held()["reason"] == HOLD_PANIC and held()["release"] == "owner"
+        assert held()["reason"] == HOLD_PANIC and held()["release"] == "resume"
     gone.add(_SENDER)
     if not panic:
         assert recheck_held_continuations() == [successor] and held() is None
@@ -868,9 +868,6 @@ def test_a_panic_hold_on_a_held_continue_outlives_its_retired_sender(tmp_path, m
     assert [r["kind"] for r in reconcile_open_local_custody(tmp_path)] == ["receiver_owner_absent"]
     assert set(_retired(tmp_path)) == {_KEY + attempt_id} and _handoffs(queue) == []
     assert recheck_held_continuations() == [] and held()["reason"] == HOLD_PANIC
-    with mind_control("controller", "its earlier sender ended"):
-        refused = queue.resume_budget_paused_task(successor)
-    assert refused["ok"] is False and refused["error"] == "panic_requires_owner_resume", refused
-    assert held()["reason"] == HOLD_PANIC
-    resumed = queue.resume_budget_paused_task(successor)  # the owner's own Resume: the required path
+    with mind_control("controller", "its earlier sender ended"):  # a mind's Resume lifts it, as the owner's would
+        resumed = queue.resume_budget_paused_task(successor)
     assert resumed["ok"] and not resumed.get("held") and held() is None, resumed

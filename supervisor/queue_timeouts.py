@@ -239,7 +239,7 @@ def pending_deadline_expirable(task: Dict[str, Any]) -> bool:
         return False
     pause, hold = task.get("_budget_pause"), budget_hold_fact(task)
     stop = current_stop(task, {"budget": _queue().BUDGET_ROOT_FENCES})
-    if continuation_refusal(task) or stop.get("release") == "owner" or stop.get("cause") == "pause":
+    if continuation_refusal(task) or stop.get("cause") in {"pause", "panic"}:
         return False
     project = task.get("_project_admission_restore_hold")
     if task.get("_budget_pause_hold") and not isinstance(task["_budget_pause_hold"], dict):

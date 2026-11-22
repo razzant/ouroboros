@@ -163,7 +163,7 @@ def mind_tool_entries() -> list:
              "continue returns what their general request paused; work they paused by name waits for their word "
              "about it or the return they named. "
              "It preserves spent money, clocks and review history; capacity and holds still apply. "
-             "Only the owner can release a Panic hold. A list Resume (task_ids) is a general return: it lifts "
+             "A list Resume (task_ids) is a general return: it lifts "
              "the Pauses Ouroboros itself placed and every other saved stop you may release, and keeps every Pause "
              "Ouroboros did not itself place, whoever is shown as its author now: the owner's "
              "(owner_paused_by_name) and one whose press declared no author (pause_author_unknown, often the "

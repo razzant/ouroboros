@@ -182,20 +182,19 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
     assert (work["activity"], work["because"][0]["code"], work["turn"], work["mark"]) == (
         "waiting", "sleeping", [], "still")
     assert [(tail["code"], tail["ids"], tail["state"], tail["text"]) for tail in work["tails"]] == [
-        ("awaited_helpers_mind", ["chosen"], "held", "1 subagent it waits for is paused until Ouroboros resumes it"),
-        ("awaited_helpers_owner", ["panic"], "held", "1 subagent it waits for is paused until you resume it")]
+        ("awaited_helpers_mind", ["chosen", "panic"], "held",
+         "2 subagents it waits for are paused until Ouroboros resumes them")]
     assert "other" not in str(work["tails"]), "a paused helper the sleep did not choose is not why it waits"
     controls = ws.controls_for(root, row("root"))
     assert "resume" not in [entry["action"] for entry in controls], "no Resume door is invented for a helper"
     # A Continue episode is neither the helper's root nor its parent: it holds no request door, so the line
-    # names no releaser for a helper only a mind could ask to resume (the owner's own release keeps its words).
+    # names no releaser for a helper only a mind could ask to resume.
     later = ws.classify_member(row("later"), {"running": True, "owner_wait": {
         "state": "waiting", "reason": "sleep", "task_attempt": 1,
         "sleep": {"mode": "warm", "tasks": ["chosen", "panic"]}}})
     work = ws.roll_up_work("root", [later, selected, panic], episode={"task_id": "later", "state": later})
     assert [(tail["code"], tail["ids"], tail["text"]) for tail in work["tails"]] == [
-        ("awaited_helpers_owner", ["panic"], "1 subagent it waits for is paused until you resume it"),
-        ("awaited_helpers_paused", ["chosen"], "1 subagent it waits for is paused")]
+        ("awaited_helpers_paused", ["chosen", "panic"], "2 subagents it waits for are paused")]
     # Without the saved selection (or once the episode ended) the line says no such thing.
     awake = ws.roll_up_work("root", [sleeper(), selected], episode={"task_id": "root", "state": sleeper()})
     assert awake["tails"] == []
@@ -203,7 +202,7 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
 
 
 @pytest.mark.parametrize(("held", "phrase"), [
-    ({"_budget_pause_hold": {"reason": "panic_hold", "release": "owner"}}, "awaited_helpers_owner"),
+    ({"_budget_pause_hold": {"reason": "panic_hold", "release": "owner"}}, "awaited_helpers_mind"),
     ({"_budget_pause": {"reason": "owner", "exact_continuation": True}}, "awaited_helpers_mind"),
 ])
 def test_the_state_projection_places_a_held_dependency_only_on_the_nested_waiter(held, phrase):

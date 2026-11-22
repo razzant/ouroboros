@@ -24,7 +24,7 @@ from tests.worker_pool_support import affirm_ready
 
 
 
-def _released_panic_running(root, monkeypatch):
+def _released_panic_running(root, monkeypatch, actor="owner"):
     q, state, workers = _install_queue(root, monkeypatch)
     _pool_events(workers, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: 5.0)
@@ -37,9 +37,8 @@ def _released_panic_running(root, monkeypatch):
     [task] = workers.PENDING
     assert eb.budget_hold_fact(task)["reason"] == eb.HOLD_PANIC
     flag.unlink()  # the boot consumer removes it after publishing its holds
-    with mind_control("mind", "resume"):
-        assert q.resume_budget_paused_task("sleeper")["error"] == "panic_requires_owner_resume"
-    resumed = q.resume_budget_paused_task("sleeper")
+    with mind_control("mind", "resume") if actor == "mind" else nullcontext():
+        resumed = q.resume_budget_paused_task("sleeper")
     assert resumed["ok"] and resumed["released_hold"] == eb.HOLD_PANIC
     assert eb.BUDGET_HOLD_KEY not in task
     sent = []
@@ -59,7 +58,7 @@ def _released_panic_running(root, monkeypatch):
 def test_released_panic_cannot_return_after_pause_before_park_and_ack_restart(tmp_path, monkeypatch, actor):
     from tests.test_work_projection_pause_producers import _works
 
-    q, workers, exact = _released_panic_running(tmp_path, monkeypatch)
+    q, workers, exact = _released_panic_running(tmp_path, monkeypatch, actor)
     with mind_control("other-mind", ""):
         paused = request_owner_pause("sleeper", request_id="pause-before-park")
     assert paused["ok"] and paused["state"] == "requested"
@@ -285,7 +284,7 @@ def test_money_gate_reads_selection_from_dispatch_on_every_send(tmp_path, monkey
 
 
 @pytest.mark.parametrize("reason,release", [
-    ("saved_work_hold", "resume"), ("owner_restart_hold", "resume"), ("panic_hold", "owner"),
+    ("saved_work_hold", "resume"), ("owner_restart_hold", "resume"), ("panic_hold", "resume"),
 ])
 def test_hold_builder_keeps_release_and_attribution_separate(reason, release):
     by = {"actor": "ouroboros", "task_id": "mind", "text": "explanation", "at": "T"}

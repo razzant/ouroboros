@@ -402,10 +402,11 @@ def test_ordinary_queue_unknown_authority_panic_and_stop_keep_their_own_words(tm
     root._model_sleep = root._owner_wait_requested = None
 
     panic = _read(tmp_path, "held-panic")["current_stop"]
-    assert (panic["state"], panic["cause"], panic["release"]) == ("held", "panic", "owner")
+    assert (panic["state"], panic["cause"], panic["release"]) == ("held", "panic", "mind")
     from ouroboros.work_stop import stop_for_reader
 
-    assert "door" not in stop_for_reader(panic, {"task_id": "held-panic", "root_task_id": "root-1"}, "root-1")
+    assert stop_for_reader(panic, {"task_id": "held-panic", "root_task_id": "root-1"}, "root-1")["door"] == \
+        "resume_child_task", "a Panic hold is its root's to request, as any member stop"
 
     request_cancel(tmp_path, "child-new", reason="no longer needed", requested_by="root-1")
     from ouroboros.task_status import wait_for_effective_tasks

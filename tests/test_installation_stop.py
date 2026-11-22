@@ -29,7 +29,7 @@ def test_received_panic_survives_failed_unlink_and_a_new_panic_is_new(tmp_path, 
     assert installation_panic(tmp_path)
     workers.PENDING.clear()
     assert q.restore_pending_from_snapshot() == 1
-    assert current_stop(workers.PENDING[0])["release"] == "owner"
+    assert current_stop(workers.PENDING[0])["reason"] == "panic_hold"
     real_unlink = Path.unlink
 
     def failed_unlink(path, *args, **kwargs):
@@ -49,7 +49,7 @@ def test_received_panic_survives_failed_unlink_and_a_new_panic_is_new(tmp_path, 
     assert q.restore_pending_from_snapshot() == 1
     worker_chat_lane.auto_resume_after_restart()
     assert state.load_state()["bg_consciousness_enabled"] is True
-    assert current_stop(workers.PENDING[0]).get("release") != "owner"
+    assert current_stop(workers.PENDING[0]).get("reason") != "panic_hold"
     monkeypatch.setattr(Path, "unlink", real_unlink)
     flag.unlink()
     flag.write_text("panic", encoding="utf-8")
@@ -57,7 +57,7 @@ def test_received_panic_survives_failed_unlink_and_a_new_panic_is_new(tmp_path, 
     assert q.persist_queue_snapshot(reason="before_new_panic")
     workers.PENDING.clear()
     assert q.restore_pending_from_snapshot() == 1
-    assert current_stop(workers.PENDING[0])["release"] == "owner"
+    assert current_stop(workers.PENDING[0])["reason"] == "panic_hold"
     worker_chat_lane.auto_resume_after_restart()
     assert not flag.exists() and state.load_state()["bg_consciousness_enabled"] is False
 
@@ -289,15 +289,15 @@ def test_unreadable_panic_content_retains_the_existing_installation_veto(tmp_pat
     assert evolution_lifecycle.evolution_stop_reason({}) == "panic_flag_unknown"
 
 
-def test_boot_panic_keeps_sleep_owner_only_and_saved_work_resumable_by_mind(tmp_path, monkeypatch):
-    from ouroboros.control_actor import mind_control
+def _panic_boot(tmp_path, monkeypatch):
+    """A sleeper and a working run, then a real Panic: the stopping queue, its flag, the boot that holds them."""
     from supervisor import worker_chat_lane
     from tests.test_model_sleep import _cold_park
     from tests.test_restart_saved_work import _working_run
     from tests.test_state_authority import _prior
 
     q, state, workers = _install_queue(tmp_path, monkeypatch)
-    state.save_state(_prior())
+    state.save_state({**_prior(), "bg_consciousness_enabled": True})
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
     _cold_park(tmp_path, monkeypatch, workers, wake_after_sec=3600)
     _working_run(tmp_path, workers, "working")
@@ -306,15 +306,42 @@ def test_boot_panic_keeps_sleep_owner_only_and_saved_work_resumable_by_mind(tmp_
     workers.PENDING.clear()
     workers.RUNNING.clear()
     assert q.restore_pending_from_snapshot() == 2
-    rows = {task["id"]: task for task in workers.PENDING}
-    assert current_stop(rows["sleeper"])["release"] == "owner"
-    assert current_stop(rows["working"])["release"] == "resume"
-    assert current_stop(rows["working"])["door"] == "panic"
     worker_chat_lane.auto_resume_after_restart()
-    with mind_control("mind", "continue saved work"):
-        assert q.resume_budget_paused_task("sleeper")["error"] == "panic_requires_owner_resume"
-        assert q.resume_budget_paused_task("working")["ok"]
-    assert q.resume_budget_paused_task("sleeper")["ok"]
+    return q, state, {task["id"]: task for task in workers.PENDING}
+
+
+@pytest.mark.parametrize("by", ["mind", "owner"])
+def test_boot_panic_holds_all_saved_work_until_a_resume_by_the_mind_or_the_owner(tmp_path, monkeypatch, by):
+    """Owner, 22 Nov 2026: after Panic nothing returns by itself, and a running mind may resume any work. The boot
+    holds sleeping work (``panic_hold``) and working work (``saved_work_hold{door: panic}``), lifts nothing and
+    leaves consciousness off; either hold yields to the mind's Resume as to the owner's press."""
+    from contextlib import nullcontext
+
+    from ouroboros.control_actor import mind_control
+
+    q, state, rows = _panic_boot(tmp_path, monkeypatch)
+    assert current_stop(rows["sleeper"])["reason"] == "panic_hold" and current_stop(rows["working"])["door"] == "panic"
+    assert current_stop(rows["sleeper"])["release"] == current_stop(rows["working"])["release"] == "resume"
+    assert state.load_state()["bg_consciousness_enabled"] is False, "Panic leaves consciousness off"
+    with mind_control("mind", "continue saved work") if by == "mind" else nullcontext():
+        for task_id in ("sleeper", "working"):
+            assert q.resume_budget_paused_task(task_id)["ok"], task_id
+
+
+def test_a_list_resume_by_the_mind_lifts_both_panic_holds(tmp_path, monkeypatch):
+    """``resume_task`` with ``task_ids`` (a general return) lifts both kinds of Panic hold, one outcome each."""
+    from types import SimpleNamespace
+
+    from ouroboros.tool_call_log import invocation_scope
+    from ouroboros.tools.control_mind import _resume_task
+    from supervisor.events_mind_controls import _apply
+
+    _q, _state, _rows = _panic_boot(tmp_path, monkeypatch)
+    ctx = SimpleNamespace(task_id="mind-root", drive_root=tmp_path, pending_events=[], event_queue=None)
+    with invocation_scope({"tool_call_id": "list"}):
+        json.loads(_resume_task(ctx, reason="carry on", task_ids=["sleeper", "working"]))
+    outcomes = {event["task_id"]: _apply(event) for event in ctx.pending_events}
+    assert outcomes["sleeper"]["ok"] and outcomes["working"]["ok"], outcomes
 
 
 def test_android_reader_cli_recognizes_the_receipt_without_product_import(tmp_path):

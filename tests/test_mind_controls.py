@@ -57,7 +57,7 @@ def test_mind_pause_other_root_records_actor_and_resume_keeps_attribution(tmp_pa
     assert read_fence(tmp_path, "other")["resume_actor"]["task_id"] == "mind-root"
 
 
-def test_panic_hold_survives_mind_resume_but_owner_can_select_it(tmp_path, monkeypatch):
+def test_a_minds_resume_lifts_a_panic_hold(tmp_path, monkeypatch):
     from ouroboros.task_results import write_task_result
     from supervisor.events_budget import HOLD_PANIC, hold_budget_row
     from supervisor.events_mind_controls import _apply
@@ -68,31 +68,21 @@ def test_panic_hold_survives_mind_resume_but_owner_can_select_it(tmp_path, monke
     hold_budget_row(task, reason=HOLD_PANIC)
     workers.PENDING.append(task)
     write_task_result(tmp_path, "other", "scheduled", root_task_id="other")
-    assert _apply(_event("resume_task", "other"))["error"] == "panic_requires_owner_resume"
-    assert task["_budget_pause_hold"]["reason"] == HOLD_PANIC
-    assert resume_budget_paused_task("other")["ok"]
+    assert _apply(_event("resume_task", "other"))["ok"]
+    assert "_budget_pause_hold" not in task
+    hold_budget_row(task, reason=HOLD_PANIC)
+    assert resume_budget_paused_task("other")["ok"], "and the owner's press"
 
 
 @pytest.mark.parametrize("declared", ["owner", "ouroboros"])
-def test_a_declared_pause_author_grants_a_mind_no_panic_release(tmp_path, monkeypatch, declared):
-    """Provenance, never power: whoever a Pause's fence names, a mind's Resume of a Panic hold is refused."""
-    from ouroboros.owner_pause import read_fence
+def test_a_declared_pause_author_takes_no_power_from_a_minds_resume(tmp_path, monkeypatch, declared):
+    """Provenance, never power: whoever a Pause's fence names, a named Resume by the mind lifts it."""
     from ouroboros.task_results import write_task_result
-    from supervisor.events_budget import HOLD_PANIC, hold_budget_row
     from supervisor.events_mind_controls import _apply
     from supervisor.owner_pause_control import request_owner_pause
 
     q, _state, workers = _install_queue(tmp_path, monkeypatch)
-    task = {"id": "other", "root_task_id": "other", "_attempt": 1, "type": "task", "admitted_dispatch": "none"}
-    workers.PENDING.append(task)
-    write_task_result(tmp_path, "other", "scheduled", root_task_id="other")
     by = {"actor": declared, "text": "", "at": "2026-10-20T00:43:00+00:00"}
-    assert request_owner_pause("other", request_id="press", by=by)["ok"]
-    assert read_fence(tmp_path, "other")["by"] == by
-    hold_budget_row(task, reason=HOLD_PANIC)
-    assert _apply(_event("resume_task", "other"))["error"] == "panic_requires_owner_resume"
-    assert task["_budget_pause_hold"]["reason"] == HOLD_PANIC
-    # Nor does a declaration take power away: a declared Pause without Panic resumes as before.
     workers.PENDING.append({"id": "plain", "root_task_id": "plain", "_attempt": 1, "type": "task",
                             "admitted_dispatch": "none"})
     write_task_result(tmp_path, "plain", "scheduled", root_task_id="plain")
@@ -286,8 +276,7 @@ def test_a_list_call_is_one_ordinary_event_per_root_and_a_general_resume_keeps_p
         assert outcomes[task_id]["error"] == "pause_author_unknown" and outcomes[task_id]["actor"] == "", task_id
         assert outcomes[task_id]["message"] and fence_closed(read_fence(tmp_path, task_id)), task_id
     assert fence_closed(read_fence(tmp_path, "owned"))
-    assert outcomes["panicked"]["error"] == "panic_requires_owner_resume"
-    assert rows["panicked"]["_budget_pause_hold"]["reason"] == HOLD_PANIC
+    assert outcomes["panicked"]["ok"] and "_budget_pause_hold" not in rows["panicked"], "a Panic hold lifts too"
     assert outcomes["ghost"]["error"] == "task_not_pending"
     # A single named Resume is unchanged: it lifts the owner's Pause and the undeclared one.
     assert _apply(_event("resume_task", "owned", "named-owned"))["ok"]

@@ -78,7 +78,7 @@ def _kept_pause(task_id: str) -> dict | None:
     """The refusal a general (list) Resume owes ``task_id``, else ``None`` (the single door decides). Read where
     the single door and the owner's Pause read: the row in RUNNING or PENDING, its storage root (``_root_drive``),
     its result strictly, the fence of its tree (its logical root's for a retry attempt). In order: a stop the mind
-    may not release (Panic first); a row whose root cannot be told, or a non-root (its root selects its children,
+    may not release; a row whose root cannot be told, or a non-root (its root selects its children,
     owner Q9); a closed fence whose CREATING press was not Ouroboros's (``control_actor.creating_author``): the
     owner's (``owner_paused_by_name``) or one that declared nobody (``pause_author_unknown``, often the owner's own
     from before the window declared him). A later press filling in an author never makes it Ouroboros's."""

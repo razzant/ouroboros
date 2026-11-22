@@ -200,7 +200,7 @@ def test_scope_precedence_keeps_the_members_release_rule_for_owner_and_mind():
     member = classify_member({"activity_id": "r", "phase": "budget_paused"},
                              {**task, "fences": {"owner": fence}})
     [mind] = _queue_hold_facts(task, {"owner_pause": fence}, [])
-    assert view["release"] == member["release"] == mind["release"] == "owner"
+    assert view["release"] == mind["release"] == "resume" and member["release"] == "mind"
     assert view["reason"]["text"] == member["reasons"][0]["text"] == mind["text"] == "You paused it"
     assert stop_presentation(task, {"owner": {"state": "released"}})["reason"]["text"] == "Stopped by Panic"
     installation = {"cause": "app_stop", "release": "resume", "door": "owner_restart"}

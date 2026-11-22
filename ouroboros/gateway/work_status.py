@@ -70,8 +70,6 @@ REASON_TEXT = {
     # A sleeping episode's chosen helpers a stop holds, by who releases them (classify_member's release).
     "awaited_helpers_mind": ("1 subagent it waits for is paused until Ouroboros resumes it",
                              "{count} subagents it waits for are paused until Ouroboros resumes them"),
-    "awaited_helpers_owner": ("1 subagent it waits for is paused until you resume it",
-                              "{count} subagents it waits for are paused until you resume them"),
     "awaited_helpers_paused": ("1 subagent it waits for is paused", "{count} subagents it waits for are paused"),
     # A turn's start step before its own Main call (census ``turn_phase``, supervisor.active_activity.TURN_PHASES).
     "turn_admitted": "Setting up the turn",
@@ -271,8 +269,7 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         # Which episodes may ask for its release (internal: ``awaited_tails`` names no releaser for another).
         state["door_holders"] = sorted(door_holders({"id": task_id, **{key: row.get(key) or raw.get(key)
                                                                       for key in ("root_task_id", "parent_task_id")}}))
-        state["release"] = ("owner" if view["release"] == "owner" else "mind" if view["resumable"]
-                            else "self" if view["waiting"] else "none")
+        state["release"] = "mind" if view["resumable"] else "self" if view["waiting"] else "none"
         if phase == "budget_pausing" and not view["waiting"] and raw.get("running", row.get("live")) \
                 and task_id not in set(raw.get("parked") or ()):
             state.update(activity="working", transition="pausing", live=True)
@@ -514,13 +511,13 @@ def awaited_tails(current: Optional[Mapping[str, Any]], paused_helpers: Mapping[
     episode holds the helper's request door (its root or parent), else no releaser at all (a Continue's
     predecessor's helper). The episode keeps its word, its controls and its turn."""
     holder = (current or {}).get("task_id")
-    selected: Dict[str, List[str]] = {"mind": [], "owner": [], "paused": []}
+    selected: Dict[str, List[str]] = {"mind": [], "paused": []}
     for task_id in (current or {}).get("waits_on") or ():
         member = paused_helpers.get(task_id)
         if member is None:
             continue
         release = member["release"]
-        can_name = release == "owner" or (release == "mind" and holder in (member.get("door_holders") or ()))
+        can_name = release == "mind" and holder in (member.get("door_holders") or ())
         selected[release if can_name else "paused"].append(task_id)
     return [_tail("helper", f"awaited_helpers_{release}", ids, state="held")
             for release, ids in selected.items() if ids]

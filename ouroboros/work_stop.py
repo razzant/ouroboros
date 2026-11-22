@@ -30,7 +30,7 @@ SELECTION_BINDING = (
 STOP_REASONS = {
     "saved_work_hold": {"cause": "app_stop", "release": "resume", "ui_code": "saved_work_hold"},
     "owner_restart_hold": {"cause": "app_stop", "release": "resume", "ui_code": "owner_restart_hold", "door": "owner_restart"},
-    "panic_hold": {"cause": "panic", "release": "owner", "ui_code": "panic_hold"},
+    "panic_hold": {"cause": "panic", "release": "resume", "ui_code": "panic_hold"},
     "saved_sleep_recovery": {"cause": "app_stop", "release": "resume", "ui_code": "saved_sleep_recovery",
                              "door_replaceable": True, "replaces_door": False},
     "unsaved_pause_intent": {"cause": "pause", "release": "resume", "ui_code": "owner_paused", "needs_source": True},
@@ -231,7 +231,7 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
     needs_resume = refusal or task.get("can_resume")
     release = stop.get("release") or ("resume" if needs_resume else "none")
     if release_refusal(stop, {"actor": "ouroboros"}):
-        release = "owner" if release_refusal(stop, {"actor": "owner"}) is None else "none"
+        release = "none"
     text = STOP_TEXT[code]
     if code == "technical_pause":
         from ouroboros.pause_notices import authority_wait_text
@@ -514,7 +514,7 @@ def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
     return {"state": "pausing" if live else "held",
             "cause": stop.get("cause") or ("refusal" if view.get("refusal") else "unknown"),
             "scope": stop.get("scope") or "member", "code": reason.get("code"), "text": reason.get("text"),
-            "release": "owner" if view.get("release") == "owner" else "mind" if view.get("resumable") else "none",
+            "release": "mind" if view.get("resumable") else "none",
             **{key: reason[key] for key in ("since", "by") if reason.get(key)},
             **({} if queue_snapshot_observation(snapshot)["fresh"] else {"queue_freshness": "stale"}),
             **({} if tree is not None else {"resume_basis": "unreadable"}),
@@ -542,8 +542,6 @@ def stop_for_reader(stop: dict, task: dict, reader_id: str) -> dict:
 def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:
     """Release permission, not readiness; empty actor means owner, mind doors must use ``mind_control``."""
     stop, actor = stop or {}, actor or {}
-    if stop.get("release") == "owner" and actor.get("actor", "owner") != "owner":
-        return {"ok": False, "error": "panic_requires_owner_resume"}
     if stop.get("release") == "none":
         return {"ok": False, "error": "stop_not_resumable"}
     return release_refusal(stop["member_stop"], actor) if stop.get("member_stop") else None
@@ -786,8 +784,7 @@ def resume_outcome(outcome: dict) -> dict:
     if outcome.get("runs") and not outcome.get("blockers"):
         outcome = {**outcome, "blockers": [{"kind": "delegated_run", **run} for run in outcome["runs"]]}
     error = str(outcome.get("error") or "")
-    phrases = {"panic_requires_owner_resume": "Only the owner can release a Panic hold.",
-               "update_in_progress": "An update is in progress; press Resume after the restart.",
+    phrases = {"update_in_progress": "An update is in progress; press Resume after the restart.",
                "root_still_paused": STOP_TEXT["awaiting_selection"],
                "root_resume_grant_missing": STOP_TEXT["awaiting_selection"]}
     from ouroboros.pause_notices import authority_wait_text

@@ -166,9 +166,6 @@ const COUNTED_REASONS = {
     awaited_helpers_mind: (n) => (n === 1
         ? tr('work.because.awaited_helpers_mind', '1 subagent it waits for is paused until Ouroboros resumes it')
         : fmt('{count} subagents it waits for are paused until Ouroboros resumes them', { count: n, n })),
-    awaited_helpers_owner: (n) => (n === 1
-        ? tr('work.because.awaited_helpers_owner', '1 subagent it waits for is paused until you resume it')
-        : fmt('{count} subagents it waits for are paused until you resume them', { count: n, n })),
     awaited_helpers_paused: (n) => (n === 1 ? tr('work.because.awaited_helpers_paused', '1 subagent it waits for is paused')
         : fmt('{count} subagents it waits for are paused', { count: n, n })),
 };

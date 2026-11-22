@@ -3948,10 +3948,6 @@
    "1": "1 subagent it waits for is paused until Ouroboros resumes it",
    "3": "3 subagents it waits for are paused until Ouroboros resumes them"
   },
-  "awaited_helpers_owner": {
-   "1": "1 subagent it waits for is paused until you resume it",
-   "3": "3 subagents it waits for are paused until you resume them"
-  },
   "awaited_helpers_paused": {
    "1": "1 subagent it waits for is paused",
    "3": "3 subagents it waits for are paused"
