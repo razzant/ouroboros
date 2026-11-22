@@ -1,0 +1,51 @@
+name: Reply post-merge fixtures
+on:
+  push:
+    branches: [qa/reply-fixtures-94e614b027a9]
+permissions:
+  contents: read
+jobs:
+  reply-fixtures:
+    name: Reply fixtures (${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: Linux, interpreter: shipped}
+          - {os: windows-latest, leg: Windows, interpreter: setup-python}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Verify wrapper and check out the exact candidate
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD^ | tr -d '\r')" = 28872ae62dd91d3d4a69e47cd9994757714e7cba
+          test "$(git rev-parse 'HEAD^{tree}' | tr -d '\r')" != 94e614b027a9c847b400d1987beab5465c05e38c
+          test "$(git diff --name-only HEAD^ HEAD | tr -d '\r')" = .github/workflows/reply-fixtures-94e614b027a9.yml
+          git checkout --detach 28872ae62dd91d3d4a69e47cd9994757714e7cba
+          test "$(git rev-parse 'HEAD^{tree}' | tr -d '\r')" = 94e614b027a9c847b400d1987beab5465c05e38c
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - name: Run the nine reported cases on this platform
+        run: |
+          set -eu
+          python -m pytest -o addopts= -q --junitxml="$RUNNER_TEMP/reply-fixtures.xml" \
+            'tests/test_chat_logs_ui.py::test_static_ui_contracts[test_inflight_history_annotation_retires_pending::web/modules/chat.js::contains0]' \
+            'tests/test_chat_logs_ui.py::test_static_ui_contracts[test_inflight_reconnect_user_row_retires_pending::web/modules/chat.js::contains]' \
+            'tests/test_chat_logs_ui.py::test_static_ui_contracts[test_inflight_routing_receipt_retires_pending::web/modules/chat.js::contains]' \
+            'tests/test_dialogue_threads_once.py::test_every_reader_of_a_thread_expands_it_or_never_hands_it_on' \
+            'tests/test_plan_dialogue_snapshot.py::test_inline_view_is_the_numbered_conversation' \
+            'tests/test_skill_identity.py::test_promotion_admits_owner_edits_only_under_the_owner_door_stamp[stamp0-True]' \
+            'tests/test_skill_identity.py::test_promotion_admits_owner_edits_only_under_the_owner_door_stamp[stamp2-False]' \
+            'tests/test_telegram_reply_references.py::test_a_reply_to_a_retired_project_card_is_refused_once_and_a_reply_to_that_refusal_is_ordinary[all]' \
+            'tests/test_telegram_reply_references.py::test_a_reply_to_a_retired_project_card_is_refused_once_and_a_reply_to_that_refusal_is_ordinary[telegram_only]'
+          python -c "import sys,xml.etree.ElementTree as E; s=E.parse(sys.argv[1]).getroot().find('testsuite'); counts={k:int(s.get(k,0)) for k in ('tests','failures','errors','skipped')}; print('Exact candidate pytest totals:',counts); assert counts == {'tests':9,'failures':0,'errors':0,'skipped':0}" "$RUNNER_TEMP/reply-fixtures.xml"
