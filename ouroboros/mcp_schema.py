@@ -353,6 +353,29 @@ def annotation_marks(annotations: Any) -> str:
     return " ".join(marks)
 
 
+SERVER_DESCRIPTION_LABEL = "Server description: "
+
+
+SERVER_METADATA_LABEL = "Server metadata: "
+
+
+def server_description(model_facing: str) -> str:
+    """The server's own description inside the host frame ``_model_facing_description`` builds ('' when it gave
+    none). The frame's paragraphs before it carry no label, so the first label is the frame's own; the host's
+    metadata paragraph is always last and a JSON object, so a label inside the server's own text stays its text."""
+    _frame, label, rest = str(model_facing or "").partition("\n\n" + SERVER_DESCRIPTION_LABEL)
+    if not label:
+        return ""
+    head, metadata, tail = rest.rpartition("\n\n" + SERVER_METADATA_LABEL)
+    if metadata:
+        try:
+            if isinstance(json.loads(tail), dict):
+                return head
+        except (ValueError, RecursionError):  # server text, so a nesting the decoder cannot walk is not ours to raise
+            pass
+    return rest
+
+
 def _model_facing_description(tool: Any) -> str:
     """One frame for the whole loaded contract, not one per field: description, hints, metadata."""
     metadata = dict(tool.metadata or {})
@@ -364,7 +387,7 @@ def _model_facing_description(tool: Any) -> str:
     if marks := annotation_marks(annotations):
         parts.append(f"Server hints (advice, not permissions): {marks}")
     if tool.description:
-        parts.append(f"Server description: {tool.description}")
+        parts.append(SERVER_DESCRIPTION_LABEL + str(tool.description))
     if metadata:
-        parts.append("Server metadata: " + json.dumps(metadata, ensure_ascii=False))
+        parts.append(SERVER_METADATA_LABEL + json.dumps(metadata, ensure_ascii=False))
     return "\n\n".join(parts)

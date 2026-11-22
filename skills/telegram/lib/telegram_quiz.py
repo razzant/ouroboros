@@ -368,6 +368,8 @@ async def _deliver(
         "request_id": f"tg:{f'{bot}:' if bot else ''}{request_key}",
         "decision_id": f"quiz:{record.get('task_id')}:{record.get('quiz_id')}",
     }
+    if bot and record.get("chat_id"):  # where the owner answered: a late answer's turn replies there (the host's check)
+        body["surface"] = {"kind": "telegram", "conversation_id": str(record["chat_id"]), "bot_id": bot}
     if option_index is not None:
         body["option_index"] = int(option_index)
     if comment:

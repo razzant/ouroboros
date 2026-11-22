@@ -19,6 +19,7 @@
  * no trace. The drag is a shortcut: every gesture has a visible control (☰ and ×). One constant switches it off in
  * one line: DRAWER_DRAG. While a pinch magnifies the page, a sideways finger pans it, as the browser means it to. */
 
+import { createGestureTail } from './gesture_tail.js';
 import { pinchMagnified } from './layout.js';
 
 export const DRAWER_DRAG = true;
@@ -31,7 +32,6 @@ export const DRAG = Object.freeze({
     openPast: 0.5,       // a slow release opens past this progress
     closePast: 0.3,      // a slow release closes once this much of the drawer has gone
     sampleWindow: 100,   // ms of velocity samples; a finger that rests longer before it lifts has no speed
-    clickGuard: 400,     // ms after a drag during which the click that ends it is not a tap
     // The settle (style.css's curve starts at 2.25× its average speed): a fling keeps the finger's speed, a slow
     // release moves at least `settleSpeed`, within `settleMin`…`settleMax` (Ionic's iOS menu takes 400 ms).
     settleSpeed: 1.2,    // px/ms
@@ -46,7 +46,7 @@ export const DRAG = Object.freeze({
 
 // What a drag may not start on: a field (the finger moves its caret or picks), a slider, media (the finger scrubs).
 // A button, a link or a summary under the finger is fine: a drag is not a tap, and the click that ends it is
-// swallowed (onClick).
+// swallowed (gesture_tail.js).
 export const FIELD_SELECTOR = 'input, textarea, select, video, audio, [role="slider"], '
     + '[contenteditable]:not([contenteditable="false"])';
 // What scrolls sideways itself: code, tables, tab strips, anything that declares it.
@@ -54,7 +54,7 @@ export const SIDEWAYS_SELECTOR = 'pre, code, table, .md-table-wrap, .app-tab-str
 // What lies over the room and owns the finger while it is open (shown, not merely mounted): a dialog, the reader,
 // a menu, the work list. A Project open on the phone is the room: the drag opens the drawer over it, as ☰ does. A
 // menu's picture leaving after it closed (motion.js leaveAsPicture) and a work list folding away are closed already.
-export const BLOCKING_SELECTOR = 'dialog[open], .marketplace-modal-backdrop, .ui-popup:not([data-leaving]), .task-control-menu, '
+export const BLOCKING_SELECTOR = 'dialog[open], .ui-modal-backdrop, .ui-popup:not([data-leaving]), .task-control-menu, '
     + '.chat-photo-menu:not([data-leaving]), .rw-shade:not([hidden]):not([inert])';
 
 /** The chain under the finger keeps its own sideways gesture: a `touch-action: none` element (the effort strip) or a
@@ -110,7 +110,8 @@ export function bindDrawerDrag({
 } = {}) {
     if (!enabled || !sidebar || !scrim) return () => {};
     let g = null;
-    let suppressUntil = 0;
+    // The click that ends a drag is not a tap on whatever lies under the finger; the next touch, pointer or key acts.
+    const tail = createGestureTail(doc);
     let settleTimer = 0;
     let scrimTimer = 0;
     const now = () => (typeof win?.performance?.now === 'function' ? win.performance.now() : Date.now());
@@ -254,7 +255,7 @@ export function bindDrawerDrag({
             if (byFinger) onSnap(open);
             setOpen(open);
         } else if (!open) hideScrimAfter(ms);  // sprang back closed: the scrim fades with it
-        suppressUntil = now() + DRAG.clickGuard;
+        tail.arm();
     }
 
     // The system took the touch (an incoming call, Telegram's edge, an iOS gesture): the drawer still settles from
@@ -285,14 +286,6 @@ export function bindDrawerDrag({
         if (g && (win?.innerWidth || 0) !== g.viewWidth) restore();
     }
 
-    // The click that ends a drag is not a tap on whatever lies under the finger.
-    function onClick(event) {
-        if (now() >= suppressUntil) return;
-        suppressUntil = 0;
-        event.stopPropagation();
-        event.preventDefault();
-    }
-
     // On the root element, not window, document or body: iOS treats those as passive by default (WebKit 182521).
     // The blocking move listener is there only where a drag can start (a phone layout under a finger), mounted
     // when the layout changes, before any touch in it: elsewhere a touch's first move never waits for the page.
@@ -310,18 +303,17 @@ export function bindDrawerDrag({
     // theme.js switches the layout on its own media-query change, after a resize handler has run: the guard follows
     // that switch; resize and the first touch are fallbacks.
     const unwatchLayout = onLayout(syncGuard);
-    doc.addEventListener('click', onClick, true);
     win.addEventListener('resize', onResize);
     return () => {
         restore();
         end();
+        tail.disarm();
         cancel(settleTimer);
         cancel(scrimTimer);
         root.removeEventListener('touchstart', onStart);
         root.removeEventListener('touchmove', onPageMove);
         guarded = false;
         unwatchLayout?.();
-        doc.removeEventListener('click', onClick, true);
         win.removeEventListener('resize', onResize);
     };
 }

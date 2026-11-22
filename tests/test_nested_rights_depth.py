@@ -575,13 +575,13 @@ def test_legacy_contract_does_not_gain_provenance_during_recovery_normalization(
     assert explicit["delegation_budget"]["depth_provenance"]["requested_depth"] == 3
 
 
-def test_fresh_depth_default_increases_without_widening_active_cap(monkeypatch):
+def test_fresh_depth_default_is_three_and_the_owners_numbers_are_optional(monkeypatch):
     from ouroboros.config import get_max_active_subagents_per_root, get_max_subagent_depth, get_max_workers
 
     monkeypatch.delenv("OUROBOROS_MAX_SUBAGENT_DEPTH", raising=False)
     monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
     assert get_max_subagent_depth() == 3
-    assert get_max_active_subagents_per_root() == 6
+    assert get_max_active_subagents_per_root() is None  # no number (owner, 21.11.2026): the mind decides how many
     monkeypatch.delenv("OUROBOROS_MAX_WORKERS", raising=False)
     assert get_max_workers() is None  # no number: the machine's memory is the limit
 

@@ -9,10 +9,11 @@
  * Retry Continue) and is no episode yet. Names, projects or an origin message shared by two tasks are
  * not a chain.
  */
-import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { reasonCodesNote, taskDoneIsTerminal, taskPresentation, taskReasonCodes, taskReasonDetail, taskTerminalPhase } from './log_events.js';
+import { escapeHtmlAttr, escapeHtmlText as escapeHtml, formatMsgTime, observedTerminalDate, terminalTimeNote } from './utils.js';
+import { isTerminalTaskDetail, reasonCodesNote, taskDoneIsTerminal, taskPresentation, taskReasonCodes, taskReasonDetail, taskTerminalPhase } from './log_events.js';
 import { fmt } from './i18n.js';
 import { outcomeTone } from './task_phase_chip.js';
+import { attemptOf, ownsClosingSentence } from './settled_card.js';
 
 export function admittedSuccessor(row) {
     const admitted = (link) => (link && typeof link === 'object' && link.state === 'admitted' ? link.successor_task_id : '');
@@ -28,24 +29,45 @@ function continuedSubject(name) {
 }
 
 export function noteEpisodeFacts(previous = {}, row = {}) {
-    const next = { ...previous };
+    const attempt = attemptOf(row);
+    if (previous.attempt != null && (attempt == null || attempt < previous.attempt)) return previous;
+    // Same task, new physical attempt: keep its work name, not the prior interval or outcome.
+    const next = attempt == null || attempt === previous.attempt ? { ...previous } : { name: previous.name, attempt };
     const name = String(row.suggested_name || row.task_name || row.title || '').trim();
     if (name) next.name = name;
     // The closing sentence is its own fact: renaming the work must not take it from this episode's history.
     const summary = String(row.wake_summary || '').trim();
-    if (summary) next.summary = summary;
+    if (Object.hasOwn(row, 'wake_summary') || (next.summary && ownsClosingSentence(row))) next.summary = summary;
     const time = row?.terminal_time && typeof row.terminal_time === 'object' ? row.terminal_time : null;
     next.started ||= String(time?.attempt?.started_at || row?.started_at || '');
-    const terminal = row?.outcome_final === true || row?.system_type === 'task_summary' || taskDoneIsTerminal(row);
+    if (row.task_phase === 'finalizing' || row.outcome_final === false) return next;
+    const event = row.task_terminal_status || (row.type || row.event) === 'task_done';
+    const terminal = row.outcome_final === true || row.system_type === 'task_summary'
+        || (event ? taskDoneIsTerminal(row) : isTerminalTaskDetail(row));
+    const typed = Object.hasOwn(row, 'terminal_time');
+    if (typed && (terminal || (!row.status && !row.task_terminal_status)) && (!next.endSource || next.endSource === 'unknown')) {
+        const observed = observedTerminalDate(time);
+        if (observed || terminal || next.finished || time?.source === 'unknown') {
+            next.endSource = observed ? time.source : 'unknown';
+            next.ended = observed ? time.occurred_at : '';
+            next.addedAt = observed ? '' : String(row.ts || '');
+        }
+    }
+    if (terminal) {
+        next.finished = true;
+        // Without the host's typed end fact, row.ts is when this receipt was added, not when the task ended.
+        if (!typed && !next.endSource) {
+            next.endSource = 'unknown';
+            next.ended = '';
+            next.addedAt = String(row.ts || '');
+        }
+    }
     if (terminal && (row?.outcome_axes || row?.task_terminal_status || row?.status)) {
-        next.ended = String(time?.occurred_at || next.ended || row?.ts || '');
         next.phase = taskTerminalPhase(row);
         // A code no sentence describes yet rides beside its neutral cause, for the expanded card (owner 2A).
         const cause = taskReasonDetail(row);
-        if (cause) Object.assign(next, { cause, codes: taskReasonCodes(row) });
+        if (cause || row.reason_code || row.outcome_axes?.execution) Object.assign(next, { cause, codes: taskReasonCodes(row) });
         else next.cause ||= '';
-    } else if (time?.occurred_at && !next.ended) {
-        next.ended = String(time.occurred_at);
     }
     return next;
 }
@@ -73,6 +95,15 @@ export function episodeSpan(started, ended) {
     return `${date(a)}, ${clock(a)} – ${date(b)}, ${clock(b)}`;
 }
 
+function episodeTime(episode, finished, addedAt = episode.addedAt) {
+    if (episode.endSource !== 'supervisor_cancel' && !(finished && !toDate(episode.ended))) {
+        return episodeSpan(episode.started, episode.ended);
+    }
+    const started = formatMsgTime(episode.started);
+    const end = terminalTimeNote({ source: episode.endSource, occurred_at: episode.ended }, addedAt).short;
+    return started ? [fmt('Started {time}', { time: started.short }), end].join(' · ') : end;
+}
+
 /**
  * Paint the episode lines. One episode is not a chain: the block stays empty and hidden.
  * `current` is the last episode: its chip is the card's, so its line carries its own name and time.
@@ -81,7 +112,7 @@ export function renderEpisodes(el, episodes = []) {
     if (!el) return false;
     const lines = episodes.length > 1 ? episodes.map((episode, index) => {
         const current = index === episodes.length - 1;
-        const span = episodeSpan(episode.started, current && !episode.ended ? '' : episode.ended);
+        const span = episodeTime(episode, !current || episode.finished || episode.phase);
         const outcome = !current && episode.phase ? taskPresentation(episode.phase).headline : '';
         const tone = outcomeTone(episode.phase) || 'neutral';  // the chips' outcome tones
         const parts = [`<span class="chat-live-episode-label">${escapeHtml(fmt('Episode {n}', { n: index + 1 }))}</span>`];
@@ -113,8 +144,10 @@ export function renderEpisodes(el, episodes = []) {
  * this chat sees none of its frames (a Main
  * portal's room): `follow(successorId, predecessor)` may mint its card from the facts it holds.
  * `renamed(record)` hears each name this module sets: the card's one headline owner paints the line under it, and a portal's Project reference names itself again.
+ * `meta(record)` paints an earlier episode's facts again once its heading or disclosed content moved: the heading's own words
+ * (`episodeHeadingWords`) are not said a second time in the Details beneath it.
  */
-export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {}, renamed = () => {} }) {
+export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {}, renamed = () => {}, meta = () => {} }) {
     const predecessors = new Map();  // successor task id -> predecessor task id
 
     function chainOf(taskId) {
@@ -151,17 +184,21 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
             }
             const facts = previous.episode || {};
             const label = [fmt('Episode {n}', { n: index + 1 }), facts.name,
-                episodeSpan(facts.started, facts.ended), facts.phase && taskPresentation(facts.phase).headline,
+                episodeTime(facts, true, ''), facts.phase && taskPresentation(facts.phase).headline,
                 facts.cause, facts.summary !== facts.name && facts.summary].filter(Boolean).join(' · ');
-            if (disclosure.firstElementChild.textContent !== label) disclosure.firstElementChild.textContent = label;
+            let changed = disclosure.firstElementChild.textContent !== label;
+            if (changed) disclosure.firstElementChild.textContent = label;
+            previous.episodeHeadingWords = [facts.name, facts.summary].filter(Boolean);  // the authored words this heading carries
             const codes = disclosure.querySelector('.chat-episode-codes');
             codes.textContent = reasonCodesNote(facts.codes);
             codes.hidden = !codes.textContent;
-            for (const content of [previous.timelineEl, previous.reviewSummaryEl, previous.reviewsHostEl, previous.subagentsEl]) {
-                if (content && content.parentNode !== disclosure) disclosure.appendChild(content);
+            for (const content of [previous.detailsEl, previous.timelineEl, previous.reviewSummaryEl,
+                previous.reviewsHostEl, previous.subagentsEl]) {
+                if (content && content.parentNode !== disclosure) { disclosure.appendChild(content); changed = true; }
             }
             const position = host.children[index] || null;
             if (position !== disclosure) host.insertBefore(disclosure, position);
+            if (changed) meta(previous);
         }
         host.hidden = false;
     }
@@ -204,11 +241,12 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
         const startedAt = Number(chain[0].root.dataset.ts);
         if (Number.isFinite(startedAt)) changed = reanchor(record, startedAt) || changed;
         const current = { ...(record.episode || {}) };
+        if (record.finished) current.finished = true;
         if (!current.started) {
             const startedSec = Number(activity(record)?.started_at);
-            current.started = Number.isFinite(startedSec) && startedSec > 0 ? startedSec * 1000 : record.ownStartedAt || '';
+            current.started = Number.isFinite(startedSec) && startedSec > 0 ? startedSec * 1000
+                : current.finished || current.ended ? '' : record.ownStartedAt || '';
         }
-        if (!record.finished) current.ended = '';
         return renderEpisodes(record.episodesEl, [...chain.map((r) => r.episode || {}), current]) || changed;
     }
 

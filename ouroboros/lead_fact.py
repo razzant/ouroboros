@@ -162,26 +162,40 @@ def project_lead(fact: Any = None, task: Mapping | None = None, *, queued: bool 
     result.pop("pending", None)
     basis = result.get("basis")
     control = task.get("owner_model") or {}
+    pending_basis = None
+    binding_changed = False
     if control.get("request_id") and control["request_id"] != task.get("_lead_request_id"):
         from ouroboros.owner_model import recorded_primary
 
         primary = recorded_primary(task)
         model, local = primary["model"], primary["use_local"]
-        carrier = (task.get("metadata") or {}).get("lead")
+        carrier = route_choice.lead_snapshot((task.get("metadata") or {}).get("lead"))
+        action = control.get("action")
+        # Set/follow/keep replace the primary and clear its wait override at handover. Return/wait only
+        # retry it: an active override is not in this projection, so don't assert that account policy.
+        if action in {"set", "keep", "follow"} and carrier:
+            pending_basis = carrier["source"]
+            acting_on_lead = (basis in route_choice.LEAD_SOURCES and basis != "mind"
+                              and result.get("cause") != "wait_card")
+            binding_changed = basis != "main" if pending_basis == "main" else not acting_on_lead
+        moved = binding_changed or (model, local) != (result["model"], result["use_local"])
         if citation := cited_fields(carrier):
             result.pop("cited", None)
             # A fallback may be the primary's own model on another account: only an accepted reply ends it.
-            if basis != "fallback" and (model, local) == (result["model"], result["use_local"]):
+            if basis != "fallback" and not moved:
                 result.pop("primary", None)
                 result.update(basis=carrier["source"], **citation)
             else:
                 result["primary"] = {"model": model, "use_local": local, "basis": carrier["source"], **citation}
     elif basis in MODEL_ROLE_SETTINGS and basis != "fallback":
         model, local = route_choice.following_route(basis)
+        pending_basis = basis
     else:
         return result
-    if (model, local) != (result["model"], result["use_local"]):
+    if model and (binding_changed or (model, local) != (result["model"], result["use_local"])):
         result["pending"] = {"model": model, "use_local": local}
+        if pending_basis:
+            result["pending"]["basis"] = pending_basis
     return result
 
 

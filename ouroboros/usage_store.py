@@ -63,17 +63,17 @@ SCHEMA_VERSION = 1
 # The header selects the lock protocol BEFORE opening (also recorded in meta.lock_tier).
 # Connection, tier and transaction core are shared with the current store (ouroboros.store).
 _APPLICATION_ID = {TIER_ENFORCED: 0x4F555345, TIER_NAME: 0x4F55534E}
-_OPEN_STATES = ("reserved", "dispatched", "unresolved")
 _OPEN_PREDICATE = ("(state IN ('reserved','dispatched','unresolved') "
                    "OR (state='settled' AND settle_reason='abandoned'))")
 # ``Txn.task_attempt_page``: newest first by the immutable, unique ``seq_first`` (``seq`` moves on every write).
-_TASK_PAGE_SQL = ("SELECT attempt_id, state, settle_reason, model, provider, ts_reserved, ts_dispatched, "
-                  "ts_final, ts_last FROM attempts INDEXED BY attempts_task "
+TASK_PAGE_COLUMNS = "attempt_id, state, settle_reason, model, provider, ts_reserved, ts_dispatched, ts_final, ts_last"
+_TASK_PAGE_SQL = (f"SELECT {TASK_PAGE_COLUMNS} FROM attempts INDEXED BY attempts_task "
                   "WHERE task_id=? AND category=? AND seq_first<? ORDER BY seq_first DESC LIMIT ?")
 _TASK_CURSOR_SQL = "SELECT seq_first FROM attempts WHERE attempt_id=? AND task_id=? AND category=?"
-# A period's model calls by position (``Txn.period_bounds``) and reservation time: the ledger's own calls, never
-# sessions, unmetered dispatches or imported history (rows that carry no reservation time).
-_PERIOD_WHERE = "rowid>=? AND rowid<? AND COALESCE(kind, 'attempt')='attempt' AND julianday(ts_reserved)>=julianday(?)"
+# One physical attempt (``ATTEMPT_ROW``), an older row without a kind included; never a session, unmetered dispatch or folded
+# history. A period's model calls (``Txn.period_bounds``): such rows by position and reservation time, which imports lack.
+ATTEMPT_ROW = "COALESCE(kind, 'attempt')='attempt'"
+_PERIOD_WHERE = f"rowid>=? AND rowid<? AND {ATTEMPT_ROW} AND julianday(ts_reserved)>=julianday(?)"
 
 # One root's money rows of a recent window by range, never the root's whole life (the consciousness
 # allowance, ``consciousness_allowance``); a store an older body created gains it at the lifespan boot.
@@ -426,23 +426,25 @@ class Txn:
         return capture(self.conn, f"SELECT {', '.join(_BUCKET_CAPTURE)} FROM summaries "
                        f"WHERE {' OR '.join(terms) or '0'}", params, _BUCKET_CAPTURE)
 
-    def task_attempt_page(self, task_id: str, category: str, *, after: str = "",
+    def task_attempt_page(self, task_id: str, category: Optional[str], *, after: str = "",
                           limit: int) -> Optional[List[Dict[str, Any]]]:
         """Lifecycle facts of one task's attempts in one category, newest first, ``limit`` rows older than ``after``.
 
-        ``after`` must name an attempt of this task and category (else ``None``): its first
+        ``category=None`` lists the task's physical attempts (``ATTEMPT_ROW``) of every category.
+        ``after`` must name an attempt this page lists (else ``None``): its first
         record is the cursor, so older rows stay reachable while newer ones join a fresh list.
         The task index addresses only this task (``INDEXED BY`` refuses a plan that scans the
         ledger); ordering still sorts the task's matching rows before the bounded page returns.
         No money, usage or payload fields."""
+        rule, scope = (ATTEMPT_ROW, (str(task_id),)) if category is None else ("category=?", (str(task_id), str(category)))
         before = 2 ** 63 - 1
         if after:
-            cursor = self.conn.execute(_TASK_CURSOR_SQL, (str(after), str(task_id), str(category))).fetchone()
+            cursor = self.conn.execute(_TASK_CURSOR_SQL.replace("category=?", rule), (str(after), *scope)).fetchone()
             if cursor is None:
                 return None
             before = cursor["seq_first"]
-        return [dict(record) for record in self.conn.execute(_TASK_PAGE_SQL, (
-            str(task_id), str(category), before, int(limit)))]
+        return [dict(record) for record in self.conn.execute(_TASK_PAGE_SQL.replace("category=?", rule), (
+            *scope, before, int(limit)))]
 
     def review_seat_costs(self, category: str, *, limit: int) -> List[Dict[str, Any]]:
         """What one reviewer seat cost in one wave: per (wave, row), the summed cost of every
@@ -450,8 +452,8 @@ class Txn:
         with the distinct models seen (``models``, comma-joined), newest wave first, at most ``limit``.
 
         ``priced`` asks every attempt of the seat for what its bill says: released unsent; settled with a
-        recorded sum that is not a partial one (the accounting's own «priced» of a closed row,
-        ``_usage_rows.summary_delta``); or a subscription call settled without a sum (a delegated session, or a
+        final, non-partial sum (accounting can also book estimates, but these are not measurements);
+        or a subscription call settled without a sum (a delegated session, or a
         model call through the subscription engine), which spends a seat and time and no API money (owner,
         2026-11-15). An attempt still open (an abandoned settlement is one, ``_OPEN_PREDICATE``), or a paid one
         settled without a sum, leaves the seat unmeasured; what the catalog knew before the send
@@ -461,13 +463,12 @@ class Txn:
         sub-select per row, since naming ``extra`` in the grouped statement carries every row's whole ``extra``
         through its sorter (an order of magnitude slower on a ledger of months, inside the store's read hold)."""
         return [dict(record) for record in self.conn.execute(
-            "SELECT review_wave_id AS wave_id, review_slot_id AS row_id, GROUP_CONCAT(DISTINCT model) AS models, "
+            "SELECT review_wave_id AS wave_id, review_slot_id AS row_id, GROUP_CONCAT(DISTINCT CASE WHEN state IN ('dispatched', 'settled', 'unresolved') THEN model END) AS models, "
             "COALESCE(SUM(CAST(cost_usd AS REAL)), MAX(CASE WHEN state='settled' "
             "AND COALESCE(settle_reason, '')!='abandoned' THEN 0.0 END)) AS usd, "
-            "MIN(CASE WHEN state='released' THEN 1 WHEN state!='settled' THEN 0 "
-            "WHEN cost_usd IS NULL THEN COALESCE(settle_reason, '')!='abandoned' "
-            "AND (COALESCE(kind, 'attempt')='subscription_session' OR COALESCE(provider, '')='claudexor') "
-            "ELSE COALESCE((SELECT json_extract(own.extra, '$.cost_partial') FROM attempts own "
+            "MIN(CASE WHEN state='released' THEN 1 WHEN state!='settled' OR settle_reason='abandoned' THEN 0 "
+            "WHEN cost_usd IS NULL THEN (COALESCE(kind, 'attempt')='subscription_session' OR COALESCE(provider, '')='claudexor') "
+            "ELSE COALESCE(cost_final, 0)=1 AND COALESCE((SELECT json_extract(own.extra, '$.cost_partial') FROM attempts own "
             "WHERE own.attempt_id=attempts.attempt_id), 0)=0 END) AS priced, "
             "MAX(ts_last_epoch) AS last_epoch FROM attempts INDEXED BY attempts_category_time "
             "WHERE category=? AND COALESCE(review_wave_id, '') != '' AND COALESCE(review_slot_id, '') != '' "
@@ -550,9 +551,6 @@ class Txn:
                 self._buckets[address] = _bucket_of(record)
             found[record["key"] if prefix is None else record["key"][len(prefix) + 1:]] = self._buckets[address]
         return found
-
-    def dirty_owner_ids(self) -> List[str]:
-        return [owner for owner, _revision in self.dirty_owners()]
 
     def dirty_owners(self, *, since: Optional[int] = None) -> List[Tuple[str, int]]:
         """The owners whose stored cost projection may be behind
@@ -864,14 +862,15 @@ def _sha256_file(path: pathlib.Path) -> Optional[str]:
 
 @contextlib.contextmanager
 def hold(root: pathlib.Path | str, *, timeout_sec: float = USAGE_LOCK_TIMEOUT_SEC,
-         write: bool = True, migrate: bool = True, exporting: bool = False, remaining_sec=None) -> Iterator[Txn]:
-    """Bounded money acquisition (``_usage_wait``); timeout raises UsageLockUnavailable.
-    Writes use BEGIN IMMEDIATE and wait for readers at COMMIT. An export mark
-    refuses writes with UsageExportInProgress; only export/abandonment use exporting=True.
-    Receipt callbacks run after the transaction and name lock have closed.
-    ``remaining_sec`` optionally narrows each acquisition to a caller's one deadline
-    (query_data SQL); it never enlarges a wait or changes other callers' defaults.
-    """
+         write: bool = True, migrate: bool = True, exporting: bool = False, remaining_sec=None,
+         inspect_only: bool = False) -> Iterator[Txn]:
+    """Bounded money acquisition (``_usage_wait``); timeout raises UsageLockUnavailable. Writes use BEGIN IMMEDIATE and
+    wait for readers at COMMIT. An export mark refuses writes with UsageExportInProgress; only export/abandonment use
+    exporting=True. Receipt callbacks run after the transaction and name lock have closed. ``remaining_sec`` optionally
+    narrows each acquisition to a caller's one deadline (query_data SQL); it never enlarges a wait or changes other
+    callers' defaults. ``inspect_only`` (an offline read) is refused while exporting, never in its handoff."""
+    if inspect_only and (write or migrate or exporting):
+        raise ValueError("usage inspection cannot write, migrate or export")
     root = pathlib.Path(root)
     tier = store_tier(root, wait_sec=timeout_sec, migrate=migrate, remaining_sec=remaining_sec)
     with contextlib.ExitStack() as stack:
@@ -887,10 +886,10 @@ def hold(root: pathlib.Path | str, *, timeout_sec: float = USAGE_LOCK_TIMEOUT_SE
         try:  # the enforced tier's COMMIT waits for readers to drain
             with _core.transaction(conn, write=write, finish=txn.commit,
                                    commit_wait_sec=USAGE_LOCK_TIMEOUT_SEC if tier == TIER_ENFORCED else None):
-                handoff = txn.meta("export") is not None
-                if write and not exporting and handoff:
-                    raise UsageExportInProgress(f"usage store is being exported for a switch; money writes are "
-                                                f"refused until it completes or is abandoned: {root / STORE_REL}")
+                handoff = txn.meta("export") is not None and not inspect_only
+                if (handoff and write and not exporting) or (inspect_only and txn.meta("export") is not None):
+                    raise UsageExportInProgress(f"usage store is being exported for a switch; writes and inspections "
+                                                f"are refused until it completes or is abandoned: {root / STORE_REL}")
                 yield txn
             handoff = handoff or txn._handoff
         except sqlite3.Error as exc:

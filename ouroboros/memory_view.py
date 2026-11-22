@@ -756,29 +756,25 @@ def _notes_by_room(store: ChronicleStore) -> Dict[str, List[Dict[str, Any]]]:
     return notes
 
 
-def _origins(root: pathlib.Path, room: str, lane_rows: List[Entry]) -> List[Dict[str, Any]]:
-    """The owner's words that started this Project, when no open row of the room carries them."""
-    from ouroboros.project_dialogue import _source_ref_identity, project_origin_rows  # D03->D17 is lazy-only
+def _origins(root: pathlib.Path, room: str, lane_rows: List[Entry], *, gaps=None) -> List[Dict[str, Any]]:
+    """The owner's words that started this Project, when no open row of the room carries them (``opening_view``)."""
+    from ouroboros.project_dialogue import _source_ref_identity, opening_view, project_origin_rows  # D03->D17 is lazy-only
 
     present = {tuple(key) for _address, meta, _pos in lane_rows for key in meta.get("source_keys") or ()}
-    return [{"ts": str(origin["ref"].get("ts") or ""), "text": origin["text"], "origin_ref": dict(origin["ref"]),
+    return [{"ts": str(origin["ref"].get("ts") or ""), **opening_view(origin), "origin_ref": dict(origin["ref"]),
              "ref": f"chat {origin['ref'].get('chat_id')} / {origin['ref'].get('client_message_id') or 'no client id'}"}
-            for origin in project_origin_rows(root, int(room)) if _source_ref_identity(origin["ref"]) not in present]
+            for origin in project_origin_rows(root, int(room), gaps=gaps)
+            if not origin.get("text_placeholder") and _source_ref_identity(origin["ref"]) not in present]
 
 
 def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, label: Callable[..., str],
                   entries: List[Entry], notes: Mapping[str, List[Dict[str, Any]]],
                   lineage: Mapping[str, Any], story: List[Dict[str, Any]] = (),
                   gaps: Optional[Mapping[str, set]] = None, *, summaries: Mapping[str, Any]) -> Dict[str, Any]:
-    """The current room: its head and standing facts, page (retold records, pages under parts, notes), origin words, lanes.
-
-    Retold records already whole in my story are not repeated. A selected account carries its records, a part
-    it tells its members too; their detail stays at their source readers rather than reappearing in this room,
-    where ``told`` names how many of the room's records accounts in my story tell, and which ones (``told_here``),
-    records folded under a part among them.
-    A standing part (the mind's, or a helper's draft not pending as a candidate) stands for its members here
-    as in the story: they keep their period and address (``standing``), a viewer with a story only.
-    """
+    """The current room: head, standing facts, page (retold records, pages under parts, notes), origins, lanes. A record
+    whole in my story is not retold; a selected account carries its records, a part its members, at their source readers
+    (``told`` counts them, ``told_here`` names them, folded records too). With a story, a standing part (the mind's, or a
+    helper's draft not pending as a candidate) stands for its members as there, keeping period and address (``standing``)."""
     room = str(spec.room_id)
     records = store.room_records(room)
     whole = {e["id"] for e in story if e.get("kind") == "legacy" and e.get("text") and not e.get("told_by")}
@@ -835,7 +831,10 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     project = (spec.origin_words or sealed) and room.lstrip("-").isdigit() and int(room) in (
         memory_inventory.membership_facts(root).project_chat_ids)
     if spec.origin_words and project:
-        facts["origins"] = _origins(root, room, entries if spec.room_lanes else [])
+        origin_gaps = None if sealed else set()  # project_words already discloses these gaps for a root
+        facts["origins"] = _origins(root, room, entries if spec.room_lanes else [], gaps=origin_gaps)
+        if origin_gaps:
+            facts["origin_gaps"] = sorted(origin_gaps)
     if spec.room_lanes and entries:
         facts["since"] = _minute(facts["facts"]["earliest"])  # the rows' first stored time, not the first row read
         facts["lane1"], facts["lane2"] = _lanes(root, entries, lineage, summaries)
@@ -991,15 +990,11 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
 
 
 def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec) -> MemoryViewSnapshot:
-    """The facts of one request's view, read once; the chronicle is activated exactly once here.
-
-    Before the import has completed (another importer holds the legacy lock, the
-    import was refused, the journal cannot be opened) the snapshot carries only the
-    reason and the room id: no story, lanes or other conversations, and no chain read; the owner-words
-    block still reads the bound room (``owner_relay.task_words_text``). On an active chronicle that
-    block is drawn after the capture, over the acting marks the capture read: a helper's birth enters
-    the chronicle no more often than its view does.
-    """
+    """The facts of one request's view, read once; the chronicle is activated exactly once here. Until the import
+    completes (another importer holds the legacy lock, the import was refused, the journal cannot be opened) the snapshot
+    holds only the reason and room id: no story, lanes or other conversations, no chain read; the owner-words block still
+    reads the bound room (``owner_relay.task_words_text``). On an active chronicle that block is drawn after the capture
+    over the acting marks it read: a helper's birth enters the chronicle no more often than its view does."""
     root = pathlib.Path(drive_root)
     word_sources: Dict[str, Any] = {}
     def words(marks: Any = None) -> str:
@@ -1024,6 +1019,10 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
         owner_words = words(acting)
         if room:
             from ouroboros.owner_words import task_governing_words
+
+            if room.get("origin_gaps") and word_sources.get("gaps"):
+                # Only fold gaps the host already rendered, never similar text inside an owner's message.
+                room["origin_gaps"] = [g for g in room["origin_gaps"] if f"[Host fact: {g}]" not in word_sources["gaps"]]
 
             # Governing words bind by identity: their ref, or (without one) the row's own exact text.
             governing, _absence = task_governing_words(task)
@@ -1438,8 +1437,10 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]], part=_ren
     if room["origins"]:
         lines += part(["", "### Words that started this work (retention-proof)"])
         for item in room["origins"]:
-            lines += part([f"[{item['ts'] or 'time not recorded'}; owner; {item['ref']}] " + _indented(item["text"]).lstrip()],
-                          "origin", [item])
+            lines += part([f"[{item['ts'] or 'time not recorded'}; owner; {item['ref']}] " + _indented(item["text"]).lstrip(),
+                           *item.get("host_lines", ())], "origin", [item])  # the host's lines stand apart from the words
+    if room.get("origin_gaps"):
+        lines += part([f"[Host fact: {gap}]" for gap in room["origin_gaps"]])
     if room.get("project_words"):  # a project root: its human's rows that left the open conversation, whole and dated
         lines += part(["", _HEADINGS["root"], _FRAMES["root"]])
         for index, item in enumerate(room["project_words"]):  # same blank-line join; a gap has no address

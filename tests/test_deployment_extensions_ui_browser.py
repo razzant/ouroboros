@@ -79,10 +79,19 @@ def _shot(page, evidence, name, locator=None):
     (locator or page).screenshot(path=str(evidence / f"{name}.png"))
 
 
+def _open_installed(page):
+    """Extensions opens as its list on a phone and beside the page last opened on a desk: its Skills row opens the
+    installed skills either way (pressed again beside the list, it keeps that page)."""
+    row = page.locator('#page-skills [data-extensions-open="installed"]')
+    row.wait_for(state="visible", timeout=60_000)
+    row.click()
+
+
 def _skills(page, url, theme, width):
     page.set_viewport_size({"width": width, "height": 1000 if width > 500 else 844})
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
     page.goto(url + "/#skills", wait_until="domcontentloaded")
+    _open_installed(page)
     page.locator(f'.skills-card[data-skill="{NOTES}"]').wait_for(state="visible", timeout=60_000)
     page.wait_for_function("() => !(document.querySelector('#skills-status')?.textContent || '').includes('Loading')")
 
@@ -379,6 +388,7 @@ def test_the_loaded_error_tracker_widget_draws_what_each_process_observed(direct
 
 def _tracker_card(page, url):
     page.goto(url + "/#skills", wait_until="domcontentloaded")
+    _open_installed(page)
     card = page.locator('.skills-card[data-skill="error_tracker"]')
     card.wait_for(state="visible", timeout=60_000)
     page.wait_for_function("() => !(document.querySelector('#skills-status')?.textContent || '').includes('Loading')")

@@ -28,16 +28,18 @@ def _custody(root_id, run):
     """One open custody row as ``_open_runs`` yields it: a bare run id is an ordinary run of the root itself."""
     run = {"run_id": run} if isinstance(run, str) else dict(run)
     return SimpleNamespace(run_id=run["run_id"], task_id=run.get("task_id", root_id), root_task_id=root_id,
+                           invocation_id=run.get("invocation_id", ""),
                            source=run.get("source", "delegated_subagent"), terminal_state=run.get("terminal_state", ""))
 
 
 def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops=None, models=None, attempts=None,
-                complete=True):
+                activities=None, complete=True):
     """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for these rows, as JSON.
 
-    ``held`` maps a tree root to its open runs: run ids, or ``{run_id, task_id, source}`` rows; ``stops`` maps a
+    ``held`` maps a tree root to its open runs: run ids, or ``{run_id, task_id, invocation_id, source}`` rows; ``stops`` maps a
     task to the runs whose stop its live Pause could not confirm; ``attempts`` maps a task to the latest Resume
-    attempt its stored record keeps (``work_stop.ATTEMPT_KEY``), which the server reads for held members only."""
+    attempt its stored record keeps (``work_stop.ATTEMPT_KEY``). Optional ``activities`` answers the passive
+    observer's (task, run, invocation) lookup."""
     results, fences, stops, attempts = dict(results or {}), dict(fences or {}), dict(stops or {}), dict(attempts or {})
     held = {root: [_custody(root, run) for run in runs] for root, runs in dict(held or {}).items()}
     with tempfile.TemporaryDirectory(prefix=ROOT_PREFIX) as root, contextlib.ExitStack() as release, \
@@ -47,10 +49,13 @@ def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops
                               lambda self, root_id, drive_root=None: (models or {}).get(root_id, [])), \
             mock.patch.object(wp._Observations, "stop_unknown",
                               lambda self, task_id, drive_root=None, owner=None: frozenset(stops.get(task_id, ()))), \
-            mock.patch.object(wp, "_open_runs", lambda drive_root: held), \
+            mock.patch.object(wp, "_open_runs", lambda drive_root, state=None: held), \
             mock.patch.object(wp._Observations, "resume_attempt",
                               lambda self, task_id, drive_root=None: attempts.get(task_id, {})), \
             mock.patch.object(wp, "_inflight_upkeep", lambda drive_root, known: []):
+        if activities is not None:
+            release.enter_context(mock.patch("ouroboros.delegate_feed.current_activities",
+                                             lambda root, keys: {key: activities.get(key) for key in keys}))
         # The projection's real reads cache this root's stores per thread; Windows removes no open file, so hand
         # them back before the root goes (this root's only: never another root's, never the installation's).
         release.callback(store.close_connections_under, pathlib.Path(root))

@@ -51,7 +51,7 @@ HOLD_REASON = "deployment_requirement_unmet"
 UNTRUSTED_REASON = "deployment_untrusted"  # the liveness reason of extension code the service does not run
 # Why an extension's code does not run on a deployment's service, by ``trust_gap`` code: the owner's own sentence.
 TRUST_SENTENCES = {
-    "not_delivered": "Only extensions your organization’s administrator delivers run here, and this one isn’t among them.",
+    "not_delivered": "Only extension skills your organization’s administrator delivers run here, and this one isn’t among them.",
     "elsewhere": "Your organization’s administrator delivers it from another folder, so this copy doesn’t run.",
     "changed": "Its files differ from the version your organization’s administrator delivered, so it doesn’t run.",
 }
@@ -477,9 +477,9 @@ def hold_text(drive_root: Any = None) -> str:
     rows = unmet_here(drive_root)
     one = len(rows) == 1
     gaps = " ".join(f"{row['name']}: {row['detail']}" for row in rows) or "A required extension is not running."
-    return (f"🔒 Not started: your organization requires {'an extension that isn’t' if one else 'extensions that aren’t'} "
+    return (f"🔒 Not started: your organization requires {'an extension skill that isn’t' if one else 'extension skills that aren’t'} "
             f"running in this process. {gaps} Nothing ran; start it again once {'it runs' if one else 'they run'}. "
-            "Stop, Panic, Settings and Skills stay available.")
+            "Stop, Panic, Settings and Extensions stay available.")
 
 
 def record_held_task(drive_root: Any, task: dict, text: str, **fields: Any) -> None:

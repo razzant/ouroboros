@@ -2,11 +2,13 @@
 from copy import deepcopy
 import json
 
+import pytest
+
 from ouroboros import config, context_budget, peer_roster
 from ouroboros.context_fit import estimate_context_prompt_tokens
 from ouroboros.llm_attempt import _physical_candidate
 from ouroboros.llm_claudexor import ModelTurnState, _request
-from ouroboros.llm_messages import _MessageShapingMixin
+from ouroboros.llm_messages import _MessageShapingMixin, project_wire_messages
 from ouroboros.loop_messages import CONTEXT_FACTS_HEADER, CONTEXT_FACTS_NAME
 from tests.test_main_authored_context import call, main_loop as _main_loop
 
@@ -97,6 +99,47 @@ def test_private_host_key_never_erases_real_names_or_nested_native_fields(monkey
     assert payload == before
     switched = _MessageShapingMixin.sanitize_reasoning_on_model_switch(messages, "first/model", "second/model")
     assert switched[1][key] == CONTEXT_FACTS_NAME  # checkpoint/model-switch history stays canonical
+
+
+@pytest.mark.parametrize("projection", ["physical", "wire", "wire-delivery", "claudexor", "estimate"])
+def test_selected_reply_source_binding_stays_canonical_and_never_enters_send_copies(monkeypatch, projection):
+    from ouroboros.loop_round_limits import _append_reply_context
+
+    key = context_budget.REPLY_SOURCE_SHA_KEY
+    source = {"address": "row:1@source#0123456789ab", "author": "Mira",
+              "text": f'North trail. Literal "{key}" stays text.',
+              "attachments": [{"name": "map.pdf", "mime": "application/pdf", "size": 55}]}
+    rows = []
+    for text, offset in (("North", 0), ("trail", 6)):
+        _append_reply_context(rows, {**source, "excerpt": {"text": text, "start_utf16": offset}}, None)
+    assert len(rows) == 3 and rows[1][key] == rows[2][key] == rows[0][context_budget.HOST_TEXT_SHA_KEY]
+    # A same-named key inside someone else's native payload/schema/argument is opaque, not this row's binding.
+    native = {"route": {"source": "codex", "model": "fixture-model"}, key: {key: "native continuation"}}
+    rows[-1]["native_extension"] = {key: "provider value"}
+    rows.append({"role": "assistant", "content": "", "tool_calls": [{"id": "read", "type": "function",
+                 "function": {"name": "reader", "arguments": json.dumps({key: "literal argument"})}}]})
+    tools = [{"type": "function", "function": {"name": "reader", "parameters": {
+              "type": "object", "properties": {key: {"type": "string"}}}}}]
+    before = deepcopy(rows)
+    expected = [{name: value for name, value in row.items()
+                 if name not in {key, context_budget.HOST_CONTEXT_KIND_KEY, context_budget.HOST_TEXT_SHA_KEY}} for row in rows]
+    if projection == "physical":
+        payload = _physical_candidate({"messages": rows, "tools": tools, "nativeContinuation": native})
+        sent = payload["messages"]
+        assert payload["tools"] == tools and payload["nativeContinuation"] == native
+    elif projection == "claudexor":
+        payload = _wire(monkeypatch, rows, tools, native=native)
+        sent = payload["messages"]
+        assert payload["tools"] == tools and payload["nativeContinuation"] == native
+    elif projection == "estimate":
+        sent = expected
+    else:
+        sent = project_wire_messages(rows, delivery_marks=projection == "wire-delivery")
+    assert sent == expected
+    for provider in ("", "openai", "claudexor"):
+        assert estimate_context_prompt_tokens(rows, tools, provider=provider, chars=True) == estimate_context_prompt_tokens(
+            expected, tools, provider=provider, chars=True)
+    assert rows == before, "send preparation and pricing must preserve the canonical source dependency"
 
 
 def test_only_private_producer_classification_marks_replaced_host_rows():

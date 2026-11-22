@@ -146,6 +146,7 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     # custody rows (the same SSOT used by wait/apply) so a restart cannot turn a
     # prompt-only claim into ``harness_used``.
     source_unresolved = 0
+    source_unverified: set = set()
     if partial_work_order_seen:
         for entry in runs.values():
             if not entry.settled or entry.review_owned:
@@ -153,6 +154,7 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
             if custody.work_order_source_verification(entry).get("status") == "cannot_verify":
                 source_unresolved += 1
                 succeeded.discard(entry.run_id)
+                source_unverified.add(entry.run_id)
                 if "source_incomplete" not in failure_states:
                     failure_states.append("source_incomplete")
     from ouroboros.delegate_bootstrap_identity import read_identity
@@ -163,8 +165,20 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
         initial_run = next((run for run in runs.values() if initial and run.invocation_id == initial["invocation_id"]), None)
         if initial:
             fate = custody.invocation_record(drive_root, initial["invocation_id"]) or {}
+            # The bound row's engine terminal observation states a KNOWN first-attempt failure even
+            # before settlement; a success still waits for settlement (display witness only).
+            state = (initial_run.terminal_state if initial_run and (initial_run.settled
+                     or (initial_run.terminal_state and initial_run.terminal_state != "succeeded"))
+                     else str(fate.get("state") or "unknown"))
+            if state == "succeeded" and initial_run is not None and initial_run.run_id in source_unverified:
+                # The process settled as a success, but the canonical brief's coverage
+                # was never confirmed (the run is discarded from ``succeeded`` above).
+                # A typed third state for the first factual display: never a plain
+                # "succeeded" (a false outright success) and never "failed" (unverified
+                # work does not rename the physical outcome).
+                state = "succeeded_source_unverified"
             initial = {**initial, "run_id": initial_run.run_id if initial_run else str(fate.get("run_id") or ""),
-                       "state": initial_run.terminal_state if initial_run and initial_run.settled else str(fate.get("state") or "unknown")}
+                       "state": state}
         obligations = unsettled_start_ids(drive_root, task_id)
     except Exception:
         initial, obligations = {"state": "unknown"}, {"status": "unknown"}
@@ -172,6 +186,9 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     return {
         # A settled row whose started row fell out of the log is still a run that ran.
         "delegated_runs_started": len(started | settled),
+        # The FIRST attempt's typed fact: its state is the display witness's single
+        # source ("succeeded_source_unverified" = settled as a success with the
+        # work-order coverage never confirmed; readers never show it as succeeded).
         "initial_execution": initial,
         "delegated_obligations": obligations,
         "delegated_runs_settled": len(settled),

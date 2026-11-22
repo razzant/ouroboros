@@ -27,6 +27,33 @@ def test_direct_project_completion_writes_the_real_last_result_pointer(tmp_path,
     assert not any(event["type"] == "project_digest" for event in pending)
 
 
+def test_quiet_salvage_keeps_the_original_record_separate_from_its_notice(tmp_path, monkeypatch):
+    from tests.test_schedule_report_door import ceiling, run_metadata
+
+    tid = "reference-schedule"
+    text = "The retained reference report.\nOne record remains to be checked."
+    task = {"id": tid, "type": "task", "chat_id": 1, "text": "Check the references.", "metadata": run_metadata(tid),
+            "task_contract": {"capability_ceiling": ceiling()}}
+    pending, kept = [], []
+
+    def preserve(root, task_id, original):
+        kept.append((root, task_id, original))
+        return "saved-report.txt"
+
+    monkeypatch.setattr("ouroboros.observability.preserve_salvaged_output", preserve)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *_a, **_k: None)
+    pipeline.emit_task_results(
+        SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None, pending, task, text,
+        {"terminal_origin": "host_salvage", "execution_status": "failed", "reason_code": "tool_failure"},
+        {"tool_calls": [], "reasoning_notes": []}, 0.0, tmp_path / "logs",
+    )
+    assert kept == [(tmp_path, tid, text)]
+    result = pipeline.load_task_result(tmp_path, tid)
+    assert result["result"] == text and result["terminal_salvage_path"] == "saved-report.txt"
+    assert result["terminal_host_notice"] and text not in result["terminal_host_notice"]
+    assert not any(text in str(event.get("text", "")) for event in pending)
+
+
 def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     memory_calls = []

@@ -5,6 +5,7 @@ is opt-in in test_docker_declared_outputs_live.py.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -129,6 +130,7 @@ def test_automatic_docker_service_outputs_and_custody(shell_docker, monkeypatch,
     from ouroboros import artifacts
     from ouroboros import workspace_executor as executor
     from ouroboros import workspace_executor_paths as paths
+    from ouroboros.process_census import launch_id
     from ouroboros.tools import services
     from tests._workspace_executor_shared import fake_docker_cli
 
@@ -190,7 +192,23 @@ def test_automatic_docker_service_outputs_and_custody(shell_docker, monkeypatch,
         assert stopped and results[0]["lifecycle"] == "stopped" and results[0]["cleanup_dispatched"]
         assert results[0]["artifact_output_failed"] is (outcome == "unavailable")
         if outcome == "export":
-            assert len(rows) == 1 and Path(rows[0]["path"]).read_text() == "service-bytes"
+            # The output keeps its ordinary registration; the stop also freezes this launch's bytes
+            # as a separate immutable version, which its published stop facts address.
+            digest = hashlib.sha256(b"service-bytes").hexdigest()
+            version = f"service-output-{hashlib.sha256(b'answer.txt').hexdigest()[:16]}-{digest}.txt"
+            facts = results[0]["service_stop"]
+            assert facts["launch_id"] == launch_id(record.scope_marker) and facts["process"]["state"] == "stopped"
+            [output] = facts["outputs"]
+            [file] = output["files"]
+            assert output["name"] == file["name"] == "answer.txt" and output["state"] == "saved"
+            assert (file["path"], file["sha256"], file["size"]) == (version, digest, len(b"service-bytes"))
+            assert file["download_url"] == f"/api/tasks/{ctx.task_id}/artifacts/{version}"
+            stored = {row["name"]: row for row in rows}
+            assert len(rows) == 2 and {name: row["kind"] for name, row in stored.items()} == {
+                "answer.txt": "process_output", version: "service_output_version"}
+            assert not stored["answer.txt"].get("immutable") and stored[version]["immutable"]
+            for row in rows:
+                assert row["sha256"] == digest and Path(row["path"]).read_bytes() == b"service-bytes"
         else:
             assert not rows and "injected post-stop output failure" in results[0]["artifact_outputs"]
 

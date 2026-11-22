@@ -89,14 +89,22 @@ export function cardSubmitLine(title, value, summary = '') {
  * own (ui.css "voice materials"), so a card's host is passed; the document root otherwise.
  */
 export function cardThemeTokens(doc = globalThis.document, material = doc?.documentElement) {
-    const candidate = globalThis.ouroTheme?.theme || doc?.documentElement?.dataset?.theme;
-    const name = candidate === 'light' ? 'light' : 'dark';
-    const computed = material && globalThis.getComputedStyle ? globalThis.getComputedStyle(material) : null;
-    const values = Object.entries(THEME_TOKENS).map(([own, host]) => {
-        const value = String(computed?.getPropertyValue(host) || '').trim().replace(/[<>{};]/g, '');
-        return value ? `${own}: ${value};` : '';
-    }).join(' ');
+    const { name, tokens } = cardThemeValues(doc, material);
+    const values = Object.keys(THEME_TOKENS).map((own) => (tokens[own] ? `${own}: ${tokens[own]};` : '')).join(' ');
     return { name, css: `:root { color-scheme: ${name}; ${values} } html { background: transparent; color: var(--ouro-text); font-family: var(--ouro-font, system-ui, sans-serif); }` };
+}
+
+/** The same theme as values, `{name, tokens}` (each present `--ouro-*` value of `material`), for a frame that is told
+ * them by message and applies them itself (Beautiful Context, `context_report_host.js`). */
+export function cardThemeValues(doc = globalThis.document, material = doc?.documentElement) {
+    const candidate = globalThis.ouroTheme?.theme || doc?.documentElement?.dataset?.theme;
+    const computed = material && globalThis.getComputedStyle ? globalThis.getComputedStyle(material) : null;
+    const tokens = {};
+    for (const [own, host] of Object.entries(THEME_TOKENS)) {
+        const value = String(computed?.getPropertyValue(host) || '').trim().replace(/[<>{};]/g, '');
+        if (value) tokens[own] = value;
+    }
+    return { name: candidate === 'light' ? 'light' : 'dark', tokens };
 }
 
 // The frame side of the bridge. `saved` is the state this card kept in this tab (JSON text or null).

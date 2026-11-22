@@ -15,6 +15,7 @@ The same rows are the source of a memory page's host stamp (``stamp_facts``,
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import uuid
 from collections import Counter
@@ -60,10 +61,11 @@ def _witness(row: dict) -> dict:
             "artifact_bundle": row.get("artifact_bundle")}
 
 
-def _files_ready(root: Any, tid: str, row: dict) -> bool:
+def _files_ready(root: Any, tid: str, stored: dict, *, task: dict | None = None) -> bool:
     from ouroboros.headless import terminal_task_files_ready
 
-    return terminal_task_files_ready(pathlib.Path(root), {**row, "id": tid}, row)
+    # Captured task context can locate a drive; it cannot supply result or capture evidence.
+    return terminal_task_files_ready(pathlib.Path(root), {**(task or {}), **stored, "id": tid}, stored)
 
 
 def _open(row: dict) -> bool:
@@ -88,32 +90,161 @@ def _publication_lock(root: Any, tid: str):
 
 
 def _delivery_disposition(root: Any, tid: str) -> dict:
-    """What the outbox says about this task's terminal message (owner Fork 2, 20:48).
-
-    ``state`` is ``owed`` while any terminal message (model final, Stop/reap
-    salvage receipt, cascade digest) is still owed — debt outranks every older or
-    technical receipt — ``exhausted`` when the host gave up delivering one,
-    ``unknown`` when the delivery registry cannot be read, ``delivered`` with
-    proven bytes, else ``""`` (no terminal message known). Only ``owed`` holds the
-    Done card; unknown and exhausted are SHOWN on it, never hidden. Nothing here is
-    recomputed from stored prose, and no read failure turns into a silent hold.
-    A settle that runs between the terminal row and the send sees ``owed`` and waits;
-    the delivery acknowledgement re-enters ``settle_terminal_projection``
-    (``events_chat_delivery._handoff_delivered_review``), so the held card follows its
-    answer without a sweep.
+    """One outbox read for a publication decision. Its task-wide state gates
+    publication while ANY terminal message is owed. Its individual receipts
+    identify which answer a reader can describe. The send acknowledgement
+    re-enters settlement, so a held card follows its answer without a sweep.
     """
     from supervisor.terminal_delivery import terminal_answer_receipts
 
     receipts = terminal_answer_receipts(root, tid)
-    if receipts.get("registry") == "unreadable":
-        return {"state": "unknown"}
-    state = str(receipts.get("state") or "")
-    disposition = {"state": state if state in {"owed", "exhausted", "delivered"} else ""}
-    if state == "exhausted":
-        row = max(receipts["exhausted"], key=lambda item: str(item.get("exhausted_at") or ""))
-        disposition["delivery_id"] = str(row.get("delivery_id") or "")
-        disposition["preserved_path"] = str(row.get("preserved_path") or "")
-    return disposition
+    if receipts.get("state") == "unknown" and receipts.get("registry") != "unreadable":
+        return {**receipts, "state": ""}  # no terminal message known
+    return receipts
+
+
+def _current_answer(root, row, attempt):
+    """The adopted or Stop receipt, or the ordinary outbox key and the exact bytes it names."""
+    from supervisor.terminal_delivery import delivery_id_for
+
+    recovery = row.get("finalization_recovery")
+    if row.get("reason_code") == "finalization_incomplete" and isinstance(recovery, dict):
+        if recovery.get("attempt") is None or attempt is None or recovery["attempt"] == attempt:
+            return recovery.get("delivery_id"), None
+        return None, None
+    cancel = row.get("cancel_receipt")
+    origin = row.get("cancel_origin")
+    if isinstance(cancel, dict) and cancel.get("settled_status") == row.get("status") and isinstance(origin, dict):
+        episode = origin.get("request_id")
+        if episode and cancel.get("delivery_id") in {f"{kind}:{row['task_id']}:{episode}" for kind in ("cancel", "cascade")}:
+            return cancel["delivery_id"], None
+    if row.get("wake_silent") is True:
+        return None, None  # the internal answer and a host notice sent in its place are different subjects
+    if row.get("status") != "completed" and row.get("terminal_origin") != "model_final":
+        return None, None  # a supervisor's framed Stop/reap receipt can hash different bytes from the stored result
+    text = row.get("result")
+    if text is None and row.get("_result_text_present") and row.get("_history_write_seq") is not None:
+        from ouroboros.task_store import result_text_at
+
+        text = result_text_at(root, row["task_id"], row["_history_write_seq"])
+    return (delivery_id_for(row["task_id"], text), text) if isinstance(text, str) and text else (None, None)
+
+
+def _answer_copy(root, tid, receipt, exhausted, text) -> str | None:
+    """Return the recorded path, or None when a reused filename cannot be verified against this answer."""
+    from ouroboros.confined_files import open_confined_file
+    from ouroboros.observability import preserved_salvage_path
+
+    path = receipt.get("preserved_path")
+    if not isinstance(path, str):
+        return None
+    if not path or (not path.endswith(".undelivered.txt") and not any(
+            other is not receipt and other.get("preserved_path") == path for other in exhausted)):
+        return path
+    try:
+        if root is None or not isinstance(text, str) or path != preserved_salvage_path(root, f"{tid}.undelivered"):
+            return None
+        expected = text.replace("\n", os.linesep).encode("utf-8")  # preserve_salvaged_output uses write_text
+        saved, stat = open_confined_file(root, pathlib.Path(path).relative_to(pathlib.Path(root).resolve()).parts)
+        with saved:
+            return path if stat.st_size == len(expected) and saved.read(len(expected) + 1) == expected else None
+    except (OSError, ValueError):
+        return None
+
+
+def _matches_answer(receipt, answer_id, chat, attempt):
+    """False for a known different subject, None where the binding is incomplete."""
+    from ouroboros.project_completion_facts import recorded_attempt
+    from ouroboros.store_hot_facts import admitted_chat
+
+    other_attempt = recorded_attempt(receipt)
+    if other_attempt is None and isinstance(receipt.get("progress_meta"), dict):
+        other_attempt = recorded_attempt(receipt["progress_meta"])
+    did, destination = receipt.get("delivery_id"), admitted_chat(receipt.get("chat_id"))
+    if ((answer_id and did and did != answer_id)
+            or (destination and chat is not None and destination != str(chat))
+            or (other_attempt is not None and attempt is not None and other_attempt != attempt)):
+        return False
+    if (not answer_id or not did or chat is None or not destination
+            or (other_attempt is not None and attempt is None)):
+        return None
+    return True
+
+
+def current_answer_delivery(root, row, recorded=None, *, receipts=None, bind_result=True):
+    """The current answer's delivery at its source chat, from this read and any retained evidence."""
+    from ouroboros.project_completion_facts import projected_delivery, recorded_attempt
+    from ouroboros.store_hot_facts import admitted_chat
+    from supervisor.terminal_delivery import lineage_chat_id
+
+    tid = str(row.get("task_id") or "")
+    if receipts is None:
+        receipts = _delivery_disposition(root, tid) if root is not None else {}
+    retained = [fact for fact in (recorded, row.get("terminal_delivery"), projected_delivery(row))
+                if isinstance(fact, dict) and fact]
+    attempt = recorded_attempt(row)
+    recovery = row.get("finalization_recovery")
+    cancel = row.get("cancel_receipt")
+    sent = isinstance(cancel, dict) and cancel.get("delivered_chat_id") is not None
+    if (row.get("reason_code") == "finalization_incomplete" and isinstance(recovery, dict)
+            and (attempt is None or recovery.get("attempt") in (None, attempt))):
+        if recovery.get("answer") in ("exhausted", "delivered"):
+            retained.append({"state": recovery["answer"], "delivery_id": recovery.get("delivery_id"),
+                             "chat_id": recovery.get("chat_id"), "task_attempt": recovery.get("attempt")})
+        elif recovery.get("answer") == "unreadable":
+            retained.append({"state": "unknown"})
+    unknown = receipts.get("registry") == "unreadable"
+    exhausted = receipts.get("exhausted", ())
+    if not (exhausted or receipts.get("owed") or receipts.get("delivered") or retained or sent):
+        return {"state": "unknown"} if unknown else {}
+    try:
+        if bind_result:
+            answer_id, text = _current_answer(root, row, attempt)
+        else:  # a legacy Main pointer can identify its source only by its own retained receipt
+            answer_id = recorded.get("delivery_id") if isinstance(recorded, dict) else None
+            text = None
+    except Exception:
+        log.debug("Current answer identity unavailable for %s", tid, exc_info=True)
+        answer_id, text = None, None
+    bound = lineage_chat_id(root, row, tid) if root is not None else None
+    source = admitted_chat(row.get("chat_id"))
+    chat = bound or (int(source) if source else None)  # lineage_chat_id uses 0 for an absent address too
+    if sent and _matches_answer({**cancel, "chat_id": cancel["delivered_chat_id"]}, answer_id, chat, attempt) is True:
+        return {"state": "delivered"}  # the sender stamped this episode at this destination
+    unbound = False
+    different_ids = set()
+    for state in ("owed", "exhausted", "delivered"):
+        for receipt in receipts.get(state, ()):
+            match = _matches_answer(receipt, answer_id, chat, attempt)
+            if match is True:
+                if state == "exhausted":
+                    return {"state": state, "delivery_id": receipt["delivery_id"], "chat_id": chat,
+                            "preserved_path": _answer_copy(root, tid, receipt, exhausted, receipt.get("text"))}
+                return {"state": state}
+            unbound |= match is None and state == "exhausted"
+            if match is False and receipt.get("delivery_id"):
+                different_ids.add(receipt["delivery_id"])
+
+    for fact in retained:
+        match = _matches_answer(fact, answer_id, chat, attempt)
+        did = fact.get("delivery_id")
+        if match is False or (isinstance(did, str) and did in different_ids):
+            continue
+        state = fact.get("state")
+        same_revision = (bind_result and not did and attempt is not None and chat is not None and fact.get("revision")
+                         and fact["revision"] == row.get("updated_at")
+                         and (isinstance(row.get("result"), str) or row.get("_history_write_seq") is not None))
+        if fact.get("scope") != "task" and (match is True or same_revision):
+            if state == "exhausted":
+                return {**{key: fact[key] for key in ("state", "delivery_id", "chat_id") if fact.get(key) is not None},
+                        "preserved_path": _answer_copy(root, tid, fact, exhausted, text)}
+            if (state == "delivered" and match is True) or (state == "owed" and not unknown):
+                return {"state": state}
+        unbound |= state == "exhausted"
+        unknown |= state == "unknown"
+    if unbound:
+        return {"state": "exhausted", "scope": "task"}
+    return {"state": "unknown"} if unknown else {}
 
 
 def _prepare(root: Any, tid: str, task: dict, event: dict) -> tuple[dict, bool]:
@@ -181,7 +312,7 @@ def completion_notice(record: dict) -> dict:
     delivery = record.get("terminal_delivery") or {}
     detail = dialogue._join_cause_clauses([
         dialogue._completion_verdict(record, {}, include_review_details=False),
-        dialogue.terminal_delivery_clause(delivery.get("state", ""), delivery.get("preserved_path", "")),
+        dialogue.terminal_delivery_clause(delivery),
     ])
     full, phase = dialogue._completion_verdict(record, {}), dialogue.outcome_phase(record, {})
     neutral = (not detail and bool(full) and execution.get("status") == "ok"
@@ -191,7 +322,7 @@ def completion_notice(record: dict) -> dict:
             **({"review_gate": gate} if gate else {})}
 
 
-def completion_event_view(root: Any, event: dict, record: dict) -> dict:
+def completion_event_view(root: Any, event: dict, record: dict, *, receipts=None) -> dict:
     """Add transport metadata to a pre-upgrade Main event, never rewrite its bytes.
 
     Both canonical readiness and the outbox can replay an old event. Its loaded
@@ -203,11 +334,20 @@ def completion_event_view(root: Any, event: dict, record: dict) -> dict:
             or isinstance(meta.get("completion_notice"), dict) or not record):
         return event
     from ouroboros.project_dialogue import _completion_excerpt
+    from ouroboros.project_completion_facts import matches_result_attempt, recorded_attempt
 
     try:
-        # Source delivery is independent registry truth, not a field of the result.
-        source_delivery = _delivery_disposition(root, str(event.get("task_id") or ""))
+        tid = event.get("task_id")
+        if not tid or record.get("task_id", tid) != tid or not matches_result_attempt(meta, recorded_attempt(record)):
+            return event
+        answer = meta.get("completion_answer")
+        if isinstance(answer, str) and (not isinstance(record.get("result"), str) or record["result"].strip() != answer):
+            return event  # the retained Main answer and this result are different revisions
         salvage = _completion_excerpt(record, chat_id=event.get("chat_id"), salvage_only=True)
+        if salvage and salvage not in str(event.get("text") or ""):
+            return event  # an older Main copy cannot acquire a later result's excerpt
+        source_delivery = current_answer_delivery(root, {**record, "task_id": tid}, meta.get("terminal_delivery"),
+            receipts=receipts, bind_result=isinstance(answer, str) and record.get("result") == answer)
         return {**event, "progress_meta": {**meta, "completion_notice": {
             **completion_notice({**record, "terminal_delivery": source_delivery}), "salvage": salvage}}}
     except Exception:
@@ -218,16 +358,17 @@ def completion_event_view(root: Any, event: dict, record: dict) -> dict:
 def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dict | None = None) -> dict:
     from ouroboros import project_dialogue as dialogue
     from ouroboros.project_facts import resolve_project_id
-    from ouroboros.task_finalization import quiet_finish, work_label
+    from ouroboros.task_finalization import quiet_finish, schedule_report_fields, work_label
 
+    report = schedule_report_fields(row)
     quiet = quiet_finish(row)
     lineage = _lineage(tid, row)
     is_root = lineage["is_root_task"]
     role = str(row.get("role") or ("root" if is_root else "child"))
     parent = str(lineage["parent_task_id"] or "")
     chat_id = int(ready.get("chat_id", row.get("chat_id", event.get("chat_id", 0))) or 0)
-    delivery = {key: str(value or "") for key, value in (delivery or {}).items()
-                if key in ("state", "delivery_id", "preserved_path")}
+    delivery = {key: value for key, value in (delivery or {}).items()
+                if key in ("state", "delivery_id", "chat_id", "preserved_path", "scope")}
     if delivery.get("state") in {"exhausted", "unknown"}:
         # Honest delivery state (owner 20:48): an exhausted or unknown delivery is a
         # ROW-LEVEL warning — the same objective.warning the browser reads for its
@@ -248,7 +389,7 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
             else f"{outcome}. {role} (child {tid} of {parent or 'unknown'}).")
     verdict = dialogue._join_cause_clauses([
         dialogue._completion_verdict(row, event),
-        dialogue.terminal_delivery_clause(delivery.get("state", ""), delivery.get("preserved_path", "")),
+        dialogue.terminal_delivery_clause(delivery),
     ])
     notice = completion_notice({**event, **row, "terminal_delivery": delivery})
     excerpt = dialogue._completion_excerpt(row, chat_id=chat_id, salvage_only=True)
@@ -260,13 +401,16 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
         "terminal_time": ready.get("terminal_time") or terminal_time_fact(row),
         "direction": "system", "type": "task_summary",
         **presence_provenance_fields(row),  # a presence room labels its terminal row like every other row
+        **report,
         "summary_id": f"task-terminal:{tid}",
         "summary_kind": "terminal_root_projection" if is_root else "terminal_result_projection",
         "task_id": tid, "parent_task_id": parent, "root_task_id": lineage["root_task_id"],
         "project_id": resolve_project_id(row), "chat_id": chat_id,
         "delegation_role": str(row.get("delegation_role") or ""), "role": role,
         "status": row["status"], "outcome": outcome, "outcome_phase": phase, "outcome_final": True,
-        "wake_silent": row.get("wake_silent") is True, "quiet_effective": quiet, **{key: row[key] for key in ("suggested_name", "wake_summary", "fold_read", "schedule_name") if row.get(key)},
+        "wake_silent": row.get("wake_silent") is True, "quiet_effective": quiet,
+        **{key: row[key] for key in ("suggested_name", "wake_summary", "fold_read", "schedule_name")
+           if row.get(key) and not (report and key == "wake_summary")},
         "outcome_authority": "canonical_task_result_after_finalization",
         # Memory stamps copy the recorded objective; readers interpret it using answer provenance.
         "outcome_axes": row.get("outcome_axes") or {}, "reason_code": str(row.get("reason_code") or ""),
@@ -314,29 +458,31 @@ def _already_in_chat(root: Any, row: dict, *, since_ts: str = "") -> dict | None
 
 
 def _append_project(root: Any, tid: str, task: dict, event: dict, *,
-                    prepare: bool = True, minted_now: bool = False) -> bool:
+                    stored: dict | None = None, minted_now: bool = False, receipts: dict | None = None) -> bool:
     from ouroboros import project_dialogue as dialogue
 
-    if prepare:
-        stored, minted = _prepare(root, tid, task, event)
-        minted_now = minted_now or minted
-    else:
-        stored = load_task_result(root, tid, strict=True) or {}
+    if stored is None:
+        stored, minted_now = _prepare(root, tid, task, event)
     if not stored or not _settled(stored):
         return False
-    effective = {**task, **stored}
+    effective = {**task, **stored, "task_id": tid}
     is_root = _lineage(tid, effective)["is_root_task"]
     ready = stored.get("canonical_terminal_projection_ready") or {}
     marker = stored.get("canonical_terminal_projection")
     if isinstance(marker, dict) and (not ready or marker.get("token") == ready.get("token")):
         return False
-    # The Done card follows the answer: the outbox's own debt holds it (owner Fork 2).
-    delivery = _delivery_disposition(root, tid) if is_root else {}
-    if is_root and (not ready or _open(stored) or delivery.get("state") == "owed"
-                    or not _files_ready(root, tid, effective)):
-        return False
-    row = _project_row(tid, effective, {key: event[key] for key in ("ts", "chat_id") if key in event}, ready,
-                       delivery=delivery)
+    delivery = {}
+    if is_root:
+        if not ready:
+            return False
+        if receipts is None:
+            cause, receipts = _publication_inputs(root, tid, task, stored)
+            if cause:
+                return False
+        delivery = current_answer_delivery(root, stored, receipts=receipts)
+    clock = ready.get("terminal_time") or terminal_time_fact(stored)
+    row = _project_row(tid, effective, {key: event[key] for key in ("ts", "chat_id") if key in event},
+                       {**ready, "terminal_time": clock}, delivery=delivery)
     appended = False
     # A readiness minted in this very call has no row yet: nothing to scan for.
     existing_row = None if minted_now or not is_root else _already_in_chat(root, row)
@@ -356,6 +502,7 @@ def _append_project(root: Any, tid: str, task: dict, event: dict, *,
             "summary_id": row["summary_id"], "summary_kind": row["summary_kind"],
             "written_at": row["ts"], "chat_id": row["chat_id"],
             "attempt": _attempt(stored), **({"token": ready["token"]} if ready.get("token") else {}),
+            **({"terminal_delivery": row["terminal_delivery"]} if row.get("terminal_delivery") else {}),
         }}
 
     write_task_result(root, tid, stored["status"], strict_existing_dict=True, _field_projector=receipt)
@@ -377,7 +524,7 @@ def append_terminal_projection(root: Any, tid: str, task: dict, event: dict, *, 
         return _append_project(root, tid, task or {}, event or {})
 
 
-def retain_main_delivery(root: Any, tid: str, event: dict) -> dict:
+def retain_main_delivery(root: Any, tid: str, event: dict, *, receipts=None) -> dict:
     """Keep the exact Main publication and its address in canonical readiness.
 
     The bounded transport outbox is a cache. This existing result obligation
@@ -389,7 +536,7 @@ def retain_main_delivery(root: Any, tid: str, event: dict) -> dict:
         return event  # legacy caller; normal terminal settlement has readiness
     saved = ready.get("main_delivery")
     if isinstance(saved, dict) and isinstance(saved.get("event"), dict):
-        return completion_event_view(root, dict(saved["event"]), stored)
+        return completion_event_view(root, dict(saved["event"]), stored, receipts=receipts)
     retained = {**event, "ts": event.get("ts") or utc_now_iso(), "terminal_projection_token": ready["token"]}
 
     def retain(current, _patch):
@@ -517,16 +664,16 @@ def clear_terminal_projection_obligation(root: Any, tid: str, expected: dict, di
     return cleared
 
 
-def _deferral(root: Any, tid: str, task: dict | None, stored: dict) -> str:
-    """What keeps a recorded readiness from publishing now, '' when nothing does: the
-    canonical row's own facts first, the delivery registry only once they all hold."""
+def _publication_inputs(root: Any, tid: str, task: dict | None, stored: dict) -> tuple[str, dict]:
+    """Check readiness before reading the outbox. Reuse those receipts for the Project row."""
     if _open(stored):
-        return "synthesis_open"
+        return "synthesis_open", {}
     if not _settled(stored):
-        return "not_settled"
-    if not _files_ready(root, tid, {**(task or {}), **stored}):
-        return "child_files"
-    return "terminal_delivery" if _delivery_disposition(root, tid).get("state") == "owed" else ""
+        return "not_settled", {}
+    if not _files_ready(root, tid, stored, task=task):
+        return "child_files", {}
+    receipts = _delivery_disposition(root, tid)
+    return ("terminal_delivery" if receipts.get("state") == "owed" else ""), receipts
 
 
 def delivery_registry_stamp(root: Any) -> list | None:
@@ -577,26 +724,27 @@ def settle_terminal_projection(drive_root: Any, task_id: str, *, task: dict | No
             else:
                 stored, minted_now = load_task_result(drive_root, tid, strict=True) or {}, False
                 require_task_roots({**(task or {}), **stored})
-            if (not isinstance(stored.get("canonical_terminal_projection_ready"), dict)
-                    or is_reconciled_presence_placeholder(stored)):  # readiness an earlier release recorded
+            ready = stored.get("canonical_terminal_projection_ready")
+            if not isinstance(ready, dict) or is_reconciled_presence_placeholder(stored):
                 waits["on"] = "nothing_owed"
                 return SETTLEMENT_NONE
-            cause = _deferral(drive_root, tid, task, stored)
+            marker = stored.get("canonical_terminal_projection")
+            if not isinstance(marker, dict) or marker.get("token") != ready.get("token"):
+                cause, receipts = _publication_inputs(drive_root, tid, task, stored)
+                if cause:
+                    waits["on"] = cause
+                    return SETTLEMENT_DEFERRED
+                _append_project(drive_root, tid, task or {}, event or {}, stored=stored,
+                                minted_now=minted_now, receipts=receipts)
+                # Project IO may have advanced the answer or introduced new debt.
+                stored = load_task_result(drive_root, tid, strict=True) or {}
+                ready = stored.get("canonical_terminal_projection_ready")
+                marker = stored.get("canonical_terminal_projection")
+                if not isinstance(ready, dict) or not isinstance(marker, dict) or marker.get("token") != ready.get("token"):
+                    return SETTLEMENT_DEFERRED
+            cause, receipts = _publication_inputs(drive_root, tid, task, stored)
             if cause:
                 waits["on"] = cause
-                return SETTLEMENT_DEFERRED
-            _append_project(drive_root, tid, task or {}, event or {}, prepare=False, minted_now=minted_now)
-            # IO may have advanced canonical state. Render Main from the NEW
-            # result, never the task_done snapshot passed to this continuation.
-            stored = load_task_result(drive_root, tid, strict=True) or {}
-            ready = stored.get("canonical_terminal_projection_ready")
-            marker = stored.get("canonical_terminal_projection")
-            source_delivery = _delivery_disposition(drive_root, tid)
-            if (not isinstance(ready, dict) or not isinstance(marker, dict)
-                    or marker.get("token") != ready.get("token") or _open(stored)
-                    or not _settled(stored)
-                    or source_delivery.get("state") == "owed"
-                    or not _files_ready(drive_root, tid, {**(task or {}), **stored})):
                 return SETTLEMENT_DEFERRED
             effective = {**(task or {}), **stored, "id": tid}
             done = {**(event or {}), **stored, "ts": ready["task_done_ts"], "chat_id": ready["chat_id"]}
@@ -607,7 +755,7 @@ def settle_terminal_projection(drive_root: Any, task_id: str, *, task: dict | No
             else:
                 disposition, _queued = dialogue.project_completion_delivery_outcome(
                     drive_root, done, tid, effective, stored, done, event_queue=event_queue,
-                    source_delivery=source_delivery)
+                    receipts=receipts)
             if clear_terminal_projection_obligation(drive_root, tid, stored, disposition):
                 return SETTLEMENT_SETTLED
             # Owed remains discoverable until the strict sender acknowledges it.

@@ -45,11 +45,11 @@ const RECONNECT_WORDS = {
     go_away: 'The voice service is moving the session',
     transport_lost: 'The voice connection dropped',
 };
-// Feature configuration lives in this skill's own Settings page (its extension settings).
+// The old Settings address leads to the Calls form over Extensions › Skills.
 // Engine keys are the secrets the call skills request (Settings › Accounts and keys), not provider accounts.
 // The spending limit is a Dashboard tab: a Settings path may name it (`dashboard:costs`).
 const KEY = { path: 'accounts' };
-const MODEL = { path: 'skill/live_conversation' };
+const MODEL = { path: 'skill/live_conversation', label: 'Open Calls' };
 const BUDGET = { path: 'dashboard:costs' };
 const SWITCH = MODEL;
 const SPENDING_LIMIT = { words: 'The spending limit is reached', action: 'settings', settings: BUDGET };
@@ -73,7 +73,7 @@ const ENDINGS = {
     missing_credential: NO_KEY,
     credential: NO_KEY,
     missing_credential_google: NO_KEY,
-    calls_disabled: { words: 'Calls are off — turn on Calls (beta) in Settings', action: 'settings', settings: SWITCH },
+    calls_disabled: { words: 'Calls are off — turn on Calls (beta) in Extensions › Skills', action: 'settings', settings: SWITCH },
     authentication: { words: 'The voice service refused the key', action: 'settings', settings: KEY },
     rate_limit: { words: 'The voice service says: “{detail}”', bare: 'The voice service asked to slow down', action: 'retry' },
     provider_closed: { words: 'The voice service closed the call: “{detail}”', bare: 'The voice service closed the call', action: 'retry' },

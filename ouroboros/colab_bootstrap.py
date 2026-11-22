@@ -18,7 +18,8 @@ from ouroboros.config import (
     SETTINGS_DEFAULTS, defaults_for_settings_document, normalize_settings_raw, serialize_settings,
 )
 from ouroboros.settings_scales import (
-    EFFORT_FORMAT_KEY, MODEL_CAP_FORMAT_KEY, OWNER_CAP_FORMAT_KEY, OWNER_CAP_KEY, normalize_effort_document, optional_bound_value,
+    EFFORT_FORMAT_KEY, MODEL_CAP_FORMAT_KEY, OWNER_CAP_FORMAT_KEY, OWNER_CAP_KEY, SUBAGENT_CAP_FORMAT_KEY,
+    document_optional_value, normalize_effort_document, optional_bound_value,
 )
 from ouroboros.update_channels import get_managed_update_fetch_timeout_sec, normalize_update_channel
 from ouroboros.utils import atomic_write_json, write_text_atomic
@@ -139,6 +140,7 @@ def build_colab_settings(
     total_budget: Optional[float] = None,
     runtime_mode: Optional[str] = None,
     max_workers: Optional[int] = None,
+    max_active_subagents_per_root: Optional[Any] = None,
     models: Dict[str, str] | None = None,
     network_password: str = "",
     existing: Optional[Dict[str, Any]] = None,
@@ -150,7 +152,7 @@ def build_colab_settings(
     the defaults FIRST, so prior owner choices that the Colab launch does not set
     explicitly — a pinned ``TELEGRAM_CHAT_ID``, tweaked model slots, an auto-grant
     preference — survive instead of being reset to defaults. The launch's secrets,
-    host and repo then win. Budget, runtime mode and workers are launch knobs
+    host and repo then win. Budget, runtime mode, workers and the per-root subagent number are launch knobs
     only when given (``None`` is "not given"): an explicit value wins, even one equal to
     the first-launch value, else the Drive document's own value stays, else a document
     that holds none takes the first-launch 200 / advanced and no worker cap. A document
@@ -179,7 +181,8 @@ def build_colab_settings(
     # former key is lost, then written back to Drive as the owner's choice. Private
     # sentinel keys stay out of the document.
     loaded = {k: v for k, v in normalize_settings_raw(document).items()
-              if not str(k).startswith("_") or k in (EFFORT_FORMAT_KEY, OWNER_CAP_FORMAT_KEY, MODEL_CAP_FORMAT_KEY)} if document else {}
+              if not str(k).startswith("_") or k in (EFFORT_FORMAT_KEY, OWNER_CAP_FORMAT_KEY, MODEL_CAP_FORMAT_KEY,
+                                                      SUBAGENT_CAP_FORMAT_KEY)} if document else {}
     if OWNER_CAP_FORMAT_KEY not in document and optional_bound_value(OWNER_CAP_KEY, document.get(OWNER_CAP_KEY)) == 1:
         loaded[OWNER_CAP_KEY] = ""  # Colab's own first-launch 1, read once as blank (migration A)
     settings.update(normalize_effort_document(loaded))
@@ -189,6 +192,9 @@ def build_colab_settings(
         ("TOTAL_BUDGET", None if total_budget is None else float(total_budget)),
         ("OUROBOROS_RUNTIME_MODE", runtime_mode),
         ("OUROBOROS_MAX_WORKERS", None if max_workers is None else int(max_workers)),
+        # Spelled as the settings document spells it: blank or "unlimited" is no number, a typo the finite 6.
+        ("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", None if max_active_subagents_per_root is None else
+         document_optional_value("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", max_active_subagents_per_root)),
     ):
         if explicit is not None:
             settings[key] = explicit

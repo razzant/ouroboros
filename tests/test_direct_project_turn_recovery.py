@@ -45,13 +45,19 @@ def _admit_project_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(
         send_chat_action=lambda *a, **k: None, broadcast=lambda *a, **k: None, push_log=lambda *a, **k: None))
+    from ouroboros.project_dialogue import build_owner_message_ref
+
     workers.open_repo_writer_admission()
     spare = install_lane_spare(workers, 90)
-    origin = {"chat_id": project["chat_id"], "client_message_id": "msg-2547",
-              "ts": "2026-10-31T12:00:00+00:00", "text_sha256": "0" * 64}
-    lane.handle_chat_direct(project["chat_id"], "Continue the room's work", task_metadata={
+    words = "Continue the room's work"
+    # The identity the owner door mints for these words (``message_ingress.record_inbound_message``, by value when
+    # its best-effort row is lost): the room's binder checks the text it is given against its checksum before the
+    # turn keeps its basis, so an artificial checksum would only test a refused bind.
+    origin = build_owner_message_ref(chat_id=project["chat_id"], client_message_id="msg-2547",
+                                     ts="2026-10-31T12:00:00+00:00", text=words)
+    lane.handle_chat_direct(project["chat_id"], words, task_metadata={
         "project_id": PID, "client_message_id": "msg-2547", "origin_message_ref": origin,
-        "origin_message_text": "Continue the room's work"})
+        "origin_message_text": words})
     [tid] = [task_id for task_id, meta in workers.RUNNING.items() if meta.get("lane") == LANE_CONVERSATION]
     assert spare.busy_task_id == tid, "the lane admitted the Project turn to its carrier"
     return project, SimpleNamespace(task_id=tid, spare=spare, workers=workers, task=None)
@@ -254,3 +260,28 @@ def test_a_parked_direct_project_turn_keeps_its_basis_through_the_queue_and_a_st
     [row] = [row for row in queue.PENDING if row["id"] == task["id"]]
     assert row["_project_admission"] == basis, row.get("_project_admission")
     assert not row["_project_admission"].get("legacy_basis"), "restore never recaptures the basis"
+
+
+@pytest.mark.parametrize("given", ["its_words", "no_words", "other_words"])
+def test_the_rooms_binder_keeps_an_ingress_identity_and_refuses_words_it_does_not_cover(tmp_path, given):
+    """The surviving direct-turn path at the guard itself (``projects_registry._validated_origin``): a same-room
+    origin the owner door minted binds under the room's basis with its words or none, keeping no copy; words its
+    checksum does not cover are refused before any binding or basis exists, never bound beside that identity."""
+    from ouroboros.project_admission import direct_turn_basis
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import bind_task_to_project, create_project, project_task_bindings
+
+    project = create_project(tmp_path, PID, name="Room 2547")
+    words = "Continue the room's work"
+    ref = build_owner_message_ref(chat_id=project["chat_id"], client_message_id="msg-2547",
+                                  ts="2026-10-31T12:00:00+00:00", text=words)
+    origin = {"ref": ref, **{"its_words": {"text": words}, "no_words": {}, "other_words": {"text": "Other words"}}[given]}
+    basis = direct_turn_basis(tmp_path, PID)
+    if given == "other_words":
+        with pytest.raises(ValueError, match="integrity check"):
+            bind_task_to_project(tmp_path, "turn-2547", PID, project["chat_id"], origin=origin, admission_basis=basis)
+        assert "turn-2547" not in project_task_bindings(tmp_path)
+        return
+    binding = bind_task_to_project(tmp_path, "turn-2547", PID, project["chat_id"], origin=origin, admission_basis=basis)
+    assert binding["source_ref"] == ref and "source_text" not in binding and "source_input" not in binding
+    assert project_task_bindings(tmp_path)["turn-2547"]["source_ref"] == ref

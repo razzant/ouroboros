@@ -52,7 +52,38 @@ def test_unknown_refusal_names_the_crosstask_read(tmp_path):
     assert (refusal.status, refusal.code) == ("error", "TOOL_REPORTED_FAILURE")
     out = json.loads(refusal.text)
     assert out["reason"] == "run_ownership_unknown"
-    assert "get_task_result" in out.get("hint", "")
+    # The kind is unknown here: the general pointer, as before.
+    assert out["hint"] == ("The run may belong to a different drive or the id may be mistyped; "
+                           "get_task_result(<task_id>) is the ownership-free way to read another task's "
+                           "delegated-run outcome.")
+
+
+def test_a_task_id_given_as_a_run_id_names_the_exact_read(tmp_path, monkeypatch):
+    """Both directions: a task this drive records is named with its ready read; a contract that withholds
+    get_task_result, and a store that cannot be read, keep the general pointer and the typed refusal."""
+    from ouroboros import task_status
+    from ouroboros.store import StoreBusy
+    from ouroboros.task_results import write_task_result
+
+    custody._CUSTODY.clear()
+    write_task_result(tmp_path, "kidtask01", "completed", result="done")
+    refusal, _ = _owned_run(_Ctx("task-a", tmp_path), "delegate_wait", "kidtask01")
+    out = json.loads(refusal.text)
+    assert out["reason"] == "run_ownership_unknown"
+    assert out["hint"] == ("That id names a task, not a delegated run: "
+                           "get_task_result(task_id='kidtask01') reads it.")
+    withheld = _Ctx("task-a", tmp_path)
+    withheld.task_metadata["disabled_tools"] = ["get_task_result"]
+    refusal, _ = _owned_run(withheld, "delegate_wait", "kidtask01")
+    assert json.loads(refusal.text)["hint"].startswith("The run may belong to a different drive")
+
+    def busy(*_args, **_kwargs):
+        raise StoreBusy("contention")
+
+    monkeypatch.setattr(task_status, "load_effective_task_result", busy)
+    refusal, _ = _owned_run(_Ctx("task-a", tmp_path), "delegate_cancel", "kidtask01")
+    out = json.loads(refusal.text)
+    assert out["reason"] == "run_ownership_unknown" and out["hint"].startswith("The run may belong")
 
 
 def test_settled_row_state_replays_into_terminal_state(tmp_path):

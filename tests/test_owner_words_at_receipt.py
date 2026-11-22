@@ -96,6 +96,35 @@ def _nanny(tmp_path):
     return ctx
 
 
+def test_carriage_uses_the_rooms_accepted_row_when_another_message_shares_its_id(tmp_path, monkeypatch):
+    from ouroboros import owner_relay
+    from tests import _dialogue as dialogue_test
+
+    first = {"direction": "in", "chat_id": 1, "client_message_id": "m-1", "text": "Add the chart",
+             "ts": "2026-11-09T10:00:00+00:00"}
+    second = {**first, "text": "Explain the legend", "ts": "2026-11-09T10:01:00+00:00"}
+    dialogue_test.seed(tmp_path, live={"chat": [first, second]})
+    dialogue_test.import_all(tmp_path)
+    captures = []
+
+    def capture(_drive, _work, quotes, **kw):
+        [quote] = quotes
+        captures.append((quote["text"], quote["source"]["address"], kw.get("went_to")))
+
+    monkeypatch.setattr(owner_relay, "carry_at_receipt", capture)
+    owner_relay.carry_row_at_receipt(tmp_path, "recipient", 1, "m-1")
+    owner_relay.carry_room_context(tmp_path, 1, "m-1", [{"task_id": "other"}], "recipient")
+    assert captures == []  # old deliveries know too little to associate either message
+    ref, words = owner_relay.owner_row_source(first)
+    owner_relay.carry_row_at_receipt(tmp_path, "recipient", 1, "m-1", source_ref=ref)
+    owner_relay.carry_room_context(tmp_path, 1, "m-1", [{"task_id": "other", "drive_root": str(tmp_path)}],
+                                  "recipient", source_ref=ref)
+    address = format_address(row_address(first))
+    assert captures == [(words, address, None), (words, address, "recipient")]
+    [carried] = _mail(tmp_path, "other")[f"relay:carry-context:{address}:other"]["owner_rows"]
+    assert carried["text"] == words and owner_relay.owner_row_address(carried) == address
+
+
 def _round_top(ctx, messages):
     from ouroboros.loop_round_limits import _drain_incoming_messages
 
@@ -270,7 +299,10 @@ def test_each_ingress_carries_at_receipt(tmp_path, monkeypatch):
     from tests.test_project_routing_v664 import _ctx as routing_ctx
     from tests.test_routing_root_snapshot import _Now, _root, _route
     from tests.test_steer_relay import _supervisor_ctx
+    from tests import _dialogue as dialogue_test
 
+    dialogue_test.seed(tmp_path, archives={"chat_20261108T000000.jsonl": [
+        {"chat_id": 777, "direction": "in", "ts": "2026-11-08T08:00:00Z", "text": "Old room notes"}]})
     room = create_project(tmp_path, "receipt-room")
     chat = int(room["chat_id"])
     running = {tid: {"task": _root(tid, chat_id=chat, project_id=room["id"], drive_root=str(tmp_path)), "started_at": 1.0}
@@ -288,12 +320,14 @@ def test_each_ingress_carries_at_receipt(tmp_path, monkeypatch):
     row = {"chat_id": chat, "direction": "in", "ts": "2026-11-09T10:01:00Z", "text": "and the charts?",
            "client_message_id": "m-2"}
     dialogue_store.append(tmp_path, "chat", row)
-    _route(ctx, "m-2", chat_id=chat)
+    assert dialogue_store.range_coverage(tmp_path, "chat")["pending"] == 1
+    _route(ctx, "m-2", chat_id=chat, row=row)
     address = format_address(row_address(row))
     assert "m-2:root-a" in _mail(tmp_path, "root-a")
     assert _mail(tmp_path, "root-a-helper")[f"relay:carry:{address}:root-a-helper"]["host_carried"] == {"went_to": ""}
     assert _mail(tmp_path, "root-b-helper")[f"relay:carry-context:{address}:root-b-helper"]["host_carried"] == {
         "went_to": "root-a"}
+    dialogue_test.import_all(tmp_path)
     # A tell_task quoting a Main row to an independent root: its helper holds the row at the steer.
     main_row = {"chat_id": 1, "direction": "in", "ts": "2026-11-09T10:02:00Z", "text": "Tell them: ship Friday",
                 "client_message_id": "m-3"}
@@ -308,6 +342,45 @@ def test_each_ingress_carries_at_receipt(tmp_path, monkeypatch):
     entry = _mail(tmp_path, "root-b-helper")[f"relay:carry:{main_address}:root-b-helper"]
     assert entry["host_carried"] == {"went_to": ""} and entry["owner_rows"][0]["text"] == main_row["text"]
     assert entry["source_task_id"] == "root-b"
+
+
+def test_unlogged_owner_followup_still_reaches_its_reader_without_an_address(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros import owner_relay, server_routing_context as routing
+    from ouroboros.dialogue_evidence import read_room_source
+    from ouroboros.projects_registry import create_project
+    from supervisor import queue as q
+    from tests.test_project_routing_v664 import _ctx as routing_ctx
+    from tests.test_routing_root_snapshot import _root, _route
+
+    room = create_project(tmp_path, "receipt-room")
+    chat, task_id = room["chat_id"], "reader"
+    task = _root(task_id, chat_id=chat, project_id=room["id"], drive_root=str(tmp_path))
+    ctx = routing_ctx(tmp_path, running={task_id: {"task": task, "started_at": 1.0}})
+    write_task_result(tmp_path, task_id, "running", delegation_role="root", root_task_id=task_id)
+    monkeypatch.setattr(q, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(routing, "_recent_root_results", lambda *_a: ([], {}))
+    source_reads, receipts = [], []
+    monkeypatch.setattr(owner_relay, "_delivery_source", lambda *a, **kw: source_reads.append(a))
+    bridge = SimpleNamespace(send_routing_ack=lambda _room, **receipt: receipts.append(receipt))
+
+    _route(ctx, "unlogged-followup", chat_id=chat, bridge=bridge)
+
+    [mail] = _mail(tmp_path, task_id).values()
+    assert mail["text"] == "how is it going?" and mail["origin_suppressed"] is True
+    assert "origin_message_ref" not in mail
+    [receipt] = receipts
+    assert receipt["status"] == "delivered" and receipt["client_message_id"] == ""
+    assert "source_row_address" not in receipt
+    source = read_room_source(tmp_path, chat, task_id=task_id)
+    [delivery] = [row for row in source["rows"] if row["stream"] == "mailbox"]
+    assert delivery["text"] == mail["text"] and "row_address" not in delivery
+    reader = _ctx(tmp_path, task_id)
+    reader.current_chat_id, reader.task_metadata = chat, {"root_task_id": task_id}
+    messages = [{"role": "user", "content": "your assignment"}]
+    _round_top(reader, messages)
+    assert mail["text"] in _said(messages) and not getattr(reader, "_held_owner_messages", None)
+    assert "source_row_address" not in reader.last_owner_delivery and source_reads == []
 
 
 @pytest.mark.parametrize("receipt_before_body", [False, True])
