@@ -21,11 +21,11 @@ Methods over 150 lines or eight parameters are decomposition signals, not gates
 (CHECKLISTS item 11(c); BIBLE P7). Runtime function totals are descriptive, with no
 aggregate ceiling: a repository-wide count penalizes useful decomposition.
 
-Enforcement: CI's `size_ratchet` lane (ARCHITECTURE §8) compares a PR's base or a push's
-`before`; only an empty, all-zero or unresolvable base uses HEAD's parent alone, so local
-qualification names the contribution base. Local default lanes skip it; readiness/health
-warn; the diff pulse states growth (tests' too) and a split's shape (BIBLE P3;
-ARCHITECTURE §6 "Commit preflight").
+Enforcement: CI's `size_ratchet` lane (ARCHITECTURE §8) compares a post-merge window's
+base; a manual or tag run without it reads HEAD's parent (a merge: only its own changes),
+so local qualification names the contribution base. Local default lanes skip it;
+readiness/health warn; the diff pulse states growth (tests' too) and a split's shape
+(BIBLE P3; ARCHITECTURE §6 "Commit preflight").
 
 ### Paying down a size cap
 
