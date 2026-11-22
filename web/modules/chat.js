@@ -856,7 +856,7 @@ export function createChatInstance({
         btn.addEventListener('click', (event) => {
             event.stopPropagation();
             openCardControls(btn, record, cardControls(workState, record.groupId).work, { activity: currentActivity(record),
-                stop: (action) => cancelRunFromCard(record, action), afterAction: reread });
+                stop: (action) => cancelRunFromCard(record, action), afterAction: refreshHeaderControlState });
         });
         actions.appendChild(btn);
         record.cancelRunBtn = btn;

@@ -492,13 +492,18 @@ def _since(row: Mapping[str, Any]) -> Optional[float]:
 def works_snapshot(drive_root: Any, owners: Iterable[Mapping[str, Any]], raw_facts: Mapping[str, Mapping[str, Any]],
                    *, complete: bool = True, bindings: Optional[Mapping[str, Any]] = None,
                    publication_roots: Optional[set] = None, publication_runs: Optional[dict] = None,
-                   questions: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
+                   questions: Iterable[Mapping[str, Any]] = (),
+                   verdicts: Optional[Mapping[str, Mapping[str, Any]]] = None) -> Dict[str, Any]:
     """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for ``/api/state``;
     ``bindings`` is the census's task-to-Project map (``_bound_room``); ``questions`` are Main's current questions
-    (``main_decisions``), which the owner's turn of each room counts as Main's pill does. Never raises."""
+    (``main_decisions``), which the owner's turn of each room counts as Main's pill does. ``verdicts`` is that same
+    measurement's answer for the owner actions (``main_decisions_snapshot``'s out-parameter): given, an action stands in
+    the room it proved (a work keeps its own home), never where the census's provisional address put it, and one it
+    could not prove is no turn anywhere and a ``works_gaps`` entry; without it the census rows decide, as before.
+    Never raises."""
     try:
         return _snapshot(drive_root, list(owners or ()), dict(raw_facts or {}), complete, dict(bindings or {}),
-                         publication_roots, list(questions or ()), publication_runs)
+                         publication_roots, list(questions or ()), publication_runs, verdicts)
     except Exception:
         log.debug("Work projection unavailable for /api/state", exc_info=True)
         return {"works": [], "rooms": {}, "work_summary": ws.roll_up_summary({}, [], complete=False),
@@ -531,7 +536,8 @@ def _bound_room(row: Mapping[str, Any], task_id: str, bindings: Mapping[str, Any
 
 def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
               complete: bool, bindings: Mapping[str, Any], publication_roots: Optional[set] = None,
-              questions: Iterable[Mapping[str, Any]] = (), publication_runs: Optional[dict] = None) -> Dict[str, Any]:
+              questions: Iterable[Mapping[str, Any]] = (), publication_runs: Optional[dict] = None,
+              verdicts: Optional[Mapping[str, Mapping[str, Any]]] = None) -> Dict[str, Any]:
     from ouroboros.store_hot_facts import snapshot
 
     obs = _Observations(drive_root)
@@ -542,7 +548,7 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
     try:
         with snapshot([(drive_root, task_id) for task_id in known | lookup_roots if task_id]):
             obs.prime_tail_roots(lookup_roots)
-            projected = _project(drive_root, owners, raw, complete, obs, bindings, questions, custody=custody)
+            projected = _project(drive_root, owners, raw, complete, obs, bindings, questions, verdicts, custody=custody)
     finally:
         if publication_roots is not None:
             publication_roots.update(obs.dependency_roots)
@@ -554,7 +560,8 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
 
 def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
              complete: bool, obs: _Observations, bindings: Mapping[str, Any],
-             questions: Iterable[Mapping[str, Any]] = (), *, custody=None) -> Dict[str, Any]:
+             questions: Iterable[Mapping[str, Any]] = (),
+             verdicts: Optional[Mapping[str, Mapping[str, Any]]] = None, *, custody=None) -> Dict[str, Any]:
     rows: Dict[str, Dict[str, Any]] = {}
     for row in owners:
         task_id = str(row.get("activity_id") or "")
@@ -618,6 +625,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
             # An accepted start no engine run answers yet: this work's Stop stays a recorded request.
             entry["unbound_start"] = True
     works: List[Dict[str, Any]] = []
+    moved: Dict[str, List[Dict[str, Any]]] = {}  # owner actions the measurement placed in a room not their work's
+    unconfirmed: List[str] = []  # tasks whose action address the measurement could not prove
     # The census rows' own names: what a sleep waits for is said by them, never by an id or a new read.
     names = {task_id: _first_name(facts) for task_id, facts in raw.items()}
     for work_id, entry in groups.items():
@@ -682,6 +691,9 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
             complete = False
             continue
         name = entry["name"] or _first_name(facts)
+        if verdicts is not None:  # the work keeps its home; where each of its owner actions stands is the measurement's
+            for member in members:
+                ws.settle_actions(member, str(room_row.get("chat_id") or 0), verdicts, moved, unconfirmed)
         work = ws.roll_up_work(work_id, members, episode=episode, name=name, room=room_row.get("chat_id"),
                                focus=(facts or {}).get("focus"), runs=entry["runs"], outcome=outcome,
                                gaps=[{"reason": "episode_record_unavailable", "task_id": root}
@@ -739,7 +751,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
     # or gap-marked row as settled (#3428).
     complete = complete and not obs.unverified
     # What waits for the owner is one set: a current question is its room's turn, in its work's when one holds it.
-    loose = ws.place_questions(works, questions)
+    loose = ws.place_actions(ws.place_questions(works, questions), moved)
+    obs.gaps.extend({"reason": "owner_action_unconfirmed", "task_id": task_id} for task_id in dict.fromkeys(unconfirmed))
     by_room: Dict[str, List[Dict[str, Any]]] = {}
     for work in works:
         by_room.setdefault(str(work.get("room") or 0), []).append(work)

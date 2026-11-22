@@ -283,15 +283,16 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     from ouroboros.gateway.main_decisions import main_decisions_snapshot
     from ouroboros.gateway.state_publication import map_revision, wire_bindings
     sent_bindings = wire_bindings(task_bindings)  # what a reader receives; the census below keeps the named map
+    verdicts = {}  # what this one measurement decided of each row's owner action (its address and availability)
     decisions = main_decisions_snapshot(drive_root, decision_owners, task_bindings,
                                        activities_complete=activity_availability["complete"],
-                                       bindings_complete=bindings_complete)
+                                       bindings_complete=bindings_complete, verdicts=verdicts)
     from ouroboros.gateway.work_projection import works_snapshot
     publication_roots = set()
     publication_runs = {}
     works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"],
                            bindings=task_bindings, publication_roots=publication_roots, publication_runs=publication_runs,
-                           questions=decisions["current_questions"])
+                           questions=decisions["current_questions"], verdicts=verdicts)
     # Registered-project facts (never raise): the compact sidebar list, and the
     # COMPLETE (uncapped, all-status) project chat_ids for the live WS fan-out
     # isolation SSOT — distinct from the capped/filtered sidebar list, so

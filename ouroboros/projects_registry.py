@@ -356,11 +356,7 @@ def all_task_project_bindings(drive_root: Any, *, strict: bool = False) -> Dict[
         for tid, row in bindings.items():
             if not isinstance(row, dict):
                 continue
-            pid = str(row.get("project_id") or "").strip()
-            try:
-                cid = int(row.get("project_chat_id") or 0)
-            except (TypeError, ValueError):
-                cid = 0
+            pid, cid = str(row.get("project_id") or "").strip(), _binding_chat(row)
             if pid and cid:
                 out[str(tid)] = {"project_id": pid, "chat_id": cid, "project_name": str(names.get(pid) or pid)}
     except Exception:
@@ -413,14 +409,16 @@ def project_binding_for_task(drive_root: Any, task_id: str, *, strict: bool = Fa
     return dict(row) if isinstance(row, dict) else None
 
 
-def project_chat_for_task(drive_root: Any, task_id: str) -> int:
-    row = project_binding_for_task(drive_root, task_id)
-    if not row:
-        return 0
+def _binding_chat(row: Any) -> int:
+    """The Project chat a binding row names; 0 when it names none or an unreadable one."""
     try:
-        return int(row.get("project_chat_id") or 0)
+        return int(row.get("project_chat_id") or 0) if isinstance(row, dict) else 0
     except (TypeError, ValueError):
         return 0
+
+
+def project_chat_for_task(drive_root: Any, task_id: str) -> int:
+    return _binding_chat(project_binding_for_task(drive_root, task_id))
 
 
 def project_id_for_task(drive_root: Any, task_id: str, *, strict: bool = False) -> str:
@@ -657,12 +655,13 @@ class RoomResolver:
     preserves the caller's address. Caller/store lineage is shared. Answers cache per
     bindings snapshot: conversion invalidates, commit does not; unavailable ancestors
     retry, absent ids read once per resolver. Strict publication uses fresh bindings
-    and propagates unreadable authority instead of pinning a guessed room."""
+    and propagates unreadable authority instead of pinning a guessed room. A strict caller's
+    one registry read (``reserved``, rows by id) answers Project membership, not a parse per task."""
 
-    __slots__ = ("root", "bindings", "answers", "misses", "_projects", "strict")
+    __slots__ = ("root", "bindings", "answers", "misses", "_projects", "strict", "reserved")
 
-    def __init__(self, drive_root: Any, *, strict: bool = False) -> None:
-        self.root, self.strict = drive_root, strict
+    def __init__(self, drive_root: Any, *, strict: bool = False, reserved: Optional[dict] = None) -> None:
+        self.root, self.strict, self.reserved = drive_root, strict, reserved if strict else None
         self.bindings = _load_bindings(drive_root, strict=strict)["bindings"]  # one ``stat`` per resolver
         key = str(_bindings_path(drive_root))
         cached = None if strict else _ROOM_ANSWERS.get(key)
@@ -672,7 +671,8 @@ class RoomResolver:
                 _ROOM_ANSWERS[key] = cached
         self.answers: Dict[str, int] = cached[1]
         self.misses: set = set()
-        self._projects: Optional[frozenset] = None
+        self._projects: Optional[frozenset] = (
+            None if self.reserved is None else frozenset(row["chat_id"] for row in self.reserved.values()) - {0})
 
     def _facts(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Cached or read facts; ``{}`` for a known miss; ``None`` when unavailable now."""
@@ -696,14 +696,12 @@ class RoomResolver:
     def _bound(self, task_id: str) -> int:
         row = project_binding_for_task(self.root, task_id, strict=self.strict, bindings_snapshot=self.bindings)
         if self.strict and row:
-            project = get_reserved_project(self.root, row["project_id"], strict=True)
+            project = (get_reserved_project(self.root, row["project_id"], strict=True) if self.reserved is None
+                       else self.reserved.get(row["project_id"]))
             if not project or type(project.get("chat_id")) is not int:
                 raise ValueError("project_source_unknown")
             return project["chat_id"]
-        try:
-            return int(row.get("project_chat_id") or 0) if isinstance(row, dict) else 0
-        except (TypeError, ValueError):
-            return 0
+        return _binding_chat(row)
 
     def __call__(self, task_id: Any, parent_task_id: Any = "", root_task_id: Any = "") -> int:
         tid = str(task_id or "").strip()

@@ -561,6 +561,52 @@ def test_one_question_is_counted_once_while_both_of_its_rooms_show_it():
     assert ws.roll_up_summary(rooms, [acting])["turn"] == 1 + 3
 
 
+def test_an_owner_action_stands_where_the_measurement_proved_it_and_is_said_once():
+    """``settle_actions``: the census row's action is a candidate; the measurement (``main_decisions`` verdicts) is its
+    one address and availability. Offered at the work's room it stays; at another room it leaves for that room; one
+    the measurement could not prove is no turn anywhere and is named; another room's own work, and what the
+    measurement never considered, keep the census's word. Questions are never placed here."""
+    resume = {"kind": "action", "task_id": "helper", "code": "after_restart"}
+    wait = {"kind": "action", "task_id": "digest", "wait_id": "w1", "code": "model_access"}
+    ask = {"kind": "question", "task_id": "helper", "quiz_id": "q1"}
+    offered = {"state": "offered", "room": 42, "waits": frozenset({"w1"}), "resume": True}
+    verdicts = {"helper": offered, "digest": {**offered, "room": 7}, "far": {"state": "elsewhere"},
+                "lost": {"state": "unconfirmed"}, "stale": {**offered, "waits": frozenset(), "resume": False}}
+
+    def settle(*items, room="42"):
+        member, moved, unconfirmed = {"turn": [dict(item) for item in items]}, {}, []
+        ws.settle_actions(member, room, verdicts, moved, unconfirmed)
+        return member["turn"], moved, unconfirmed
+    assert settle(resume, ask) == ([resume, ask], {}, [])
+    assert settle(wait, resume) == ([resume], {"7": [wait]}, [])
+    assert settle(resume, room="7") == ([], {"42": [resume]}, [])
+    other = {"kind": "action", "task_id": "far"}
+    unknown = {"kind": "action", "task_id": "never-considered"}
+    assert settle(other, unknown) == ([other, unknown], {}, [])
+    lost, stale, stale_wait = ({"kind": "action", "task_id": task} for task in ("lost", "stale", "stale"))
+    assert settle(lost, stale, {**stale_wait, "wait_id": "w1"}) == ([], {}, ["lost", "stale", "stale"])
+    # Said once: the room's own turn gets one item per task and wait.
+    assert ws.place_actions({"7": [{"kind": "open_question", "task_id": "x"}]}, {"7": [wait, dict(wait), resume]}) == {
+        "7": [{"kind": "open_question", "task_id": "x"}, wait, resume]}
+
+
+def test_the_tray_counts_a_work_once_whichever_rooms_hold_its_actions():
+    """A helper's action placed in another room stands with no work of that room. Its work is already one wait when
+    it has a turn of its own; otherwise that action is the one wait. Nine helpers of one work are one work."""
+    def work(work_id, *tasks, turn=()):
+        return {**_work("working", work_id=work_id, turn=turn), "members": {"ids": list(tasks)}}
+    own = work("w-own", "a", "a-helper", turn=[{"kind": "question", "task_id": "a"}])
+    bare = work("w-bare", "b", *[f"b-helper-{index}" for index in range(9)])
+    acts = [{"kind": "action", "task_id": task} for task in ("a-helper", *[f"b-helper-{index}" for index in range(9)])]
+    elsewhere = ws.roll_up_room([], questions=acts)
+    here = ws.roll_up_room([own, bare])
+    assert elsewhere["amber"] is True and here["amber"] is True
+    assert ws.roll_up_summary({"7": elsewhere, "42": here}, [own, bare])["turn"] == 2, "w-own once, w-bare once"
+    # An action whose work is not listed at all is its own wait, once per task.
+    lone = [{"kind": "action", "task_id": "ghost"}, {"kind": "action", "task_id": "ghost", "wait_id": "w2"}]
+    assert ws.roll_up_summary({"7": ws.roll_up_room([], questions=lone)}, [])["turn"] == 1
+
+
 # ---- the server adapter ------------------------------------------------------------------------------
 
 _REAL_OPEN_RUNS = wp._open_runs  # the custody reader itself, before a fixture fakes it

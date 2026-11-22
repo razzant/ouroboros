@@ -692,6 +692,47 @@ def place_questions(works: List[Dict[str, Any]], questions: Iterable[Mapping[str
     return {room: items for room, items in loose.items() if items}
 
 
+def settle_actions(member: Dict[str, Any], room: str, verdicts: Mapping[str, Mapping[str, Any]],
+                   moved: Dict[str, List[Dict[str, Any]]], unconfirmed: List[str]) -> None:
+    """Place one member's owner actions (its ``turn`` items of kind ``action``) by the measurement that decided them
+    (``main_decisions_snapshot``'s ``verdicts``: the one address and availability its ``main_attention`` carries).
+
+    ``room`` is the work's room as ``rooms`` keys it. An action the measurement offers at that room stays in the
+    member's turn; one it offers at another (the strict rule found the nearest binding the census's provisional
+    address skipped) leaves it for that room (``moved``); one it could not prove is no offer anywhere
+    (``unconfirmed`` names its task), and one it never considered or left to another room's own work keeps the census's
+    word. Only ``action`` items are placed: a question's address is its own (``place_questions``)."""
+    from ouroboros.gateway.main_decisions import ELSEWHERE, OFFERED
+
+    kept = []
+    for item in member["turn"]:
+        verdict = verdicts.get(str(item.get("task_id") or "")) if item.get("kind") == "action" else None
+        state = (verdict or {}).get("state")
+        if state in (None, ELSEWHERE):
+            kept.append(item)
+        elif state != OFFERED or not (item["wait_id"] in verdict["waits"] if item.get("wait_id") else verdict["resume"]):
+            unconfirmed.append(str(item["task_id"]))
+        elif str(verdict["room"]) == room:
+            kept.append(item)
+        else:
+            moved.setdefault(str(verdict["room"]), []).append(item)
+    member["turn"] = kept
+
+
+def place_actions(loose: Dict[str, List[Dict[str, Any]]], moved: Mapping[str, List[Dict[str, Any]]]
+                  ) -> Dict[str, List[Dict[str, Any]]]:
+    """Add the owner actions a measurement placed in a room that is not their work's to that room's own turn items,
+    beside its questions no work holds (``place_questions``): the room is the owner's turn there, and no work of it
+    carries what waits. One action is said once."""
+    for room, items in moved.items():
+        held = loose.setdefault(room, [])
+        for item in items:
+            if not any(entry.get("kind") == "action" and entry.get("task_id") == item.get("task_id")
+                       and entry.get("wait_id") == item.get("wait_id") for entry in held):
+                held.append(item)
+    return loose
+
+
 def _question_room(row: Mapping[str, Any], main_chat: Any) -> str:
     """The room a current question belongs to: its Project's, else Main's."""
     return str(row.get("project_chat_id") if row.get("project_id") else main_chat)
@@ -743,9 +784,15 @@ def roll_up_summary(rooms: Mapping[Any, Mapping[str, Any]], works: List[Mapping[
     # unless a counted work already carries it (a private Presence question is asked in Main while its work stands
     # in its Project): one question is counted once, though both rooms show it.
     carried = [item for work in works for item in work["turn"] if item.get("kind") in {"question", "open_question"}]
-    loose = sum(1 for room in rooms.values() for item in room.get("turn") or ()
-                if not item.get("work_id") and not any(_same_question(item, held) for held in carried))
-    return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works) + loose,
+    standalone = [item for room in rooms.values() for item in room.get("turn") or () if not item.get("work_id")]
+    loose = sum(1 for item in standalone if item.get("kind") != "action"
+                and not any(_same_question(item, held) for held in carried))
+    # An owner action a measurement placed in another room than its work's stands there with no work of that room; its
+    # work is counted once whichever rooms hold its actions (the work's own turn, or that helper's action elsewhere).
+    owner_of = {str(task): work["work_id"] for work in works for task in (work.get("members") or {}).get("ids") or ()}
+    acting = {owner_of.get(str(item.get("task_id")), f"task:{item.get('task_id')}")
+              for item in standalone if item.get("kind") == "action"} - {work["work_id"] for work in works if work["turn"]}
+    return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works) + len(acting) + loose,
             "confirmed": complete and all(room.get("confirmed", True) for room in rooms.values())}
 
 
