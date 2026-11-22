@@ -10,34 +10,67 @@ from tests.test_task_done_durable_vs_transport import _mk_ctx
 
 
 def _rows(root, kind):
-    return [row for line in (root / 'logs/events.jsonl').read_text().splitlines()
+    path = root / 'logs/events.jsonl'
+    return [row for line in (path.read_text().splitlines() if path.exists() else [])
             if (row := json.loads(line)).get('type') == kind]
+
+
+class _StopAfterReceived(Exception):
+    pass
+
+
+def _start(root, monkeypatch, task, *, stored=True):
+    """``_prepare_task_context`` up to its ``task_received`` row (the dispatch mirror after it stops the start); the
+    start record's stand-in notes the rows already written when it runs and answers ``stored``."""
+    from ouroboros import agent as module
+
+    monkeypatch.setattr(module, 'attach_task_contract', lambda task: task)
+    monkeypatch.setattr(module, 'apply_consciousness_authority', lambda task: task)
+    monkeypatch.setattr(module, 'resolve_dispatch_axes', lambda task: {})
+    monkeypatch.setattr(module, '_record_executor_resolution', lambda *args: None)
+    monkeypatch.setattr(module, 'emit_dispatch_resolution', lambda *args: (_ for _ in ()).throw(_StopAfterReceived()))
+    seen = []
+
+    def persist(_task):
+        seen.append(_rows(root, 'task_received'))
+        return stored
+
+    host = SimpleNamespace(env=SimpleNamespace(drive_root=root, drive_path=lambda name: root / name),
+                           _event_queue=None, _persist_running_record=persist)
+    with pytest.raises(_StopAfterReceived):
+        module.OuroborosAgent._prepare_task_context(host, task, authority_refusal={})
+    return seen, _rows(root, 'task_received')
 
 
 @pytest.mark.parametrize('lineage', [{}, {'root_task_id': 'root', 'parent_task_id': 'parent'}])
 def test_task_received_carries_only_supplied_top_level_identity(tmp_path, monkeypatch, lineage):
     from ouroboros import agent as module
 
-    class StopAfterReceived(Exception):
-        pass
-
-    def stop(_task):
-        raise StopAfterReceived
-
-    monkeypatch.setattr(module, 'attach_task_contract', lambda task: task)
-    monkeypatch.setattr(module, 'apply_consciousness_authority', lambda task: task)
-    monkeypatch.setattr(module, 'resolve_dispatch_axes', lambda task: {})
-    monkeypatch.setattr(module, '_record_executor_resolution', lambda *args: None)
     monkeypatch.setattr(module, 'sanitize_task_for_event', lambda task, logs: task)
-    host = SimpleNamespace(env=SimpleNamespace(drive_root=tmp_path, drive_path=lambda name: tmp_path / name),
-                           _persist_running_record=stop)
-    with pytest.raises(StopAfterReceived):
-        module.OuroborosAgent._prepare_task_context(host, {'id': 'child', **lineage}, authority_refusal={})
-    row, = _rows(tmp_path, 'task_received')
+    _, (row,) = _start(tmp_path, monkeypatch, {'id': 'child', **lineage})
     assert row['task_id'] == row['task']['id'] == 'child'
     assert {key: row[key] for key in lineage} == lineage
     if not lineage:
         assert 'root_task_id' not in row and 'parent_task_id' not in row
+
+
+def test_the_event_counts_the_routing_lists_only_after_the_start_record_holds_them(tmp_path, monkeypatch):
+    """DEVELOPMENT 03 «Source-complete decision pipeline»: the start record stores the task, its routing lists whole,
+    before ``task_received`` goes out, and only a stored record lets the event keep their lengths; when that write
+    fails the event is their one stored copy and keeps them whole."""
+    manifest = {'projects': [{'project_id': 'p'}], 'omissions': {'projects': 0}}
+    for stored in (True, False):
+        seen, (row,) = _start(tmp_path / str(stored), monkeypatch,
+                              {'id': 'turn', 'metadata': {'main_routing_manifest': manifest}}, stored=stored)
+        assert seen == [[]], "the start record is written before the event"
+        assert row['task']['metadata']['main_routing_manifest'] == (
+            {'projects_len': 1, 'omissions': {'projects': 0}} if stored else manifest)
+    from ouroboros import agent as module  # the real start record answers whether it stored the task
+
+    host = SimpleNamespace(env=SimpleNamespace(drive_root=tmp_path))
+    assert module.OuroborosAgent._persist_running_record(host, {'id': 'stored'}) is True
+    monkeypatch.setattr(module, 'write_task_result', lambda *args, **kwargs: (_ for _ in ()).throw(OSError('full')))
+    assert module.OuroborosAgent._persist_running_record(host, {'id': 'refused'}) is False
 
 
 @pytest.mark.parametrize(("lineage", "fault"), [
