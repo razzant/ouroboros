@@ -1256,12 +1256,17 @@ def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
     try:
         table = json.loads((pathlib.Path(config.DATA_DIR) / TEST_DURATIONS_PATH).read_text(encoding="utf-8"))
         systems = list(table["platforms"].values())
-        recorded = [max(files.get(path, 0) for files in systems) for path in paths
-                    if any(path in files for files in systems)]
-        readable = all(type(value) in (int, float) and math.isfinite(value) for value in recorded)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        recorded = []
+        for path in paths:
+            samples = [files[path] for files in systems if path in files]
+            if any(type(value) not in (int, float) or not math.isfinite(value) for value in samples):
+                return None  # every system's sample is checked before the slowest one is taken
+            if samples:
+                recorded.append(max(samples))
+        seconds = sum(recorded) / 1000
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ArithmeticError):  # an int too large for a float
         return None
-    return (sum(recorded) / 1000, len(paths) - len(recorded)) if readable else None
+    return (seconds, len(paths) - len(recorded)) if math.isfinite(seconds) else None
 
 
 def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
