@@ -357,3 +357,39 @@ def test_a_wait_that_changes_without_a_transition_reaches_both_publications_at_t
     queue_publication.publish_queue_changes()
     assert queue_publication.queue_revision() == revision, "a quiet tick marks nothing"
     assert (root / "state" / "queue_snapshot.json").read_bytes() == snapshot, "and writes nothing"
+
+
+def test_the_ticks_wait_mark_keeps_a_pending_reason_and_a_barrier_records_the_waits_it_captured(published,
+                                                                                                monkeypatch):
+    """Round 4: the tick's wait mark never replaces the reason of a transition still unpublished (an export
+    decides how that capture is written), names ``lane_wait`` only when nothing else is pending, marks nothing on
+    an empty queue, and a barrier capture records the waits it captured so the next tick does not mark them again."""
+    from supervisor import workers
+
+    root, _now = published
+    for name in ("PENDING", "RUNNING", "DRIVE_ROOT"):
+        monkeypatch.setattr(workers, name, getattr(queue, name))
+    monkeypatch.setattr(queue, "INITIALIZED", True, raising=False)
+    monkeypatch.setitem(queue_publication._STATE, "waits", {})  # as a new queue generation starts (``reset``)
+    revision = queue_publication.queue_revision()
+    queue_publication.publish_queue_changes()
+    assert queue_publication.queue_revision() == revision, "an empty queue's first tick marks nothing for waits"
+
+    def reason():
+        return _read(root, "queue_snapshot.json")["reason"]
+
+    holder = {"task": {"id": "x", "type": "task", "project_id": "p", "root_task_id": "x"}, "worker_id": 0}
+    queue.PENDING.append({"id": "q", "type": "task", "project_id": "p", "root_task_id": "q"})
+    with queue._queue_lock:
+        queue.RUNNING["x"] = holder
+        queue_publication.mark_dirty_locked("pre_restart_exit")
+    queue_publication.publish_queue_changes()
+    assert reason() == "pre_restart_exit", "the pending export keeps its reason"
+    del queue.RUNNING["x"]
+    queue_publication._publish_now("barrier")
+    revision = queue_publication.queue_revision()
+    queue_publication.publish_queue_changes()
+    assert queue_publication.queue_revision() == revision and reason() == "barrier", "the barrier's waits recorded"
+    queue.RUNNING["x"] = holder
+    queue_publication.publish_queue_changes()
+    assert reason() == "lane_wait" and queue_publication.queue_revision() == revision + 1
