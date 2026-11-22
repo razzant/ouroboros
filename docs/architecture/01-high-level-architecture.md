@@ -517,7 +517,7 @@ ouroboros/ — agent core and shared runtime (§6)
     vision_process.py — Tracked vision-child IPC: validated receipts, result recovery, parent-owned cancellation
     task_retention.py — `set_task_retention`: a root's keep or release on held owner words (owner_keep.py)
     knowledge.py — Persistent topic-based knowledge files with an auto-maintained index
-    chronicle.py — `chronicle_write`/`memory_read`/`memory_mark`, exported by knowledge.py: host-expanded page row sets, task stamps, checked quotes; reads paged at the source (§6)
+    chronicle.py — `chronicle_write`/`memory_read`/`memory_mark` (members: memory_members.py), exported by knowledge.py: host-expanded page row sets, task stamps, checked quotes; reads paged at the source (§6)
     memory_tools.py — Memory registry tools for data sources, gaps and trust
     health.py — Codebase health tool: complexity metrics and self-assessment
     compact_context.py — the mind's own context view (§6 Context fitting)

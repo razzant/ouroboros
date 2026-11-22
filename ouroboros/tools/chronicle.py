@@ -61,7 +61,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from ouroboros import chat_chain, memory_inventory
+from ouroboros import chat_chain, memory_inventory, memory_members
 from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
 from ouroboros.chronicle_quotes import QuoteResolver, QuoteSource, SPEAKERS
 from ouroboros.chronicle_lead import LEAD_RULE
@@ -141,10 +141,6 @@ def _room(ctx: Any, root: Path, room_id: Any) -> str:
     if own is None:
         raise ValueError("room_id is required: this task has no room address")
     return str(own)
-
-
-def _author_of(row: Dict[str, Any], pos: Optional[int], lineage: Dict[str, Any]) -> Dict[str, Any]:
-    return row_author(row, pos=pos, **lineage)
 
 
 def _reply(ctx: Any, payload: Dict[str, Any], *, code: str = "OK", meta: Optional[Dict[str, Any]] = None) -> str:
@@ -337,7 +333,7 @@ def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = 
         notes += held
         if rooms:
             rooms[each] = list(dict.fromkeys([*rooms[each], *(f"note:{ident}" for ident in held)]))
-    authors = Counter(_author_of(row, pos, lineage)["kind"] for _a, row, pos in rows)
+    authors = Counter(row_author(row, pos=pos, **lineage)["kind"] for _a, row, pos in rows)
     covers = {"room_id": room, "mode": mode, "request": request,
               "rows": [address["row_sha256"] for address, _r, _p in rows] + [f"note:{n}" for n in notes],
               "first": rows[0][0], "last": rows[-1][0], "count": len(rows), "task_ids": tasks, "note_ids": notes,
@@ -398,14 +394,14 @@ def _quote_resolver(root: Path, lineage: Dict[str, Any],
         if row is None:
             return None
         try:
-            author = _author_of(row, None, lineage)
+            author = row_author(row, pos=None, **lineage)
         except TypeError:  # a pre-epoch candidate needs its stream position
             sha = found["address"]["row_sha256"]
             pos = (positions or {}).get(sha)
             pos = pos if pos is not None else chat_chain.stream_position_of(root, found["address"])
             if pos is None:
                 return None
-            author = _author_of(row, pos, lineage)
+            author = row_author(row, pos=pos, **lineage)
         return quote_parts(row, root), author["kind"]
     return resolve
 
@@ -789,7 +785,7 @@ def _listed(record: Dict[str, Any], periods: Dict[str, memory_inventory.Period],
 
 def _row_line(address: Dict[str, Any], row: Dict[str, Any], pos: int, lineage: Dict[str, Any]) -> Tuple[str, str]:
     """``(header, text)`` of one chat row: the one memory-row header and its words without JSON."""
-    return memory_row_header(address, row, author=_author_of(row, pos, lineage)), render_row_text(row)
+    return memory_row_header(address, row, author=row_author(row, pos=pos, **lineage)), render_row_text(row)
 
 
 def _fit(head: str, items: List[str], exhausted: bool, continuation: Callable[[int, bool], str],
@@ -964,7 +960,7 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any], revision: str 
         task_ids, held = [str(task) for task in covers.get("task_ids") or []], {str(e.get("task_id")) for e in stamped}
         unstamped = [task for task in task_ids if task not in held]  # the ids no stamp line after the text names
         sections.append(f"covers ({covers.get('mode')}): {covers.get('count')} rows, "
-                        f"{_address_text(covers.get('first'))} – {_address_text(covers.get('last'))}; "
+                        f"{chat_chain.address_text(covers.get('first'))} – {chat_chain.address_text(covers.get('last'))}; "
                         f"tasks: {len(task_ids)}" + (" (one stamp line each, after the text)" if stamped else "")
                         + (f", without a stamp: {', '.join(unstamped)}" if unstamped else "") + "; "
                         f"notes: {', '.join(covers.get('note_ids') or []) or 'none'}")
@@ -980,8 +976,8 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any], revision: str 
     elif covers.get("raw_range"):
         raw = covers["raw_range"]
         sections.append(f"raw_range {raw.get('status')}: positions {raw.get('pos')}; rows: memory_read(rows=true, "
-                        f"room_id={record['room_id']}, from={_address_text(raw.get('first'))}, "
-                        f"to={_address_text(raw.get('last'))})")
+                        f"room_id={record['room_id']}, from={chat_chain.address_text(raw.get('first'))}, "
+                        f"to={chat_chain.address_text(raw.get('last'))})")
     if kind == "mark":
         target = record.get("target_ref")
         source = isinstance(target, dict) and target.get("kind") == "task_source"
@@ -1036,13 +1032,6 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any], revision: str 
                 sections.append(f"informs account {account['id']} (revision {src.get('revision')} read; seq {account['sequence']}): "
                                 f"memory_read(node_id={account['id']})")
     return shown, "\n".join(sections)
-
-
-def _address_text(address: Any) -> str:
-    try:
-        return chat_chain.format_address(address) if isinstance(address, dict) else str(address or "?")
-    except (KeyError, TypeError, ValueError):
-        return "?"
 
 
 def _read_node(root: Path, node_id: str, start: int, limit: int, revision: str = "") -> str:
@@ -1243,7 +1232,7 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
 
         covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
         spans = [(room, first, last) for room, _name, first, last in covered_rooms(root, record)] or (
-            [(record["room_id"], _address_text(covers.get("first")), _address_text(covers.get("last")))]
+            [(record["room_id"], chat_chain.address_text(covers.get("first")), chat_chain.address_text(covers.get("last")))]
             if record["kind"] == "page" and covers.get("first") else [])  # one reader per room the page sealed
         readers = [f"memory_read(node_id='{record['id']}')"] + [
             f"rows: memory_read(room_id='{room}', rows=true, from='{first}', to='{last}')" for room, first, last in spans]
@@ -1295,7 +1284,7 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
 def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: int = 0, rows: bool = False,
                  task_id: str = "", period: Any = None, source_ref: Any = None, start: int = 0, revision: str = "",
                  story: bool = False, proposed_selection: Any = None, fingerprint: str = "", owner_words: bool = False,
-                 source: Any = None, version: Any = None, **bounds: Any) -> str:
+                 source: Any = None, version: Any = None, members: bool = False, words: Any = None, **bounds: Any) -> str:
     unknown = sorted(set(bounds) - {"from", "to"})
     if unknown:
         return _arg_error(ctx, f"unknown argument(s): {', '.join(unknown)}")
@@ -1304,13 +1293,13 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
     door, notes = version_door(ctx, source, version, start, fingerprint, {  # each selector by its own omission rule
         "node_id": node_id, "room_id": room_id, "after_seq": after_seq or None, "rows": rows or None, "task_id": task_id,
         "period": period, "source_ref": source_ref or None, "revision": revision, "story": story or None,
-        "owner_words": owner_words or None, "proposed_selection": proposed_selection, **bounds})
+        "owner_words": owner_words or None, "proposed_selection": proposed_selection, "members": members or None, "words": words, **bounds})
     if door is not None:
         return door
     if (sum(bool(mode) for mode in (node_id, source_ref, rows, story, owner_words, proposed_selection is not None)) > 1
             or (story or owner_words) and room_id is not None):
         return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, story=true, owner_words=true, "
-                               "proposed_selection, or a room's records")
+                               "proposed_selection, members=true (with room_id or node_id), or a room's records")
     if revision and not node_id:
         return _arg_error(ctx, "revision reads one record (node_id) as of that revision")
     if fingerprint and (proposed_selection is None or not isinstance(fingerprint, str)):
@@ -1321,8 +1310,12 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
     try:
         root = _root(ctx)
         # A retained source is verified on read, and my human's words are read where they are, without the chronicle.
-        store = None if source_ref or owner_words else _activated(root)
-        if source_ref:
+        store = None if source_ref or owner_words or members or words is not None else _activated(root)
+        if members or words is not None:  # what stands under a room or a record (memory_members): passive, never activating
+            text = memory_members.members_text(root, members, words, start, limit, room_id=room_id, node_id=node_id, others={
+                "rows": rows, "story": story, "owner_words": owner_words, "source_ref": source_ref, "after_seq": after_seq,
+                "proposed_selection": proposed_selection, "revision": revision, "task_id": task_id, "period": period, **bounds})
+        elif source_ref:
             text = _read_source(root, source_ref, start, limit)
         elif owner_words:  # this work's set exactly as its reviewers and plan council read it (owner_words.work_words)
             from ouroboros.owner_words import work_words_text
@@ -1531,6 +1524,8 @@ def chronicle_tools() -> List[ToolEntry]:
         "reason": {"type": "string", "description": "decision or selection: why."},
     }
     read = {
+        "members": {"type": "boolean", "description": "true: list what stands under room_id or node_id."},
+        "words": {"type": "array", "items": string, "description": "members: keep records whose own text or one correction matches an item (word prefixes, any order; quotes exact)."},
         "story": {"type": "boolean", "description": "true: list every current page, part and selected account with its id and reader; continue with start."},
         "owner_words": {"type": "boolean", "description": "true: my human's words section for this work, which its reviewers and plan council render; their packets append the run's schedule text. The same rows (those that marks in force target among them), each verbatim and dated, a store that could not be read named as a gap, else the host's marker that none are recorded. No objective, plan, brief or schedule text in this reader; continue with start."},
         "proposed_selection": {"type": "object", "additionalProperties": False, "required": ["target_id"],
@@ -1583,7 +1578,7 @@ def chronicle_tools() -> List[ToolEntry]:
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",
-            "Read memory by address, as text: a room's records and the marks placed in it (first line: room, head and how many global marks are in force — they are in my view, not repeated), one record: what identifies it, its text, then its corrections, quotes and stamp (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), my human's words section for this work which its reviewers and plan council render (owner_words=true; their packets append the run's schedule text), or a selection before I make it (proposed_selection). A memory text's versions (source=identity, world, workpad or workpad:<project id>; version=<revision> reads one exactly, the current one too; without it, the list newest first, each line naming the version its write replaced) need no chronicle. Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start): records older to newer, chat rows in stored order, a source's versions newest first. Choose the depth yourself.",
+            "Read memory by address, as text: a room's records and the marks placed in it (first line: room, head and how many global marks are in force — they are in my view, not repeated), one record: what identifies it, its text, then its corrections, quotes and stamp (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), my human's words section for this work which its reviewers and plan council render (owner_words=true; their packets append the run's schedule text), or a selection before I make it (proposed_selection). members=true with room_id lists the room's tellings in publication order, then its untold rows as runs; with node_id, what that record seals, folds, cites, replaces or retells. Each line has its opening and readers. words keeps records whose own text or one correction matches; runs of rows are not filtered. A memory text's versions (source=identity, world, workpad or workpad:<project id>; version=<revision> reads one exactly, the current one too; without it, the list newest first, each line naming the version its write replaced) need no chronicle. Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start): records older to newer, chat rows in stored order, a source's versions newest first. Choose the depth yourself.",
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",

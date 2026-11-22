@@ -535,6 +535,7 @@ D20 = "Presence"
 "ouroboros/memory.py" = "D15"
 "ouroboros/merge_receipts.py" = "D10"
 "ouroboros/memory_inventory.py" = "D15"  # open rows and the one folded rule of old memory, shared by the view and the writers
+"ouroboros/memory_members.py" = "D15"  # memory_read(members=true): what stands under a room or record, by recorded relation
 "ouroboros/memory_fallback.py" = "D15"  # signed acting drafts only with consciousness off
 "ouroboros/memory_sealing.py" = "D15"  # separately attributed terminal links
 "ouroboros/memory_nomination_receipts.py" = "D15"
