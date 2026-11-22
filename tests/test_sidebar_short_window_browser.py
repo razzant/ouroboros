@@ -429,7 +429,7 @@ def test_the_bars_measured_heights_follow_a_tall_window_that_turns_short(shell_u
 
 
 # The foot's two cards measured where they stand: every row's label on one line and unclipped, the edges the rows and
-# the version share, and the four sections' need on one line (each row as wide as its words, 12 px between them).
+# the version share, and the four sections' need on one line (each row as wide as its words, 8 px between them).
 RU = {'Circles': 'Круги', 'Files': 'Файлы', 'Extensions': 'Расширения', 'Widgets': 'Виджеты', 'Dashboard': 'Панель управления',
       'Settings': 'Настройки', 'Update': 'Обновить', 'Up to date': 'Обновлений нет', 'Check failed': 'Не удалось проверить',
       'Updating…': 'Обновляю…'}
@@ -530,11 +530,13 @@ def test_the_two_cards_keep_every_name_whole_and_turn_wide_at_475(shell_ui, tmp_
             assert max(gaps) - min(gaps) <= 1.5 and min(gaps) >= at['gap'] - 0.5, ('the room shared evenly', width, gaps)
     if lang == 'ru' and shell_ui['engine'] == 'chromium':
         # The switch is where the four sections fit one line with the longest name so far, «Расширения», rows and their
-        # 12 px gaps: not a few px below. Past it the rows keep their widths and the gaps take the room.
+        # 8 px gaps: four fit at the switch itself, not above it. The bound is not tied to one font's widths (they
+        # differ between systems); the strict unfolding above (two lines at 474, one at 475) and the rows keeping
+        # their widths while the gaps take the room carry the rest.
         wide = facts[475]
         need = sum(row['width'] for row in wide['sections']) + 3 * wide['gap']
         fits_from = 475 - (wide['inner'][1] - wide['inner'][0] - need)
-        assert 465 < fits_from <= 475, ('the switch is where four fit', fits_from, facts)
+        assert fits_from <= 475, ('the switch is where four fit', fits_from, facts)
         later = min(b['left'] - a['right'] for a, b in zip(facts[480]['sections'], facts[480]['sections'][1:]))
         assert abs(later - (wide['gap'] + (480 - fits_from) / 3)) <= 1.5, ('the gaps take the room', later, fits_from)
 

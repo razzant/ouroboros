@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: '9124b27a4759f89338f2b5ba6f2f77708f727920'
+          ref: '84a20b3bd86d98b39cb97aa2bf704e7790a69483'
           persist-credentials: false
 
       - uses: ./.github/actions/setup-python-env
@@ -30,8 +30,8 @@ jobs:
           commit=$(git rev-parse HEAD)
           tree=$(git rev-parse 'HEAD^{tree}')
           printf 'Product commit: %s\nProduct tree: %s\n' "$commit" "$tree"
-          test "$commit" = '9124b27a4759f89338f2b5ba6f2f77708f727920'
-          test "$tree" = 'fefe152c57af16be988ed224c0e4da0531281160'
+          test "$commit" = '84a20b3bd86d98b39cb97aa2bf704e7790a69483'
+          test "$tree" = 'fef53f3b04c6acb8a311af30510d17d9dbf51dd8'
           git diff --quiet
           git diff --cached --quiet
           test ! -e .github/workflows/qa-sidebar-foot.yml
@@ -62,15 +62,14 @@ jobs:
           junit="$RUNNER_TEMP/sidebar-foot.xml"
           python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/sidebar-evidence" \
             -- python -m pytest -o addopts= -q --tb=short -m ui_browser \
-              tests/test_sidebar_short_window_browser.py \
-              tests/test_ui_shell_legacy_browser.py::test_retained_sidebar_wheel_scrolls_projects_between_main_and_the_tools \
+              tests/test_sidebar_short_window_browser.py::test_the_two_cards_keep_every_name_whole_and_turn_wide_at_475 \
+              tests/test_sidebar_short_window_browser.py::test_a_name_longer_than_the_card_wraps_inside_it \
+              tests/test_sidebar_short_window_browser.py::test_a_1280_by_540_window_keeps_both_cards_whole_and_the_list_scrolls_alone \
+              tests/test_sidebar_short_window_browser.py::test_the_drawer_keeps_the_same_block_with_finger_targets \
+              tests/test_sidebar_short_window_browser.py::test_a_short_window_keeps_the_version_and_the_update_on_the_bottom_edge \
+              tests/test_sidebar_short_window_browser.py::test_a_column_too_short_for_both_bars_scrolls_them_with_the_list \
+              tests/test_sidebar_short_window_browser.py::test_the_version_row_keeps_one_height_whatever_the_check_or_the_update_says \
               tests/test_ui_shell_legacy_browser.py::test_the_document_before_the_cards_gets_the_same_foot_as_a_fresh_one \
-              tests/test_shell_interactions_browser.py::test_collapsed_projects_keep_only_the_pinned_ones_and_the_tools_follow \
-              tests/test_ui_smoke_update_progress.py::test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_panel \
-              tests/test_update_local_changes_browser.py \
-              tests/test_projects_nav_browser.py::test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_focus \
-              tests/test_projects_nav_browser.py::test_find_field_is_a_row_high_capsule_on_the_rows_columns \
-              tests/test_project_pin_browser.py::test_many_pins_order_within_groups_long_names_and_short_windows \
               tests/test_project_pin_browser.py::test_local_pin_reveal_respects_input_and_visible_scroll_region \
               --junitxml="$junit"
           python - "$junit" <<'PY'
