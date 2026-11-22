@@ -150,12 +150,17 @@ async def _locked(cfg: Any):
             held.__exit__(None, None, None)
 
 
-def _required(cfg: Any, doc: Dict[str, Any], reason: str, detail: str = "", **facts: Any) -> MCPAuthRequired:
-    """Record that sign-in is needed (with what the server said) and return the refusal to raise. While the
-    record already says sign-in is required, its ``since`` (the open state's start) survives the repeat."""
+def _required_state(doc: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    """The one rule for a required sign-in record: an open requirement keeps its start (an unknown one stays
+    unknown); a requirement after a signed-in state starts now."""
     prior = doc.get("sign_in") or {}
     since = prior.get("since") if prior.get("state") == SIGN_IN_REQUIRED else utc_now_iso()
-    doc = {**doc, **facts, "sign_in": {"state": SIGN_IN_REQUIRED, "reason": reason, "since": since}}
+    return {"state": SIGN_IN_REQUIRED, "reason": reason, "since": since}
+
+
+def _required(cfg: Any, doc: Dict[str, Any], reason: str, detail: str = "", **facts: Any) -> MCPAuthRequired:
+    """Record that sign-in is needed (with what the server said) and return the refusal to raise."""
+    doc = {**doc, **facts, "sign_in": _required_state(doc, reason)}
     if reason in ("refresh_rejected", "token_rejected", "expired"):
         doc.pop("tokens", None)  # a grant the provider no longer honours is not kept as if it were
     _save(cfg, doc)
@@ -611,7 +616,7 @@ async def sign_out(cfg: Any) -> Dict[str, Any]:
         tokens = doc.pop("tokens", None) or {}
         doc.pop("pending", None)
         if doc:
-            doc["sign_in"] = {"state": SIGN_IN_REQUIRED, "reason": "signed_out", "since": utc_now_iso()}
+            doc["sign_in"] = _required_state(doc, "signed_out")
             _save(cfg, doc)
     endpoint, revoked = (doc.get("metadata") or {}).get("revocation_endpoint"), None
     if endpoint and tokens:
