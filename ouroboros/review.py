@@ -597,12 +597,14 @@ def validate_manifest_transition(
     current: SizeRatchetManifest,
     previous: SizeRatchetManifest,
     line_counts: Mapping[str, int] | None = None,
+    recorded: Mapping[str, str | None] | None = None,
 ) -> list[str]:
     """Validate shrink-only debt and rationale authority against a previous manifest (the parent's,
     or the event base's across an interval). A recorded band rationale may be replaced by another
     (Git keeps the old text), never dropped; a new entry needs one. ``line_counts`` are the
     candidate tree's module lines: an entry with a reason leaves with its module or with the band,
-    never while the module holds 1001-1600 lines."""
+    never while the module holds 1001-1600 lines. ``recorded`` are the reasons a drop is judged
+    against, the previous manifest's unless a pairwise check names its fork point's."""
     errors: list[str] = []
     if current.baseline_source_sha != previous.baseline_source_sha:
         errors.append("BASELINE_SOURCE_SHA is immutable")
@@ -633,7 +635,8 @@ def validate_manifest_transition(
     for path in sorted(set(current.band_paths) - previous_band):
         if not (current.band_paths[path] or "").strip():
             errors.append(f"new or re-entered 1001-1600 path needs a nonblank rationale: {path}")
-    for path in sorted(path for path in previous_band if previous.band_paths[path] is not None):
+    reasons = previous.band_paths if recorded is None else recorded
+    for path in sorted(path for path, reason in reasons.items() if reason is not None):
         lines = (line_counts or {}).get(path, 0)
         if path not in current.band_paths and TARGET_MODULE_LINES < lines <= MAX_MODULE_LINES:
             errors.append(f"band rationale dropped: {path} (entry removed at {lines} lines)")
@@ -1034,7 +1037,7 @@ def validate_size_ratchet_transition_against_base(
     parent inventory produces a failing finding, never a false PASS. A module
     HEAD changed since its merge-base with the base answers ``touched_band_errors``
     even when the manifest did not change (a moved-on base, ahead of HEAD, lends
-    HEAD none of its own touches); HEAD's line counts are read strictly, and a
+    HEAD none of its own touches or reasons); HEAD's line counts are read strictly, and a
     blob or touched list Git cannot give is a ``partial:`` finding, never absence."""
     root = pathlib.Path(repo_dir).resolve()
     tip_text = _git_show_manifest(root, "HEAD", manifest_path)
@@ -1094,22 +1097,24 @@ def validate_size_ratchet_transition_against_base(
             ]
     tip = parse_size_ratchet_manifest(tip_text)
     # HEAD's own change runs from its fork point with the base, the base itself for CI's bases (ancestors
-    # of HEAD): a base ahead of HEAD (a target that moved on) lends HEAD neither its touches nor its reasons.
+    # of HEAD): a base ahead of HEAD (a target that moved on) lends HEAD neither its touches nor the
+    # reasons it recorded, so a drop is judged against the fork's. A push that rewinds a published branch
+    # (its `before` descends from HEAD) is out of scope: force-pushing `ouroboros` is forbidden by policy.
     fork = subprocess.run(["git", "merge-base", base_commit, "HEAD"], cwd=root, capture_output=True, text=True)
     since = fork.stdout.strip() if fork.returncode == 0 and fork.stdout.strip() else base_commit
+    reasons = previous.band_paths
     try:
         touched = _touched_paths(root, since, "HEAD")
-        forked = base_text if since == base_commit else _git_show_manifest(root, since, manifest_path)
-        recorded = set(parse_size_ratchet_manifest(forked).band_paths) if forked else set()
-        removed = (set(previous.band_paths) & recorded) - set(tip.band_paths)
-        lines = _tree_line_counts(root, "HEAD", touched | removed)
+        if since != base_commit:
+            forked = _git_show_manifest(root, since, manifest_path)
+            reasons = parse_size_ratchet_manifest(forked).band_paths if forked else {}
+        lines = _tree_line_counts(root, "HEAD", touched | (set(reasons) - set(tip.band_paths)))
         unread: list[str] = []
     except (OSError, subprocess.SubprocessError, SizeRatchetRefUnavailable) as exc:  # never read as absent
-        touched, removed, lines = frozenset(), set(), {}
+        touched, lines = frozenset(), {}
         unread = [_partial_finding("pairwise touched or recorded modules at HEAD", exc,
                                    "band rationales of touched modules and removed entries")]
-    errors = [] if base_text == tip_text else validate_manifest_transition(
-        tip, previous, {path: lines[path] for path in removed if path in lines})
+    errors = [] if base_text == tip_text else validate_manifest_transition(tip, previous, lines, reasons)
     return errors + touched_band_errors(tip, lines, touched) + unread
 
 

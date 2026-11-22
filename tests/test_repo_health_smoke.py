@@ -596,6 +596,31 @@ def test_touched_runs_from_the_fork_point_of_a_base_that_moved_on(tmp_path: Path
     assert validate_size_ratchet_transition_against_base(repo, fork) == touched
 
 
+def test_a_drop_is_judged_against_the_reasons_the_fork_point_recorded(tmp_path: Path) -> None:
+    """A target that moved on and gave an inherited ``None`` a reason lends a branch that never touched the
+    module no drop; a reason the fork recorded and the branch drops is caught against the target and the
+    fork. A push that rewinds a published branch is out of scope: force-pushing ``ouroboros`` is forbidden."""
+    baseline = frozenset({"gap.py"})
+    repo = _band_repo(tmp_path, {"gap.py": 1200, "kept.py": 1550},
+                      _manifest(band_baseline_paths=baseline, band_paths={"gap.py": None, "kept.py": "a seam"}))
+    fork = _git(repo, "rev-parse", "HEAD")
+    _write_manifest(repo, _manifest(band_baseline_paths=baseline, band_paths={"gap.py": "a reason", "kept.py": "a seam"}))
+    _git(repo, "commit", "-qam", "the target gives the inherited None a reason")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "feature", fork)
+    (repo / "README.md").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "an unrelated change")
+    assert validate_size_ratchet_transition_against_base(repo, target) == []
+    assert validate_size_ratchet_transition_against_base(repo, fork) == []
+    for kept, dropped in (({}, "kept.py (entry removed at 1550 lines)"), ({"kept.py": None}, "kept.py")):
+        _write_manifest(repo, _manifest(band_baseline_paths=baseline, band_paths={"gap.py": None, **kept}))
+        _git(repo, "commit", "-qam", "the branch drops the reason the fork recorded")
+        for base in (target, fork):
+            assert validate_size_ratchet_transition_against_base(repo, base) == [f"band rationale dropped: {dropped}"]
+        _git(repo, "reset", "-q", "--hard", "HEAD~1")
+
+
 def test_tree_validation_reads_staged_bytes_not_unstaged_worktree_bytes(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     baseline = _bootstrap_repo(repo)
