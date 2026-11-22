@@ -638,6 +638,7 @@ def test_a_terminal_write_beside_an_unreadable_folder_lands_and_stays_owed(root)
 
 def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkeypatch):
     from ouroboros import owner_keep
+    from tests._owner_keep_answer import outside_store
 
     handles = _task(root, "raced")
     write_task_result(root, "raced", "completed", child_drive_root=str(root / "task_drives" / "raced-settled"))
@@ -654,7 +655,11 @@ def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkey
     monkeypatch.setattr(owner_keep, "inventory", pass_between_inventory_and_lock)
     answer = owner_keep.set_owner_keep(root, "raced", keep=True, source={"basis": "test"})
     assert not any(path.exists() for path in copies)
-    assert answer["status"] == "already_retired" and not answer["retained"], answer
+    # #3981: Keep also names every file of the canonical store; the folders' sources stay there, so the answer is
+    # partly retired (the saved states gone, the sources kept), and no saved state is ever reported retained.
+    rest = outside_store(answer, root, "raced")
+    assert answer["status"] == "partly_retired" and not rest["retained"], answer
+    assert not {str(path) for path in copies} & set(answer["retained"]), answer
     assert {place for place in answer["retired"] if place.startswith("saved_states:")} == {
         f"saved_states:{handles / 'context_checkpoints'}", f"saved_states:{handles / 'working'}"}
 
