@@ -618,7 +618,13 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
     memory rows. A host notice's step and raw details follow its phrase (``host_notice``)."""
     if entry.get("type") == "task_summary" and not _text(entry.get("text")):
         return _host_facts_text(entry)
-    text = _with_reaction(entry, str(entry.get("text", ""))) + notice_text(entry)
+    from ouroboros.chat_uploads import attachment_ref_delivery_block
+
+    delivery = attachment_ref_delivery_block(entry.get("attachments")) if entry.get("source") == "skill:telegram" else ""
+    content = "" if delivery and entry.get("text_placeholder") else str(entry.get("text", ""))
+    text = _with_reaction(entry, content) + notice_text(entry)
+    if delivery:
+        text = "\n\n".join(part for part in (text, delivery) if part)
     transport = _mapping(entry.get("transport"))
     message = _mapping(transport.get("message"))
     if entry.get("type") == "presence_delivery" and message:
@@ -712,14 +718,18 @@ def relation_text(entry: Mapping[str, Any]) -> str:
     replies to and, on a relay, the owner's words it quotes, complete, with where they were said
     and what they replied to. History keeps these fields; every text reader shows them too."""
     def reference(ref: Mapping[str, Any]) -> str:
+        from ouroboros.chat_uploads import attachment_ref_delivery_block
+
+        failure = attachment_ref_delivery_block(ref.get("attachment_failures"))
+        suffix = "\n" + failure if failure else ""
         if citation := excerpt_citation(ref):
-            return citation
+            return citation + suffix
         if ref.get("unresolved"):
             return f"[Reply to {_text(ref.get('address'))}: not resolved]"
         chars = ref.get("chars")  # a cut preview's whole length: the model reads how much the address holds
         size = f" [{chars} chars in full]" if isinstance(chars, int) and not isinstance(chars, bool) and chars else ""
         return (f"[Reply to {_text(ref.get('author_label')) or 'a message'} {_text(ref.get('address'))}"
-                f" ({_text(ref.get('kind')) or 'message'}): {_text(ref.get('snippet'))}{size}]")
+                f" ({_text(ref.get('kind')) or 'message'}): {_text(ref.get('snippet'))}{size}]" + suffix)
 
     lines = []
     if _mapping(entry.get("reply_to")):
@@ -1042,6 +1052,11 @@ def quote_parts(row: Mapping[str, Any], root: Any = None) -> tuple[str, ...]:
         quiz, _ = answered_card_source(row, row.get("_owner_source_root") or root)
         quiz = _mapping(quiz)
         return () if quiz.get("secret_request") else (str(quiz.get("comment") or ""),)
+    if row.get("source") == "skill:telegram":
+        from ouroboros.chat_uploads import delivery_failures
+
+        if delivery_failures(row.get("attachments")) or _mapping(row.get("reply_to")).get("attachment_failures"):
+            return () if row.get("text_placeholder") else (str(row.get("text") or ""),)
     if (_mapping(row.get("reply_to")).get("excerpt")
             or any(_mapping(quote.get("reply_to")).get("excerpt") for quote in relay_quotes(row))
             or row.get("direction") == "in" and row_provenance(row) == "place"

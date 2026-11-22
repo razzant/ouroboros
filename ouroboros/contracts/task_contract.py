@@ -123,6 +123,7 @@ def normalize_attachment_manifest(value: Any) -> list[Dict[str, Any]]:
     allowed = (
         "ordinal", "status", "reason", "label", "root", "relpath",
         "abs_path", "mime", "is_image", "size", "sha256", "rule",
+        "limit_bytes",  # the transport's cap beside media it never received (``chat_uploads.DELIVERY_FAILURES``)
         "path_only",  # an inherited file: read by path, never injected as pixels (artifacts.stage_task_attachments)
     )
     for index, item in enumerate(value):

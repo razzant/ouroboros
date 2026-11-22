@@ -19,6 +19,7 @@ class ChatReplyReference(TypedDict, total=False):
     author_label: str
     kind: str
     excerpt: ReplyExcerpt
+    attachment_failures: list[dict[str, Any]]  # pathless facts from the exact source row
     snippet: str
     chars: int  # the quoted text's whole length, present when ``snippet`` cuts it
     ts: str

@@ -108,7 +108,8 @@ def test_without_a_proxy_both_transports_stay_direct_and_never_follow_redirects(
     assert client.proxy is None
     with pytest.raises(telegram_api.TelegramTransportError, match="invalid JSON during getMe"):
         asyncio.run(client.call("getMe"))
-    assert asyncio.run(client._download_bytes("documents/file_1.pdf")) == b""
+    with pytest.raises(RuntimeError, match="Telegram file download returned HTTP 302"):
+        asyncio.run(client._download_bytes("documents/file_1.pdf"))
 
     assert [(kw["proxy"], kw["follow_redirects"], kw["trust_env"]) for kw in seen] == [(None, False, False)] * 2
     # Each 302 stayed an answer from Telegram; the redirect target was never requested.

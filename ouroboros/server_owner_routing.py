@@ -66,11 +66,17 @@ def _stage_mailbox_attachments(
         if not uploads:
             return "", [], ""
         from ouroboros.artifacts import attachment_manifest_projection, stage_task_attachments
+        from ouroboros.chat_uploads import delivery_manifest_rows
         from ouroboros.gateway.tasks import _render_attachment_lines
 
         manifest = stage_task_attachments(task_drive, task_id, uploads)
-        rendered = _render_attachment_lines(attachment_manifest_projection(task_drive, task_id, manifest))
-        note = f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]" if rendered else ""
+        authority = attachment_manifest_projection(task_drive, task_id, manifest)
+        rendered = _render_attachment_lines(authority)
+        rows = authority["attachment_manifest"]
+        if failures := delivery_manifest_rows(rows):
+            authority = {**authority, "attachment_manifest": [row for row in rows if row not in failures]}
+        staged = _render_attachment_lines(authority) if failures else rendered
+        note = f"\n\n[ATTACHMENTS]\n{staged}\n[END_ATTACHMENTS]" if staged else ""
         return note, manifest, rendered
     finally:
         if temp_source is not None:

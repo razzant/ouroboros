@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.21
+version: 1.4.22
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -30,10 +30,11 @@ companion_processes:
 
 One owner-only Telegram integration provides both the established bot bridge
 and the optional Mini App. The first positive private Telegram chat binds as
-the sole owner. Text, photos and files (documents, video, audio and voice notes within
-this integration's 10 MiB download cap) can be sent to Ouroboros, with or without a
-caption; replies, photos, videos, documents, typing state, subagent cards, quiz
-cards, and opt-in notifications are mirrored back to that owner. A helper's own final report
+the sole owner. Text, photos and files (documents, video, audio and voice notes) can be sent
+to Ouroboros, with or without a caption. The bridge checks the complete download against any size Telegram announced.
+A file over this integration's 10 MiB cap or one that failed to download still delivers its caption and why it is missing, as one
+message you can Reply to; only intake Ouroboros cannot confirm gets a bot notice. Replies,
+photos, videos, documents, typing state, subagent cards, quiz cards, and opt-in notifications are mirrored back to that owner. A helper's own final report
 stays in the app, where its card shows it; Ouroboros's answer speaks for it, while a helper's
 message to you, question or file still comes here. A helper's card and its notices for work begun
 from this chat also come in Telegram-only mode, from a Project room too, but only through the bot and

@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any, Dict, Mapping
 
 from ouroboros.chat_chain import format_address, parse_address, resolve_row, row_address
-from ouroboros.chat_uploads import web_attachment_caption
+from ouroboros.chat_uploads import delivery_failures, web_attachment_caption
 from ouroboros.store import StoreBusy, StoreError, StoreMigrating
 
 TELEGRAM_SOURCE = "skill:telegram"  # the bundled owner bridge's authenticated ingress identity
@@ -81,6 +81,10 @@ def reply_target(drive_root: Any, reference: Any) -> Dict[str, Any]:
         return {"address": address, "author": "Ouroboros" if project_answer_text(row) else row_author(row)["label"],
                 "text": excerpt_source_text(row), **citation, "role": reply_role(row),
                 **({"attachments": files} if files else {})}
+    if delivery_failures(row.get("attachments")):
+        return {"address": address, "author": row_author(row)["label"],
+                "text": "" if row.get("text_placeholder") else excerpt_source_text(row),
+                "attachments": excerpt_source_attachments(row)}
     return {"address": address, "author": row_author(row)["label"],
             "text": quote_words(row) if (row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}).get("excerpt") else render_row_text(row)}
 
@@ -89,7 +93,7 @@ def selected_reply_target(root, source, matching_deliveries):
     """Use the selected row's retained target, or later deliveries of that same address and passage."""
     held = source.get("_owner_reply_target")
     target = held if isinstance(held, Mapping) and held else reply_target(root, source.get("reply_to"))
-    if not target.get("address") or target.get("text"):
+    if not target.get("address") or has_source(target):
         return target
     return next((prior for prior in matching_deliveries if isinstance(prior, Mapping) and prior.get("text")
                  and all(prior.get(key) == target.get(key) for key in ("address", "excerpt"))), target)
@@ -214,11 +218,13 @@ def reference_from_row(row: dict, root=None) -> dict:
     body = card_reply_display(root, row)  # the host's account of a card display, for its preview alone: the row is still its sender's
     from ouroboros.room_membership import reply_target_home
     address = row_address(row)
+    failures = delivery_failures(row.get("attachments"))
     return {"address": format_address(address), "row_sha256": address["row_sha256"], "chat_id": address["chat_id"],
             **({"quote_role": "user"} if chose else {}),
             "role": role, "author_label": str(row.get("sender_label") or "You") if chose else _reply_author_label(row),
             "kind": kind, **_preview("" if row.get("text_placeholder") else body or answer or chose or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
+            **({"attachment_failures": failures} if failures else {}),
             "target_home": reply_target_home(row)}
 
 

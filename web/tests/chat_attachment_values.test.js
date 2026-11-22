@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { attachmentCaption, attachmentTail, attachmentViews, composerText } from '../modules/chat_attachments.js';
+import { attachmentCaption, attachmentTail, attachmentViews, buildAttachmentBlock, composerText } from '../modules/chat_attachments.js';
 import { uploadView } from './helpers/attachment_views.js';
 import { NodeStub, countPropertyWrites, fixture } from './chat_decision_fixture.js';
 
@@ -75,6 +75,22 @@ test('attachment views keep their closed shape and refuse a foreign URL', () => 
     assert.equal(ok.available && ok.kind === 'image' && ok.url.startsWith('/api/files/download?upload='), true);
     assert.deepEqual([foreign.available, foreign.kind, foreign.url], [false, 'file', '']);
     assert.deepEqual([weird.name, weird.kind], ['c d', 'file']);
+});
+
+test('a Telegram file never received is one inert card with its known size and reason', () => {
+    const fx = fixture();
+    try {
+        const raw = [
+            { name: 'large.mp4', kind: 'file', available: false, size: 11534336, unavailable: 'too_large', limit_bytes: 10485760 },
+            { name: 'unread.pdf', kind: 'file', available: false, unavailable: 'download_failed' },
+        ];
+        const block = buildAttachmentBlock({ fileExtension: () => 'FILE', humanSize: n => n ? `${n} B` : '' }, raw);
+        assert.match(block.innerHTML, /disabled aria-disabled="true"/);
+        assert.match(block.innerHTML, /11534336 B · File exceeds the download limit \(10485760 B\)/);
+        assert.match(block.innerHTML, /File could not be downloaded/);
+        assert.doesNotMatch(block.innerHTML, /•••|download\?upload|<video/);
+        assert.equal(attachmentCaption('(attachment unavailable)', raw, { placeholder: true }), '');
+    } finally { fx.restore(); }
 });
 
 test('a file the host could not attach is named right under the owner\'s words, and only while that is true', () => {

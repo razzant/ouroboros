@@ -350,8 +350,9 @@ def _target_chat(settings: Dict[str, Any], event: Dict[str, Any]) -> int:
         return 0
 
 
-async def _host_post(api, path: str, payload: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
-    """POST one JSON payload to the loopback Host Service; return ``(status, body)``."""
+async def _host_post(api, path: str, payload: Dict[str, Any] | None,
+                     *, method: str = "POST") -> tuple[int, Dict[str, Any]]:
+    """POST one JSON payload (or ``method="GET"``, one read) to the loopback Host Service; return ``(status, body)``."""
     try:
         port = int(os.environ.get("OUROBOROS_HOST_SERVICE_PORT", "8767"))
     except (TypeError, ValueError):
@@ -363,11 +364,9 @@ async def _host_post(api, path: str, payload: Dict[str, Any]) -> tuple[int, Dict
         trust_env=False,
         follow_redirects=False,
     ) as client:
-        response = await client.post(
-            f"http://127.0.0.1:{port}{path}",
-            headers=_host_headers(api),
-            json=payload,
-        )
+        url = f"http://127.0.0.1:{port}{path}"
+        response = await (client.get(url, headers=_host_headers(api)) if method == "GET" else
+                          client.post(url, headers=_host_headers(api), json=payload))
     try:
         body = response.json()
     except Exception:
@@ -386,15 +385,35 @@ def _panic_update(update: Dict[str, Any]) -> bool:
 _NOT_ACCEPTED_RETRY_SEC = 2.0
 
 
+async def _accepted_after_unknown(api, payload: Dict[str, Any]) -> bool:
+    """After an unknown answer, the host's receipt for this exact message id, read once and never sent again:
+    True only when this skill's accepted row is there and its work was not lost (``GET /chat/operations``)."""
+    ref = f"{int(payload.get('chat_id') or 0)}:{payload.get('client_message_id') or ''}"
+    try:
+        status, body = await _host_post(api, f"/chat/operations/{ref}", None, method="GET")
+    except Exception:
+        return False
+    return status == 200 and body.get("ok") is True and body.get("status") != "lost"
+
+
 async def _inject(api, payload: Dict[str, Any]) -> None:
     settings = _load_settings(api)
     pinned_chat = str(settings.get("TELEGRAM_CHAT_ID") or "").strip()
     if not pinned_chat:
         api.log("warning", "Host inject refused: TELEGRAM_CHAT_ID is not configured or bound.")
         return
-    status, body = await _host_post(api, "/chat/inject", payload)
+    # An unknown outcome of an owner message (never Panic's door, never a press) is read back by its receipt.
+    reconcile = bool(payload.get("client_message_id")) and payload.get("text") != "/panic"
+    try:
+        status, body = await _host_post(api, "/chat/inject", payload)
+    except Exception:
+        if not (reconcile and await _accepted_after_unknown(api, payload)):
+            raise
+        status, body = 202, {}
     if status == 503 and body.get("code") == "not_accepted":
         raise InjectNotAccepted("Host inject did not record this attempt")
+    if status >= 500 and reconcile and await _accepted_after_unknown(api, payload):
+        status = 202  # its words are in the host's history: one ordinary answer follows, no failure notice
     if status >= 400:
         raise RuntimeError(f"Host inject returned HTTP {status}")
     # A new user turn starts here — break the silent-mode chain so the next
@@ -854,8 +873,10 @@ async def _handle_owner_message(
     # Owner binding + filtering is already enforced at the top of
     # the update loop (TOFU for all command modes), so chat_id is
     # guaranteed to equal the pinned owner chat here.
-    text = str(message.get("text") or message.get("caption") or "").strip()
-    caption = str(message.get("caption") or "").strip()
+    caption = str(message.get("caption") or "")
+    text = str(message.get("text") or (caption if caption.strip() else ""))
+    if not caption:  # ordinary text and commands keep their earlier behavior
+        text = text.strip()
     # Handle /menu command locally — always allowed
     cleaned_text = text.lower().strip()
     is_menu_cmd = _is_exact_bot_command(cleaned_text, "/menu")
@@ -966,17 +987,8 @@ async def _handle_owner_message(
 
     target = reply_target(read_target) if reply_target is not None else read_target()
     photos = message.get("photo") or []
-    image_base64 = ""
-    image_mime = ""
-    if photos:
-        file_id = str((photos[-1] or {}).get("file_id") or "").strip()
-        if file_id:
-            image_base64, image_mime = await client.download_photo(file_id)
-    inbound = None if photos else telegram_inbound.inbound_file(message)
-    if inbound is not None and inbound.get("refusal"):
-        await client.send_message(chat_id, telegram_inbound.refusal_text(inbound, lang))
-        return
-    if not safe_text and not image_base64 and inbound is None:
+    media = telegram_inbound.photo_media(photos[-1]) if photos else telegram_inbound.inbound_file(message)
+    if not safe_text and media is None:
         # Acknowledge an unsupported message kind (sticker, poll,
         # location…) instead of silently swallowing it.
         if telegram_inbound.unsupported_kind(message):
@@ -984,12 +996,9 @@ async def _handle_owner_message(
         return
     sender_name = _extract_sender_label(sender, chat_id)
     sender_label = f"Telegram ({sender_name})"
-    parked = None
-    if inbound is not None:
-        # Documents, video, audio and voice ride the host's shared
-        # attachment path (#668): parked in this skill's state dir,
-        # copied by the host into data/uploads, removed here after.
-        parked = await telegram_inbound.park_inbound_file(api, client, inbound)
+    # A photo rides inline; other files are parked for the host's shared attachment path (#668); media that
+    # did not arrive is a pathless fact beside the caption on the same accepted row (lib/telegram_inbound.py).
+    media_fields, parked = await telegram_inbound.receive_media(api, client, media) if media else ({}, None)
     try:
         await _inject(api, {
             **_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id, target),
@@ -1000,10 +1009,8 @@ async def _handle_owner_message(
             "sender_label": sender_label,
             "transport": {"kind": "telegram", "conversation_id": str(chat_id), "sender_label": sender_label,
                           **_reply_ingress_transport(target, client.bot_id, int(message.get("message_id") or 0))},
-            "image_base64": image_base64,
-            "image_mime": image_mime,
-            "image_caption": safe_caption,
-            **({"attachments": [parked.spec]} if parked is not None else {}),
+            "image_base64": "", "image_mime": "", "image_caption": safe_caption,
+            **media_fields,
         })
     finally:
         if parked is not None:
