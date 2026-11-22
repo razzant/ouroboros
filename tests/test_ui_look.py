@@ -532,6 +532,11 @@ def test_a_class_the_draft_hides_is_looked_at_where_the_served_page_shows_it(tmp
     assert alone["screens"] == [] and alone["discovered"] == ["phone"]
     assert any(line.startswith(".panel-own stood on no screen of the draft") and "frames 'first'" in line
                for line in alone["not_looked"]), alone["not_looked"]
+    monkeypatch.setattr(stand, "place_plan", lambda *args: {"all": False, "pages": [], "classes": list("gfedcba"),
+                                                            "changed": [], "why": ["changed CSS"], "unplaced": []})
+    seven = _look(tmp_path, monkeypatch, frames="none")["not_looked"]
+    assert any(line.startswith(".a, .b, .c, .d, .e, .f, .g stood on no screen") for line in seven), "all named: " + str(seven)
+    assert stand._dotted(list("edcba")) == ".a, .b, .c, .d, .e", "a single name stands where '1 more' would"
 
 
 def test_new_findings_are_matched_one_by_one_and_an_unmeasured_page_leaves_them_unknown(tmp_path, monkeypatch):
@@ -555,6 +560,16 @@ def test_new_findings_are_matched_one_by_one_and_an_unmeasured_page_leaves_them_
         assert "new" not in screen and f"did not measure the {broken}" in screen["new_unknown"], screen
         assert answer["summary"][0]["new_unknown"] == screen["new_unknown"]
     assert answer["screens_without_findings"] == [] and "snippet failed" in answer["summary"][0]["unmeasured"]
+
+    def clean_draft(self, limit=6, page=None):   # the draft shows nothing, the served page went unmeasured
+        if page is self.twin:
+            return {"uneven_rows": [], "long_texts": [], "layout_error": "TypeError: snippet failed"}
+        return {"uneven_rows": [], "long_texts": [], "layout": {"facts": {"counts": {}}, "findings": []}}
+
+    monkeypatch.setattr(_FakeStand, "measure", clean_draft)
+    answer = _answer(_look(tmp_path, monkeypatch, places=["alpha"], frames="first"), tmp_path)
+    assert answer["screens_without_findings"] == [], "a failed baseline does not make a clean draft look clean"
+    assert "did not measure the served page" in answer["summary"][0]["new_unknown"], answer["summary"]
 
 
 def test_a_pair_matches_findings_by_the_identity_of_what_they_are_about():

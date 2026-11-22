@@ -654,9 +654,10 @@ def _note(notes, text):
         notes.append(text)
 
 
-def _dotted(names) -> str:
+def _dotted(names, keep=4) -> str:   # a single name stands where "and 1 more" would
     names = sorted(names)
-    return "." + ", .".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
+    keep = len(names) if len(names) <= keep + 1 else keep
+    return "." + ", .".join(names[:keep]) + (f" and {len(names) - keep} more" if len(names) > keep else "")
 
 
 def _counterparts(views, twin_views) -> dict:
@@ -935,7 +936,7 @@ def look(spec: dict, report_path) -> dict:
     if unseen:   # a class the change touches that no searched screen showed: where it stands was not looked at
         where = "the draft or the served page beside it" if look_spec["twin"] else "the draft" if web_root else "the interface"
         report["not_looked"].append(
-            f"{_dotted(unseen)} stood on no screen of {where} in the windows searched ({', '.join(report['discovered'])}), "
+            f"{_dotted(unseen, len(unseen))} stood on no screen of {where} in the windows searched ({', '.join(report['discovered'])}), "
             "so where it stands was not looked at" + ("; a call with frames 'first' also looks at the served interface "
                                                       "beside the draft, which shows where it was" if web_root and not look_spec["twin"] else ""))
     named = plan["pages"] if plan.get("named") and not plan["all"] else []

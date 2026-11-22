@@ -325,7 +325,8 @@ def summary(report: dict, report_path: pathlib.Path, outcome: dict, missing: lis
         name = f"{screen['screen']} {screen['theme']} {screen['viewport']} {short.get(screen['engine'], screen['engine'])}"
         if (screen.get("served") or {}).get("absent"):
             unpaired.append(f"{name} ({screen['served']['absent']})")
-        if not counts and not screen.get("unmeasured"):  # a screen measure.js failed on is not one without findings
+        # a screen measure.js failed on, on either page of its pair, is not one without findings
+        if not counts and not screen.get("unmeasured") and not screen.get("new_unknown"):
             quiet.append(name)
             continue
         rows.append({"screen": screen["screen"], "engine": short.get(screen["engine"], screen["engine"]),
