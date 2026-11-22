@@ -28,7 +28,7 @@ def _open(browser, engine, width, theme, rows, sources=None):
 
 def _contained(page):
     assert no_overflow(page)
-    assert page.locator(".marketplace-modal-body").evaluate_all(
+    assert page.locator(".ui-modal-body").evaluate_all(
         "nodes => nodes.every(el => el.scrollWidth <= el.clientWidth + 1)")
 
 

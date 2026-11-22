@@ -22,8 +22,8 @@ def schedule_subagent_properties() -> Dict[str, Any]:
 
     The PUBLIC schema is the model contract (`ToolEntry("schedule_subagent", …)` in `get_tools`,
     with `additionalProperties: False`). Ordinary arguments are derived from this one mapping;
-    the only non-public exception is the bounded D23 legacy selector set carried through the
-    registry for deterministic migration. This avoids the former pair of hand-maintained public
+    the only non-public exceptions are the bounded D23 legacy selector set carried through the
+    registry for deterministic migration and ``title``, refused there with the call that works. This avoids the former pair of hand-maintained public
     parameter lists drifting apart (BIBLE P7).
 
     Returns a FRESH mapping per call, exactly as the inline literal did, so a caller that mutates
@@ -231,8 +231,12 @@ def _shape_problems(params: Dict[str, Any], unsupported: Any) -> tuple[list[str]
         elif parsed <= utc_now():
             problems.append(f"deadline_at is already in the past ({deadline_at}); a child bound to it would "
                             "finalize before doing any work.")
+    if "title" in params:  # start_task's card name; this call names no card
+        problems.append(f"title={params['title']!r} is no schedule_subagent field: objective names the work"
+                        + ("" if str(params.get("objective") or "").strip() else " and is required")
+                        + ", and the optional role becomes part of the child's assignment; send the call without title.")
     for field in ("objective", "expected_output"):
-        if not str(params.get(field) or "").strip():
+        if not str(params.get(field) or "").strip() and (field, "title" in params) != ("objective", True):
             problems.append(f"{field} is required.")
     raw_claims = params.get("acceptance_claims")
     if raw_claims is not None and (not isinstance(raw_claims, list) or any(not isinstance(item, str) for item in raw_claims)):

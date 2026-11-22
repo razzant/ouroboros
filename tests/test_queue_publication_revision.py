@@ -329,6 +329,29 @@ def test_an_unknown_document_keeps_its_unknown_counts_under_a_certificate_that_c
     assert queue_observation.load_queue_document(tmp_path)["worker_total"] is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX read permission")
+def test_a_document_that_became_unreadable_is_unknown_never_its_cached_reading(tmp_path):
+    """An unchanged file answers from the cache; a withdrawn read permission (same mtime, size and inode) is
+    read again and is invalid, not the earlier counts; readable again, it is read again."""
+    path = tmp_path / "state/queue_snapshot.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"running_count": 0, "pending_count": 0, "running": [],
+                                "pending": [{"id": "p", "task": {"id": "p", "metadata": {"k": "v"}}}]}), encoding="utf-8")
+    first = queue_observation.load_queue_document(tmp_path)
+    again = queue_observation.load_queue_document(tmp_path)
+    assert again["pending"][0]["task"]["metadata"] is first["pending"][0]["task"]["metadata"], "a cache hit"
+    mode = path.stat().st_mode & 0o777
+    path.chmod(0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("this user reads a file without permission")
+        unread = queue_observation.load_queue_document(tmp_path)
+    finally:
+        path.chmod(mode)
+    assert unread == {"_snapshot_invalid": True}
+    assert queue_observation.load_queue_document(tmp_path)["pending_count"] == 0
+
+
 def test_publications_follow_changes_not_ticks(published, monkeypatch):
     root, _now = published
     writes, _fsyncs = _writes(monkeypatch)

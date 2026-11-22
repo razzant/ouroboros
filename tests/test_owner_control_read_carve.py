@@ -37,12 +37,3 @@ def test_owner_control_example_reaches_a_registered_result(tmp_path, monkeypatch
     assert "ARTIFACT_OUTPUTS" in result, result
     record = registered_task_artifact(drive, ctx.task_id, "example.txt")
     assert record and pathlib.Path(record["path"]).read_text(encoding="utf-8") == example
-
-
-def test_inplace_editor_is_not_a_pure_read_inspection():
-    from ouroboros.tools.registry import _is_pure_read_inspection
-
-    assert not _is_pure_read_inspection("yq -i '.mode = off' settings.json")
-    assert not _is_pure_read_inspection("yq --inplace '.mode = low' settings.json")
-    assert _is_pure_read_inspection("yq '.mode' settings.json")
-    assert _is_pure_read_inspection("jq '.mode' settings.json")

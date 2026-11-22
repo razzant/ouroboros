@@ -249,21 +249,21 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
     function openDialog(form, card) {
         if (form.dialog) { form.dialog.inputs[0]?.focus?.(); return; }
         if (!usable(form)) return;
-        const backdrop = el('div', 'marketplace-modal-backdrop secret-request-backdrop');
+        const backdrop = el('div', 'ui-modal-backdrop secret-request-backdrop');
         // Every visible string here comes through tr/fmt; the overlay never walks the form.
         backdrop.setAttribute('data-i18n-authored', '');
-        const panel = el('div', 'marketplace-modal secret-request-dialog');
+        const panel = el('div', 'ui-modal secret-request-dialog');
         panel.setAttribute('role', 'dialog');
         panel.setAttribute('aria-modal', 'true');
         const titleId = `secret-request-title-${form.quiz.quizId}`;
         panel.setAttribute('aria-labelledby', titleId);
-        const head = el('div', 'marketplace-modal-head');
+        const head = el('div', 'ui-modal-head');
         const title = el('h3', 'secret-request-title', fmt('{plugin}: secret needed', { plugin: form.request.pluginName }));
         title.id = titleId;
         const close = button('btn btn-default btn-sm secret-request-close', tr('secret.close', 'Close'));
         close.setAttribute('aria-label', tr('secret.close_form', 'Close the form; the request stays open'));
         head.append(title, close);
-        const body = el('div', 'marketplace-modal-body secret-request-body');
+        const body = el('div', 'ui-modal-body secret-request-body');
         body.append(el('p', 'secret-request-intro', tr('secret.intro', 'The value is saved to Settings. It is not sent in this conversation.')));
         const late = el('p', 'secret-request-late ui-status');
         late.dataset.tone = 'neutral';
@@ -311,7 +311,7 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
         error.dataset.tone = 'danger';
         const check = button('btn btn-default btn-sm secret-request-check', tr('secret.check_status', 'Check status'));
         body.append(late, fieldsBox, readersTitle, readers, warning, error, check);
-        const footer = el('div', 'marketplace-modal-actions');
+        const footer = el('div', 'ui-modal-actions');
         const dismiss = button('btn btn-default secret-request-cancel', tr('secret.close', 'Close'));
         const ok = button('btn secret-request-ok', tr('secret.save', 'Save'));
         ok.dataset.primary = '';  // the dialog foot's one primary action (ui.css primary slot)

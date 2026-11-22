@@ -723,6 +723,15 @@ def _main_full_output_near_end(root, card_after=185):
 
 
 _MAIN_OFFSET = "n => n.getBoundingClientRect().top - document.querySelector('#chat-messages').getBoundingClientRect().top"
+# One wheel may move a box over several frames (WebKit on Linux animates it): a position is read once it has stopped.
+_SCROLL_AT_REST = """n => new Promise(done => {
+    let last = n.scrollTop, still = 0;
+    const step = () => {
+        if (n.scrollTop === last) still += 1; else { last = n.scrollTop; still = 0; }
+        if (still >= 8) done(last); else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+})"""
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
@@ -780,8 +789,7 @@ def test_a_wheel_inside_a_box_supersedes_a_landing_still_reading_and_its_late_an
             page.mouse.wheel(0, 240)
             page.wait_for_function('([n, top]) => n.scrollTop > top', arg=[body.element_handle(), before['body']],
                                    timeout=5_000)
-            page.evaluate(_FRAMES)
-            read = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_MAIN_OFFSET)}
+            read = {'body': body.evaluate(_SCROLL_AT_REST), 'line': line.evaluate(_MAIN_OFFSET)}
             assert read['body'] > before['body'] and abs(read['line'] - before['line']) <= 1, (before, read)
             page.evaluate('() => window.__releaseHeld()')
             page.wait_for_function("feed => document.querySelector(feed).textContent.includes('Late arrival 39')",
