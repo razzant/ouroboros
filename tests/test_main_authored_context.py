@@ -663,3 +663,66 @@ def test_two_full_folds_leave_the_start_and_the_first_folds_request_in_place(mai
     assert after_second[:len(after_first)] == after_first  # that whole request stands, superseded facts included
     second = after_second[len(after_first)]
     assert _capsule_metadata(second)[1] and second["content"][0]["text"].endswith("\n" + second_note)
+
+
+def _roster_after_a_change(monkeypatch):
+    """A roster of twelve independent roots whose titles carry a version; ``bump`` changes it as a reply is produced."""
+    from ouroboros import peer_roster
+
+    state = {"v": 0}
+    monkeypatch.setattr(peer_roster, "independent_roots", lambda _root: {"roots": [
+        {"task_id": f"peer-{n}", "title": f"Peer work {n} at version {state['v']} " + "x" * 80, "project_id": "",
+         "chat_id": 1, "status": "running"} for n in range(12)], "incomplete": False})
+
+    def bump(reply):
+        def produce(_kwargs):
+            state["v"] += 1
+            return reply
+        return produce
+    return bump
+
+
+def _rosters(rows):
+    return [i for i, row in enumerate(rows) if str(row.get(HOST_CONTEXT_KIND_KEY) or "").startswith("ouroboros_roster")]
+
+
+def test_a_round_that_applies_a_fold_holds_a_changed_roster_back_one_round(main_loop, monkeypatch):
+    """Three directions at the loop's seam: with the roster changed, the round that applies a fold appends no roster
+    row and the next round appends it; a round without a fold appends it at once; when a fold is applied in two
+    consecutive rounds, the first round appends no roster row and the second does."""
+    from ouroboros.context_compaction import _capsule_metadata
+
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    read = lambda n: call("read_file", {"path": "evidence.txt"}, f"read-{n}")  # noqa: E731
+    f.run([read(1), bump(call("compact_context", {"working_note": "N1 holds read one.", "keep_unit_ids": []}, "fold-1")),
+           read(2), bump(read(3)),
+           bump(call("compact_context", {"working_note": "N2 holds read three.", "fold_last_n": 1}, "fold-2")),
+           bump(call("compact_context", {"working_note": "N3 holds the rest.", "keep_unit_ids": []}, "fold-3")),
+           {"content": "done"}])
+    requests = [_plain(f.inputs[i]["messages"]) for i in range(len(f.inputs))]
+
+    def after_last_note(rows):
+        return [i for i in _rosters(rows) if i > max(i for i, row in enumerate(rows) if _capsule_metadata(row)[1])]
+
+    def calls_before(rows, ident):
+        return next(i for i, row in enumerate(rows) if ident in {c["id"] for c in row.get("tool_calls") or ()})
+
+    assert not after_last_note(requests[2]) and after_last_note(requests[3])  # held by fold-1, then appended
+    assert max(_rosters(requests[4])) > calls_before(requests[4], "read-3")  # no fold: at once
+    assert not after_last_note(requests[5])  # held by fold-2
+    assert after_last_note(requests[6])  # fold-3 the next round: appended anyway
+
+
+def test_four_full_folds_with_a_changing_roster_keep_at_most_two_snapshots_and_each_request(main_loop, monkeypatch):
+    """Over four full folds with a roster that changes before each, the view never holds more than two roster rows,
+    and the request sent after each fold is a prefix of the request sent after the next."""
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    script = []
+    for n in range(1, 5):
+        script += [bump(call("read_file", {"path": "evidence.txt"}, f"read-{n}")),
+                   call("compact_context", {"working_note": f"N{n} holds read {n}.", "keep_unit_ids": []}, f"fold-{n}")]
+    f.run([*script, {"content": "done"}])
+    requests = [_plain(f.inputs[i]["messages"]) for i in range(len(f.inputs))]
+    assert max(len(_rosters(rows)) for rows in requests) <= 2, [len(_rosters(rows)) for rows in requests]
+    folded = requests[2::2]
+    assert len(folded) == 4 and all(later[:len(earlier)] == earlier for earlier, later in zip(folded, folded[1:]))
