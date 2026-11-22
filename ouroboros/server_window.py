@@ -187,7 +187,7 @@ def local_health_window(model: str) -> int:
 
 def read_metadata_window(model: str, base_url: str, api_key: str, *, provider: str, evidence_root) -> Tuple[int, str]:
     """CW6 (v6.34.0): an OpenAI-compatible server (vLLM, Ollama, LM Studio, TGI, ...)
-    commonly publishes the per-model window in GET {base_url}/models. ``server_window`` names the fields: vLLM's
+    commonly publishes the per-model window in GET {base_url}/models (Go: its documented list URL). vLLM's
     ``max_model_len`` and llama.cpp's ``meta.n_ctx`` are the server's own buffer (``server_metadata``), a catalog's
     ``context_length`` / ``context_window`` stay ``provider_metadata``. When the listing answered without one, a
     server on this host or network is asked at its own documented paths (llama.cpp ``/props``, LM Studio
@@ -201,7 +201,10 @@ def read_metadata_window(model: str, base_url: str, api_key: str, *, provider: s
 
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         from ouroboros.net_transport import verify_kwargs
-        resp = httpx.get(str(base_url).rstrip("/") + "/models", headers=headers, timeout=5.0, **verify_kwargs())
+        from ouroboros.opencode_go import compatible_models_url, go_client_headers, go_model_limits, is_go_chat_route
+
+        headers.update(go_client_headers(provider, base_url))
+        resp = httpx.get(compatible_models_url(provider, base_url), headers=headers, timeout=5.0, **verify_kwargs())
         resp.raise_for_status()
         payload = resp.json()
         items = payload.get("data") if isinstance(payload, dict) else payload
@@ -216,10 +219,17 @@ def read_metadata_window(model: str, base_url: str, api_key: str, *, provider: s
         matched = [item for item in (items or []) if isinstance(item, dict)
                    and str(item.get("id") or item.get("name") or "") in wanted]
         from ouroboros.response_limits import positive_limit, record_metadata_limit
+
+        go_route = is_go_chat_route(provider, base_url)
+        maximum = (max((go_model_limits(item)[1] for item in matched), default=0) if go_route else
+                   max((positive_limit(item.get("max_output_tokens")) for item in matched), default=0))
         # A listing that was read is an observation even when it publishes no maximum.
         record_metadata_limit(evidence_root, provider=provider, model=model,
-            base_url=base_url, maximum=max((positive_limit(item.get("max_output_tokens")) for item in matched), default=0),
-            source="/models max_output_tokens")
+            base_url=base_url, maximum=maximum,
+            source="OpenCode Go /models limit.output" if go_route else "/models max_output_tokens")
+        if go_route:
+            window = max((go_model_limits(item)[0] for item in matched), default=0)
+            return (window, SOURCE_PROVIDER_METADATA) if window else (0, "")
         for item in matched:
             window, source = models_item_window(item)
             if window:

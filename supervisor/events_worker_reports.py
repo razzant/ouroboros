@@ -242,6 +242,9 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
     for key in ("routing_tool_calls", "completion_tool_calls", "rounds"):
         if key in evt:
             payload[key] = None if evt[key] is None else int(evt[key])
+    attempt = evt.get("task_attempt")
+    if type(attempt) is int and attempt >= 0:
+        payload["task_attempt"] = attempt
     if "tool_call_counts" in evt:
         counts = evt["tool_call_counts"]
         payload["tool_call_counts"] = dict(counts) if isinstance(counts, dict) else None

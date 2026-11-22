@@ -234,9 +234,9 @@ purpose: immediate room return with reading, forms and unsent work, or a Keep ru
 widget. Retained rooms suspend polling/rendering, keep send custody and still own
 their disposer; Stop, unload, reload and shutdown remain force-destroy boundaries.
 Late async results defer hidden painting and check `destroyed` before touching state
-or re-arming loops. Merely hiding a node while all its handlers keep working is a leak.
+or re-arming loops. Hiding a node while its handlers keep working is a leak.
 A module widget uses ordered dispose with acknowledgement (`WIDGET_DISPOSE_ACK_TIMEOUT_MS`;
-ARCHITECTURE §3 "Skills and Widgets").
+ARCHITECTURE §3 "Extensions and Widgets").
 
 Enforcement: the deterministic leak test runs in the release-tier `ui_browser` lane;
 commit-tier coverage is the advisory CHECKLISTS item 9 `perf_lifecycle`. The class is
@@ -256,7 +256,7 @@ verification is event-driven on the relevant engine and proves convergence to a 
 fixed point with a real consumer or production-derived fixture that crosses the known
 wrapping threshold, not two snapshots. A module widget's own faults use
 `ouro-widget-error`; the builtin page sends bounded, best-effort reports to the existing
-event log (ARCHITECTURE §3 "Skills and Widgets"). These page-reported diagnostics are not
+event log (ARCHITECTURE §3 "Extensions and Widgets"). These page-reported diagnostics are not
 task-execution evidence. Module source loading and declarative requests have a bounded
 host timeout; declarative job widgets keep their `job_id` and bounded retry/timeout
 behavior in the refresh contract, where missing or malformed job status is an immediate

@@ -201,7 +201,7 @@ def _js_sources() -> str:
     and theme.js, beside the vendored *.min.js bundles) and the modules.
 
     JS participates in the variable contract from both ends: it writes measured
-    values with ``setProperty('--chat-input-reserve', …)`` and it reads themed
+    values with ``setProperty('--chat-composer-height', …)`` and it reads themed
     ones with ``getComputedStyle(...).getPropertyValue('--diagram-bg')``. A
     token at either end is live even though no CSS rule mentions it: app.js's
     handles write the dragged box's ``--drag-width``."""

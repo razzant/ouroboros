@@ -89,7 +89,7 @@ function wrapRuns(runs, width, styleOf, measure) {
         for (const part of String(run.text).split(/(\n| +)/)) {
             if (!part) continue;
             if (part === '\n') { newLine(); continue; }
-            if (!part.trim()) { if (line.length) space = { style, width: measure(' ', style.font) }; continue; }
+            if (!run.code && !part.trim()) { if (line.length) space = { style, width: measure(' ', style.font) }; continue; }
             const size = measure(part, style.font);
             if (line.length && x + (space?.width || 0) + size > width) newLine();
             else if (space && line.length) place(' ', space.style, space.width);
@@ -150,8 +150,7 @@ export function layoutCard(blocks, { theme, measure, excerpt = false, logo = fal
                 // One base direction per paragraph: its lines in plain type, drawn from the right edge.
                 const right = PAD_X + inner - (item.depth || 0) * LEVEL - (item.quote || 0) * QUOTE;
                 if (marker) lines.push({ y, height: metric.line, rtl: true, right, pieces: [{ text: marker, style: { font: plain, color: theme.meta } }] });
-                const words = cardRuns(item.runs).map((run) => run.text).join('');
-                const wrapped = wrapRuns([{ text: words }], right - markerWidth - PAD_X, () => ({ font: plain, color: theme.text }), measure);
+                const wrapped = wrapRuns(cardRuns(item.runs), right - markerWidth - PAD_X, () => ({ font: plain, color: theme.text }), measure);
                 wrapped.forEach((pieces, index) => lines.push({ y: y + index * metric.line, height: metric.line, rtl: true,
                     right: right - markerWidth,
                     pieces: [{ text: pieces.map((piece) => piece.text).join(''), style: { font: plain, color: theme.text } }] }));
@@ -209,6 +208,20 @@ function roundRect(ctx, x, y, w, h, r) {
     else ctx.rect(x, y, w, h);
 }
 
+/** The spans of a line one inline-code background covers: each run of adjacent code pieces, its own spaces
+ *  included, as the chat draws one background behind the code; a run of only spaces draws none. */
+function washSpans(pieces) {
+    const spans = [];
+    let open = null;
+    for (const piece of pieces) {
+        if (!piece.style?.wash) { open = null; continue; }
+        if (!open) spans.push(open = { x: piece.x, width: 0, inked: false });
+        open.width = piece.x + piece.width - open.x;
+        open.inked ||= Boolean(piece.text.trim());
+    }
+    return spans.filter((span) => span.inked);
+}
+
 function paint(ctx, plan, theme, logo) {
     roundRect(ctx, 0, 0, CARD_WIDTH, plan.height, RADIUS);
     ctx.fillStyle = theme.background;
@@ -230,6 +243,11 @@ function paint(ctx, plan, theme, logo) {
             ctx.drawImage(logo, line.mark.x, line.mark.y, line.mark.size, line.mark.size);
             ctx.restore();
         }
+        for (const span of line.rtl ? [] : washSpans(line.pieces)) {
+            ctx.fillStyle = theme.wash;
+            roundRect(ctx, span.x - 3, line.y + 3, span.width + 6, line.height - 6, 5);
+            ctx.fill();
+        }
         for (const piece of line.pieces) {
             const { style } = piece;
             ctx.font = style.font;
@@ -241,11 +259,6 @@ function paint(ctx, plan, theme, logo) {
                 ctx.direction = 'ltr';
                 ctx.textAlign = 'left';
                 continue;
-            }
-            if (style.wash && piece.text.trim()) {
-                ctx.fillStyle = theme.wash;
-                roundRect(ctx, piece.x - 3, line.y + 3, piece.width + 6, line.height - 6, 5);
-                ctx.fill();
             }
             ctx.fillStyle = style.color;
             ctx.fillText(piece.text, piece.x, middle);

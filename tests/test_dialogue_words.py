@@ -1,4 +1,4 @@
-"""The one tokenization rule and the one word predicate (``ouroboros/dialogue_words.py``, consensus K4.1)."""
+"""The one tokenization rule and the one word predicate (``ouroboros/dialogue_words.py``)."""
 from __future__ import annotations
 
 import json
@@ -6,13 +6,35 @@ import unicodedata
 
 import pytest
 
-from ouroboros.dialogue_words import Field, fields_of, match_fields, match_text, normalize, parse, tokens
+from ouroboros.dialogue_words import Field, excerpt, fields_of, locate, match_fields, match_text, normalize, parse, tokens
 
 
 def test_normalize_is_nfc_casefold_and_yo_as_ye():
     decomposed = unicodedata.normalize("NFD", "ЁЛКА Straße")
     assert normalize(decomposed) == "елка strasse"
-    assert tokens("Чат_History, follow-up: «ёж»!") == ["чат_history", "follow", "up", "еж"]
+    assert tokens("Чат_History, follow-up: «ёж»!") == ["чат", "history", "follow", "up", "еж"]
+
+
+def test_underscore_splits_identifiers_into_findable_words():
+    assert tokens("see memory_view.py") == ["see", "memory", "view", "py"]
+    assert match_text(parse(["history"]), "the chat_history tool")
+    assert match_text(parse(["chat_history"]), "history of a chat")  # unquoted: two prefixes, any order
+    assert match_text(parse(['"chat_history"']), "run chat_history now")  # quoted: the consecutive pair
+    assert not match_text(parse(['"chat_history"']), "history of a chat")
+
+
+def test_combining_marks_stay_inside_their_word():
+    assert tokens("हिन्दी नमस्ते") == ["हिन्दी", "नमस्ते"]
+    assert tokens("שָׁלוֹם עולם") == ["שָׁלוֹם", "עולם"]
+    assert match_text(parse(["नमस"]), "हिन्दी नमस्ते")
+    # a mark with no word character before it starts nothing
+    assert tokens("\u0301x") == ["x"]
+
+
+def test_text_without_spaces_is_one_token_per_run_a_named_limit():
+    assert tokens("日本語のテキスト") == ["日本語のテキスト"]
+    assert match_text(parse(["日本"]), "日本語のテキスト")
+    assert not match_text(parse(["テキスト"]), "日本語のテキスト")  # a piece inside a run: use search
 
 
 def test_words_are_prefixes_in_any_order_and_all_required():
@@ -180,3 +202,32 @@ def test_fields_of_runs_on_every_row_kind_with_no_store_importable(blocked, tmp_
     assert done.returncode == 0, done.stderr
     assert [[tuple(f) for f in kind] for kind in json.loads(done.stdout)] == [
         [tuple(f) for f in fields_of(row)] for row in _EVERY_KIND]
+
+
+_FILLER = "Filler sentence goes here. " * 20
+
+
+@pytest.mark.parametrize("words, text, found", [
+    (["art"], "A smart start. " + _FILLER + "Then the art of it.", "art"),  # inside another word earlier
+    (["needle"], "Straße. " + _FILLER + "Here is the needle.", "needle"),  # normalizing changes the length
+    (["plan zebra", "needle"], "The plan is first. " + _FILLER + "Here is the needle.", "needle"),  # not satisfied
+    (['"socket timeout"'], "Words. " + _FILLER + "the socket,  timeout came.", "socket,  timeout"),  # parted
+    (["needle"], "Plain. " + _FILLER + "a needle here", "needle"),  # the control
+])
+def test_the_one_locator_finds_the_matched_run_in_the_original_text(words, text, found):
+    query = parse(words)
+    start, end = locate(query, text)
+    assert text[start:end] == found
+    shown = excerpt(query, text, 240)
+    assert " ".join(found.split()) in shown and f"[{len(text)} chars in full]" in shown
+
+
+def test_the_locator_says_none_where_nothing_matches_and_a_short_field_is_whole():
+    assert locate(parse(["zebra"]), "no such animal") is None
+    assert excerpt(parse(["zebra"]), "no such   animal") == "no such animal"
+    assert excerpt(parse(["x"]), "x" * 300).startswith("x" * 240) and "[300 chars in full]" in excerpt(parse(["x"]), "x" * 300)
+
+
+def test_a_quoted_part_against_its_neighbours_never_joins_them():
+    assert match_text(parse(['one"two"three']), "one two three")
+    assert not match_text(parse(['one"two"three']), "onethree two")

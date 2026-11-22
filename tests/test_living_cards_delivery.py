@@ -117,7 +117,7 @@ def test_the_delivery_projection_keeps_its_earlier_kinds(tmp_path):
     assert delivery_fields({"type": "document", "filename": "r.pdf", "size_bytes": "12"}) == {
         "msg_type": "document", "filename": "r.pdf", "mime": "application/octet-stream", "download_url": "",
         "download_url_compat": "", "caption": "", "size_bytes": 12}
-    assert delivery_fields({"type": "photo"}) == {}  # a photo without a stored URL stays a text row
+    assert delivery_fields({"type": "photo"}) == {}  # no URL and no authored caption: keep the generated fallback text
     assert delivery_fields({"type": "links", "actions": [{"label": "a", "url": "https://a"}]})["msg_type"] == "links"
     assert delivery_fields({"type": "card"}) == {} and delivery_fields({"type": "quiz", "quiz": {}}) == {}
 

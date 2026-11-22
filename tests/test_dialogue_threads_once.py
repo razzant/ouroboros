@@ -361,11 +361,13 @@ _CONVERSATION_READERS = {
 _BODY_DECODERS = {
     "ouroboros/dialogue_store.py::whole_body": "expands",
     "ouroboros/dialogue_store.py::revise_text": "expands: refreshes the identity, returns the row as written",
+    "ouroboros/dialogue_store.py::annotation_sources": "stored row, its address only",
     "ouroboros/place_arrivals.py::project_source": "every Row reader: identity and words; whole_rows hands rows on",
     "ouroboros/place_arrivals.py::heard_replay": "stored row, identity and import marker only",
     "ouroboros/place_arrivals.py::record_heard": "stored row, identity only",
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
     "ouroboros/place_arrivals.py::retain_focus_source": "stored row, its address only",
+    "ouroboros/dialogue_word_index.py::_post_segment": "stored row, its typed word fields only (never the thread)",
 }
 # Readers that hand a stored row on whole (a receipt, a comparison, a rebuilt source, the exports) expand it.
 _WHOLE_ROW_READERS = ("ouroboros/dialogue_store.py::append", "ouroboros/dialogue_store.py::_receipt",

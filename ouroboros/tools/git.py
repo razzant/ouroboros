@@ -1257,13 +1257,8 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         if _managed_tx:
             # Persist this continuation only when a later phase refuses Pause.
             # It is a commit/binding receipt, never proof that tests or smoke passed.
-            _managed_tx.update(merge_commit=commit_sha, postcommit_resume={
-                "commit_message": commit_message, "pre_fingerprint": pre_fingerprint,
-                "post_fingerprint": post_fingerprint,
-                "review_context": {key: getattr(ctx, key, None) for key in (
-                    "_last_triad_models", "_last_scope_model", "_last_triad_raw_results",
-                    "_last_scope_raw_result", "_review_degraded_reasons", "_author_commit_record")},
-            })
+            _managed_tx.update(merge_commit=commit_sha, postcommit_resume=managed_postcommit_receipt(
+                ctx, commit_message, pre_fingerprint, post_fingerprint))
         gate_failure = _managed_post_commit_tests_gate(
             ctx, commit_message, _commit_start, skip_tests, test_warning_ref, _managed_tx,
             fingerprints=(pre_fingerprint, post_fingerprint),
@@ -1504,6 +1499,7 @@ from ouroboros.tools.git_managed_postcommit import (  # noqa: E402,F401
     _managed_commit_paused,
     _managed_post_commit_tests_gate,
     _resume_managed_commit,
+    managed_postcommit_receipt,
 )
 
 

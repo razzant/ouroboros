@@ -307,6 +307,7 @@ class LLMClient(
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
+        chat_conversation_id: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
 
@@ -329,7 +330,9 @@ class LLMClient(
         a confirmed quota/auth refusal to this caller without entering resource
         waiting; task overrides, controls and dispatched-operation custody remain.
         ``caller_dispatch_deadline_ts`` is a helper's send window, never a wait's end
-        (``deadline_utils.caller_deadline_scoped``)."""
+        (``deadline_utils.caller_deadline_scoped``). ``chat_conversation_id`` is
+        caller-owned wire affinity, separate from cache, role and billing scope;
+        no identity is inherited by other calls."""
         from ouroboros.llm_claudexor import turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
@@ -348,7 +351,8 @@ class LLMClient(
                 # The spawner's transport policy (``utils.transport_no_proxy``): a forked child
                 # avoids OS proxy lookup; a spawned carrier keeps the server's policy.
                 no_proxy = no_proxy or transport_no_proxy()
-                target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
+                target = {**self._resolve_remote_target(model), "processing_preference": processing_preference,
+                          "chat_conversation_id": chat_conversation_id}
                 temperature = resolve_temperature_hint(target, temperature, default_temperature)
                 message, usage = self._chat_remote(
                     target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
@@ -397,11 +401,12 @@ class LLMClient(
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
+        chat_conversation_id: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs.
 
-        Host temperature hints, resource waiting and the active-turn transport
-        slot follow ``chat``'s effective-route contract."""
+        Temperature hints, resource waiting and caller conversation identity
+        follow ``chat``'s effective-route contract."""
         from ouroboros.llm_claudexor import turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
@@ -429,7 +434,8 @@ class LLMClient(
                 adopt_physical_attempt_capture(capture)
             result[1]["ledger_attempt_ids"] = list(attempt_ids)
             return result
-        target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
+        target = {**self._resolve_remote_target(model), "processing_preference": processing_preference,
+                  "chat_conversation_id": chat_conversation_id}
         temperature = resolve_temperature_hint(target, temperature, default_temperature)
         carried_turn_state = turn_state_for_route(model_turn_state, target.get("provider"))
         if target.get("provider") == "claudexor":
@@ -491,6 +497,7 @@ class LLMClient(
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
+                    wire_completion=resp,
                 )
                 result[1]["ledger_attempt_ids"] = list(attempt_ids)
                 return _one_shot_result(result, tools)
@@ -522,6 +529,7 @@ class LLMClient(
             _reply_dict(resp, target),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
+            wire_completion=resp,
         )
         result[1]["ledger_attempt_ids"] = list(attempt_ids)
         return _one_shot_result(result, tools)
@@ -814,14 +822,16 @@ def openrouter_web_search_server_tool(
     *, api_key: str, model: str, query: str, search_context_size: str,
     accounting_scope: Optional[UsageScope] = None, timeout: Optional[float] = None,
     processing_preference: str | None = None, caller_dispatch_deadline_ts: Optional[float] = None,
+    target: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Keep native search tools on the shared physical-send recovery driver.
 
-    ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted."""
+    ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted;
+    ``target`` the leg's resolved connection (``llm_openai_compatible.openrouter_web_search_server_tool``)."""
     return _openrouter_web_search_server_tool(
         api_key=api_key, model=model, query=query, search_context_size=search_context_size,
         accounting_scope=accounting_scope, timeout=timeout, processing_preference=processing_preference,
-        _recovery=LLMClient()._create_chat_completion_with_retries,
+        target=target, _recovery=LLMClient()._create_chat_completion_with_retries,
     )
 
 
@@ -830,12 +840,13 @@ def anthropic_web_search_server_tool(
     *, api_key: str, model: str, query: str,
     accounting_scope: Optional[UsageScope] = None, timeout: Optional[float] = None,
     processing_preference: str | None = None, caller_dispatch_deadline_ts: Optional[float] = None,
+    target: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Compose native Messages search without converting its provider-owned tool.
 
     ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted."""
     return _anthropic_web_search_server_tool(
         api_key=api_key, model=model, query=query, accounting_scope=accounting_scope,
-        timeout=timeout, processing_preference=processing_preference,
+        timeout=timeout, processing_preference=processing_preference, target=target,
         _recovery=LLMClient()._create_chat_completion_with_retries,
     )

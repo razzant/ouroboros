@@ -1,4 +1,4 @@
-"""``chat_history(words=…)``: the words reader over the conversation (``ouroboros/dialogue_recall.py``, K4)."""
+"""``chat_history(words=…)``: the words reader over the conversation (``ouroboros/dialogue_recall.py``)."""
 from __future__ import annotations
 
 import json
@@ -22,7 +22,7 @@ def _read(root, **kwargs) -> str:
 
 
 def _say(root, ts, text, *, direction="in", chat_id=1, **extra):
-    ds.append(root, "chat", {"ts": ts, "direction": direction, "chat_id": chat_id, "text": text, **extra})
+    return ds.append(root, "chat", {"ts": ts, "direction": direction, "chat_id": chat_id, "text": text, **extra})
 
 
 def _card(root, ts, *, question, options, index, comment, task="asker-1", **quiz):
@@ -31,6 +31,10 @@ def _card(root, ts, *, question, options, index, comment, task="asker-1", **quiz
         "text": f"[answer q] chose ({index + 1}) {options[index]}",
         "quiz": {"quiz_id": "q-" + ts[-9:-1], "question": question, "options": options, "answered_index": index,
                  "comment": comment, **quiz}})
+
+
+def _lines(text: str) -> str:
+    return text.split("\n\n", 1)[1] if "\n\n" in text else ""
 
 
 def _addresses(text: str):
@@ -87,19 +91,21 @@ def test_order_is_the_callers_direction_of_time(tmp_path):
     assert "2026-11-01" in _addresses(oldest)[0] and "2026-11-03" in _addresses(newest)[0]
 
 
-def test_voice_owner_keeps_my_humans_words_and_on_a_card_only_what_they_wrote(tmp_path):
+def test_voice_owner_selects_my_humans_rows_and_matches_every_field_of_them(tmp_path):
     _say(tmp_path, "2026-11-01T10:00:00Z", "merge plan from me")
     _say(tmp_path, "2026-11-01T10:01:00Z", "merge plan from Ouroboros", direction="out")
-    _card(tmp_path, "2026-11-01T10:02:00Z", question="Merge plan B?", options=["Yes", "No"], index=0, comment="fine")
-    everyone = _read(tmp_path, words=["merge plan"])
-    assert "total=3" in everyone
+    _card(tmp_path, "2026-11-01T10:02:00Z", question="Merge plan B?", options=["Yes", "No"], index=0, comment="")
+    # a card asked but never answered: Ouroboros's row, not my human's
+    ds.append(tmp_path, "chat", {"ts": "2026-11-01T10:03:00Z", "type": "quiz", "direction": "out", "chat_id": 1,
+                                 "text": "Merge plan C?", "quiz": {"quiz_id": "qc", "question": "Merge plan C?",
+                                                                   "options": ["Yes"]}})
+    assert "total=4" in _read(tmp_path, words=["merge plan"])
     mine = _read(tmp_path, words=["merge plan"], voice="owner")
-    assert "total=1" in mine and "merge plan from me" in mine and "from Ouroboros" not in mine
-    # the card's question is the asking task's text: not my human's words, though the card is shown whole
-    shown = _read(tmp_path, words=["fine"], voice="owner")
-    assert "total=1" in shown
-    assert "question (task asker-1): Merge plan B?" in shown and "comment (my human): fine" in shown
-    assert "press (my human): (1) Yes" in shown
+    assert "total=2" in mine and "merge plan from me" in mine
+    assert "from Ouroboros" not in mine and "Merge plan C" not in mine
+    # the answered card is found by its question's words, and the line says whose words they are
+    assert "matched question" in mine
+    assert "question (task asker-1): Merge plan B?" in mine and "press (my human): (1) Yes" in mine
 
 
 def test_the_api_door_stamp_is_named_and_an_unstamped_row_claims_nothing(tmp_path):
@@ -126,17 +132,26 @@ def test_total_is_exact_on_a_complete_set_and_unknown_with_a_named_gap(tmp_path)
     assert "Gaps: jsonl_malformed" in answer
 
 
-def test_a_candidate_set_past_the_recheck_bound_returns_the_examined_range(tmp_path, monkeypatch):
+def test_the_scan_rechecks_every_row_so_a_default_call_starts_at_the_newest(tmp_path, monkeypatch):
+    """No postings here: the bound of the postings path does not apply, the scan reads every row as the
+    legacy search does, so the newest match leads even when the candidates outnumber the bound."""
     for minute in range(4):
         _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", f"match {minute}")
-    assert "total=4" in _read(tmp_path, words=["match"])
-    monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 4)  # met exactly, nothing left unexamined
-    assert "total=4" in _read(tmp_path, words=["match"])
     monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 2)
-    answer = _read(tmp_path, words=["match"])
-    assert "observed=2; total_unknown" in answer
-    assert "recheck_bound: 2 candidate rows re-checked in stored order, through row:1@2026-11-01T10:01:00Z" in answer
-    assert "match 1" in answer and "match 3" not in answer  # an answer, never a block
+    answer = _read(tmp_path, words=["match"], count=1)
+    assert "total=4" in answer and "recheck_bound" not in answer and "Read by scan of every row" in answer
+    assert "match 3" in answer and "match 0" not in answer
+    assert "match 0" in _read(tmp_path, words=["match"], count=1, order="oldest")
+
+
+def test_order_follows_recorded_time_not_storage(tmp_path):
+    _say(tmp_path, "2026-11-05T10:00:00Z", "match later said")  # stored first
+    _say(tmp_path, "2026-11-01T10:00:00Z", "match earlier said")  # a backdated arrival stored after it
+    _say(tmp_path, "", "match without a time")
+    newest = _lines(_read(tmp_path, words=["match"]))
+    assert newest.index("later said") < newest.index("earlier said") < newest.index("without a time")
+    oldest = _lines(_read(tmp_path, words=["match"], order="oldest"))
+    assert oldest.index("without a time") < oldest.index("earlier said") < oldest.index("later said")
 
 
 def test_a_source_row_is_counted_once_across_fields_and_copies(tmp_path):
@@ -211,7 +226,7 @@ def test_the_acting_seal_is_read_passively_with_its_own_address(tmp_path):
     store.log_path.write_bytes(b'{"kind":"page"}\n')
     before = store.index_path.read_bytes()
     behind = _read(tmp_path, words=["match"])
-    assert "Seals: page seals not read: the chronicle index is behind its journal" in behind
+    assert "Seals: page seals were not read on this path" in behind and "memory_read of the row's room" in behind
     assert "sealed by page" not in behind and store.index_path.read_bytes() == before
 
 
@@ -236,3 +251,152 @@ def test_chat_history_words_projects_whole_on_the_custom_route():
     assert len(description) <= MAX_CUSTOM_DESCRIPTION_CHARS
     assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE + json.dumps(
         entry.schema["parameters"], ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+# ---- the reader's shape: showing rooms, authors, snapshot, the structured result -------------------------
+
+def _follow(root, line):
+    """The printed reader of a hit's line, called as printed."""
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.registry import ToolContext
+
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_id="reader0001", current_chat_id=1)
+    rows = re.search(r'read: memory_read\(rows=true, room_id="(-?\d+)", from="([^"]+)", to="([^"]+)"\)', line)
+    if rows:
+        return _memory_read(ctx, rows=True, room_id=rows[1], **{"from": rows[2], "to": rows[3]})
+    source = re.search(r"read: memory_read\(source_ref=(\{.*\})\)", line)
+    return _memory_read(ctx, source_ref=json.loads(source[1]))
+
+
+@pytest.mark.parametrize("words, text, room", [
+    (["hello back"], "hello back", "1"),  # an ordinary row of Main
+    (["bound work"], "bound work", "alpha"),  # Main speech of a task later bound to a Project: shown there only
+    (["hidden note"], "hidden note", "0"),  # the hidden partition
+])
+def test_every_printed_reader_returns_its_row(tmp_path, words, text, room):
+    from tests import _memory_inventory_shared as shared
+
+    rooms = shared.world(tmp_path, activate=False)
+    answer = _read(tmp_path, words=words)
+    assert re.search(r"(total|observed)=1;", answer), answer  # the world holds a torn line: observed
+    line = next(line for line in answer.splitlines() if line.startswith("row:"))
+    expected = str(rooms.get(room, room))
+    assert f'room_id="{expected}"' in line
+    assert text in _follow(tmp_path, line)
+
+
+def test_a_row_stored_without_a_chat_id_reads_and_seals_in_main(tmp_path):
+    from ouroboros.chat_chain import source_row_id
+
+    ds.append(tmp_path, "chat", {"ts": "2026-11-01T10:00:00Z", "direction": "in", "chat_id": None, "text": "nullroom match"})
+    row = next(entry.row for entry in ds.iter_rows(tmp_path, "chat"))
+    _chronicle_index(tmp_path, seals=[("1", "page-null", source_row_id(row))])
+    answer = _read(tmp_path, words=["nullroom"])
+    line = next(line for line in answer.splitlines() if line.startswith("row:"))
+    assert 'room_id="None"' not in line and 'room_id="1"' in line
+    assert 'sealed by page page-null in room 1' in line
+
+
+def test_an_in_place_edit_between_pages_refuses_the_shifted_page(tmp_path):
+    receipts = [_say(tmp_path, f"2026-11-01T10:0{n}:00Z", f"match {n}") for n in range(3)]
+    first = _read(tmp_path, words=["match"], count=1)
+    token = re.search(r"snapshot=([0-9a-f]{64})", first).group(1)
+    assert "match 1" in _read(tmp_path, words=["match"], count=1, offset=1, snapshot=token)  # unchanged: pages
+    ds.revise_text(tmp_path, "chat", receipts[2].seq, "no longer here")
+    shifted = _read(tmp_path, words=["match"], count=1, offset=1, snapshot=token)
+    assert shifted.startswith("CHAT_HISTORY_SNAPSHOT_CHANGED") and "edited row" in shifted
+
+
+def test_a_row_from_before_the_lineage_epoch_is_named_as_the_row_reader_names_it(tmp_path):
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.registry import ToolContext
+
+    for row in ({"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:00:01+00:00", "text": "Review the patch."},
+                {"chat_id": 1, "direction": "out", "ts": "2026-10-01T00:00:02+00:00", "task_id": "kid00001",
+                 "text": "Child review: the patch is unsafe."}):
+        ds.append(tmp_path, "chat", row)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root0001", current_chat_id=1)
+    rows = _memory_read(ctx, rows=True)  # activates: the lineage epoch stands after these rows
+    assert "outgoing, author not recorded" in rows
+    answer = _read(tmp_path, words=["unsafe"])
+    assert "outgoing, author not recorded" in answer and "· Ouroboros" not in answer
+
+
+def test_the_line_names_a_reply_target_and_the_room_it_was_read_in(tmp_path):
+    target = _say(tmp_path, "2026-11-01T10:00:00Z", "the original")
+    from ouroboros.chat_chain import format_address, row_address
+
+    address = format_address(row_address(target.row))
+    _say(tmp_path, "2026-11-01T10:01:00Z", "a reply match", reply_to={"address": address, "kind": "message",
+                                                                     "snippet": "the original"})
+    _say(tmp_path, "2026-11-01T10:02:00Z", "plain match")
+    answer = _read(tmp_path, words=["match"])
+    reply_line = next(line for line in answer.splitlines() if line.startswith("row:") and "10:01:00Z" in line)
+    plain_line = next(line for line in answer.splitlines() if line.startswith("row:") and "10:02:00Z" in line)
+    assert f"replies to {address}" in reply_line and "replies to" not in plain_line
+    seven = _say(tmp_path, "2026-11-01T10:03:00Z", "seven match", chat_id=7)
+    in_seven = _read(tmp_path, words=["seven"], room_id="7")
+    assert "in room 7" in in_seven and 'room_id="7"' in in_seven and format_address(row_address(seven.row)) in in_seven
+
+
+def test_unreadable_owner_accounts_are_said_and_counted_only_under_voice(tmp_path, monkeypatch):
+    from ouroboros import places
+
+    _say(tmp_path, "2026-11-01T10:00:00Z", "match")
+    assert "owner accounts unreadable" not in _read(tmp_path, words=["match"])
+
+    def broken(_root):
+        raise places.PlaceError("registry unreadable")
+
+    monkeypatch.setattr(places, "place_owner_accounts", broken)
+    plain = _read(tmp_path, words=["match"])
+    assert "Note: owner accounts unreadable" in plain and "total=1" in plain
+    owner = _read(tmp_path, words=["match"], voice="owner")
+    assert "owner_accounts_unreadable" in owner and "total_unknown" in owner and "my human's rows only" in owner
+
+
+def test_whitespace_search_is_still_a_search_and_excludes_words(tmp_path):
+    _say(tmp_path, "2026-11-01T10:00:00Z", "two  spaces")
+    assert "exclude each other" in _read(tmp_path, words=["two"], search="  ")
+    assert _read(tmp_path, search="  ").startswith("Showing 1 of 1 messages")
+
+
+def test_two_rows_sharing_a_short_address_are_counted_apart(tmp_path, monkeypatch):
+    from ouroboros import chat_chain
+
+    for side in ("left match", "right match"):
+        _say(tmp_path, "2026-11-01T10:00:00Z", side)
+    real = chat_chain.source_row_id
+    monkeypatch.setattr(chat_chain, "source_row_id", lambda row: "abcdef012345" + real(row)[12:])
+    assert "total=2" in _read(tmp_path, words=["match"])
+
+
+def test_the_seal_lookup_chunks_its_variables(tmp_path):
+    _say(tmp_path, "2026-11-01T10:00:00Z", "match")
+    _chronicle_index(tmp_path, seals=[("1", "page-x", "f" * 64)])
+    found, gap = dialogue_recall._seals(tmp_path, [(1, f"{n:064x}") for n in range(40_000)] + [(1, "f" * 64)])
+    assert gap == "" and found == {(1, "f" * 64): "page-x"}
+
+
+def test_a_store_error_reads_like_the_old_readers_sentence(tmp_path, monkeypatch):
+    _say(tmp_path, "2026-11-01T10:00:00Z", "match")
+
+    def broken(*_args, **_kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(ds, "stream_end", broken)
+    assert _read(tmp_path, words=["match"]) == "(error reading history: disk I/O error)"
+
+
+def test_the_structured_result_is_what_the_text_renders(tmp_path):
+    from ouroboros.dialogue_words import parse
+    from ouroboros.memory import Memory
+
+    _card(tmp_path, "2026-11-01T10:00:00Z", question="Merge plan B?", options=["Yes", "No"], index=0, comment="fine")
+    found = dialogue_recall.search(Memory(tmp_path), parse(["merge plan"]), room=None, voice="owner", filters={})
+    hit, = found["hits"]
+    assert found["total"] == 1 and found["refused"] is None and found["snapshot"]
+    assert hit["rooms"] == [1] and hit["reader_room"] == 1 and hit["reader"].startswith("memory_read(rows=true")
+    assert len(hit["sha256"]) == 64 and hit["matched"] == ["question"]
+    speakers = {field["name"]: (field["speaker"], field["label"]) for field in hit["fields"]}
+    assert speakers["question"] == ("asker", "task asker-1") and speakers["press"] == ("owner", "my human")

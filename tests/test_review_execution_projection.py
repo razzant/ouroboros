@@ -71,6 +71,18 @@ def test_empty_receipt_placeholders_do_not_mint_api_execution_badges():
     ]) == []
 
 
+def test_typed_review_facts_keep_projected_dispatch_separate_from_retained_ids():
+    legacy = {"ledger_attempt_ids": ["recorded-before-typed-dispatch"]}
+    held = {"ledger_attempt_ids": ["hold"], "physical_attempt_state": "released"}
+    prior_native = {**held, "delivery": "native_tool_rounds", "native_rounds": 1, "physical_dispatch_observed": False}
+    assert review_executions_from_actor_usage([
+        {"usage": held}, {"usage": {"physical_attempt_state": "unresolved"}},
+    ]) == []
+    assert review_executions_from_actor_usage([{"usage": prior_native}, {"usage": legacy}]) == [
+        {"kind": "native"}, {"kind": "api"},
+    ]
+
+
 def test_task_acceptance_public_actors_carry_only_actual_executions():
     projection = compact_review_projection([{
         "request": {

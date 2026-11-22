@@ -409,6 +409,10 @@ def test_a_routing_act_recorded_during_the_turn_rides_the_next_real_request(main
     from tests.test_llm_claudexor import ledger
 
     ctx, gateway, _controller, _events, _decide, _observations = main_call
+    from ouroboros import dialogue_store
+
+    dialogue_store.append(ctx.drive_root, "chat", {"direction": "in", "chat_id": 1, "client_message_id": "cm-7",
+                                                   "ts": "2024-01-02T12:00:00Z", "text": "Check the build"})
     ctx.tools._ctx.task_metadata = {"client_message_id": "cm-7", "routing_contract": {"llm_first": True}}
     append_chat_annotation(ctx.drive_root, "cm-7", action="steer_task", target="root-b", target_label="Build",
                            status="delivered", routing_token="tok-1")

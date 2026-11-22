@@ -6,17 +6,20 @@ import shutil
 import time
 from typing import Dict
 
+from ouroboros import i18n_memory as _memory
 from ouroboros.queue_observation import load_queue_document, pool_observation_status
 
 from .telegram_api import _LOCALIZED_TEXTS
-from .telegram_i18n import Index
-from .telegram_state import _data_dir, _jsonl_tail, _read_json_file
+from .telegram_i18n import Index, drive_root, host_sentence
+from .telegram_state import _data_dir, _jsonl_tail
 
 
 _HEALTH_EN = {
-    "queue": "Queue", "idle": "idle", "busy": "working", "workers": "Workers", "not_observed": "not observed",
+    "queue": "Queue", "works": "Works", "idle": "idle", "workers": "Workers", "not_observed": "not observed",
     "disk": "Disk", "logs": "logs", "incidents": "Incidents (1h)", "clean": "clean",
     "free": "free", "tasks_idle": "🟢 idle — nothing running",
+    "tasks_unknown": "❔ unknown — the list of works could not be read",
+    "unknown": "unknown",
     "tail_none": "none in bounded tail",
     "tail_limited": "earlier coverage may be incomplete",
     "gb": "GB", "mb": "MB",
@@ -91,8 +94,9 @@ def _owner_running(snap: dict) -> list:
     return [row for row in rows if not (isinstance(row, dict) and _presence_row(row))]
 
 
-def _collect_health(api, lang: str = "en") -> str:
-    """Health snapshot from durable files — queue, workers, incidents, disk. Read-only."""
+def _collect_health(api, lang: str = "en", state=None) -> str:
+    """Health snapshot — the works of ``state`` (the server's ``/api/state`` body), the queue's counts, workers,
+    incidents, disk. Read-only."""
     s = _HEALTH[lang]
     data = _data_dir(api)
     out = []
@@ -100,9 +104,14 @@ def _collect_health(api, lang: str = "en") -> str:
     listed = snap.get("running") if isinstance(snap.get("running"), list) else []
     rc = max(0, int(snap.get("running_count") or 0) - (len(listed) - len(_owner_running(snap))))
     pc = int(snap.get("pending_count") or 0)
-    q_icon = "🟢" if (rc + pc) == 0 else "🟡"
-    q_state = s["idle"] if (rc + pc) == 0 else s["busy"]
-    out.append(f"⚙️ {s['queue']}: {q_icon} {q_state} (RUNNING {rc} · PENDING {pc})")
+    unread = bool(snap.get("_snapshot_missing") or snap.get("_snapshot_invalid"))  # a lost document is no zero
+    rows = s["unknown"] if unread else f"RUNNING {rc} · PENDING {pc}"
+    said = _owner_works(state)  # the window's works: an unread projection is unknown, never idle
+    q_icon = "❔" if said is None else "🟢" if not said else "🟡"
+    q_state = s["unknown"] if said is None else s["idle"] if not said else " · ".join(
+        f"{sum(w['state'] == one['state'] for w in said)} {_chip_word(one, lang)}"
+        for one in {w["state"]: w for w in said}.values())
+    out.append(f"⚙️ {s['works']}: {q_icon} {q_state} · {s['queue']}: {rows}")
     if snap and pool_observation_status(snap) == "unknown":  # a failed pool measurement is not 0 processes
         out.append(f"👷 {s['workers']}: {s['not_observed']}")
     elif isinstance(snap.get("worker_total"), int):
@@ -128,35 +137,90 @@ def _collect_health(api, lang: str = "en") -> str:
     return "\n".join(out)
 
 
-def _collect_tasks_text(api, lang: str = "en") -> str:
-    """Read-only list of running/pending tasks from queue_snapshot.json."""
+def _owner_works(state) -> list | None:
+    """The window's works without a correspondent's Presence turn (its recorded ``place_turn``), as the RUNNING count
+    leaves it out (``_owner_running``, 02.11 ``99fee149788``); ``None`` when the projection was not read."""
+    try:  # a kept bridge copy over an older core without the renderer: the panels say unknown, the bridge runs
+        from ouroboros.gateway.work_status import said_works
+    except ImportError:
+        return None
+    said = said_works(state)
+    return None if said is None else [work for work in said if not work.get("place_turn")]
+
+
+def _chip_word(work: dict, lang: str) -> str:
+    """The window's own word: its chip's catalogue entry (``code:task.chip.*``), English when the memory has none."""
+    key = work.get("chip_key")
+    return (_memory.tr("code:" + key, lang, work["word"], drive_root=drive_root()) if key else None) or work["word"]
+
+
+def _reason_words(work: dict, lang: str) -> str:
+    """The reason as the window says it: its catalogue entry ``code:work.because.<code>``, else by its text."""
+    by_code = _memory.tr("code:work.because." + work["reason_code"], lang, None, drive_root=drive_root()) \
+        if work.get("reason_code") else None
+    return by_code or host_sentence(work["reason"], lang)
+
+
+_STATE_ICONS = {"working": "🟡", "finalizing": "🟡", "pausing": "🟡", "queued": "⏳", "waiting": "⏳",
+                "question": "❓", "paused": "⏸", "unknown": "❔"}
+
+
+TELEGRAM_TEXT_LIMIT = 4096  # Telegram's message limit, counted in UTF-16 code units
+
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _cut(text: str, room: int) -> str:
+    """``text`` within ``room`` UTF-16 code units, a cut one said with an ellipsis (an astral character is two)."""
+    if _units(text) <= room:
+        return text
+    used, keep = 1, []
+    for ch in text:
+        used += 2 if ord(ch) > 0xFFFF else 1
+        if used > room:
+            break
+        keep.append(ch)
+    return "".join(keep) + "…" if room > 0 else ""
+
+
+def _collect_tasks_text(state, lang: str = "en", limit: int = TELEGRAM_TEXT_LIMIT) -> str:
+    """The works the window shows, from the server's ``/api/state`` body: each work's name, its word and its first
+    reason in the server's own sentences. An unread or incomplete projection is unknown. At most twelve lines, and
+    with the ``… +N`` line never past ``limit`` UTF-16 code units (Telegram drops a longer message whole)."""
     s = _HEALTH[lang]
-    snap = _read_json_file(_data_dir(api) / "state" / "queue_snapshot.json")
-    running = _owner_running(snap)
-    pending = snap.get("pending") if isinstance(snap.get("pending"), list) else []
-    if not running and not pending:
-        return s["tasks_idle"]
-
-    def fmt(task, icon):
-        task = task or {}
-        tid = str(task.get("id") or task.get("task_id") or "")[:8]
-        typ = str(task.get("type") or "task")
-        role = str(task.get("delegation_role") or "")
-        suffix = f" · {role}" if role and role != "root" else ""
-        return f"{icon} {typ}{suffix}" + (f" [{tid}]" if tid else "")
-
-    lines = [fmt(x, "🟡") for x in running[:12]] + [fmt(x, "⏳") for x in pending[:12]]
-    total = len(running) + len(pending)
-    if total > len(lines):
-        lines.append(f"… +{total - len(lines)}")
+    said = _owner_works(state)
+    if said is None or not said:
+        return s["tasks_unknown" if said is None else "tasks_idle"]
+    lines: list = []
+    for work in said[:12]:
+        word = _chip_word(work, lang)
+        reason = _reason_words(work, lang) if work["reason"] else ""
+        reason = f": {reason}" if reason and reason.strip().casefold() != word.strip().casefold() else ""
+        line = f"{_STATE_ICONS.get(work['state'], '❔')} {work['name'] or '—'} — {word}{reason}"
+        more = len(said) - len(lines) - 1
+        tail = f"\n… +{more}" if more else ""
+        used = _units("\n".join(lines + [line]) + tail)
+        if used > limit:
+            room = limit - _units("\n".join(lines + [""]) + f"\n… +{len(said) - len(lines)}")
+            if lines or room < 2:
+                break
+            line = _cut(line, room)  # one line longer than the page: cut, said with an ellipsis
+        lines.append(line)
+    if len(said) > len(lines):
+        lines.append(f"… +{len(said) - len(lines)}")
     return "\n".join(lines)
 
 
-def _build_menu_tasks(api, command_mode: str, lang: str = "en") -> tuple[str, list[list[dict]]]:
-    """Read-only running/pending task list. No inline mutations (owner inject-minimization policy)."""
+def _build_menu_tasks(state, command_mode: str, lang: str = "en") -> tuple[str, list[list[dict]]]:
+    """Read-only list of works (``state``: the ``/api/state`` body). No inline mutations (owner inject-minimization)."""
     t = _LOCALIZED_TEXTS[lang]
-    title = t["tasks_title"]
-    header = f"{title}\n\n{_collect_tasks_text(api, lang)}"
+    # the header leaves the body at least its shortest form (the ``… +N`` line), else the title is cut;
+    # the last cut bites only on a catalogue sentence longer than the page
+    title = _cut(t["tasks_title"], TELEGRAM_TEXT_LIMIT - 2 - _units(_collect_tasks_text(state, lang, 0)))
+    header = _cut(f"{title}\n\n" + _collect_tasks_text(state, lang, TELEGRAM_TEXT_LIMIT - _units(f"{title}\n\n")),
+                  TELEGRAM_TEXT_LIMIT)
     keyboard = [
         [{"text": t["btn_refresh"], "callback_data": "nav:tasks"}],
         [{"text": t["btn_back"], "callback_data": "nav:menu"}],

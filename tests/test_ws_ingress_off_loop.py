@@ -422,6 +422,72 @@ class _ClosingSocket(_OpenSocket):
         await super().send_text(text)
 
 
+@pytest.mark.parametrize(("registry_readable", "first_project", "retry_project", "kind"), [
+    (False, "garden", "", "room_echo"),      # the Project form already knows its address
+    (True, "", "other", "room_echo"),        # an id-only sender had a registry witness at acceptance
+    (False, "", "garden", None),             # a retry cannot make an unclassified receipt local
+    (False, "other", "garden", "room_echo"),  # a mismatched hint can only narrow this echo
+])
+def test_web_echo_keeps_first_display_address_on_rejoin(bridge, registry_readable, first_project, retry_project, kind):
+    from ouroboros.projects_registry import create_project
+
+    chat = create_project(bridge.drive, "garden")["chat_id"]
+    registry = bridge.drive / "state" / "projects.json"
+    if not registry_readable:
+        registry.write_text("{", encoding="utf-8")
+    echoes = []
+    bridge._broadcast_fn = echoes.append
+
+    def deliver(project, **extra):
+        frame = {"type": "chat", "content": "Here", "chat_id": chat, "client_message_id": "once",
+                 "sender_session_id": "writer", **extra}
+        if project:
+            frame["project_id"] = project
+        asyncio.run(ws_endpoint(_ClosingSocket([json.dumps(frame)], disconnect=True)))
+
+    # An id-only frame cannot supply the host's stamp, authorize an extra room or change its author.
+    claims = dict(kind="room_echo", also_rooms=[1], project_thread=True, user_id=77)
+    deliver(first_project, **(claims if kind is None else {}))
+    if registry_readable:
+        registry.write_text("{", encoding="utf-8")
+    deliver(retry_project, **claims)
+
+    [row] = dialogue_test.chat_rows(bridge.drive)
+    [update] = bridge.get_updates(offset=0, timeout=0)
+    message = update["message"]
+    assert (row["chat_id"], row["user_id"], row["source"], row["text"]) == (chat, 1, "web", "Here")
+    assert (message["chat"]["id"], message["from"]["id"]) == (chat, 1)
+    assert (message["source"], message["text"]) == ("web", "Here")
+    assert message["task_metadata"].get("project_id", "") == first_project
+    assert row.get("kind") == kind and "project_thread" not in row
+    first, retry = echoes
+    assert first["row_address"] == retry["row_address"]
+    assert first.get("project_thread") == (True if registry_readable else None)
+    assert "project_thread" not in retry
+    for echo in echoes:
+        assert (echo["chat_id"], echo["source"], echo["role"]) == (chat, "web", "user")
+        assert (echo["client_message_id"], echo["ts"]) == ("once", row["ts"])
+        assert echo["ingress_accepted"] is True and echo.get("kind") == kind
+        assert "also_rooms" not in echo and "project_id" not in echo
+
+
+def test_external_owner_echo_keeps_its_positive_transport_room(bridge):
+    echoes = []
+    bridge._broadcast_fn = echoes.append
+    chat = 197422551
+    row, rejoined = message_bus.accept_local_message(
+        bridge, bridge.drive, "Via Telegram", chat_id=chat, user_id=42, source="skill:telegram", client_message_id="tg-1",
+    )
+    [update] = bridge.get_updates(offset=0, timeout=0)
+    message_bus.record_inbound_message(bridge, update["message"], chat_id=chat, user_id=42,
+                                       client_message_id="tg-1", text="Via Telegram", ts=row["ts"])
+    [echo] = echoes
+    assert not rejoined and "kind" not in row
+    assert (echo["chat_id"], echo["source"]) == (chat, "skill:telegram")
+    assert (echo["role"], echo["content"]) == ("user", "Via Telegram")
+    assert not {"kind", "project_thread", "ingress_accepted"}.intersection(echo)
+
+
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_a_failed_acceptance_answers_in_order_and_the_next_chat_still_lands(bridge, disconnect):
     """A refused acceptance answers its sender with the initialization notice before

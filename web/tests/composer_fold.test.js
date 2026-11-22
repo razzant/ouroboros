@@ -9,7 +9,7 @@
 // Real frames are in the browser lane (tests/test_composer_fold_browser.py).
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { FOLD, createComposerFold } from '../modules/composer_fold.js';
+import { FOLD, composerHeightAtRest, createComposerFold, shortRoom } from '../modules/composer_fold.js';
 
 function rig({ stack = true } = {}) {
     const timers = new Map();
@@ -322,4 +322,47 @@ test('a resize of the room leaves a fold of the owner\'s reading back', () => {
     r.scroll(false);
     r.scroll(false);
     assert.equal(r.fold.folded(), false);
+});
+
+test('shortRoom measures the room height left below its bar without relying on @property', () => {
+    const room = (height, bar = 0) => ({
+        getBoundingClientRect: () => ({ height }),
+        querySelector: () => (bar ? { getBoundingClientRect: () => ({ height: bar }) } : null),
+    });
+    assert.equal(shortRoom(room(250, 93)), true, 'Telegram fullscreen at 250px leaves 157px under its 93px band');
+    assert.equal(shortRoom(room(340, 93)), false, '340px under the 93px band keeps 247px for the row and feed');
+    assert.equal(shortRoom(room(250, 56)), false, '250px with an ordinary 56px bar keeps 194px');
+    assert.equal(shortRoom(room(210, 56)), true, '210px with a 56px bar drops under 164px');
+    assert.equal(shortRoom({}), false);
+    assert.equal(shortRoom(null), false);
+});
+
+test('composerHeightAtRest matches offsetHeight across fractional reply-strip motion frames', () => {
+    const prior = globalThis.getComputedStyle;
+    let margins = { marginTop: '0px', marginBottom: '0px' };
+    globalThis.getComputedStyle = () => margins;
+    try {
+        const strip = {
+            dataset: { motion: 'open' },
+            height: 0,
+            style: { getPropertyValue: (k) => (k === '--reply-room' ? '54.984375px' : '') },
+            getBoundingClientRect() { return { height: this.height }; },
+        };
+        const area = {
+            rectHeight: 129.1875,
+            get offsetHeight() { return Math.round(this.rectHeight); },
+            getBoundingClientRect() { return { height: this.rectHeight }; },
+            querySelectorAll: () => (strip.dataset.motion ? [strip] : []),
+        };
+        assert.equal(composerHeightAtRest(area), 184, 'held at 0px on frame 0: already equals final offsetHeight');
+        strip.height = 11.78125;
+        margins = { marginTop: '1.8503px', marginBottom: '-0.92515px' };
+        area.rectHeight = 129.1875 + 11.78125 + 1.8503 - 0.92515;
+        assert.equal(composerHeightAtRest(area), 184, 'mid-motion fractional box rounds to the same rest integer');
+        delete strip.dataset.motion;
+        area.rectHeight = 129.1875 + 54.984375;
+        assert.equal(composerHeightAtRest(area), 184, 'settled offsetHeight matches with zero end-of-motion step');
+    } finally {
+        globalThis.getComputedStyle = prior;
+    }
 });

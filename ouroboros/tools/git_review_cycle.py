@@ -556,6 +556,7 @@ def _reset_commit_review_state(ctx):
     ctx._commit_preflight = None
     ctx._commit_review_panel = None
     ctx._preflight_execution, ctx._review_since, ctx._commit_attribution = None, "", None
+    ctx._review_dispute_input = None  # this call's own prepared input (``review_history.prepare_history``)
     ctx._review_detached_operations = []  # what THIS call's author left (``review_pause.watch_left_review``)
     ctx._staged_selection = None  # what this call staged (``_stage_candidate_for_review``)
 

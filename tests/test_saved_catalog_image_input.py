@@ -104,7 +104,10 @@ def test_saved_catalog_reaches_auto_without_an_extra_request(catalog, monkeypatc
                     {"id": "malformed", **metadata(False), "input_modalities": "text"},
                     {"id": "conflict", **metadata(False), "supports_vision": True}]
     items = discover()
-    assert all(set(item) == {"provider_id", "provider", "source", "id", "name", "value", "label"} for item in items)
+    # The host's transport modes ride beside the item (``_labelled_loader``); direct Anthropic carries Fast too.
+    transport = {"openai-compatible": ["standard"], "deepseek": ["standard"], "anthropic": ["standard", "fast"]}[provider]
+    assert all(set(item) == {"provider_id", "provider", "source", "id", "name", "value", "label", "processing_transport"}
+               and item["processing_transport"] == transport for item in items)
     for model, verdict in (("blind", False), ("sees", True), ("unknown", None), ("malformed", None), ("conflict", None)):
         assert_auto(f"{provider}::{model}", verdict)
     assert len(catalog.requests) == 1 and len(catalog.writes) == 1

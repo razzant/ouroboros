@@ -700,7 +700,7 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
             missing_bits.append(f"permissions={grant_status.get('missing_permissions')}")
         return (
             f"skill {skill.name!r} is missing owner grants for "
-            f"{', '.join(missing_bits)}. Grant access from the Skills tab."
+            f"{', '.join(missing_bits)}. Grant access on its card in Extensions → Skills."
         )
     granted_core = list(grant_status.get("granted_keys") or [])
     if not _force_in_process:

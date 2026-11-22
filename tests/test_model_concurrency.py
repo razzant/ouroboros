@@ -497,23 +497,25 @@ KEY, LOCAL_ROUTE = "OUROBOROS_MODEL_MAX_CONCURRENCY", {"provider": "local", "bas
 
 
 @pytest.mark.parametrize("document,api,local", [
-    ({}, 0, 3),                             # a fresh install, or a document without the key: not chosen
-    ({KEY: ""}, 0, 3),                      # the shipped blank
-    ({KEY: 3}, 0, 3),                       # saved while every shipped default was saved: read once as not chosen
-    ({KEY: "3"}, 0, 3),
+    ({}, 0, 1),                             # a fresh install, or a document without the key: not chosen
+    ({KEY: ""}, 0, 1),                      # the shipped blank
+    ({KEY: 3}, 0, 1),                       # saved while every shipped default was saved: read once as not chosen
+    ({KEY: "3"}, 0, 1),
     ({KEY: 3, "_model_cap_format": 1}, 3, 3),          # after the format marker a 3 is the owner's
+    ({KEY: 5, "_model_cap_format": 1}, 5, 5),
+    ({KEY: 0, "_model_cap_format": 1}, 0, 0),
     ({KEY: 5}, 5, 5),                       # any other number was always a choice
     ({KEY: 1, "_model_cap_format": 1}, 1, 1),
     ({KEY: 0}, 0, 0),                       # zero or less: no limit for either, as before
     ({KEY: -1, "_model_cap_format": 1}, -1, -1),
-    ({KEY: "unlimited", "_model_cap_format": 1}, 0, 3),
+    ({KEY: "unlimited", "_model_cap_format": 1}, 0, 1),
     ({KEY: "three", "_model_cap_format": 1}, 3, 3),    # a typo reads finite, never "no limit"
     ({KEY: 2.5, "_model_cap_format": 1}, 3, 3),
 ])
-def test_a_limit_nobody_chose_leaves_api_routes_free_and_a_local_model_three(monkeypatch, isolated_queue, document,
+def test_a_limit_nobody_chose_leaves_api_routes_free_and_the_builtin_server_one(monkeypatch, isolated_queue, document,
                                                                              api, local):
-    """Owner, 13 Nov 2026 (5A, 6A): with no number of the owner's, a route to a provider's API has no limit of the
-    host's and a model served on this computer keeps three; a number limits both; zero or less neither. The 3 every
+    """With no number of the owner's, a route to a provider's API has no limit of the
+    host's and the built-in server admits one; a number limits both; zero or less neither. The 3 every
     earlier install saved by itself is not a choice: a document without the format marker reads it as blank, once."""
     from ouroboros.utils import atomic_write_json
 
@@ -527,11 +529,22 @@ def test_a_limit_nobody_chose_leaves_api_routes_free_and_a_local_model_three(mon
         assert len(_records(isolated_queue, "slot")) == (1 if local > 0 else 0)
 
 
+def test_unset_local_limit_keeps_the_second_request_outside_the_server(monkeypatch, isolated_queue):
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    atomic_write_json(isolated_queue / "settings.json", {})
+    with mc.model_call_slot("model", use_local=True, route=LOCAL_ROUTE):
+        with pytest.raises(mc.ModelSlotTimeout):
+            with mc.model_call_slot("model", use_local=True, route=LOCAL_ROUTE, deadline_ts=time.time() + 0.3):
+                pytest.fail("second request reached the server while the first held its slot")
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_the_real_sender_queues_a_local_model_and_no_api_route_while_no_limit_is_chosen(monkeypatch, isolated_queue,
                                                                                         asynchronous):
     """Every physical send goes through ``limit_physical_send``, which learns from the route alone whether the model
-    runs on this computer: with no number chosen the local server's sender holds a slot (three at once) and an API
+    runs on this computer: with no number chosen the local server's sender holds a slot (one at a time) and an API
     route's sender holds none. An OpenAI-compatible endpoint that happens to be on localhost is an API route."""
     import asyncio
     from ouroboros import llm_attempt
@@ -553,6 +566,137 @@ def test_the_real_sender_queues_a_local_model_and_no_api_route_while_no_limit_is
     assert seen == {"local": 1, "api": 0, "compatible": 0}
 
 
+BUILTIN = {"provider": "local", "resolved_model": "local-model", "usage_model": "local-model"}  # the lane's own target
+
+
+def test_the_built_in_route_is_the_queue_of_the_lanes_generation_and_the_servers_count(monkeypatch, isolated_queue,
+                                                                                      no_controls):
+    """One identity for the built-in server's one model: the lane's target (``llm_local._build_local_candidate``,
+    which spells no endpoint) and ``built_in_route`` stand in the same line, so the Settings Test's probe — which
+    names that identity — waits where the lane generates and the server's own count declines while it holds the
+    slot. A local route that spells its endpoint is a different identity, never this queue."""
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    atomic_write_json(isolated_queue / "settings.json", {})
+    lane = {**BUILTIN, "processing_preference": "standard", "context_window_tokens": 4096,
+            "context_window_confirmed": True, "window_instance_id": "42"}  # the shape the lane sends
+    with mc.model_call_slot("local-model", True, route=mc.built_in_route()):
+        with pytest.raises(mc.ModelSlotTimeout):
+            with mc.model_call_slot("local-model", True, route=lane, deadline_ts=time.time() + 0.3):
+                pytest.fail("the lane's generation entered beside the probe on the server's one slot")
+        with mc.measurement_slot(BUILTIN, wait=False) as admitted:
+            assert admitted is False  # the server's own count declines beside a generation
+        assert len(_records(isolated_queue, "slot")) == 1
+    assert not _records(isolated_queue, "slot") and not _records(isolated_queue, "ticket")
+    assert (mc._route_digest("local-model", True, mc.built_in_route())
+            == mc._route_digest("local-model", True, lane))
+    # Another server's port is another queue; the shape a lane target carries beside that identity never splits it.
+    assert (mc._route_digest("local-model", True, {**lane, "base_url": "http://127.0.0.1:9999/v1"})
+            != mc._route_digest("local-model", True, lane))
+    # The queue is an address, and the one that counts is the port the caller's own client reaches: a probe names
+    # the server it sends to, another server's port is another queue, and a setting that send does not follow
+    # (a task's snapshot, a deployment policy) never moves the lane off the port it connects to.
+    assert (mc._route_digest("local-model", True, mc.built_in_route(8766))
+            == mc._route_digest("local-model", True, lane)), "the same port is the same queue"
+    assert (mc._route_digest("local-model", True, mc.built_in_route(9001))
+            != mc._route_digest("local-model", True, lane)), "another server is another queue"
+    monkeypatch.setattr(mc, "runtime_setting", lambda key, default=None: 9001)
+    assert (mc._route_digest("local-model", True, mc.built_in_route())
+            == mc._route_digest("local-model", True, lane)), "the lane's queue follows the port its client uses"
+
+
+@pytest.fixture
+def no_controls(monkeypatch):
+    """No Stop, Pause or deadline is bound: ``llm_attempt.require_physical_dispatch_window`` (read at call time) passes."""
+    from ouroboros import llm_attempt
+
+    monkeypatch.setattr(llm_attempt, "require_physical_dispatch_window", lambda: None)
+
+
+@pytest.mark.parametrize("document,route,held", [
+    ({}, BUILTIN, 1),                                                  # no number chosen: the count takes the one slot
+    ({KEY: "", "_model_cap_format": 1}, BUILTIN, 1),
+    ({KEY: 3}, BUILTIN, 1),                                            # the 3 an earlier release saved by itself is no choice
+    ({KEY: 2, "_model_cap_format": 1}, BUILTIN, 0),                    # an owner's number keeps the count outside the queue
+    ({KEY: 1, "_model_cap_format": 1}, BUILTIN, 0),
+    ({KEY: 0, "_model_cap_format": 1}, BUILTIN, 0),                    # zero or less: no queue at all
+    ({KEY: -1, "_model_cap_format": 1}, BUILTIN, 0),
+    ({}, {"provider": "openai-compatible", "base_url": "http://127.0.0.1:11434/v1", "usage_model": "served"}, 0),  # Ollama
+    ({}, {"provider": "openrouter", "base_url": "https://provider.invalid/v1", "usage_model": "model"}, 0),       # cloud API
+    ({}, {"provider": "claudexor", "source": "managed", "usage_model": "model"}, 0),                              # the engine's
+], ids=["blank", "blank-marked", "shipped-3", "number-2", "number-1", "zero", "negative", "external-ollama", "cloud-api",
+        "managed-engine"])
+def test_only_a_blank_limit_queues_the_built_in_servers_count(monkeypatch, isolated_queue, no_controls, document, route,
+                                                              held):
+    """The count (``/extras/measure_chat``) waits on the server's inference lock like a generation. With no number of
+    the owner's it takes the one slot the server computes with, in its waiting and its once-only form alike; an
+    owner's number (zero or less included) and every other route keep it outside the queue, and no slot or ticket
+    outlives it."""
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    atomic_write_json(isolated_queue / "settings.json", document)
+    for wait in (True, False):  # the sender's own count and a count whose answer is only advice, on a free slot
+        with mc.measurement_slot(route, wait=wait) as admitted:
+            assert admitted and len(_records(isolated_queue, "slot")) == held
+    assert not _records(isolated_queue, "slot") and not _records(isolated_queue, "ticket")
+
+
+def test_a_best_effort_count_declines_a_busy_slot_and_opens_nothing(monkeypatch, isolated_queue, no_controls):
+    """A count whose answer is advice tries the server's one slot once: a generation holding it declines the count
+    at once, with no ticket left behind and no wait, so its caller's own estimate or unavailable fact stands instead
+    of a connection standing behind that generation. The freed slot admits the next count."""
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    atomic_write_json(isolated_queue / "settings.json", {})
+    with mc.model_call_slot("local-model", True, route=BUILTIN):  # another call generates on the server's one slot
+        with mc.measurement_slot(BUILTIN, wait=False) as admitted:
+            assert admitted is False
+        assert len(_records(isolated_queue, "slot")) == 1 and not _records(isolated_queue, "ticket")
+    with mc.measurement_slot(BUILTIN, wait=False) as admitted:
+        assert admitted is True and len(_records(isolated_queue, "slot")) == 1
+    assert not _records(isolated_queue, "slot") and not _records(isolated_queue, "ticket")
+
+
+def test_a_count_waiting_for_the_built_in_servers_slot_ends_at_its_callers_deadline(monkeypatch, isolated_queue,
+                                                                                    no_controls):
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    atomic_write_json(isolated_queue / "settings.json", {})
+    with mc.model_call_slot("local-model", True, route=BUILTIN):  # another call generates on the server's one slot
+        with pytest.raises(mc.ModelSlotTimeout, match="the request was not sent"):
+            with mc.model_call_scope("local-model", True, deadline_ts=time.time() + 0.3), mc.measurement_slot(BUILTIN):
+                pytest.fail("the count reached the server while another request held its slot")
+        assert not _records(isolated_queue, "ticket")
+    with mc.measurement_slot(BUILTIN):  # the refusal left the queue usable
+        assert len(_records(isolated_queue, "slot")) == 1
+
+
+def test_a_count_waiting_in_line_polls_the_dispatch_controls_and_gives_its_place_up(monkeypatch, isolated_queue):
+    """Stop, Pause and the dispatch window are the checks a send's own wait polls; here they end a count that has not
+    opened its connection, as not started, and leave no ticket behind."""
+    from ouroboros import llm_attempt
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    atomic_write_json(isolated_queue / "settings.json", {})
+
+    def controls():
+        if _records(isolated_queue, "ticket"):  # the owner stopped this work once it stood in line
+            raise llm_attempt._PhysicalSendNotStarted("owner_stop")
+
+    monkeypatch.setattr(llm_attempt, "require_physical_dispatch_window", controls)
+    with mc.model_call_slot("local-model", True, route=BUILTIN):
+        with pytest.raises(llm_attempt._PhysicalSendNotStarted) as stopped:
+            with mc.measurement_slot(BUILTIN):
+                pytest.fail("the count reached the server after the owner stopped the work")
+        assert stopped.value.control_reason == "owner_stop"
+        assert not _records(isolated_queue, "ticket")
+
+
 @pytest.mark.parametrize("saved,marked,read", [(3, False, ""), ("3", False, ""), (3, True, 3), (5, False, 5), (0, False, 0)])
 def test_a_saved_shipped_three_reads_blank_once_and_the_next_save_ends_it(tmp_path, monkeypatch, saved, marked, read):
     """The settings seam's side of 6A: the view carries the format marker, a read stays a read, the first whole save
@@ -572,7 +716,7 @@ def test_a_saved_shipped_three_reads_blank_once_and_the_next_save_ends_it(tmp_pa
     loaded = config.load_settings()
     assert loaded[KEY] == read and loaded[MODEL_CAP_FORMAT_KEY] == 1
     assert json.loads(path.read_text(encoding="utf-8")) == {KEY: saved, **({MODEL_CAP_FORMAT_KEY: 1} if marked else {})}
-    assert mc._cap(False) == (read or 0) and mc._cap(True) == (3 if read == "" else read)
+    assert mc._cap(False) == (read or 0) and mc._cap(True) == (1 if read == "" else read)
     config.save_settings(loaded)
     stored = json.loads(path.read_text(encoding="utf-8"))
     assert stored[KEY] == read and stored[MODEL_CAP_FORMAT_KEY] == 1

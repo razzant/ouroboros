@@ -31,7 +31,8 @@ saved is not sent (counted for the Connection form, which says the journal is fa
 next state cannot be written waits for its retry instead of sending.
 
 States: an operation is ``pending`` (saved, waiting for its turn or a token), ``sending``, ``retry_wait``, or
-finished. A finished one is ``confirmed`` (every part it asked for was delivered; its files are removed),
+finished. A finished one is ``confirmed`` (its handler finished and every part it asked for was delivered; its
+files are removed),
 ``unknown``, ``refused``, ``failed`` (stopped: expired after ``MAX_AGE_SEC``, changed before its retry, the token
 changed after a delivered part, the queue full, its handler failing) or ``superseded`` (accepted, its handler later
 asked no more of Telegram: a mirror setting changed while it waited). Telemetry, or an event whose handler asks
@@ -255,6 +256,16 @@ class _Operation:
 
     async def _send(self, client, part: dict, method: str, data, files, timeout) -> Dict[str, Any]:
         record = self.record
+        strict = bool(getattr(client, "strict_reply", False))
+        if strict:  # an exact Reply's turn: the anchor of its first attempt holds for every part and retry
+            if "native_reply_id" not in record:
+                record.update(native_reply_id=int(client.reply_to_message_id or 0),
+                              reply_fallback_id=int(client.reply_fallback_id or 0))
+            if record.get("chat_id") and record["chat_id"] != _chat(data):
+                await self.outbox._stop(self, "changed")
+            client.reply_to_message_id = record["native_reply_id"]
+            if client.on_reply_changed is not None:
+                client.on_reply_changed(record["native_reply_id"])
         before = part["state"]
         part.update(state="sending", attempts=int(part.get("attempts") or 0) + 1)
         # The bot of its first delivered part owns the operation; until then, the one in force sends it.
@@ -283,6 +294,14 @@ class _Operation:
                 await self.outbox._defer(self, max(1, exc.retry_after), "HTTP 429")
             if not exc.unsent:
                 return await self._unknown(part, exc)
+            fallback = int(record.get("reply_fallback_id") or 0) if strict else 0
+            if (exc.missing_reply and fallback and fallback != record["native_reply_id"] and not _delivered(record)
+                    and method.startswith("send")):
+                # Its card is gone and nothing of this operation arrived: once, the owner's own message, saved
+                # with the part's next sending state before the request (no other part ever had the old anchor).
+                part.update(state="pending", refused_reply_id=record["native_reply_id"])
+                record.update(native_reply_id=fallback, reply_fallback_id=0)
+                return await self._send(client, part, method, data, files, timeout)
             if str(exc) == _NOT_MODIFIED:
                 part.update(state="confirmed", not_modified=True, status=exc.status_code)
             else:
@@ -631,8 +650,10 @@ class Outbox:
                 if part.get("state") in _ACTIVE:
                     part.update(state=unreached, **({"reason": _cause(op.failure)} if op.failure else {}))
             record["state"] = _final_state(record["parts"]) if record["parts"] else unreached
-            if not record["parts"] and op.failure is not None:
-                record["reason"] = _cause(op.failure)
+            if op.failure is not None and record["state"] in ("confirmed", "failed"):
+                # A handler that failed may have stopped before asking for its next part: only its completion
+                # confirms the whole. Its delivered parts keep their receipts; the rest stays content (``_keeps``).
+                record.update(state="failed", reason=_cause(op.failure))
         await self._finish(record)
 
     # --- the journal ---

@@ -325,6 +325,9 @@ def test_depth3_control_plane_reaches_the_root_depth_summary(tmp_path, monkeypat
             delegation_role="subagent",
             task_contract=task["task_contract"],
             depth_provenance=task["depth_provenance"],
+            # A worker's result names the attempt it was dispatched with (agent.py stamps its running row);
+            # copy-back settles the live row only for that attempt, never for a result that names none.
+            task_attempt=task["_attempt"],
             result=f"done-{task['id']}",
         )
 

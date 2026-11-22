@@ -358,6 +358,11 @@ def get_tools() -> List[ToolEntry]:
                     "model": {"type": "string", "description": "Model for this new work, with owner_words citing your human's words or their pressed choice. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
                     "model_as_typed": {"type": "boolean", "default": False, "description": "Use the exact typed id despite similar catalog suggestions. The route is unverified; this confirms your choice, not availability."},
                     "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
+                    "owner_source": {"type": "string", "default": "", "description": (
+                        "A held owner_quote_handle: which of your human's messages the new work answers (its Reply, files and source); "
+                        "empty keeps the message this run answers, with its files. A held message's files never refuse the start; "
+                        "a turn's own fresh files stage what they can and refuse it only if none can; others' stay named, not given. "
+                        "Only a root your human started.")},
                 },
                 "required": ["objective", "title"],
             },
@@ -439,9 +444,9 @@ def get_tools() -> List[ToolEntry]:
                 "date_to": {"type": "string", "default": "", "description": "Inclusive ISO-8601 upper timestamp bound"},
                 "snapshot": {"type": "string", "default": "", "description": "Opaque snapshot returned by the first page; reuse it with offset to refuse shifted/mixed pages"},
                 "words": {"type": "array", "items": {"type": "string"}, "description": WORDS_DESCRIPTION},
-                "room_id": {"type": "string", "description": "With words: one room, its chat id as text (1 is Main); default every room."},
-                "voice": {"type": "string", "enum": ["owner"], "description": "With words: only my human's own words; on a card, the comment, not the question or options."},
-                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first, so an original said before its restatements can come first."},
+                "room_id": {"type": "string", "description": "With words: one room's chat id (1 is Main)."},
+                "voice": {"type": "string", "enum": ["owner"], "description": "With words: only rows of my human's own words, a card they answered included."},
+                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first."},
             }, "required": [], "additionalProperties": False},
         }, _chat_history),
         ToolEntry("update_scratchpad", {

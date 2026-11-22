@@ -77,6 +77,12 @@ def test_ui_control_text_inventory_is_byte_identical():
     _assert_identical(inv.UI_CONTROLS_OUT, inv.build_ui_control_inventory()[0])
 
 
+def test_fixed_translated_selection_and_menu_actions_are_in_the_inventory():
+    text = inv.build_ui_control_inventory()[0]
+    assert "| Reply to quote | `btn btn-float btn-sm ui-hit-area chat-reply-selection-action`" in text
+    assert "| Select text | `(no class)` | modules/chat_row_menu.js |" in text
+
+
 def test_ui_control_scan_lists_fixed_text_and_only_counts_the_rest():
     from scripts.ui_control_inventory import scan_controls
 

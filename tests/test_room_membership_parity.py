@@ -46,6 +46,16 @@ def _synthetic(rooms):
     yield shared.msg("2026-09-01T00:05:00+00:00", shared.ORIGIN, client_message_id="origin-a")  # bound origin
     yield shared.msg("2026-09-01T00:05:00+00:00", shared.ORIGIN, client_message_id="")  # ref without client id
     yield shared.msg("2026-09-01T00:05:00+00:00", shared.ORIGIN + "!", client_message_id="origin-a")  # other text
+    # Accepted web echoes (CLIENT_CONTRACT §5): the persisted stamp confines display to the written
+    # room with and without a reservation; the unstamped web twin keeps the implicit Main mirror.
+    for chat in (rooms["alpha"], 777):
+        for stamped in (True, False):
+            yield shared.msg("2026-09-05T02:00:00+00:00", f"echo {chat} {stamped}", chat_id=chat,
+                             direction="in", source="web", ingress_accepted=True,
+                             client_message_id=f"echo-{chat}-{stamped}",
+                             **({"kind": "room_echo"} if stamped else {}))
+    yield shared.msg("2026-09-05T02:01:00+00:00", "echo main", direction="in", source="web",  # written to Main
+                     ingress_accepted=True, kind="room_echo", client_message_id="echo-1-True")
 
 
 def test_rooms_of_row_matches_room_membership_for_every_row_and_room(tmp_path):
