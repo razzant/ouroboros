@@ -51,6 +51,7 @@ EXCERPT_CHARS = 240  # the shown part of one field around its first match; the r
 ORDERS = ("newest", "oldest")
 VOICES = ("owner",)
 API_DOOR_NOTE = "API door, sender not recorded"
+OWNER_ACCOUNTS_UNREAD = "owner accounts unreadable: no place row is labelled as my human's"
 SPEAKER_WORDS = {"owner": "my human", "host": "host"}  # the mind's labels for those field speakers
 _CHUNK = 500  # SQL variables one statement names
 # The owner-facing sentence of ``chat_history``'s ``words`` (tools/control.py), beside the reader it describes.
@@ -298,6 +299,17 @@ def _authors(root: pathlib.Path, pairs: List[Tuple[int, Dict[str, Any]]], lineag
     return out, gap
 
 
+def label_authors(root: pathlib.Path, pairs: List[Tuple[int, Dict[str, Any]]]
+                  ) -> Tuple[Dict[int, Dict[str, Any]], List[str]]:
+    """The authors of the ``(seq, row)`` pairs handed in, named as ``search`` names its page rows (and
+    ``memory_read(rows=true)`` names them): the places' owner accounts, the lineage epoch and each row's stream
+    position. ``(authors by seq, notes)``; the notes say what could not be read."""
+    lineage, note = _lineage(root)
+    authors, gap = _authors(root, pairs, lineage)
+    unread = [] if "owner_accounts" in lineage else [OWNER_ACCOUNTS_UNREAD]
+    return authors, unread + [item for item in (note, gap) if item]
+
+
 def _lineage(root: pathlib.Path) -> Tuple[Dict[str, Any], str]:
     """``row_author`` keywords as ``chronicle_import.row_lineage`` gives them (the places' owner accounts, the
     activation receipt's lineage epoch and the task lookup), the receipt read on the lock-free index path only:
@@ -363,7 +375,7 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
     if lineage_note:
         notes.append(lineage_note)
     if "owner_accounts" not in lineage:  # no place row reads as my human's then; said, never guessed
-        notes.append("owner accounts unreadable: no place row is labelled as my human's")
+        notes.append(OWNER_ACCOUNTS_UNREAD)
         if voice == "owner":
             gaps_extra.append("owner_accounts_unreadable: place rows of my human not confirmed")
     accounts = lineage.get("owner_accounts")

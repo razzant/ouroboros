@@ -313,6 +313,21 @@ def test_the_largest_room_id_the_store_holds_is_still_a_search(tmp_path):
     assert _search(tmp_path, "a", room_id=2**63 - 1)["total"] == 0
 
 
+def test_a_row_from_before_the_lineage_epoch_reopens_with_the_author_its_search_names(tmp_path):
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.registry import ToolContext
+
+    _say(tmp_path, "2026-10-01T00:00:01+00:00", "Review the patch.")
+    _say(tmp_path, "2026-10-01T00:00:02+00:00", "Child review: the patch is unsafe.", direction="out",
+         task_id="kid00001")
+    _memory_read(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root0001", current_chat_id=1),
+                 rows=True)  # activates: the lineage epoch stands after these rows
+    found = _search(tmp_path, "unsafe")["rows"][0]
+    reopened = _ok(tmp_path, *_run(found["reopen"]))["row"]
+    assert "outgoing, author not recorded" in found["speaker"]
+    assert reopened["speaker"] == found["speaker"] and reopened["fields"] == found["fields"]
+
+
 def test_unreadable_owner_accounts_are_noted_on_search_and_reopen(tmp_path, monkeypatch):
     _say(tmp_path, "2026-11-01T10:00:00Z", "archive words")
     address = _search(tmp_path, "archive")["rows"][0]["address"]
@@ -323,8 +338,8 @@ def test_unreadable_owner_accounts_are_noted_on_search_and_reopen(tmp_path, monk
         raise OSError("places registry unreadable")
 
     monkeypatch.setattr(ouroboros.places, "place_owner_accounts", broken)
-    assert _search(tmp_path, "archive")["notes"] == [recall.OWNER_ACCOUNTS_NOTE]
-    assert _ok(tmp_path, ("row", address))["notes"] == [f"{recall.OWNER_ACCOUNTS_NOTE} (OSError)"]
+    unread = "owner accounts unreadable: no place row is labelled as the owner's"
+    assert _search(tmp_path, "archive")["notes"] == [unread] and _ok(tmp_path, ("row", address))["notes"] == [unread]
 
 
 def test_the_door_serves_the_rooms_not_hidden_work_and_the_mind_still_reads_everything(tmp_path):

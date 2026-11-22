@@ -23,7 +23,7 @@ import json
 import pathlib
 import re
 import urllib.parse
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -36,7 +36,6 @@ CHAT_ID_LIMIT = 2**63  # a room address the store can hold: SQLite's signed 64-b
 # A field's speaker on the door, a closed set (``RecallField``): ``owner`` and ``host`` here, ``task <id>``,
 # "the asking task" and "the closing task" from the words reader, else the row's own author label.
 _FIELD_SPEAKERS = {"owner": "owner", "host": "host"}
-OWNER_ACCOUNTS_NOTE = "owner accounts unreadable: no place row is labelled as the owner's"
 _SEARCH_KEYS = ("words", "room_id", "voice", "order", "date_from", "date_to", "count", "offset", "snapshot")
 _FILTER_KEYS = ("date_from", "date_to")
 _HEADERS = {"Cache-Control": "no-store"}
@@ -118,16 +117,6 @@ def _showing(root: pathlib.Path, row: Mapping[str, Any], written: int) -> Tuple[
         return [written], f"rooms_unreadable ({type(exc).__name__}): the row names the chat it was written in"
 
 
-def _owner_accounts(root: pathlib.Path) -> Tuple[Optional[Mapping[str, Any]], str]:
-    """``(accounts, note)``: the places' confirmed owner accounts, or None and the note the answer carries."""
-    try:
-        from ouroboros.places import place_owner_accounts
-
-        return place_owner_accounts(root), ""
-    except Exception as exc:  # no place row is then labelled as the owner's, and the answer says so
-        return None, f"{OWNER_ACCOUNTS_NOTE} ({type(exc).__name__})"
-
-
 def _integer(values: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
     text = str(values.get(name, "") or "").strip()
     if not text:
@@ -185,8 +174,8 @@ def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
     """One ``RecallRowResponse``: the row at ``text`` whole, through the shared row resolver, when a visible room
     shows it; a hidden-only or synthetic row answers exactly as a missing one."""
     from ouroboros.chat_chain import parse_address, resolve_row, row_address, source_row_id
-    from ouroboros.dialogue_provenance import RoomLabelResolver, row_author
-    from ouroboros.dialogue_recall import field_speaker
+    from ouroboros.dialogue_provenance import RoomLabelResolver
+    from ouroboros.dialogue_recall import field_speaker, label_authors
     from ouroboros.dialogue_words import fields_of
 
     try:
@@ -211,8 +200,8 @@ def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
     rooms, rooms_note = _showing(root, row, written)
     if not any(chat > 0 for chat in rooms):  # the hidden partition is no room a person reads
         raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
-    accounts, note = _owner_accounts(root)
-    author = row_author(row, owner_accounts=accounts)
+    authors, notes = label_authors(root, [(found["seq"], row)])  # as the search names it, lineage epoch included
+    author = authors[found["seq"]]
     surface = row.get("client_surface") if isinstance(row.get("client_surface"), Mapping) else {}
     reply = row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}
     hit = {"row": row, "written_chat": written, "sha256": source_row_id(row), "rooms": rooms, "author": author,
@@ -221,7 +210,7 @@ def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
            "fields": [{"name": field.name, "text": field.text, "speaker": field.speaker,
                        "label": field_speaker(field, row, author)} for field in fields_of(row)]}
     return {"mode": "row", "row": row_view(hit, labels=RoomLabelResolver(root)),
-            "notes": [item for item in (note, rooms_note) if item]}
+            "notes": [_outward(item) for item in (*notes, rooms_note) if item]}
 
 
 def _chat_id(text: str) -> bool:
