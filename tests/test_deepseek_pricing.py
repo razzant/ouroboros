@@ -512,6 +512,7 @@ def test_reported_cash_wins_and_invalid_cash_is_not_estimated(ledger, tariff, mo
     assert "tariff_pricing" not in row["cost_evidence"]
     _, row = _settled_row(ledger, _pinned(tariff), {**REPLY, "cost": "free"})
     assert (row["cost_usd"], row["cost_estimated"], row.get("cost_invalid")) == (None, False, True)
+    assert not row["cost_final"] and "tariff_pricing" not in row["cost_evidence"]
 
 
 @pytest.mark.parametrize("field", ["prompt_tokens", "completion_tokens", "cache_write_tokens",
