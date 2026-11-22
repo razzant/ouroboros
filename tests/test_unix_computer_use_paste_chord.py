@@ -97,7 +97,7 @@ def test_a_refused_paste_chord_posts_nothing_in_the_words_the_receipt_reads(tmp_
                                                "the paste chord was not sent"]
     assert denied["log"] == ["WARNING: Accessibility privileges not enabled (no right to post input events); "
                              "the paste chord was not sent"]
-    for run, reason in ((turkmen, "untypable_characters"), (unread, "untypable_characters"), (denied, "permission_denied")):
+    for run, reason in ((turkmen, "untypable_characters"), (unread, "layout_unread"), (denied, "permission_denied")):
         module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", run["log"][0] + "\n"))
         out = receipt(api.tools["type_text"](text="x", via="paste"))
         assert out["ok"] is False and out["reason"] == reason and out["dispatched"] is True and out["clipboard_done"] is True, out

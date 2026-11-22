@@ -53,6 +53,7 @@ def helper_op(argv: list[str]) -> list[str]:
 
 
 CHORD_POSTED = "paste chord: Command + key code 9 (v under Command in com.apple.keylayout.ABC)\n"
+EVENTS_POSTED = '{"posted":2}\n'  # the input program's answer on success: what it posted
 
 
 def observing(helper):
@@ -92,7 +93,7 @@ DOWN, RIGHT, RETURN, TAB = key(125), key(124), key(36), key(48)
 RESOLVED_ALL = '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}\n'
 
 
-def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, events=(0, "", ""), lsappinfo=True, on_input=None,
+def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, events=(0, EVENTS_POSTED, ""), lsappinfo=True, on_input=None,
         chord=(0, "", CHORD_POSTED), resolved=None):
     """A faked local Mac: lsappinfo reports ``state['front']``; the native helper answers through ``helper(args, state)``;
     ``on_input(argv, state)`` runs when the input program is called (a key that moves the front, for instance) and it

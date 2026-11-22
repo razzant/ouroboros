@@ -236,6 +236,17 @@ def info_line(triple) -> str:
     return f'"pid"={pid} "CFBundleIdentifier"="{bid}" "LSDisplayName"="{name}" '
 
 
+SH_SCRIPT_RUNNER = """/bin/sh -c 'script=$(cat); eval "$script" </dev/null'"""  # remote._SH_SCRIPT_RUNNER, written out
+
+
+def sent_command(argv: list[str], data: bytes | None) -> list[str]:
+    """The ssh call with the command the Mac runs in last place: the skill's own commands go on stdin to sh (the
+    runner is the argument), so a script answering by the command's words reads those bytes."""
+    if data is not None and argv and argv[-1] == SH_SCRIPT_RUNNER:
+        return [*argv[:-1], data.decode("utf-8")]
+    return argv
+
+
 def ssh(tmp_path, monkeypatch, script):
     """A Mac over SSH: ``script(command)`` -> (rc, stdout[, stderr]) for every ssh call."""
     module = load_plugin()
@@ -245,7 +256,7 @@ def ssh(tmp_path, monkeypatch, script):
     calls = []
 
     def run(cmd, *a, **k):
-        argv = [str(part) for part in cmd]
+        argv = sent_command([str(part) for part in cmd], k.get("input"))
         calls.append(argv)
         answer = script(argv[-1])
         rc, out, err = (answer + ("",))[:3]
@@ -395,9 +406,40 @@ def test_an_ssh_text_that_posts_nothing_has_no_mark_and_one_that_posts_does(tmp_
     assert typed["observed_effect"] is True and (typed["chars_sent"], typed["method"]) == (2, "unicode_events"), typed
 
 
+@pytest.mark.parametrize("spent", [0, 15])
+def test_an_ssh_typing_deadline_counts_the_time_the_switch_took(tmp_path, monkeypatch, spent):
+    """Over SSH the program's deadline and ssh's timeout come from what the call has left once the target is in front
+    (the inventory and the switch are round trips of their own), with 3 s for the reply: 15 s spent there leave the
+    program 152 s and ssh 155 s, below the 165 s the host has left."""
+    clock = [1000.0]
+
+    def script(command):
+        if "lsappinfo list" in command:
+            clock[0] += spent  # a slow inventory and switch
+            return 0, LISTING + "__FRONT__" + info_line(KEYNOTE)
+        answer = json.dumps({"posted": 9000, "chars_total": 4500, "chars_sent": 4500})
+        return 0, f"__FRONT_BEFORE__{info_line(KEYNOTE)}\n{answer}\n__FRONT_AFTER__{info_line(KEYNOTE)}\n"
+    module, api, calls = ssh(tmp_path, monkeypatch, script)
+    mac_input = sys.modules[module.__name__ + ".mac_input"]
+    monkeypatch.setattr(mac_input, "_clock", lambda: clock[0])
+    fake, waits = module.subprocess.run, []
+
+    def timed(cmd, *a, **k):
+        if is_input(sent_command([str(part) for part in cmd], k.get("input"))[-1]):
+            waits.append(k["timeout"])
+        return fake(cmd, *a, **k)
+    monkeypatch.setattr(module.subprocess, "run", timed)
+    out = receipt(api.tools["type_text"](text="x" * 4500, interval_ms=40, app="Keynote"))
+    assert out["ok"] is True and out["chars_sent"] == 4500, out
+    sent = [argv[-1] for argv in calls if is_input(argv[-1])]
+    budget = (170 - spent) * 1000 - 3000
+    assert len(sent) == len(waits) == 1 and f'"budget_ms":{budget}' in sent[0] and '"until"' not in sent[0], (waits, out)
+    assert budget + 3000 <= waits[0] * 1000 <= (mac_input.TYPE_HOST_SEC - spent) * 1000 - 10_000, waits
+
+
 def test_a_command_longer_than_a_host_command_line_goes_on_ssh_stdin(tmp_path, monkeypatch):
-    """A command the host cannot start as an argument goes as UTF-8 bytes on ssh's stdin to the account's own login
-    shell (no remote command: a raw remote_exec keeps its shell's syntax; bytes: no LF becomes CRLF on Windows). On
+    """The skill's own commands always go as UTF-8 bytes on ssh's stdin to sh; a raw remote_exec script too when the host
+    cannot start it as an argument, then to the account's own shell (bytes: no LF becomes CRLF on Windows). On
     Windows the measure is the command line as the launcher quotes it, in UTF-16 units: 5,000 double quotes in a
     29,000-character command make a line over 33,000 units, which a plain count of characters would have passed."""
     module = load_plugin()
@@ -414,17 +456,39 @@ def test_a_command_longer_than_a_host_command_line_goes_on_ssh_stdin(tmp_path, m
     long_command = "printf %s 'line\nnext' " + "x" * 140_000
     impl._ssh_run(conn, long_command)
     impl._ssh_run(conn, long_command, raw=True)
-    (short_argv, short_input), (long_argv, long_input), (raw_argv, raw_input) = seen
-    assert short_argv[-1] == "echo short" and short_input is None
-    # The skill's own commands go to /bin/sh whatever the account's shell (tcsh cannot run them); -T: no terminal.
-    assert long_argv[:2] == ["ssh", "-T"] and long_argv[-1] == "/bin/sh -s" and long_input == long_command.encode("utf-8")
-    assert long_command not in long_argv
+    impl._ssh_run(conn, "echo short", raw=True)
+    (short_argv, short_input), (long_argv, long_input), (raw_argv, raw_input), (own_argv, own_input) = seen
+    # The skill's own commands, short or long, go to /bin/sh on stdin whatever the account's shell (tcsh cannot run
+    # them, not even the short inventory); -T: no terminal.
+    for argv, data, command in ((short_argv, short_input, "echo short"), (long_argv, long_input, long_command)):
+        assert argv[:2] == ["ssh", "-T"] and argv[-1] == remote._SH_SCRIPT_RUNNER == SH_SCRIPT_RUNNER, argv
+        assert data == command.encode("utf-8") and command not in argv
+    # A user's short script stays ssh's argument, for the account's own shell to parse.
+    assert own_argv[-1] == "echo short" and own_input is None
     # A user's own script goes to the account's own shell, not as a login, its stdin closed.
     assert raw_argv[:2] == ["ssh", "-T"] and raw_argv[-1] == remote._RAW_SCRIPT_RUNNER and raw_input == long_command.encode("utf-8")
     quotes = "printf %s " + '"' * 5000 + " " + "q" * 23_900
     dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "owner@mac.invalid"]
     assert len(quotes) < 30_000 and remote._fits_command_line([*dest, quotes], windows=False)  # a POSIX host carries it
     assert not remote._fits_command_line([*dest, quotes], windows=True) and remote._fits_command_line([*dest, "echo short"], windows=True)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("sh"), reason="the runner is a POSIX shell command")
+@pytest.mark.parametrize("login_shell", ["sh", "zsh", "tcsh"])
+def test_the_skills_own_command_runs_in_sh_whatever_the_accounts_shell(login_shell):
+    """The skill's commands are POSIX (RC=$?, $(...)): the runner line as the account's shell parses it hands them to
+    sh, so a tcsh account runs the inventory too; its exit code comes back, and a command reading stdin gets nothing."""
+    shell = shutil.which(login_shell)
+    if not shell:
+        pytest.skip(f"{login_shell} is not installed here")
+    remote = sys.modules[load_plugin().__name__ + ".remote"]
+    script = remote._SSH_INVENTORY.replace("lsappinfo list", "echo listed").format(read="echo front") + "\n"
+    done = subprocess.run([shell, "-c", remote._SH_SCRIPT_RUNNER], input=script.encode("utf-8"), capture_output=True,
+                          timeout=20, env={"PATH": "/usr/bin:/bin", "SHELL": shell})
+    assert (done.returncode, done.stdout.decode()) == (0, "listed\n\n__FRONT__\nfront\n"), (login_shell, done)
+    failing = subprocess.run([shell, "-c", remote._SH_SCRIPT_RUNNER], input=b"cat\nX=$(printf two); echo $X\nexit 5\n",
+                             capture_output=True, timeout=20, env={"PATH": "/usr/bin:/bin", "SHELL": shell})
+    assert (failing.returncode, failing.stdout.decode()) == (5, "two\n"), (login_shell, failing)
 
 
 @pytest.mark.skipif(sys.platform == "win32" or not shutil.which("sh"), reason="the runner is a POSIX shell command")

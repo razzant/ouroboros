@@ -1134,7 +1134,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
             # says so (method, chars_sent, override_only). The program has its own deadline below the helper timeout.
             seconds = mac_input.type_seconds(text, interval_ms)
             cmd = mac_input.argv([{"op": "type", "text": text, "interval_ms": max(0, int(interval_ms or 0))}],
-                                 budget_ms=seconds * 1000 - 2000)
+                                 budget_ms=seconds * 1000 - 2000, until=mac_input.deadline_in(seconds))
             return self._exec_input(cmd, timeout=seconds, app=app, raise_policy=raise_policy, connection=connection)
         elif plat == "linux" and _session_type() == "wayland" and (_which("ydotool") or _which("wtype")):
             # `--` terminates option parsing so text starting with '-' is typed,
@@ -1284,7 +1284,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                       for r in results if r.get("dispatched") is True]  # the dispatched steps, whether or not their front was read
         last = results[-1]
         if last.get("ok"):
-            payload: dict[str, Any] = {"ok": True, "sequence": steps, "steps": len(steps), "keys": combo, "dispatched": True}
+            payload: dict[str, Any] = mac_input.with_grants({"ok": True, "sequence": steps, "steps": len(steps), "keys": combo, "dispatched": True}, results)
         else:
             done = len(results) - 1
             dispatched = last.get("dispatched")  # the failing step's helper ran (its outcome may be partial)
@@ -1305,8 +1305,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
         elif (ctx.get("target") or {}).get("activated"):
             payload["observed_effect"] = True
             payload["activation_done"] = True
-        if not isinstance(ctx.get("delivered_to"), dict) and isinstance(results[0].get("delivered_to"), dict):
-            ctx["delivered_to"] = results[0]["delivered_to"]  # a remote probe read it in the first step
+        self._first_front(ctx, results[0], reread=looked and connection[0] == "local")  # who got (or refused) step 1
         stderr = "\n".join(r.get("helper_stderr") or "" for r in results).strip()
         payload = self._finish(payload, ctx, stderr, after=ctx.get("front_last"))
         if not last.get("ok") and last.get("reason") in ("permission_denied", "untypable_characters") and last.get("note"):
@@ -1474,6 +1473,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                 return self._finish(payload, step)
         if ask_stop and (stopped := self._stop_refusal(step, first=not recheck)):
             return stopped  # a key chord, the first included: the host's Stop, read last before its input
+        cmd, timeout = mac_input.fit(cmd, timeout)  # what is left of the call's time after the switch
         rc, stdout, stderr = self._try(cmd, timeout=timeout)
         if rc != 0:
             payload = {"ok": False, "error": stderr.strip() or stdout.strip() or f"exit {rc}", "cmd": mac_input.shown(cmd),

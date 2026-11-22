@@ -35,6 +35,9 @@ from .place import parse_wmctrl_rows, parse_x11_front, window_id_int, x11_resolv
 # Run by the account's login shell, whatever it is (single quotes mean the same to sh, zsh, bash and tcsh): sh reads
 # the whole script from stdin, then hands it to the account's shell as one -c argument with stdin closed.
 _RAW_SCRIPT_RUNNER = """/bin/sh -c 'script=$(cat); exec "${SHELL:-/bin/sh}" -c "$script" </dev/null'"""
+# The skill's own POSIX commands: sh reads the whole script and evaluates it itself (no exec, so no argument length
+# limit), with stdin closed for the commands in it. tcsh and other non-POSIX account shells never parse them.
+_SH_SCRIPT_RUNNER = """/bin/sh -c 'script=$(cat); eval "$script" </dev/null'"""
 
 
 def _fits_command_line(argv: list[str], windows: bool = os.name == "nt") -> bool:
@@ -299,7 +302,8 @@ class RemoteBackends:
             ops, err = mac_input.ops_for_pyautogui(code)
             if err:
                 return {"ok": False, "backend": backend, "error": err, "code": code}
-            ssh_command = shlex.join(mac_input.argv(ops, remote=True, budget_ms=max(1000, timeout * 1000 - 3000)))
+            ssh_command = shlex.join(mac_input.argv(ops, remote=True, budget_ms=max(1000, timeout * 1000 - 3000),
+                                                     until=mac_input.deadline_in(timeout)))
             note = {**(note or {}), "method": mac_input.method_of(ops)} if input_effect else note
         if input_effect and ctx is None:
             refusal, ctx = self._begin(target, raise_policy=raise_policy, connection=("remote", conn))
@@ -337,7 +341,7 @@ class RemoteBackends:
                         payload.update({"reason": "completion_unknown", "transport_failed": True})
                 stderr = ""
             elif backend == "ssh_macos":
-                remote = ssh_command
+                remote, timeout = mac_input.fit_shell(ssh_command, timeout)  # the call's time left after the switch
                 if input_effect:
                     precheck = _SSH_PRECHECK.format(pid=int(expect["pid"])) if expect.get("pid") else ""
                     remote = _SSH_INPUT_WRAPPER.format(read=_SSH_FRONT_READ, precheck=precheck, command=remote)
@@ -815,17 +819,18 @@ class RemoteBackends:
         return ["-P", str(port), src] if port != 22 else [src]
 
     def _ssh_run(self, conn: dict[str, Any], command: str, *, timeout: int = 30, raw: bool = False) -> tuple[int, str, str]:
-        """One remote command through the user's ssh, as its argument while the host's command line can carry it, else
-        on ssh's stdin (``-T``, as UTF-8 bytes: a text pipe on Windows would turn LF into CRLF). The skill's own POSIX
-        commands are read by /bin/sh whatever the account's shell (tcsh cannot run them); a ``raw`` remote_exec script is
-        read first and then run by the account's own shell, not as a login, with its stdin closed so that a command
-        in it cannot swallow the rest of the script."""
+        """One remote command through the user's ssh. The skill's own POSIX commands always go on ssh's stdin (``-T``,
+        as UTF-8 bytes: a text pipe on Windows would turn LF into CRLF) to /bin/sh, whatever the account's shell (tcsh
+        cannot run them, even short ones). A ``raw`` remote_exec script goes as ssh's argument, to the account's own
+        shell, while the host's command line can carry it, else on stdin, read first and then run by the account's
+        own shell, not as a login, with its stdin closed so that a command in it cannot swallow the rest."""
         dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self._ssh_destination(conn)]
-        if _fits_command_line([*dest, command]):
+        if raw and _fits_command_line([*dest, command]):
             return self._run_cmd([*dest, command], timeout=timeout)
-        remote = _RAW_SCRIPT_RUNNER if raw else "/bin/sh -s"
+        remote = _RAW_SCRIPT_RUNNER if raw else _SH_SCRIPT_RUNNER
         proc = subprocess.run(["ssh", "-T", *dest[1:], remote], input=command.encode("utf-8"), capture_output=True, timeout=timeout)
-        return int(proc.returncode), (proc.stdout or b"").decode("utf-8", "replace"), (proc.stderr or b"").decode("utf-8", "replace")
+        out, err = (part.decode("utf-8", "replace") if isinstance(part, bytes) else str(part or "") for part in (proc.stdout, proc.stderr))
+        return int(proc.returncode), out, err
 
     def _ssh_macos_screenshot(self, conn: dict[str, Any], *, max_width: int, max_height: int,
                               connection_name: str = "") -> str:
@@ -884,6 +889,7 @@ class RemoteBackends:
     def _remote_type_text(self, conn: dict[str, Any], text: str, interval_ms: int = 0, target: str = "", via: str = "",
                           raise_policy: str = "allow") -> str:
         """type_text on a remote backend (OSWorld clipboard routing measured on the bench; SSH Mac types or pastes)."""
+        began = mac_input.deadline_in(0)  # the host's deadline counts from here, the switch below included
         text = str(text or "")
         interval = max(0, int(interval_ms or 0)) / 1000.0
         typewrite_code = f"pyautogui.typewrite({text!r}, interval={interval!r})"
@@ -956,7 +962,7 @@ class RemoteBackends:
                 conn, typewrite_code, note={"method": "typewrite", "clipboard_fallback": True}, timeout=60, target=target, ctx=ctx,
                 raise_policy=raise_policy,
             )
-        timeout = max(60, mac_input.type_seconds(text, interval_ms)) if backend == "ssh_macos" else 60
+        timeout = mac_input.left_of(began, max(60, mac_input.type_seconds(text, interval_ms))) if backend == "ssh_macos" else 60
         return self._remote_pyautogui(conn, typewrite_code, note={"method": "typewrite"}, timeout=timeout, target=target,
                                       ctx=ctx, raise_policy=raise_policy)
 

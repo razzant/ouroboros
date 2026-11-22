@@ -14,7 +14,7 @@ import sys
 
 import pytest
 
-from tests._unix_computer_use import (API, CHORD_POSTED, KEYNOTE, RETURN, RIGHT, SAFARI, app_dict, inputs, is_input, key,
+from tests._unix_computer_use import (API, CHORD_POSTED, EVENTS_POSTED, KEYNOTE, RETURN, RIGHT, SAFARI, app_dict, inputs, is_input, key,
                                       load_plugin, mac, receipt)
 
 
@@ -95,10 +95,19 @@ def test_a_refused_input_is_an_honest_failure(tmp_path, monkeypatch):
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is False and out["reason"] == "permission_denied" and out["observed_effect"] is True and out["activation_done"] is True
     # Other stderr noise is kept beside a successful dispatch.
-    module, api, state = mac(tmp_path, monkeypatch, events=(0, "", "some note\n"))
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, EVENTS_POSTED, "some note\n"))
     out = receipt(api.tools["key"](keys="right"))
     assert out["ok"] is True and out["observed_effect"] is True and out["helper_stderr"] == "some note" and "refusal" not in out
     assert out["permissions_available"] == ["post_events"]
+    # An exit 0 that answers nothing (a program that printed no count) is a dispatch, not evidence of the grant.
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, "", ""))
+    out = receipt(api.tools["key"](keys="right"))
+    assert out["ok"] is True and out["dispatched"] is True and "permissions_available" not in out, out
+    # The chord program prints no count: its line naming the key it pressed is the evidence, for a shortcut and a paste.
+    for chord, proof in ((CHORD_POSTED, ["post_events"]), ("", None)):
+        module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", chord))
+        for out in (receipt(api.tools["key"](keys="cmd+g")), receipt(api.tools["type_text"](text="x", via="paste"))):
+            assert out["ok"] is True and out.get("permissions_available") == proof, (chord, out)
 
 
 def test_a_text_that_posts_nothing_has_no_mark_and_one_stopped_part_way_keeps_its_count(tmp_path, monkeypatch):
@@ -157,10 +166,29 @@ def test_a_switch_during_the_lookup_stops_the_sequence_before_its_first_key(tmp_
     monkeypatch.setattr(module.subprocess, "run", run)
     out = receipt(api.tools["key"](keys="a b", app="Keynote"))
     assert out["ok"] is False and out["reason"] == "target_lost" and out["steps_done"] == 0 and inputs(state) == [], out
-    assert out["activation_done"] is True and (out.get("delivered_to") or {}).get("app") != "Keynote", out
+    # The front at the refusal, as the step read it after the lookup: not the target the switch had verified before.
+    assert out["activation_done"] is True and out["front"] == app_dict(SAFARI) and "delivered_to" not in out, out
     module, api, state = mac(tmp_path, monkeypatch)
     kept = receipt(api.tools["key"](keys="a b", app="Keynote"))
     assert kept["ok"] is True and inputs(state) == [[key(None, char="a")], [key(None, char="b")]], kept
+    assert kept["delivered_to"] == app_dict(KEYNOTE) and kept["permissions_available"] == ["post_events"], kept
+
+
+def test_an_untargeted_sequence_names_the_application_its_keys_reached(tmp_path, monkeypatch):
+    """Without app= the keys go to whoever is in front: when that changes during the lookup, both keys reach the new
+    front application, and the receipt says so instead of naming the one in front before the lookup."""
+    module, api, state = mac(tmp_path, monkeypatch, front=SAFARI)
+    fake = module.subprocess.run
+
+    def run(cmd, *a, **k):
+        if [str(part) for part in cmd][:1] == ["osascript"] and '"op":"resolve"' in str(cmd[-1]):
+            state["front"] = KEYNOTE
+        return fake(cmd, *a, **k)
+    monkeypatch.setattr(module.subprocess, "run", run)
+    out = receipt(api.tools["key"](keys="a b"))
+    assert out["ok"] is True and inputs(state) == [[key(None, char="a")], [key(None, char="b")]], out
+    assert out["delivered_to"] == app_dict(KEYNOTE) and out["front_before"] == app_dict(SAFARI), out
+    assert "steps_delivered_to" not in out, "both steps reached the same application"
 
 
 def test_an_unreadable_layout_is_its_own_refusal_not_a_missing_key(tmp_path, monkeypatch):
@@ -169,6 +197,12 @@ def test_an_unreadable_layout_is_its_own_refusal_not_a_missing_key(tmp_path, mon
     out = receipt(api.tools["key"](keys="ctrl+a"))
     assert out["ok"] is False and out["reason"] == "layout_unread" and out["dispatched"] is False and "untyped" not in out, out
     assert "could not be read" in out["error"] and "not sent" in out["note"]
+    # A Command shortcut goes through the chord program, whose refusal wraps the same words in its key-code line.
+    chord = "Unable to get key code for a (the active keyboard layout could not be read); the shortcut was not sent\n"
+    module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", chord))
+    out = receipt(api.tools["key"](keys="cmd+a"))
+    assert out["ok"] is False and out["reason"] == "layout_unread" and out["dispatched"] is False and "untyped" not in out, out
+    assert "shortcut was not sent" in out["error"], out
 
 
 def test_an_element_act_without_accessibility_carries_the_one_refusal_field(tmp_path, monkeypatch):
@@ -946,3 +980,34 @@ def test_native_activation_rules_without_a_desktop(monkeypatch):
     monkeypatch.setattr(native, "_activate_pid", lambda ax, pid, wait_ms: ("system_events", None, 2000))
     unread = native.op_activate("Keynote", 500)
     assert unread["ok"] is False and unread["reason"] == "front_unread" and unread["activated"] is None
+
+
+@pytest.mark.parametrize("spent", [0, 15])
+def test_the_typing_deadline_counts_the_time_the_switch_took(tmp_path, monkeypatch, spent):
+    """type_text's host deadline (180 s) runs from the call's start. 4,500 characters at 40 ms want more than the
+    helper's 170 s, so the program's own deadline (which stops with chars_sent) and the helper's timeout are cut to
+    what the switch left: 15 s spent activating the target leave the program 153 s and the helper 155 s, still below
+    the 165 s the host has left, never the 168 s and 170 s of a call that started with the program."""
+    clock = [1000.0]
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, '{"posted":9000,"chars_total":4500,"chars_sent":4500}\n', ""))
+    mac_input = sys.modules[module.__name__ + ".mac_input"]
+    monkeypatch.setattr(mac_input, "_clock", lambda: clock[0])
+    activate, waits = module._ComputerUse._begin, []
+
+    def slow_begin(self, *a, **k):
+        clock[0] += spent  # the switch to the target takes this long
+        return activate(self, *a, **k)
+    real_try = module._ComputerUse._try
+
+    def timed_try(self, cmd, *, timeout=30):
+        if is_input([str(part) for part in cmd]):
+            waits.append(timeout)
+        return real_try(self, cmd, timeout=timeout)
+    monkeypatch.setattr(module._ComputerUse, "_begin", slow_begin)
+    monkeypatch.setattr(module._ComputerUse, "_try", timed_try)
+    out = receipt(api.tools["type_text"](text="x" * 4500, interval_ms=40, app="Keynote"))
+    assert out["ok"] is True and out["chars_sent"] == 4500, out
+    spec = json.loads([argv for argv in state["calls"] if is_input(argv)][0][-1])
+    host_left_ms = (mac_input.TYPE_HOST_SEC - spent) * 1000
+    assert "until" not in spec and spec["budget_ms"] == (170 - spent) * 1000 - 2000, spec
+    assert len(waits) == 1 and spec["budget_ms"] + 2000 <= waits[0] * 1000 <= host_left_ms - 10_000, (spec, waits)

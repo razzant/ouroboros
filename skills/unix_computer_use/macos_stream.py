@@ -553,6 +553,13 @@ def _refusal(reason: str, error: str, **extra: Any) -> dict[str, Any]:
     return mac_input.with_refusal({"ok": False, "reason": reason, "error": error, **extra})
 
 
+def _grant_stop(facts: dict[str, Any]) -> dict[str, Any]:
+    """A stream the system ended for a missing grant (SCStreamError -3801) carries the structured refusal a denied
+    start carries: the owner must allow Screen Recording before a new session can work."""
+    stop = facts.get("stop") if isinstance(facts.get("stop"), dict) else {}
+    return mac_input.permission_refusal("screen_recording") if stop.get("reason") == "screen_recording_denied" else {}
+
+
 class WindowSessions:
     """``begin`` / ``frame`` / ``release`` for at most one window stream at a time (the module docstring's contract).
 
@@ -675,12 +682,12 @@ class WindowSessions:
                     "cleanup": ending}
         if store.stop is not None:  # the stream reported its own end before its start answered
             _frame, state = store.snapshot()
-            return {**_refusal("stream_stopped", "the stream ended as it started", app=target, window=facts, **state),
+            return {**_refusal("stream_stopped", "the stream ended as it started", app=target, window=facts, **state), **_grant_stop(state),
                     "cleanup": self._end(session, "released", STOP_TIMEOUT_MS)}
-        return {"ok": True, "state": "live", "backend": "ScreenCaptureKit", "app": target, "window": facts,
-                "stream": applied, "point_pixel_scale": scale, "start_ms": round((clock() - started) * 1000, 1),
-                "window_gone_check": "window_server",
-                "mapped_input_available": False, "note": _NOTE}
+        return mac_input.proved({"ok": True, "state": "live", "backend": "ScreenCaptureKit", "app": target, "window": facts,
+                                 "stream": applied, "point_pixel_scale": scale, "start_ms": round((clock() - started) * 1000, 1),
+                                 "window_gone_check": "window_server",
+                                 "mapped_input_available": False, "note": _NOTE}, "screen_recording")  # a live stream
 
     # -- frame --------------------------------------------------------------------------------------------------
 
@@ -731,7 +738,7 @@ class WindowSessions:
                  "mapped_input_available": False}
 
         def withhold(reason: str, error: str) -> tuple[dict[str, Any], None]:
-            return {"ok": False, "reason": reason, "error": error, "image": False, **facts}, None
+            return {"ok": False, "reason": reason, "error": error, "image": False, **facts, **_grant_stop(facts)}, None
 
         if state["state"] != "live":
             # The native stream's fate stays answerable until release: the same witness release/_end confirm by,

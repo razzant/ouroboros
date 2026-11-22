@@ -71,7 +71,8 @@ class Transport:
         self.answer = answer or (lambda argv, index: 0)
 
     def __call__(self, cmd, *args, **kwargs):
-        argv = [str(part) for part in cmd]
+        from tests.test_unix_computer_use_remote_targeting import sent_command  # an SSH Mac's command, read from stdin
+        argv = sent_command([str(part) for part in cmd], kwargs.get("input"))
         if is_probe(argv):
             self.probes.append(argv)  # a sequence's lookup answers that the layout has every key it names
             return subprocess.CompletedProcess(cmd, 0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}\n' if '"op":"resolve"' in argv[-1] else "", "")

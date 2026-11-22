@@ -405,6 +405,15 @@ class PlaceMixin:
                 return {"ok": False, "reason": "target_lost", "error": self._target_error(app, res), "target": ctx["target"], "front": front}, step
         return None, step
 
+    @staticmethod
+    def _first_front(ctx: dict[str, Any], first: dict[str, Any], *, reread: bool) -> None:
+        """The front a sequence's receipt names is its first step's own: the application that step reached, or the one
+        in front when it was refused, as that step read it. ``reread``: the first step read the front again (after the
+        lookup of the sequence's characters), so an unread front there is unknown, not the earlier read."""
+        front = next((first[k] for k in ("delivered_to", "front_at_dispatch", "front") if isinstance(first.get(k), dict)), None)
+        if front is not None or reread:
+            ctx["delivered_to"] = front  # a remote probe also reads it in the first step
+
     def _stop_before_activation(self, app: str, front: dict[str, Any] | None = None,
                                 resolved: dict[str, Any] | None = None) -> dict[str, Any] | None:
         """The native Mac helper resolves and may raise in one call. Other transports already read the target and front."""
@@ -498,8 +507,10 @@ class PlaceMixin:
                                "was in front; " + next_step + "the rest were not sent; this tool observed no UI change")
             return payload
         dropped = "accessibility" in text.lower() and "not enabled" in text.lower()
-        untyped = re.findall(r"Unable to get key code for (\S+)", text)
-        unread = not untyped and not dropped and "keyboard layout could not be read" in text
+        # An unread layout says so in words of its own (paste_chord.js wraps them in its "Unable to get key code" line):
+        # nothing is known about the keys then, which is not "no key gives it".
+        unread = not dropped and "keyboard layout could not be read" in text
+        untyped = [] if unread else re.findall(r"Unable to get key code for (\S+)", text)
         if untyped or dropped or unread:
             payload.pop("observed_effect", None)
             payload["ok"] = False

@@ -405,9 +405,11 @@ Input receipts (the same contract on every backend):
   sequence looks all its characters up in one call that posts nothing, after
   any switch to `app=` and before its first step, so in the target's own layout
   `key("return Ж")` on ABC sends no Return; a lookup that cannot be read is
-  `layout_unread` and sends nothing, as is a layout without key data; a switch
+  `layout_unread` and sends nothing, as is a layout without key data, for a
+  single shortcut and the paste chord too; a switch
   before it keeps its mark, and the front is read again after the lookup, so a
-  window the owner switched to meanwhile gets no key); either refusal posts
+  window the owner switched to meanwhile gets no key, and the receipt names who
+  received the first key, or who was in front when it was refused, as read then); either refusal posts
   nothing, warns on stderr and exits 0. Such receipts are `ok: false` with
   `reason: permission_denied` / `untypable_characters`, no input mark and, for
   the input and Command chord programs, `dispatched: false` (a completed
@@ -421,10 +423,13 @@ Input receipts (the same contract on every backend):
   Settings > Privacy & Security > …"}` (`reason` stays the string code). Nothing
   asks the system to show a grant prompt. A successful answer names the
   permission the call proved it holds, `permissions_available`: `post_events`
-  for posted input (local or on the SSH Mac), `screen_recording` for a macOS
+  for input the program reports it posted (its count, or the chord program's
+  key line; an exit 0 without either proves nothing), local or on the SSH Mac,
+  a key sequence included, `screen_recording` for a live window session and a macOS
   screenshot whose preflight read `granted` (an unread preflight still captures
   but proves nothing) and for a window capture, `accessibility` for `ax_tree`
-  and `element_act`. A local
+  and `element_act`. A window session the system ends for a withdrawn Screen
+  Recording grant (-3801) answers its next frame with the same `refusal`. A local
   display `screenshot` without the Screen Recording grant (read with the display
   list) is refused the same way, `note: "nothing was captured"`, instead of
   returning the wallpaper. With `app=` the switch runs before the input program
@@ -554,13 +559,17 @@ Backend matrix (honest limitations):
   Russian layout, emoji, accents), on the key that gives the character when
   the layout has one (a dead key never is: such a character goes on the
   neutral key with its string); a line break (`\n`, `\r` or CRLF) is Return.
-  The receipt says how (see "Input receipts"). A command the host could not
-  start as an argument (Windows: the quoted command line over 32,767 UTF-16
-  units; elsewhere an argument over 128 KiB) reaches an SSH Mac as UTF-8 bytes
-  on ssh's stdin (`ssh -T`): the skill's own POSIX commands are read by
-  `/bin/sh` whatever the account's shell (tcsh included), and a `remote_exec`
-  script is read whole and then run by the account's own shell, not as a
-  login, with its stdin closed, so it keeps its shell's syntax.
+  The receipt says how (see "Input receipts"). The program's own deadline and
+  the helper's timeout are what the call has left of type_text's 180 s after
+  the switch to `app=`, less 10 s for the receipt, so a long text cut short
+  answers with `chars_sent` rather than the host's timeout. The skill's own
+  POSIX commands reach an SSH Mac as UTF-8 bytes on ssh's stdin (`ssh -T`),
+  read whole and run by `/bin/sh` whatever the account's shell (tcsh
+  included). A `remote_exec` script is ssh's argument, for the account's own
+  shell, while the host can start it so (Windows: the quoted command line up
+  to 32,767 UTF-16 units; elsewhere an argument up to 128 KiB); a longer one
+  goes on stdin, is read whole and then run by the account's own shell, not as
+  a login, with its stdin closed, so it keeps its shell's syntax.
   `key(cmd+v)` sends only the shortcut, without changing the clipboard.
   `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
   UTF-8 and told so whatever locale the process inherited, as over SSH) and

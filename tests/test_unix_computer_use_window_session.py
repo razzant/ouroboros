@@ -442,6 +442,7 @@ def test_begin_selects_one_window_once_and_starts_one_bounded_stream(desk):
     sessions, bridge, _clock = desk(size=(1600.0, 500.0, 2.0))
     answer = begin(sessions, window="Editor")
     assert answer["ok"] is True and answer["state"] == "live" and answer["backend"] == "ScreenCaptureKit"
+    assert answer["permissions_available"] == ["screen_recording"], "a live stream proves the grant"
     assert answer["window"]["window_id"] == 7 and answer["app"]["pid"] == 11
     assert ("config", 1280, 400) in bridge.calls and ("filter", 7) in bridge.calls  # 3200x1000 fitted into 1280x800
     order = [bridge.calls.index(step) for step in ("preflight", "load", "content", "add_output", ("start", "stream-1"))]
@@ -806,6 +807,22 @@ def test_an_end_while_the_image_is_written_withholds_it(desk):
     facts, png = sessions.frame({})
     assert png is None and facts["reason"] == "stream_stopped" and facts["stop"]["reason"] == "system_stopped"
     assert facts["cleanup"] == {"confirmed": True, "detail": "the stream reported its own end"}
+
+
+@pytest.mark.parametrize(("reason", "code"), [("screen_recording_denied", -3801), ("system_stopped", -3821)])
+def test_a_stream_the_system_ends_for_the_grant_says_which_grant(desk, reason, code):
+    """A grant withdrawn while the stream runs ends it with -3801: the frame's refusal carries the same structured
+    field a denied start does, so the owner is asked for Screen Recording; another end carries none."""
+    sessions, bridge, _clock = desk()
+    begin(sessions)
+    bridge.stores[0].end(reason, by="stream", code=code)
+    facts, png = sessions.frame({})
+    assert png is None and facts["reason"] == "stream_stopped" and facts["stop"]["reason"] == reason, facts
+    if code == -3801:
+        assert facts["refusal"] == {"capability_unavailable": True, "permission": "screen_recording", "repair": "owner",
+                                    "where": "System Settings > Privacy & Security > Screen & System Audio Recording"}
+    else:
+        assert "refusal" not in facts, facts
 
 
 def test_a_frame_dropped_while_it_is_written_is_not_rescued_by_a_later_image(desk):

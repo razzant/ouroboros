@@ -13,6 +13,8 @@ import ast
 import json
 import pathlib
 import re
+import shlex
+import time
 from typing import Any
 
 INPUT_EVENTS_JS = pathlib.Path(__file__).with_name("input_events.js")
@@ -51,12 +53,57 @@ _GRANT_REASONS = {"accessibility_untrusted": "accessibility", "screen_recording_
 # (arm64 macos-15 / macos-26), where 10 ms ran into the deadline at 485 and 514 characters; the pause after the down
 # is gone since, and 40 ms keeps about twice the slowest measured rate.
 TYPE_MS_PER_CHAR = 40
+# type_text's registered timeout_sec: the host kills the child then, counting from its start; the last TYPE_RECEIPT_SEC
+# of it are kept for the child's start before the handler and for the receipt after the program.
+TYPE_HOST_SEC = 180
+TYPE_RECEIPT_SEC = 10
+_clock = time.monotonic  # the host's deadline counts on this clock too (a test double replaces this name only)
 
 
 def type_seconds(text: str, interval_ms: int = 0) -> int:
     """The helper timeout for typing ``text``: a fixed part for starting the program and reading the layout, plus the
     per-character budget and the asked interval; the program's own deadline is 2 s below it."""
-    return min(170, 10 + len(text) * (max(0, int(interval_ms or 0)) + TYPE_MS_PER_CHAR) // 1000)
+    need = 10 + len(text) * (max(0, int(interval_ms or 0)) + TYPE_MS_PER_CHAR) // 1000
+    return min(TYPE_HOST_SEC - TYPE_RECEIPT_SEC, need)
+
+
+def deadline_in(seconds: float) -> float:
+    """The monotonic moment ``seconds`` from now, read when the call begins: the helper must be done by then, so the
+    time its target switch takes comes out of the program's budget (``fit``), never out of the host's deadline."""
+    return round(_clock() + float(seconds), 3)
+
+
+def left_of(began: float, seconds: int) -> int:
+    """What is left of ``seconds`` that began at ``began`` (a ``deadline_in(0)`` stamp), in whole seconds, at least 1:
+    the time a call spent before building its program (an SSH Mac's inventory and switch) is not given again."""
+    return max(1, int(began + seconds - _clock()))
+
+
+def fit(cmd: list[str], timeout: int, *, margin_ms: int = 2000) -> tuple[list[str], int]:
+    """``cmd`` and its helper timeout cut to what is left before the spec's ``until`` (``deadline_in``), just before it
+    runs: the program's own deadline falls ``margin_ms`` before the helper's, which falls at ``until``, so a text the
+    switch delayed stops with its counts (chars_sent) instead of being killed by the host without them. Any other
+    argv, or one without ``until``, is returned as it is."""
+    if ops_of(cmd) is None:
+        return cmd, timeout
+    spec = json.loads(cmd[-1])
+    end = spec.pop("until", None)
+    if not isinstance(end, (int, float)):
+        return cmd, timeout
+    left_ms = int((end - _clock()) * 1000)
+    spec["budget_ms"] = max(500, min(int(spec.get("budget_ms") or 8000), left_ms - margin_ms))
+    wait = max(min(int(timeout), -(-left_ms // 1000)), -(-(spec["budget_ms"] + margin_ms) // 1000))
+    return [*cmd[:-1], json.dumps(spec, ensure_ascii=True, separators=(",", ":"))], wait
+
+
+def fit_shell(command: str, timeout: int) -> tuple[str, int]:
+    """``fit`` for the shell-quoted program an SSH Mac runs (3 s of margin for the round trip)."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command, timeout
+    fitted, wait = fit(words, timeout, margin_ms=3000)
+    return (shlex.join(fitted), wait) if fitted is not words else (command, timeout)
 
 
 def permission_refusal(grant: str) -> dict[str, Any]:
@@ -80,10 +127,12 @@ def with_refusal(payload: dict[str, Any]) -> dict[str, Any]:
     return {**payload, **permission_refusal(grant)} if grant else payload
 
 
-def argv(ops: list[dict[str, Any]], *, remote: bool = False, budget_ms: int = 8000) -> list[str]:
+def argv(ops: list[dict[str, Any]], *, remote: bool = False, budget_ms: int = 8000, until: float | None = None) -> list[str]:
     """The program's argv: the file locally, its source over SSH (shell-quoted word by word by the caller), and the
-    spec as the one word after it (ASCII JSON, so no locale on either end can change it)."""
-    spec = json.dumps({"ops": ops, "budget_ms": int(budget_ms)}, ensure_ascii=True, separators=(",", ":"))
+    spec as the one word after it (ASCII JSON, so no locale on either end can change it). ``until`` (``deadline_in``)
+    is for ``fit`` alone, which takes it out before the program runs."""
+    body: dict[str, Any] = {"ops": ops, "budget_ms": int(budget_ms), **({"until": until} if until is not None else {})}
+    spec = json.dumps(body, ensure_ascii=True, separators=(",", ":"))
     program = ["-e", INPUT_EVENTS_JS.read_text(encoding="utf-8")] if remote else [str(INPUT_EVENTS_JS)]
     return ["osascript", "-l", "JavaScript", *program, spec]
 
@@ -112,6 +161,7 @@ def shown(cmd: list[str]) -> list[str]:
     if ops is None:
         return cmd
     spec = json.loads(cmd[-1])
+    spec.pop("until", None)  # a moment on this host's clock, meaningless in a receipt
     return [*cmd[:3], cmd[3] if cmd[3] != "-e" else "-e input_events.js", json.dumps(spec, ensure_ascii=False)]
 
 
@@ -186,6 +236,23 @@ def resolve_refusal(rc: int, stdout: str, stderr: str) -> dict[str, Any] | None:
                         "under Command, type the text with type_text, or use the app's own commands")}
 
 
+def posting_seen(payload: dict[str, Any], posted: Any) -> bool:
+    """Evidence that events went out: the input program's own count above zero, or the paste chord's line naming the
+    key it pressed (a paste or a Command shortcut). An exit 0 with no answer (a cut reply, a program that printed
+    nothing) proves no grant."""
+    if isinstance(posted, int):
+        return posted > 0
+    return payload.get("method") in ("paste", "command_chord") and bool(re.search(r"\+ key code \d+ \(", str(payload.get("helper_stderr") or "")))
+
+
+def with_grants(payload: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
+    """A successful multi-step answer names the grants its steps proved (each step's own ``permissions_available``)."""
+    for result in results:
+        for grant in result.get("permissions_available") or []:
+            proved(payload, grant)
+    return payload
+
+
 def posted_effect(payload: dict[str, Any]) -> dict[str, Any]:
     """What the input program said it posted decides the input's mark: an answer that posted nothing (an empty text)
     carries no input mark, and one that stopped after posting some keeps the mark and says how much went out. An
@@ -193,7 +260,7 @@ def posted_effect(payload: dict[str, Any]) -> dict[str, Any]:
     posted = payload.get("posted")
     if payload.get("ok") is not True:
         payload.pop("permissions_available", None)  # a receipt demoted after the first look proves nothing
-    elif payload.get("method") in _POSTING_METHODS and posted != 0:
+    elif payload.get("method") in _POSTING_METHODS and posting_seen(payload, posted):
         proved(payload, "post_events")  # events went out: the right to post them is a fact, not a preflight
     if not isinstance(posted, int):
         return payload
