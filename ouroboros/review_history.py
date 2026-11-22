@@ -501,18 +501,139 @@ def wave_history_input(drive_root: Any, facts: dict, subject: dict, record_id: s
     retry = str(facts.get("retry_key") or (facts.get("structured") or {}).get("retry_key") or "")
     task, root, own = str(facts.get("task_id") or ""), subject.get("root"), facts.get("attempts_root") or None
     try:
-        if retry:
-            rows = _attempts(drive_root, root, task, own)
-            saved = next((a.review_input for a in reversed(rows) if a.review_retry_key == retry and a.review_input), None)
-            if saved is not None:
-                return copy.deepcopy(saved)
-        history = review_dispute_history(drive_root=drive_root, repo_root=root, task_id=task, exclude_record_id=record_id,
-                                         attempts_root=own)
-        return {"previous_records": history["record_heads"], "gaps": [
+        number, tool = facts.get("attempt"), facts.get("tool_name")
+        rows = [a for a in _attempts(drive_root, root, task, own)
+                if (not retry or a.review_retry_key == retry) and (not tool or a.tool_name == tool)]
+        candidates = [a for a in rows if record_id and a.review_record_id == record_id]
+        if not candidates and tool and number:
+            candidates = [a for a in rows if not a.review_record_id and a.attempt == number]
+        inputs = [a.review_input for a in candidates if a.review_input]
+        if inputs and all(bound == inputs[0] for bound in inputs):
+            return copy.deepcopy(inputs[0])
+        return {"previous_records": [], "gaps": [  # never heads rebuilt after dispatch: not what the seats were given
             _gap("wave preparation has no exact dispute-input binding", record_id=record_id)]}
     except (OSError, TypeError, ValueError) as exc:
         return {"previous_records": [], "gaps": [_gap(
             f"wave input binding could not be read ({type(exc).__name__})", record_id=record_id)]}
+
+
+def _needs_original_run_answer(seat):
+    """No retained words yet: none looked for, or only a named gap a later read may still fill."""
+    from ouroboros.review_ledger import seat_open
+
+    held = seat.get("original_run_answer")
+    return bool(seat.get("operation_id") and (not held or isinstance(held, dict) and _unavailable(held)) and (
+        seat.get("failure_code") == "provider_outcome_unknown" or (
+            (seat.get("requested") or {}).get("route") == "agent_session"
+            and (seat_open(seat) or seat.get("status") in {"error", "empty", "unanswered"}))))
+
+
+_RUN_ANSWER_ROLE = "redacted_run_answer"  # the one retained role: every delivered answer is a masked copy
+
+
+def _unavailable(answer):
+    return answer.get("provenance") == "unavailable"
+
+
+def retain_original_run_answers(ctx, attempt, record, result):
+    """Append only separately attested native output, already masked by its reader, as the masked copy it is
+    (``review_session_custody.answer_words``: the source's bytes are never confirmed); a run that kept only a preview
+    leaves a named gap and no words. The record must bind this attempt: a commit gate's by the gate's staged
+    binding, any other wave's by its frozen subject. The review decision keeps its own sources and quorum."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_operation import retained_original_run_answer
+
+    drive = ledger.ledger_root(ctx)
+    subject = result.get("subject") or {}
+    fingerprints = record.get("fingerprints") or {}
+    retry = fingerprints.get("retry_key") or attempt.review_retry_key
+    contract = fingerprints.get("review_contract") or attempt.review_contract_fingerprint
+    root_task = record.get("root_task_id") or attempt.root_task_id
+    binding, recorded = str(attempt.pre_review_fingerprint or ""), str(fingerprints.get("binding") or "")
+    bound = recorded == binding if record.get("surface") == "commit_gate" else (
+        subject.get("diff_sha") == binding and recorded in ("", binding))
+    if (not all((binding, retry, contract, root_task)) or not bound
+            or any(saved and saved != exact for saved, exact in (
+                (attempt.review_retry_key, retry), (attempt.review_contract_fingerprint, contract),
+                (attempt.root_task_id, root_task)))):
+        return None
+    interested = [s for s in result["rows"] if _needs_original_run_answer(s)]
+    if not interested:
+        return None
+    task, rid = attempt.task_id, result["record_id"]
+    roster = {}
+    for row in attempt.triad_raw_results or []:
+        if isinstance(row, dict):
+            roster.setdefault(row.get("slot_id") or row.get("slot"), []).append(row)
+    found = {}
+    for seat in interested:
+        sid, operation = seat["seat_id"], seat["operation_id"]
+        matching = [r for r in roster.get(sid, []) if r.get("operation_id") == operation]
+        if sid in roster and len(matching) != 1:
+            continue
+        raw = matching[0] if matching else {"slot_id": sid, "operation_id": operation}
+        try:
+            answer = retained_original_run_answer(drive, task_id=task, surface="multi_model_review", row=raw,
+                                                  retry_key=retry, root_task_id=root_task, review_contract=contract, usage_ctx=ctx)
+        except (OSError, TypeError, ValueError, KeyError, RuntimeError):
+            continue  # An unreadable or unbound source establishes no new fact.
+        if not answer or answer == seat.get("original_run_answer"):
+            continue  # nothing, or the gap the record already names
+        if not _unavailable(answer):
+            source = ledger.retain_text_source(drive, task, record_id=rid, seat_id=sid,
+                                               role=_RUN_ANSWER_ROLE, text=answer.pop("text"))
+            if source["status"] != "retained":
+                continue
+            answer["source"] = source
+        found[(sid, operation)] = answer
+    if not found:
+        return None
+
+    def append(current):
+        changed = False
+        for seat in current["rows"]:
+            answer = found.get((seat["seat_id"], seat.get("operation_id")))
+            if (answer and _needs_original_run_answer(seat) and current["subject"] == subject
+                    and answer != seat.get("original_run_answer")):
+                seat["original_run_answer"] = answer
+                if answer.get("source"):
+                    seat.setdefault("source_refs", []).append(answer["source"])
+                changed = True
+        if not changed:
+            raise ledger.RecordUnchanged()
+        return current
+    return ledger.revise_record(drive, rid, append)
+
+
+def read_original_run_answers(ctx, task, rows):
+    """Read each retained run answer back whole. An entry whose provenance, role, operation, owner or the copy's own
+    identity (``copy_sha256``/``copy_chars`` against the retained source) disagrees proves nothing and is dropped; an
+    unreadable source stays a named gap, and so does a run that kept only a preview (``unavailable``), which carries
+    no words to read."""
+    from ouroboros import review_ledger as ledger
+
+    for seat in rows:
+        answer = seat.get("original_run_answer")
+        if not answer:
+            continue
+        if _unavailable(answer):
+            if answer.get("operation_id") != seat.get("operation_id") or {"source", "text"} & set(answer):
+                seat.pop("original_run_answer")
+            continue
+        source = answer.get("source") or {}
+        named = answer.get("copy_sha256")
+        if (answer.get("operation_id") != seat.get("operation_id") or answer.get("provenance") != "redacted_copy"
+                or source.get("role") != _RUN_ANSWER_ROLE
+                or source.get("task_id") != task or source.get("seat_id") != seat.get("seat_id")
+                or not isinstance(named, str) or not named or (source.get("ref") or {}).get("sha256") != named
+                or source.get("chars") != answer.get("copy_chars")):
+            seat.pop("original_run_answer")
+            continue
+        try:
+            text = ledger.read_source(ledger.ledger_root(ctx), task, source).decode("utf-8")
+            seat["original_run_answer"] = {**answer, "text": text}
+        except (OSError, ValueError, KeyError) as exc:
+            seat["original_run_answer"] = {**answer, "source_gap": str(exc)}
 
 
 # The prior-rounds section's own words beside the history it renders.
