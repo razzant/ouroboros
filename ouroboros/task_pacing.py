@@ -743,7 +743,7 @@ def prospective_wrapup_attempt_request(
     reasoning_effort: str, tools: Optional[list[Dict[str, Any]]] = None,
     allow_server_web_search: bool = False, prompt_tokens: int = 0,
     model_role: str = "main", model_account_override: Optional[str] = None,
-    model_turn_state: Any = None,
+    model_turn_state: Any = None, use_local: bool = False,
     cache_affinity: Optional[str] = None,
     processing_preference: Optional[str] = None,
     task_id: str = "",
@@ -766,6 +766,10 @@ def prospective_wrapup_attempt_request(
     from ouroboros.model_slots import resolve_processing_preference
 
     processing_preference = resolve_processing_preference(model_role, override=processing_preference)
+    if use_local:
+        target, candidate = llm._prepared_local_candidate(
+            messages, tools, MAIN_LOOP_MAX_TOKENS, "auto", processing_preference, reasoning_effort)
+        return _merge_scope(_attempt_request(target, candidate, source="llm.local"))[0]
 
     resolved = None
     if callable(getattr(llm, "_resolve_remote_target", None)):
@@ -877,8 +881,7 @@ def prepared_wrapup_candidate(
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=allow_server_web_search,
             prompt_tokens=int(ctx.accumulated_usage.get("_context_prompt_estimate") or 0),
-            cache_affinity="" if ctx.active_use_local else None,
-            **options,
+            use_local=ctx.active_use_local, **options,
         )
     return request, send_messages
 

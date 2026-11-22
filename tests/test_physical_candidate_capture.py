@@ -295,7 +295,8 @@ def test_local_transport_timeout_is_separate_from_physical_candidate(
         transport_timeouts.append(request.extensions["timeout"])
         return httpx.Response(200, json=_Response(text="local").model_dump())
 
-    def measure(payload):
+    def measure(payload, *, expected_port):
+        assert expected_port == 8799
         measured.append(copy.deepcopy(payload))
         return {
             "supported": measurement_supported, "input_is_exact": measurement_supported,
@@ -305,7 +306,10 @@ def test_local_transport_timeout_is_separate_from_physical_candidate(
         }
 
     monkeypatch.setattr(import_module("ouroboros.local_model"), "get_manager", lambda: SimpleNamespace(
-        serving_context_evidence=lambda: {"context_window": 8192, "confirmed": True, "process_id": 123},
+        serving_context_evidence=lambda *, bind_endpoint=False: {
+            "context_window": 8192, "confirmed": True, "process_id": 123,
+            **({"port": 8799} if bind_endpoint else {}),
+        },
         measure_prepared_input=measure,
     ))
     messages = [{"role": "user", "content": "hello", "_context_capsule": {"generation": 2}}]
