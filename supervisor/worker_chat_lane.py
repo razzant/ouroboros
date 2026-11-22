@@ -590,6 +590,7 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
             attachment_manifest_has_rejections,
             stage_task_attachments,
         )
+        from ouroboros.chat_uploads import delivery_manifest_rows
         from ouroboros.gateway.tasks import _render_attachment_lines
 
         manifest = stage_task_attachments(root, str(task["id"]), uploads)
@@ -610,7 +611,11 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
                                       f"{cause} ({count} file{'' if count == 1 else 's'})" if count else cause)
         from ouroboros.artifacts import attachment_manifest_projection
         authority = attachment_manifest_projection(root, str(task["id"]), manifest)
-        rendered = _render_attachment_lines(authority)
+        rows = authority["attachment_manifest"]
+        if failures := delivery_manifest_rows(rows):
+            rendered = _render_attachment_lines({**authority, "attachment_manifest": [row for row in rows if row not in failures]})
+        else:
+            rendered = _render_attachment_lines(authority)
         if attachment_manifest_has_rejections(manifest):
             # The turn starts with the rejected rows in its own block and
             # tells the owner itself; the host keeps only the diagnostic.
@@ -656,7 +661,7 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
                            "facts": {"_project_admission": basis, "project_id": pid}})
         except Exception as exc:
             _pool()._report_binding_failure(task["id"], pid, exc, path="direct_project_turn")
-    if not task.get("text"):
+    if not task.get("text") and not (uploads and failures):
         from ouroboros.chat_uploads import attachment_placeholder
         task["text"] = attachment_placeholder(task.get("image_source_ref") or task.get("image_base64"), task_metadata)
     # A Main turn is named lazily: the turn queue fires the namer on the first

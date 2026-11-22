@@ -1957,11 +1957,9 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 - **Video and audio** play in the existing inline players; every other file is
   the existing file card (no PDF viewer). A preview the engine cannot show (HEIC
   in Chromium, an unsupported codec) becomes an ordinary card with Open/Download
-  and "Preview unavailable"; a file deleted since it was sent, or whose size or
-  mtime no longer matches the recorded stat witness, is the inert card
-  "Unavailable". The witness is not a hash and nothing rehashes per view: a
-  same-size replacement that restores the mtime is not detected and shows as the
-  original.
+  and "Preview unavailable". The inert card shows why a file was not received
+  and its size if known. A deleted file or a failed size/mtime check shows
+  "Unavailable"; a same-size replacement with restored mtime is not detected.
 - **Actions never depend on hover:** the photo `•••` and file cards are always
   visible and finger-sized under a coarse pointer; a long name wraps to two lines
   and the card's dialog shows it whole. Open/Save succeed only when the desktop

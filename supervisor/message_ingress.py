@@ -514,7 +514,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     once a write is attempted or a row is handed over; a refusal before that adopts nothing.
     """
     from ouroboros.owner_relay import owner_row_source
-    from ouroboros.chat_uploads import attachment_placeholder
+    from ouroboros.chat_uploads import attachment_placeholder, local_message_words
     from ouroboros.owner_quiz import late_answer_ref
     from supervisor import message_bus
 
@@ -526,9 +526,9 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     task_metadata = message.get("task_metadata") or {}
     press = late_press_ref(task_metadata.get("card_press"))
     late_answer = late_answer_ref(task_metadata.get("late_answer"))
-    logged = (text if press or late_answer else text.strip()) or str(message.get("image_caption") or "").strip() or attachment_placeholder(
-        message.get("image_base64"), message.get("task_metadata")
-    )
+    words = (text if (press or late_answer) and text else
+             local_message_words(source, text, str(message.get("image_caption") or "")))
+    logged = words or attachment_placeholder(message.get("image_base64"), task_metadata)
     if not logged:
         raise ValueError("message is empty")
     from ouroboros.chat_references import delivery_reply, exact_reply_ingress, ingress_reply, telegram_reply_room, with_turn_address
@@ -536,7 +536,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     exact = bool(task_metadata.get("reply_to")) and exact_reply_ingress(
         root, source, chat_id, message_id, message.get("transport"))
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
-    placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
+    placeholder = not words.strip()
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
         try:

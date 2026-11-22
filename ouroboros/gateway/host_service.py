@@ -583,7 +583,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                 except ValueError as exc:
                     return _json_error(str(exc), 400)
                 # Reuse the accepted byte-proven kinds; same_message still checks every incoming digest/name.
-                logged = text.strip() or image_caption.strip() or chat_uploads.attachment_placeholder(
+                logged = chat_uploads.local_message_words(f"skill:{skill_name}", text, image_caption) or chat_uploads.attachment_placeholder(
                     inline_image, {"chat_attachments": inbound.get("attachments"), "chat_attachment_uploads": incoming})
                 if (not chat_uploads.same_message(inbound, logged, incoming)
                         or not await asyncio.to_thread(same_reply, ctx.data_dir, inbound.get("reply_to") or {}, requested_reply)):
@@ -772,20 +772,36 @@ def _skill_state_path(ctx: HostServiceContext, skill_name: str, raw: Any, field:
 
 
 def _confined_inject_sources(
-    ctx: HostServiceContext, skill_name: str, value: Any,
-) -> list[tuple[pathlib.Path, str, str]]:
+    ctx: HostServiceContext, skill_name: str, payload: dict,
+) -> list[tuple[Optional[pathlib.Path], str, Any]]:
     """``(source, name, mime)`` per ``{path, name?, mime?}``; each a regular file under the
-    calling skill's OWN state root (the ``staged_files`` confinement, ``_skill_state_path``)."""
+    calling skill's OWN state root (the ``staged_files`` confinement, ``_skill_state_path``).
+    A pathless ``{name, unavailable, ...}`` is media the skill never received: ``(None, name, its
+    row ref)`` (``chat_uploads.delivery_ref``); nothing is read for it."""
+    value = payload.get("attachments")
     if value in (None, []):
         return []
     if not isinstance(value, list):
         raise ValueError("attachments must be a list of {path, name?, mime?}")
     if len(value) > _INJECT_ATTACHMENT_MAX:
         raise ValueError(f"attachments: at most {_INJECT_ATTACHMENT_MAX} files per message")
-    sources: list[tuple[pathlib.Path, str, str]] = []
+    sources: list[tuple[Optional[pathlib.Path], str, Any]] = []
     for index, item in enumerate(value):
         if not isinstance(item, dict):
             raise ValueError(f"attachments[{index}] must be an object")
+        if "unavailable" in item:
+            from ouroboros.chat_references import exact_reply_ingress
+
+            chat_id, user_id = int(payload.get("chat_id") or 0), int(payload.get("user_id") or 0)
+            if (chat_id <= 0 or user_id != chat_id or payload.get("ui_control") or not exact_reply_ingress(
+                    ctx.data_dir, f"skill:{skill_name}", chat_id, payload.get("client_message_id"), payload.get("transport"))):
+                raise ValueError("pathless attachment facts require the bundled Telegram owner's message")
+            try:
+                fact = chat_uploads.delivery_ref(item)
+            except ValueError as exc:
+                raise ValueError(f"attachments[{index}] {exc}") from None
+            sources.append((None, fact["name"], fact))
+            continue
         source = _skill_state_path(ctx, skill_name, item.get("path"), f"attachments[{index}]")
         if not source.is_file():
             raise ValueError(f"attachments[{index}] is not a regular file")
@@ -801,10 +817,13 @@ def _inject_identity(
     measured from the sources, so a regenerated stored name never changes it; and whether
     the inline bytes are a proven image (what the placeholder text says)."""
     data, inline_image = _inline_image_bytes(payload)
-    entries = [chat_uploads.bytes_identity(data, chat_uploads.inline_image_name(data))] if data else []
-    entries += [chat_uploads.source_identity(source, name)
-                for source, name, _mime in _confined_inject_sources(ctx, skill_name, payload.get("attachments"))]
-    return [{"sha256": sha256, "name": name} for sha256, name in entries], inline_image
+    def identity(pair: list[str]) -> dict:
+        return dict(zip(("sha256", "name"), pair))
+
+    entries = [identity(chat_uploads.bytes_identity(data, chat_uploads.inline_image_name(data)))] if data else []
+    entries += [identity(chat_uploads.source_identity(source, name)) if source is not None else mime
+                for source, name, mime in _confined_inject_sources(ctx, skill_name, payload)]
+    return entries, inline_image
 
 
 def _inject_attachment_uploads(
@@ -821,13 +840,14 @@ def _inject_attachment_uploads(
     photo, so later explicit readers retain its pixels. Every lane drops the inline
     copy once uploads stage. Inline bytes that prove no image are no photo: they are
     staged as an ordinary file and never reach vision under the transport's label.
-    Each spec carries its ref's measured identity, which staging verifies while copying.
+    Each spec carries its ref's measured identity, which staging verifies while copying; a fact
+    of media never received records its ref and a pathless spec that staging names by its reason.
     Each new destination belongs to the request cleanup stack until its message is
     accepted; partial batches and cancelled copy waits therefore cannot orphan earlier copies.
     """
     refs: list[dict[str, Any]] = []
     specs: list[dict[str, Any]] = []
-    sources = _confined_inject_sources(ctx, skill_name, payload.get("attachments"))
+    sources = _confined_inject_sources(ctx, skill_name, payload)
 
     def park(source: Any, name: str, mime: str = "") -> None:
         stored, ref = store_upload(source, name, data_dir=ctx.data_dir)
@@ -840,6 +860,11 @@ def _inject_attachment_uploads(
     if data:  # parked first: a proven image's ref is refs[0]
         park(data, chat_uploads.inline_image_name(data))
     for source, name, mime in sources:
+        if source is None:
+            refs.append(mime)
+            specs.append({"label": name, **{key: mime[key] for key in ("mime", "size", "unavailable", "limit_bytes")
+                                            if key in mime}})
+            continue
         park(source, name, mime)
     return specs, refs, refs[0]["mime"] if image else ""
 

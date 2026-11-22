@@ -824,7 +824,7 @@
  * @property {number} size
  * @property {string=} sha256
  * @property {string} mime  // the extension's type, as the model-input rail reads it
- * @property {{name: string, kind: ('image'|'video'|'audio'|'file'), mime: string, size: (?number|undefined), available: boolean, url: (string|undefined)}=} view  // ChatAttachmentView (chat_uploads.attachment_view): the sender's own bubble renders exactly this; `kind` proven from bytes, `url` only while available
+ * @property {{name: string, kind: ('image'|'video'|'audio'|'file'), mime: string, size: (?number|undefined), available: boolean, url: (string|undefined), unavailable: ('too_large'|'download_failed'|undefined), limit_bytes: (number|undefined)}=} view  // ChatAttachmentView: kind proven from bytes; URL only while available
  */
 
 /** @typedef {Object} StatusResponse
@@ -1138,6 +1138,7 @@
  * @property {number=} size
  * @property {string=} sha256
  * @property {string=} rule
+ * @property {number=} limit_bytes
  */
 
 /**
