@@ -385,21 +385,26 @@ def _folder_answers(row: Dict[str, Any]) -> bool:
 def lane_waits() -> Dict[str, Dict[str, Any]]:
     """Under Q: each queued row another tree keeps out of its Project's or folder's lane now, by task id, as
     ``project_lease.lane_wait`` names the holder. Who holds a lane is what the walk counts before it picks
-    (RUNNING with its carriers, plus launches claimed); a returned turn takes no lane, and a folder is said only
-    while it answers for the row's admitted room (``_folder_answers``). Pure over memory: the queue snapshot and the
-    status census publish it, nothing stores it on a task; a display fact, so a failure says none (warned once per
-    distinct error), never raises."""
+    (RUNNING with its carriers, plus launches claimed); a returned turn takes no lane, a folder is said only while
+    it answers for the row's admitted room (``_folder_answers``), and only a row the chooser's own memory gates
+    would otherwise admit waits for its lane (``_candidate_ineligible`` without lanes or stat reads). Memory only,
+    save what that gate itself pays on every pass (a deployment's hold resolves its required extensions' paths): the
+    queue snapshot and the status census publish it, nothing stores it on a task; a display fact, so a failure says
+    none (warned once per distinct error), never raises."""
     from ouroboros.project_lease import folder_projects, lane_holders, lane_wait
+    from supervisor import queue
     from supervisor.conversation_lane import resumes_on_lane
 
     try:
-        started, pending = _assignment()._started_projection(), list(_pool().PENDING)
+        wa = _assignment()
+        started, pending = wa._started_projection(), list(_pool().PENDING)
         holders = lane_holders(started, pending)
         projects = folder_projects(started + pending) if holders else {}
         waits = {}
         for row in pending if holders else ():
             wait = {} if resumes_on_lane(row) else lane_wait(row, holders, projects)
-            if wait and (wait["lane"] == "project" or _folder_answers(row)):
+            if wait and (wait["lane"] == "project" or _folder_answers(row)) and not wa._candidate_ineligible(
+                    queue, row, float("inf"), started, holders={}, leased=frozenset(), stat=False):
                 waits[_tid(row)] = wait
         return waits
     except Exception as error:

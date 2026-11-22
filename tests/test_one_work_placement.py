@@ -512,8 +512,9 @@ def test_a_queued_roots_lane_wait_is_what_holds_its_lane_now_whatever_the_choose
     assert waits([other], [root("q", **folder)]) == {"q": {"lane": "folder", "task_id": "o", "project_id": "other",
                                                            "folder": shared}}
     assert waits([other, {"task": root("x", **folder)}], [root("q", **folder)]) == {"q": behind_x}
-    # A sleeper returning to a folder it already holds waits only for those acting in it.
-    sleeper = root("s", project="s", _budget_pause={"reason": "sleep"}, **folder)
+    # A sleeper granted back to a folder it already holds waits only for those acting in it (one still parked waits
+    # for its sleep, below).
+    sleeper = root("s", project="s", _budget_pause_resume={"pause": {"reason": "sleep"}}, **folder)
     kid = {"task": root("s-kid", project="s", delegation_role="subagent", root_task_id="s")}
     assert waits([kid, other], [sleeper]) == {"s": {"lane": "folder", "task_id": "o", "project_id": "other",
                                                     "folder": shared}}
@@ -540,6 +541,22 @@ def test_a_queued_roots_lane_wait_is_what_holds_its_lane_now_whatever_the_choose
     assert waits([other], [root("q", **folder, **admitted("/elsewhere", "explicit_resource"))]) == by_folder
     assert waits([other], [root("q", **folder, **admitted("/elsewhere"))]) == {}
     assert waits([other, {"task": root("x")}], [root("q", **folder, **admitted("/elsewhere"))]) == {"q": behind_x}
+    # Only a row the chooser's own memory gates would admit waits for its lane (``_candidate_ineligible`` with no
+    # lanes and no stat reads): its pause, sleep, hold, the owner's hold, a launch claim or its root's fence first.
+    running = [{"task": root("x")}]
+    for fields in ({"_budget_pause": {"reason": "owner"}}, {"_budget_pause": {"reason": "sleep"}},
+                   {"_budget_pause_hold": {"reason": "panic_hold"}}, {"_owner_hold": {"reason": "owner"}},
+                   {"_launch_claim": {"token": "t"}}):
+        assert waits(running, [root("q", **fields)]) == {}, fields
+    queue.BUDGET_ROOT_FENCES["q"] = {"root_task_id": "q", "fence_id": "f1", "status": "paused", "cause": "owner_pause"}
+    assert waits(running, [root("q")]) == {}, "its root's spending fence, not selected against it"
+    grant = {"pause_id": "pz", "grant_id": "g1", "authority": "explicit_resume", "root_fence_id": "f1",
+             "root_grant_id": "rg", "root_resume_generation": 1}  # Opus S1: a member selected against the fence
+    assert waits(running, [root("q", _budget_pause_resume=grant)]) == {"q": behind_x}
+    assert waits(running, [root("q", _resume_selection={"fence_id": "f1"})]) == {"q": behind_x}
+    queue.BUDGET_ROOT_FENCES.clear()
+    resumed = root("q", _budget_pause_resume={"pause_id": "pz", "grant_id": "g1", "authority": "explicit_resume"})
+    assert waits(running, [resumed]) == {"q": behind_x}, "Astra B3: its Resume was granted"
 
 
 def test_a_moved_row_names_no_holder_of_the_folder_it_left_until_the_chooser_reads_its_new_one(tmp_path, monkeypatch):

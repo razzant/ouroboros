@@ -18,8 +18,8 @@ and wake sources, the owner's Pause with the author it declared, a monetary
 pause; an unrecognized reason stays ``unknown`` with that reason) -- for a root
 that waits, its ``tails`` (what of its tree still runs, typed and worded as the
 owner's card says it, ``gateway/work_status.py``) -- for a queued root another
-tree keeps out of its Project's or its folder's lane and nothing holds or pauses, that holder, the lane and
-its Project as its published queue row says (``lane_wait``, ``dispatch_choice.lane_waits``) -- and the dated authored
+tree keeps out of its Project's or its folder's lane, that holder, the lane and its Project as its
+published queue row says (``lane_wait``, ``dispatch_choice.lane_waits``) -- and the dated authored
 focus of any root that has not settled.  The task result is read per row; the
 open delegated runs are one custody read per roster.  A source a row's read could not
 open is named on that row (``unavailable``): the facts it holds are unknown at
@@ -488,10 +488,8 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str,
         waiting += _queue_hold_facts(task, stored, waiting)
     from ouroboros.work_stop import stop_presentation
     view = stop_presentation({**stored, **task}, {"owner": stored.get("owner_pause") or {}})
-    # Who keeps its lane, as the queue published it beside the row; a nearer cause comes first (a stop, a refusal, a
-    # wait of this attempt, a Project hold, its root's spending fence), so the list names what the card says.
-    if (not settled and not waiting and isinstance(queue_row.get("lane_wait"), dict)
-            and not (view["stop"] or view["refusal"] or view["waiting"] or row.get("project_admission_hold"))):
+    # Who keeps its lane, as the queue published it beside the row (the chooser's own gates decided it is the cause).
+    if not settled and isinstance(queue_row.get("lane_wait"), dict):
         row["lane_wait"] = dict(queue_row["lane_wait"])
     if view["stop"] or view["refusal"]:
         row.update(stop=view["stop"], release=view["release"], refusal=view["refusal"])
@@ -521,8 +519,6 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     trees = _live_trees(root, snapshot, gaps)
     listed: List[tuple] = []  # (task_id, task, status, queue_row), in roster order
     seen: set[str] = set()
-    fenced = {str(fence.get("root_task_id") or "") for fence in snapshot.get("budget_root_fences") or ()
-              if isinstance(fence, dict)}  # a root's spending fence holds its queued rows before any lane
     if not (snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid")):
         for status_key in ("running", "pending"):
             for row in snapshot.get(status_key) or []:
@@ -541,8 +537,7 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
                 ):
                     continue
                 seen.add(task_id)
-                listed.append((task_id, task, status_key, {**row, "lane_wait": None}
-                               if str(task.get("root_task_id") or task_id) in fenced else row))
+                listed.append((task_id, task, status_key, row))
     from ouroboros.conversation_lease import resolved_presence_turns
 
     # Live Presence authors moved to a Project join the ONE read of every listed root's result (B10 L3).

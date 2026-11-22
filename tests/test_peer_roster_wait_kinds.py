@@ -251,48 +251,35 @@ def test_a_queued_root_names_the_work_that_keeps_its_projects_or_its_folders_lan
 @pytest.mark.parametrize("wait", [{"lane": "folder", "task_id": "holder", "project_id": "room-a",
                                    "folder": "/work/shared"},
                                   {"lane": "project", "task_id": "holder-b", "project_id": "room-b"}])
-def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_lane(tmp_path, wait):
-    """Opus 15.11.2026 and review round 2 (Astra B4): a row's own pause, sleep, hold, saved question or its root's
-    spending fence comes first: a row the queue publishes a ``lane_wait`` beside waits for that, so the roster names
-    that and no lane, as its card does. The same row, eligible again, names its lane wait as the queue publishes it."""
+def test_the_list_says_the_lane_wait_the_queue_published_and_a_settled_row_none(tmp_path, wait):
+    """Review round 3 (Opus S1, Astra B3) and round 4: whether the lane is what keeps a row queued is decided once,
+    where the wait is defined (``dispatch_choice.lane_waits`` publishes it only for a row the chooser's own memory
+    gates would admit), so the list shows the published wait beside the row's other facts, as its card does, and
+    adds no rule of its own; a row whose result has settled waits on nothing."""
     from ouroboros.peer_roster import independent_roots
 
-    write_task_result(tmp_path, "paused", "scheduled", reason_code="budget_paused", budget_pause={
-        "pause_id": "p-paused", "state": "paused", "task_attempt": 1, "paused_at": _PAUSED_AT,
-        "reason": "owner", "rail": "owner_pause"}, owner_pause={
-        "state": "paused", "fence_id": "f-paused", "requested_by": "owner", "requested_at": _PAUSED_ISO})
-    write_task_result(tmp_path, "asleep", "scheduled", reason_code="budget_paused", budget_pause={
-        "pause_id": "p-asleep", "state": "paused", "task_attempt": 1, "paused_at": _PAUSED_AT,
-        "reason": "sleep", "rail": "model_sleep", "sleep": _sleep("cold")})
     _park(tmp_path, "asker", quiz="q7")
-    held = {"reason": "project_routing_fence_lookup_failed", "detail": "The task result is unreadable."}
-    markers = {"eligible": {}, "asker": {}, "fenced": {}, "paused": {"_budget_pause": {"exact_continuation": True}},
-               "asleep": {"_budget_pause": {"exact_continuation": True}},
-               "held": {"_project_admission_restore_hold": held}, "owner-held": {"_owner_hold": {"reason": "owner"}}}
+    write_task_result(tmp_path, "done", "completed")
 
-    def publish(marked):
+    def publish(*task_ids):
         write_queue_document(tmp_path / "state" / "queue_snapshot.json", {
             "ts": utc_now_iso(),
             "running": [{"id": "holder", "attempt": 1, "task": {"id": "holder", "title": "Weekly review", "_attempt": 1,
                                                                 "project_id": "room-a"}}],
             "budget_root_fences": [{"root_task_id": "fenced", "fence_id": "f-root", "status": "active"}],
             "pending": [{"id": task_id, "attempt": 1, "task": {"id": task_id, "title": task_id, "_attempt": 1,
-                                                               "project_id": "room-b", **extra}, "lane_wait": wait}
-                        for task_id, extra in marked.items()],
+                                                               "project_id": "room-b"}, "lane_wait": wait}
+                        for task_id in task_ids] + [{"id": "free", "attempt": 1, "task": {
+                            "id": "free", "title": "free", "_attempt": 1, "project_id": "room-b"}}],
         })
         return {row["task_id"]: row for row in independent_roots(tmp_path)["roots"]}
 
-    rows = publish(markers)
-    assert rows["eligible"]["lane_wait"] == wait
-    for task_id in ("paused", "asleep", "held", "owner-held", "asker", "fenced"):
-        assert "lane_wait" not in rows[task_id], task_id
-    assert rows["asker"]["waiting"][0]["kind"] == "owner"
-    assert rows["paused"]["waiting"][0]["kind"] == "owner_pause" and rows["asleep"]["waiting"][0]["kind"] == "sleep"
-    assert rows["held"]["project_admission_hold"]["reason"] == held["reason"]
-    assert rows["owner-held"]["refusal"] == {"reason": "_owner_hold"}
-    assert _note(tmp_path).count("lane_wait=") == 1
-    # The hold lifted, the same row is eligible again: its noted lane wait is said once more.
-    assert publish({"eligible": {}, "held": {}})["held"]["lane_wait"] == wait
+    rows = publish("eligible", "asker", "fenced", "done")
+    for task_id in ("eligible", "asker", "fenced"):
+        assert rows[task_id]["lane_wait"] == wait, task_id
+    assert rows["asker"]["waiting"][0]["kind"] == "owner", "its other facts stay beside it"
+    assert "lane_wait" not in rows.get("done", {}) and "lane_wait" not in rows["free"]
+    assert _note(tmp_path).count("lane_wait=") == 3
 
 
 @pytest.mark.parametrize("legacy", [False, True])
