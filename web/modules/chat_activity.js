@@ -6,7 +6,7 @@ import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
 import { modelHandoverFact } from './model_handover.js';
 import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
-import { childLineCause, compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
+import { childLineCause, compactModel, formatLogDuration, modelExecutionView, serviceOutputLinksHtml } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
@@ -126,8 +126,8 @@ export function buildTimelineItemHtml(item, record) {
     const displayBody = expanded ? (item.fullReadError || fetched || item.fullBody || item.body) : item.body;
     const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
-    const evidenceHtml = evidenceLinkHtml(item.evidenceRef);
-    const plainBody = item.bodyFormat === 'text' || item.cardReview?.kind === 'merge_review';
+    const evidenceHtml = item.serviceStop ? serviceOutputLinksHtml(item.serviceStop.links) : evidenceLinkHtml(item.evidenceRef);
+    const plainBody = item.bodyFormat === 'text' || item.cardReview?.kind === 'merge_review' || Boolean(item.serviceStop);
     const bodyHtml = !displayBody ? '' : plainBody
         ? escapeHtml(displayBody) : renderMarkdown(displayBody, { inlineHeadingBreaks: true });
     const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
@@ -153,7 +153,7 @@ export function buildTimelineItemHtml(item, record) {
         : `<div class="chat-live-line-head">${headContent}</div>`;
     return `
         <div
-            class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
+            class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}${item.serviceStop ? ' service-stop-result' : ''}"
             data-live-line-key="${escapeHtmlAttr(item.lineKey || '')}"
             ${item.historyId ? `data-history-id="${escapeHtmlAttr(item.historyId)}"`
         : item.sourceHistoryId ? `data-source-history-id="${escapeHtmlAttr(item.sourceHistoryId)}"` : ''}

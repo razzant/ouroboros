@@ -5,8 +5,8 @@ import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
     handledRefusalHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase, configuredActorCauseKey, firstAttemptClauseKey } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
-import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
-export { taskCheckpointLabel } from './task_checkpoints.js';
+import { checkpointHasProgressRow, serviceCheckpointFacts, serviceStopCardRow, taskCheckpointIdentity, taskCheckpointLabel, waitEpisode } from './task_checkpoints.js';
+export { taskCheckpointLabel, serviceOutputLinksHtml } from './task_checkpoints.js';
 import { coordinatorRouteClause, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
@@ -1068,6 +1068,8 @@ function summarizeHostLogEvent(evt, t, view, about, tool) {
     }
 
     if (t === 'task_checkpoint' || t === 'context_reclaim') {
+        const stop = serviceCheckpointFacts(evt);  // a service stop's Logs row is its launch's typed receipt, links and all
+        if (stop) return { ...view('info', stop.headline, stop), serviceStop: stop };
         return view(['context_fit_low_retry', 'service_finalization_error'].includes(evt.checkpoint_kind) ? 'warn' : 'thinking', taskCheckpointLabel(evt), {
             meta: [evt.model ? compactModel(evt.model) : '', evt.round ? `r${evt.round}` : '',
                 evt.context_tokens ? `~${evt.context_tokens} tok` : '',
@@ -1452,7 +1454,8 @@ function summarizeChatLiveEventView(evt) {
         // episodes fold into one receipt row per kind (task_checkpoints.foldWaitRow).
         const lowRetry = evt.checkpoint_kind === 'context_fit_low_retry';
         const wait = waitEpisode(evt);
-        return chatView({
+        const stopRow = serviceStopCardRow(evt);  // the checkpoint family's own card-row projection
+        return stopRow || chatView({
             phase: lowRetry || evt.checkpoint_kind === 'service_finalization_error' ? 'warn' : 'thinking',
             headline: taskCheckpointLabel(evt),
             visible: !checkpointHasProgressRow(evt) && !(evt.checkpoint_kind === 'prompt_prefix_break' && evt.reasoning_retired),

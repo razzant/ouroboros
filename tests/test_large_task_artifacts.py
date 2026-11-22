@@ -640,7 +640,7 @@ def test_immutable_copy_name_keeps_every_ordinary_carrier_and_spells_a_raw_name_
     digest = sha256(b"bytes").hexdigest()
 
     def carrier(name):
-        return artifacts._immutable_artifact_name(PurePosixPath(name), digest)
+        return artifacts.immutable_artifact_name(PurePosixPath(name), digest)
 
     def raw(data):  # what POSIX os.fsdecode reads back
         return data.decode("utf-8", "surrogateescape")

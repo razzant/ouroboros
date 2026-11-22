@@ -122,7 +122,7 @@ _PROGRESS_META_FIELDS = (
     # stay what it was, or a reload would hand the card title back to a line live refused it.
     "narration", "reasoning", "spoken",
     "card_row", "card_row_id", "card_row_revision",
-    "checkpoint_kind", "episode_id", "phase", "elapsed_sec",
+    "checkpoint_kind", "episode_id", "phase", "elapsed_sec", "service_stop",
 )
 
 _SKILL_REVIEW_STRING_FIELDS = (

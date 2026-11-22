@@ -20,7 +20,11 @@ from ouroboros.loop_transport import TransportWaitEpisode, end_episode_budget as
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context_fit import messages_carry_native_images
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable
-from ouroboros.utils import truncate_within_limit
+from ouroboros.tools.service_stop import (
+    finalization_evidence,
+    service_identity_projection as _service_identity_projection,
+)
+from ouroboros.utils import json_dumps_utf8
 
 
 from typing import TYPE_CHECKING
@@ -438,24 +442,11 @@ def _soft_land_exhausted_ceiling(
 
 
 def _service_finalization_evidence(llm_trace: Dict[str, Any]) -> list[Dict[str, Any]]:
-    """Return the stable, answer-relevant part of service finalization events."""
+    """Facade for the loop's ``_loop()`` handle: the stop-evidence reader in
+    ``tools/service_stop.py`` owns the mapping from verification events to the
+    answer's service rows (one current outcome per launch)."""
 
-    rows: list[Dict[str, Any]] = []
-    for event in llm_trace.get("verification_events") or []:
-        if not isinstance(event, dict) or str(event.get("kind") or "") not in {
-            "services_stopped",
-            "services_kept",
-            "service_finalization_error",
-        }:
-            continue
-        services = [_service_identity_projection(service)
-                    for service in event.get("services") or [] if isinstance(service, dict)]
-        rows.append({
-            "kind": str(event.get("kind") or ""),
-            "services": services,
-            "error": truncate_within_limit(str(event.get("error") or ""), 2000),
-        })
-    return rows
+    return finalization_evidence(llm_trace)
 
 
 @dataclass
@@ -759,40 +750,6 @@ def _cleanup_loop_resources(
         log.debug("Failed to release delegated runs for task %s", ctx.task_id, exc_info=True)
 
 
-def _service_identity_projection(service: Dict[str, Any]) -> Dict[str, Any]:
-    """Bounded identity used to deduplicate idempotent teardown observations."""
-
-    fields = (
-        "service_id",
-        "name",
-        "task_id",
-        "lifecycle",
-        "backend",
-        "pid",
-        "port",
-        "artifact_outputs",
-        "artifact_output_failed",
-        "artifact_audit_gap",
-        "log_finalization",
-        "state",
-        "stop_failed",
-        "cleanup_dispatched",
-        "stop_error",
-    )
-    projected = {}
-    for key in fields:
-        value = service.get(key)
-        if key == "stop_error" and value not in (None, ""):
-            value = truncate_within_limit(str(value), 2000)
-        if value not in (None, "", [], {}):
-            projected[key] = value
-    cleanup = service.get("process_cleanup")
-    if isinstance(cleanup, dict):  # what stayed unconfirmed (pid, birth, reason) and why a rest is unknown, whole
-        projected["process_cleanup"] = {key: cleanup[key] for key in (
-            "exit_confirmed", "census_failed", "residual", "survivors", "unverified", "custody") if key in cleanup}
-    return projected
-
-
 def _finalize_task_services(ctx: _LoopExitContext) -> bool:
     """Finalize newly observed task services and record answer-bound evidence.
 
@@ -814,7 +771,7 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
         for service in finalized:
             if not isinstance(service, dict):
                 continue
-            signature = hashlib.sha256(json.dumps(
+            signature = hashlib.sha256(json_dumps_utf8(
                 _service_identity_projection(service),
                 ensure_ascii=False,
                 sort_keys=True,
@@ -825,13 +782,16 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
                 continue
             seen.add(signature)
             fresh.append(service)
+        # The producer tags every payload with its ``lifecycle`` (and corrects legacy
+        # labels itself, ``services.stop_task_services``): teardown classifies by that
+        # tag, not by the service payload's internal stop fields.
         stopped, kept, pending = [], [], []
         for service in fresh:
-            if (service.get("lifecycle") == "cleanup_pending" or service.get("stop_failed")
-                    or service.get("cleanup_dispatched") is False or service.get("state") == "cleanup_pending"):
-                pending.append(_service_identity_projection(service))
-            elif service.get("lifecycle") == "kept":
+            lifecycle = str(service.get("lifecycle") or "")
+            if lifecycle == "kept":
                 kept.append(service)
+            elif lifecycle == "cleanup_pending":
+                pending.append(_service_identity_projection(service))
             else:
                 stopped.append(service)
         for kind, services in (("services_stopped", stopped),
@@ -841,9 +801,11 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
             details = {"services": services}
             if kind == "service_finalization_error":
                 details["error"] = "service cleanup was not confirmed"
-            _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-                "checkpoint_kind": kind, **details,
-            })
+            # Real launch receipts already reached the two checkpoints readers at the producer.
+            if legacy := [service for service in services if not service.get("launch_id") or kind == "services_kept"]:
+                _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
+                    "checkpoint_kind": kind, "services": legacy,
+                })
             ctx.llm_trace.setdefault("verification_events", []).append({"kind": kind, **details})
         return bool(fresh)
     except Exception as exc:
