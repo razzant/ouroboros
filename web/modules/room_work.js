@@ -104,6 +104,44 @@ export function hangUnderCapsules(bar, anchor) {
     anchor.style.setProperty('--rw-top', px(capsule.bottom - edge.top));
 }
 
+// What a press on an unloaded row found out about where its message is (DESIGN "Room work status").
+function whereText(row) {
+    const ended = row.settled || Boolean(row.view.outcome);
+    return { loading: tr('room_work.lookup.loading', 'Loading its message…'),
+        absent: ended ? tr('room_work.lookup.absent_ended', 'No message saved in this chat.') : tr('room_work.lookup.absent', 'No message yet.'),
+        moved: tr('room_work.lookup.moved', 'This work is in another room.'),
+        unknown: tr('room_work.lookup.unknown', 'Its message could not be checked.') }[row.lookup] || '';
+}
+
+/** A row's details, label and words per line (DESIGN "Room work status"). */
+export function rowDetailLines(row) {
+    const lines = [];
+    if (row.settled && !row.latest) lines.push(row.outcomeKnown
+        ? [tr('room_work.detail.finished', 'Finished'),
+            tr('room_work.detail.finished_text', 'Its recorded outcome is shown above. This row stays until the list closes.')]
+        : [tr('room_work.detail.activity', 'Activity'),
+            tr('room_work.detail.ended_text', 'No longer listed as active; its outcome is not known here. This row stays until the list closes.')]);
+    const where = whereText(row);
+    if (where) lines.push([tr('room_work.detail.where', 'Where'), where]);
+    const uncontrolled = !row.confirmed && !row.canMenu && !row.resume && !row.settled && !row.latest;
+    if (uncontrolled) lines.push([tr('room_work.detail.why', 'Why no controls'),
+        tr('room_work.detail.why_text', 'The latest update did not confirm this work, so nothing here can be paused or stopped.')]);
+    // The work's latest refused Resume, or its own refused start, in the door's words (its line keeps the date).
+    const attempt = row.confirmed ? resumeAttemptWords(row.work?.last_resume) : '';
+    if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
+        : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
+    // The work a queued one stands behind now: its id and the lane (its line names it); never on an ended row.
+    const behind = row.confirmed && !row.settled ? behindWords(row.work) : '';
+    if (behind) lines.push([tr('room_work.detail.behind', 'Behind'), behind]);
+    const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
+        : row.kind === 'question' ? tr('room_work.what.question', 'A question that waits for you')
+        : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')
+            : tr('room_work.what.turn', 'A turn in this chat'))
+            : tr('room_work.what.task', 'A task');
+    lines.push([tr('room_work.detail.what', 'What'), what]);
+    return lines;
+}
+
 export function createRoomWork({
     page, asPanel = false, ws = null, statusBadge, messagesDiv, reading, stateSnapshots = null, revealQuestion = null,
     works = () => null, liveCardRecords: records = new Map(),
@@ -431,43 +469,6 @@ export function createRoomWork({
         return out;
     }
 
-    // What a press on an unloaded row found out about where its message is (DESIGN "Room work status").
-    function whereText(row) {
-        const ended = row.settled || Boolean(row.view.outcome);
-        return { loading: tr('room_work.lookup.loading', 'Loading its message…'),
-            absent: ended ? tr('room_work.lookup.absent_ended', 'No message saved in this chat.') : tr('room_work.lookup.absent', 'No message yet.'),
-            moved: tr('room_work.lookup.moved', 'This work is in another room.'),
-            unknown: tr('room_work.lookup.unknown', 'Its message could not be checked.') }[row.lookup] || '';
-    }
-
-    function describe(row) {
-        const lines = [];
-        if (row.settled && !row.latest) lines.push(row.outcomeKnown
-            ? [tr('room_work.detail.finished', 'Finished'),
-                tr('room_work.detail.finished_text', 'Its recorded outcome is shown above. This row stays until the list closes.')]
-            : [tr('room_work.detail.activity', 'Activity'),
-                tr('room_work.detail.ended_text', 'No longer listed as active; its outcome is not known here. This row stays until the list closes.')]);
-        const where = whereText(row);
-        if (where) lines.push([tr('room_work.detail.where', 'Where'), where]);
-        const uncontrolled = !row.confirmed && !row.canMenu && !row.resume && !row.settled && !row.latest;
-        if (uncontrolled) lines.push([tr('room_work.detail.why', 'Why no controls'),
-            tr('room_work.detail.why_text', 'The latest update did not confirm this work, so nothing here can be paused or stopped.')]);
-        // The work's latest refused Resume, or its own refused start, in the door's words (its line keeps the date).
-        const attempt = row.confirmed ? resumeAttemptWords(row.work?.last_resume) : '';
-        if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
-            : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
-        // The work a queued one stands behind, as the scheduler recorded it: its id and the lane (its line names it).
-        const behind = row.confirmed ? behindWords(row.work) : '';
-        if (behind) lines.push([tr('room_work.detail.behind', 'Behind'), behind]);
-        const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
-            : row.kind === 'question' ? tr('room_work.what.question', 'A question that waits for you')
-            : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')
-                : tr('room_work.what.turn', 'A turn in this chat'))
-                : tr('room_work.what.task', 'A task');
-        lines.push([tr('room_work.detail.what', 'What'), what]);
-        return lines;
-    }
-
     // ---- rows
     function viewFor(row) {
         let view = views.get(row.key);
@@ -591,7 +592,7 @@ export function createRoomWork({
         view.where.hidden = !detailable;
         view.detail.hidden = !isOpen;
         if (isOpen) {
-            const lines = describe(row);
+            const lines = rowDetailLines(row);
             const key = lines.map((line) => line.join('\u0000')).join('\u0001');
             if (view.detailKey !== key) {
                 view.detailKey = key;

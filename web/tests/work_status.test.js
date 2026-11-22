@@ -477,6 +477,13 @@ test('a queued work says the work it stands behind by its name; its details give
     }
     assert.equal(behindWords(project), 'qh keeps its Project');
     assert.equal(behindWords(folder), 'qh keeps the folder /work/shared');
+    // A retried holder and one whose queue row named nothing are named as their work reads in the list.
+    assert.equal(workRowView(work('queued_behind_retry', 1)).secondary, 'behind “Add Ollama support”');
+    assert.equal(workRowView(work('queued_behind_derived_name', 1)).secondary, 'behind “Add Ollama support”');
+    // The message card's chip says the same line; its details give the id and the lane (no new control or style).
+    assert.deepEqual([cardWorkView(project)?.secondary, cardWorkView(project)?.note],
+        ['behind “Add Ollama support”', 'qh keeps its Project']);
+    assert.equal(cardWorkView(work('queued_behind_unlisted'))?.note, undefined, 'no holder, no details line');
     // A holder the census does not list, an older payload, a non-queued work: no claim, no details line.
     const unlisted = work('queued_behind_unlisted');
     assert.deepEqual([workRowView(unlisted).secondary, behindWords(unlisted)], ['', '']);

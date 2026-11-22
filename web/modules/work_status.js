@@ -445,8 +445,8 @@ function projectedCardView(work, member) {
     const classes = list(work.turn).length ? 'warn' : finalizing ? 'working finalizing'
         : running && waiting ? 'working waiting' : work.activity;
     // The latest refused Resume in the door's own words explains the word in the card's details (its line keeps the
-    // dated clause alone).
-    const note = resumeAttemptWords(work.last_resume);
+    // dated clause alone); a queued work's details give the id and lane of the work it stands behind.
+    const note = resumeAttemptWords(work.last_resume) || behindWords(work);
     return {
         phase: running ? 'working' : work.activity, text: word, secondary: line, classes,
         tone: waiting ? 'neutral' : 'live', waiting, ...(finalizing ? { finalizing } : {}),
