@@ -24,7 +24,7 @@ from ouroboros.call_peers import CallPeerError, get_hub
 from ouroboros.contracts.realtime import RealtimeSetupError
 from ouroboros.gateway.call_contracts import HostCallOpenRequest
 from ouroboros.gateway.call_ws import read_call_body, refusal, serve_peer
-from ouroboros.gateway.host_service import HostServiceAuthError, _authenticated, _bounded_host_read
+from ouroboros.gateway.host_service import HostServiceAuthError, PermissionWaiting, _authenticated, _bounded_host_read
 from ouroboros.gateway.schema import validate_ingress
 
 log = logging.getLogger(__name__)
@@ -87,6 +87,8 @@ async def api_host_call_open(request: Request) -> JSONResponse:
         if not call_id:
             try:
                 await _bounded_host_read(ctx, lambda: ctx.require_permission(skill, token_payload, "presence"))
+            except PermissionWaiting as exc:
+                return refusal("presence_waiting", 403, str(exc))
             except HostServiceAuthError:
                 return refusal("presence_forbidden", 403,
                                "Opening a Presence call needs this skill's presence grant as well as call_peer.")
@@ -115,6 +117,8 @@ async def api_host_call_open(request: Request) -> JSONResponse:
         hub.grant_peer(skill, _token_digest(raw_token), mic=payload.get("mic", True),
                        speaker=payload.get("speaker", False), video=payload.get("video", False))
         return JSONResponse({"call_id": call_id, "peer_path": f"/call/{call_id}/peer"})
+    except PermissionWaiting as exc:  # the edited client waits for its check; say so (an invalid token stays plain)
+        return refusal("call_peer_waiting", 403, str(exc))
     except HostServiceAuthError:
         return refusal("call_peer_forbidden", 403)
     except CallPeerError as exc:
@@ -139,6 +143,9 @@ async def ws_host_call(websocket: WebSocket) -> None:
         grant = hub.peer_grant(skill, _token_digest(raw_token))
         if hub.spec.opened_by == cp.OPENED_BY_SKILL:
             await _bounded_host_read(ctx, lambda: _place(ctx, skill, hub.spec.presence_binding_id))
+    except PermissionWaiting:  # the close reason is short; the HTTP door carries the words
+        await websocket.close(code=1008, reason="call_peer_waiting")
+        return
     except (HostServiceAuthError, CallPeerError, ValueError, KeyError):
         await websocket.close(code=1008, reason="call_peer_forbidden")
         return
