@@ -177,3 +177,14 @@ test('a settled detail naming only saved work still gets its Files row', () => {
     assert.equal(syncResultFilesItem(record, { status: 'failed', artifacts: [] }), true, 'gone from the detail: gone');
     assert.deepEqual(record.items, []);
 });
+
+test('a file the owner released in Storage offers no download, at the root or in a folder', () => {
+    const released = { at: '2024-02-03T12:00:00Z', operation: 'op1', loss: 'no rerun', status_before: 'ready', bytes_now: 'deleting' };
+    const view = projectResultArtifacts(TASK, [
+        { kind: 'task_artifact', name: 'snapshot.sqlite', size: 70000, status: 'ready', errors: [], released },
+        { kind: 'task_artifact', name: 'db.sqlite', relpath: 'runs/r1/db.sqlite', size: 9000, measured: false, released },
+        { kind: 'task_artifact', name: 'REPORT.md', relpath: 'runs/r1/REPORT.md', size: 900, measured: false },
+    ]);
+    assert.deepEqual(view.files, [{ name: 'snapshot.sqlite', bytes: 70000, note: 'released', url: '' }]);
+    assert.equal(view.folders[0].unavailableCount, 1, 'the released member is not offered; the report is');
+});

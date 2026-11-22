@@ -96,6 +96,10 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
                 identity.setdefault("relpath", artifact_path.as_posix())
             if "name" not in identity:
                 identity["name"] = Path(raw_path).name
+        if "status" in identity and isinstance(item.get("released"), dict):
+            from ouroboros.payload_release_state import hashed_status  # an owner's Storage release keeps the identity
+
+            identity["status"] = hashed_status(semantic_result, item)
         if not identity:
             continue
         encoded_identity = json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str)

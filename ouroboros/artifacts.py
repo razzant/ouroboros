@@ -764,7 +764,10 @@ def stream_actor_source(drive_root: Union[pathlib.Path, str], task_id: str, *, c
                                             source_path=None, source_stamp=())
         ref = actor_source_reference(category=category, source_id=source_id, data=b"", extension=extension,
                                      measured=measured)
-        target = task_artifact_dir_path(drive_root, task_id).joinpath(*pathlib.PurePosixPath(ref["path"]).parts)
+        from ouroboros.payload_release_state import check_source_release
+        parts = pathlib.PurePosixPath(ref["path"]).parts
+        check_source_release(drive_root, task_id, parts)
+        target = task_artifact_dir_path(drive_root, task_id).joinpath(*parts)
         try:  # write-once by digest: an intact file of these bytes IS this handle; a damaged one is repaired
             present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=measured))
         except OSError:
@@ -793,6 +796,8 @@ def store_actor_source_bytes(
 
     ref = actor_source_reference(category=category, source_id=source_id, data=data, extension=extension)
     relative = pathlib.PurePosixPath(ref["path"])
+    from ouroboros.payload_release_state import check_source_release
+    check_source_release(drive_root, task_id, relative.parts)
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
     target = artifact_dir.joinpath(*relative.parts)
     # WRITE-ONCE. The name carries the digest, so an existing file (loose or a pack member) with
@@ -838,6 +843,7 @@ def read_actor_source_bytes(
         if not target.is_relative_to(base):
             raise ValueError("actor source ref escapes its task artifact root")
     from ouroboros.evidence_packs import handle_bytes
+    from ouroboros.payload_release_state import check_source_release
     try:
         if rel.parts[:2] == ("source_handles", "context_checkpoints"):
             raw = handle_bytes(placement, task_id, rel.as_posix(), anchor=anchor)
@@ -848,10 +854,13 @@ def read_actor_source_bytes(
         else:
             raw = target.read_bytes()
     except FileNotFoundError:
+        check_source_release(placement, task_id, parts, anchor=anchor)
         if not retained:
             raise
         from ouroboros.source_retention import read_retained_task_source
-        return read_retained_task_source(placement, task_id, ref, anchor=anchor)
+        raw = read_retained_task_source(placement, task_id, ref, anchor=anchor)
+        check_source_release(placement, task_id, parts, anchor=anchor)
+        return raw  # the alternate placement verified the same ref before returning
     try:
         expected_size = int(ref["size"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -860,6 +869,7 @@ def read_actor_source_bytes(
         raise ValueError("actor source ref failed size verification")
     if sha256(raw).hexdigest() != str(ref.get("sha256") or ""):
         raise ValueError("actor source ref failed sha256 verification")
+    check_source_release(placement, task_id, parts, anchor=anchor)
     return raw
 
 
@@ -1259,6 +1269,8 @@ def store_task_artifact_bytes(
     temporary = temporary_sibling(path)
 
     def publish(_current):
+        from ouroboros.payload_release_state import require_file_available
+        require_file_available(path, anchor=drive_root)
         try:
             os.link(temporary, path)
         except OSError as exc:
@@ -1395,6 +1407,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
     """Copy a generated file, preserving an immutable rebase's original identity. A store file keeps
     its source and kind while its bytes stay unchanged; a conversion becomes its own result."""
     from ouroboros import work_domain
+    from ouroboros.payload_release_state import require_file_available
 
     if work_domain.is_work(source_path):
         return _copy_work_file_to_task_artifacts(ctx, work_domain.settle(source_path), kind=kind,
@@ -1404,6 +1417,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         return None
     task_id = task_id_for_artifacts(ctx)
     drive_root = pathlib.Path(getattr(ctx, "drive_root"))
+    require_file_available(source, anchor=drive_root, identity=expected)
     if is_verification_receipts_path(drive_root, task_id, source):
         return None
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
@@ -1436,6 +1450,8 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
     ):
         digest = sha256(str(logical or source.resolve(strict=False)).encode("utf-8", errors="replace")).hexdigest()[:8]
         dest = artifact_dir / f"{source.stem}.{digest}{source.suffix}"
+    if source != dest:
+        require_file_available(dest, anchor=drive_root, identity=source_identity)
     if reused_existing_source and dest.resolve(strict=False) != source.resolve(strict=False):  # user files and process outputs alike
         _archive_previous_artifact_version(drive_root, task_id, dest, source)
     if immutable and dest.exists() and not dest.is_symlink() and (not source.exists() or not dest.samefile(source)):

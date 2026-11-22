@@ -1459,8 +1459,8 @@
  * @property {string} reason
  * @property {string[]} retained  // material on disk now: paths, `pins:<snapshot>` for result pins, `saved_states:<folder>` while it holds a saved state, `review_thread:<id>` no recorded release let go
  * @property {string[]} retired  // gone, accepted for deletion, or managed import ID reuse released; not proof of deleted bytes
- * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them
- * @property {Object<string, string>} releases  // `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded; `managed_import:<key>` -> held | release_unconfirmed | future_reuse_released | upload_cancelled | binding_unavailable:<outcome> | release_refused:<code> (not deleted bytes)
+ * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them, including canonical_payloads
+ * @property {Object<string, string>} releases  // canonical path -> held | queued | moved (seen before accounting) | staged | deleting (awaiting removal) | deleted | missing | unknown. Only deleted reports completed deletion. `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded; `managed_import:<key>` -> held | release_unconfirmed | future_reuse_released | upload_cancelled | binding_unavailable:<outcome> | release_refused:<code> (not deleted bytes)
  */
 /**
  * @typedef {Object} LogTailResponse

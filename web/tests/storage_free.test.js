@@ -368,7 +368,7 @@ test('names from the server are escaped text; titles and accessible names are fi
 
 // Revision 4 of the backend contract (sections 2 and 3): every typed reason a page, a pool or a run's kept rows can carry.
 const CONTRACT_REASONS = ['results_pending', 'in_use', 'busy', 'unreadable_record', 'restart', 'other', 'capture_unproven', 'retained_evidence',
-    'undeclared_environment', 'owner_keep', 'changed', 'unproven_excluded_inputs', 'advanced_group'];
+    'undeclared_environment', 'owner_keep', 'changed', 'unproven_excluded_inputs', 'advanced_group', 'payload_offer'];
 
 test('every reason the server can send has its own words; none falls through to "another reason"', () => {
     for (const reason of CONTRACT_REASONS.filter((name) => name !== 'other')) {

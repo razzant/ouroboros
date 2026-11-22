@@ -1204,19 +1204,17 @@ def effective_task_result(
         merged["workspace_capture"] = publication
     try:
         from ouroboros.outcomes import artifact_bundle_from_result
+        from ouroboros.payload_release_state import overlay
         from ouroboros.task_custody import own_child_drives, store_artifact_view
 
-        # In this artifact view, canonical admission/copy-back facts authorize child store
-        # reads, never scratch existence. Keep child claims even after cancellation; the
-        # view copies, hashes and registers nothing.
+        # Canonical admission/copy-back facts authorize child store reads, never scratch existence. Keep child
+        # claims even after cancellation; the view copies, hashes and registers nothing; released files are said.
         child_rows = {}
         for drive in own_child_drives(drive_root, task_id, store_row=result):
             rows = (child_result if drive == producer_drive else (load_task_result(drive, task_id) or {})).get("artifacts")
             child_rows[drive / "task_results" / "artifacts" / task_id] = rows if isinstance(rows, list) else []
         recorded = [item for item in (merged.get("artifacts") or []) if isinstance(item, dict)]
-        listed = store_artifact_view(drive_root, task_id, recorded, child_rows)
-        if publication and not listed:
-            publication["read_error"] = "current capture has no artifact records"
+        listed = overlay(drive_root, merged, store_artifact_view(drive_root, task_id, recorded, child_rows), task_id)
         if listed:
             merged["artifacts"] = listed
             merged["artifact_bundle"] = artifact_bundle_from_result(merged)

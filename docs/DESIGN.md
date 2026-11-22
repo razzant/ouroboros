@@ -2752,19 +2752,19 @@ cards keep their edges rather than taking the shared fade.
 
 Storage leads with **Space used by Ouroboros**, its count's age and growth
 (duration and unreadable items in Details), **Refresh sizes**, the coloured bar and
-five-group legend (owner choice 2026-11-04). **Cleanup** follows: a sentence until a
-check, then **Can be removed**, never the selection; **Selected** is a separate quieter figure. One
+five-group legend. **Cleanup** starts as a sentence; after checking, **Can be removed**
+and the quieter **Selected** remain separate. One
 **Remove N selected items** waits for the whole list and sends exactly those ids;
-hidden rows keep their choice. Copies not verified saved and saved groups have
-one compact row each, deliberately opened, unchecked, with their whole-loss
-confirmation. **Kept** names concrete causes, each item accessible on request.
+hidden rows keep their choice. Copies not verified saved, saved groups and the
+mind's stored-file proposals each have one compact, deliberately opened row,
+unchecked, with loss confirmation; a proposal shows every file, its
+role and loss, and what stays. **Kept** names concrete causes, each item accessible on request.
 An unanswered Remove/Free holds its flow; a lost POST never replays. A refused
 plan offers Check again. Results put problems first and keep every item reachable.
 **Folders** lists every measured place in two columns (one on phones), each opening
 to its reason, removers and parts. Free disk space is secondary, with its own
 reading date: counted size never promises free space. An environment goes whole.
-`Folders of deleted projects` is one read-only fold under the groups (owner choices
-2026-11-01T17:46Z and 22:27Z): no key, share, headline or action. A folder lists
+`Folders of deleted projects` is one read-only fold under the groups: no key, share, headline or action. A folder lists
 under the place already holding its bytes, or as outside the total; a shared one
 is one row, a nested one part of its parent. Not counted yet, not measured yet,
 could not be read, not found and never had a folder stay five answers; a size never

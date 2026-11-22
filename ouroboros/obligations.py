@@ -168,6 +168,10 @@ def result_memberships(row: dict) -> set[str]:
         from ouroboros.owner_quiz import quiz_needs_retention
         if any(quiz_needs_retention(block) for block in quizzes.values()):
             names.add("owner_questions")
+    if row.get("payload_release"):
+        from ouroboros.payload_release_state import flagged
+        if flagged(row):  # an open owner's choice, a decided move or a held staging (Storage -> Free)
+            names.add("payload_offers")
     return names
 
 

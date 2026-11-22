@@ -1299,7 +1299,7 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
     artifact_axis = axes.get("artifacts") if isinstance(axes.get("artifacts"), dict) else {}
     axis_status = str(artifact_axis.get("status") or "").strip()
     explicit_status = bundle_status or old_status
-    if explicit_status in {
+    accepted_statuses = {
         ARTIFACT_STATUS_PENDING,
         ARTIFACT_STATUS_FINALIZING,
         ARTIFACT_STATUS_READY,
@@ -1308,21 +1308,23 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "ready_no_changes",
         "missing",
         "not_applicable",
-    }:
-        status = explicit_status
-    elif axis_status:
-        status = axis_status
-    elif artifacts:
-        status = ARTIFACT_STATUS_READY
-    else:
-        status = "not_applicable"
+    }
+    status = explicit_status if explicit_status in accepted_statuses else (
+        axis_status or (ARTIFACT_STATUS_READY if artifacts else "not_applicable")
+    )
     records: List[Dict[str, Any]] = []
     for item in artifacts:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path") or "")
         explicit_status = str(item.get("status") or "").strip()
-        if item.get("copy_status") == "failed":
+        if isinstance(item.get("released"), dict):
+            artifact_status = "released"  # the owner released it in Storage (``payload_release``): neither ready nor missing
+        elif item.get("release_pending"):
+            artifact_status = "release_pending"
+        elif item.get("release_unavailable"):
+            artifact_status = "unavailable"
+        elif item.get("copy_status") == "failed":
             artifact_status = "missing"
         elif explicit_status:
             artifact_status = explicit_status
@@ -1344,11 +1346,13 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
             "errors": (list(item.get("errors") or []) if isinstance(item.get("errors"), list) else [])
                       + ([str(item["copy_error"])] if item.get("copy_error") else []),
         }
-        records.append(record | ({"relpath": str(item["relpath"])} if item.get("relpath") else {}))
+        records.append(record | ({"relpath": str(item["relpath"])} if item.get("relpath") else {})
+                       | ({"released": item["released"]} if isinstance(item.get("released"), dict) else {}))
     current_records = [item for item in records if item["kind"] != "workspace_capture_history"]
-    if old_status == ARTIFACT_STATUS_FAILED or any(item["status"] == ARTIFACT_STATUS_FAILED for item in current_records):
+    before_release = {(item.get("released") or {}).get("status_before") or item["status"] for item in current_records}
+    if old_status == ARTIFACT_STATUS_FAILED or ARTIFACT_STATUS_FAILED in before_release:
         status = ARTIFACT_STATUS_FAILED
-    elif status != ARTIFACT_STATUS_FAILED and any(item["status"] == "missing" for item in current_records):
+    elif status != ARTIFACT_STATUS_FAILED and "missing" in before_release:
         status = "missing"
     errors = []
     if result.get("artifact_error"):

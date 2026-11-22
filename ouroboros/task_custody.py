@@ -30,7 +30,7 @@ source gone it is held only by a canonical row whose digest its canonical copy
 verifies against and no child-side claim contradicts); a canonical file is never
 replaced (a differing copy publishes beside it under a content-named collision);
 unrecorded files are carried without inventing rows. Every placement is a
-create-only link: a name that appeared after the identity check retains the pass.
+create-only link: a name that appeared after the identity check retains the pass. A pending owner release holds the drive; an exact release receipt prevents republishing those bytes under the original name or its collision alias.
 
 Ownership interlock. Preparation (verification, staging into private unserved
 staging) runs without locks and writes nothing served. The probe is re-asked
@@ -721,7 +721,7 @@ def custody_revision(row: Dict[str, Any]) -> str:
     """A digest of the fields custody publishes, so a concurrent publisher's write between
     two looks at the row is seen even under the same status and attempt."""
     fields = {key: row.get(key) for key in ("artifacts", "artifact_bundle", "child_ref_promotion", "unread_mailbox",
-                                             *_INPUT_FIELDS)}
+                                             "payload_release", *_INPUT_FIELDS)}
     return hashlib.sha256(json.dumps(fields, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
@@ -737,7 +737,6 @@ def _identity(path: pathlib.Path) -> Optional[tuple]:
 def _occupants(drive: pathlib.Path, task_id: str) -> List[str]:
     """Every task whose result, store or mailbox lives in DRIVE (a timeout retry keeps the
     original drive); a name that is not a task id retains the drive."""
-    from ouroboros.store import StoreError
     from ouroboros.task_store import task_ids
 
     ids = {task_id}
@@ -773,17 +772,6 @@ def _verified(path: pathlib.Path, expected: Optional[Dict[str, Any]]) -> Optiona
         return stream_artifact_file(path, expected=expected)
     except (OSError, ValueError):
         return None
-
-
-def _held_copy(target: pathlib.Path, canonical_rows: List[Dict[str, Any]], row: Dict[str, Any],
-               preferred: pathlib.Path) -> str:
-    """The canonical relpath already holding ROW's recorded immutable bytes (its own relpath
-    first, then any canonical row with the same identity, e.g. a collision name), verified
-    now; '' when none does."""
-    rels = [store_relpath(target, preferred)] + [store_relpath(target, item.get("path")) for item in canonical_rows
-                                                 if item.get("sha256") == row.get("sha256")
-                                                 and item.get("size") == row.get("size")]
-    return next((rel for rel in rels if rel and _verified(target.joinpath(*rel.split("/")), row)), "")
 
 
 def _collision(dest: pathlib.Path, digest: str) -> pathlib.Path:
@@ -839,41 +827,52 @@ def _listed(source: pathlib.Path) -> Dict[str, pathlib.Path]:
 
 def _child_store_plan(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, current: Dict[str, Any],
                       child: Dict[str, Any], staging: pathlib.Path) -> List[Dict[str, Any]]:
-    """Stage every obligation of TASK's store in DRIVE the canonical store does not hold yet.
-    Returns ``{rel, row?, staged?, dest_identity}`` publication items (``rel`` canonical;
-    ``row`` None for an unrecorded file, carried without a row). Missing, unreadable or
-    mismatched material raises ``_Retained``; nothing touches the served store."""
+    """Stage uncustodied obligations as ``{rel, row?, staged?, dest_identity}``; no served writes.
+    ``row`` is None for unrecorded files. Missing, unreadable or mismatched bytes retain the drive."""
     from ouroboros.artifacts import copy_artifact_file, stream_artifact_file
+    from ouroboros.payload_release_state import task_release_state
 
     source, target = drive / _ARTIFACTS_DIR / task_id, canonical / _ARTIFACTS_DIR / task_id
-    canonical_rows = [row for row in current.get("artifacts") or [] if isinstance(row, dict)]
     listed = _listed(source)
     recorded = _obligations(source, current, child)
     if target.resolve(strict=False) != target:
         raise _Retained("canonical_store_unsafe")
-    canonical_by_rel = {rel: row for row in canonical_rows if (rel := store_relpath(target, row.get("path")))}
+    releases = task_release_state(current, target)
+    released, pending = releases.released, releases.pending
     plan: List[Dict[str, Any]] = []
     for rel in sorted(set(recorded) | set(listed)):
         row = recorded.get(rel)
         dest = target.joinpath(*rel.split("/"))
         if dest.parent.resolve(strict=False) != target.joinpath(*rel.split("/")[:-1]) or dest.is_symlink():
             raise _Retained("canonical_store_unsafe")  # a linked component would redirect the write
-        if row is not None and row.get("immutable"):
+        try:
+            address = releases.address(rel)
+            if address in pending:
+                raise _Retained("payload_release_pending")
+            if row is not None and releases.collision(source / rel, dest, row):
+                continue  # the canonical row already carries this identity; preserve its accepted metadata
+        except OSError as exc:
+            raise _Retained(str(exc)) from exc
+        if address in released:
+            # Receipt-matching bytes keep the row, never republish the file; else the collision path below.
+            if (expected := releases.released_source(listed, rel, address, row, dest, plan)) is None:
+                continue
+        elif row is not None and row.get("immutable"):
             if not (isinstance(row.get("size"), int) and row.get("sha256")):
                 raise _Retained("artifact_identity_incomplete")
-            if held := _held_copy(target, canonical_rows, row, dest):
+            if held := releases.held_copy(row, dest):
                 plan.append({"rel": held, "row": row, "dest_identity": _identity(target.joinpath(*held.split("/")))})
                 continue
             if rel not in listed:
                 raise _Retained("artifact_source_missing")
-            expected: Optional[Dict[str, Any]] = row
+            expected = row
         else:
             expected = None
             if rel not in listed:
                 # A recorded mutable file whose source is gone is held only by a canonical row
                 # recording a digest its canonical copy verifies against AND that no child-side
                 # claim contradicts: anything less is convenient metadata, not preserved proof.
-                canonical_row = canonical_by_rel.get(rel)
+                canonical_row = releases.canonical_rows.get(rel)
                 if canonical_row is None or not canonical_row.get("sha256") or _verified(dest, canonical_row) is None \
                         or (row is not None and row.get("sha256") and row["sha256"] != canonical_row["sha256"]):
                     raise _Retained("artifact_source_missing")
@@ -892,15 +891,19 @@ def _child_store_plan(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
             measured = copy_artifact_file(listed[rel], staged, expected=expected)
         except OSError as exc:
             raise _Retained("artifact_source_mismatch" if expected is not None else "child_artifact_store_unreadable") from exc
-        if dest.exists() or dest.is_symlink():  # different bytes: publish beside, never replace
+        if address in released or dest.exists() or dest.is_symlink():  # released name stays absent; conflicts go beside
             beside = _collision(dest, measured["sha256"])
+            beside_rel = releases.address(store_relpath(target, beside))
+            if beside_rel in pending:
+                raise _Retained("payload_release_pending")
+            if releases.released_beside(beside_rel, measured, row, beside, staged, plan):
+                continue
             if beside.exists() or beside.is_symlink():
                 if _verified(beside, measured) is None:
                     raise _Retained("artifact_identity_conflict")
                 staged.unlink(missing_ok=True)
                 if row is not None:
-                    plan.append({"rel": store_relpath(target, beside), "row": {**row, **measured},
-                                 "dest_identity": _identity(beside)})
+                    plan.append({"rel": beside_rel, "row": {**row, **measured}, "dest_identity": _identity(beside)})
                 continue
             dest = beside
         plan.append({"rel": store_relpath(target, dest), "row": {**row, **measured} if row is not None else None,
@@ -1067,7 +1070,6 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
     """Everything outside the locks: liveness, durable settledness, copy-back, pending refs and
     private staging; nothing served is written. Raises ``_Retained``."""
     from ouroboros.owner_mailbox import settled_mailbox_cleanup_allowed
-    from ouroboros.store import StoreError
     from ouroboros.task_results import cancellation_blocks_child_result
 
     _require_not_live([task_id], live)
@@ -1474,18 +1476,15 @@ def _remove_entry(entry: pathlib.Path) -> None:
 
 def sweep_custody_leftovers(canonical_root: Any, *, min_age_sec: float = 3600.0) -> None:
     """Remove the staging a crashed settlement left behind (older than ``min_age_sec``, so a
-    running settlement keeps its own); staging is a private copy, unserved and unreferenced. A scratch
-    release's entry holds its record, the only one: the next release pass publishes it instead."""
-    import time
-
-    from ouroboros.workspace_preflight import _RELEASE_MARK
-
+    running settlement keeps its own); staging is a private copy, unserved and unreferenced. A release's
+    entry ('+' in its name: a scratch record, the only one, or files the owner released, the only originals)
+    is never swept: the next release pass publishes it (``payload_release.recover``) instead."""
     root = pathlib.Path(canonical_root) / _STAGING_DIR
     if not root.is_dir() or root.is_symlink():
         return
     for entry in root.iterdir():
         try:
-            if _RELEASE_MARK not in entry.name and time.time() - entry.lstat().st_mtime >= min_age_sec:
+            if "+" not in entry.name and time.time() - entry.lstat().st_mtime >= min_age_sec:
                 _remove_entry(entry)
         except OSError:
             continue

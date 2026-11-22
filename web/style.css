@@ -6977,6 +6977,7 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 .storage-free-group > .storage-free-paths { grid-column: 2 / -1; margin-top: var(--space-1); }
 .storage-free-paths .storage-largest-list { gap: 2px; }
 .storage-free-paths :is(.storage-largest-name.storage-free-path, .storage-largest-size) { font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-largest-item > .storage-free-why { grid-column: 1 / -1; }  /* a proposed file's role and loss, under its path */
 .storage-free-paths .storage-largest-size { color: var(--text-meta); }
 .storage-free-sub { margin: var(--space-3) 0 0; color: var(--text-primary); font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 650; }
 .storage-free-picks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-top: var(--space-2); }

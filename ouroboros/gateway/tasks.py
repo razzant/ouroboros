@@ -41,7 +41,7 @@ from ouroboros.gateway.task_hurry import api_task_hurry  # noqa: F401
 from ouroboros.gateway.task_pause import api_task_pause, owner_tree_control_routes  # noqa: F401 -- same split as hurry
 from ouroboros.gateway.task_decision import api_decision_answer  # noqa: F401
 from ouroboros.gateway.task_archive import (
-    chat_media_identity, directory_archives, plain_segments, serve_directory_archive, serve_task_file,
+    chat_media_identity, directory_archives, download_refusal, plain_segments, serve_directory_archive, serve_task_file,
     task_artifact_location, recorded_identity, serve_task_source, serve_wrap_up_document,
 )
 from ouroboros.confined_files import root_spellings
@@ -974,10 +974,15 @@ def api_task_artifact(request: Request):
         return (serve_task_file(drive_root, stores[0], media[2], name, chat_media_identity(name), task_id=task_id)
                 if media else json_error("artifact not found", 404, task_id=task_id, artifact=name))
     registered = artifact_store.registered_task_artifact(drive_root, task_id, name) if relpath in (None, name) else None
-    # A registered immutable top-level file needs one identity check, not a result projection.
+    # The immutable fast path can serve a running task. The byte reader checks its addressed
+    # release state once after the confined open, even when this registration predates a move.
     fast = bool(not source and registered and registered.get("immutable")
-                and (at := task_artifact_location(stores, registered.get("path"), spellings)) and at[2] == name)
-    result = {} if fast else (load_effective_task_result(drive_root, task_id) or {})
+                and (at := task_artifact_location(stores, registered.get("path"), spellings)) and at[2] == name
+                and pathlib.Path(str(registered.get("path"))).exists())
+    try:
+        result = {} if fast else (load_effective_task_result(drive_root, task_id) or {})
+    except (StoreError, OSError, ValueError) as exc:
+        return json_error("task record unavailable", 503, reason_code="artifact_unavailable", cause=type(exc).__name__)
     if not result and not registered:
         return json_error("task not found", 404)
     if source:
@@ -992,6 +997,8 @@ def api_task_artifact(request: Request):
         return json_error("artifact name matches several nested files; select one with ?relpath=", 409,
                           reason_code="artifact_name_ambiguous", task_id=task_id, artifact=name, relpaths=nested)
     if not matches:
+        if refusal := download_refusal(drive_root, task_id, relpath or name):
+            return refusal
         if relpath is None and any(at[2].rsplit("/", 1)[-1] != name for at, _order, _row in located):
             return json_error("artifact metadata path does not match requested name", 500)
         if (rows or registered) and not located and relpath is None:

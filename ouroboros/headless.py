@@ -864,9 +864,11 @@ def _copy_child_artifacts_to_parent(
         ArtifactIdentityError, _archive_previous_artifact_version, copy_artifact_file, stream_artifact_file,
     )
     from ouroboros.outcome_receipt_store import is_verification_receipts_path
+    from ouroboros.payload_release_state import read_release_state, released_publication_row
 
     parent_dir = task_artifacts_dir(parent_drive_root, task_id)
     parent_base = parent_dir.resolve(strict=False)
+    releases = read_release_state(parent_drive_root, task_id)
     child_base = task_artifacts_dir(child_drive, task_id, create=False).resolve(strict=False)
     rebased: List[Dict[str, Any]] = []
     for artifact in artifacts:
@@ -884,13 +886,18 @@ def _copy_child_artifacts_to_parent(
         dest = (src if src.is_relative_to(parent_base) else
                 parent_dir / (src.relative_to(child_base) if src.is_relative_to(child_base) else src.name))
         canonical_candidate = dest
-        if dest != src and expected is not None and dest.exists() and dest.resolve(strict=False) != src:
-            try:
-                stream_artifact_file(dest, expected=item)
-                src = dest  # Exact canonical bytes already survive this copy-back.
-            except OSError:
-                dest = dest.with_name(f"{src.stem}_{sha256(str(src).encode('utf-8')).hexdigest()[:8]}{src.suffix}")
         try:
+            if settled := released_publication_row(releases, src, dest, item):
+                rebased.append(settled)  # keep the canonical name/identity its accepted result already carries
+                continue
+            if dest != src and expected is not None and dest.exists() and dest.resolve(strict=False) != src:
+                try:
+                    stream_artifact_file(dest, expected=item)
+                    src = dest  # Exact canonical bytes already survive this copy-back.
+                except OSError:
+                    dest = dest.with_name(f"{src.stem}_{sha256(str(src).encode('utf-8')).hexdigest()[:8]}{src.suffix}")
+            if (final_rel := releases.address(dest.resolve(strict=False).relative_to(parent_base).as_posix())) in releases.pending or final_rel in releases.released:
+                raise OSError("payload_release_pending" if final_rel in releases.pending else "released_path_conflict")
             if expected is None and dest != src and dest.is_file() and not dest.is_symlink():
                 _archive_previous_artifact_version(pathlib.Path(parent_drive_root), task_id, dest, src)
             measured = copy_artifact_file(src, dest, expected=expected)

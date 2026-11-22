@@ -98,6 +98,9 @@ def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str,
     from ouroboros.store import is_wal_index
     from ouroboros.task_custody import _STAGING_DIR, PublicationClosed, _publish, _Retained, _verified
 
+    from ouroboros.payload_release_state import task_release_state
+    from ouroboros.task_store import read_document
+
     root, drive = Path(parent).resolve(strict=False), Path(child).resolve(strict=False)
     if root == drive:
         return 0  # one store: nothing to carry
@@ -148,7 +151,9 @@ def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str,
                         gaps.append(gap(path, exc))
         else:
             return 0  # its writer makes only directories: a file of this name is not that family
+    document = read_document(root, task_id)
     target = task_artifact_dir_path(root, task_id, create=False)
+    releases = task_release_state(document, target)
     staging = root / _STAGING_DIR / f"{task_id}-{uuid.uuid4().hex[:12]}"
     placed = 0
     try:
@@ -158,6 +163,14 @@ def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str,
             try:
                 if dest.parent.resolve(strict=False) != dest.parent or dest.is_symlink():
                     raise _Retained("canonical_store_unsafe")  # a linked component would redirect or fake it
+                address = releases.address(rel)
+                if address in releases.pending:
+                    raise _Retained("payload_release_pending")
+                if address in releases.released:
+                    observed, receipt = stream_artifact_file(path), releases.released[address]
+                    if not receipt.get("sha256") or (observed["sha256"], observed["size"]) != (receipt["sha256"], receipt.get("bytes")):
+                        gaps.append(gap(path, "released_path_conflict", **observed))
+                    continue  # same released bytes stay gone; different/unproved bytes keep their child drive
                 if dest.exists():
                     observed = stream_artifact_file(path)
                     if _verified(dest, observed) is None:
