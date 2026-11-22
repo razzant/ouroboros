@@ -384,7 +384,7 @@ def onboarding_skill_choices(body: Dict[str, Any], settings: Dict[str, Any]) -> 
     starter = body.get("starter_skills")
     if starter is not None and (not isinstance(starter, list) or not all(isinstance(i, str) for i in starter)):
         raise ValueError("starter_skills must be a list of catalog ids.")
-    cards = completion_settings(body)  # a connection card's token and code, in this same write
+    cards = completion_settings(body)  # a connection card's token, in this same write (its code goes to the skill)
     trust = body.get("skill_source_trust")
     if trust in (None, {}):
         return cards
