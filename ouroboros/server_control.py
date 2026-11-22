@@ -91,6 +91,10 @@ class PanicIngress:
     def invalidate_owner(self) -> None:
         self._owner = [False, None]
 
+    def observed_owner(self):
+        """The ``(user, chat)`` pair an external /panic is accepted from now, or None."""
+        return self._owner[1]
+
     def request(self, text: str, *, source="web", user_id=0, chat_id=0, evidence=None) -> bool:
         if self._stop is None or not str(text).strip().lower().startswith("/panic"):
             return False

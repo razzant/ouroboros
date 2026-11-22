@@ -182,8 +182,7 @@ def test_canonical_manifest_field_maps_ids_to_declared_env_keys():
             parse_skill_manifest_text(_MANIFEST.format(name="x", version="1", env="X_TOKEN", fields=fields))
 
 
-@pytest.mark.parametrize("skill,mapping", [("telegram", {"botToken": "TELEGRAM_BOT_TOKEN",
-                                                         "pairingCode": "TELEGRAM_PAIRING_CODE"}),
+@pytest.mark.parametrize("skill,mapping", [("telegram", {"botToken": "TELEGRAM_BOT_TOKEN"}),
                                            ("gemini_live", {"apiKey": "GEMINI_API_KEY"}),
                                            ("grok_realtime", {"apiKey": "XAI_API_KEY"})])
 def test_bundled_skills_declare_their_owner_entered_keys(skill, mapping):

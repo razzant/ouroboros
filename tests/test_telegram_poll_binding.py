@@ -564,31 +564,25 @@ def test_a_competing_poll_is_retried_without_a_save_or_the_restart_budget(tmp_pa
 def test_the_observer_applies_settings_to_the_mini_app_on_its_first_read_and_after_each_change(monkeypatch):
     """Refresh is asked on the first read and after each accepted change, naming the token read, retried while it
     cannot settle, confirmed from the host's memory at each read after an applied answer, never asked for an
-    unknown document, and the observer ends when the API closes. A confirmation names every settings key the
-    companion is given, as the host requires: the token read now and the pairing code read for the refresh it
-    confirms, so a newly saved pairing code (here c2) never restarts the Mini App, while a new token still does."""
+    unknown document, and the observer ends when the API closes."""
     plugin, _api, _notifier = _load()
     token_mod = sys.modules[plugin.__package__ + ".lib.telegram_token"]
-    code = "TELEGRAM_PAIRING_CODE"
-    replies = iter([{"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a", code: "c1"}, "missing": []},
-                    {"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a", code: "c2"}, "missing": []},
+    replies = iter([{"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a"}, "missing": []},
+                    {"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a"}, "missing": []},
                     {"status": "unknown", "values": {}, "missing": []},
                     {"status": "ok", "values": {}, "missing": ["TELEGRAM_BOT_TOKEN"]},
                     {"status": "ok", "values": {}, "missing": ["TELEGRAM_BOT_TOKEN"]},
                     {"status": "access_closed", "values": {}, "missing": []}])
     outcomes = iter(["unchanged", "unchanged", "stop_unconfirmed", "restarted"])
-    asked, read = [], []
+    asked = []
 
     class Api:
         logs = []
 
         def get_settings_state(self, keys):
-            read.append(list(keys))
             return next(replies)
 
         def refresh_companion_process(self, name, expected=None, only_if_differs=False):
-            # The host refuses a confirmation that does not name every env_from_settings key (PluginAPI 2.4).
-            assert not only_if_differs or set(expected) == {"TELEGRAM_BOT_TOKEN", code}
             asked.append((name, expected, only_if_differs))
             return next(outcomes)
 
@@ -600,13 +594,10 @@ def test_the_observer_applies_settings_to_the_mini_app_on_its_first_read_and_aft
     woken = []  # the typing cue's wake: told of each accepted change, never of an unchanged or unknown read
     asyncio.run(token_mod.make_token_observer(api, "miniapp_gateway",
                                               lambda: woken.append(token_mod.binding_for(api).snapshot()))())
-    assert woken == [("1:a", 1), ("", 2)]  # a new pairing code is no token change
-    assert read and all(keys == ["TELEGRAM_BOT_TOKEN", code] for keys in read)
-    # First read; its confirmation at the next read (the code the refresh read, not the newer c2); the change; its
-    # retry. Unknown asks nothing.
-    assert asked == [("miniapp_gateway", expected, confirm) for expected, confirm in (
-        ({"TELEGRAM_BOT_TOKEN": "1:a"}, False), ({"TELEGRAM_BOT_TOKEN": "1:a", code: "c1"}, True),
-        ({"TELEGRAM_BOT_TOKEN": ""}, False), ({"TELEGRAM_BOT_TOKEN": ""}, False))]
+    assert woken == [("1:a", 1), ("", 2)]
+    # First read; its confirmation at the next read; the change; its retry. Unknown asks nothing.
+    assert asked == [("miniapp_gateway", {"TELEGRAM_BOT_TOKEN": token}, confirm)
+                     for token, confirm in (("1:a", False), ("1:a", True), ("", False), ("", False))]
     assert token_mod.binding_for(api).state == "closed" and token_mod.binding_for(api).snapshot() == ("", 3)  # closing advanced it
 
 

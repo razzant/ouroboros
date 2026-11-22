@@ -537,14 +537,23 @@ def test_a_writer_racing_an_owner_reset_never_resurrects_the_old_identity(root):
 
 def test_owner_bindings_have_only_known_empty_slot_writers():
     """The proof a backup's SET binding relies on (``_backup_unconfirmed``): every
-    production write of an owner binding key sits behind a known-empty-slot check."""
+    production write of an owner binding key sits behind a known-empty-slot check:
+    the core's first-slash binders (server.py) and a transport's registered owner
+    (``gateway/host_owner.py``), each inside ``if control_value(live, <slot>) == (True, None)``."""
     import ast
 
     keys = {"owner_id", "owner_chat_id", "owner_external_id", "owner_external_chat_id"}
     repo = pathlib.Path(__file__).resolve().parents[1]
-    writers = []
+    writers, unguarded = [], []
     for path in [repo / "server.py", *repo.joinpath("ouroboros").rglob("*.py"), *repo.joinpath("supervisor").rglob("*.py")]:
         tree = parse(path.read_text(encoding="utf-8"))
+        guarded = set()  # nodes under an `if control_value(live, "<owner slot>") == (True, None)` (possibly `and`-ed)
+        for node in ast.walk(tree):
+            tests = (node.test.values if isinstance(node.test, ast.BoolOp) and isinstance(node.test.op, ast.And)
+                     else [node.test]) if isinstance(node, ast.If) else []
+            if any(ast.unparse(test) in {f"control_value(live, '{slot}') == (True, None)"
+                                         for slot in ("owner_id", "owner_external_id")} for test in tests):
+                guarded.update(id(inner) for statement in node.body for inner in ast.walk(statement))
         for node in ast.walk(tree):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
                 node, ast.AugAssign) else []
@@ -552,6 +561,8 @@ def test_owner_bindings_have_only_known_empty_slot_writers():
                 if (isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
                         and target.slice.value in keys):
                     writers.append((path.name, target.slice.value))
+                    if id(node) not in guarded:
+                        unguarded.append((path.name, node.lineno))
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr in {"update", "pop"} and any(
                         (isinstance(arg, ast.Constant) and arg.value in keys) for arg in node.args)
@@ -559,10 +570,14 @@ def test_owner_bindings_have_only_known_empty_slot_writers():
                     and isinstance(node.func, ast.Attribute) and node.func.attr == "update"):
                 writers.append((path.name, "update/pop"))
     assert sorted(writers) == sorted([("server.py", "owner_id"), ("server.py", "owner_chat_id"),
-                                      ("server.py", "owner_external_id"), ("server.py", "owner_external_chat_id")])
+                                      ("server.py", "owner_external_id"), ("server.py", "owner_external_chat_id"),
+                                      ("host_owner.py", "owner_external_id"), ("host_owner.py", "owner_external_chat_id")])
+    assert unguarded == []
     source = (repo / "server.py").read_text(encoding="utf-8")
     assert source.count('control_value(live, "owner_id") == (True, None)') == 1
     assert source.count('control_value(live, "owner_external_id") == (True, None)') == 1
+    registered = (repo / "ouroboros" / "gateway" / "host_owner.py").read_text(encoding="utf-8")
+    assert registered.count('control_value(live, "owner_external_id") == (True, None)') == 1
 
 
 def test_an_initialization_write_failure_is_typed_never_fatal(root, monkeypatch):

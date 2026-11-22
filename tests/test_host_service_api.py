@@ -1023,19 +1023,42 @@ def test_owner_external_binds_only_an_empty_slot_and_the_emergency_door_observes
     for bad in ({"user_id": 0, "chat_id": 23}, {"user_id": 17, "chat_id": -5}, {"user_id": "17", "chat_id": 23},
                 {"user_id": True, "chat_id": 23}, [17, 23]):
         assert client.post("/owner/external", headers={"X-Skill-Token": "token"}, json=bad).status_code == 400
-    assert _external(owner_state) == (None, None) and bridge.panic._owner[1] is None
+    assert _external(owner_state) == (None, None) and bridge.panic.observed_owner() is None
 
     answer = client.post("/owner/external", headers={"X-Skill-Token": "token"}, json=owner)
     assert answer.status_code == 200 and answer.json() == {"ok": True, "owner": "bound"}
-    assert _external(owner_state) == (17, 23) and bridge.panic._owner[1] == (17, 23)
+    assert _external(owner_state) == (17, 23) and bridge.panic.observed_owner() == (17, 23)
     accepted = client.post("/chat/inject", headers={"X-Skill-Token": "token"}, json={"text": "/panic", **owner})
     assert accepted.status_code == 202 and bridge.stopped.wait(3)
 
     again = client.post("/owner/external", headers={"X-Skill-Token": "token"}, json=owner)
     other = client.post("/owner/external", headers={"X-Skill-Token": "token"}, json={"user_id": 99, "chat_id": 99})
     assert again.json()["owner"] == "same" and other.json()["owner"] == "other"
-    assert _external(owner_state) == (17, 23) and bridge.panic._owner[1] == (17, 23)
+    assert _external(owner_state) == (17, 23) and bridge.panic.observed_owner() == (17, 23)
     assert bridge.messages == []  # registering an owner writes no chat message
+
+
+def test_owner_external_answers_bound_only_once_the_live_door_accepts_the_pair(tmp_path, owner_state,
+                                                                             panic_bridge):
+    """A registration racing the core's start: the core built its door from a read taken before the slot was
+    written, and publishes that bridge only afterwards. The route then saves the pair but answers ``unknown``,
+    never ``bound``; the transport's next ask, once the bridge is published, answers ``same`` and that very door
+    accepts the pair's first /panic."""
+    _seed_token(tmp_path, permissions=["inject_chat"])
+    door = panic_bridge.panic
+    door.observe_owner(owner_state.load_state())  # the startup read: the slot is still empty
+    published = {"bridge": None}
+    client = TestClient(create_host_service_app(tmp_path, bridge_getter=lambda: published["bridge"]))
+    headers, owner = {"X-Skill-Token": "token"}, {"user_id": 17, "chat_id": 23}
+
+    first = client.post("/owner/external", headers=headers, json=owner)
+    assert first.json() == {"ok": True, "owner": "unknown"} and _external(owner_state) == (17, 23)
+    assert door.observed_owner() is None
+    published["bridge"] = panic_bridge
+    again = client.post("/owner/external", headers=headers, json=owner)
+    assert again.json() == {"ok": True, "owner": "same"} and door.observed_owner() == (17, 23)
+    accepted = client.post("/chat/inject", headers=headers, json={"text": "/panic", **owner})
+    assert accepted.status_code == 202 and panic_bridge.stopped.wait(3)
 
 
 def test_owner_external_binds_nothing_while_the_state_cannot_be_read(tmp_path, owner_state, panic_bridge,
@@ -1046,4 +1069,4 @@ def test_owner_external_binds_nothing_while_the_state_cannot_be_read(tmp_path, o
     monkeypatch.setattr(owner_state, "load_state", lambda: {STATE_READ_KEY: {"quality": "unavailable"}})
     client = TestClient(create_host_service_app(tmp_path, bridge_getter=lambda: panic_bridge))
     answer = client.post("/owner/external", headers={"X-Skill-Token": "token"}, json={"user_id": 17, "chat_id": 23})
-    assert answer.json() == {"ok": True, "owner": "unknown"} and panic_bridge.panic._owner[1] is None
+    assert answer.json() == {"ok": True, "owner": "unknown"} and panic_bridge.panic.observed_owner() is None

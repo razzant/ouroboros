@@ -11,7 +11,9 @@ first slash command it carries: the route grants no new power, it only stops the
 that Strict mode never forwards and Panic never is.
 
 Answer: ``{"ok": true, "owner": "bound" | "same" | "other" | "unknown"}`` (``same``: the pair was already this
-one, and the door now observes it; ``other``: another pair holds the slot; ``unknown``: the state cannot be read).
+one; ``other``: another pair holds the slot; ``unknown``: the state cannot be read, or the live door does not hold
+the pair yet, so the transport asks again). ``bound`` and ``same`` are answered only once the live emergency door,
+read after the write, holds the pair: a door the core built from an earlier read while it started is reached too.
 """
 
 from __future__ import annotations
@@ -31,15 +33,23 @@ def _positive(value: Any) -> bool:
     return type(value) is int and value > 0
 
 
+def _door_holds(bridge_getter: Callable[[], Any], saved: dict, pair: tuple) -> bool:
+    """Whether the live emergency door, observing ``saved`` now, accepts ``pair``; no published bridge: not yet."""
+    try:
+        panic = getattr(bridge_getter(), "panic", None)
+    except Exception:  # noqa: BLE001 — no bridge published yet
+        return False
+    if panic is None:
+        return False
+    panic.observe_owner(saved)
+    return panic.observed_owner() == pair
+
+
 def bind_external_owner(bridge_getter: Callable[[], Any], user_id: int, chat_id: int) -> str:
-    """Bind ``(user_id, chat_id)`` into the empty external owner slot; the door observes the saved pair."""
+    """Bind ``(user_id, chat_id)`` into the empty external owner slot; the live door observes the saved pair."""
     from ouroboros.server_control import external_owner_binding
     from supervisor.state import StateUnavailable, control_value, load_state, update_state
 
-    try:
-        panic = getattr(bridge_getter(), "panic", None)
-    except Exception:  # noqa: BLE001 — no bridge yet: its door reads the saved pair when it starts
-        panic = None
     current = load_state()
     known, owner, pair = external_owner_binding(current)
     if not known:
@@ -47,9 +57,7 @@ def bind_external_owner(bridge_getter: Callable[[], Any], user_id: int, chat_id:
     if owner is not None:
         if pair != (user_id, chat_id):
             return "other"
-        if panic is not None:
-            panic.observe_owner(current)
-        return "same"
+        return "same" if _door_holds(bridge_getter, current, pair) else "unknown"
     outcome = {"value": "unknown"}
 
     def bind(live: dict) -> None:
@@ -66,8 +74,8 @@ def bind_external_owner(bridge_getter: Callable[[], Any], user_id: int, chat_id:
         saved = update_state(bind)
     except StateUnavailable:
         return "unknown"
-    if panic is not None and outcome["value"] in ("bound", "same"):
-        panic.observe_owner(saved)
+    if outcome["value"] in ("bound", "same") and not _door_holds(bridge_getter, saved, (user_id, chat_id)):
+        return "unknown"  # saved, but the door cannot accept it yet: the transport's next ask answers "same"
     return outcome["value"]
 
 
