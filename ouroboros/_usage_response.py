@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -565,6 +566,13 @@ def failure_settlement_price(error: BaseException, payload: Any, provider: str, 
 
 _ANSWER_CODE_KEYS = ("code", "type", "provider_code", "provider_error_code", "error_type", "limit_source")
 _ANSWER_WALK_LIMIT = 400  # nodes and JSON scans of one answer: a parser bound, never a judgment
+_SSE_FRAME = re.compile(r"(?:^|\n)[ \t]*(?:(?:data|event|id|retry)[ \t]*:|:)[^\n]*")
+_CITATION_MARKER = re.compile(r"previous (?:response|diagnostic)\s*:", re.I)
+
+
+def _wire_envelope(prefix: str) -> bool:
+    """True when only SSE framing (or whitespace) precedes an embedded JSON document."""
+    return not _SSE_FRAME.sub("", prefix).strip()
 
 
 @dataclass(frozen=True)
@@ -576,6 +584,8 @@ class AnswerObject:
     history: bool
     sentences: Tuple[str, ...]
     codes: Tuple[str, ...]
+    message: str = ""
+    inline: bool = False  # embedded JSON after non-SSE prose in a string
 
 
 @dataclass(frozen=True)
@@ -634,7 +644,8 @@ def provider_answer(source: Any) -> ProviderAnswer:
     ``source`` is an exception (its received body, then its explicit causes') or a body. Every error object at
     any depth is read. A sentence is any string with a space, under any key (a ``message`` also as one word); JSON
     inside a string is opened (the string itself, SSE ``data:`` lines, an object with words around it, whose words
-    stay a sentence). Codes are ``code``/``type`` and a gateway's typed metadata fields, never ``param``.
+    stay a sentence); an explicit citation tail after ``previous response:`` / ``previous diagnostic:`` (#3858) is
+    not part of this answer. Codes are ``code``/``type`` and a gateway's typed metadata fields, never ``param``.
     ``provider_name`` names who speaks below it. A list holds earlier attempts (history) only where its own
     document also states a sentence outside lists; otherwise the list is the answer. An engine-typed problem
     (``problem``) keeps its typed attributes only (``typed_values``): its message is the engine's, its body private.
@@ -644,8 +655,9 @@ def provider_answer(source: Any) -> ProviderAnswer:
     objects = []
     left = [_ANSWER_WALK_LIMIT]
 
-    def opened(text: str) -> Tuple[List[Any], str]:
+    def opened(text: str) -> Tuple[List[Tuple[Any, bool]], str]:
         found, kept, index, decoder = [], [], 0, json.JSONDecoder()
+        cited = inline = False
         while left[0] > 0 and (start := text.find("{", index)) >= 0:
             left[0] -= 1
             try:
@@ -653,10 +665,25 @@ def provider_answer(source: Any) -> ProviderAnswer:
             except ValueError:
                 value, end = None, start + 1
             document = isinstance(value, dict) and bool(value)
-            kept.append(text[index:start] if document else text[index:end])
-            found.extend([value] if document else [])
+            segment = text[index:start] if document else text[index:end]
+            if not cited and (marker := _CITATION_MARKER.search(segment)):
+                kept.append(segment[:marker.start()])
+                cited = True
+            elif not cited:
+                kept.append(segment)
+            if document:
+                inline = inline or not _wire_envelope(segment)
+                if not cited:
+                    found.append((value, inline))
             index = end
-        return found, " ".join(("".join(kept) + text[index:]).split())
+        tail = text[index:]
+        if not cited:
+            marker = _CITATION_MARKER.search(tail)
+            kept.append(tail[:marker.start()] if marker else tail)
+            cited = marker is not None
+        raw_words = "".join(kept)
+        words = "" if (found and not inline and not cited and _wire_envelope(raw_words)) else " ".join(raw_words.split())
+        return found, words
 
     def states(node: Any) -> bool:
         return isinstance(node, dict) and any(
@@ -664,13 +691,14 @@ def provider_answer(source: Any) -> ProviderAnswer:
                               and " " in opened(value)[1])
             for key, value in node.items())
 
-    def walk(node: Any, speaker: str, history: bool, lists_are_history: bool, parent: int = -1) -> None:
+    def walk(node: Any, speaker: str, history: bool, lists_are_history: bool, parent: int = -1,
+             inline: bool = False) -> None:
         left[0] -= 1
         if left[0] <= 0:
             return
         if isinstance(node, list):
             for item in node:
-                walk(item, speaker, history or lists_are_history, lists_are_history, parent)
+                walk(item, speaker, history or lists_are_history, lists_are_history, parent, inline)
             return
         if isinstance(node, str):
             node = {"": node}
@@ -679,23 +707,25 @@ def provider_answer(source: Any) -> ProviderAnswer:
         index, said_start, code_start = len(objects), len(said), len(codes)
         if isinstance(node.get("provider_name"), str) and node["provider_name"].strip():
             speaker = node["provider_name"].strip()
-        inner = []
+        inner, message = [], ""
         for key, value in sorted(node.items(), key=lambda item: item[0] != "message"):  # its message leads
             if key in _ANSWER_CODE_KEYS:
                 if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
                     codes.append((speaker, str(value).strip(), history))
             elif isinstance(value, str) and key != "provider_name":
                 documents, words = opened(value)
+                if key == "message":
+                    message = words
                 if " " in words or (words and key == "message"):  # a ``message`` is a sentence even as one word
                     said.append((speaker, words, history))
-                inner.extend((document, None) for document in documents)
+                inner.extend((document, None, embedded) for document, embedded in documents)
             elif isinstance(value, (dict, list)):
-                inner.append((value, lists_are_history))
+                inner.append((value, lists_are_history, inline))
         objects.append(AnswerObject(node, parent, speaker, history,
                                     tuple(row[1] for row in said[said_start:]),
-                                    tuple(row[1] for row in codes[code_start:])))
-        for value, rule in inner:  # an opened document applies the history rule to itself
-            walk(value, speaker, history, states(value) if rule is None else rule, index)
+                                    tuple(row[1] for row in codes[code_start:]), message, inline))
+        for value, rule, embedded in inner:  # an opened document applies the history rule to itself
+            walk(value, speaker, history, states(value) if rule is None else rule, index, inline or embedded)
 
     def read(payload: Any) -> Optional[int]:
         top = payload["error"] if isinstance(payload, dict) and isinstance(payload.get("error"), (dict, str)) else payload

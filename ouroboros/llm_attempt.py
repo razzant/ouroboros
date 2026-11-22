@@ -211,14 +211,16 @@ def body_error_facts(error: Dict[str, Any], transient: bool) -> Dict[str, Any]:
 
     Size is recognised on the whole object and before the transient heuristic (``transient``), so a size refusal
     that says "try again" is no outage; ``message`` stays the bounded log projection of the quoted sentence and
-    ``answer`` the record the loop stamps (``loop_transport.owner_provider_answer``)."""
+    ``answer`` the record the loop stamps (``loop_transport.owner_provider_answer``). A refusal its own code and
+    wording explain (#3858) is no untyped client refusal either: the cited-number step takes no number it cites."""
     from ouroboros.context_budget import SIZE_REFUSAL_STATUSES
-
+    from ouroboros.size_refusal import cited_size_refusal
     answer = provider_answer({"error": error})
     size = size_refusal(answer, answer.status)
     transient = transient and not size
     facts = answer.facts(size[2:] if size else ("", ""), basis=size[0] if size else "",
-                         untyped=not size and not transient and answer.status in SIZE_REFUSAL_STATUSES)
+                         untyped=not size and not transient and not cited_size_refusal(answer)
+                                 and answer.status in SIZE_REFUSAL_STATUSES)
     from ouroboros.size_refusal import answer_fact
     numbers = answer_fact(answer, answer.status)  # an excluded quotation keeps a numberless fact, as ``stamp``
     if numbers is not None:

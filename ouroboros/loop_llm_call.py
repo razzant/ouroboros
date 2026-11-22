@@ -282,9 +282,20 @@ def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tupl
     # A refusal under its body's own status; a typed cause of another kind keeps its kind, as on an exception.
     typed_other = isinstance(body_err, dict) and any(
         _provider_code_kind(str(body_err.get(key) or "")) in ("quota_exhausted", "auth_error") for key in ("type", "code"))
-    if isinstance(body_err, dict) and not typed_other and (
-            (body_err.get("answer") or {}).get("basis") or is_size_refusal(body_err)):
-        return "remote_context_overflow", False, True
+    if isinstance(body_err, dict) and not typed_other:
+        # The stamped answer projection is the one decision: its basis/size, never a re-read of the normalized
+        # negative reason (#3858), whose quoted and history rows are no party of the current answer. A projection
+        # whose only size row is a negative ("excluded") is no recognition; an unprojected body keeps the legacy read.
+        projected = body_err.get("answer")
+        if isinstance(projected, dict):
+            size = projected.get("size")
+            # "excluded" is the negative reason: a size row that states no number this attempt may take.
+            excluded = isinstance(size, dict) and size.get("source") == "excluded"
+            recognized = bool(projected.get("basis")) or (bool(size) and not excluded)
+        else:
+            recognized = is_size_refusal(body_err)
+        if recognized:
+            return "remote_context_overflow", False, True
     if not body_err and finish in OUTPUT_LIMIT_FINISH_REASONS:
         return "llm_empty_response", False, True
     if not body_err and finish in CONTENT_REFUSAL_FINISH_REASONS:
@@ -531,6 +542,7 @@ from ouroboros.context_budget import (  # one overflow vocabulary for every seam
     OUTPUT_OR_BODY_SIZE_MARKERS, SIZE_REFUSAL_STATUSES,
     output_or_body_size_message as _output_or_body_size_message, size_refusal,
 )
+from ouroboros.size_refusal import cited_size_refusal
 _FORCED_INCOMPLETE_FINISH_REASONS = (_STRUCTURED_CONTEXT_OVERFLOW_CODES | OUTPUT_LIMIT_FINISH_REASONS
                                      | TOOL_CALL_FINISH_REASONS | INTERMEDIATE_FINISH_REASONS)
 
@@ -751,8 +763,13 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
         return LlmErrorClassification("provider_transient", True, status_code, provider_code)
     if size := size_refusal(answer, status_code, printed=safe):  # size evidence outranks output words on the same answer
         return LlmErrorClassification("context_overflow", False, status_code, size[1] or provider_code, basis=size[0], said=size[2:])
-    untyped = status_code in SIZE_REFUSAL_STATUSES
-    if size_family and any(_output_or_body_size_message(text) for text in (*(row[1] for row in answer.said), safe)):
+    # A refusal the provider's own code and wording explain is no untyped client refusal, so the secondary
+    # cited-number step (``context_anchor.cited_limit_refusal``, untyped only) and raw exception repr take nothing
+    # from a previous answer it only cites (#3858).
+    cited_param = cited_size_refusal(answer)
+    untyped = status_code in SIZE_REFUSAL_STATUSES and not cited_param
+    output_texts = (*(row[1] for row in answer.said), *(() if cited_param else (safe,)))
+    if size_family and any(_output_or_body_size_message(text) for text in output_texts):
         return LlmErrorClassification("request_too_large", False, status_code, provider_code, untyped=untyped)
     if provider_kind:
         return LlmErrorClassification(provider_kind, False, status_code, provider_code, untyped=untyped)
