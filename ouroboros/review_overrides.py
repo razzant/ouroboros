@@ -209,6 +209,20 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     return reason.partition("gate_block:")[2] or reason or kept
 
 
+def landing_reason(ctx: Any) -> str:
+    """The outcome a landing on this commit goes over: the reviewed attempt's own reason when the
+    author continued over it, else this call's decision ("" when it met none).
+
+    One rule, one place: the Git boundary reads it to keep it in the receipt and the landing
+    reads it to record the row, so both name the same outcome (#3451). The decision belongs to
+    the call that met it: a resumed worker restores the receipt's outcome into this call's own
+    per-call field, so the next call on the same context starts without it.
+    """
+    source = getattr(ctx, "_author_commit_source", None)  # the durable attempt, resolved afresh by each call
+    return (_went_on_over(ctx, source)
+            or str(getattr(ctx, "_review_override_this_call", "") or ""))
+
+
 def note_author_continuation(ctx: Any, decision: Any) -> None:
     """The author's explicit continuation over the reviewed attempt its validated reference resolved to, when that
     attempt stands at a FAIL or no verdict: the work's ``continued`` part, with the disposition and the head of its
@@ -240,8 +254,7 @@ def note_override_landing(ctx: Any, commit_sha: str) -> None:
     try:
         from ouroboros.tool_access import canonical_data_root
 
-        source = getattr(ctx, "_author_commit_source", None)  # the durable attempt, resolved afresh by each call
-        reason = _went_on_over(ctx, source) or getattr(ctx, "_review_override_this_call", "")
+        reason = landing_reason(ctx)
         if not (reason and commit_sha):
             return
         author, at = getattr(ctx, "_author_commit_record", None), utc_now_iso()  # this call's continuation, if any
