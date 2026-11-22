@@ -57,10 +57,10 @@ export function updateTarget(status = {}) {
         : status.behind ? `${status.behind} new ${status.behind === 1 ? 'change' : 'changes'}` : latest;
 }
 
-// The Apply dialog's title names the versions only when the status read names the very range preflight pinned;
-// otherwise it is neutral, and the pinned commits lead its Details (preflightEvidenceRows).
+// The Apply dialog's title names the versions only when the status read names the very range preflight pinned and both
+// its versions are readable (never "unknown"); otherwise it is neutral, and the pinned commits lead its Details.
 export const applyTitle = (status = {}, plan = {}) => (plan.base_sha && (status.running_sha ?? status.current_sha) === plan.base_sha
-    && (status.checked_target_sha || status.latest_sha) === plan.target_sha ? `Update: ${updateTarget(status)}` : 'Update');
+    && (status.checked_target_sha || status.latest_sha) === plan.target_sha && status.current_version && status.latest_version ? `Update: ${updateTarget(status)}` : 'Update');
 
 // Shared preflight verification for the ONE apply surface (consumed by
 // web/modules/updates.js): never lets an unverified plan reach updateApply.
