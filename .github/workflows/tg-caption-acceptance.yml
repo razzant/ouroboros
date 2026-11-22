@@ -1,0 +1,148 @@
+name: Telegram caption acceptance
+
+"on":
+  push:
+    branches: [qa/tg-caption-acceptance]
+
+permissions:
+  contents: read
+
+jobs:
+  conversation:
+    if: ${{ github.event.deleted == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Set the temporary work directory
+        run: echo "CASE=$RUNNER_TEMP/tg-caption" >> "$GITHUB_ENV"
+
+      - name: Check out the exact test commit
+        id: checkout
+        timeout-minutes: 4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Identify the reviewed product and the five test-only additions
+        id: source
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$CASE/build" "$CASE/proof"
+          qa=qa/tg-caption
+          workflow=.github/workflows/tg-caption-acceptance.yml
+          candidate=$(cat "$qa/candidate.sha")
+          [[ $candidate =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$candidate"
+          files=("$workflow" "$qa/Dockerfile" "$qa/candidate.sha" "$qa/loopback.py" "$qa/scenario.py")
+          printf 'A\t%s\n' "${files[@]}" | LC_ALL=C sort > "$CASE/expected"
+          git diff --no-renames --name-status "$candidate" "$GITHUB_SHA" | LC_ALL=C sort > "$CASE/actual"
+          cmp "$CASE/expected" "$CASE/actual"
+          for file in "${files[@]}"; do
+            test "$(git ls-tree "$GITHUB_SHA" -- "$file" | cut -d' ' -f1)" = 100644
+          done
+          printf '%s\n' "$candidate" > "$CASE/candidate"
+          # Direct object list: only the selected commit + its tree/blobs,
+          # no parent commits, history, remote settings or runner checkout.
+          {
+            printf '%s\n' "$candidate" "$(git rev-parse "$candidate^{tree}")"
+            git ls-tree -r -t --format='%(objecttype) %(objectname)' "$candidate" |
+              awk '$1 == "blob" || $1 == "tree" {print $2}'
+          } | LC_ALL=C sort -u | git pack-objects --stdout > "$CASE/build/candidate.pack"
+          git show "$candidate:requirements-runtime.lock" > "$CASE/build/requirements-runtime.lock"
+          cp "$qa/Dockerfile" "$qa/loopback.py" "$qa/scenario.py" "$CASE/build/"
+
+      - name: Build the runtime and install Chromium
+        id: image
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --no-cache --iidfile "$CASE/image" \
+            --build-arg "CANDIDATE_SHA=$(cat "$CASE/candidate")" "$CASE/build"
+
+      - name: Run the conversation with only loopback
+        id: exercise
+        timeout-minutes: 14
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker create --cidfile "$CASE/container" --network=none --pull=never \
+            --cap-drop=ALL --security-opt=no-new-privileges=true --user=10001:10001 \
+            --log-driver=none --shm-size=256m --pids-limit=512 \
+            "$(cat "$CASE/image")" /evidence "$(cat "$CASE/candidate")" > /dev/null
+          cid=$(cat "$CASE/container")
+          docker start "$cid" > /dev/null
+          if ! timeout 12m docker wait "$cid" > "$CASE/exit"; then
+            docker stop --time 5 "$cid" > /dev/null
+            exit 1
+          fi
+          test "$(cat "$CASE/exit")" = 0
+
+      - name: Collect the report and eight synthetic chat images (partial on failure)
+        id: collect
+        if: ${{ always() }}
+        shell: bash
+        env:
+          CHECKOUT: ${{ steps.checkout.outcome }}
+          SOURCE: ${{ steps.source.outcome }}
+          IMAGE: ${{ steps.image.outcome }}
+          EXERCISE: ${{ steps.exercise.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$CASE/proof"
+          report="$CASE/proof/report.txt"
+          printf 'test_commit=%s\ncheckout=%s source=%s build=%s exercise=%s\n' \
+            "$GITHUB_SHA" "$CHECKOUT" "$SOURCE" "$IMAGE" "$EXERCISE" > "$report"
+          if [[ -f $CASE/candidate ]]; then printf 'product_commit=%s\n' "$(cat "$CASE/candidate")" >> "$report"; fi
+          if [[ -f $CASE/image ]]; then printf 'image=%s\n' "$(cat "$CASE/image")" >> "$report"; fi
+          if [[ -s $CASE/exit ]]; then printf 'guest_exit=%s\n' "$(cat "$CASE/exit")" >> "$report"; fi
+          ready=false
+          count=0
+          if [[ -s $CASE/container ]]; then
+            cid=$(cat "$CASE/container")
+            if docker cp "$cid:/evidence/observations.txt" "$CASE/observations" 2>/dev/null &&
+               [[ -f $CASE/observations && ! -L $CASE/observations ]]; then
+              cat "$CASE/observations" >> "$report"
+              [[ $(tail -n 1 "$CASE/observations") != PASS ]] || ready=true
+            fi
+            for stage in live reload; do
+              for part in a b reply answer; do
+                name="$stage-$part.png"
+                if docker cp "$cid:/evidence/$name" "$CASE/$name" 2>/dev/null &&
+                   [[ -f $CASE/$name && ! -L $CASE/$name && -s $CASE/$name ]]; then
+                  install -m 0644 "$CASE/$name" "$CASE/proof/$name"
+                  (cd "$CASE/proof" && sha256sum "$name") >> "$report"
+                  count=$((count + 1))
+                fi
+              done
+            done
+          fi
+          if [[ $EXERCISE == success && $ready == true && $count == 8 ]]; then
+            echo 'RESULT=PASS' >> "$report"
+          else
+            echo 'RESULT=INCOMPLETE_OR_FAILED' >> "$report"
+            exit 1
+          fi
+
+      - name: Upload one result for this run attempt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tg-caption-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/tg-caption/proof/report.txt
+            ${{ runner.temp }}/tg-caption/proof/live-a.png
+            ${{ runner.temp }}/tg-caption/proof/live-b.png
+            ${{ runner.temp }}/tg-caption/proof/live-reply.png
+            ${{ runner.temp }}/tg-caption/proof/live-answer.png
+            ${{ runner.temp }}/tg-caption/proof/reload-a.png
+            ${{ runner.temp }}/tg-caption/proof/reload-b.png
+            ${{ runner.temp }}/tg-caption/proof/reload-reply.png
+            ${{ runner.temp }}/tg-caption/proof/reload-answer.png
+          if-no-files-found: error
+          retention-days: 7
