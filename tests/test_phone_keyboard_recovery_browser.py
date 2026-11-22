@@ -6,6 +6,8 @@ keyboard, IME, autocorrect panel or Telegram client. Uses the static-server/API 
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 from pathlib import Path
 
@@ -1210,6 +1212,83 @@ def test_a_swipe_from_a_box_at_its_end_moves_the_feed_until_the_page_edge(shell_
     assert measured['olderMoves'] == [False, False], measured
     page.wait_for_function('id => document.activeElement !== document.getElementById(id)', arg=field_id)
     assert field.input_value() == 'Keep my draft.'
+
+
+FIND_GEOMETRY = """scope => {
+    const room = document.querySelector(scope), sheet = room.querySelector('.chat-find');
+    const bar = room.classList.contains('chat-instance-panel')
+        ? room.closest('.project-panel').querySelector('.project-panel-bar')
+        : room.querySelector('.chat-page-header');
+    const box = el => el.getBoundingClientRect(), p = box(room), s = box(sheet), h = box(bar);
+    return {barHeight: h.height, barFlow: getComputedStyle(bar).position, gap: s.top - p.top,
+        fromBar: s.top - h.bottom, sheetHeight: s.height,
+        focused: document.activeElement === sheet.querySelector('input'),
+        keyboard: document.body.classList.contains('keyboard-open')};
+}"""
+
+
+def keep_find_sheet(page, name, geometry, clip, tmp_path):
+    """The keyboard-raised Find sheet as published diagnostics when a test owner names a destination: the frame and exact
+    geometry this test also keeps as local evidence (the frame bounded by its clip, at CSS size), in a producer folder that
+    `diagnostic_directory` keys by `tmp_path / name`, so each engine, room and height has its own. Evidence only: a failed
+    export keeps the environment to inspect, says only its exception's class in public output (a message can carry a local
+    path) and never rewrites the verdict."""
+    if not os.environ.get('OUROBOROS_TEST_EVIDENCE_ROOT'):
+        return
+    from ouroboros.test_evidence import diagnostic_directory, diagnostics_incomplete, report_diagnostic
+    try:
+        folder = diagnostic_directory(tmp_path / name, 'find-sheet-keyboard', publish=True)
+        (folder / f'{name}.json').write_text(json.dumps(geometry, indent=1, sort_keys=True), encoding='utf-8')
+        page.screenshot(path=str(folder / f'{name}.png'), clip=clip, scale='css')
+    except Exception as exc:
+        reason = type(exc).__name__
+        report_diagnostic(f'TEST_DIAGNOSTICS_INCOMPLETE {name}: {reason}')
+        diagnostics_incomplete(reason)
+
+
+@pytest.mark.parametrize('height', [508, 250])
+@pytest.mark.parametrize('room', ['main', 'project', 'telegram-project'])
+def test_the_find_sheet_stays_a_step_under_the_rooms_bar_with_the_keyboard_up(shell_ui, room, height, tmp_path):
+    fullscreen = room == 'telegram-project'
+    page = telegram_phone(shell_ui, fullscreen=True) if fullscreen else phone(shell_ui, telegram=False)
+    page.route('**/api/chat/history**', lambda route: route.fulfill(json=history([LONG_LINE] * 12)))
+    page.goto(shell_ui['url'])
+    if fullscreen:
+        page.wait_for_function("document.documentElement.hasAttribute('data-telegram-fullscreen')")
+    page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
+    scope = '#page-chat'
+    if room != 'main':
+        open_project(page)
+        scope = '.project-panel .chat-instance-panel'
+    feed = page.locator('#chat-messages' if room == 'main' else f'{scope} .chat-messages')
+    feed.click(position={'x': 40, 'y': 200})
+    page.keyboard.press('ControlOrMeta+f')
+    page.wait_for_function("s => document.querySelector(s + ' .chat-find input') === document.activeElement", arg=scope)
+    still(page)
+    rested = page.evaluate(FIND_GEOMETRY, scope)
+    page.evaluate(f'window.__viewport({height})')  # the page's own keyboard detection, not a class the test adds
+    page.wait_for_function("document.body.classList.contains('keyboard-open')")
+    still(page)
+    raised = page.evaluate(FIND_GEOMETRY, scope)
+    name = f'find-sheet-keyboard-{height}-{room}-{shell_ui["engine"]}'
+    facts(name, {'rested': rested, 'raised': raised})
+    shot(page, name, {'x': 0, 'y': 0, 'width': 390, 'height': height})
+    keep_find_sheet(page, name, {'rested': rested, 'raised': raised},
+                    {'x': 0, 'y': 0, 'width': 390, 'height': height}, tmp_path)
+    assert rested['focused'] and not rested['keyboard'] and rested['sheetHeight'] > 0, rested
+    assert raised['focused'] and raised['keyboard'] and raised['sheetHeight'] > 0, raised
+    assert 0 <= rested['fromBar'] <= 16, ('rested: the sheet floats a step under the floating bar', rested)
+    if fullscreen:
+        assert raised['barFlow'] == 'absolute', raised
+        assert abs(raised['fromBar'] - rested['fromBar']) <= 1, (rested, raised)
+    elif room == 'project':
+        assert raised['barFlow'] == 'relative', raised
+        assert 0 <= raised['gap'] <= 16 and abs(raised['fromBar']) <= 16, \
+            ('keyboard up: a full bar of extra gap is the #3653 bug', raised)
+    else:
+        assert raised['barFlow'] == 'relative', raised
+        # The short viewport can shrink the bar itself; keep Find's gap from its lower edge.
+        assert abs(raised['fromBar'] - rested['fromBar']) <= 1, (rested, raised)
 
 
 CAP = """id => { const f = document.getElementById(id); return {height: f.getBoundingClientRect().height,

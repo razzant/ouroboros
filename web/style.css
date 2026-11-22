@@ -6555,24 +6555,25 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 /* How Ouroboros changed: the head, one measure at a time (the shared segments, wrapping on a narrow card so none
    hides past its edge), the chart, how it is measured behind a disclosure, and the chosen version. */
 .evo-story { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.evo-story-head { container: evostoryhead / inline-size; display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
+.evo-story-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
 .evo-story-words { display: grid; gap: 2px; min-width: 0; }
 .evo-story-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .evo-story-status { display: flex; align-items: center; gap: 2px var(--space-2); flex-wrap: wrap; margin: 0; min-height: calc(var(--type-meta) * var(--line-meta)); }
 .evo-story-status .ui-status { margin: 0; }
 .evo-progress { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.evo-measures { --control-h: var(--control-h-sm); display: flex; flex-wrap: wrap; gap: 6px; }
+.evo-measures { --control-h: var(--control-h-sm);
+    --measure-gap: 6px;
+    display: flex; flex-wrap: wrap;
+    gap: var(--measure-gap) calc(2 * var(--measure-gap) + 1px); max-inline-size: 100%; }
+.evo-measure-set { display: flex; flex-wrap: wrap; gap: var(--measure-gap); min-inline-size: 0; }
+.evo-measures-install { position: relative; flex-wrap: nowrap; }
 /* The measures wrap on a narrow card: under a finger they take the touch minimum as their own height. */
 @media (pointer: coarse) {
     .evo-measures { --control-h: var(--touch-target-min); }
 }
-.evo-measures-sep { width: 1px; align-self: stretch; margin: 0; background: rgba(var(--neutral-rgb), 0.12); }
-/* The divider parts the release's measures from the installation's own (Identity, Scratchpad) on one line. A head too
-   narrow for the five on one line (about 32rem) wraps them, and the divider would hang at the end of a row with nothing
-   after it, so there it becomes the break: the installation's two take the next line together. */
-@container evostoryhead (max-width: 33rem) {
-    .evo-measures-sep { flex-basis: 100%; height: 0; background: none; }
-}
+/* The hairline occupies the space between adjacent groups. Hiding it on a wrap cannot move either group. */
+.evo-measures-sep { position: absolute; inset-block: 0; inset-inline-start: calc(-1px - var(--measure-gap));
+    width: 1px; background: rgba(var(--neutral-rgb), 0.12); }
 .evo-quiet { --control-pad-x: var(--space-2); }
 .evo-quiet svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .evo-link { padding: 0; border: 0; background: none; color: var(--text-primary); font-family: inherit; font-size: var(--type-meta);
@@ -9201,6 +9202,8 @@ html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .project-
     position: relative;
     top: auto;
 }
+/* The in-flow Project bar already moves the sheet's containing block below it. Main's bar is inside that block. */
+html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .chat-find { top: var(--space-1); }
 html:not([data-telegram-fullscreen]) body.keyboard-open :is(.chat-page-header, .project-panel-bar) {
     padding-top: calc(var(--chrome-inset) + var(--inset-top));
     padding-bottom: var(--chrome-inset);
