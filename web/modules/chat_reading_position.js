@@ -192,9 +192,11 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             settledBox = feedBox(); state.top = feed.scrollTop;
             const keptHeld = !state.stick && !kept && heldByLimit(viewportAnchor);
             // A later reflow still belongs to the box edge, not a line the reader can move inside it.
-            // A box that is gone or hidden fails restore and is reselected by the ordinary anchor owner.
-            if (keptNested || keptHeld || (heightOnly && (state.stick || kept || rowStillPlaced(viewportAnchor)))) {
-                if (keptNested || keptHeld) width = feed.clientWidth;
+            // A box that is gone or hidden fails restore and is reselected by the ordinary anchor owner. A row put back
+            // still stays the row read through a passing layout (a rotation): a fresh search there would pick another
+            // row of the band, and the way back would land a line off.
+            if (keptNested || keptHeld || (heightOnly && state.stick) || (!state.stick && rowStillPlaced(viewportAnchor))) {
+                width = feed.clientWidth;
                 if (state.stick) viewportAnchor = null; // an edge follower has no reading row to reselect
                 viewportTop = state.top;
             } else { state.remember(true); viewportTop = state.top; }
