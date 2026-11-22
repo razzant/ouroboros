@@ -139,7 +139,7 @@ def mode_words(plan, mode):
 
 _LOW_START_WHY = {
     "memory": "the whole books did not fit beside my memory even in its shortest tellings",
-    "request": "even with no memory, what the request itself carries tips this start over the window",
+    "request": "even with no memory, what the request itself carries tips this start over the window on {model}",
     "route": ("on {model} the window cannot hold the whole books beside the rest of this start and the work's room "
               "even with no memory; folding my memory cannot change that"),
 }

@@ -57,9 +57,10 @@ def test_a_start_memory_lowered_to_low_says_so_without_numbers_or_advice():
 def test_what_the_request_carries_and_the_route_send_their_own_lines():
     """Consilium of 22.11.2026 (P6, P7): the opening line goes for every cause, each in its own words, no numbers."""
     request = _room(zero_need=1_100_000, floor_need=950_000)  # the books fit without the tool schemas, not with them
-    assert low_start_line(_plan(request), "low", "rootA") == (
+    assert low_start_line(_plan(request, model="opus"), "low", "rootA") == (  # a period per model: the line names it
         "Task rootA runs in Low for now, not in your Max: even with no memory, what the request itself carries tips "
-        "this start over the window. Your setting stays Max.")
+        "this start over the window on opus. Your setting stays Max.")
+    assert "over the window on this route. Your" in low_start_line(_plan(request), "low", "rootA")  # no model named
     assert low_start_line(_plan(_room("route"), model="opus"), "low", "rootA") == (
         "Task rootA runs in Low for now, not in your Max: on opus the window cannot hold the whole books beside the rest "
         "of this start and the work's room even with no memory; folding my memory cannot change that. Your setting stays Max.")
