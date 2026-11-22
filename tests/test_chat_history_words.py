@@ -489,6 +489,8 @@ def test_learning_the_rooms_of_hits_never_reads_a_room(tmp_path, monkeypatch):
     assert zebra <= 2 and "unique zebra" in answer
     scoped, answer = bodies(words=["zebra"], room_id="777")
     assert scoped <= 2 and "unique zebra" in answer
-    _founder_reads, answer = bodies(words=["founding sentence"])
+    founder, answer = bodies(words=["founding sentence"])
+    # The founder of an old-form reference pays one walk of its room (97 Main rows) to prove one original, plus itself.
+    assert founder == 1 + 97, founder
     line = next(line for line in answer.splitlines() if line.startswith("row:"))
     assert "Main" in line and f"[chat_id={project['chat_id']}]" in line
