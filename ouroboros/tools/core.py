@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read, publish_no_effect
 
-from ouroboros.tools.arg_feedback import payload_item_feedback, with_argument_notes
+from ouroboros.tools.arg_feedback import (
+    ABSENT, argument_refusal, ignored_argument_note, payload_item_feedback, with_argument_notes,
+)
 
 import copy
 import json
@@ -738,9 +740,24 @@ def _edit_text(
     force: bool = False,
     edits: List[Dict[str, str]] | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
+    count: object = ABSENT,
 ) -> str:
     from ouroboros.tools.tool_resolution import inferred_file_root
 
+    if count is not ABSENT:  # outside the schema (DEVELOPMENT 02): only count=1, or a null, has one meaning here
+        if count is None or type(count) is int and count == 1 and edits is None:
+            return with_argument_notes(ctx, _edit_text(
+                ctx, path, old_str, new_str, root, bucket, skill_name, force, edits, _resolved_binding,
+            ), [ignored_argument_note("count", count, "empty optional value" if count is None
+                                      else "one replacement is edit_text's default")])
+        kept = "".join(f", {key}={json.dumps(value)}" for key, value in (
+            ("root", root), ("bucket", bucket), ("skill_name", skill_name), ("force", force)) if value)
+        repair = ("count belongs inside each edit: edits=[{old_str, new_str, count}]" if edits is not None else
+                  f"edit_text replaces exactly one occurrence; for counted replacements call edit_text(path="
+                  f"{json.dumps(path)}{kept}, edits=[{{\"old_str\": <this call's old_str>, \"new_str\": <this call's "
+                  f"new_str>, \"count\": {count if type(count) is int and count > 1 else '<occurrences>'}}}])")
+        return publish_no_effect(ctx, argument_refusal(ctx, "TOOL_ARG_ERROR", [f"count={count!r}: {repair}"],
+                                                       effect="Nothing was written."), tool_name="edit_text")
     root, root_error = inferred_file_root(ctx, "edit_text", root, [path])
     if root_error:
         return publish_no_effect(ctx, root_error, tool_name="edit_text")
@@ -887,6 +904,8 @@ def _edit_text(
     except Exception as exc:
         return f"⚠️ EDIT_TEXT_ERROR: {type(exc).__name__}: {exc}"
 
+
+setattr(_edit_text, "_hidden_legacy_params", ("count",))
 _MAX_SEARCH_RESULTS = 200
 # Search file-skip helper and caps live in ouroboros.code_search_rg (the search
 # module SSOT); imported with the historical private names used by call sites.
