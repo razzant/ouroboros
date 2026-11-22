@@ -259,13 +259,31 @@ def retain_named_evidence(area, files_dir, gaps, *, product_paths=(), preserve_m
 
 
 def retain_workspace_evidence(area, destination, *, product_paths=(), previous=None):
-    """Retain one witnessed workspace generation, reusing it while unchanged. A failed copy leaves
-    its typed gap for the workspace patch, whose fallback also excludes private settings."""
+    """Retain a copy's evidence folder ONCE for a capture no run retains it for (a task's own workspace at
+    finalization, #2711): ``destination/files/`` byte-exact through ``retain_named_evidence``, beside a
+    ``summary.json`` carrying the folder's witness (``named_evidence_witness``: its stat identity, so an
+    unchanged generation is reused, never recopied). ``previous`` is the last published summary of the same
+    workspace: an unchanged folder (same witness, files still there) is not copied again and that summary
+    stands, never a second copy; a changed one replaces this capture's own earlier generation whole. A
+    Storage release that protects the previous generation's bytes, or this destination, raises before any
+    copy: already released bytes are never republished. A raised copier, or a folder that moved during the
+    copy, leaves no partial files and a ``capture_failed`` summary: the caller then keeps the folder's files
+    in its own capture, so the bytes are never zero copies either."""
+    from ouroboros.payload_release_state import states_under
+
     destination = pathlib.Path(destination)
     witness = named_evidence_witness(area)
-    if (isinstance(previous, dict) and previous.get("status") == "retained" and witness
-            and previous.get("witness") == witness and pathlib.Path(str(previous.get("evidence_dir") or "")).is_dir()):
-        return previous
+    if isinstance(previous, dict) and previous.get("evidence_dir"):
+        summary = said_released(previous)
+        if summary.get("reason"):
+            raise OSError(summary["reason"])
+        if (previous.get("status") == "retained" and witness and previous.get("witness") == witness
+                and pathlib.Path(previous["evidence_dir"]).is_dir()):
+            return summary
+        if summary.get("released"):
+            raise OSError("a Storage choice protects the previous evidence generation")
+    if states_under(destination, include_retained=True):
+        raise OSError("a Storage choice protects this evidence generation")
     staging = destination.parent / f".{destination.name}-{uuid.uuid4().hex}.pending"
     gaps = []
     try:
@@ -278,16 +296,46 @@ def retain_workspace_evidence(area, destination, *, product_paths=(), previous=N
     summary = {"status": "retained", "files": files, "retained_bytes": sum(f["size"] for f in files), "gaps": gaps, "witness": witness,
                "evidence_dir": str(destination), "summary_path": str(destination / "summary.json")}
     atomic_write_json(staging / "summary.json", summary)
-    if destination.exists():  # only this capture's own earlier generation of the same workspace
-        shutil.rmtree(destination, ignore_errors=True)
-    staging.rename(destination)
+    try:
+        # The task finalizer holds the canonical custody lock across this replacement.
+        if destination.exists():
+            shutil.rmtree(destination)
+        staging.rename(destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
     return summary
+
+
+def said_released(summary, *, directory=None):
+    """Project one retained generation from its addressed state. An uncertain read exposes no stale file
+    refs and is never an input witness or a custody receipt. The immutable source summary stays intact."""
+    from ouroboros.payload_release_state import KEY, PublicationReleases, states_under
+
+    base = directory or summary.get("evidence_dir")
+    if not base:
+        return summary
+    try:
+        states = states_under(base)
+        if any(receipt is None for receipt in states.values()):
+            return {"status": "partial", "reason": "payload_release_pending", "files": []}
+        if not states:
+            return summary
+        names = PublicationReleases({KEY: {"released": states}}, pathlib.Path(base))
+        kept = [row for row in summary.get("files") or () if names.address(f"files/{_file_path(row)}") not in states]
+    except Exception as exc:
+        return {"status": "partial", "reason": "release_state_unavailable", "error": type(exc).__name__, "files": []}
+    return {**summary, "files": kept, "released": sorted(states)}
+
+
+def _file_path(row):
+    return str(row.get("path") or row.get("relpath") or "") if isinstance(row, dict) else str(row or "")
 
 
 def published_workspace_evidence(result):
     """The last published summary of a task workspace's retained evidence folder (its ``named_evidence_manifest``
-    artifact row), so a later finalization copies an unchanged folder no second time; None when there is none or
-    it cannot be read."""
+    artifact row), so a later finalization reuses an unchanged folder. An unreadable summary still supplies
+    its published directory for the Storage check. No manifest row yields None."""
     row = next((item for item in reversed(result.get("artifacts") or [])
                 if isinstance(item, dict) and item.get("kind") == "named_evidence_manifest" and item.get("path")), None)
     if row is None:
@@ -295,8 +343,9 @@ def published_workspace_evidence(result):
     try:
         saved = json.loads(pathlib.Path(str(row["path"])).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
-    return saved if isinstance(saved, dict) else None
+        saved = None
+    # The published row still identifies the prior directory. Check its Storage choice before a recapture.
+    return {**(saved if isinstance(saved, dict) else {}), "evidence_dir": str(pathlib.Path(row["path"]).parent)}
 
 
 def saved_named_evidence(root, entry, *, observe=True):
@@ -311,6 +360,9 @@ def saved_named_evidence(root, entry, *, observe=True):
         saved = {}
     if not isinstance(saved, dict):
         saved = {}
+    view = said_released(saved, directory=path.parent)
+    if view.get("reason") or (not saved and view.get("released")):
+        return path, view if view.get("reason") else {"status": "partial", "reason": "released_summary_unavailable", "files": []}
     if observe and not saved and entry.named_evidence and entry.named_evidence.get("status") != "unreadable":
         # A consumer discovered a lost receipt, a new physical fact. It requests no
         # recapture itself; the body's ordinary due rule sees the changed custody.
@@ -318,10 +370,10 @@ def saved_named_evidence(root, entry, *, observe=True):
         custody.emit(root, custody.NAMED_EVIDENCE_RETAINED,
                      {"run_id": entry.run_id, "task_id": entry.task_id, "outcome": outcome})
         entry.named_evidence = outcome
-    files = saved.get("files")
+    files = view.get("files")
     if isinstance(files, list) and all(isinstance(f, dict) and type(f.get("size")) is int for f in files):
-        saved["retained_bytes"] = sum(f["size"] for f in files)
-    return path, saved
+        view["retained_bytes"] = sum(f["size"] for f in files)
+    return path, view
 
 
 def prune_abandoned_generations(home):
@@ -345,12 +397,31 @@ def prune_abandoned_generations(home):
 
 
 def _publish(root, entry, name, summary):
+    """The custody receipt of the generation NAME as it stands: ``released`` counts the files the owner released
+    from it in Storage (``said_released``), so a reuse never re-asserts them retained."""
     outcome = {"directory": name, "status": summary["status"], "inputs": summary["inputs"],
-               "retry": summary.get("retry", "")}
+               "retry": summary.get("retry", ""), **({"released": len(summary["released"])} if summary.get("released") else {})}
     if entry.named_evidence != outcome and not custody.emit(root, custody.NAMED_EVIDENCE_RETAINED,
             {"run_id": entry.run_id, "task_id": entry.task_id, "outcome": outcome}):
         raise OSError("named-evidence receipt publication failed")
     entry.named_evidence = outcome
+
+
+def publish_saved(root, entry, summary, folder):
+    """Re-read the generation under task custody immediately before publishing its named refs."""
+    from ouroboros.payload_release_state import publication_lock
+    from ouroboros.task_custody import CustodyBusy
+
+    try:
+        with publication_lock(folder) as locked:
+            if not locked:
+                raise CustodyBusy("custody_busy")
+            view = said_released(summary, directory=folder)
+            if not view.get("reason"):
+                _publish(root, entry, folder.name, view)
+            return view
+    except CustodyBusy as exc:
+        return {"status": "partial", "reason": "release_state_unavailable", "error": str(exc), "files": []}
 
 
 def _selection(entry, area, whole):
@@ -376,12 +447,22 @@ def retain_named(root, entry, *, whole=False, recapture=False, reread=False, pub
     No BodyRuntime tick calls the witness walker. A new terminal observation, explicit
     recapture, or this foreground retention boundary is what observes changed sources.
     """
+    from ouroboros.payload_release_state import publication_lock
+    from ouroboros.task_custody import CustodyBusy
+
     root = pathlib.Path(root).resolve()
     home = custody.delegated_capture_dir(root, entry.task_id, custody.capture_key(entry))
     previous, known = saved_named_evidence(root, entry, observe=publish)
     area = pathlib.Path(str(entry.execution_root or ""))
-    if reread or not entry.execution_root or not area.is_dir():
+    if known.get("reason") or reread or not entry.execution_root or not area.is_dir():
         return known or {"status": "copy_missing", "files": [], "gaps": []}
+    if known.get("released"):
+        witness_now = named_evidence_witness(area)
+        if not witness_now:
+            return {**known, "status": "partial", "reason": "released_generation_unreadable"}
+        if (known.get("inputs") or {}).get("witness") != witness_now:
+            return {**known, "status": "partial", "reason": "released_generation_changed"}
+        return publish_saved(root, entry, known, previous.parent) if publish else known
     source = {"policy": POLICY, "limit_bytes": None,
               "whole": whole, "baseline_sha": entry.baseline_sha,
               "terminal_sha": entry.terminal_source.get("sha256"), "invocation_id": entry.invocation_id,
@@ -393,10 +474,8 @@ def retain_named(root, entry, *, whole=False, recapture=False, reread=False, pub
         source["product_selection"] = hashlib.sha256(json.dumps(sorted(products)).encode()).hexdigest()
     except Exception as exc:
         error = exc
-    if not recapture and error is None and known.get("inputs") == source:
-        if publish:
-            _publish(root, entry, previous.parent.name, known)
-        return known
+    if not recapture and error is None and source["witness"] and known.get("inputs") == source:
+        return publish_saved(root, entry, known, previous.parent) if publish else known
     private_directory(home, root)
     prune_abandoned_generations(home)
     token = uuid.uuid4().hex
@@ -429,10 +508,18 @@ def retain_named(root, entry, *, whole=False, recapture=False, reread=False, pub
         summary_read={"root": "artifact_store", "path": f"delegated_runs/{home.name}/{name}/summary.json"})
     try:
         atomic_write_json(staging / "summary.json", summary)
-        staging.rename(final)  # only a never-published, unique destination
-        if publish:
-            _publish(root, entry, name, summary)
+        with publication_lock(final) as locked:
+            if not locked:
+                return {"status": "partial", "reason": "release_state_unavailable", "error": "custody_busy", "files": []}
+            _, latest = saved_named_evidence(root, entry, observe=False)
+            if latest.get("reason") or latest.get("released"):
+                return latest
+            staging.rename(final)  # only a never-published, unique destination
+            if publish:
+                _publish(root, entry, name, summary)
         return summary
+    except CustodyBusy as exc:
+        return {"status": "partial", "reason": "release_state_unavailable", "error": str(exc), "files": []}
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)

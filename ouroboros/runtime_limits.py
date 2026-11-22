@@ -370,12 +370,13 @@ REVIEW_GOVERNANCE_INLINE_SHARE = 0.20
 MAX_ACTIVE_SUBAGENTS_HARD_CAP, MAX_SUBAGENT_DEPTH_HARD_CAP = 500, 10
 
 
-def get_max_active_subagents_per_root() -> int:
-    return _bounded_positive_int_setting(
-        "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
-        default=int(SETTINGS_DEFAULTS["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"]),
-        hard_max=MAX_ACTIVE_SUBAGENTS_HARD_CAP,
-    )
+def get_max_active_subagents_per_root() -> Optional[int]:
+    """The owner's optional number of one root's acting subagents, read live at every admission: None is no number
+    (how many to call is the mind's; the pool's memory admission and the hard cap still bound the tree); a typo reads
+    finite, never as no number (``settings_scales.optional_bound_value``); above the hard cap it reads as the cap."""
+    value = optional_bound_value("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
+                                 runtime_setting("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"))
+    return None if value is None else min(value, MAX_ACTIVE_SUBAGENTS_HARD_CAP)
 
 
 def get_max_subagent_depth() -> int:

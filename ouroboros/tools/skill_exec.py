@@ -613,7 +613,7 @@ def _skill_tool_preflight(
         return None
     return (
         "⚠️ SKILLS_UNAVAILABLE: No skills are discoverable. Point "
-        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Skills → "
+        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Extensions → "
         "Sources, or install skills into the data plane."
     )
 
@@ -1012,7 +1012,7 @@ def _grant_refusal(skill_name: str, grants: Dict[str, Any]) -> str:
     return (
         "⚠️ SKILL_EXEC_GRANT_REQUIRED: skill "
         f"{skill_name!r} requests {' and '.join(requested)}. "
-        "Its review gate already permits these bytes; grant them from the Skills UI before execution."
+        "Its review gate already permits these bytes; grant them on its card in Extensions → Skills before execution."
         + (f" {cause}" if cause else "")
     )
 
@@ -1055,7 +1055,7 @@ def _handle_skill_exec(
     if not loaded.enabled:
         return (
             f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} is disabled. "
-            "Enable it after review in the Skills UI (Phase 5) or via "
+            "Enable it after review in Extensions → Skills or via "
             "the dedicated enable tool."
         )
     conflict = skill_conflict_status(loaded, discover_skills(drive_root))

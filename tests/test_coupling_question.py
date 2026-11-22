@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import json
 import pathlib
+import time
 
 import pytest
 
@@ -393,15 +394,17 @@ def _review_catalog(*routes) -> str:
 
 @pytest.fixture
 def offline_tariffs(monkeypatch):
-    """The live tariff read is the only stub — pool builder, admission and reservation
-    math stay real; ``_UNPRICED`` has no tariff (unknown, never zero). Yields the reads."""
+    """Only the priced seat has a fresh endpoint tariff. Record any unexpected fetch."""
     import ouroboros.pricing as pricing
 
     fetched = []
-    for name in ("_cached_pricing", "_pricing_fetched_at", "_pricing_retry_after"):
-        monkeypatch.setattr(pricing, name, {})
-    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda provider, model="": fetched.append((provider, model))
-                        or ({_PRICED: (1.0, 0.1, None, 4.0)} if (provider, model) == ("openrouter", "") else {}))
+    key = ("openrouter", _PRICED)
+    tariff = pricing.PricingSchedule((1.0, 0.1, None, 4.0), source={"processing": "standard"})
+    monkeypatch.setattr(pricing, "_cached_pricing", {key: {"vendor": tariff}})
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", {key: time.time()})
+    monkeypatch.setattr(pricing, "_pricing_retry_after", {})
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *args: fetched.append(args) or {})
+    monkeypatch.setenv("USE_LOCAL_MAIN", "0")
     monkeypatch.delenv("OUROBOROS_REVIEW_MAX_TOKENS", raising=False)
     monkeypatch.setenv("OUROBOROS_MODEL", _PRICED)  # the Main seat of a pool with no marked row
     return fetched
@@ -411,6 +414,7 @@ def offline_tariffs(monkeypatch):
     ((_API, _API), [_PRICED, _PRICED], 2 * _SEAT_USD, 0, 0),
     ((_SESSION, _SESSION), [], None, 0, 2),
     ((_API, _API_UNPRICED, _SESSION), [_PRICED, _UNPRICED], _SEAT_USD, 1, 1),
+    ((_API_UNPRICED, _SESSION), [_UNPRICED], None, 1, 1),
     ((), [_PRICED], _SEAT_USD, 0, 0),  # no marked row: the Main model reviews alone
 ])
 def test_the_managed_update_estimate_prices_real_api_slots_and_counts_sessions(
@@ -427,10 +431,10 @@ def test_the_managed_update_estimate_prices_real_api_slots_and_counts_sessions(
     assert event == {"type": "managed_update_wave_estimate", "estimated_wave_usd": usd,
                      "exceeds_known_remaining": False, "unpriced_slots": unpriced, "session_slots": sessions,
                      "remaining_usd": 10.0}
-    assert offline_tariffs == ([("openrouter", "")] if priced else [])
     if usd:
         event = managed_update_wave_estimate(usd / 2)
         assert event["exceeds_known_remaining"] is True and "fits" not in event, "a disclosure, never a verdict"
+    assert offline_tariffs == []
 
 
 def test_an_empty_composed_wave_prices_nothing(offline_tariffs):

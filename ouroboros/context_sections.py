@@ -286,7 +286,7 @@ def _installed_skills_section(env: Any, skills: Optional[List[Any]]) -> HostSect
         lines.append("author_accepted=true: Current payload accepted by its author; "
                      "reviewer evidence remains at its original hash.")
     operative = list(lines)
-    count = 0
+    listed = False
     for skill in summary.get("skills") or []:
         if not isinstance(skill, dict) or not skill.get("enabled") or not skill.get("executable_review"):
             continue
@@ -340,16 +340,19 @@ def _installed_skills_section(env: Any, skills: Optional[List[Any]]) -> HostSect
             if token_effect:
                 lines.append(f"  Token effect: {token_effect}")
         if surfaces:
-            shown, more = surfaces[:8], len(surfaces) - min(len(surfaces), 8)
-            # Eight names fit the legend; a silent cut read as the whole set (the 27.10 call enabled
-            # 7 of 24 desktop tools and told the owner the rest did not exist).
-            lines.append(f"  Tools: {', '.join(shown)}" + (
-                f"; and {more} more: list_available_tools(namespace={name!r}) names them all" if more else ""))
+            # Every name, sorted so registration order never moves these cached bytes: a cut list read as the
+            # whole set (the 27.10 call enabled 7 of 24 desktop tools and told the owner the rest did not exist).
+            lines.append(f"  Tools: {', '.join(sorted(surfaces))}")
+            listed = True
         elif skill.get("runnable_via_skill_exec"):
             lines.append("  Tools: skill_exec")
-        count += 1
     _append_unadmitted(lines, operative, summary.get("skills") or [], env.drive_root, _field, off_state, skill_status,
                        unlisted_skill_sources(env.drive_root))
+    if listed:  # a skill_exec line names no registered tool, and its skill's name loads nothing
+        lines.insert(1, 'A "Tools" line that lists a skill\'s registered tools names all of them; '
+                        'enable_tools("<skill name>") loads them in one call where their schemas are not in the '
+                        "request yet.")
+        operative.insert(1, 'enable_tools("<skill name>") loads all tools a skill registers in one call.')
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
 
 

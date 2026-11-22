@@ -324,19 +324,6 @@ def _note_open_scratch(data_root: Any, task_id: str, key: str, owner: pathlib.Pa
         logging.getLogger(__name__).warning("Open session scratch note not written: %s", note, exc_info=True)
 
 
-def _runs_still_open(root: pathlib.Path, task_id: str) -> bool:
-    """Whether delegated custody still holds a run of the task that has not settled, or a start
-    request with no bound run: a run spared by an undeliberate end of its task keeps working
-    (``delegate_custody_reconcile``), possibly in this scratch. An unreadable store counts as open."""
-    from ouroboros.delegate_custody_current import task_snapshot
-
-    try:
-        held = task_snapshot(root, task_id)
-    except Exception:
-        return True
-    return bool(held["pending"]) or any(not run.settled for run in held["runs"].values())
-
-
 _RELEASE_MARK = "+scratch-"  # '+' is in no task id: a released record's entry is never a moved drive's
 
 
@@ -401,22 +388,45 @@ def _publish_released(root: pathlib.Path, staged: pathlib.Path) -> None:
     os.replace(staged, root / _TRASH_DIR / staged.name)
 
 
+HANDOFF_RECORD = "handoff.json"
+
+
+def handoff_owner_unproven(record: pathlib.Path, task: str) -> bool:
+    """A direct handoff needs its stage's binding; a moved drive retains its layout proof."""
+    from ouroboros.session_scratch import _scratch_record
+
+    holder = record.parents[2]
+    entry = holder.parent if holder.name == "data" else holder
+    if _RELEASE_MARK not in entry.name:
+        return False
+    with contextlib.suppress(OSError, ValueError):
+        return _scratch_record(record.with_name(HANDOFF_RECORD)) != {"task_id": task}
+    return True
+
+
 def _retire_record(root: pathlib.Path, task_id: str, owner: pathlib.Path) -> bool:
     """Hand OWNER's record to the custody trash, then drop OWNER; False when no folder was there. The
-    record file itself moves, so it is in exactly one place at every step: the task's drive (the owner's
-    Keep still counts the scratch), private staging (a pass interrupted there is published by the next
-    one) or the trash. A move that fails leaves no staged entry behind: the record stays where it was."""
+    record file itself moves through the drive, private staging (published by the next pass after an
+    interruption), then trash, byte for byte. Stage its source task's binding beside it before moving it.
+    A child's Keep still counts an unaccepted handoff. Callers serialize relocation with that child's
+    custody lock. A failed binding or move leaves the record where it was."""
     from ouroboros.force_remove import force_rmtree
     from ouroboros.session_scratch import has_record
     from ouroboros.task_custody import _STAGING_DIR
+    from ouroboros.utils import atomic_write_json, fsync_folder
 
     if not _plain_directory(owner):
         return False
     if has_record(owner):  # else an uncompleted preparation: nothing to release
+        record = owner / "scratch.json"
         staged = root / _STAGING_DIR / f"{task_id}{_RELEASE_MARK}{uuid.uuid4().hex[:12]}"
-        (staged / SESSION_SCRATCH_DIRNAME / owner.name).mkdir(parents=True)
+        target = staged / SESSION_SCRATCH_DIRNAME / owner.name
+        target.mkdir(parents=True)
         try:
-            os.replace(owner / "scratch.json", staged / SESSION_SCRATCH_DIRNAME / owner.name / "scratch.json")
+            if not owner.name.startswith(SEAT_SCRATCH_KEY_PREFIX):
+                atomic_write_json(target / HANDOFF_RECORD, {"task_id": task_id}, fsync=True)
+                fsync_folder(target)
+            os.replace(record, target / "scratch.json")
         except OSError:
             force_rmtree(staged)  # it holds no record yet
             raise
@@ -431,7 +441,8 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
     A same-task start reuses its scratch while the task lives (``_session_scratch``), so the scratch
     waits for its task, not for its drive's retention term: terminal, not live by the supervisor's
     probe ``live``, no lineage process (``subagent_worktrees._task_proven_over``), no delegated run
-    still open (``_runs_still_open``) and not kept by the owner (``owner_keep.gate``, the recorded facts
+    or pending start still open (``session_scratch.task_hold``), no recorded parent line still waiting on its current result
+    (``session_scratch.parent_hold``) and not kept by the owner (``owner_keep.gate``, the recorded facts
     read again inside). A seat-keyed record (``SEAT_SCRATCH_KEY_PREFIX``, written into a task drive
     before seats held their own records, the Skills-page and marketplace pseudo task ids included) is
     judged by its seat instead (``session_scratch.seat_hold``): it goes once the seat's copy is gone,
@@ -439,26 +450,41 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
     (``_retire_record``), whose remover deletes the scratch in the maintenance child, off the serving
     process (``session_scratch.release_session_scratch``). A note whose record already retired with its
     drive, or that names no record of its task, is dropped; every record kept is reported as a typed
-    hold with its reason and since when (``holds``: ``session_scratch.task_hold`` words, ``seat_open``,
-    ``owner_keep``, ``busy``, ``task_not_terminal``, ``kept_service_capture_owed``: a kept service's declared
-    outputs in this scratch still owe their capture, read once for the pass); a busy custody lock or a failed
-    step keeps it for the next pass. Links and junctions are never followed."""
+    hold with its reason and since when (``holds``: ``session_scratch.task_hold`` and ``parent_hold`` words,
+    ``seat_open``, ``owner_keep``, ``busy``, ``task_not_terminal``, ``kept_service_capture_owed``: a kept
+    service's declared outputs in this scratch still owe their capture, read once for the pass); a busy
+    custody lock or a failed step keeps it for the next pass. Links and junctions are never followed."""
     from ouroboros.body_candidate import _recorded_terminal
     from ouroboros.owner_keep import gate
-    from ouroboros.session_scratch import aggregate_holds, scratch_capture_owed, seat_hold, task_hold
-    from ouroboros.task_custody import _STAGING_DIR
+    from ouroboros.payload_release import recover
+    from ouroboros.session_scratch import (
+        aggregate_holds,
+        child_parent,
+        entry_task_id,
+        parent_hold,
+        scratch_capture_owed,
+        seat_hold,
+        task_hold,
+    )
+    from ouroboros.task_custody import _STAGING_DIR, task_custody_lock
+    from ouroboros.task_reads import TaskReads
     from ouroboros.task_results import validate_task_id
     from ouroboros.tools.kept_service_outputs import owed_declarations
 
     root = pathlib.Path(data_root)
-    report: Dict[str, Any] = {"released": [], "holds": [], "errors": []}
+    report: Dict[str, Any] = {"released": [], "holds": [], "errors": list(recover(root)["errors"])}  # an owner's release a stop interrupted: recorded, then published
     held: List[Tuple[str, str, Any]] = []
+    reads, members = TaskReads(root), {}
     owed = owed_declarations(root)
     with contextlib.suppress(OSError):  # one pass at a time (the custody latch): staged entries are a stopped pass's
         for staged in sorted((root / _STAGING_DIR).glob(f"*{_RELEASE_MARK}*")):
             try:
-                _publish_released(root, staged)
-            except OSError as exc:
+                task = entry_task_id(staged.name)
+                lock = task_custody_lock(root, task, timeout_sec=0) if child_parent(root, task) else contextlib.nullcontext(True)
+                with lock as locked:
+                    if locked:
+                        _publish_released(root, staged)
+            except Exception as exc:
                 report["errors"].append(f"{staged}: {type(exc).__name__}: {exc}")
     try:
         folders = [] if (root / OPEN_SCRATCH_DIR).is_symlink() else sorted((root / OPEN_SCRATCH_DIR).iterdir())
@@ -483,7 +509,9 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
             continue
         notes = [note for note in sorted(folder.glob("*.json")) if not note.is_symlink() and note.is_file()]
         seats = {note for note in notes if note.stem.startswith(SEAT_SCRATCH_KEY_PREFIX)}
-        hold = task_hold(root, task_id, live) if len(seats) < len(notes) else ""  # the task's proof, read once
+        # The task's proof, then its parent line's (``parent_hold``), read once and outside the keep gate.
+        hold = (task_hold(root, task_id, live) or parent_hold(
+            root, task_id, live, reads=reads, members=members)) if len(seats) < len(notes) else ""
         with gate(root, task_id, timeout_sec=0) as kept:
             for note in notes:
                 try:

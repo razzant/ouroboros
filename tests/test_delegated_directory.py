@@ -185,11 +185,16 @@ def test_a_git_workspace_treats_the_named_default_as_omission_and_still_refuses_
     for index, geometry in enumerate((
         {"directory_strategy": "copy", "scope_paths": ["."]},
         {"scope_paths": ["src"]},
+        {"directory_strategy": "snapshot"},  # a value outside the defaults, with no scope_paths passed
     )):
         refused, engine = _git_workspace_start(tmp_path, monkeypatch, f"geometry-{index}", **geometry)
         assert refused["status"] == "refused", geometry
         assert refused["reason"] == "directory_execution_unavailable"
         assert "Git workspaces keep their snapshot contract" in refused["detail"]
+        # The repair names exactly the options in the way, never a default the call did not ask for.
+        assert refused["detail"].endswith(("Omit directory_strategy and scope_paths for this Git workspace.",
+                                           "Omit scope_paths for this Git workspace.",
+                                           "Omit directory_strategy for this Git workspace.")[index])
         assert refused["definitely_unrun"] is True
         assert engine.posts == []
 

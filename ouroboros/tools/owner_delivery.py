@@ -52,6 +52,8 @@ import logging
 import threading
 from typing import Any, Dict
 
+from ouroboros.utils import path_for_prose
+
 log = logging.getLogger(__name__)
 
 _STICKY_ATTR = "_owner_delivery_sticky_deferred"
@@ -374,8 +376,9 @@ def show_record(ctx: Any, mode: str, material: Any) -> str:
     items = [item for item in pieces if item.get("sha256")]
     if not items:
         return "Host fact: card media bytes: unknown." if unresolved else ""
-    found = _reviews_naming(ctx, {str(item["sha256"]): str(item.get("name") or "") for item in items})
-    shown = "; ".join(f"{item.get('name')}, sha256 {str(item['sha256'])[:12]}, {item.get('size')} B" for item in items)
+    named = [(path_for_prose(str(item.get("name") or "")), str(item["sha256"]), item.get("size")) for item in items]
+    found = _reviews_naming(ctx, {digest: name for name, digest, _size in named})
+    shown = "; ".join(f"{name}, sha256 {digest[:12]}, {size} B" for name, digest, size in named)
     reviews = "unknown" if found is None else "; ".join(found) or "none in this task's recent records"
     return (f"Host fact: {'accepted' if mode == 'live' else 'queued'} for delivery: {shown}. "
             f"Reviews on record naming these bytes: {reviews}." + (" Other card media bytes: unknown." if unresolved else ""))

@@ -136,6 +136,41 @@ def test_empty_and_legacy_observations_remain_unknown_without_an_extra_artifact(
     assert "not evidence that no action occurred" in legacy
 
 
+def test_sealed_prompt_carries_byte_names_through_a_utf8_request_and_ordinary_names_unchanged():
+    """A POSIX byte name in the manifest or an observation reaches the synthesis prompt as an exact JSON
+    escape, so the provider request encodes; the sealed package keeps what was stored."""
+    import httpx
+
+    name = b"report-\xff.txt".decode("utf-8", "surrogateescape")
+    literal, ordinary = r"report-\udcff.txt", "отчёт 雪.txt"
+
+    def sealed_for(names):
+        observations = {"trace_available": True, "delivery_results": [
+            {"tool": "send_file", "status": "error", "result": f"Not delivered: {item}"} for item in names]}
+        row = {"artifacts": [{"name": item, "size": 3, "status": "ready"} for item in names],
+               "completion_observations": observations}
+        sealed = build_sealed_final_package(row, "Done.")
+        assert [item["name"] for item in sealed["artifact_manifest"]] == names
+        assert sealed["completion_observations"] == observations
+        return sealed, sealed_final_prompt_section(sealed)
+
+    sealed, prompt = sealed_for([name, literal, ordinary])
+    # The strict UTF-8 JSON body a provider client builds from the prompt.
+    httpx.Request("POST", "https://provider.invalid/v1/chat/completions",
+                  json={"messages": [{"role": "user", "content": prompt}]})
+    manifest, observed = prompt.split("Artifact store manifest (task_results/artifacts/<task_id>/):\n", 1)[1].split(
+        "\nTask completion observations:\n", 1)
+    assert manifest == f'- "report-\\udcff.txt" (3 bytes)\n- {literal} (3 bytes)\n- {ordinary} (3 bytes)'
+    assert json.loads(manifest.splitlines()[0][2:-10]).encode("utf-8", "surrogateescape") == b"report-\xff.txt"
+    assert json.loads(observed) == sealed["completion_observations"]
+
+    # Without a byte name the section is the text it always was.
+    sealed, prompt = sealed_for([literal, ordinary])
+    assert prompt.endswith(
+        f"- {literal} (3 bytes)\n- {ordinary} (3 bytes)\nTask completion observations:\n"
+        + json.dumps(sealed["completion_observations"], ensure_ascii=False, default=str) + "\n\n")
+
+
 def test_facts_row_buys_no_packet_and_persists_no_narrative(tmp_path, monkeypatch):
     """Owner decision 2=A: the paid task narrative is gone. The host facts row
     keeps the exact tool census for history with empty text, custodies no

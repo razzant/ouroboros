@@ -478,7 +478,9 @@ def actor_first_unresolved_fact(
     children is disclosed as an incomplete execution, never a clean one
     (children remain visible in the fact's evidence fields). Unreadable
     receipt evidence stays ``unknown`` rather than permission to finalize
-    cleanly.
+    cleanly. A bound first interruption — or a first success whose work-order
+    coverage stayed unverified — beside a settled success is an informational
+    witness, not an unresolved execution.
     """
     bootstrap = getattr(ctx, "_configured_actor_bootstrap", None)
     if not isinstance(bootstrap, dict):
@@ -523,6 +525,11 @@ def actor_first_unresolved_fact(
                     "delegated_obligations": obligations}
         succeeded = int(evidence.get("delegated_runs_succeeded") or 0)
         if succeeded:
+            run_id = initial.get("run_id")
+            if (initial.get("state") in {"interrupted", "succeeded_source_unverified"}
+                    and isinstance(run_id, str) and run_id.strip()):
+                return {"status": "unknown", "reason": "initial_execution_display_only",
+                        "initial_execution": initial, "delegated_runs_succeeded": succeeded}
             return None
         started = int(evidence.get("delegated_runs_started") or 0)
         settled = int(evidence.get("delegated_runs_settled") or 0)
@@ -546,6 +553,8 @@ def actor_first_unresolved_fact(
             "delegated_runs_failed": int(evidence.get("delegated_runs_failed") or 0),
             "delegated_run_failure_states": failure_states[:12],
             "route_available": bootstrap.get("route_available"),
+            # The FIRST attempt's own typed fact, already read above; the readers state it beside the aggregate.
+            **({"initial_execution": initial} if initial else {}),
         }
         if len(failure_states) > 12:
             # Bounded but DISCLOSED (P1): never a silent truncation.
@@ -683,6 +692,9 @@ def actor_first_terminal_projection(
             # fences a second physical start on read, but a self-reported
             # completion with zero runs is unverifiable authority: project it
             # as UNKNOWN with disclosure (owner 2026-08-28), never as clean.
+            # The validated receipt's no-physical-start fact is still proof:
+            # the first-attempt twin (tool_error_words.first_attempt_cause_key)
+            # reads exactly this typed spelling as "did not start".
             fact = {
                 "status": "unknown",
                 "reason": "historical_zero_run_complete",

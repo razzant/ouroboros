@@ -20,7 +20,7 @@
 import { tr } from './i18n.js';
 import { CARD_RENDER_CONTEXT } from './card_components.js';
 import { CARD_APP_SANDBOX, INLINE_FRAME_FLOOR, cardAppSrcdoc, cardThemeTokens } from './card_frames.js';
-import { renderChartDataTable } from './widget_chart.js';
+import { renderDrawnChartDataTable } from './widget_chart.js';
 import { renderComponent, syncWidgetCharts } from './widget_render.js';
 import { WIDGET_FRAME_MAX_HEIGHT } from './widget_module.js';
 
@@ -363,13 +363,9 @@ export function answerPage(content, { doc = globalThis.document, win = globalThi
         const box = drawn.getBoundingClientRect?.();
         if (box?.width) { picture.width = Math.round(box.width); picture.height = Math.round(box.height); }
         canvas.replaceWith(picture);
-        const data = chart?.data;
-        if (Array.isArray(data?.datasets) && data.datasets.length) {
+        if (chart?.data?.datasets?.length) {
             const table = page.createElement('div');
-            table.innerHTML = renderChartDataTable({ type: chart?.config?.type, data: {
-                labels: (data.labels || []).map((label) => String(label ?? '')),
-                datasets: data.datasets.map((set) => ({ label: String(set?.label ?? ''), data: Array.isArray(set?.data) ? set.data : [] })) } },
-            tr('share.chart_label', 'chart'), false);
+            table.innerHTML = renderDrawnChartDataTable(chart, tr('share.chart_label', 'chart'));
             picture.after(...table.childNodes);
         }
     });

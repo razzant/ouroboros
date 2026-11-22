@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import re
+import stat
 import time
 from typing import Any, Dict, List, NamedTuple, Optional
 
@@ -25,6 +26,7 @@ except ImportError:  # pragma: no cover - Python 3.10 compatibility.
     from typing_extensions import TypedDict
 
 from ouroboros import process_custody as pc
+from ouroboros.utils import file_identity
 
 log = logging.getLogger(__name__)
 
@@ -90,17 +92,20 @@ def read_custody(drive_root: Any, *, strict: bool = True, every_drive: bool = Fa
     return LaunchCustody(readable, rows, copies, unknown, blind, previous, records)
 
 
-def unsettled_rows(drive_root: Any, owners: Any) -> List[tuple]:
+def unsettled_rows(drive_root: Any, owners: Any, *, gaps: Optional[List[str]] = None) -> List[tuple]:
     """What ``owners``' launches and older rows may still run: ``(row, "live" | "unknown")``. Read only, never a stop.
     Raises when the drive's ledger cannot be read, or when nothing else answers and a launch may exist that no row
-    attributes: unavailable is never "none"."""
+    attributes. A reader filtering by member needs both the named launches and any unattributed gap."""
     custody = read_custody(drive_root, every_drive=True)
     if not custody.readable:
         raise OSError("process_custody_unreadable")
     found = unsettled_selection(drive_root, [row for row in custody.rows if str(row.get("owner_task") or "") in owners],
                                 custody)
-    if custody.blind and not found:
-        raise OSError(f"process_custody_unknown: {custody.blind}")
+    if custody.blind:
+        if gaps is not None:
+            gaps.append(custody.blind)
+        elif not found:
+            raise OSError(f"process_custody_unknown: {custody.blind}")
     return found
 
 
@@ -242,10 +247,78 @@ def _log_address(path: str) -> str:
         return ""
 
 
-def _host_log(drive: pathlib.Path, task_id: str, name: str, executor: bool = False) -> str:
+def _ordinary(info, kind) -> bool:
+    return kind(info.st_mode) and not (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def service_log_directory(path: pathlib.Path) -> bool:
+    """Only a missing component is absence; a link, junction or unreadable folder is not."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not _ordinary(info, stat.S_ISDIR):
+        raise OSError("service log directory is not a plain directory")
+    return True
+
+
+def local_service_log_stamp(path: pathlib.Path) -> tuple:
+    info = path.lstat()
+    if not _ordinary(info, stat.S_ISREG):
+        raise OSError("service log is not a plain file")
+    return file_identity(info)
+
+
+def _local_log_path(drive, task_id, name, executor, launch="") -> pathlib.Path:
+    # '~' cannot occur in a service name: a launch's file cannot be another service's plain filename.
+    folder = drive / "services" / task_id
+    stem = f"{name}.~{launch.removeprefix('launch-')}" if launch else name
+    if executor:
+        return folder / f"{stem}.executor.log"
+    return folder / f"{stem}.log"
+
+
+def open_local_service_log(drive, task_id, name, scope_marker, *, keep_alive, executor=False):
+    """New kept launches always have their own recoverable path. Never open an earlier log for append."""
+    from ouroboros.process_census import launch_id
+
+    folder = drive / "services" / task_id
+    folder.mkdir(parents=True, exist_ok=True)
+    if not keep_alive:
+        path = _local_log_path(drive, task_id, name, executor)
+        try:
+            return path, path.open("xb")
+        except FileExistsError:
+            pass
+    if not (launch := launch_id(scope_marker)):
+        raise ValueError("local service log has no launch identity")
+    path = _local_log_path(drive, task_id, name, executor, launch)
+    return path, path.open("xb")
+
+
+def service_log_origin(path: pathlib.Path) -> tuple[str, str | None]:
+    name, _, nonce = path.stem.rpartition(".~")
+    nonce = nonce.removesuffix(".executor")
+    if name and re.fullmatch(r"[0-9a-f]{32}", nonce):
+        return name, f"launch-{nonce}"
+    return path.stem, None  # a task-owned legacy log need not have a proven individual launch id
+
+
+def _host_log(drive: pathlib.Path, task_id: str, name: str, executor: bool, launch: str, recorded: str) -> str:
     if not task_id or pathlib.Path(task_id).name != task_id or not name or pathlib.Path(name).name != name:
         return ""
-    return str(drive / "services" / task_id / f"{name}{'.executor' if executor else ''}.log")
+    folder = drive / "services" / task_id
+    # A legacy exact record still works; absence never lets a launch borrow an earlier writer's bare name.
+    path = pathlib.Path(recorded) if recorded else _local_log_path(drive, task_id, name, executor, launch)
+    if not launch.startswith("launch-") or path.parent != folder:
+        return ""
+    try:
+        if service_log_directory(folder.parent) and service_log_directory(folder):
+            local_service_log_stamp(path)
+            return str(path)
+    except OSError:
+        pass  # no path established; process custody and the stop's authority are separate
+    return ""
 
 
 def _durable_launch(stored: Dict[str, Any]) -> bool:
@@ -308,13 +381,14 @@ def _kept_selection(drive_root: Any) -> tuple:
         local = attached.get(key)
         if local is not None:
             entries.append({key_: value for key_, value in local.items() if key_ != "_stored"})
-        log_path = (str((local or {}).get("_stored", {}).get("backend_log_path") or "") if local
-                    else _host_log(drive, task_id, name))
+        is_executor = purpose.startswith("workspace_service:")
+        recorded = str((local or {}).get("_stored", {}).get("backend_log_path") or "")
+        log_path = _host_log(drive, task_id, name, is_executor, rid, recorded)
         found.append(({"launch_id": rid, "name": name, "task_id": task_id,
                        "state": "running" if states[id(row)] == "live" else "unknown",
                        "since": str(row.get("ts") or (local or {}).get("birth") or ""),
                        "address": _log_address(log_path) if log_path else "", "log_path": log_path,
-                       "backend": "local_executor" if local or purpose.startswith("workspace_service:") else "host",
+                       "backend": "local_executor" if local or is_executor else "host",
                        "pid": int(row.get("pid") or 0)}, entries))
     for record, stored in docker:
         if stored.get("executor_type") == "local":

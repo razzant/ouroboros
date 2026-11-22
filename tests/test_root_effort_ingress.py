@@ -49,24 +49,28 @@ def _supervisor_ctx(root, workers):
     )
 
 
-def _tool_ctx(root, sup_ctx, **metadata):
-    """A conversation turn whose control events reach the REAL supervisor handler."""
+OPENING = "please research this properly"  # the owner's words every start here answers; their message lives in room 7
+
+
+def _tool_ctx(root, sup_ctx, *, chat_id=7, **metadata):
+    """A conversation turn whose control events reach the REAL supervisor handler.
+    ``chat_id``: the room the turn answers in (the opening message stays in room 7)."""
     from ouroboros.project_dialogue import build_owner_message_ref
     from supervisor.events import _handle_promote_chat_to_task
 
-    words = "please research this properly"
     ref = build_owner_message_ref(chat_id=7, client_message_id="owner-msg-1", ts="2026-10-06T12:00:00+00:00",
-                                  text=words)
+                                  text=OPENING)
     return types.SimpleNamespace(
-        current_chat_id=7, drive_root=root, pending_events=[], task_id="owner-turn",
-        task_metadata={"origin_message_ref": ref, "origin_message_text": words, **metadata},
+        current_chat_id=chat_id, drive_root=root, pending_events=[], task_id="owner-turn",
+        task_metadata={"origin_message_ref": ref, "origin_message_text": OPENING, **metadata},
         event_queue=types.SimpleNamespace(put_nowait=lambda evt: _handle_promote_chat_to_task(evt, sup_ctx)),
     )
 
 
-def _promoted(tmp_path, monkeypatch, **promote_kwargs):
+def _promoted(tmp_path, monkeypatch, *, folder=None, chat_id=7, **promote_kwargs):
     """Promote through the tool, the event, the supervisor admission and its receipt.
-    A root Ouroboros creates itself takes an explicit effort in Cyber Pro only."""
+    A root Ouroboros creates itself takes an explicit effort in Cyber Pro only. ``folder``: an allowed
+    folder outside the data drive the start names (else it opts out of any folder); ``chat_id``: its room."""
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.control import _start_task
 
@@ -75,8 +79,8 @@ def _promoted(tmp_path, monkeypatch, **promote_kwargs):
     _q, _state, workers = _install_queue(tmp_path, monkeypatch)
     _pool_ready(monkeypatch, workers)
     sup = _supervisor_ctx(tmp_path, workers)
-    out = _start_task(_tool_ctx(tmp_path, sup), "Research the market", title="Market research",
-                                workspace="none",  **promote_kwargs)
+    out = _start_task(_tool_ctx(tmp_path, sup, chat_id=chat_id), "Research the market", title="Market research",
+                      **({"workspace": "none"} if folder is None else {"workspace_root": str(folder)}), **promote_kwargs)
     assert out.startswith("OK: task"), out
     [task] = workers.PENDING
     return task, load_task_result(tmp_path, task["id"]), workers
@@ -336,34 +340,113 @@ def test_a_followup_fires_its_explicit_effort_through_the_real_occurrence(tmp_pa
     assert _first_round(tmp_path, monkeypatch, fired[0])[0] == "xhigh"
 
 
-@pytest.mark.parametrize("effort", ["xhigh", None], ids=["explicit", "omitted"])
-def test_preworker_admission_keeps_effort_but_preserves_baseline_continue_refusal(tmp_path, monkeypatch, effort):
-    """A real admission row can outlive a worker that never wrote its start.
+BINDING = ("chat_id", "workspace_root", "workspace_mode", "memory_mode", "drive_root", "budget_drive_root")
 
-    Restart settles that row with the explicit effort intact, but the existing
-    Continue eligibility still refuses because no owner source was captured.
-    The test deliberately does not fabricate an origin or owner corpus.
-    """
+
+def test_a_promoted_receipt_keeps_the_admitted_room_folder_and_drive_before_any_worker_writes(
+        tmp_path, tmp_path_factory, monkeypatch):
+    """The scheduled receipt is the only durable row of a root no worker started. It names the room, the folder,
+    the drive and the authored title the admission itself set, verbatim, never the opening message's room (7) or
+    a default; the title is its own field beside ``suggested_name``."""
+    from ouroboros.headless import task_state_dir
+
+    folder = tmp_path_factory.mktemp("allowed-folder")  # outside the data drive and the system repo
+    task, row, _workers = _promoted(tmp_path, monkeypatch, folder=folder, chat_id=9)
+    assert row["status"] == "scheduled" and task["origin_message_ref"]["chat_id"] == 7
+    keys = ("title", *BINDING)
+    assert {key: row[key] for key in keys} == {key: task[key] for key in keys}
+    assert row["title"] == "Market research" and row["suggested_name"] == task["suggested_name"]
+    assert (row["chat_id"], row["workspace_root"], row["workspace_mode"], row["memory_mode"]) == (
+        9, str(folder.resolve()), "external", "forked")
+    assert (row["drive_root"], row["budget_drive_root"]) == (
+        str(task_state_dir(tmp_path, task["id"]) / "data"), str(tmp_path))
+
+
+def test_a_start_without_a_folder_keeps_its_room_and_records_no_folder_or_drive(tmp_path, monkeypatch):
+    task, row, _workers = _promoted(tmp_path, monkeypatch, chat_id=9)
+    assert row["chat_id"] == task["chat_id"] == 9
+    assert {key: row.get(key) for key in BINDING} == {key: task.get(key) for key in BINDING}
+    assert not any(row.get(key) for key in BINDING[1:])
+
+
+def _restarted_before_any_worker_write(tmp_path, tmp_path_factory, monkeypatch, **promote_kwargs):
+    """A start into an allowed folder, ended by the REAL owner Restart before its worker wrote anything."""
     from ouroboros.task_results import load_task_result
-    from supervisor.continuation_admission import admit_continuation
 
-    task, admission_row, workers = _promoted(
-        tmp_path, monkeypatch, **({"reasoning_effort": effort} if effort else {}))
-    assert admission_row["status"] == "scheduled" and admission_row.get("reasoning_effort") == effort
-    assert "origin_message_ref" not in admission_row and "owner_corpus" not in admission_row
+    folder = tmp_path_factory.mktemp("allowed-folder")
+    task, admission_row, workers = _promoted(tmp_path, monkeypatch, folder=folder, chat_id=9, **promote_kwargs)
+    assert admission_row["status"] == "scheduled"
     monkeypatch.setattr(workers, "WORKERS", {})
     _pool_events(workers, monkeypatch)
     workers.PENDING.clear()
     workers.RUNNING[task["id"]] = {"task": dict(task), "worker_id": 0, "attempt": 1}
     _restart_door(tmp_path, monkeypatch, workers)
     interrupted = load_task_result(tmp_path, task["id"])
-    assert interrupted["status"] == "cancelled"
-    assert interrupted["cancel_origin"]["source"] == "owner_restart"
-    assert interrupted.get("reasoning_effort") == effort
-    assert "origin_message_ref" not in interrupted and "owner_corpus" not in interrupted
-    outcome = admit_continuation(task["id"], action_nonce="preworker-continue-0001")
+    assert interrupted["status"] == "cancelled" and interrupted["cancel_origin"]["source"] == "owner_restart"
+    return task, admission_row, interrupted, folder, workers
+
+
+@pytest.mark.parametrize("effort", ["xhigh", None], ids=["explicit", "omitted"])
+def test_preworker_admission_keeps_effort_and_is_continued_where_it_was_admitted(
+        tmp_path, tmp_path_factory, monkeypatch, effort):
+    """A real admission row can outlive a worker that never wrote its start.
+
+    The real Restart settles that row with the explicit effort intact; the owner's explicit Continue then admits
+    one successor from the receipt alone: the room it was admitted to, the allowed folder, its own fork of the
+    drive (never the predecessor's), the owner's exact opening and the effort the start named, or none."""
+    from pathlib import Path
+
+    from ouroboros.headless import prepared_drive_mode, task_state_dir
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    task, admission_row, interrupted, folder, workers = _restarted_before_any_worker_write(
+        tmp_path, tmp_path_factory, monkeypatch, **({"reasoning_effort": effort} if effort else {}))
+    opener = task["origin_message_ref"]
+    assert admission_row.get("reasoning_effort") == effort and interrupted.get("reasoning_effort") == effort
+    assert admission_row["origin_message_ref"] == opener and "owner_corpus" not in admission_row
+    assert interrupted["origin_message_ref"] == opener and interrupted["chat_id"] == 9
+
+    ack = admit_continuation(task["id"], action_nonce="preworker-continue-0001")
+    assert ack["ok"] is True, ack
+    [successor] = [row for row in workers.PENDING if row["id"] == ack["successor_task_id"]]
+    assert (successor["chat_id"], successor["workspace_root"], successor["workspace_mode"]) == (
+        9, str(folder.resolve()), "external")
+    own = task_state_dir(tmp_path, successor["id"]) / "data"
+    assert (successor["memory_mode"], successor["drive_root"], successor["budget_drive_root"]) == (
+        "forked", str(own), str(tmp_path))
+    assert successor["drive_root"] != task["drive_root"] and prepared_drive_mode(Path(successor["drive_root"]),
+                                                                                 successor["id"]) == "forked"
+    assert successor.get("reasoning_effort") == effort
+    assert f"Owner's original instruction (verbatim):\n{OPENING}" in successor["text"]
+    assert successor["metadata"]["origin_message_ref"] == opener and successor["metadata"]["origin_message_text"] == OPENING
+    assert [(row["source"], row["content"]) for row in successor["metadata"]["owner_corpus"]] == [
+        ("origin_message", OPENING)]
+    binding = load_task_result(tmp_path, task["id"])["continued_by"]["binding"]
+    assert (binding["chat_id"], binding["workspace_root"], binding["workspace_mode"], binding["memory_mode"]) == (
+        9, str(folder.resolve()), "external", "forked")
+    stored = load_task_result(tmp_path, successor["id"])
+    assert (stored["chat_id"], stored["workspace_root"], stored["drive_root"]) == (
+        9, str(folder.resolve()), str(own))
+    assert admit_continuation(task["id"], action_nonce="preworker-continue-0001")["successor_task_id"] == successor["id"]
+    assert [row["id"] for row in workers.PENDING].count(successor["id"]) == 1
+
+
+def test_preworker_admission_without_its_opening_still_refuses_continue(tmp_path, tmp_path_factory, monkeypatch):
+    """The admitted room and folder never stand in for the owner's opening: a root whose receipt lost it, and
+    whose producer recorded no absence, still names the gap and admits nothing."""
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from tests._store_shared import seed_result
+
+    task, _admission, interrupted, _folder, workers = _restarted_before_any_worker_write(
+        tmp_path, tmp_path_factory, monkeypatch)
+    seed_result(tmp_path, task["id"], {key: value for key, value in interrupted.items()
+                                       if key not in {"origin_message_ref", "origin_message_text"}})
+    outcome = admit_continuation(task["id"], action_nonce="preworker-continue-0002")
     assert outcome["ok"] is False and outcome["error"] == "owner_source_missing"
-    assert workers.PENDING == []
+    assert "original_owner_message_text" in outcome["gaps"]
+    assert workers.PENDING == [] and "continued_by" not in load_task_result(tmp_path, task["id"])
 
 
 def test_continue_keeps_the_explicit_effort_including_a_successor_that_never_reached_a_worker(

@@ -8,7 +8,7 @@ import test from 'node:test';
 import { installedSkillModel, renderInstalledSkillCard } from '../modules/skill_card_renderer.js';
 
 const UNLISTED = { state: 'untrusted', reason: 'not_delivered', administered: false,
-    detail: 'Only extensions your organization’s administrator delivers run here, and this one isn’t among them.' };
+    detail: 'Only extension skills your organization’s administrator delivers run here, and this one isn’t among them.' };
 const CHANGED = { state: 'untrusted', reason: 'changed', administered: true,
     detail: 'Its files differ from the version your organization’s administrator delivered, so it doesn’t run.' };
 const DELIVERED = { state: 'trusted', administered: true };
@@ -38,11 +38,11 @@ test('an extension the service does not run says so neutrally and offers nothing
     const model = installedSkillModel(off);
     assert.match(model.chip, /data-tone="neutral"[^>]*>Doesn’t run here</);
     assert.equal(model.needs, false, 'the organization’s choice is not the owner’s move');
-    assert.equal(model.lockReason, 'Only extensions your organization delivers run here.');
+    assert.equal(model.lockReason, 'Only extension skills your organization delivers run here.');
     const html = renderInstalledSkillCard(off);
     const trays = html.split('data-skill-trays>')[1];
-    assert.match(trays, /Only extensions your organization’s administrator delivers run here, and this one isn’t among them\./);
-    assert.match(trays, /New extensions and their versions come from your organization’s administrator\./);
+    assert.match(trays, /Only extension skills your organization’s administrator delivers run here, and this one isn’t among them\./);
+    assert.match(trays, /New extension skills and their versions come from your organization’s administrator\./);
     assert.doesNotMatch(trays, /data-tone="(warn|danger)"/);
     for (const offer of NOWHERE) assert.doesNotMatch(html, new RegExp(offer), offer);
     assert.doesNotMatch(html, /data-needs-you/);

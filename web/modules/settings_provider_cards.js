@@ -67,7 +67,7 @@ export const PROVIDER_CARDS = [
             { id: 's-openai-compatible-base-url', rowField: 'base_url', settingKey: 'OPENAI_COMPATIBLE_BASE_URL', label: 'Base URL', placeholder: 'https://provider.example/v1', credential: true, required: true },
             { id: 's-openai-compatible-key', rowField: 'api_key', settingKey: 'OPENAI_COMPATIBLE_API_KEY', secret: true, label: 'API key', placeholder: 'No key' },
         ],
-        note: 'Use this card for custom base URLs. Built-in web search only works with the official OpenAI Responses API, so keep <code>OPENAI_BASE_URL</code> empty when you want <code>web_search</code>.',
+        note: 'Enter your provider’s Base URL, then choose this connection in Models or Agents. For coding with OpenCode Go, use <code>https://opencode.ai/inference/go/openai/v1</code> and your Console API key. For built-in <code>web_search</code>, use the official OpenAI Responses API and leave <code>OPENAI_BASE_URL</code> empty.',
     },
     {
         // advanced: rendered inside the collapsed "More providers" section. Inputs stay mounted either

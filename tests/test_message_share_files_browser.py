@@ -138,7 +138,7 @@ def card_row(body, n):
             "ts": f"2026-11-10T10:0{n}:00Z", "history_id": f"h-c{n}", "row_address": f"row:1@2026-11-10T10:0{n}:00Z#{n:012d}"}
 
 
-def history(cards):
+def history(cards, points=POINTS):
     """The owner's question, a neighbouring answer, the rich answer quoting the question (shown, since a row lies
     between them), an answer charting points, then the cards (the broken apps only where their failure is the point)."""
     return {"messages": [
@@ -150,7 +150,7 @@ def history(cards):
          "row_address": "row:1@2026-11-10T09:00:20Z#bbbbbbbbbbbb",
          "reply_to": {"address": QUESTION_ROW, "chat_id": 1, "role": "user", "kind": "message", "author_label": "You",
                       "snippet": QUESTION, "ts": "2026-11-10T09:00:00Z"}},
-        {"role": "assistant", "text": POINTS, "chat_id": 1, "ts": "2026-11-10T09:00:30Z", "history_id": "h-3",
+        {"role": "assistant", "text": points, "chat_id": 1, "ts": "2026-11-10T09:00:30Z", "history_id": "h-3",
          "row_address": "row:1@2026-11-10T09:00:30Z#dddddddddddd"},
         *(card_row(body, index + 1) for index, body in enumerate(cards)),
     ], "progress": []}
@@ -164,12 +164,12 @@ def evidence(name, data: bytes | str):
         target.write_bytes(data if isinstance(data, bytes) else data.encode())
 
 
-def open_app(ui, *, width, scheme, sockets=None, bodies=None, cards=(TRIP, RIVER, SKILL), before=None):
+def open_app(ui, *, width, scheme, sockets=None, bodies=None, cards=(TRIP, RIVER, SKILL), before=None, points=POINTS):
     page = ui["page"]
     origin = urlparse(ui["url"]).netloc
     outside: list[str] = []
     served = bodies if bodies is not None else BODIES
-    rows = history(cards)
+    rows = history(cards, points)
 
     def only_this_origin(route):
         url = urlparse(route.request.url)
@@ -418,24 +418,237 @@ def test_file_pressed_while_the_room_still_draws_waits_for_its_drawing(ui):
     assert not outside, outside
 
 
+def keep_bubble_table(page, tmp):
+    """The saved file's bare-bubble data table, opened, as published diagnostics when a test owner names a destination: one
+    render at the window's own size (CSS pixels, a single element), in a producer folder that `diagnostic_directory` keys by
+    `tmp / name`, so each engine has its own. It runs after the table assertions and before the no-fetch check, so that
+    check covers its click and render too. A failed export keeps the environment to inspect, says only its exception's
+    class in public output (a message can carry a local path) and never rewrites the verdict."""
+    if not os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT"):
+        return
+    from ouroboros.test_evidence import diagnostic_directory, diagnostics_incomplete, report_diagnostic
+    engine = re.sub(r"[^A-Za-z0-9]+", "-", os.environ.get("OUROBOROS_UI_BROWSER_ENGINE") or "default")
+    name = f"answer-points-bubble-table-1100-light-{engine}"
+    try:
+        folder = diagnostic_directory(tmp / name, "share-file-bubble-table", publish=True)
+        table = page.locator(".widget-chart-data").nth(10)  # the bare-bubble chart: Series, Label, x, y, r
+        if not table.get_by_role("table").is_visible():
+            table.locator("summary").click()
+        table.get_by_role("table").wait_for()
+        table.screenshot(path=str(folder / f"{name}.png"), animations="disabled", scale="css")
+    except Exception as exc:
+        reason = type(exc).__name__
+        report_diagnostic(f"TEST_DIAGNOSTICS_INCOMPLETE {name}: {reason}")
+        diagnostics_incomplete(reason)
+
+
 def test_a_chart_of_points_leaves_with_every_point_in_its_data(ui):
-    """A scatter chart without labels leaves as its picture beside one data row per point: its series, x and y."""
-    page, outside = open_app(ui, width=1100, scheme="light")
+    """Export follows the actual drawing: legacy chart-wide parsing, radial values, bubble radii and a bubble's bare
+    values, and making the File leaves the room's charts as they were drawn."""
+    scatter = {
+        "type": "scatter", "options": {"parsing": {"xAxisKey": r"walk\.km.start", "yAxisKey": "level.out"}},
+        "data": {"datasets": [
+            {"label": "Out", "data": [{"walk.km": {"start": 0}, "level": {"out": 12}}]},
+            # Legacy Markdown ignores dataset.parsing; those answers draw both series with level.out.
+            {"label": "Back", "parsing": {"yAxisKey": "level.back"}, "data": [
+                {"walk.km": {"start": 3}, "level": {"out": 9, "back": 0}},
+                {"walk.km": {"start": 5}, "level": {"out": None, "back": 7}}]},
+        ]},
+    }
+    pie = {"type": "pie", "options": {"parsing": {"key": "budget.euro"}},
+           "data": {"labels": ["Museum", "Park", "Cafe"], "datasets": [
+               {"label": "Cost", "data": [{"budget": {"euro": v}} for v in (24, 0, None, 7)]}]}}
+    # Parsing off: each point is Chart.js's own record. Three bubbles at one place differ only in the radius they are
+    # drawn with: their own `_custom`, zero included, or, for the last, the dataset's radius (its `r` is not read).
+    bubbles = {"type": "bubble", "options": {"parsing": False}, "data": {"datasets": [
+        {"label": "Stops", "data": [{"x": 1, "y": 2, "_custom": 6}, {"x": 1, "y": 2, "_custom": 0}, {"x": 1, "y": 2, "r": 9}]}]}}
+    # Parsing off without `_custom`: each point takes the radius the chart's options give its index, zero included.
+    configured = {"type": "bubble", "options": {"parsing": False, "elements": {"point": {"radius": [4, 0, 8]}}},
+                  "data": {"datasets": [{"label": "Benches", "data": [{"x": 3, "y": 1}, {"x": 4, "y": 1}, {"x": 5, "y": 1}]}]}}
+    # An ordinary bubble chart: a point's `r`, zero included, and the dataset's radius for a point without one.
+    ordinary = {"type": "bubble", "data": {"datasets": [
+        {"label": "Fountains", "data": [{"x": 2, "y": 5, "r": 7}, {"x": 2, "y": 6, "r": 0}, {"x": 2, "y": 7}]}]}}
+    tuples = {"type": "bubble", "options": {"elements": {"point": {"radius": [4, 0, 8]}}},
+              "data": {"datasets": [{"label": "Steps", "data": [[2, 5], [2, 6], [2, 7, 3]]}]}}
+    # Bare values: Chart.js draws each at its label on the index axis with the radius the options give its position,
+    # zero included. A category axis places a label by its index; the data keeps the label's name.
+    bare = {"type": "bubble", "options": {"elements": {"point": {"radius": [2, 6, 0]}}},
+            "data": {"labels": [7, 8, 0], "datasets": [{"label": "Kiosks", "data": [10, 20, 0]}]}}
+    named = {"type": "bubble", "options": {"indexAxis": "y", "scales": {"y": {"type": "category"}}},
+             "data": {"labels": ["Mon", "Tue"], "datasets": [{"label": "Visits", "data": [3, 5]}]}}
+    doughnut = {"type": "doughnut", "data": {"labels": [], "datasets": [{"label": "Euro", "data": [24, 0, 7]}]}}
+    # Identical pairs mean different things to Chart.js: (x, y) on a line, [from, to] on a bar.
+    pair_data = {"labels": ["Start", "End"], "datasets": [{"label": "Route", "data": [[0, 4], [1, 8]]}]}
+    charts = (scatter, pie, bubbles, configured, ordinary, tuples, doughnut,
+              {"type": "line", "data": pair_data}, {"type": "bar", "data": pair_data}, bare, named)
+    for chart in charts:
+        chart.setdefault("options", {})["animation"] = False  # inspect the chart's settled elements before Share
+    points = POINTS + "".join("\n\n```chart\n" + json.dumps(chart) + "\n```" for chart in charts)
+    page, outside = open_app(ui, width=1100, scheme="light", points=points)
     origin = urlparse(ui["url"]).netloc
     answer = bubble_of(page, text="Points along the river walk")
-    answer.locator(".md-chart canvas").wait_for()
+    canvases = answer.locator(".md-chart canvas")
+    radii = []
+    for nth in (3, 4, 5, 6):
+        canvases.nth(nth).wait_for()
+        radii.append(canvases.nth(nth).evaluate("""canvas => {
+            const meta = Chart.getChart(canvas).getDatasetMeta(0);
+            return { drawn: meta.data.map(point => point.options.radius),
+                dataset: Chart.defaults.elements.point.radius };
+        }"""))
+    dataset = radii[0]["dataset"]
+    assert [each["drawn"] for each in radii] == [[6, 0, dataset], [4, 0, 8], [7, 0, dataset], [4, 0, 3]], radii
+    assert dataset != 9
+    plotted = canvases.nth(1).evaluate("""canvas => {
+        const chart = Chart.getChart(canvas);
+        return chart.data.datasets.flatMap((set, i) => set.data.map((_, j) => {
+            const {x, y} = chart.getDatasetMeta(i).controller.getParsed(j);
+            return [set.label, x, y];
+        }));
+    }""")
+    assert plotted == [["Out", 0, 12], ["Back", 3, 9], ["Back", 5, None]]
+    canvases.nth(7).wait_for()
+    assert canvases.nth(7).evaluate("""canvas => Chart.getChart(canvas).getDatasetMeta(0).data
+        .map(arc => arc.circumference > 0)""") == [True, False, True]
+    for index, fields in ((8, '[p.x, p.y]'), (9, '[p._custom.start, p._custom.end]')):
+        canvases.nth(index).wait_for()
+        assert canvases.nth(index).evaluate(f"""canvas => {{
+            const controller = Chart.getChart(canvas).getDatasetMeta(0).controller;
+            return [0, 1].map(i => {{ const p = controller.getParsed(i); return {fields}; }});
+        }}""") == [[0, 4], [1, 8]]
+    # The bare-value bubbles as the room drew them: the chart itself, each point's parsed place and radius, and the
+    # data it was drawn from, kept to compare once the File is made.
+    drawn_bare = """(canvas, keep) => {
+        const chart = Chart.getChart(canvas);
+        const kept = window.__bareCharts = window.__bareCharts || new Map();
+        if (keep) kept.set(canvas, chart);
+        const { controller, data } = chart.getDatasetMeta(0);
+        return { same: kept.get(canvas) === chart, source: JSON.stringify(chart.config.data),
+            points: data.map((point, i) => {
+                const { x, y, _custom } = controller.getParsed(i);
+                return [x, y, _custom, point.options.radius];
+            }) };
+    }"""
+    for nth in (10, 11):
+        canvases.nth(nth).wait_for()
+    bare_drawn = [canvases.nth(nth).evaluate(drawn_bare, True) for nth in (10, 11)]
+    assert [each["points"] for each in bare_drawn] == [
+        [[7, 10, 2, 2], [8, 20, 6, 6], [0, 0, 0, 0]], [[3, 0, dataset, dataset], [5, 1, dataset, dataset]]], bare_drawn
     sheet = open_share(page, answer)
     sheet.locator("[data-share-format='file']").click()
     _name, html = ready_file(page, sheet)
-    evidence("answer-points-1100-light.html", html)
     assert_private(html, origin=origin)
+    evidence("answer-points-1100-light.html", html)
     page.keyboard.press("Escape")
     sheet.wait_for(state="detached")
-    file_page, seen, uri = open_file(ui, html, "answer-points-1100-light-js.html", width=1100)
-    assert file_page.locator("img.ouro-share-chart").evaluate("node => node.complete && node.naturalWidth > 0")
-    rows = file_page.locator(".widget-chart-data tbody tr").evaluate_all(
-        "rows => rows.map((row) => Array.from(row.children, (cell) => cell.textContent))")
-    assert rows == [["Walk", "1", "3"], ["Walk", "2.5", "7"]], rows
+    assert [canvases.nth(nth).evaluate(drawn_bare, False) for nth in (10, 11)] == bare_drawn, \
+        "making the File leaves the room's charts as they were drawn"
+    file_page, seen, uri = open_file(ui, html, "answer-points-1100-light-noscript.html", width=1100, scripts=False)
+    assert file_page.locator("img.ouro-share-chart").evaluate_all(
+        "images => images.length === 12 && images.every(node => node.complete && node.naturalWidth > 0)")
+    custom = file_page.locator(".widget-chart-data").nth(1)
+    custom.locator("summary").click()
+    assert custom.get_by_role("table").is_visible()
+    assert file_page.locator(".widget-chart-data").nth(0).locator("thead th").all_text_contents() == ["Series", "x", "y"]
+    assert file_page.locator(".widget-chart-data").nth(7).locator("thead th").all_text_contents() == ["Position", "Euro"]
+    assert file_page.locator(".widget-chart-data").nth(10).locator("thead th").all_text_contents() \
+        == ["Series", "Label", "x", "y", "r"], "a bubble's bare values keep their place and radius"
+    tables = file_page.locator(".widget-chart-data tbody").evaluate_all("""bodies => bodies.map(body =>
+        Array.from(body.rows, row => Array.from(row.cells, cell => cell.textContent)))""")
+    assert tables == [
+        [["Walk", "1", "3"], ["Walk", "2.5", "7"]],
+        [["Out", "0", "12"], ["Back", "3", "9"], ["Back", "5", "—"]],
+        [["Museum", "24"], ["Park", "0"], ["Cafe", "—"], ["—", "7"]],
+        [["Stops", "1", "2", "6"], ["Stops", "1", "2", "0"], ["Stops", "1", "2", str(dataset)]],
+        [["Benches", "3", "1", "4"], ["Benches", "4", "1", "0"], ["Benches", "5", "1", "8"]],
+        [["Fountains", "2", "5", "7"], ["Fountains", "2", "6", "0"], ["Fountains", "2", "7", str(dataset)]],
+        [["Steps", "2", "5", "4"], ["Steps", "2", "6", "0"], ["Steps", "2", "7", "3"]],
+        [["1", "24"], ["2", "0"], ["3", "7"]],
+        [["Route", "Start", "0", "4"], ["Route", "End", "1", "8"]],
+        [["Start", "0 – 4"], ["End", "1 – 8"]],
+        [["Kiosks", "7", "7", "10", "2"], ["Kiosks", "8", "8", "20", "6"], ["Kiosks", "0", "0", "0", "0"]],
+        [["Visits", "Mon", "3", "Mon", str(dataset)], ["Visits", "Tue", "5", "Tue", str(dataset)]],
+    ]
+    keep_bubble_table(file_page, ui["tmp"])
+    assert_fetched_nothing(seen, uri)
+    file_page.close()
+    assert not outside, outside
+
+
+def test_a_floating_bar_leaves_with_its_category_and_endpoints(ui):
+    """The file names each floating bar by the category its index scale drew and keeps its two endpoints as one interval:
+    an axis that names its categories (vertical or horizontal) beside data that names none or others, a series of records,
+    plain values at an axis's categories, ranges by place beside records of the other order (each row says the category
+    Chart.js drew it at, the interval on the value axis) and a line's pairs, which stay points. Each chart is first read off
+    the room's own drawing: every series' categories and values as Chart.js parsed them."""
+    days = ["Monday", "Tuesday"]
+    shifts = lambda: [[8, 12], [13, 17]]
+    axis = lambda name, labels=days: {"scales": {name: {"type": "category", "labels": labels}}}
+    ranges = {"label": "Ranges", "data": shifts()}
+    charts = (
+        {"type": "bar", "options": axis("x"), "data": {"datasets": [{"label": "Hours", "data": shifts()}]}},
+        {"type": "bar", "options": {"indexAxis": "y", **axis("y")}, "data": {"datasets": [{"label": "Hours", "data": shifts()}]}},
+        # The data names others than the axis draws; the file keeps the drawn ones.
+        {"type": "bar", "options": axis("x"), "data": {"labels": ["A", "B"], "datasets": [{"label": "Hours", "data": shifts()}]}},
+        {"type": "bar", "data": {"datasets": [{"label": "Hours", "data": [{"x": "Monday", "y": [8, 12]}, {"x": "Tuesday", "y": [13, 17]}]}]}},
+        {"type": "bar", "options": axis("x", ["Museum", "Cafe"]), "data": {"datasets": [{"label": "Euro", "data": [24, 0]}]}},
+        # Ranges by place beside records in the opposite category order: the records are not at their place.
+        {"type": "bar", "options": axis("x"), "data": {"datasets": [
+            ranges, {"label": "Records", "data": [{"x": "Tuesday", "y": [21, 23]}, {"x": "Monday", "y": [1, 3]}]}]}},
+        {"type": "bar", "options": {"indexAxis": "y", **axis("y")}, "data": {"datasets": [
+            ranges, {"label": "Records", "data": [{"y": "Tuesday", "x": [21, 23]}, {"y": "Monday", "x": [1, 3]}]}]}},
+        # A line's pair is a point: its category is the one it names, not the label of its place.
+        {"type": "line", "options": axis("x"), "data": {"datasets": [{"label": "Visits", "data": [["Tuesday", 21], ["Monday", 7]]}]}},
+    )
+    for chart in charts:
+        chart.setdefault("options", {})["animation"] = False  # inspect the chart's settled elements before Share
+    points = "Shifts along the river.\n\n" + "\n\n".join("```chart\n" + json.dumps(chart) + "\n```" for chart in charts)
+    page, outside = open_app(ui, width=1100, scheme="light", points=points)
+    origin = urlparse(ui["url"]).netloc
+    answer = bubble_of(page, text="Shifts along the river")
+    canvases = answer.locator(".md-chart canvas")
+    drawn = []
+    for nth in range(len(charts)):
+        canvases.nth(nth).wait_for()
+        drawn.append(canvases.nth(nth).evaluate("""canvas => {
+            const chart = Chart.getChart(canvas);
+            return chart.data.datasets.map((dataset, index) => {
+                const { controller, iScale, vScale } = chart.getDatasetMeta(index);
+                return dataset.data.map((_, point) => {
+                    const parsed = controller.getParsed(point);
+                    return [iScale.getLabels()[parsed[iScale.axis]] ?? null,
+                        parsed._custom ? `${parsed._custom.start} – ${parsed._custom.end}` : parsed[vScale.axis]];
+                });
+            });
+        }"""))
+    interval = [["Monday", "8 – 12"], ["Tuesday", "13 – 17"]]
+    records = [["Tuesday", "21 – 23"], ["Monday", "1 – 3"]]
+    assert drawn == [[interval]] * 4 + [[[["Museum", 24], ["Cafe", 0]]], [interval, records], [interval, records],
+                                        [[["Tuesday", 21], ["Monday", 7]]]], drawn
+    sheet = open_share(page, answer)
+    sheet.locator("[data-share-format='file']").click()
+    _name, html = ready_file(page, sheet)
+    assert_private(html, origin=origin)
+    evidence("answer-floating-bars-1100-light.html", html)
+    page.keyboard.press("Escape")
+    sheet.wait_for(state="detached")
+    file_page, seen, uri = open_file(ui, html, "answer-floating-bars-1100-light-noscript.html", width=1100, scripts=False)
+    assert file_page.locator("img.ouro-share-chart").evaluate_all(
+        f"images => images.length === {len(charts)} && images.every(node => node.complete && node.naturalWidth > 0)")
+    heads = file_page.locator(".widget-chart-data").evaluate_all("""tables => tables.map(table =>
+        Array.from(table.querySelectorAll('thead th'), cell => cell.textContent))""")
+    tables = file_page.locator(".widget-chart-data tbody").evaluate_all("""bodies => bodies.map(body =>
+        Array.from(body.rows, row => Array.from(row.cells, cell => cell.textContent)))""")
+    assert heads == [["Label", "Hours"]] * 3 + [["Series", "Label", "x", "y"], ["Label", "Euro"]] + [["Series", "x", "y"]] * 3, heads
+    assert tables == [interval, interval, interval,
+                      [["Hours", "Monday", "Monday", "8 – 12"], ["Hours", "Tuesday", "Tuesday", "13 – 17"]],
+                      [["Museum", "24"], ["Cafe", "0"]],
+                      # A row says its own category on the index axis (x in a vertical bar, y in a horizontal one), its interval on the value axis.
+                      [["Ranges", "Monday", "8 – 12"], ["Ranges", "Tuesday", "13 – 17"],
+                       ["Records", "Tuesday", "21 – 23"], ["Records", "Monday", "1 – 3"]],
+                      [["Ranges", "8 – 12", "Monday"], ["Ranges", "13 – 17", "Tuesday"],
+                       ["Records", "21 – 23", "Tuesday"], ["Records", "1 – 3", "Monday"]],
+                      [["Visits", "Tuesday", "21"], ["Visits", "Monday", "7"]]], tables
     assert_fetched_nothing(seen, uri)
     file_page.close()
     assert not outside, outside

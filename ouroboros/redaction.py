@@ -201,7 +201,14 @@ class RedactionResult:
         }
 
 
-def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
+def _rule_sub(pattern, repl, text: str, walk) -> str:
+    """One rule application: this module's own ``pattern.sub``, or the walk's span-keeping substitute."""
+    return pattern.sub(repl, text) if walk is None else walk.substitute(pattern, repl, text)
+
+
+def _redact_text(text: str, records: List[RedactionRecord], path: str, *, walk=None) -> str:
+    """``text`` with every rule applied in this order. ``walk`` (an internal ``secret_masking.MaskWalk``) runs the
+    same rules with the selected Settings values' occurrences kept in view; None is the established single walk."""
     out = text
     for rule, pattern in _TOKEN_PATTERNS:
         if rule == "url_credentials":
@@ -209,13 +216,13 @@ def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
                 records.append(RedactionRecord(path=path, rule=rule))
                 return f"{match.group(1)}***REDACTED***:***REDACTED***@"
 
-            out = pattern.sub(_url_repl, out)
+            out = _rule_sub(pattern, _url_repl, out, walk)
             continue
         def _repl(match: re.Match[str], _rule: str = rule) -> str:
             records.append(RedactionRecord(path=path, rule=_rule))
             return "***REDACTED***"
 
-        out = pattern.sub(_repl, out)
+        out = _rule_sub(pattern, _repl, out, walk)
 
     def _query_param_repl(match: re.Match[str]) -> str:
         if not _is_secret_key_name(match.group("key")):
@@ -226,7 +233,7 @@ def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
             f"{match.group('separator')}***REDACTED***"
         )
 
-    out = _SECRET_QUERY_PARAM_RE.sub(_query_param_repl, out)
+    out = _rule_sub(_SECRET_QUERY_PARAM_RE, _query_param_repl, out, walk)
 
     def _literal_repl(match: re.Match[str]) -> str:
         prefix = match.group("prefix")
@@ -236,7 +243,7 @@ def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
         records.append(RedactionRecord(path=path, rule="secret_literal_assignment"))
         return f"{prefix}***REDACTED***{match.group('suffix')}"
 
-    out = _SECRET_LITERAL_RE.sub(_literal_repl, out)
+    out = _rule_sub(_SECRET_LITERAL_RE, _literal_repl, out, walk)
 
     def _generic_kv_repl(match: re.Match[str]) -> str:
         # Mask ONLY when the key itself signals a credential (provider name / secret
@@ -249,7 +256,7 @@ def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
         records.append(RedactionRecord(path=path, rule="secret_generic_kv"))
         return f"{match.group('prefix')}***REDACTED***{match.group('suffix')}"
 
-    out = _SECRET_GENERIC_KV_RE.sub(_generic_kv_repl, out)
+    out = _rule_sub(_SECRET_GENERIC_KV_RE, _generic_kv_repl, out, walk)
     return out
 
 
@@ -274,9 +281,10 @@ def _schema_names(item: Any) -> bool:
 
 
 def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret_literals: bool = False,
-                schema: bool = False, part: Optional[Callable[..., Any]] = None) -> Any:
+                schema: bool = False, part: Optional[Callable[..., Any]] = None, walk=None) -> Any:
     """The masked copy of ``value`` at ``path``, its records appended in walk order; ``part``, when given, redacts
-    each dict element of a list reached from the root through dicts only (a request view's part, ``shared_values``)."""
+    each dict element of a list reached from the root through dicts only (a request view's part, ``shared_values``).
+    ``walk`` applies to the root string alone: it holds the occurrences of one text."""
     if secret_literals and not isinstance(value, (dict, list, tuple, bool)) and value not in (None, ""):
         records.append(RedactionRecord(path=path, rule="secret_key_name"))
         return _secret_value_fingerprint(value)
@@ -308,7 +316,7 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret
                 else _redact_any(item, records, f"{path}[{idx}]", secret_literals=secret_literals)
                 for idx, item in enumerate(value)]
     if isinstance(value, str):
-        return _redact_text(value, records, path)
+        return _redact_text(value, records, path, walk=walk)
     return value
 
 
@@ -338,10 +346,10 @@ def part_fact(item: Any, facts: Dict[tuple, tuple], *, path: str = "$",
     return fact
 
 
-def redact_projection(value: Any, *, facts: Optional[Dict[tuple, tuple]] = None) -> RedactionResult:
+def redact_projection(value: Any, *, facts: Optional[Dict[tuple, tuple]] = None, walk=None) -> RedactionResult:
     """``value`` with its secret values masked and one record per rule that fired. With ``facts``, ``value`` is a
     request view: each part (``shared_values``) is redacted once per ``part_fact`` key and its records re-rooted where
-    it stands, so the result is byte for byte the whole walk's."""
+    it stands, so the result is byte for byte the whole walk's. ``walk``: see ``_redact_text``."""
     def part(item: Any, records: List[RedactionRecord], path: str, secret_literals: bool) -> Any:
         found = part_fact(item, facts, path=path, secret_literals=secret_literals)
         if found is None:
@@ -350,4 +358,4 @@ def redact_projection(value: Any, *, facts: Optional[Dict[tuple, tuple]] = None)
         return item if found[0] is None else found[0]
 
     records: List[RedactionRecord] = []
-    return RedactionResult(_redact_any(value, records, "$", part=part if facts is not None else None), records)
+    return RedactionResult(_redact_any(value, records, "$", part=part if facts is not None else None, walk=walk), records)

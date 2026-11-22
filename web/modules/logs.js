@@ -13,6 +13,7 @@ import {
     getLogTaskGroupId,
     isGroupedTaskEvent,
     summarizeLogEvent,
+    serviceOutputLinksHtml,
     taskPresentation,
 } from './log_events.js';
 import { markView, statusMarkHtml } from './status_mark.js';
@@ -428,12 +429,13 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
     // An event's own head and fold: its name, a failure's chip (the outcome family's word), its words, and its facts
     // after the exact moment.
     const eventParts = (view, ts) => ({ ts, name: view.headline, failure: FAILED_PHASES.has(view.phase) ? taskPresentation(view.phase).headline : '',
-        words: wordsOf(view, view.body), whole: wordsOf(view, view.full), facts: [timeOf(ts).exact, ...view.meta] });
+        words: wordsOf(view, view.body), whole: wordsOf(view, view.full), facts: [timeOf(ts).exact, ...view.meta],
+        serviceStop: view.serviceStop });
 
     // An event's parts, each written only when it changed. A delegated executor is a quiet chip among its facts, and its
     // detail sentence is text in the fold (#360 A).
     function paintEvent(node, { ts = '', name = '', task = '', failure = '', count = '', words = '', whole = '', facts = [],
-        execution = null, omitted = '' }) {
+        execution = null, omitted = '', serviceStop = null }) {
         const parts = partsOf.get(node), time = timeOf(ts);
         setText(parts.ts, time.short);
         setAttr(parts.ts, 'datetime', ts);
@@ -452,8 +454,10 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
         const chip = execution ? `<span class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${
             harnessIdentityMarkup(execution.harness, { label: execution.label || '', className: 'log-executor-identity' })}</span>` : '';
         const said = facts.filter(Boolean);
-        setHtml(parts.facts, chip + escapeHtml(said.join(' · ')));
-        parts.facts.hidden = !chip && !said.length;
+        const links = serviceOutputLinksHtml(serviceStop?.links);
+        node.classList.toggle('service-stop-result', Boolean(serviceStop));
+        setHtml(parts.facts, chip + escapeHtml(said.join(' · ')) + links);
+        parts.facts.hidden = !chip && !said.length && !links;
         setText(parts.detail, execution?.title || '');
         parts.detail.hidden = !execution?.title;
         if (parts.omitted) { setText(parts.omitted, omitted); parts.omitted.hidden = !omitted; }
@@ -609,6 +613,8 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
     }
 
     function eventKey(evt) {
+        if (evt?.checkpoint_kind === 'service_stop' && evt.task_id && evt.service_stop?.launch_id && evt.card_row_revision)
+            return `service-stop|${evt.task_id}|${evt.service_stop.launch_id}|${evt.card_row_revision}`;
         const ts = evt?.ts || evt?.timestamp || '';
         const type = evt?.type || '';
         // Dedupe on the natural identity (timestamp has microseconds, so distinct
