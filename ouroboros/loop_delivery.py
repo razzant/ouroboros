@@ -1240,7 +1240,9 @@ def _no_tool_final_answer(
     from ouroboros.loop_messages import transcript_growth_signature
     before = transcript_growth_signature(messages)
     origin = "resume" if resume_candidate else "selection" if explicit_candidate else "prose"
-    if origin == "prose":  # a tool-less response carries nothing that rides: a records-only place returns its note once
+    # A tool-less response carries nothing that rides, and a restored answer whose checkpoint predates its saved send
+    # fact cannot show one did: a records-only place returns its note once. A recorded send still rides once.
+    if origin == "prose" or (origin == "resume" and getattr(tools._ctx, "_completion_riding_send", None) is None):
         tools._ctx._completion_riding_send = False
 
     def held(reason: str, subreason: str = ""):

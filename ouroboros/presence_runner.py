@@ -127,7 +127,7 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     from ouroboros.presence_continuation import _handoff_ref, terminal_output
     from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS, schedule_report_run
 
-    from ouroboros.place_reply import prepare_focus_reply, reply_carrier
+    from ouroboros.place_reply import carrier_now, prepare_focus_reply
     if schedule_report_run(task):
         # A legacy schedule's report is retained in the result only. Host facts alone decide whether work is owed;
         # neither the forced declaration nor a finish note may carry its text to the next turn.
@@ -149,7 +149,7 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
             "type": "presence_result", "task_id": str(task.get("id") or ""), "outcome": outcome,
             "text": "", "message": "", "work_ref": work_ref, "output_ref": "", "ts": utc_now_iso(),
         }
-    carrier = reply_carrier(task.get("metadata") or {})
+    carrier = carrier_now(ctx, task.get("metadata") or {})  # a new selection: a retained legacy binding meets its place
     if carrier:
         # Ordinary exits have already returned flags to the mind. Forced exits cannot buy a
         # new round: preserve the flag as a held reply instead of releasing unchecked speech.

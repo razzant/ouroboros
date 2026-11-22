@@ -1020,6 +1020,146 @@ def test_only_the_focus_turns_record_owes_my_humans_reply_first(focus, monkeypat
         assert ctx._presence_completion["outcome"] == "silent" and not getattr(ctx, "_focus_record_only", False)
 
 
+@pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
+def test_a_place_reactivated_between_the_two_state_reads_never_turns_a_door_finish_into_words(focus, monkeypatch, door):
+    """The selection reads the place twice (``records_only_now``, then ``reply_hold``). Silent at the first and Active
+    at the second (the owner reactivates it meanwhile): a door connector's finish stays its record, unchecked and
+    unposted; a doorless one keeps its automatic reply through the ``place_reply`` check."""
+    from ouroboros import place_reply
+    from tests.test_place_reply_revision import promoted
+    root, place, _admission, _event = focus
+    if door:
+        _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    checks = []
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
+    p.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
+    real_hold = place_reply.reply_hold
+
+    def reactivated_then_hold(*args, **kwargs):
+        p.edit_place(root, place.place_id, "set_state", author="owner", state="active")
+        return real_hold(*args, **kwargs)
+
+    monkeypatch.setattr(place_reply, "reply_hold", reactivated_then_hold)
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=False)
+    assert place_reply.prepare_focus_reply(ctx, "Hello") == (True, "")
+    assert p.get_place(root, place.place_id).state == "active", "the second read saw the reactivated place"
+    assert ctx._presence_completion["outcome"] == ("silent" if door else "message")
+    assert checks == ([] if door else ["place_reply"])
+
+
+@pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
+def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, monkeypatch, door):
+    """Pre-migration task bytes name the place only by its old ``binding_id``: a new selection resolves it through the
+    place store as ``reply_hold`` does, so a door connector's finish is its record (the live result builder included)
+    and a doorless one meets the ``place_reply`` check; a final stored before it is replayed as stored."""
+    from ouroboros.place_reply import prepare_focus_reply, records_only, reply_carrier
+    from ouroboros.presence_runner import build_presence_result_event, presence_result_from_stored
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    if door:
+        _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    presence = task["metadata"]["presence"]
+    presence["binding_id"] = presence.pop("place_id")
+    task["metadata"].pop("focus", None)  # pre-migration bytes carry no focus frame either
+    assert reply_carrier(task["metadata"]) == {} and records_only(task["metadata"]) is door
+    checks = []
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=True)
+    assert prepare_focus_reply(ctx, "Hello") == (True, "")
+    assert ctx._presence_completion["outcome"] == ("silent" if door else "message")
+    assert checks == ([] if door else ["place_reply"])
+    built = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                            _completion_riding_send=True, _presence_selection_seq=0)
+    event = build_presence_result_event({**task, "metadata": task["metadata"]}, "Hello", built,
+                                        terminal_origin="model_final")
+    assert (event["outcome"], event["text"]) == (("silent", "") if door else ("message", "Hello"))
+    stored = {"status": "completed", "terminal_origin": "model_final", "result": "Hello",
+              "metadata": {**task["metadata"], "presence_outcome": "message", "presence_result_text": "Hello"}}
+    replay = presence_result_from_stored(stored, task["id"])
+    assert (replay.outcome, replay.text) == ("message", "Hello"), "a final selected before the update is served as stored"
+
+
+class _Death(BaseException):
+    """The worker dies right after a working save; nothing after it runs."""
+
+
+@pytest.mark.parametrize("saved", ["recorded_no_send", "older_checkpoint", "recorded_send"])
+def test_a_restart_after_a_door_roots_saved_answer_reads_the_record_note_first(focus, monkeypatch, saved):
+    """The worker dies right after a door connector's root saved its wordy answer (the ``candidate`` save precedes the
+    one return with the record note). The restored attempt reads that note first, from the saved send fact, and from
+    an older checkpoint without it by the honest fallback; a send recorded with that finish still rides once, with no
+    note. Either way the answer then stays the record and nothing is posted."""
+    import queue
+    from ouroboros import loop, working_checkpoint as wc
+    from ouroboros.presence_runner import build_presence_result_event
+    from ouroboros.task_results import write_task_result
+    from tests.test_place_reply_revision import promoted
+    from tests.test_working_checkpoint import _registry
+    root = focus[0]
+    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    write_task_result(root, task["id"], "running", metadata=task["metadata"], delegation_role="root",
+                      root_task_id=task["id"], chat_id=1)
+    asked = []
+
+    def attempt(number, answers, **facts):
+        registry = _registry(root, monkeypatch, task["id"], number)
+        registry._ctx.task_metadata, registry._ctx.task_contract = task["metadata"], task["task_contract"]
+        for key, value in facts.items():
+            setattr(registry._ctx, key, value)
+        replies = iter(answers)
+
+        def respond(_llm, messages, *_a, **_kw):
+            asked.append((number, json.dumps(messages, ensure_ascii=False)))
+            return next(replies), 0.0
+
+        monkeypatch.setattr(loop, "call_llm_with_retry", respond)
+        result = loop.run_llm_loop([{"role": "user", "content": "Look again"}], registry,
+                                   SimpleNamespace(default_model=lambda: "test-model"), root / "logs",
+                                   lambda *_a, **_kw: None, queue.Queue(), task_id=task["id"], drive_root=root)
+        return registry, result
+
+    real_save = wc.save_or_log
+
+    def save_then_die(limit_ctx, boundary):
+        result = real_save(limit_ctx, boundary)
+        if boundary == "candidate":
+            raise _Death()
+        return result
+
+    with monkeypatch.context() as dying:
+        dying.setattr(wc, "save_or_log", save_then_die)
+        with pytest.raises(_Death):
+            attempt(1, [{"content": "Hello", "tool_calls": []}])
+    state = wc.read_working(root, task["id"], 1)[1]
+    assert state["delivery"]["_completion_riding_send"] is False, "the prose answer's fact is saved beside it"
+    if saved != "recorded_no_send":
+        if saved == "older_checkpoint":
+            state["delivery"].pop("_completion_riding_send")  # a checkpoint written before the fact was saved
+        else:
+            state["delivery"]["_completion_riding_send"] = True  # that finish's door send rode and was recorded
+        wc.checkpoint_path(root, task["id"], 1).write_text(json.dumps(state), encoding="utf-8")
+    handoff = {"id": task["id"]}
+    assert wc.attach_recovery(root, handoff, source_task_id=task["id"], from_attempt=1, cause="worker_crash")
+    keep = {"content": None, "tool_calls": [{"id": "keep", "type": "function", "function": {
+        "name": "finish_task", "arguments": json.dumps({"action": "finish", "answer": "Hello"})}}]}
+    registry, (text, usage, _trace) = attempt(2, [keep], working_recovery=handoff["_working_recovery"])
+    second = [words for number, words in asked if number == 2]
+    if saved == "recorded_send":
+        assert second == [], "the recorded send rode with that finish: the restored answer is the record at once"
+    else:
+        assert len(second) == 1 and second[0].count("[FOCUS_FINISH_IS_A_RECORD]") == 1, "the note is read first"
+    event = build_presence_result_event(task, text, registry._ctx, terminal_origin=usage.get("terminal_origin", ""),
+                                        silent=usage.get("wake_silent") is True)
+    assert text == "Hello" and (event["outcome"], event["text"]) == ("silent", "")
+
+
 # --- a place turn reads any project journal; writes and a child's reads stay forbidden (owner 06.11, 4=A) ----------
 
 

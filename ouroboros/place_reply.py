@@ -39,6 +39,43 @@ def reply_carrier(metadata) -> dict:
             "destination": event.get("destination") or {}}
 
 
+def _legacy_binding(metadata) -> str:
+    """The old ``binding_id`` that pre-migration task bytes keep in place of a ``place_id``, beside their conversation."""
+    presence = metadata.get("presence") if isinstance(metadata, dict) else None
+    event = presence.get("event") if isinstance(presence, dict) else None
+    if not isinstance(event, dict) or not event.get("conversation_key") or reply_carrier(metadata):
+        return ""
+    return str(presence.get("binding_id") or "")
+
+
+def resolved_carrier(root, metadata) -> dict:
+    """``reply_carrier``, or for a legacy binding (``_legacy_binding``) the place the existing store resolves it to,
+    its id itself when no place names it. Isolated legacy readers without place state resolve nothing."""
+    binding_id = _legacy_binding(metadata) if root is not None else ""
+    if not binding_id:
+        return reply_carrier(metadata) if isinstance(metadata, dict) else {}
+    from pathlib import Path
+    from ouroboros.places import load_places, places_path
+    from ouroboros.presence_bindings import PRESENCE_BINDINGS_FILENAME
+    if not (places_path(root).exists() or (Path(root) / "state" / PRESENCE_BINDINGS_FILENAME).exists()):
+        return {}
+    event = metadata["presence"]["event"]
+    place = next((p for p in load_places(root) if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
+    return {"place_id": place.place_id if place else binding_id, "conversation_key": event["conversation_key"],
+            "destination": event.get("destination") or {}}
+
+
+def carrier_now(ctx, metadata=None) -> dict:
+    """The carrier a run selects its finish by (``resolved_carrier`` at its canonical root): a new selection of a
+    retained legacy binding meets its place like any other, while a stored result replays as it was selected."""
+    if metadata is None:
+        metadata = getattr(ctx, "task_metadata", None) or {}
+    if not _legacy_binding(metadata):
+        return reply_carrier(metadata) if isinstance(metadata, dict) else {}
+    from ouroboros.tool_access import canonical_data_root
+    return resolved_carrier(canonical_data_root(ctx), metadata)
+
+
 def reply_addresses(metadata, anchor=None) -> tuple:
     """The selected input's further reply addresses as ``{"source_event_id", "reply_targets"}`` (its
     ``message.reply_targets``), and why they cannot be read (``""`` when they can). ``anchor`` is this turn's selected
@@ -65,23 +102,10 @@ def reply_addresses(metadata, anchor=None) -> tuple:
 
 def reply_hold(root, metadata, task_id, text: str, *, anchor=None) -> str:
     """Current host facts only: never generate or buy another safety check on replay. The reply's further addresses
-    (``reply_addresses`` of ``anchor``) are resolved now, as its dispatch would meet them."""
-    carrier = reply_carrier(metadata)
-    if not carrier and text:
-        from pathlib import Path
-        from ouroboros.places import load_places, places_path
-        from ouroboros.presence_bindings import PRESENCE_BINDINGS_FILENAME
-        presence = metadata.get("presence") or {}
-        event = presence.get("event") or {}
-        binding_id = presence.get("binding_id")
-        # Pre-migration task bytes retain the old id. Resolve it through the
-        # existing place store; isolated legacy readers have no place state.
-        if (binding_id and event.get("conversation_key") and
-                (places_path(root).exists() or (Path(root) / "state" / PRESENCE_BINDINGS_FILENAME).exists())):
-            place = next((p for p in load_places(root) if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
-            carrier = {"place_id": place.place_id if place else binding_id,
-                       "conversation_key": event["conversation_key"], "destination": event.get("destination") or {}}
-    if not carrier or not text:
+    (``reply_addresses`` of ``anchor``) are resolved now, as its dispatch would meet them. Pre-migration task bytes
+    retain the old binding id, resolved through the existing place store (``resolved_carrier``)."""
+    carrier = resolved_carrier(root, metadata) if text else {}
+    if not carrier:
         return ""
     from ouroboros.consciousness_authority import is_observe_origin
     from ouroboros.place_guard import reply_address_hold
@@ -195,10 +219,11 @@ def conversation_gesture_tools(connector: str) -> list:
 def records_only(metadata) -> bool:
     """A place-bound root (a focus turn, a root it handed off, a schedule's run) whose own connector speaks through
     such a tool: its finish is its record and people hear only what it sends (owner 06.11 «2A», 21.11 «1A»). A
-    connector without one (a peer URL) keeps the final as its reply."""
+    connector without one (a peer URL) keeps the final as its reply. A legacy binding is bound like a place."""
     metadata = metadata if isinstance(metadata, dict) else {}
     presence = metadata.get("presence") or {}
-    return bool(reply_carrier(metadata)) and bool(conversation_send_tools(str(presence.get("transport_skill") or "")))
+    return (bool(reply_carrier(metadata) or _legacy_binding(metadata))
+            and bool(conversation_send_tools(str(presence.get("transport_skill") or ""))))
 
 
 def _focus_turn(metadata) -> bool:
@@ -227,7 +252,8 @@ def records_only_now(ctx) -> bool:
     if is_observe_origin(metadata):
         return False
     try:
-        return get_place(canonical_data_root(ctx), reply_carrier(metadata)["place_id"]).state == "active"
+        root = canonical_data_root(ctx)
+        return get_place(root, resolved_carrier(root, metadata)["place_id"]).state == "active"
     except Exception:  # a missing or unreadable place: the held path says so, as it does for every final
         return False
 
@@ -243,7 +269,7 @@ def riding_sends(ctx, calls) -> list:
     from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, retained_descriptor
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
+    carrier = carrier_now(ctx, metadata)
     connector = str((metadata.get("presence") or {}).get("transport_skill") or "")
     sends, gestures = dict(conversation_send_tools(connector)), dict(conversation_gesture_tools(connector))
     delivered = (getattr(ctx, "_presence_completion", None) or {}).get("outcome") == "tool_delivered"
@@ -368,7 +394,7 @@ def record_note(ctx) -> str:
     from ouroboros.presence_context import _source_conversation
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
+    carrier = carrier_now(ctx, metadata)
     label, route = _source_conversation(metadata.get("presence") or {})
     sends = this_turn_sends(ctx, carrier["conversation_key"])
     pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
@@ -386,14 +412,16 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     finish of every root bound to it is the record: nothing is posted; a finish with words that sent nothing in its
     own response returns once with the facts (``record_note``), the next is accepted. Only the focus turn also owes
     my human's reply first (R3) and ends its wake quiet; a root it handed off keeps the final its Project reads. An
-    admitted handoff stays deferred either way; words that are not speech never ride it (``quiet`` in the completion)."""
+    admitted handoff stays deferred either way; words that are not speech never ride it (``quiet`` in the completion).
+    A door connector's final is never words, whatever the place state read a moment ago: a hold that a reactivated
+    place no longer makes leaves it the record, unchecked and unposted (``door``)."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
+    carrier = carrier_now(ctx, metadata)
     if not carrier:
         return True, ""
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, reply_anchor, selection_for
-    records, focus = records_only_now(ctx), _focus_turn(metadata)
+    door, records, focus = records_only(metadata), records_only_now(ctx), _focus_turn(metadata)
     if records and focus and text and not quiet:
         from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
         if owner_reply_owed(ctx):  # R3 at the common exit: a focus's record owes my human's reply as a silent one does
@@ -417,7 +445,7 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
         held = reply_hold(root, metadata, ctx.task_id, text, anchor=anchor)
         if held:
             ctx._focus_reply_hold = held
-        elif getattr(ctx, "_focus_checked_reply", None) != digest:
+        elif not door and getattr(ctx, "_focus_checked_reply", None) != digest:
             from ouroboros.safety import check_safety
             allowed, message = check_safety("place_reply", subject, ctx=ctx)
             if not allowed:
@@ -427,12 +455,13 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
                               task_id=ctx.task_id, text="Safety note on this turn's reply: " + message,
                               identity=f"{ctx.task_id}:{digest}:safety-note")
             ctx._focus_checked_reply = digest
-    outcome = "deferred" if _handoff_ref(ctx) else "silent" if quiet or held else "message"
+    record = quiet or bool(held) or door
+    outcome = "deferred" if _handoff_ref(ctx) else "silent" if record else "message"
     old = getattr(ctx, "_presence_completion", {}) or {}
     selection = old.get("selection") if old.get("message") == text else None
     ctx._presence_completion = {"outcome": outcome, "message": text,
                                 "selection": selection or selection_for(ctx, hashlib.sha256(text.encode()).hexdigest()),
-                                **({"quiet": True} if quiet or held else {})}
+                                **({"quiet": True} if record else {})}
     ctx._presence_completion_accepted = True
     return True, ""
 
@@ -445,7 +474,7 @@ def refusal_facts(ctx) -> str:
     from ouroboros.place_guard import this_turn_sends
     from ouroboros.presence_context import _source_conversation
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
+    carrier = carrier_now(ctx, metadata)
     if not carrier or records_only_now(ctx):  # a records-only place posts no finish: the record note says so
         return ""
     label, route = _source_conversation(metadata.get("presence") or {})
