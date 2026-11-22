@@ -55,8 +55,14 @@ def git_repository(destination: Path, *, unborn: bool = False, identity: bool = 
 
 
 def world_git(root, *args):
-    """``git`` in a world's build: the first consumer's own Git state stays out of the copy every test takes."""
-    return git(root, *args, env=_git_environment())
+    """``git`` in a world's build: the first consumer's own Git state (``GIT_*``, system and global
+    configuration) stays out of these build commands; HOME, XDG and TZ stay what tests/conftest.py gives the run.
+    The world serves the whole run, so a commit that left no branch, because something stood in for git at the
+    first build, fails in that test instead of publishing an unborn tree."""
+    out = git(root, *args, env=_git_environment())
+    if "commit" in args and not any((Path(root) / ".git" / "refs" / "heads").iterdir()):
+        raise RuntimeError("no commit was laid: something stood in for git during the build")
+    return out
 
 
 def repository(root, *, unborn=False):

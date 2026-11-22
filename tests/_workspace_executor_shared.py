@@ -2,8 +2,9 @@
 
 The git repository was split out of ``tests/test_workspace_executor.py`` when that
 module was divided by theme; it is now one world of the run, so every sibling suite
-keeps the exact repository layout it was written against. ``fake_docker_cli`` is the
-one Docker CLI boundary those suites fake.
+keeps the tree, commit and configuration it was written against (the ``.git`` folder
+holds no template files). ``fake_docker_cli`` is the one Docker CLI boundary those
+suites fake.
 """
 
 from __future__ import annotations

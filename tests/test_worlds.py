@@ -20,7 +20,7 @@ from tests import _contributor_packet_shared as shared
 from tests import _worlds
 from tests._live_world import _own_installation, installation_template
 from tests._source_scan import parse
-from tests._workspace_git import git_repository
+from tests._workspace_git import git_repository, world_git
 from tests._worlds import clone, run_folder, world
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -272,6 +272,29 @@ def test_a_git_world_is_a_private_repository_whatever_git_state_its_first_test_s
     assert template.is_dir() and shared.git(rebuilt, "log", "--format=%an %s") == "Fixture base"
     with pytest.raises(FileExistsError):
         git_repository(tmp_path / "first")
+
+
+def test_a_fixed_tree_world_whose_commit_did_not_land_fails_its_build_and_publishes_nothing(
+        run_root, tmp_path, monkeypatch):
+    def lay(folder):
+        repo = git_repository(folder / "repo", unborn=True)
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        world_git(repo, "add", "a.txt")
+        world_git(repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "seed")
+
+    git_repository(tmp_path / "warm", unborn=True)  # the unborn world a fixed tree starts from is already built
+    real = subprocess.run
+
+    def stood_in(args, **options):  # the first consumer's own stub of git, in place before it builds the world
+        return subprocess.CompletedProcess(args, 0, b"", b"") if args[0] == "git" else real(args, **options)
+
+    with monkeypatch.context() as stand_in:
+        stand_in.setattr(subprocess, "run", stood_in)
+        with pytest.raises(RuntimeError, match="no commit was laid"):
+            world("fixed-tree", lay)
+    assert not (run_folder("worlds") / "fixed-tree").exists()
+    copy = _worlds.clone_repository(world("fixed-tree", lay) / "repo", tmp_path / "copy")
+    assert shared.git(copy, "log", "--format=%an %s") == "T seed" and shared.git(copy, "status", "--porcelain") == ""
 
 
 def test_the_installation_a_host_starts_from_is_a_private_copy(run_root, tmp_path):

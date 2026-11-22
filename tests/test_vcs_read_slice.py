@@ -68,9 +68,11 @@ def read_ok(ctx, **args):
 def test_repository_is_selected_before_path_and_nested_repo_is_distinct(world):
     _registry, ctx, _system, project = world
     nested = repo(project / "nested")
+    git(nested, "commit", "--amend", "-qm", "first in nested")  # copies of one world share a HEAD: not this one
     (project / "note.txt").write_text("project dirty\n", encoding="utf-8")
     (nested / "note.txt").write_text("nested dirty\n", encoding="utf-8")
     head = git(nested, "rev-parse", "HEAD")
+    assert head != git(project, "rev-parse", "HEAD")  # a read of the project's history cannot pass for the nested one
 
     from ouroboros.tools.tool_resolution import _build_builtin_target_binding
 
