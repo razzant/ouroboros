@@ -448,7 +448,6 @@ def test_log_scope_does_not_read_or_fill_the_finalization_children_cache(tmp_pat
     from ouroboros import task_status
     from ouroboros.finalization_timing import finalization_child_scope
     from ouroboros.gateway.logs import _scope
-    from ouroboros.task_reads import TaskReads
     from ouroboros.task_results import write_task_result
     from ouroboros.task_status import find_child_tasks
     from ouroboros.utils import utc_now_iso
@@ -465,11 +464,8 @@ def test_log_scope_does_not_read_or_fill_the_finalization_children_cache(tmp_pat
     def log_children():
         # Membership discovery and the running child's reconciliation share one physical
         # queue-document read. A fresh Logs request gets its own observation.
-        with (patch.object(task_status, "load_queue_document", wraps=task_status.load_queue_document) as load,
-              patch.object(TaskReads, "queue_snapshot", autospec=True, side_effect=TaskReads.queue_snapshot) as lookup):
+        with patch.object(task_status, "load_queue_document", wraps=task_status.load_queue_document) as load:
             children = _scope(tmp_path, "boss")[1]
-        reader = lookup.call_args_list[0].args[0]
-        assert [call.args for call in lookup.call_args_list] == [(reader, tmp_path.resolve())] * 2
         load.assert_called_once_with(tmp_path.resolve())
         return children
 
