@@ -897,11 +897,20 @@ def _safe_listdir(root: pathlib.Path, *, strict: bool = False) -> List[pathlib.P
         return []
 
 
+def _mode(path: pathlib.Path) -> int:
+    """``st_mode`` of ``path``, 0 when it is absent; any other failure (a permission fault) raises: ``Path.is_file``
+    answers False for one on Python 3.14."""
+    try:
+        return path.stat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return 0
+
+
 def _looks_like_skill_dir(path: pathlib.Path) -> bool:
     """Return True when ``path`` directly contains a skill manifest; a check that cannot be made is a noted gap of
     the walk, so its neighbours still load."""
     try:
-        return path.is_dir() and any((path / candidate).is_file() for candidate in _MANIFEST_NAMES)
+        return stat.S_ISDIR(_mode(path)) and any(stat.S_ISREG(_mode(path / name)) for name in _MANIFEST_NAMES)
     except OSError as exc:
         from ouroboros.skill_discovery_reuse import note_unreadable
 
@@ -1362,9 +1371,7 @@ def discover_skills(
         drive_root, repo_path=repo_path, listdir=(lambda root: _safe_listdir(root, strict=True)) if strict else None)
     from ouroboros.skill_discovery_reuse import WalkedSkills
 
-    found = WalkedSkills(_load_skill_location_candidates(candidates, drive_root=drive_root))
-    found.gaps = getattr(candidates, "gaps", ())  # the folders this walk could not read
-    return found
+    return WalkedSkills(_load_skill_location_candidates(candidates, drive_root=drive_root), getattr(candidates, "gaps", ()))
 
 
 def discover_selected_skill_candidates(

@@ -522,7 +522,7 @@ def test_a_package_that_cannot_be_checked_fails_strict_readers_and_is_a_named_ga
     locked.chmod(0)
     try:
         try:
-            (locked / "SKILL.md").is_file()
+            (locked / "SKILL.md").stat()  # is_file() answers False for a permission fault on Python 3.14
             pytest.skip("this filesystem does not enforce directory permissions")
         except PermissionError:
             pass

@@ -120,7 +120,7 @@ _WALK_GAPS: "contextvars.ContextVar[Optional[Dict[str, str]]]" = contextvars.Con
 
 class Walked(tuple):
     """A walk's location inventory, and ``gaps``: each folder it could not read (a listing or a manifest check),
-    as walked, with the error's name; kept and handed out with the inventory, so a reused walk says them too."""
+    as walked, with the error's name. Only complete inventories are cached."""
 
     gaps: Tuple[str, ...] = ()
 
@@ -128,7 +128,9 @@ class Walked(tuple):
 class WalkedSkills(list):
     """The skills discovered from one walk, with that walk's ``gaps``."""
 
-    gaps: Tuple[str, ...] = ()
+    def __init__(self, skills: Iterable[Any] = (), gaps: Iterable[str] = ()) -> None:
+        super().__init__(skills)
+        self.gaps: Tuple[str, ...] = tuple(gaps)
 
 
 def note_unreadable(path: Any, error: BaseException) -> bool:
