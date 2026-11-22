@@ -556,6 +556,39 @@ def test_local_review_drain_lists_unsettled_attempts_without_settling_them():
                 rc._ACTIVE.pop(key, None)
 
 
+def test_detached_drain_spares_only_a_reviewer_its_live_registry_names(monkeypatch):
+    """Spared only when ``live_detached_operations`` names the operation: open, its author detached, in
+    this process's live registry. An unregistered, attached or closed operation keeps the barrier,
+    and without ``spare_detached`` (every other pause) nothing is spared."""
+    from types import SimpleNamespace
+
+    from ouroboros import budget_pause, review_custody as rc, review_operation as ro
+
+    def operation(owner_id, *, detached=True, closed=False, registered=True):
+        op = SimpleNamespace(owner_id=owner_id, task_id="t8", surface="change", retry_key=owner_id, identity={},
+                             closed=closed, author_detached=detached)
+        if registered:
+            monkeypatch.setitem(ro._LIVE, owner_id, op)
+        return op
+
+    attempts = {name: rc.ActiveReviewAttempt(key=f"change|t8|{name}", operation_id=f"op-{name}",
+                                             wave_key=f"change|t8|{name}", operation=op)
+                for name, op in {"live": operation("live"), "attached": operation("attached", detached=False),
+                                 "closed": operation("closed", closed=True),
+                                 "unregistered": operation("unregistered", registered=False)}.items()}
+    for entry in attempts.values():
+        monkeypatch.setitem(rc._ACTIVE, entry.key, entry)
+    owner = budget_pause.drain_local_review_attempts("t8", timeout_sec=0.05, spare_detached=True)
+    assert [row["operation_id"] for row in owner["spared"]] == ["op-live"]
+    assert sorted(row["operation_id"] for row in owner["unsettled"]) == ["op-attached", "op-closed", "op-unregistered"]
+    assert budget_pause.drain_local_review_attempts("t8", timeout_sec=0.05)["spared"] == []
+    for name in ("attached", "closed", "unregistered"):
+        attempts[name].event.set()
+    owner = budget_pause.drain_local_review_attempts("t8", timeout_sec=0.05, spare_detached=True)
+    assert owner["drained"] is True and [row["operation_id"] for row in owner["spared"]] == ["op-live"]
+    assert not attempts["live"].event.is_set()  # never settled by the drain
+
+
 def test_the_round_start_stamp_stays_out_of_the_stored_continuation(tmp_path, monkeypatch):
     """A paused round resumes on the same round id; a carried monotonic start would stretch
     its llm_round duration over the whole pause, so the stored usage drops it and keeps the rest."""

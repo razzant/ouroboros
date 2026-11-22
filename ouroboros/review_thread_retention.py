@@ -497,7 +497,8 @@ def _members_hold(root: Any, tree: str, task_id: str, document: Dict[str, Any]) 
     return ""
 
 
-def _tree_open(root: Any, tree: str, task_id: str, document: Dict[str, Any], live: Callable[[str], Any]) -> str:
+def _tree_open(root: Any, tree: str, task_id: str, document: Dict[str, Any], live: Callable[[str], Any], *,
+               interlocked: bool = False) -> str:
     """Why one tree's work is not over (``""`` when it is): the task and its root proven over, no live queue row
     in the tree, every member ended with no open review work (``_members_hold``)."""
     from ouroboros.subagent_worktrees import _task_proven_over
@@ -505,6 +506,12 @@ def _tree_open(root: Any, tree: str, task_id: str, document: Dict[str, Any], liv
 
     if any(not _task_proven_over(member, root, live) for member in dict.fromkeys((task_id, tree))):
         return "task_not_proven_over"
+    if interlocked:
+        from supervisor import queue
+        from supervisor.queue_transitions import _live_descendants_locked
+
+        if _live_descendants_locked(queue, tree, exclude_task_id=tree):
+            return "tree_live"  # a recent admission need not be in the published snapshot yet
     if task_subtree_has_live_queue_rows(root, tree):
         return "tree_live"
     return _members_hold(root, tree, task_id, document)
@@ -554,7 +561,7 @@ def _continued_roots(root: Any, tree: str) -> Optional[List[Tuple[str, Dict[str,
 
 
 def tree_hold(root: Any, task_id: str, document: Dict[str, Any], *, live: Callable[[str], Any],
-              census: Optional[set], every_offer: bool = False) -> Tuple[str, Dict[str, Any]]:
+              census: Optional[set], every_offer: bool = False, continuation_reads: Any = None) -> Tuple[str, Dict[str, Any]]:
     """Why the task's threads cannot go yet (``""`` when nothing holds them) and its own custody runs in its tree.
     The whole work holds them: the task's tree, the line while it is continuable, then the tree of each root
     the owner's Continue admitted after it, whose own members, reviews and custody must end too (that hold
@@ -564,8 +571,13 @@ def tree_hold(root: Any, task_id: str, document: Dict[str, Any], *, live: Callab
     take the supervisor's queue lock in the server process)."""
     from ouroboros.delegate_continuation import still_continuable
 
+    interlocked = False
+    if continuation_reads is not None:  # manual file release's two checks
+        from supervisor import queue
+
+        interlocked = queue._queue_lock._is_owned() and queue.owns_live_queue(root)
     tree = str(document.get("root_task_id") or task_id)
-    why = _tree_open(root, tree, task_id, document, live)
+    why = _tree_open(root, tree, task_id, document, live, interlocked=interlocked)
     if why:
         return why, {}
     if census is None:
@@ -575,13 +587,13 @@ def tree_hold(root: Any, task_id: str, document: Dict[str, Any], *, live: Callab
         return why, {}
     line = SimpleNamespace(review_owned=False, run_id=f"review-threads:{task_id}", task_id=task_id,
                            root_task_id=tree, invocation_id="")
-    if still_continuable(root, line, census, every_offer=every_offer):
+    if still_continuable(root, line, census, every_offer=every_offer, ownership=continuation_reads):
         return "continuable", {}
     successors = _continued_roots(root, tree)
     if successors is None:
         return "continuation_unverified", {}
     for successor, own in successors:  # an ended, uncontinuable successor may still have its tree's work open
-        why = _tree_open(root, successor, successor, own, live) or _custody_hold(root, successor)[0]
+        why = _tree_open(root, successor, successor, own, live, interlocked=interlocked) or _custody_hold(root, successor)[0]
         if why:
             return f"continued_{why}", {}
     return "", runs

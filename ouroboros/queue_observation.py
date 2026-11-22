@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, Optional
 
 from ouroboros.shared_values import SHARED_KEY, SharedValueMissing, token_digest
-from ouroboros.utils import read_json_dict
+from ouroboros.utils import file_identity, read_json_dict
 
 _sleep = time.sleep  # the admission contention sleeper, independent of the snapshot observation clock
 
@@ -79,11 +79,11 @@ def expand_shared(document: dict) -> dict:
 def _parsed(path: pathlib.Path, *, fresh: bool) -> Optional[dict]:
     """The expanded document of ``path``: the cached one while the file identity holds, else re-read.
 
-    ``fresh`` returns an unshared copy (a restore mutates what it reads) and caches nothing.
+    ``fresh`` returns an unshared copy (a restore mutates what it reads) and caches nothing. The identity
+    carries the change time, so a withdrawn read permission is re-read; a failed read drops the cached one.
     """
     try:
-        stat = os.stat(path)
-        identity = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        identity = file_identity(os.stat(path))
     except OSError:
         identity = None
     if not fresh and identity is not None:
@@ -92,11 +92,13 @@ def _parsed(path: pathlib.Path, *, fresh: bool) -> Optional[dict]:
         if cached is not None and cached[0] == identity:
             return cached[1]
     document = read_json_dict(path)
-    if document is None:
-        return None
     try:
+        if document is None:
+            raise ValueError(path)
         expand_shared(document)
     except ValueError:
+        with _CACHE_LOCK:  # an unreadable document is unknown, never an older reading
+            _CACHE.pop(path, None)
         return None
     if fresh:
         return document

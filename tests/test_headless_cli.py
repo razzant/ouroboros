@@ -166,6 +166,58 @@ def test_cli_run_no_stream_waits_without_jsonl(monkeypatch, capsys):
     assert captured.out.strip() == "done"
 
 
+def test_cli_exports_task_result_posix_names_in_json_and_jsonl(tmp_path, monkeypatch, capsysbinary):
+    from ouroboros import cli
+
+    artifacts = [{"name": name} for name in ("report-\udcff.txt", r"report-\udcff.txt", "файл🪶.txt")]
+    result = {"status": "completed", "result": "готово", "artifacts": artifacts}
+    event = {"type": "task_result", "data": result, "cursor": {"v": 2}}
+
+    class Client:
+        def request(self, method, path, body=None):
+            if (method, path) == ("POST", "/api/tasks"):
+                return {"task_id": "done"}
+            assert (method, path) == ("GET", "/api/tasks/done")
+            return result
+
+        def stream_sse(self, path, *, timeout, body):
+            assert path == "/api/tasks/done/events"
+            yield event
+
+    monkeypatch.setattr(cli, "_client", lambda *args, **kwargs: Client())
+    output = tmp_path / "result.json"
+    assert cli.main(["run", "--jsonl", "--result-json-out", str(output), "hello"]) == 0
+    lines = capsysbinary.readouterr().out.decode("utf-8").splitlines()
+    assert [json.loads(line) for line in lines] == [event, {"type": "final", "task_id": "done", "result": result}]
+    assert cli.main(["tasks", "show", "done"]) == 0
+    show = capsysbinary.readouterr().out.decode("utf-8")
+    saved = output.read_bytes().decode("utf-8")
+    assert json.loads(saved) == json.loads(show) == result
+    for wire in [*lines, saved, show]:
+        assert r'"report-\udcff.txt"' in wire and r'"report-\\udcff.txt"' in wire and "файл🪶.txt" in wire
+
+
+@pytest.mark.parametrize("command", ["tail", "follow"])
+def test_cli_logs_output_keeps_posix_names_and_literal_spelling_distinct(command, monkeypatch, capsysbinary):
+    from ouroboros import cli
+
+    entries = [{"type": "task_done", "ts": "same", "artifact_bundle": {"artifacts": [{"name": name}]}}
+               for name in ("report-\udcff.txt", r"report-\udcff.txt")]
+    client = SimpleNamespace(request=lambda *_args: {"entries": entries})
+    monkeypatch.setattr(cli, "_client", lambda *_args: client)
+    if command == "tail":
+        assert cli.main(["logs", command, "events"]) == 0
+    else:
+        def stop_after_one_page(_seconds):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli.time, "sleep", stop_after_one_page)
+        with pytest.raises(KeyboardInterrupt):
+            cli.main(["logs", command, "events"])
+    lines = capsysbinary.readouterr().out.decode("utf-8").splitlines()
+    assert [json.loads(line) for line in lines] == entries
+
+
 def test_cli_run_timeout_waits_through_finalization_grace(monkeypatch):
     from ouroboros import cli
     from supervisor import queue

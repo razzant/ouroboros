@@ -31,6 +31,10 @@ _RECENT_SERVERS = 4
 _PARK_CHECK_SEC = 5.0
 
 
+class InjectNotAccepted(RuntimeError):
+    """The host proves this attempt did not enter the dialogue store."""
+
+
 def saved_server(api) -> tuple[str, str | None]:
     """The saved Bot API server origin and its file store, read fresh for every client."""
     state_dir = Path(api.get_state_dir())
@@ -106,6 +110,8 @@ class PollCursor:
     def __init__(self, path: Path, base: str, bot: str = ""):
         self.path, self.base, self.bot, self.offset = Path(path), CLOUD_BASE, "", 0
         self._handled: dict[str, list[str]] = {}
+        self._early: dict[str, dict[str, int]] = {}
+        self._held: dict[str, dict] = {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.offset = int(data.get("offset") or 0)
@@ -114,6 +120,10 @@ class PollCursor:
             self.bot = str(data.get("bot") or "")
             self._handled = {str(key): [str(item) for item in value]
                              for key, value in dict(data.get("handled") or {}).items()}
+            self._early = {base: {key: int(uid) for key, uid in items.items()}
+                           for base, items in dict(data.get("early") or {}).items()}
+            self._held = {base: item for base, item in dict(data.get("held") or {}).items()
+                          if isinstance(item.get("target"), dict)}
         except Exception:
             pass
         self.follow(base, bot)
@@ -122,21 +132,122 @@ class PollCursor:
         """Bind to ``base`` and ``bot``; a different server or bot starts from its own oldest update."""
         if bot and self.bot and bot != self.bot:
             self.base, self.offset, self._handled = base, 0, {}
+            self._early, self._held = {}, {}
         elif base != self.base:
             self.base, self.offset = base, 0
         self.bot = bot or self.bot
 
     def is_replay(self, update: dict) -> bool:
         key = update_key(update)
-        return bool(key) and any(key in keys for keys in self._handled.values())
+        return bool(key) and (any(key in keys for keys in self._handled.values())
+                              or any(key in keys for keys in self._early.values()))
+
+    def remember_early(self, update: dict) -> None:
+        if (key := update_key(update)) and (uid := int(update.get("update_id") or 0)) > 0:
+            self._early.setdefault(self.base, {})[key] = uid
+
+    def held_target(self, update: dict):
+        key = update_key(update)
+        return next((held["target"] for held in self._held.values() if key and held.get("key") == key), None)
+
+    def hold_target(self, update: dict, target: dict) -> None:
+        self._held[self.base] = {"key": update_key(update), "update_id": update["update_id"], "target": target}
+
+    def retire_target(self, key: str) -> None:
+        if key:
+            self._held = {base: held for base, held in self._held.items() if held.get("key") != key}
 
     def save(self, offset: int, handled: list[str]) -> None:
         self.offset = offset
         self._handled.pop(self.base, None)
         self._handled[self.base] = [key for key in handled if key]
         self._handled = dict(list(self._handled.items())[-_RECENT_SERVERS:])
+        if self.base in self._early:
+            self._early[self.base] = {key: uid for key, uid in self._early[self.base].items() if uid >= offset}
+        self._early = {base: items for base, items in self._early.items() if items and base in self._handled}
+        if self._held.get(self.base, {}).get("update_id", offset) < offset:
+            self._held.pop(self.base, None)
+        self._held = {base: item for base, item in self._held.items() if base in self._handled}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"offset": offset, "base": self.base, "bot": self.bot, "handled": self._handled}),
-                       encoding="utf-8")
+        tmp.write_text(json.dumps({"offset": offset, "base": self.base, "bot": self.bot, "handled": self._handled,
+                                   **({"early": self._early} if self._early else {}),
+                                   **({"held": self._held} if self._held else {})}), encoding="utf-8")
         tmp.replace(self.path)
+
+
+async def handle_poll_batch(api, client, updates, cursor, binding, generation, pinned_chat, max_updates, command_mode,
+                            lang, *, authorize, is_panic, on_message, on_callback) -> tuple[bool, str]:
+    """Confirm updates in order. An already received Panic alone may pass a limit or an acceptance gap."""
+    from .telegram_api import TelegramBindingChanged, _LOCALIZED_TEXTS
+
+    offset, handled, deferred = cursor.offset, [], False
+    for index, update in enumerate(updates):
+        if not binding.current(generation):
+            break
+        early = deferred or index >= max_updates
+        replay = cursor.is_replay(update)
+        key = update_key(update)
+        if early and not is_panic(update):
+            if replay:
+                handled.append(key)
+            continue
+        authorized_chat, confirmed, target = None, (offset, len(handled)), cursor.held_target(update)
+
+        def confirm():
+            nonlocal confirmed
+            confirmed = None  # a local or host effect already happened
+
+        def resolve_target(read):
+            nonlocal target
+            if target is None:
+                target = read()
+            return target
+
+        try:
+            update_id = int(update.get("update_id") or 0)
+            if update_id > 0 and not early:
+                offset = update_id + 1  # retain the existing recovery for a restarted server's numbering
+            handled.append(key)
+            if replay:
+                cursor.retire_target(key)
+                continue
+            authorized_chat = await authorize(api, client, update, pinned_chat, lang)
+            if not authorized_chat:
+                cursor.retire_target(key)
+                continue
+            pinned_chat = authorized_chat
+            if update.get("callback_query"):
+                lang = await on_callback(api, client, update, pinned_chat, command_mode, lang, confirm)
+            else:
+                await on_message(api, client, update, update_id, command_mode, lang, reply_target=resolve_target)
+        except TelegramBindingChanged:
+            if confirmed is not None:
+                offset, handled = confirmed[0], handled[:confirmed[1]]
+                api.log("info", "Telegram bot token changed while an update was handled; it stays unconfirmed.")
+            else:
+                cursor.retire_target(key)
+                api.log("info", "Telegram bot token changed after an update was applied; its reply was not sent.")
+            break
+        except InjectNotAccepted:
+            if confirmed is not None:
+                offset, handled = confirmed[0], handled[:confirmed[1]]
+                deferred = True
+                if not early and target is not None and update_id > 0:
+                    cursor.hold_target(update, target)
+                api.log("info", "The host did not record a Telegram update; it will be delivered again.")
+                continue
+            api.log("warning", "Telegram update was not accepted after its local effect; it is not retried.")
+        except Exception as exc:
+            api.log("warning", f"Telegram update processing failed ({type(exc).__name__}).")
+            if authorized_chat:
+                try:
+                    await client.send_message(int(authorized_chat), _LOCALIZED_TEXTS[lang]["update_failed"])
+                except Exception:
+                    api.log("warning", "Telegram update failure notice could not be delivered.")
+        cursor.retire_target(key)
+        if early:
+            cursor.remember_early(update)
+    if updates and (handled or deferred or offset != cursor.offset):
+        cursor.save(offset, handled)
+    return deferred, lang

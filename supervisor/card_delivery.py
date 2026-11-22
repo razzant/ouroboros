@@ -30,7 +30,7 @@ def card_identity(record: Dict[str, Any]) -> Dict[str, Any]:
 def send_card(bridge: Any, record: Dict[str, Any], chat_id: int, *, task_id: str,
               interactive: bool) -> Tuple[bool, str]:
     """Write the card's chat row, then tell the page, the skills and plain transports."""
-    from ouroboros.chat_references import projection_fields
+    from ouroboros.chat_references import delivery_transport, projection_fields
     from ouroboros.projects_registry import stamp_project_thread
     from supervisor import message_bus as bus
     from supervisor.state import load_state
@@ -58,7 +58,7 @@ def send_card(bridge: Any, record: Dict[str, Any], chat_id: int, *, task_id: str
             pass
     stamp_project_thread(bus.DATA_DIR, frame)
     bridge.broadcast(frame)
-    transport = bridge.chat_transport(chat_id)
+    transport = delivery_transport(bus.DATA_DIR, bridge.chat_transport(chat_id), task_id)
     publish_event(CHAT_CARD, {**identity, "chat_id": int(chat_id), "transport": transport,
                               "fallback_text": fallback, "interactive": bool(interactive),
                               "task_id": task_id, "ts": ts})

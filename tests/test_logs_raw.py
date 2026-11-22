@@ -163,6 +163,36 @@ def test_public_projection_is_reapplied_and_has_a_separate_identity(tmp_path):
     assert full["nested"] == {} and "outcome_axes" in full
 
 
+def test_task_done_names_round_trip_in_both_tails_and_verified_raw(tmp_path):
+    from ouroboros.utils import append_jsonl
+
+    artifacts = [{"name": name} for name in ("report-\udcff.txt", r"report-\udcff.txt", "файл🪶.txt")]
+    bundle = {"status": "ready", "artifacts": artifacts}
+    path = tmp_path / "logs/events.jsonl"
+    assert append_jsonl(path, {"type": "task_done", "task_id": "done", "status": "completed",
+                               "result_status": "completed", "artifact_bundle": bundle}, live=False)
+    stored = path.read_bytes()
+    http = client(tmp_path)
+    for view in ("full", "compact"):
+        response = http.get("/api/logs/events", params={"view": view})
+        assert response.status_code == 200
+        wire = response.content.decode("utf-8")
+        assert r'"report-\udcff.txt"' in wire and r'"report-\\udcff.txt"' in wire and "файл🪶.txt" in wire
+        [entry] = response.json()["entries"]
+        assert entry["artifact_bundle"] == bundle and "result_status" not in entry
+
+    digest = hashlib.sha256(stored).hexdigest()
+    assert entry["_raw"]["source"]["sha256"] == digest
+    raw = read(http, entry, download=1)
+    assert raw.status_code == 200
+    assert raw.headers["x-ouroboros-raw-representation"] == "public_task_result"
+    assert raw.headers["x-ouroboros-source-sha256"] == digest
+    assert raw.headers["x-ouroboros-payload-sha256"] == hashlib.sha256(raw.content).hexdigest()
+    assert len(raw.content) == entry["_raw"]["public_bytes"]
+    assert json.loads(raw.content.decode("utf-8"))["artifact_bundle"] == bundle
+    assert read(http, entry).json()["text"].encode("utf-8") == raw.content
+
+
 def test_raw_refuses_overwritten_json_members_instead_of_leaking_unprojected_bytes(tmp_path):
     write(tmp_path, {"type": "row"})
     http = client(tmp_path)

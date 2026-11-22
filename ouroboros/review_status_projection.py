@@ -339,6 +339,31 @@ def _review_status_actor_summary(attempt: Any) -> Dict[str, Any]:
     }
 
 
+def _attempt_kind(attempt: Any) -> str:
+    """What kind of attempt this row is, in the words the status line uses."""
+    return {"review_result": "result review", "review_skill": "skill review",
+            "review_change": "change review"}.get(str(getattr(attempt, "tool_name", "") or ""), "commit attempt")
+
+
+def _attempt_records_reviewer_evidence(attempt: Any) -> bool:
+    """Whether this attempt's own row records a reviewer operation, a wave record or retry evidence.
+
+    Only what the row holds counts: the actor rows a reviewer operation wrote, the ledger record
+    of its wave (``review_record_id``) and the key a retry wrote (``review_retry_key``). What the row
+    does NOT hold is no fact about the attempt's fate — it only means this record cannot confirm one.
+    """
+    if getattr(attempt, "triad_raw_results", None):
+        return True
+    scope = getattr(attempt, "scope_raw_result", None)
+    if isinstance(scope, dict) and scope:
+        return True
+    if str(getattr(attempt, "review_record_id", "") or ""):
+        return True
+    if str(getattr(attempt, "review_retry_key", "") or ""):
+        return True
+    return False
+
+
 def _review_status_message(projection: Dict[str, Any]) -> str:
     ca = projection.get("selected_attempt")
     current = f"Current advisory: {projection['effective_status']}"
@@ -399,6 +424,14 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
             from ouroboros.review_records import review_failure_summary
             current += "\n" + "\n".join(review_failure_summary(row) for row in (ca.triad_raw_results or [])
                                          if row.get("status") != "responded")
+    elif ca and ca.status == "reviewing" and not _attempt_records_reviewer_evidence(ca):
+        # An open row is not a running panel. The row says the attempt reached the review phase and stopped
+        # there: without a recorded reviewer operation, wave record or retry evidence it cannot confirm that a
+        # panel was dispatched or sent, and what its preparation and its outcome became stays unknown.
+        current = (f"Last {_attempt_kind(ca)}: its row is marked reviewing, but the record holds no reviewer "
+                   "operation, no wave record and no retry evidence — it does not confirm that a review panel was "
+                   "dispatched or sent, and the attempt's preparation and its outcome may still be unknown."
+                   f"  |  {current}")
     if projection.get("canonical_attempts_unreadable"):
         current = (f"{current}  |  This task's canonically held review_change attempts are not listed: "
                    f"{projection['canonical_attempts_unreadable']}")

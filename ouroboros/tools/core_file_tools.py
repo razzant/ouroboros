@@ -128,7 +128,6 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
     Disclosed in the header, so the view never silently masquerades as the whole line.
     """
     start_raw, max_raw = _coerce_line_window(start_line, max_lines)
-    max_raw = max(1, max_raw)
     lines = content.splitlines(keepends=True)
     total = len(lines)
     start = max(1, min(start_raw, total + 1))
@@ -755,6 +754,8 @@ def read_admission(ctx: ToolContext, root: str, path: str, *, bucket: str = "", 
                    prospective_copy: Optional[pathlib.Path] = None) -> tuple[str, Optional[ResolvedResourceBinding], Any]:
     """Unpublished admission. For a measured copy about to be handed off, require its exact address
     instead of hashing a copy not yet published; the actual read still verifies the copy's identity.
+    Shared profile, binding, Presence, runtime-data, protected-path and custody checks for file reads.
+    Return (root, binding, refusal): None admits; otherwise a ToolResult or the protected path's final text.
     The profile, runtime-data and protected-path checks always apply."""
     from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED, _presence_binding_allowed
 
@@ -772,7 +773,16 @@ def read_admission(ctx: ToolContext, root: str, path: str, *, bucket: str = "", 
         return normalized, binding, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=PRESENCE_RESOURCE_BLOCKED)
     if runtime_block := _runtime_data_read_block(ctx, binding.target_path, root=binding.root):
         return normalized, binding, ToolResult(status="blocked", code="DATA_BLOCKED", text=runtime_block)
-    return normalized, binding, block_reason_for_path(ctx, binding.target_path, "read_bytes", binding) or None
+    refusal = block_reason_for_path(ctx, binding.target_path, "read_bytes", binding)
+    if not refusal and binding.root == "artifact_store":
+        from ouroboros.payload_release_state import ReleaseUnavailable, require_file_available
+        try:
+            require_file_available(binding.target_path, anchor=ctx.drive_root)
+        except OSError as exc:
+            reason = exc.reason if isinstance(exc, ReleaseUnavailable) else "artifact_unavailable"
+            refusal = ToolResult(status="unavailable", code="TOOL_ADMISSION_UNAVAILABLE",
+                                 text=f"⚠️ TOOL_ADMISSION_UNAVAILABLE: {reason}", meta={"reason_code": reason})
+    return normalized, binding, refusal or None
 
 
 def _root_display_path(root: str, path: str) -> str:
@@ -861,9 +871,7 @@ def _read_file(
     _resolved_binding: ResolvedResourceBinding | None = None,
     max_chars: Optional[int] = None,
 ) -> str:
-    # Reset first: a blocked or missing read must never inherit the previous
-    # read's extent (the renderer fills `extent` only when it rendered).
-    ctx.last_read_view = None
+    ctx.last_read_view = None  # a blocked or missing read must not inherit the previous extent
     extent: Dict[str, Any] = {}
     if not root:
         from ouroboros.tools.tool_resolution import _root_containing_absolute_path
@@ -908,10 +916,7 @@ def _read_file(
     except UnicodeDecodeError as exc:
         return _publish_tool_result(ctx, _not_text_error(normalized, path, target, exc, selectors))
     except UserFilesPathBlockedError as exc:
-        # Typed POLICY refusal, not an executor failure: the runtime said "no"
-        # to this read. The distinct prefix routes it into the v6.57.0
-        # policy-denial partition instead of a generic error that falsely
-        # degrades a shipped task to tool_failure.
+        # The typed policy-denial prefix keeps this runtime refusal from degrading the task to tool_failure.
         return _publish_tool_result(ctx, ToolResult(
             status="blocked", code="USER_FILES_PATH_BLOCKED", text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}"))
     except Exception as exc:
@@ -954,8 +959,7 @@ def _list_files(
             status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ LIST_FILES_ERROR ({type(exc).__name__}): {exc}"))
     if runtime_block := _runtime_data_read_block(ctx, binding.target_path, listing=True, root=binding.root):
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="DATA_BLOCKED", text=runtime_block))
-    protected_list_block = block_reason_for_path(ctx, binding.target_path, "static_introspection", binding)
-    if protected_list_block:
+    if protected_list_block := block_reason_for_path(ctx, binding.target_path, "static_introspection", binding):
         return protected_list_block
     try:
         # Every listing branch runs inside this try: a hard iterdir/permission/
@@ -967,10 +971,6 @@ def _list_files(
         if normalized in {"active_workspace", "system_repo", "runtime_data"}:
             lister = _data_list if normalized == "runtime_data" else _repo_list
             return lister(ctx, dir=path, max_entries=max_entries, _resolved_binding=binding)
-        if normalized == "skill_payload":
-            rel = binding.target_path.relative_to(binding.base_path).as_posix() or "."
-            items = _list_dir(binding.base_path, rel, max_entries)
-            return json.dumps(items, ensure_ascii=False, indent=2)
         if normalized == "user_files":
             items = _list_user_files_dir(ctx, binding.base_path, binding.target_path, max_entries)
             return json.dumps(items, ensure_ascii=False, indent=2)

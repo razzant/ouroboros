@@ -422,8 +422,8 @@ def test_skills_name_each_extensions_trust_only_with_an_execution_domain(org, mo
         assert trust == {NAME: None, "notes_helper": None}
         return
     unlisted = {"state": "untrusted", "reason": "not_delivered", "administered": False,
-                "detail": "Only extensions your organization’s administrator delivers run here, and this one isn’t "
-                          "among them."}
+                "detail": "Only extension skills your organization’s administrator delivers run here, and this one "
+                          "isn’t among them."}
     assert trust["notes_helper"] == unlisted
     assert trust[NAME] == ({"state": "trusted", "administered": True} if mode == "trusted" else unlisted)
     assert rows["notes_helper"]["live_reason"] == "deployment_untrusted"

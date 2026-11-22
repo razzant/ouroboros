@@ -1,3 +1,4 @@
+import { ownerMessageBubble } from './chat_history_replay.js';
 import { isPanicFrame } from './panic.js';
 // Owner attachments inside the owner's own chat bubble (docs/DESIGN.md "Chat
 // attachments"): one message, attachments above the caption, whole images
@@ -10,7 +11,7 @@ import { isPanicFrame } from './panic.js';
 // response for the sender's own bubble, the echo for other tabs, history for
 // replay — the same dict everywhere. Nothing here builds a file URL.
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { tr } from './i18n.js';
+import { fmt, tr } from './i18n.js';
 import { apiClient, apiFetch } from './api_client.js';
 import { documentReaderKind } from './document_reader.js';
 
@@ -241,7 +242,7 @@ async function degrade(atoms, block, node, view) {
  * file is staged, revoked when it is removed, sent or the composer is destroyed,
  * and kept across a failed send so the owner can retry.
  */
-export function createComposerAttachments({ preview, attachBtn, fileInput, input, onLayout, showToast }) {
+export function createComposerAttachments({ preview, attachBtn, fileInput, input, onLayout, showToast, onChange = () => {} }) {
     let pending = [];
     let uploading = false;
 
@@ -267,6 +268,7 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
                 if (uploading) return;
                 const removeId = button.dataset.attachmentRemove || '';
                 pending = pending.filter((item) => item.id !== removeId || (revoke(item), false));
+                onChange();
                 render();
             });
         });
@@ -288,6 +290,7 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
             display_name: file.name || 'upload',
             thumb: thumbFor(file),
         })));
+        onChange();
         render();
     }
 
@@ -302,17 +305,27 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     }
 
     /**
-     * Upload every staged file in order; `connected()` is checked before each one.
+     * Upload the submitted files in order; `connected()` is checked before each one.
      * Resolves with `{filename, display_name, mime, view}` per file. On failure the
      * uploads already made are handed back on the error (`error.uploaded`) for
      * cleanup, and the staged files (with their thumbnails) stay for a retry.
      */
-    async function upload(connected) {
+    async function upload(connected, items = pending.slice()) {
         const uploaded = [];
         setUploading(true);
         try {
-            for (const item of [...pending]) {
+            for (const item of items) {
                 if (!connected()) throw new Error('Connection closed during upload. Reconnect and try again.');
+                if (item.upload) {
+                    const { view } = item.upload;
+                    const available = view?.url && await apiFetch(view.url, { method: 'HEAD', cache: 'no-store' });
+                    if (!available || available.status === 404) throw new Error(fmt(
+                        'Saved attachment “{name}” is unavailable. Remove it or attach it again.', { name: item.display_name }));
+                    if (!available.ok) throw new Error(fmt('Could not check saved attachment “{name}”. Try again.',
+                        { name: item.display_name }));
+                    uploaded.push({ ...item.upload, reused: true });
+                    continue;
+                }
                 const data = await apiClient.uploadChatAttachment(item.file);
                 uploaded.push({
                     filename: data.filename || '',
@@ -324,7 +337,7 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
             if (!connected()) throw new Error('Connection closed after upload. Reconnect and try again.');
             return uploaded;
         } catch (error) {
-            error.uploaded = uploaded;
+            error.uploaded = uploaded.filter(item => !item.reused);
             throw error;
         } finally {
             setUploading(false);
@@ -332,15 +345,39 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     }
 
     function clear() {
+        const changed = pending.length > 0;
         pending.forEach(revoke);
         pending = [];
+        if (changed) onChange();
         render();
     }
 
     return {
         stage,
         upload,
+        snapshot: () => pending.slice(),
         clear,
+        // Once a message has actually been sent, a badge still staged keeps the ref of the upload
+        // that just completed, matched by its staged identity and never by list index: a removed or
+        // replaced badge cannot take another item's ref. Its old retry frame remains independent:
+        // removing the badge must not delete the file from that frame.
+        keepUploads(staged, uploads) {
+            const refs = new Map();
+            staged.forEach((item, index) => {
+                const upload = draftUpload(uploads[index]);
+                if (upload) refs.set(item.id, upload);
+            });
+            for (const item of pending) {
+                const upload = refs.get(item.id);
+                if (upload) item.upload = upload;
+            }
+        },
+        restoreUploads(uploads) {
+            pending = (Array.isArray(uploads) ? uploads : []).map(draftUpload).filter(Boolean)
+                .map((upload, index) => ({ id: `saved-${index}`, display_name: upload.display_name, upload }));
+            if (pending.length) render();
+        },
+        get uploads() { return pending.flatMap(item => item.upload ? [item.upload] : []); },
         destroy() { pending.forEach(revoke); pending = []; },
         get count() { return pending.length; },
         get busy() { return uploading; },
@@ -349,7 +386,15 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
 
 // What a reload keeps of a sent frame: its words, identity, routing and the refs of uploads the
 // host already stores — never bytes, never the send-time client_surface (an honest gap on resend).
-const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to'];
+const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt'];
+
+function draftUpload(raw) {
+    const filename = String(raw?.filename || '');
+    if (!/^[0-9a-f]{32}_[^/\\\r\n]+$/.test(filename)) return null;
+    const [view] = attachmentViews([raw.view]);
+    return { filename, display_name: String(raw.display_name || view?.name || 'attachment'), mime: String(raw.mime || ''),
+        view: view?.available && new URLSearchParams(view.url.split('?')[1]).get('upload') === filename ? view : null };
+}
 
 function keptFrame(frame) {
     if (isPanicFrame(frame)) return null;
@@ -391,29 +436,32 @@ export function placeIngressNote(bubble, note) {
  * history read after a reload does not show the message saved (`reconcile`) — every
  * such bubble says so and offers "Send again": the SAME frame and id, which the host
  * rejoins if it saved the message after all (never a second message) or accepts now,
- * and "Discard", which forgets only this tab's copy. A saved row marked
+ * and "Discard", which forgets only this tab's copy; a selected reply's bubble also offers "Send as new", which
+ * returns its words and quote to an empty composer (`compose`) and sends nothing. A saved row marked
  * `ingress_pending` is the running host's, between its append and its dispatch
  * (or echoed before a deferred dispatch): the frame waits for the next fact. A saved row
  * with neither dispatch fact came from a host process that has since ended (a restart came
  * between): whether it reached the agent is unknown and Send again would only rejoin
- * it, so its bubble says "Saved; delivery not confirmed" and the frame is dropped; the one action it keeps is "Send as a
- * new message", which only prepares the composer with the owner's words (`compose`) and sends nothing. Bubble
+ * it, so its bubble says "Saved; delivery not confirmed"; the tab keeps this doubt across reloads and the one action
+ * "Send as a new message", which only prepares the composer with the owner's words (`compose`) and sends nothing. Bubble
  * labels (markIngressSaved): `Input saved` on `ingress_dispatched` and `ingress_pending`.
- * `count` feeds the chat
+ * `count` excludes saved delivery doubts and feeds the chat
  * instance's `hasPendingWork`, which keeps a Project room holding one hidden instead of
  * destroying it. Nothing here resends by itself or deletes an upload: those stay on the host.
  */
 export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, storage = null, storageKey = '' }) {
-    const frames = new Map();  // id -> { frame, views, ts, restored, queued }
-    const bubbleOf = (id) => [...(root()?.querySelectorAll('.chat-bubble.user[data-client-message-id]') || [])]
-        .find((node) => node.dataset.clientMessageId === id) || null;
+    const frames = new Map();  // id -> { frame, reply, views, ts, restored, queued, deliveryUnknown }
+    const bubbleOf = id => {
+        const frame = frames.get(id)?.frame;
+        return ownerMessageBubble(root(), frame, Number(frame?.chat_id ?? 1));
+    };
     let unreadable = false;  // a kept copy this tab cannot read restores nothing, and says so
     try {
         const kept = storage && storageKey ? storage.getItem(storageKey) : null;
         for (const entry of kept === null ? [] : JSON.parse(kept)) {
             const frame = keptFrame(entry?.frame);
-            if (frame) frames.set(String(frame.client_message_id), { frame, views: attachmentViews(entry.views),
-                ts: String(entry.ts || ''), restored: true });
+            if (frame) frames.set(String(frame.client_message_id), { frame, reply: entry.reply, views: attachmentViews(entry.views),
+                ts: String(entry.ts || ''), restored: true, deliveryUnknown: entry.deliveryUnknown === true });
             else unreadable = true;
         }
     } catch { unreadable = true; }
@@ -427,7 +475,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         try {
             if (!frames.size) storage.removeItem(storageKey);
             else storage.setItem(storageKey, JSON.stringify([...frames.values()]
-                .map(({ frame, views, ts }) => ({ frame: keptFrame(frame), views, ts }))));
+                .map(({ frame, reply, views, ts, deliveryUnknown }) => ({ frame: keptFrame(frame), reply, views, ts,
+                    ...(deliveryUnknown ? { deliveryUnknown: true } : {}) }))));
         } catch {
             showToast(tr('chat.send_unconfirmed_unkept',
                 'This tab could not keep the unsaved message for a reload. Send again still works until then.'), 'error',
@@ -441,19 +490,32 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
 
     function retry(id, note) {
         const entry = frames.get(id);
-        if (!entry) return;
+        if (!entry || entry.deliveryUnknown) return;
         if (send(entry.frame, { queue: false })?.status !== 'sent') {
             showToast(tr('chat.send_again_offline', 'Still offline. Reconnect and send again.'), 'error');
             return;
         }
         // The doubt waits for the next fact; a pending saved row keeps its note, without actions.
-        onDomWrite(() => (note.dataset.ingressUnconfirmed !== undefined ? note.remove() : clearActions(note, bubbleOf(id)), true));
+        if (note) onDomWrite(() => (note.dataset.ingressUnconfirmed !== undefined ? note.remove() : clearActions(note, bubbleOf(id)), true));
     }
 
     // Without its actions a pending saved note is the quiet tick again (placeIngressNote).
     function clearActions(note, bubble = null) {
         for (const button of note.querySelectorAll('[data-unconfirmed-action]')) button.remove();
         placeIngressNote(bubble, note);
+    }
+
+    // The running host's own fact on the row (dispatched, or pending) ends every doubt its bubble wears, whoever drew it and
+    // whether or not a saved tick followed: the delivery doubt with its "Send as new", a "Not confirmed" note with its
+    // actions, and the actions of a pending note. Nothing of the warning outlives the fact it was about.
+    function clearDoubt(bubble) {
+        let changed = false;
+        for (const note of [...bubble.querySelectorAll('[data-ingress-unconfirmed]')]) { note.remove(); changed = true; }
+        for (const note of [...bubble.querySelectorAll('[data-ingress-saved]')]) {
+            if (note.dataset.ingressSaved === 'unconfirmed') { note.remove(); changed = true; }
+            else if (note.querySelector('[data-unconfirmed-action]')) { clearActions(note, bubble); changed = true; }
+        }
+        return changed;
     }
 
     function action(label, kind, onClick) {
@@ -466,8 +528,21 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         return button;
     }
 
-    // The doubt on its bubble, or a pending saved note after a disconnect, gains the two actions.
+    // Prepares the composer with the owner's own words (a selected reply with its quote) and sends nothing: the saved row
+    // stays as it is, and the owner reads, edits and sends (or does not) from the composer. Short visible words so the
+    // sentence and its actions share one row on a phone; the name stays whole.
+    function sendAsNew(bubble, reply) {
+        const words = () => bubble.querySelector('.message')?.textContent || '';
+        const asNew = action(tr('chat.send_as_new_short', 'Send as new'), 'send_as_new', () => compose(words(), reply?.excerpt ? reply : null));
+        asNew.setAttribute('aria-label', tr('chat.send_as_new', 'Send as a new message'));
+        return asNew;
+    }
+
+    // The doubt on its bubble, or a pending saved note after a disconnect, gains the two actions; a selected reply, which
+    // left the composer when it was sent, a third that brings its words and quote back.
     function mark(id, bubble) {
+        const entry = frames.get(id);
+        if (entry?.deliveryUnknown) return doubtDelivery(bubble, entry.reply?.reply_to);
         const saved = bubble.querySelector('[data-ingress-saved]');
         let note = saved || bubble.querySelector('[data-ingress-unconfirmed]');
         if (!frames.has(id) || saved?.dataset.ingressSaved === '' || note?.querySelector('[data-unconfirmed-action]')) return false;
@@ -478,16 +553,17 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             note.textContent = `${tr('chat.send_unconfirmed', 'Not confirmed as saved.')} `;
             bubble.insertBefore(note, bubble.querySelector('.msg-time'));
         }
+        const { frame, reply } = frames.get(id);
         note.append(action(tr('chat.send_again', 'Send again'), 'retry', () => retry(id, note)),
+            ...(compose && frame.reply_excerpt ? [sendAsNew(bubble, reply?.reply_to || { address: frame.reply_to, excerpt: frame.reply_excerpt })] : []),
             action(tr('chat.send_discard', 'Discard'), 'discard', () => { forget(id); onDomWrite(() => (clearActions(note, bubble), true)); }));
         placeIngressNote(bubble, note);  // a pending saved note with actions is a row again
         return true;
     }
 
     // Saved by a host process that has since ended: what it did with the row is unknown, and nothing replays it.
-    // The one honest next step is a NEW message: its action prepares the composer with the owner's own words and sends
-    // nothing; the saved row stays as it is, and the owner reads, edits and sends (or does not) from the composer.
-    function doubtDelivery(bubble) {
+    // The one honest next step is a NEW message (`sendAsNew`).
+    function doubtDelivery(bubble, reply) {
         let note = bubble.querySelector('[data-ingress-saved]');
         if (!note) {
             note = Object.assign(document.createElement('div'), { className: 'msg-pending' });
@@ -497,13 +573,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         clearActions(note);
         note.dataset.ingressSaved = 'unconfirmed';
         note.textContent = tr('chat.saved_delivery_unconfirmed', 'Saved; delivery not confirmed.');
-        if (compose) {
-            const words = () => bubble.querySelector('.message')?.textContent || '';
-            // Short visible words so the sentence and its action share one row on a phone; the name stays whole.
-            const asNew = action(tr('chat.send_as_new_short', 'Send as new'), 'send_as_new', () => compose(words()));
-            asNew.setAttribute('aria-label', tr('chat.send_as_new', 'Send as a new message'));
-            note.append(asNew);
-        }
+        if (compose) note.append(sendAsNew(bubble, reply));
         placeIngressNote(bubble, note);
         return true;
     }
@@ -513,17 +583,17 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         for (const id of ids) {
             const bubble = frames.has(id) && bubbleOf(id);
             if (!bubble) continue;  // settled meanwhile, or not in the feed now: still unsaved, the frame stays
-            if (bubble.querySelector('[data-ingress-saved]')?.dataset.ingressSaved === '') forget(id);
+            if (!frames.get(id).deliveryUnknown && bubble.querySelector('[data-ingress-saved]')?.dataset.ingressSaved === '') forget(id);
             else if (!frames.get(id).queued) onDomWrite(() => mark(id, bubble));  // the socket's own queue still holds a queued one
         }
     }
 
     return {
-        track(frame, { views = [], ts = '', queued = false } = {}) {
+        track(frame, { views = [], ts = '', queued = false, reply } = {}) {
             if (isPanicFrame(frame)) return;
             const id = String(frame?.client_message_id || '');
             if (!id) return;
-            frames.set(id, { frame, views: attachmentViews(views), ts, queued });
+            frames.set(id, { frame, reply, views: attachmentViews(views), ts, queued });
             persist();
         },
         /** The socket's offline queue wrote (or dropped) a queued frame: from now on it is this tab's to offer again. */
@@ -537,22 +607,35 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         settle(row) {
             const id = String(row?.client_message_id || '');
             if (row?.role !== 'user' || row.ingress_accepted !== true || !frames.has(id)) return;
-            const bubble = bubbleOf(id);
+            const entry = frames.get(id), bubble = bubbleOf(id);
             if (row.ingress_dispatched === true) {
                 forget(id);
+                if (bubble) onDomWrite(() => clearDoubt(bubble));
             } else if (row.ingress_pending === true) {
                 // The running host took it and still owes dispatch: the frame waits for its confirmation,
                 // and a reload's first read that shows it so has answered for the kept copy (no doubt from `reconcile`).
-                frames.get(id).restored = false;
-            } else if (bubble) {  // without its bubble the frame waits, so the doubt is not lost unseen
-                forget(id);
-                onDomWrite(() => doubtDelivery(bubble));
+                entry.restored = false;
+                if (entry.deliveryUnknown) {
+                    entry.deliveryUnknown = false;
+                    persist();
+                    if (bubble) onDomWrite(() => clearDoubt(bubble));
+                }
+            } else {
+                // A saved row of an ended host is a fact of the receipt, kept with the frame whether or not its bubble is in
+                // the feed now. Drawn on the bubble when there is one; without it the frame stays `restored` (a kept copy
+                // the first read has not yet reconciled), so `reconcile` shows its bubble again with the doubt, and any
+                // later `unsettle` or replay of the row draws it.
+                entry.deliveryUnknown = true;
+                entry.reply = { ...entry.reply, reply_to: row.reply_to || entry.reply?.reply_to };
+                if (bubble) entry.restored = false;
+                persist();
+                if (bubble) onDomWrite(() => doubtDelivery(bubble, entry.reply.reply_to));
             }
         },
         /** The socket closed or a frame was refused: every still-unsaved sent message in the feed says so. */
         unsettle,
         /** What a disconnect now puts in doubt: the held messages the socket has written (a queued one is the queue's). */
-        written: () => [...frames].filter(([, entry]) => !entry.queued).map(([id]) => id),
+        written: () => [...frames].filter(([, entry]) => !entry.queued && !entry.deliveryUnknown).map(([id]) => id),
         /** After a reload's first history read (or its failure): a kept message it did not settle (nor show
          *  `ingress_pending`) shows its bubble again from the kept words and views if the read did not, then its doubt.
          *  A message this page sent while that read was pending is not in doubt: the read predates it. */
@@ -564,7 +647,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             }
             unsettle(kept.map(([id]) => id));
         },
-        get count() { return frames.size; },
+        get count() { return [...frames.values()].filter(entry => !entry.deliveryUnknown).length; },
         /** Room teardown: this instance forgets; the tab's kept copies stay for the room's next instance. */
         release() { frames.clear(); },
     };

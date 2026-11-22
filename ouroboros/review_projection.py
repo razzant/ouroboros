@@ -166,7 +166,9 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
         reason = (reason or _AWAITING_REASON) if outcome else _AWAITING_REASON
     model = str(usage.get("resolved_model", row.get("model")) or "")
     provider = str(usage.get("provider") or row.get("provider") or "")
-    if not provider:
+    if usage.get("physical_dispatch_observed") is True and "provider" in usage and not usage["provider"]:
+        provider = "unknown"  # a failed physical receipt can explicitly lack a provider
+    elif not provider:
         provider = _sub().provider_for_model(model) if model else "unknown"
     outcome_tier = (
         str(parsed.get("outcome_tier") or "").strip().lower()
@@ -297,16 +299,23 @@ _LEDGER_PARSE = {"responded": "valid", "partial": "partial"}
 
 def _ledger_seat_executions(seat: Dict[str, Any]) -> List[Dict[str, str]]:
     """What actually ran for one seat, when the reviewer row's own last execution proved it
-    (``review_ledger._apply_execution``); a requested route alone proves nothing."""
+    (``review_ledger._apply_execution``); a requested route alone proves nothing, and an
+    explicitly empty recorded route — the slot projection's "send never left", a released
+    reservation — proves no actor at all. A session route whose harness nobody observed (a
+    start that was refused or never reported) proves none either, and is never an API run."""
     from ouroboros.review_execution_projection import normalize_review_executions
 
     effective = seat.get("effective") if isinstance(seat.get("effective"), dict) else {}
     if effective.get("source") != "reviewer_slot_last_execution":
         return []
     route, model = str(effective.get("route") or ""), str(effective.get("model") or "")
-    harness = route.split(":", 1)[1] if route.startswith("agent_session:") else ""
-    kind = "harness" if harness else ("native" if effective.get("delivery") == "retrieving" else "api")
-    return normalize_review_executions([{"kind": kind, "harness_id": harness, "model": model}])
+    head, _, harness = route.partition(":")
+    session = head == "agent_session"
+    if not route or (session and not harness):
+        # Nothing was witnessed sending: no harness, no delivery, no executed actor.
+        return []
+    kind = "harness" if session else ("native" if effective.get("delivery") == "retrieving" else "api")
+    return normalize_review_executions([{"kind": kind, "harness_id": harness if session else "", "model": model}])
 
 
 def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
@@ -316,6 +325,7 @@ def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str
     outcome = seat.get("outcome") or {}
     status, surface = str(outcome.get("status") or seat.get("status") or ""), str(record.get("surface") or "review")
     requested = seat.get("requested") if isinstance(seat.get("requested"), dict) else {}
+    effective = seat.get("effective") if isinstance(seat.get("effective"), dict) else {}
     observed = str(seat.get("observed_model") or "")
     model = observed if observed not in ("", "unknown") else ""
     answers = outcome.get("answers") or (seat.get("answers") if isinstance(seat.get("answers"), dict) else {})
@@ -335,7 +345,8 @@ def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str
     actor = {
         "slot_id": str(seat.get("seat_id") or ""), "model": model,
         "requested_model": str(requested.get("model") or ""), "observed_model": model,
-        "provider": _sub().provider_for_model(model) if model else "unknown",
+        "provider": (str(effective["provider"] or "unknown") if "provider" in effective
+                     else _sub().provider_for_model(model) if model else "unknown"),
         "actor_role": f"{surface} {'additional ' if seat.get('additional') else ''}reviewer",
         "transport_status": str(outcome.get("transport") or seat.get("transport_status") or ("success" if status in _LEDGER_PARSE else status or "unknown")),
         "parse_status": outcome.get("parse") or _LEDGER_PARSE.get(status, "none"),

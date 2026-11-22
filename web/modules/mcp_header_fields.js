@@ -76,18 +76,49 @@ function rowsFor(server) {
         const token = String(server.auth_token ?? '');
         if (token) {
             const name = String(server.auth_header || 'Authorization');
-            rows.push({ source: 'legacy', name, value: token, savedName: name, savedValue: token, valueEdited: false });
+            rows.push({ source: 'legacy', name, value: token, savedName: name, savedValue: token, valueEdited: false, edits: 0 });
         }
         const unreadable = Object.hasOwn(server, 'headers') && server.headers !== null && !isMap(server.headers);
         if (isMap(server.headers)) {
             for (const [name, value] of Object.entries(server.headers)) {
                 const text = typeof value === 'string' ? value : HEADER_PLACEHOLDER;
-                rows.push({ source: 'map', name, value: text, savedName: name, savedValue: text, valueEdited: false });
+                rows.push({ source: 'map', name, value: text, savedName: name, savedValue: text, valueEdited: false, edits: 0 });
             }
         }
-        rowsByServer.set(server, { touched: false, unreadable, rows });
+        rowsByServer.set(server, { touched: false, unreadable, rows, revision: Symbol() });
     }
     return rowsByServer.get(server);
+}
+
+/** Did these rows change after Save? The receipt needs no copy of their values. */
+export const headerRevision = server => rowsFor(server).revision;
+
+/**
+ * What one Save sends from these rows: each row that carries a value of its own (not a kept mask), with the
+ * count of value edits it had and the name it went under. A legacy row of an unreadable map goes to the legacy pair.
+ */
+export function headerSubmission(server) {
+    const state = rowsFor(server);
+    return { revision: state.revision, rows: state.rows.filter((row) => !keepsSavedValue(row)).map((row) => ({
+        row, edits: row.edits, name: row.name, legacy: state.unreadable && row.source === 'legacy' })) };
+}
+
+/**
+ * That Save landed and its entry was read back while other rows changed. A row whose value was not edited since
+ * now keeps what the Save stored, under the name it was stored with: a later Save sends the mask, never the old
+ * literal again, so it cannot overwrite a value changed elsewhere meanwhile. A row edited since keeps its draft.
+ */
+export function settleHeaderRows(server, sent, entry) {
+    const state = rowsFor(server);
+    const stored = isMap(entry.headers) ? entry.headers : {};
+    for (const { row, edits, name, legacy } of sent.rows) {
+        if (row.edits !== edits || !state.rows.includes(row)) continue;
+        const savedName = legacy ? String(entry.auth_header || 'Authorization')
+            : Object.keys(stored).find((key) => folded(key) === folded(name)) ?? name;
+        const raw = legacy ? entry.auth_token : stored[savedName];
+        const savedValue = typeof raw === 'string' ? raw : HEADER_PLACEHOLDER;
+        Object.assign(row, { source: legacy ? 'legacy' : 'map', savedName, savedValue, value: savedValue, valueEdited: false });
+    }
 }
 
 /** Whether this row still asks Save/Test to keep its saved value. */
@@ -201,13 +232,13 @@ export function renderHeaderFields(server, index) {
 
 export function bindHeaderFields(card, { server, savedIdentity, onChange, render }) {
     const state = rowsFor(server);
-    const changed = () => { state.touched = true; onChange(); };
+    const changed = () => { state.touched = true; state.revision = Symbol(); onChange(); };
     card.querySelectorAll('[data-mcp-header-row]').forEach((node) => {
         const number = Number(node.dataset.mcpHeaderRow);
         const row = state.rows[number];
         const name = node.querySelector('[data-mcp-header-field="name"]');
         const value = node.querySelector('[data-mcp-header-field="value"]');
-        const markEdited = () => { row.valueEdited = true; value.dataset.appliedValue = ''; };
+        const markEdited = () => { row.valueEdited = true; row.edits += 1; value.dataset.appliedValue = ''; };
         name.addEventListener('input', () => { row.name = name.value; changed(); });
         value.addEventListener('input', () => { markEdited(); row.value = value.value; changed(); });
         value.dataset.appliedValue = keepsSavedValue(row) ? row.savedValue : '';
@@ -243,7 +274,7 @@ export function bindHeaderFields(card, { server, savedIdentity, onChange, render
         changed(); render();
     });
     card.querySelector('[data-mcp-header-add]')?.addEventListener('click', () => {
-        state.rows.push({ source: 'new', name: '', value: '', savedName: '', savedValue: '', valueEdited: false });
+        state.rows.push({ source: 'new', name: '', value: '', savedName: '', savedValue: '', valueEdited: false, edits: 0 });
         changed(); render();
         const host = document.querySelector(`[data-mcp-index="${card.dataset.mcpIndex}"]`);
         const row = host?.querySelector(`[data-mcp-header-row="${state.rows.length - 1}"]`);

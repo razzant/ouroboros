@@ -64,7 +64,7 @@ class ProviderStreamError(IncompleteProviderStream):
 
     code = ""
 
-    def __init__(self, body: dict, *, usage: Any = None):
+    def __init__(self, body: dict, *, usage: Any = None, prior_usage: list[dict] | None = None):
         self.body = copy.deepcopy(body)
         error = body.get("error")
         error = error if isinstance(error, dict) else {}
@@ -86,6 +86,9 @@ class ProviderStreamError(IncompleteProviderStream):
         receipt = body.get("openrouter_metadata")
         self.openrouter_metadata = copy.deepcopy(receipt) if isinstance(receipt, dict) else None
         self.stream_usage = copy.deepcopy(usage) if isinstance(usage, dict) and usage else None
+        # The terminal body, earlier reports, and the legacy cumulative usage
+        # view are different sources. Only an explicit Chat error carries these reports.
+        self.stream_prior_usage = prior_usage
         # Keep producer facts in body/private evidence. Text-only pre-routing
         # classifiers must not turn an HTTP-200 SSE failure into a free rejection.
         super().__init__("Provider reported an SSE error after stream dispatch")
@@ -294,6 +297,8 @@ class ChatAccumulator(_Accumulator):
         self.choices: dict[int, dict] = {}
         self.expected_choices = expected_choices
         self.on_generation_id = on_generation_id
+        self.usage_reports: list[dict] = []
+        self.terminal_usage_start: int | None = None
 
     def accept(self, event: str, data: str) -> None:
         if self.done:
@@ -315,8 +320,14 @@ class ChatAccumulator(_Accumulator):
         if isinstance(chunk.get("error"), dict):
             _snapshot(self.body, {key: value for key, value in chunk.items()
                                   if key not in {"choices", "usage", "object"}})
-            raise ProviderStreamError(chunk, usage=chunk.get("usage") or self.body.get("usage"))
+            raise ProviderStreamError(chunk, usage=chunk.get("usage") or self.body.get("usage"),
+                                      prior_usage=self.usage_reports)
+        report = {key: chunk[key] for key in ("usage", "total_cost_usd", "openrouter_metadata")
+                  if chunk.get(key) is not None}
         for key, value in chunk.items():
+            if key == "service_tier":
+                self.body[key] = value  # A later explicit null withdraws an earlier tier.
+                continue
             if key in {"choices", "object", "obfuscation"} or value is None:
                 continue
             if key in {"id", "model"} and self.body.get(key) not in (None, value):
@@ -324,15 +335,17 @@ class ChatAccumulator(_Accumulator):
                 continue
             _snapshot(self.body, {key: value})
         choices = chunk.get("choices")
-        if choices is None:
-            return  # A usage/metadata frame: its envelope keys were snapshotted above.
-        if not isinstance(choices, list):
+        if isinstance(choices, list):
+            for position, update in enumerate(choices):
+                self._accept_choice(position, update, chunk)
+            if self.terminal_usage_start is None and self._choices_finished():
+                self.terminal_usage_start = len(self.usage_reports)
+        elif choices is not None:
             self._note(f"choices is {type(choices).__name__}, not a list; skipped")
-            return
-        for position, update in enumerate(choices):
-            self._accept_choice(position, update)
+        if report:  # A failing choice passes this chunk as terminal, never also as a prior report.
+            self.usage_reports.append(report)
 
-    def _accept_choice(self, position: int, update: Any) -> None:
+    def _accept_choice(self, position: int, update: Any, chunk: dict) -> None:
         if not isinstance(update, dict):
             self._note(f"choice at position {position} is not an object; skipped")
             return
@@ -364,7 +377,8 @@ class ChatAccumulator(_Accumulator):
             if not isinstance(finish, str) or not finish:
                 self._note(f"choice {index}: finish_reason {finish!r} is not a non-empty string; ignored")
             elif finish == "error":
-                raise ProviderStreamError({"error": {"type": "stream_finish_error"}}, usage=self.body.get("usage"))
+                raise ProviderStreamError({**chunk, "error": {"type": "stream_finish_error"}},
+                                          usage=self.body.get("usage"), prior_usage=self.usage_reports)
             elif choice.get("finish_reason") not in (None, finish):
                 self._note(f"choice {index}: finish_reason {choice['finish_reason']!r} then {finish!r}; kept first")
             else:
@@ -372,14 +386,17 @@ class ChatAccumulator(_Accumulator):
         _snapshot(choice, {key: value for key, value in update.items()
                            if key not in {"delta", "logprobs", "index", "finish_reason"}})
 
+    def _choices_finished(self) -> bool:
+        return (set(self.choices) == set(range(self.expected_choices))
+                and all(choice.get("finish_reason") for choice in self.choices.values()))
+
     def result(self) -> dict:
         """Judge once, after terminal framing: unknown outcome vs. unusable body."""
         if not self.done:
             # A body the provider closed cleanly after every choice finished is
             # terminal framing too ([DONE] is the other witness); a close before
             # that is the one unknown outcome this assembler still reports.
-            if (set(self.choices) != set(range(self.expected_choices))
-                    or any(not choice.get("finish_reason") for choice in self.choices.values())):
+            if not self._choices_finished():
                 raise IncompleteProviderStream("Stream ended without complete terminal framing")
             self._note("stream closed without [DONE] after every choice finished")
             self.done = True
@@ -655,7 +672,7 @@ class _SSEFrames:
 
 class _StreamAssembly:
     def __init__(self, response: Any, native: bool, expected_choices: int, *, defer_binding: bool = False,
-                 responses: bool = False):
+                 responses: bool = False, opencode_go: bool = False):
         from ouroboros.usage_accounting import (
             AttemptReservation, current_physical_attempt_drive_root, last_physical_attempt_capture,
         )
@@ -663,6 +680,7 @@ class _StreamAssembly:
         capture, root = last_physical_attempt_capture(), current_physical_attempt_drive_root()
         self.reservation = (AttemptReservation(capture.attempt_id, root, capture.model, capture.provider, None)
                             if capture is not None and root is not None else None)
+        self.cost_keys = ("cost",) if opencode_go else ("cost", "total_cost")
         self.defer_binding = defer_binding
         self.pending_generations = []
         self.generation_id = ""
@@ -716,14 +734,23 @@ class _StreamAssembly:
         usage = copy.deepcopy(usage) if isinstance(usage, dict) else {}
         complete_usage = (self.accumulator.usage_final if isinstance(self.accumulator, AnthropicAccumulator)
                           else self.accumulator.done)
+        if (isinstance(self.accumulator, ChatAccumulator) and not complete_usage and self.accumulator.usage_reports
+                and getattr(error, "stream_prior_usage", None) is None):
+            reports = self.accumulator.usage_reports
+            start = self.accumulator.terminal_usage_start
+            error.stream_prior_usage = reports[:start]
+            if start is not None:
+                # A provider may finish the choices before the transport delivers [DONE]. This prices
+                # only the finish and later reports; it does not make the interrupted reply usable.
+                error.stream_terminal_usage = reports[start:]
         if not complete_usage:
             # message_start and unfinished Chat streams can carry partial counters.
             # An explicit price remains authoritative even on a partial message.
-            if not any(provider_cost_value(usage.get(key)) is not None for key in ("cost", "total_cost")):
+            if not any(provider_cost_value(usage.get(key)) is not None for key in self.cost_keys):
                 usage = {}
         received = getattr(error, "stream_usage", None)
         if isinstance(received, dict):
-            cost = next((value for source in (received, usage) for key in ("cost", "total_cost")
+            cost = next((value for source in (received, usage) for key in self.cost_keys
                          if (value := provider_cost_value(source.get(key))) is not None), None)
             _snapshot(usage, received)
             if cost is not None:
@@ -755,6 +782,11 @@ class _StreamAssembly:
                  "anomalies": self.accumulator.anomaly_facts()}
         if error is not None:  # a failed reply's typed shape, never its text
             facts["model_output_received"] = self.accumulator.output_received()
+            if isinstance(self.accumulator, ChatAccumulator) and getattr(error, "stream_prior_usage", None) is not None:
+                from ouroboros._usage_response import refusal_body_conflicts
+
+                # Keep non-usage work proof distinct from the text fact used by transport timeouts.
+                facts["refusal_prior_work"] = refusal_body_conflicts({"choices": list(self.accumulator.choices.values())})
         if self.generation_conflict:
             facts["generation_conflict"] = True
             facts["conflicting_generation_id"] = self.conflicting_generation_id
@@ -791,9 +823,9 @@ class _StreamAssembly:
 
 
 def consume_stream(stream: Any, *, native: bool = False, expected_choices: int = 1,
-                   responses: bool = False) -> AssembledResponse:
+                   responses: bool = False, opencode_go: bool = False) -> AssembledResponse:
     response = stream if native else getattr(stream, "response", stream)
-    assembly = _StreamAssembly(response, native, expected_choices, responses=responses)
+    assembly = _StreamAssembly(response, native, expected_choices, responses=responses, opencode_go=opencode_go)
     try:
         chunks = response.iter_content(chunk_size=8192) if native else response.iter_bytes()
         for chunk in chunks:
@@ -813,11 +845,13 @@ def consume_stream(stream: Any, *, native: bool = False, expected_choices: int =
     return AssembledResponse(body)
 
 
-async def consume_stream_async(stream: Any, *, expected_choices: int = 1, responses: bool = False) -> AssembledResponse:
+async def consume_stream_async(stream: Any, *, expected_choices: int = 1, responses: bool = False,
+                               opencode_go: bool = False) -> AssembledResponse:
     from ouroboros._usage_wait import presend_off_loop
 
     response = getattr(stream, "response", stream)
-    assembly = _StreamAssembly(response, False, expected_choices, defer_binding=True, responses=responses)
+    assembly = _StreamAssembly(response, False, expected_choices, defer_binding=True, responses=responses,
+                               opencode_go=opencode_go)
     try:
         if assembly.pending_generations:
             await presend_off_loop(assembly.bind_pending_generations)

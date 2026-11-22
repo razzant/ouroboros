@@ -289,3 +289,135 @@ def test_a_same_time_different_row_beside_an_unreadable_gap_is_unknown_not_absen
     status, page = _read(tmp_path / "torn", around=stale)
     assert status == 503 and page["reason_code"] == "history_source_unavailable", page
     assert _read(tmp_path / "intact", around=stale)[1]["anchor"]["state"] == "absent"
+
+
+# DESIGN "Replies": an owner's answer to a card is shown on its question's card, never as a row of its own. The
+# question row names the answer row (`quiz.answer_row_address`), and a page around that answer stands on the question.
+QUESTION = {"quiz_id": "qz-1", "options": [{"label": "Yes"}, {"label": "No"}], "stake": "", "assumption": "",
+            "state": "open"}
+
+
+def _card(root, at, gap, *, block=True, comment=""):
+    """A Main question, ``gap`` owner messages, the owner's recorded answer (and, with ``block``, its task's
+    question block keeping the stored answer row's copy): (question receipt, answer receipt, answer address)."""
+    asked = ds.append(root, "chat", {"ts": _ts(at), "direction": "out", "chat_id": 1, "task_id": "asker",
+                                     "type": "quiz", "text": "Use blue and gold in the table legend?", "quiz": dict(QUESTION)})
+    _say(root, at + 1, gap)
+    answered = {**QUESTION, "state": "answered", "answered_index": 1, "answered_at": _ts(at + gap + 1),
+                **({"comment": comment} if comment else {})}
+    answer = ds.append(root, "chat", {"ts": _ts(at + gap + 1), "direction": "system", "chat_id": 1,
+                                      "type": "quiz_answer", "source": "owner_quiz_answer", "task_id": "asker",
+                                      "client_message_id": "quiz_answer:asker:qz-1",
+                                      "text": "[Owner quiz answer] quiz qz-1 — No", "quiz": answered})
+    if block:
+        from ouroboros.task_results import write_task_result
+
+        write_task_result(root, "asker", "running", owner_quiz={"qz-1": {**answered, "delivery": {
+            "history_at": _ts(at + gap + 1), "answer_row": dict(answer.row)}}})
+    return asked, answer, format_address(row_address(answer.row))
+
+
+def _question(page):
+    (card,) = [row for row in page["messages"] if row.get("msg_type") == "quiz"]
+    return card
+
+
+def test_answer_quote_can_reopen_after_its_question_imports(tmp_path):
+    from ouroboros import dialogue_import
+
+    question = {"ts": "2024-04-09T10:05:00+00:00", "chat_id": 1, "direction": "out", "task_id": "asker",
+                "type": "quiz", "text": "Use blue and gold in the table legend?", "quiz": dict(QUESTION)}
+    dialogue_test.seed(tmp_path, archives={"chat_20240409T110000.jsonl": [question]})
+    dialogue_import.cutover(tmp_path)
+    _, address = _save(tmp_path, ts="2024-04-09T10:14:00+00:00", task_id="asker", direction="system", type="quiz_answer",
+                       source="owner_quiz_answer", quiz={**QUESTION, "state": "answered", "answered_index": 0})
+    status, page = _read(tmp_path, around=address)
+    assert status == 503 and page["reason_code"] == "migrating", page
+    dialogue_test.import_all(tmp_path)
+    status, page = _read(tmp_path, around=address)
+    assert status == 200 and page["anchor"]["state"] == "found", page
+    assert _question(page)["quiz"]["answer_row_address"] == address
+
+
+@pytest.mark.parametrize("gap_first", [True, False], ids=["before_answer", "after_answer"])
+@pytest.mark.parametrize("imported", [False, True], ids=["pending", "unreadable_line"])
+def test_missing_question_only_depends_on_gaps_before_its_answer(tmp_path, gap_first, imported):
+    from ouroboros import dialogue_import
+
+    answer = {"ts": "2024-04-09T10:14:00+00:00", "chat_id": 1, "task_id": "asker", "direction": "system", "type": "quiz_answer",
+              "source": "owner_quiz_answer", "text": "Choice", "quiz": {**QUESTION, "state": "answered", "answered_index": 1}}
+    earlier, later = "chat_20240409T110000.jsonl", "chat_20240409T120000.jsonl"
+    gap_segment, answer_segment = (earlier, later) if gap_first else (later, earlier)
+    dialogue_test.seed(tmp_path, archives={gap_segment: ["{torn line\n"], answer_segment: [answer]})
+    dialogue_import.cutover(tmp_path)
+    dialogue_import.import_segment(tmp_path, "chat", answer_segment)
+    if imported:
+        dialogue_import.import_segment(tmp_path, "chat", gap_segment)
+    address = format_address(row_address(answer))
+    status, page = _read(tmp_path, around=address)
+    if gap_first:
+        assert status == 503 and page["reason_code"] == ("history_source_unavailable" if imported else "migrating"), page
+    else:
+        assert status == 200 and page["anchor"] == {"row_address": address, "state": "unavailable"}, page
+
+
+def test_readable_question_needs_no_chat_coverage_check(tmp_path, monkeypatch):
+    from ouroboros import dialogue_positions
+    from ouroboros.chat_references import quiz_question_row
+
+    asked, answer, _ = _card(tmp_path, 0, 1)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("A matching question already proves the destination")
+
+    monkeypatch.setattr(ds, "require_imported", unexpected)
+    monkeypatch.setattr(dialogue_positions, "skipped_between", unexpected)
+    assert quiz_question_row(tmp_path, answer.row, answer_seq=answer.seq).seq == asked.seq
+
+
+@pytest.mark.parametrize("block", [True, False], ids=["question_block", "window_only"])
+def test_an_answered_question_names_its_answer_row_the_card_shows(tmp_path, block):
+    asked, answer, address = _card(tmp_path, 0, 2, block=block, comment="and soon")
+    status, page = _read(tmp_path)
+    assert status == 200 and not validate_ingress(page, ChatHistoryResponse), validate_ingress(page, ChatHistoryResponse)
+    card = _question(page)
+    assert card["history_id"] == f"chat:{asked.seq}" and card["quiz"]["state"] == "answered"
+    assert card["quiz"]["answer_row_address"] == address, card["quiz"]
+
+
+def test_an_open_or_closed_question_names_no_answer_row(tmp_path):
+    ds.append(tmp_path, "chat", {"ts": _ts(0), "direction": "out", "chat_id": 1, "task_id": "asker", "type": "quiz",
+                                 "text": "Use blue and gold in the table legend?", "quiz": dict(QUESTION)})
+    assert "answer_row_address" not in _question(_read(tmp_path)[1])["quiz"]
+    closed = {**QUESTION, "state": "closed", "closed_reason": "No longer needed", "closed_at": _ts(1)}
+    ds.append(tmp_path, "chat", {"ts": _ts(1), "direction": "system", "chat_id": 1, "type": "quiz_closed",
+                                 "task_id": "asker", "client_message_id": "quiz_closed:asker:qz-1",
+                                 "text": "No longer needed", "quiz": closed})
+    card = _question(_read(tmp_path)[1])
+    assert card["quiz"]["state"] == "closed" and "answer_row_address" not in card["quiz"]
+
+
+def test_an_answer_far_from_its_question_pages_at_the_question_and_keeps_its_own_identity(tmp_path):
+    _say(tmp_path, 0, 5)
+    asked, answer, address = _card(tmp_path, 5, 60)
+    _say(tmp_path, 100, 30)
+    status, page = _read(tmp_path, around=address, n_human=8, n_progress=8)
+    assert status == 200 and not validate_ingress(page, ChatHistoryResponse), validate_ingress(page, ChatHistoryResponse)
+    # The anchor is the answer's own, never the question's: a client lands on the card part naming it.
+    assert page["anchor"] == {"state": "found", "row_address": address, "chat_id": 1, "history_id": f"chat:{answer.seq}"}
+    card = _question(page)
+    assert card["history_id"] == f"chat:{asked.seq}" != page["anchor"]["history_id"]
+    assert card["quiz"]["state"] == "answered" and card["quiz"]["answer_row_address"] == address
+    assert address not in {row.get("row_address") for row in page["messages"]}, "no row of its own on the page"
+    # The page is an ordinary around page: it re-reads and continues older from the question.
+    assert _read(tmp_path, cursor=page["page_cursor"])[1]["messages"] == page["messages"] and page["has_more"]
+
+
+def test_an_ordinary_exact_row_still_pages_at_itself(tmp_path):
+    _say(tmp_path, 0, 5)
+    _card(tmp_path, 5, 60)
+    _say(tmp_path, 100, 30)
+    row, address = _save(tmp_path, ts=_ts(140), client_message_id="plain-owner", text="Not an answer")
+    _say(tmp_path, 141, 30)
+    page = _found(tmp_path, address)
+    assert [m for m in page["messages"] if m.get("msg_type") == "quiz"] == []

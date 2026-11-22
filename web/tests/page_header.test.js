@@ -6,34 +6,35 @@ import { NodeStub, setup } from './dashboard_dom_fixture.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
-test('Skills keeps its return and tabs at the leading edge, with one extra line only in a narrow page column', () => {
+test('Extensions keeps the shared section band; its own box decides, never the window', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    assert.match(css, /#page-skills \{ container: skillspage \/ inline-size; \}/);
-    assert.match(css, /html\[data-layout="docked"\] #page-skills > \.app-page-header\[data-lead\] \{[^}]*grid-template-areas: "back tabs toolbar";\s*gap: 0 var\(--space-2\);/,
-        'Back stands 8px before the tabs, its own grid cell, so changing actions cannot shrink or move it');
-    assert.match(css, /#page-skills \.skills-scroll \{ padding-top: 0; \}/);
-    assert.match(css, /#page-skills > \.app-page-tabs \{ padding-bottom: var\(--space-2\); \}/,
-        'a phone keeps 10px between the tabs and the search, as Telegram does');
-    assert.match(css, /#page-skills > \.app-page-tabs:not\(\[hidden\]\) \{ display: flex; align-items: flex-start; gap: var\(--space-2\); \}/);
-    assert.match(css, /#page-skills > \.app-page-tabs > \.btn \{ margin-top: var\(--space-2\); \}/,
-        'Update stands level with the tabs, which start below the strip\'s shadow room');
-    assert.doesNotMatch(css, /#page-skills > \.app-page-tabs[^{]*\{[^}]*align-items: center/, 'centred on the strip\'s box it stood 4px high');
-    assert.match(css, /#page-skills > \.app-page-tabs > \.app-tab-strip \{[\s\S]*?margin-bottom: calc\(-1 \* var\(--space-4\)\);/,
-        'the strip lends its shadows space without a blank row before the search');
-    const narrow = css.slice(css.indexOf('html[data-layout="docked"] #page-skills > .app-page-header[data-lead]'), css.indexOf('.skills-search-chrome {'));
-    assert.match(narrow, /@container skillspage \(max-width: calc\(33rem - 0\.02px\)\) \{\n    html\[data-layout="docked"\] #page-skills > \.app-page-header\[data-lead\]\[data-return\]/,
-        'below 33rem of its own column a return takes the tabs\' row: the round Back needs 38px of a desk row, 52px under a finger');
-    assert.doesNotMatch(narrow, /max-width: 36rem/, 'the named capsule\'s threshold is gone with it');
-    assert.match(narrow, /@container skillspage \(max-width: calc\(30rem - 0\.02px\)\)/);
-    assert.doesNotMatch(narrow, /@media/, 'the column decides, never the window\'s width');
-    assert.match(narrow, /grid-template-areas: "back toolbar" "tabs tabs"/);
-    assert.match(narrow, /\.app-page-toolbar \{ min-height: var\(--page-header-row-h\);/,
-        'the first row keeps its band with native chrome and without the host token');
-    assert.match(narrow, /\.app-page-lead \{ display: contents;/);
-    assert.match(narrow, /\.app-tab-strip \{[\s\S]*?grid-area: tabs;/);
+    const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
+    // The place is a section (ui.css "The section list"): the shared container measures it. Its own
+    // container left with the old Skills page, and the views are pages of the section, so no tabs band
+    // of its own survives.
+    assert.match(ui, /\.section-place \{\n    container: sectionplace \/ inline-size;/);
+    assert.doesNotMatch(css, /#page-skills \{ container:/, 'no container of its own: the retired skillspage is gone');
+    assert.doesNotMatch(css, /@container skillspage/);
+    assert.doesNotMatch(css, /#page-skills[^{]*\.app-page-tabs/, 'no tabs band survives the section');
     assert.match(css, /html\[data-layout="docked"\] \.app-page-header\[data-lead\] \{[\s\S]*?grid-template-areas: "title toolbar"/,
         'a wide column keeps the single existing row');
-    assert.doesNotMatch(narrow, /ResizeObserver/);
+    // The views own only their search and scroller; the band's end holds the open view's actions, and a
+    // registry page hides that end (extensions.js paintLead).
+    assert.match(css, /\.extensions-toolbar \{ margin-inline-start: auto; \}/);
+    assert.match(css, /\.extensions-toolbar\[hidden\] \{ display: none; \}/);
+    assert.match(css, /#page-skills,\n#page-widgets \{\n    flex-direction: column;\n    min-height: 0;\n    overflow: hidden;\n\}/);
+    assert.match(css, /#page-skills \.skills-scroll \{ padding-top: 0; \}/);
+    assert.match(css, /#page-skills :is\(\.skills-scroll, \.skills-search-chrome\) \{ padding-inline: var\(--page-header-padding-x\); \}/);
+    assert.match(css, /\.extensions-views > \.skills-search-chrome \{ margin-top: var\(--space-2\); \}/);
+    // A return and a page alone rearrange the band by the place's own box, never the window's width.
+    const narrow = css.slice(css.indexOf('.extensions-mark[hidden]'), css.indexOf('.extensions-views[data-settings-arrive'));
+    assert.ok(narrow.includes('@container sectionplace (max-width: calc(40rem - 0.02px)) {'), 'the place\'s box decides');
+    assert.doesNotMatch(narrow, /@media/, 'the column decides, never the window\'s width');
+    assert.match(narrow, /html\[data-layout="stack"\] #page-skills\[data-section-view="page"\] > \.app-page-header \{ grid-template-columns: minmax\(0, 1fr\); grid-template-areas: "lead"; \}/,
+        'a page alone is one lead row: its round Back and its own name');
+    assert.match(narrow, /#page-skills\[data-section-view="home"\] > \.app-page-header\[data-return\] \.section-lead-page \{ display: flex; \}/);
+    assert.match(narrow, /#page-skills\[data-section-view="home"\] > \.app-page-header\[data-return\] \.section-lead-rail \{ display: none; \}/,
+        'a return takes the list\'s row');
 });
 
 test('a section band has the same inset without native chrome and one leading edge with or without a return', () => {

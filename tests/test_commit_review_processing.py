@@ -63,7 +63,7 @@ def dispatch(monkeypatch, tmp_path):
     return deliver
 
 
-@pytest.mark.parametrize(("processing", "local"), [("economy", False), ("", True)])
+@pytest.mark.parametrize(("processing", "local"), [("economy", False), ("ultrafast", False), ("", True)])
 def test_empty_pool_main_processing_survives_commit_vectors(monkeypatch, dispatch, local, processing):
     settings = {
         "OUROBOROS_SUBAGENTS": pool_roster(), "OUROBOROS_MODEL": MODEL,
@@ -101,7 +101,7 @@ def test_local_candidate_keeps_captured_processing_or_inherits_when_unspecified(
     class CandidateBuilt(BaseException):
         """Stop after real construction, before measurement or physical dispatch."""
 
-    def finalized(_client, target, payload):
+    def finalized(_client, target, payload, *, measure=True):
         seen.append((target, payload))
         raise CandidateBuilt()
 

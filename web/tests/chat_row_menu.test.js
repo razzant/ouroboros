@@ -8,7 +8,7 @@ import { createMessageActions } from '../modules/message_actions.js';
 import { cardMenuActions, emptyWorkState } from '../modules/work_status.js';
 import { installDomDouble } from './dom_double.js';
 
-function fixture({ actions = undefined } = {}) {
+function fixture({ actions = undefined, selectText } = {}) {
     const env = installDomDouble();
     const { doc, el } = env;
     const feed = el('div', { className: 'chat-messages' });
@@ -18,6 +18,7 @@ function fixture({ actions = undefined } = {}) {
         bubbleRef: (row) => (row.dataset.rowAddress ? { address: row.dataset.rowAddress } : null),
         cardRef: (record) => (record.replyable ? { address: `task:${record.groupId}` } : null),
         start: (ref) => started.push(ref.address),
+        canSelect: row => Boolean(selectText && row.dataset.rowAddress), selectText,
     };
     const copied = [];
     const copy = el('button', { className: 'chat-message-copy' });
@@ -41,7 +42,9 @@ function fixture({ actions = undefined } = {}) {
         actionsOf: (record) => cardMenuActions(works, record, activity), actions });
     const openMenu = () => doc.body.children.find((node) => node.classList.contains('chat-row-menu')) || null;
     const items = () => (openMenu()?.children || []).map((node) => node.dataset.rowAction);
-    return { ...env, feed, cards, bubble, plain, copy, link, words, menu, started, copied, opened, activity, works, openMenu, items,
+    const touch = (node, type, extra = {}) => node.emit(type, { pointerType: 'touch', isPrimary: true, pointerId: 1,
+        clientX: 30, clientY: 60, ...extra });
+    return { ...env, feed, cards, bubble, plain, copy, link, words, menu, started, copied, opened, activity, works, openMenu, items, touch,
         close() { menu.destroy(); env.restore(); } };
 }
 
@@ -185,6 +188,121 @@ test('a long touch press opens the menu where the finger is; the tap that ends i
     } finally { f.close(); }
 });
 
+test('Select text releases the touched body to native handles without staging a reply', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const calls = [];
+    const f = fixture({ selectText(row, point) { calls.push(point); row.dataset.selectText = '1'; } });
+    const hold = () => f.words.emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: 1, clientX: 20, clientY: 40 });
+    try {
+        hold();
+        t.mock.timers.tick(500);
+        const item = f.openMenu().children.find(button => button.textContent === 'Select text');
+        f.words.emit('pointerup', { pointerType: 'touch', pointerId: 1 });
+        item.emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: 2 });
+        item.click();
+        assert.deepEqual(calls, [{ x: 20, y: 40 }]);
+        hold();
+        t.mock.timers.tick(800);
+        assert.equal(f.openMenu(), null);
+        assert.equal(f.words.emit('contextmenu', { clientX: 20, clientY: 40 }).defaultPrevented, undefined);
+        assert.deepEqual(f.started, []);
+    } finally { f.close(); }
+});
+
+test('feed scroll cancels a pending hold, but not the release guard of an open menu', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = fixture();
+    try {
+        f.touch(f.words, 'pointerdown');
+        t.mock.timers.tick(200);
+        assert.equal(f.bubble.dataset.rowPress, 'hold');
+        f.feed.emit('scroll');
+        assert.equal(f.bubble.dataset.rowPress, undefined, 'a waiting row stops sinking');
+        t.mock.timers.tick(250);
+        assert.equal(f.openMenu(), null, 'a pending press cannot open after a scroll');
+
+        f.touch(f.words, 'pointerup');
+        f.touch(f.words, 'pointerdown');
+        t.mock.timers.tick(450);
+        const menu = f.openMenu();
+        assert.ok(menu);
+        f.feed.emit('scroll'); // a reflow can scroll the feed beneath the lifted row without closing its menu
+        f.touch(f.words, 'pointerup');
+        const reply = menu.children[0];
+        const click = reply.emit('click', { isTrusted: true, detail: 1 });
+        assert.deepEqual(f.started, [], 'reflow did not turn the original release into Reply');
+        assert.equal(click.defaultPrevented, true);
+        assert.equal(f.openMenu(), menu);
+    } finally { f.close(); }
+});
+
+test('an unrelated pointer end does not end a pending or fired hold', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = fixture();
+    try {
+        f.touch(f.words, 'pointerdown');
+        f.touch(f.words, 'pointerup', { pointerId: 2 });
+        t.mock.timers.tick(450);
+        const menu = f.openMenu();
+        assert.ok(menu, 'the waiting finger is still down');
+        f.touch(f.words, 'pointercancel', { pointerId: 2 });
+        f.touch(f.words, 'pointerup');
+        assert.equal(menu.children[0].emit('click', { isTrusted: true, detail: 1 }).defaultPrevented, true,
+            'only the original pointer ends the fired hold');
+        assert.deepEqual(f.started, []);
+    } finally { f.close(); }
+});
+
+for (const end of ['pointerup', 'pointercancel']) {
+    test(`${end} outside the feed still ends a hold whose captured row was detached`, (t) => {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const f = fixture();
+        try {
+            f.touch(f.words, 'pointerdown');
+            t.mock.timers.tick(450);
+            const reply = f.openMenu().children[0];
+            f.bubble.remove();
+            f.touch(reply, end); // the portalled target is in the document, not in the chat feed
+            assert.equal(reply.emit('click', { isTrusted: true, detail: 1 }).defaultPrevented, true);
+            assert.deepEqual(f.started, []);
+        } finally { f.close(); }
+    });
+}
+
+test('movement outside the feed past the tolerance ends a pending hold after capture changed', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = fixture();
+    try {
+        f.touch(f.words, 'pointerdown');
+        t.mock.timers.tick(200);
+        assert.equal(f.bubble.dataset.rowPress, 'hold');
+        f.touch(f.doc.body, 'pointermove', { clientY: 71 });
+        assert.equal(f.bubble.dataset.rowPress, undefined);
+        t.mock.timers.tick(250);
+        assert.equal(f.openMenu(), null);
+    } finally { f.close(); }
+});
+
+test('a hold also swallows its compatibility mousedown, but not the next independent mouse press', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = fixture();
+    try {
+        f.touch(f.words, 'pointerdown');
+        t.mock.timers.tick(450);
+        const [reply, copy] = f.openMenu().children;
+        assert.equal(f.doc.activeElement, reply);
+        f.touch(f.words, 'pointerup');
+        const mouse = { isTrusted: true, detail: 1 };
+        const compatDown = copy.emit('mousedown', { ...mouse });
+        assert.equal(compatDown.defaultPrevented && compatDown.stopped, true, 'the focus default is suppressed');
+        // No compatibility click arrives. A real mouse button down disarms the old tail.
+        reply.emit('pointerdown', { pointerType: 'mouse', pointerId: 2 });
+        assert.equal(reply.emit('mousedown', { ...mouse }).defaultPrevented, undefined);
+        assert.equal(reply.emit('click', { ...mouse }).defaultPrevented, undefined);
+        assert.deepEqual(f.started, ['row:1@t#a']);
+    } finally { f.close(); }
+});
+
 test("Android's contextmenu before the long press's time opens the menu once, and the lift presses nothing", (t) => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
     const f = fixture();
@@ -201,6 +319,74 @@ test("Android's contextmenu before the long press's time opens the menu once, an
         assert.equal(menu.children[0].emit('click', { target: menu.children[0] }).defaultPrevented, true,
             'the lifting finger does not press the item under it');
         assert.deepEqual(f.started, []);
+    } finally { f.close(); }
+});
+
+test('a tap 250 ms after a long press presses the item it meets, once; the lift\'s own click presses nothing', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture();
+    const hold = (id) => {
+        f.words.emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: id, clientX: 30, clientY: 60 });
+        t.mock.timers.tick(450);
+        f.words.emit('pointerup', { pointerType: 'touch', pointerId: id });
+        return f.openMenu();
+    };
+    const tap = (node, id) => {
+        node.emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: id, clientX: 30, clientY: 60 });
+        node.emit('pointerup', { pointerType: 'touch', pointerId: id });
+        return node.emit('click', { target: node, detail: 1 });
+    };
+    try {
+        assert.equal(f.doc.captures.get('click')?.size || 0, 0, 'nothing listens for clicks on the document before a press');
+        const menu = hold(1);  // this host sends no click for the hold
+        t.mock.timers.tick(250);
+        assert.equal(tap(menu.children[0], 2).defaultPrevented, undefined, 'the next finger presses Reply');
+        assert.deepEqual(f.started, ['row:1@t#a'], 'once');
+        assert.equal(f.openMenu(), null);
+        // A host that does send the hold's click: that one presses nothing, the next finger's does.
+        const again = hold(3);
+        assert.equal(again.children[1].emit('click', { target: again.children[1], detail: 1 }).defaultPrevented, true);
+        assert.deepEqual(f.copied, []);
+        t.mock.timers.tick(250);
+        tap(again.children[1], 4);
+        assert.deepEqual(f.copied, ['bubble'], 'Copy, once');
+        assert.equal(f.doc.captures.get('click')?.size || 0, 0, 'and nothing waits any more');
+    } finally { f.close(); }
+});
+
+test('after the browser took the hold, or by the menu\'s keys, the next action acts at once; a right-click opens anew', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture();
+    const hold = (id) => {
+        f.words.emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: id, clientX: 30, clientY: 60 });
+        t.mock.timers.tick(450);
+        return f.openMenu();
+    };
+    try {
+        const menu = hold(1);
+        f.words.emit('pointercancel', { pointerType: 'touch', pointerId: 1 });
+        t.mock.timers.tick(250);
+        menu.children[0].emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: 2 });
+        assert.equal(menu.children[0].emit('click', { target: menu.children[0], detail: 1 }).defaultPrevented, undefined,
+            'pointercancel, then a new finger');
+        assert.deepEqual(f.started, ['row:1@t#a']);
+        const keyed = hold(3);
+        f.words.emit('pointerup', { pointerType: 'touch', pointerId: 3 });
+        assert.equal(f.doc.activeElement, keyed.children[0], 'the keyboard focus is in the menu the press opened');
+        keyed.children[1].focus();
+        keyed.children[1].emit('keydown', { key: 'Enter' });
+        keyed.children[1].emit('click', { target: keyed.children[1], detail: 0 });
+        assert.deepEqual(f.copied, ['bubble'], 'Enter presses Copy at once');
+        // The contextmenu Android may still fire for a lifted hold opens nothing; a right-click after it does.
+        hold(5);
+        f.words.emit('pointerup', { pointerType: 'touch', pointerId: 5 });
+        f.doc.defaultView.emit('blur');  // the window lost the focus: the menu went
+        assert.equal(f.openMenu(), null);
+        assert.equal(f.words.emit('contextmenu', { clientX: 30, clientY: 60 }).defaultPrevented, true);
+        assert.equal(f.openMenu(), null, 'the same hold is no second opening');
+        f.words.emit('pointerdown', { button: 2, pointerType: 'mouse', isPrimary: true, pointerId: 6 });
+        assert.equal(f.words.emit('contextmenu', { clientX: 40, clientY: 50 }).defaultPrevented, true);
+        assert.ok(f.openMenu(), 'a right-click right after it opens the menu');
     } finally { f.close(); }
 });
 
@@ -293,6 +479,24 @@ test('destroy closes an open menu and leaves no listener on the feed or the docu
     assert.equal(f.doc.captures.get('click')?.size || 0, 0);
     assert.equal(f.doc.captures.get('pointerdown')?.size || 0, 0);
     f.restore();
+});
+
+test('destroy disposes both document tracking during a held press and its guard after release', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    for (const release of [false, true]) {
+        const f = fixture();
+        try {
+            f.touch(f.words, 'pointerdown');
+            t.mock.timers.tick(release ? 450 : 200);
+            if (release) f.touch(f.words, 'pointerup');
+            assert.ok(f.doc.captures.get(release ? 'mousedown' : 'pointerup')?.size);
+            f.menu.destroy();
+            t.mock.timers.tick(500);
+            assert.equal(f.openMenu(), null);
+            assert.equal(f.bubble.dataset.rowPress, undefined);
+            assert.ok([...f.doc.captures.values()].every((listeners) => listeners.size === 0));
+        } finally { f.close(); }
+    }
 });
 
 test('a bubble\'s menu lists the registered actions after its own doors, in their present words; a work card none', () => {

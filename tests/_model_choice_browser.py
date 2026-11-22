@@ -19,9 +19,6 @@ WORK_SCOPE = WORK_SCOPE_OWN = ("for this work from its next call and its new sub
                                "the running call and started subagents keep theirs")
 QUEUED_SCOPE = "for this work when it starts, and its new subagents without a tier of their own"
 ROOM_SCOPE = ROOM_SCOPE_OWN = "for new work here and its new subagents without a tier of their own; running work keeps its own"
-# The tiers the strip offers on the loopback source, in its order (Flex, Standard, Fast): Ultrafast stands there only
-# where the source's transport and the model's catalog both list it, or it is already the choice, and never for Main.
-OFFERED = ["economy", "standard", "fast"]
 
 
 class Provider:
@@ -248,9 +245,9 @@ def _capsule_ready(page, capsule: str) -> None:
     page.wait_for_function("(sel) => document.querySelector(sel)?.dataset.known === 'true'", arg=capsule, timeout=30_000)
 
 
-def _open_sheet(page, capsule: str) -> None:
+def _open_sheet(page, capsule: str, *, finger: bool = False) -> None:
     """A press on the capsule (never hover) opens its Model sheet, whose list the catalog's read fills."""
-    page.click(f"{capsule} .chat-model-head")
+    (page.tap if finger else page.click)(f"{capsule} .chat-model-head")
     page.wait_for_selector(".ui-popup.model-sheet .chat-model-row", timeout=20_000)
     page.wait_for_function("() => !document.querySelector('.ui-popup.model-sheet .chat-model-note')?.innerText.includes('Reading')",
                            timeout=20_000)

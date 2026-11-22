@@ -65,6 +65,25 @@ def test_quiet_history_has_no_result_or_projection_reads(env, monkeypatch):
     maintenance._reconcile_abandoned_usage(env.root)
 
 
+def test_reconciliation_keeps_an_unpriced_add_on_with_its_reservation(env, monkeypatch):
+    task(env)
+    reservation = usage.reserve_attempt(usage.AttemptRequest(
+        model="vendor/model", provider="openrouter", drive_root=env.root, task_id="root", root_task_id="root",
+        force_unknown_reservation=True, unpriced_add_on=True))
+    usage.mark_dispatched(reservation)
+    abandon = usage.terminalize_abandoned_attempt
+
+    def with_counts(restored, **kwargs):
+        return abandon(restored, usage={"prompt_tokens": 8}, **kwargs)
+
+    monkeypatch.setattr(usage, "terminalize_abandoned_attempt", with_counts)
+    monkeypatch.setattr(usage, "estimate_cost_optional", lambda *a, **k: pytest.fail("token-only price"))
+    maintenance._reconcile_abandoned_usage(env.root)
+    [row] = ledger_rows(env.root)
+    assert row["state"] == "settled" and row["unpriced_add_on"] is True and row["prompt_tokens"] == 8
+    assert row["cost_usd"] is None and row["cost_final"] is False
+
+
 @pytest.mark.parametrize("failure", ["false", "raise"])
 def test_failed_refresh_keeps_dirty_revision(env, monkeypatch, failure):
     task(env)

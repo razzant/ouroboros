@@ -178,12 +178,14 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     assert page.evaluate("() => window.__ouroSettings.open('old/advanced', {map: true})") is True
     page.locator(f'{HOME} [data-settings-result="door:skill"]').wait_for(state="visible")
     assert page.locator("#settings-search").input_value() == "advanced"
-    # The door among the results opens the list of skill forms. Words the shell searched are spent by that press:
-    # Back returns to the home's own rows, never to results nobody asked for again.
+    # The door among the results opens the list of skill forms, a page of Extensions (over Skills) with Back to
+    # Settings. Words the shell searched are spent by that press: Back returns to the home's own rows, never to
+    # results nobody asked for again.
     page.locator(f'{HOME} [data-settings-result="door:skill"]').click()
     forms = settings_page(page, "skill")
     forms.wait_for(state="visible")
-    assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "Skill settings"
+    assert page.locator("#page-skills [data-extensions-lead-name]").inner_text().strip() == "Skill settings"
+    assert page.locator("#page-skills > .app-page-header [data-shell-back]").get_attribute("aria-label") == "Back to Settings"
     forms.locator("[data-skill-forms]").wait_for(state="visible")
     assert "No installed skill has settings." in forms.inner_text()
     assert go_back(page) == ""
@@ -239,10 +241,10 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     assert first.is_visible() and back.count() == 0 and page.evaluate(SETTINGS_LAYERS) == []
     # A jump from Skills has the same named return in the wide header.
     page.evaluate("document.querySelector('[data-nav-page=\"skills\"]').click()")
-    page.wait_for_selector("#page-skills.active")
+    page.wait_for_selector('#page-skills [data-extensions-open="installed"][aria-current="page"]')
     page.evaluate("() => window.__ouroSettings.open('test-shell')")
     back.wait_for(state="visible")
-    assert back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Skills"
+    assert back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Extensions › Skills"
     back.click()
     page.wait_for_selector("#page-skills.active")
     assert back.count() == 0

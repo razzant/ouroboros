@@ -185,7 +185,7 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
     from ouroboros.lead_fact import is_integrating_focus
     from ouroboros.owner_words import cited_owner_basis
     from ouroboros.gateway.ui_preferences import record_model_recent
-    from ouroboros.gateway.owner_effort import _write_main_route
+    from ouroboros.gateway.owner_effort import BindingRefused, _write_main_route
     from ouroboros.gateway.owner_settings import settings_document_mutation
     from ouroboros.composer_cognition import update_project_model_choice
     from ouroboros.tools.control_routing import _inherited_project_scope
@@ -231,6 +231,8 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
                 result = _write_main_route(None, choice, origin={"surface": "tool", "actor": "ouroboros", "actor_task_id": ctx.task_id})
             if choice["kind"] == "model":
                 record_model_recent(root, choice["model"], choice["use_local"])
+    except BindingRefused as exc:
+        return refuse(ctx, str(exc))
     except DeploymentPolicyRefusal:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_REPORTED_FAILURE",
             text="Model write refused by deployment policy; nothing was saved."))

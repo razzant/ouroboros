@@ -269,14 +269,12 @@ class TestForwardToWorkerTool(unittest.TestCase):
             forbidden = _forward_to_worker(ctx, "otherchild", "wrong root")
 
             self.assertIn("Message forwarded", output)
-            # TZ-1 V10: a queued task's mailbox takes the message; the receipt says nothing read it.
-            self.assertIn("(queued)", queued)
-            self.assertIn("has not started, so nothing has read it", queued)
+            for receipt in (queued, requested):
+                self.assertIn("written to its mailbox (queued). Read status is unconfirmed.", receipt)
             queued_mailbox = queued_drive / "memory" / "owner_mailbox" / "queued1.jsonl"
             self.assertIn("read this when you start", queued_mailbox.read_text(encoding="utf-8"))
             # A requested child's mailbox already exists in its recorded drive: the message waits
             # there for its start (never dropped); a settled task still refuses.
-            self.assertIn("(queued)", requested)
             asked_mailbox = asked_drive / "memory" / "owner_mailbox" / "asked1.jsonl"
             self.assertIn("read this once admitted", asked_mailbox.read_text(encoding="utf-8"))
             self.assertIn("TASK_NOT_ACTIVE", blocked)

@@ -89,6 +89,11 @@ def native_name(name: Any) -> bool:
     return not IS_WINDOWS or relative_parts(name) == [name]
 
 
+def short_name(path: pathlib.Path) -> str:
+    """The native DOS alias when the selected volume supplies one, otherwise the real leaf name."""
+    return _Win32Files.load().short_name(path) if IS_WINDOWS else path.name
+
+
 def root_spellings(root: Any) -> Tuple[pathlib.Path, ...]:
     """A host-configured ROOT as reads descend from it (physical), then as producers
     recorded it (configured) when that differs. Only this trusted root is resolved."""
@@ -220,6 +225,43 @@ class ConfinedDirectory:
             return database + "-shm" == name or self.api.identity(self.handle, database + "-shm") == own
         except OSError:
             return False
+
+    def move_selected(self, name, target, slot, stamp):
+        """Move the owner's exact one-link file between held directories. The relative source and
+        destination never traverse a substituted parent. On NT the rename addresses the file handle."""
+        from ouroboros.store import is_wal_index
+
+        if not all(native_name(part) for part in (name, slot)):
+            raise OSError(errno.EINVAL, "invalid release position")
+        def verify(info):
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                    [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns] != stamp):
+                raise OSError(errno.EAGAIN, "selected file changed")
+        if self.api:
+            if self._wal_index(name):
+                raise OSError(errno.EACCES, "WAL index held")
+            raw = self.api.open_relative(self.handle, name, directory=False, for_rename=True)
+            try:
+                fd = self.api.to_fd(raw)
+            except BaseException:
+                self.api.close(raw)
+                raise
+            try:
+                verify(os.fstat(fd))
+                self.api.rename_handle(raw, target.handle, slot)
+            finally:
+                os.close(fd)
+        else:
+            if is_wal_index(name, dir_fd=self.handle):
+                raise OSError(errno.EACCES, "WAL index held")
+            try:
+                os.stat(slot, dir_fd=target.handle, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError(errno.EEXIST, "release slot occupied")
+            verify(os.stat(name, dir_fd=self.handle, follow_symlinks=False))
+            os.rename(name, slot, src_dir_fd=self.handle, dst_dir_fd=target.handle)
 
     def entries(self, *, include_links: bool = False) -> list[tuple[str, bool]]:
         """Directories and regular files with directory hints; opens recheck kind. Links,
@@ -427,6 +469,12 @@ class _Win32Files:
                                    wintypes.LPVOID, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG,
                                    wintypes.ULONG, wintypes.LPVOID, wintypes.ULONG]
         self._nt_create.restype = wintypes.LONG
+        self._nt_set = ntdll.NtSetInformationFile
+        self._nt_set.argtypes = [wintypes.HANDLE, ctypes.POINTER(IoStatus), wintypes.LPVOID, wintypes.ULONG, wintypes.ULONG]
+        self._nt_set.restype = wintypes.LONG
+        self._short_path = kernel32.GetShortPathNameW
+        self._short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        self._short_path.restype = wintypes.DWORD
         self._nt_query = ntdll.NtQueryDirectoryFile
         self._nt_query.argtypes = [wintypes.HANDLE, wintypes.HANDLE, wintypes.LPVOID, wintypes.LPVOID,
                                   ctypes.POINTER(IoStatus), wintypes.LPVOID, wintypes.ULONG,
@@ -466,7 +514,7 @@ class _Win32Files:
             self.close(handle)
             raise
 
-    def open_relative(self, parent: int, name: str, *, directory: bool, metadata: bool = False) -> int:
+    def open_relative(self, parent: int, name: str, *, directory: bool, metadata: bool = False, for_rename=False) -> int:
         """``metadata``: no data access, so the handle reads no byte and NT checks no share mode."""
         if not native_name(name):
             raise OSError(errno.EINVAL, "not a plain Windows component")
@@ -479,6 +527,8 @@ class _Win32Files:
                                       0x40 | 0x1000, None, None)  # CASE_INSENSITIVE | DONT_REPARSE
         handle, io = ctypes.c_void_p(), self._io_status()
         access = 0x100000 | 0x80 | (0 if metadata else 0x1)  # SYNCHRONIZE | READ_ATTRIBUTES [| READ_DATA]
+        if for_rename:
+            access |= 0x10000  # DELETE permits renaming this exact open file.
         status = self._nt_create(ctypes.byref(handle), access, ctypes.byref(attributes),
                                  ctypes.byref(io), None, 0, self.SHARE_READ | self.SHARE_WRITE | self.SHARE_DELETE,
                                  1, 0x20 | 0x200000 | (0x1 if directory else 0x40), None, 0)
@@ -491,6 +541,25 @@ class _Win32Files:
         except BaseException:
             self.close(handle.value)
             raise
+
+    def rename_handle(self, source, parent, name):
+        ctypes = self._ctypes
+        encoded = name.encode("utf-16-le")
+        class Rename(ctypes.Structure):
+            _fields_ = [("replace", ctypes.c_ubyte), ("root", ctypes.c_void_p), ("length", ctypes.c_uint32),
+                        ("name", ctypes.c_char * len(encoded))]
+        info = Rename(0, parent, len(encoded))
+        ctypes.memmove(ctypes.addressof(info) + Rename.name.offset, encoded, len(encoded))
+        status = self._nt_set(source, ctypes.byref(self._io_status()), ctypes.byref(info), ctypes.sizeof(info), 10)
+        if status < 0:  # FileRenameInformation, replace disabled
+            raise self._status_error(status)
+
+    def short_name(self, path):
+        size = self._short_path(str(path), None, 0)
+        buffer = self._ctypes.create_unicode_buffer(size)
+        if not size or not 0 < self._short_path(str(path), buffer, size) < size:
+            raise self._error("GetShortPathNameW")
+        return pathlib.Path(buffer.value).name
 
     def identity(self, parent: int, name: str) -> Tuple[int, int, int]:
         """A plain regular entry's (volume, file index) by an attribute-only relative handle: the

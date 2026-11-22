@@ -8,8 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests._delivery_candidate_shared import (
-    write_child as _write_child,
-    write_confirmed_disposition_fixture as _write_confirmed_disposition,
+    _run_loop,
 )
 
 
@@ -23,77 +22,6 @@ def _finish_response(answer, *, by_hash=False):
 
 def _assert_no_repair_round(calls):
     assert all("DELIVERY_CONTROL_REPAIR" not in str(row) for call in calls for row in call)
-
-
-def _run_loop(
-    tmp_path,
-    monkeypatch,
-    responses,
-    review_holds=None,
-    *,
-    child=False,
-    bind_child_before_second=False,
-    progress=None,
-):
-    import ouroboros.loop as loop
-    from ouroboros.tools.registry import ToolRegistry
-
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    if child:
-        _write_child(tmp_path)
-    answers = iter(responses)
-    calls = []
-    progress = progress if progress is not None else []
-
-    class FakeLLM:
-        def default_model(self):
-            return "test-model"
-
-    def fake_call(_llm, request_messages, *_args, **_kwargs):
-        calls.append([dict(row) for row in request_messages])
-        if child and bind_child_before_second and len(calls) == 2:
-            _write_confirmed_disposition(
-                tmp_path,
-                disposition="integrated",
-                rationale="test parent consumed the handoff",
-            )
-        answer = next(answers)
-        if isinstance(answer, dict):
-            return {"role": "assistant", **answer}, 0.0
-        return {"role": "assistant", "content": answer}, 0.0
-
-    holds = iter(review_holds or [])
-
-    def fake_review_at_delivery(ctx, _content, _llm_trace, hold):
-        # The result review's host step at delivery: a blocking hold shows its outcome to the
-        # author and retains the first answer, so the next complete answer is selected
-        # explicitly through the real completion door (a non-blocking outcome shown once leaves
-        # the next prose fresh: tests/test_completion_hold_observation.py).
-        held = next(holds, False)
-        if held:
-            ctx._completion_hold_cause = "blocking_refusal"
-            hold("[Result review] The review's findings were shown before delivery.")
-        return held
-
-    monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
-    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", fake_review_at_delivery)
-    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_metadata = {
-        "budget_drive_root": str(tmp_path),
-        "root_task_id": "parent1",
-    }
-    result, usage, trace = loop.run_llm_loop(
-        messages=[{"role": "user", "content": "do the work"}],
-        tools=registry,
-        llm=FakeLLM(),
-        drive_logs=tmp_path,
-        emit_progress=lambda text, **facts: progress.append({"text": text, **facts}),
-        incoming_messages=queue.Queue(),
-        task_id="parent1",
-        drive_root=tmp_path,
-    )
-    return result, usage, trace, calls
 
 
 def test_service_notices_after_a_review_hold_cannot_erase_full_candidate(tmp_path, monkeypatch):

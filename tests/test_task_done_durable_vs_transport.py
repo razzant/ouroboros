@@ -14,6 +14,8 @@ Verifies Lane B claims at the byte level:
 """
 import json
 
+import pytest
+
 
 def _mk_ctx(tmp_path, sent, pushed):
     class Bridge:
@@ -181,3 +183,56 @@ def test_non_subagent_log_channel_not_enriched(tmp_path):
     for k in KEYS:
         assert k not in pushed_done[0], f"non-subagent push_log gained {k}"
         assert k not in done_rows[0]
+
+
+@pytest.mark.parametrize('queue_attempt', [None, 1])
+@pytest.mark.parametrize('done_first', [False, True])
+def test_direct_physical_zero_reaches_live_metrics_and_cold_history(tmp_path, monkeypatch, queue_attempt, done_first):
+    import asyncio
+    from types import SimpleNamespace
+
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.task_status import execution_owner_record
+    from supervisor.events_worker_reports import _handle_task_metrics
+    from supervisor.events import _handle_task_done
+    from tests._dialogue import chat_rows
+    from tests._store_shared import delete_result
+
+    tid = 'direct-zero'
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    task = {'id': tid, 'type': 'task', 'chat_id': 1, 'text': 'Check', '_is_direct_chat': True,
+            '_skip_post_task_synthesis': True}
+    owner = execution_owner_record(tmp_path, task, 'direct')
+    task['_execution_owner'] = owner
+    if queue_attempt is not None:
+        task['_attempt'] = queue_attempt
+    pipeline.write_task_result(tmp_path, tid, 'running', task_attempt=0, execution_owner=owner, chat_id=1)
+    pushed, pending = [], []
+    ctx = _mk_ctx(tmp_path, [], pushed)
+    ctx.RUNNING[tid] = {'task': task, 'attempt': 1}
+    monkeypatch.setattr(pipeline, '_task_cost_fields', lambda *_: {'total_rounds': 99})
+    pipeline.emit_task_results(SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None,
+                               pending, task, 'Checked.', {'rounds': 3},
+                               {'tool_calls': [], 'reasoning_notes': []}, 0.0, logs)
+    handlers = {'task_done': _handle_task_done, 'task_metrics': _handle_task_metrics}
+    sequence = ['task_done', 'task_metrics'] if done_first else ['task_metrics', 'task_done']
+    for kind in sequence:
+        handlers[kind](json.loads(json.dumps(next(e for e in pending if e['type'] == kind))), ctx)
+    live = [row for row in pushed if row.get('type') in {'task_done', 'task_metrics_event'}]
+    assert [row['type'] for row in live] == [kind if kind == 'task_done' else 'task_metrics_event' for kind in sequence]
+    [done] = [row for row in live if row['type'] == 'task_done']
+    [metrics] = [row for row in live if row['type'] == 'task_metrics_event']
+    assert done['execution_owner']['task_id'] == tid and done['execution_owner']['task_attempt'] == 0
+    assert metrics['task_attempt'] == 0 and metrics['rounds'] == 3
+    [evaluation] = [row for line in (logs / 'events.jsonl').read_text().splitlines()
+                    if (row := json.loads(line)).get('type') == 'task_eval']
+    [facts] = [row for row in chat_rows(tmp_path) if row.get('summary_kind') == 'host_task_facts']
+    assert evaluation['task_attempt'] == facts['task_attempt'] == 0 and facts['rounds'] == 3
+    delete_result(tmp_path, tid)
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={'chat_id': '1'})))
+    assert response.status_code == 200
+    assert any(row.get('task_id') == tid and row.get('system_type') == 'task_summary'
+               and row.get('task_attempt') == 0 and row.get('rounds') == 3
+               for row in json.loads(response.body)['messages'])

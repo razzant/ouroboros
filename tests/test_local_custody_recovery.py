@@ -276,4 +276,11 @@ def test_a_malformed_neighbor_claim_does_not_erase_or_prevent_exact_retirement(t
     row = load_task_result(tmp_path, "root")
     assert "op-root" in row.get("retired_tool_invocations", {})
     assert row.get("launch_handoffs", {}) == {"malformed": "unreadable"}
-    assert "tree_census_unreadable" in [b["kind"] for b in blockers], "the malformed independent claim stays held"
+    # The census itself was read; only this member's claim could not be read. The damaged
+    # member is NAMED (its id and the reason), so the claim stays held without hiding the
+    # other members' custody behind a whole-census unreadable (#3428).
+    damaged = [b for b in blockers if b["kind"] == "member_record_unreadable"]
+    assert [b["task_id"] for b in damaged] == ["root"], "the malformed independent claim stays held"
+    assert damaged[0]["detail"], "the reason the claim could not be read is kept"
+    assert not [b for b in blockers if b["kind"] == "tree_census_unreadable"], (
+        "the census was read; only the damaged member's claim was not")

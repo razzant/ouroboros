@@ -123,7 +123,7 @@ ANCHOR_ROWS: tuple[AnchorRow, ...] = (
         "(unknown, never 0) for a task that ended without loop evidence.",
         _fields("ts type task_id task_type duration_sec tool_calls tool_errors reason_code"),
         nullable=_fields("tool_calls tool_errors"),
-        optional=_fields("outcome_axes routing_tool_calls completion_tool_calls tool_call_counts chat_id "
+        optional=_fields("task_attempt outcome_axes routing_tool_calls completion_tool_calls tool_call_counts chat_id "
                          "parent_task_id root_task_id"),
         content=_fields("outcome_axes"), natural_key=("task_id", "type", "ts"),
     ),
@@ -197,7 +197,7 @@ ANCHOR_ROWS: tuple[AnchorRow, ...] = (
         _fields(_TOOL + " elapsed_ms is_error status"),
         optional=_fields(_TOOL_OPTIONAL + " result_preview args_ref result_ref tool_result_meta exit_code signal "
                                           "duration_ms timed_out killed_by_host pre_exec_failure resolved_runtime "
-                                          "runtime_provenance ws_relay_failures tool_result_code control_reason"),
+                                          "runtime_provenance ws_relay_failures memory_oom tool_result_code control_reason"),
         content=_fields("args result_preview tool_result_meta"), natural_key=("invocation_id", "type"),
     ),
     AnchorRow(

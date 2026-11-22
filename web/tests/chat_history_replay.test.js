@@ -282,3 +282,23 @@ test('adopting a missing locator preserves the timestamp tie ordering witness', 
     assert.equal(record.items[0].headline, 'Running');
     assert.equal(record.items[0].sourceHistoryId, 'progress:1');
 });
+
+test('a terminal report keeps its full-report reference when it replaces the scheduled line', () => {
+    const record = { items: [] };
+    const key = 'subagent-lifecycle:child';
+    const row = (id, second) => ({ history_id: id, history_position: { source: 'progress', offset: second },
+        ts: `2026-09-12T12:00:0${second}Z` });
+    const fullBody = 'Subagent child completed.\n\n## Report to parent\nCapped report\n\n[TRACE]\nShort trace';
+    const scheduled = { visible: true, headline: 'Researcher', phase: 'start', dedupeKey: key,
+        body: 'Starting.', fullBody: 'Starting.', fullRef: '', truncated: false };
+    const terminal = { visible: true, headline: 'Researcher', phase: 'done', terminal: true, dedupeKey: key,
+        body: 'Capped report', fullBody, fullRef: 'child', truncated: true };
+    assert.equal(mergeHistoricalTimelineItem(record, scheduled, row('p0', 0), '12:00:00'), true);
+    assert.equal(mergeHistoricalTimelineItem(record, terminal, row('p2', 2), '12:00:02'), true);
+    assert.equal(record.items[0].truncated, true);
+    assert.equal(record.items[0].fullRef, 'child');
+    const before = JSON.stringify(record.items);
+    assert.equal(mergeHistoricalTimelineItem(record, terminal, row('p2', 2), '12:00:02'), false);
+    assert.equal(mergeHistoricalTimelineItem(record, scheduled, row('p0', 0), '12:00:00'), false);
+    assert.equal(JSON.stringify(record.items), before);
+});

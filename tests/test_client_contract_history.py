@@ -17,7 +17,7 @@ import pytest
 
 from ouroboros.gateway.contracts import ChatOutbound
 from ouroboros.gateway.history import make_chat_history_endpoint
-from ouroboros.gateway.history_contracts import ChatHistoryMessage, ChatHistoryResponse
+from ouroboros.gateway.history_contracts import ChatHistoryMessage, ChatHistoryResponse, HistoricalTerminal
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.owner_quiz import record_asked
 from supervisor import message_bus
@@ -108,6 +108,179 @@ def test_history_rows_follow_the_published_row_contract(chat):
         assert row["history_id"] == f"{row['history_position']['source']}:{row['history_position']['offset']}"
     timestamps = [row["ts"] for row in body["messages"]]
     assert timestamps == sorted(timestamps), "rows are oldest first"
+
+
+@pytest.mark.parametrize("source", ["unknown", "supervisor_cancel", "executor_terminal", "legacy"])
+def test_main_receipt_contract_preserves_the_clock_that_was_published(chat, monkeypatch, source):
+    from ouroboros import dialogue_store
+    from ouroboros.task_results import write_task_result
+    from ouroboros.terminal_projection import _project_row
+
+    tid = "room-clock"
+    published = "2026-10-14T12:34:56+00:00"
+    write_task_result(chat.root, tid, "running", chat_id=1, task_attempt=0, started_at="2026-10-12T08:00:00Z")
+    monkeypatch.setattr("ouroboros.task_results.utc_now_iso", lambda: TS)
+    stored = write_task_result(chat.root, tid, "cancelled" if source == "supervisor_cancel" else "completed",
+                               _cancel_observed=source == "supervisor_cancel", _terminal_observed=source == "executor_terminal",
+                               suggested_name="Inbox check", schedule_name="Daily", wake_summary="Inbox checked.", wake_silent=True)
+    monkeypatch.setattr("ouroboros.terminal_projection.utc_now_iso", lambda: published)
+    event = _project_row(tid, stored, {}, {"chat_id": 1}, delivery={"state": "exhausted", "preserved_path": "saved/answer"})
+    if source == "legacy":
+        event.pop("terminal_time")
+    dialogue_store.append(chat.root, "chat", event)
+    code, body = _read(chat.root)
+    assert code == 200
+    [receipt] = [r for r in body["messages"] if r.get("task_id") == tid]
+    frozen = receipt["historical_terminal"]
+    assert receipt["ts"] == frozen["ts"] == published
+    if source == "legacy":
+        assert "terminal_time" not in receipt and "terminal_time" not in frozen
+    else:
+        assert receipt["terminal_time"] == frozen["terminal_time"] == event["terminal_time"]
+        assert frozen["task_attempt"] == 0 and frozen["terminal_time"]["source"] == source
+        assert frozen["terminal_time"]["occurred_at"] == (None if source == "unknown" else TS)
+    for key in ("wake_summary", "schedule_name", "suggested_name", "wake_silent", "quiet_effective", "terminal_delivery"):
+        assert receipt[key] == frozen[key] == event[key]
+    assert set(receipt) <= set(typing.get_type_hints(ChatHistoryMessage))
+    assert set(frozen) <= set(typing.get_type_hints(HistoricalTerminal))
+    assert not validate_ingress(receipt, ChatHistoryMessage)
+
+
+def test_live_executor_frame_and_its_history_row_identify_the_recorded_attempt(chat):
+    observation = {"task_id": "work", "task_attempt": "0", "run_id": "job", "attempt_id": "run-1",
+                   "harness_id": "codex", "phase": "running", "revision": 1}
+    message_bus.send_with_budget(1, "Reading", task_id="work", is_progress=True,
+                                 progress_meta={"executor_observation": observation})
+    code, body = _read(chat.root)
+    assert code == 200
+    [live] = [frame for frame in chat.frames if frame.get("type") == "chat" and frame.get("task_id") == "work"]
+    [recorded] = [row for row in body["messages"] if row.get("task_id") == "work"]
+    assert _live_key(live) == _row_key(recorded)
+    assert live["executor_observation"] == recorded["executor_observation"] == observation
+    assert "task_attempt" not in live and recorded["task_attempt"] == 0
+    assert not validate_ingress(live, ChatOutbound) and not validate_ingress(recorded, ChatHistoryMessage)
+
+
+RETRIED = "inventory"
+
+
+def _attempt_names(root, attempt):
+    """How a task and its stored result name an attempt: a pooled dispatch's ordinal, a first direct turn's
+    owner-bound zero, or nothing (a writer older than the stamp)."""
+    if attempt is None:
+        return {}, {}
+    if attempt == 0:
+        from ouroboros.task_status import execution_owner_record
+
+        owner = execution_owner_record(root, {"id": RETRIED}, "direct")
+        return {"_execution_owner": owner}, {"execution_owner": owner}
+    return {"_attempt": attempt}, {"task_attempt": attempt}
+
+
+def _facts_row(chat, attempt, **usage):
+    """An attempt's own facts row, written by its post-task stage over the result that attempt stored."""
+    from ouroboros.post_task_synthesis import _record_task_facts
+
+    task = {"id": RETRIED, "chat_id": 1, **_attempt_names(chat.root, attempt)[0]}
+    _record_task_facts(SimpleNamespace(drive_root=chat.root), task, usage, {"tool_calls": [{"tool": "read_file"}]},
+                       chat.root / "logs")
+
+
+@pytest.mark.parametrize(("earlier", "current"), [
+    (1, 2), (0, 1), (None, 2), (None, 0),  # another attempt's ending; an unnumbered one is no numbered attempt's, zero included
+    (None, None),  # no ordinal anywhere: the rows cannot be told apart and all follow the stored result
+])
+def test_a_finalizing_retry_holds_its_early_answer_apart_from_an_earlier_attempts_ending(chat, earlier, current):
+    """An attempt failed and recorded its facts; the same task answered again and still finalizes. Its narration and
+    its early answer are stored without an attempt, as their producers write them."""
+    from tests._store_shared import seed_result
+
+    message_bus.send_with_budget(1, "Counting the east bed", is_progress=True, task_id=RETRIED)
+    seed_result(chat.root, RETRIED, {"chat_id": 1, "status": "failed", "reason_code": "tool_error",
+                                     **_attempt_names(chat.root, earlier)[1]})
+    _facts_row(chat, earlier, rounds=4, reason_code="tool_error", outcome_axes={"lifecycle": {"status": "failed"}})
+    seed_result(chat.root, RETRIED, {"chat_id": 1, "status": "completed", "reason_code": "final_message",
+                                     "root_phase_checkpoint": {"post_task_synthesis": "running"},
+                                     "loop_outcome": {"usage": {"total_rounds": 17}},
+                                     **_attempt_names(chat.root, current)[1]})
+    message_bus.send_with_budget(1, "Counting it again", is_progress=True, task_id=RETRIED)
+    message_bus.send_with_budget(1, "The east bed holds sage.", task_id=RETRIED,
+                                 progress_meta={"task_phase": "finalizing", "task_terminal_status": "completed"})
+    _facts_row(chat, current, rounds=17, reason_code="final_message", outcome_axes={"lifecycle": {"status": "completed"}})
+
+    status, body = _read(chat.root)
+    assert status == 200
+    rows = [row for row in body["messages"] if row.get("task_id") == RETRIED]
+    summaries = [row for row in rows if row["system_type"] == "task_summary"]
+    speech = [row for row in rows if row["system_type"] != "task_summary"]
+    assert sorted(row["text"] for row in speech) == ["Counting it again", "Counting the east bed", "The east bed holds sage."]
+    assert [row["is_progress"] for row in speech].count(True) == 2 and len(summaries) == 2
+    for row in speech:  # the stored result's early answer, whichever attempt wrote the row: no row names one
+        assert "task_attempt" not in row
+        assert (row["task_phase"], row["outcome_final"], row["rounds"], row["reason_code"]) == (
+            "finalizing", False, 17, "final_message")
+    old, own = (next(row for row in summaries if row["status"] == ended) for ended in ("failed", "completed"))
+    assert (own["task_phase"], own["outcome_final"], own["rounds"]) == ("finalizing", False, 17)
+    if earlier is None and current is None:
+        assert (old["task_phase"], old["rounds"], old["reason_code"]) == ("finalizing", 17, "final_message")
+    else:  # its own ending stays its own and is no early answer of the attempt that still finalizes
+        assert old["task_phase"] == "unfinished" and "current_outcome" not in old
+        assert (old.get("task_attempt"), old["rounds"], old["tool_calls"], old["reason_code"]) == (earlier, 4, 1, "tool_error")
+
+
+@pytest.mark.parametrize(("earlier", "current"), [(1, 2), (None, 0)])
+def test_an_earlier_attempts_row_carries_the_stored_end_as_that_results_own_clock(chat, monkeypatch, earlier, current):
+    """The result writer dates the attempt it saw end; another attempt's row shows that end beside its own facts."""
+    from ouroboros.task_results import write_task_result
+
+    started = "2026-10-12T08:00:00Z"
+    write_task_result(chat.root, RETRIED, "running", chat_id=1, task_attempt=current, started_at=started)
+    monkeypatch.setattr("ouroboros.task_results.utc_now_iso", lambda: TS)
+    stored = write_task_result(chat.root, RETRIED, "completed", _terminal_observed=True, reason_code="final_message")
+    assert (stored["terminal_time"]["source"], stored["terminal_time"]["occurred_at"]) == ("executor_terminal", TS)
+    # A facts row of the earlier attempt, written from its own snapshot after the store moved on.
+    _facts_row(chat, earlier, rounds=4, reason_code="tool_error", outcome_axes={"lifecycle": {"status": "failed"}})
+
+    status, body = _read(chat.root)
+    assert status == 200
+    [old] = [row for row in body["messages"] if row.get("task_id") == RETRIED]
+    assert (old.get("task_attempt"), old["status"], old["rounds"]) == (earlier, "failed", 4)
+    ended = old["current_outcome"]
+    assert (ended["task_attempt"], ended["status"], ended["terminal_time"]) == (current, "completed", stored["terminal_time"])
+    assert ended["terminal_time"]["attempt"]["task_attempt"] == current
+    assert ended["terminal_time"]["attempt"]["started_at"] == started
+
+
+def test_the_reply_author_label_is_a_published_field_of_live_frames_and_history_rows(chat):
+    """What a Reply to a row signs (``chat_references.projection_fields``) rides the live frame and the replay of every
+    stored row, so the published types, their browser twins and the contract's words declare it, and the schema types
+    it: the owner's row says You, an answer Ouroboros, the host's own row System."""
+    import pathlib
+
+    from ouroboros.gateway.reference_contracts import ChatReferenceFields
+    from tests.test_gateway_parity import _js_typedef_fields
+
+    _produce(chat)
+    chat.bridge.handle_web_message("Cue: greet the caller.", client_message_id="call:c1:open",
+                                   task_metadata={"host_fact": {"kind": "call_open", "call_id": "c1"}})
+    frames = [frame for frame in chat.frames if frame.get("type") == "chat" and "reply_author_label" in frame]
+    status, body = _read(chat.root)
+    rows = [row for row in body["messages"] if "reply_author_label" in row]
+    assert status == 200 and frames and rows
+    assert {frame["reply_author_label"] for frame in frames} >= {"You", "Ouroboros", "System"}
+    assert {row["reply_author_label"] for row in rows} >= {"You", "Ouroboros", "System"}
+    for frame in frames:
+        assert not validate_ingress(frame, ChatOutbound), (frame, validate_ingress(frame, ChatOutbound))
+    for row in rows:
+        assert not validate_ingress(row, ChatHistoryMessage), (row, validate_ingress(row, ChatHistoryMessage))
+    assert validate_ingress({**frames[0], "reply_author_label": 3}, ChatOutbound), "typed: a label is a string"
+    assert validate_ingress({**rows[0], "reply_author_label": 3}, ChatHistoryMessage)
+    assert "reply_author_label" in typing.get_type_hints(ChatReferenceFields) and "reply_author_label" in ROW_KEYS
+    web = pathlib.Path(__file__).resolve().parents[1]
+    assert "reply_author_label" in _js_typedef_fields((web / "web/modules/api_types.js").read_text(encoding="utf-8"), "ChatOutbound")
+    assert "reply_author_label" in _js_typedef_fields(
+        (web / "web/modules/client_contract_types.js").read_text(encoding="utf-8"), "ChatHistoryMessage")
+    assert "`reply_author_label`" in (web / "docs/CLIENT_CONTRACT.md").read_text(encoding="utf-8")
 
 
 def test_every_stored_live_frame_finds_exactly_its_history_row(chat):

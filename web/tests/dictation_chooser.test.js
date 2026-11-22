@@ -39,7 +39,7 @@ test('the chooser lists live engines, bundled engines that are off and Whisper, 
         ['live', 'Demo', 'On this computer', 'Chosen', false],
         ['live', 'Gone', 'Not here.', 'Use', true],
         ['offer', 'Browser speech', BROWSER_OFFER.title, 'Turn on and use', false],
-        ['hub', 'Whisper', 'On this computer · ~500 MB · OuroborosHub', 'Find Whisper in Skills', false],
+        ['hub', 'Whisper', 'On this computer · ~500 MB · OuroborosHub', 'Find Whisper in Extensions', false],
     ], 'an offer that is already live is not offered twice; the browser path is the skill\'s own words');
     const installed = chooserOptions({ speech, installed: [{ name: 'whisper-voice', enabled: false }], location: LOCAL });
     assert.equal(installed.rows.at(-1).hint, 'Open Whisper in Skills', 'installed but off: its Skills entry');
@@ -69,7 +69,7 @@ test('a built-in engine this install has not installed is found in Browse, never
     const absent = { ...BROWSER_OFFER, installed: false };
     const speech = hubReading({ offers: [absent] });
     const [row] = chooserOptions({ speech, installed: [], location: LOCAL }).rows;
-    assert.deepEqual([row.kind, row.hint], ['offer', 'Find Browser speech in Skills']);
+    assert.deepEqual([row.kind, row.hint], ['offer', 'Find Browser speech in Extensions']);
     const opened = [];
     assert.equal(await chooseOption(row, { speech, open: (detail) => opened.push(detail) }), '');
     assert.deepEqual(opened, [{ query: 'browser_speech' }]);

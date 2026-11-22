@@ -7,12 +7,13 @@
 // it, scrolls. The finger's end and its moves are heard on the document, so a menu that mounts under the finger, or a
 // layer that takes the finger's capture (the drawer), cannot leave a press armed; the tap that ends a long press is not
 // also a press of what lies under it (nor, where a host sends them, its mouse events, whose mousedown would take the
-// focus out of the menu just opened), and the contextmenu Android fires for the same hold is not a second opening.
+// focus out of the menu just opened), and the contextmenu Android fires for the same hold is not a second opening. The
+// next touch, pointer or key acts at once (gesture_tail.js).
+import { createGestureTail } from './gesture_tail.js';
 
 export const LONG_PRESS_MS = 450;
 export const MOVE_TOLERANCE_PX = 10;
 const NATIVE = 'a[href], input, textarea, select, [contenteditable="true"], video, audio';
-const CLICK_GUARD_MS = 400;
 
 /**
  * `rowOf(node)` names the row a node belongs to (null outside one); `open(row, { point } | { anchor })` opens that
@@ -22,7 +23,7 @@ const CLICK_GUARD_MS = 400;
 export function bindRowMenuGesture({ root, rowOf, open, isOpen = () => false }) {
     const doc = root.ownerDocument;
     let press = null;  // a touch that may become (or became) a long press
-    let swallowClickUntil = 0;
+    const tail = createGestureTail(doc, { mousedown: true });  // what the finger that ended a long press still sends
     let rightPress = null;  // what was selected when a right button went down, before its own default selected a word
 
     const selectedIn = (row) => {
@@ -34,7 +35,7 @@ export function bindRowMenuGesture({ root, rowOf, open, isOpen = () => false }) 
         const row = rowOf(event.target);
         if (!row) return;
         // A long press already answered (Android also fires contextmenu for it).
-        if (press?.fired || Date.now() < swallowClickUntil || isOpen(row)) { event.preventDefault(); return; }
+        if (press?.fired || tail.armed || isOpen(row)) { event.preventDefault(); return; }
         // Words the owner selected keep the browser's menu (Copy them). A right button on macOS selects the word under
         // it before this event; that selection is the gesture's own, not the owner's, and goes with the row menu.
         const owned = rightPress?.row === row ? rightPress.selected : selectedIn(row);
@@ -78,7 +79,7 @@ export function bindRowMenuGesture({ root, rowOf, open, isOpen = () => false }) 
     }
 
     function onPointerEnd(event) {
-        if (press?.fired && event.pointerId === press.id) swallowClickUntil = Date.now() + CLICK_GUARD_MS;
+        if (press?.fired && event.pointerId === press.id) tail.arm();
         if (event.pointerId === press?.id) cancelPress();
     }
 
@@ -88,20 +89,14 @@ export function bindRowMenuGesture({ root, rowOf, open, isOpen = () => false }) 
         if (press && !press.fired && (event.target === doc || event.target?.contains?.(root))) cancelPress();
     }
 
-    function onLiftCapture(event) {
-        if (Date.now() >= swallowClickUntil) return;
-        if (event.type === 'click') swallowClickUntil = 0;
-        event.preventDefault();
-        event.stopPropagation();
-    }
-
     const onRoot = [['contextmenu', onContextMenu], ['keydown', onKeydown], ['pointerdown', onPointerDown]];
     const onDocument = [['pointermove', onPointerMove], ['pointerup', onPointerEnd], ['pointercancel', onPointerEnd],
-        ['scroll', onScroll], ['mousedown', onLiftCapture], ['click', onLiftCapture]];
+        ['scroll', onScroll]];
     for (const [type, handler] of onRoot) root.addEventListener(type, handler);
     for (const [type, handler] of onDocument) doc.addEventListener(type, handler, true);
     return () => {
         cancelPress();
+        tail.disarm();
         for (const [type, handler] of onRoot) root.removeEventListener(type, handler);
         for (const [type, handler] of onDocument) doc.removeEventListener(type, handler, true);
     };
