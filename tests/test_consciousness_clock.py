@@ -169,6 +169,31 @@ def test_an_unidentified_external_sender_is_not_my_human_where_no_external_owner
     assert _intake(monkeypatch, ctx, _message("Asia/Tokyo", name="w1"))["zone"] == "Asia/Tokyo", "the web owner's own"
 
 
+def test_a_retry_takes_the_zone_and_its_time_from_the_row_it_repeats(monkeypatch):
+    """A same-id web retry dispatches the first acceptance's row (``accepted_source_row``) beside its own metadata:
+    a retry that sends no client_surface (Send again after reload) records the original's zone at the original's
+    time, and one from another zone never moves it; a fresh message, and a non-web one without an accepted row, keep
+    reading their own metadata."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+
+    ts = "2026-11-21T08:00:00+00:00"
+
+    def retry(metadata):
+        ref = build_owner_message_ref(chat_id=1, client_message_id="r1", ts=ts, text="hello")
+        row = {"direction": "in", "source": "web", "chat_id": 1, "client_message_id": "r1", "ts": ts, "text": "hello",
+               "client_surface": {"timezone": "Europe/Moscow"}}
+        return {**_message(None, name="r1"), "task_metadata": metadata, "accepted_source_ref": ref,
+                "accepted_source_row": row}
+
+    fact = _intake(monkeypatch, _Ctx(BOUND), retry({}))
+    assert fact["zone"] == "Europe/Moscow" and fact["at"] == fact["message"]["ts"] == ts
+    moved = _intake(monkeypatch, _Ctx(BOUND), retry({"client_surface": {"timezone": "Asia/Tokyo"}}))
+    assert moved["zone"] == "Europe/Moscow" and moved["at"] == ts, "the retry's own zone is not the original's"
+    assert _intake(monkeypatch, _Ctx(BOUND), _message("Asia/Tokyo", name="fresh"))["zone"] == "Asia/Tokyo"
+    telegram = _message("Europe/Berlin", chat=42, sender=7, source="skill:telegram-bridge", name="tg1")
+    assert _intake(monkeypatch, _Ctx(BOUND), telegram)["zone"] == "Europe/Berlin", "no accepted row: its metadata"
+
+
 def test_a_display_default_sender_in_the_bound_owner_chat_is_not_my_human(monkeypatch):
     """The zone takes the bridge's positive identities, as a task's owner binding does (``bound_external_owner``): in
     a private chat bound as (42, 42), a message without a sender id reads as the chat's id only by display default."""
@@ -195,8 +220,10 @@ def test_the_zone_is_dated_by_its_own_message_and_an_older_one_never_replaces_a_
 
     def accepted(zone, ts, name):
         ref = build_owner_message_ref(chat_id=1, client_message_id=name, ts=ts, text="hello")
-        row = {"direction": "in", "source": "web", "chat_id": 1, "client_message_id": name, "ts": ts, "text": "hello"}
-        return {**_message(zone, name=name), "accepted_source_ref": ref, "accepted_source_row": row}
+        message = _message(zone, name=name)  # the row keeps the surface its acceptance reported (``accept_chat``)
+        row = {"direction": "in", "source": "web", "chat_id": 1, "client_message_id": name, "ts": ts, "text": "hello",
+               **message["task_metadata"]}
+        return {**message, "accepted_source_ref": ref, "accepted_source_row": row}
 
     newer = {"zone": "Asia/Dubai", "at": "2026-11-21T09:00:00+00:00"}
     ctx = _Ctx({**BOUND, clock.OWNER_ZONE_STATE_KEY: newer})

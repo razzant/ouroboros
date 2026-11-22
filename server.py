@@ -383,7 +383,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 live["owner_id"] = user_id
                 live["owner_chat_id"] = _owner_binding_chat_id(ctx, chat_id, is_external_transport)
             live["last_owner_message_at"] = now_iso
-            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_external_owner, message=origin_message_ref, at=now_iso)
+            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_external_owner, message=origin_message_ref, at=now_iso, accepted=msg.get("accepted_source_row"))
 
         try:
             ctx.update_state(_stamp_owner_activity)

@@ -177,14 +177,17 @@ def choice_receipt(seen: Dict[str, Any], *, interval: Optional[int], clamp_note:
     return text + (f" The wake-up interval is now {interval} s{clamp_note}." if interval is not None else "")
 
 
-def note_owner_zone(live: Dict[str, Any], metadata: Any, *, own: bool, message: Any, at: str) -> None:
+def note_owner_zone(live: Dict[str, Any], metadata: Any, *, own: bool, message: Any, at: str, accepted: Any = None) -> None:
     """At owner ingress, inside the write that stamps their activity: my human's own message (``own``) whose client
     reported a valid IANA zone overwrites the one dated fact, dated by the ``ts`` its reference carries (a message
     accepted earlier and processed later keeps when it came), so it never replaces a report dated later; a reference
-    without one is dated ``at``. Any other message leaves the fact as it is."""
+    without one is dated ``at``. An item carrying its accepted row (``accepted``) reads the zone that row recorded,
+    since a same-id retry carries the first acceptance's row beside its own metadata; else its metadata's. Any other
+    message leaves the fact as it is."""
     from ouroboros.client_surface import normalize_timezone_name
 
-    surface = metadata.get("client_surface") if own and isinstance(metadata, dict) else None
+    source = accepted if isinstance(accepted, dict) and accepted else metadata
+    surface = source.get("client_surface") if own and isinstance(source, dict) else None
     zone = normalize_timezone_name(surface.get("timezone")) if isinstance(surface, dict) else ""
     if not zone:
         return
