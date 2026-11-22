@@ -984,7 +984,11 @@ def _capture_context_core(
     registry = "" if declared else _build_registry_section(context_env)
     if registry:
         dynamic_parts.append(registry)
-    installed_skills = "" if declared else _build_installed_skills_section(context_env, skills=skills)
+    from ouroboros.contracts.task_constraint import normalize_task_constraint
+
+    bound = normalize_task_constraint(task.get("task_constraint") or getattr(ctx, "task_constraint", None))
+    installed_skills = "" if declared else _build_installed_skills_section(
+        context_env, skills=skills, selected_skill=bound.skill_name if bound and bound.has_selected_skill else "")
     if installed_skills:
         dynamic_parts.append(installed_skills)
     dynamic_parts.extend([

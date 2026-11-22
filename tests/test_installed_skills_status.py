@@ -456,3 +456,45 @@ def test_a_source_whose_manifest_check_fails_is_named_and_its_neighbours_keep_th
         assert "\n- kept (instruction, v1, " in text and "inside" not in text
         assert text.endswith(f"Skill folders that could not be read (their skills are missing here): {hidden} "
                              "(PermissionError)")
+
+
+def _long_off(drive: pathlib.Path, name: str) -> str:
+    folder = drive / "skills" / "external" / name
+    folder.mkdir(parents=True)
+    description = f"{name} design guidance for pages. " * 14 + "Judge the result by eye at its real size."
+    (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {json.dumps(description)}\nversion: '1'\n"
+                                     "type: instruction\n---\nB\n", encoding="utf-8")
+    return description
+
+
+def test_a_work_bound_to_one_skill_is_pointed_to_list_skills_for_another_skills_whole_purpose(tmp_path):
+    """A work bound to one skill's payload may not read another skill's manifest (SKILL_REDIRECT_BLOCKED), so a cut
+    purpose there names list_skills(name=...); every other work keeps the read_file address it can open (RV2 DX8)."""
+    _long_off(tmp_path, "design-off")
+    _long_off(tmp_path, "alpha")
+    env = SimpleNamespace(drive_root=tmp_path)
+    reader = ("Whole text: read_file(root='skill_payload', bucket='external', skill_name='design-off', "
+              "path='SKILL.md').")
+    ordinary = _build_installed_skills_section(env).full_text
+    bound = _build_installed_skills_section(env, selected_skill="alpha").full_text
+    assert reader in ordinary and "list_skills(name='design-off')" not in ordinary
+    assert "Whole text: list_skills(name='design-off')." in bound and reader not in bound
+    assert ("Whole text: read_file(root='skill_payload', bucket='external', skill_name='alpha', path='SKILL.md')."
+            in bound)  # the bound skill's own manifest stays readable there
+
+
+def test_the_context_build_passes_the_bound_skill_to_the_catalog(tmp_path):
+    from ouroboros.context import build_llm_messages
+    from tests.test_doc_context import _make_env_and_memory
+
+    env, memory = _make_env_and_memory(tmp_path)
+    _long_off(tmp_path / "drive", "design-off")
+    texts = {}
+    for label, constraint in (("ordinary", None), ("bound", {"mode": "normal", "skill_name": "alpha",
+                                                             "payload_root": "skills/external/alpha"})):
+        task = {"id": f"t-{label}", "type": "task", "text": "hi", **({"task_constraint": constraint} if constraint else {})}
+        messages, _ = build_llm_messages(env=env, memory=memory, task=task)
+        texts[label] = "\n".join(block.get("text", "") for block in messages[0]["content"] if isinstance(block, dict))
+    assert "Whole text: list_skills(name='design-off')." in texts["bound"]
+    assert "Whole text: list_skills(name='design-off')." not in texts["ordinary"]
+    assert "skill_name='design-off', path='SKILL.md')." in texts["ordinary"]
