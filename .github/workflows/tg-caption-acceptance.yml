@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
 
       - name: Identify the reviewed product and the five test-only additions
@@ -37,7 +37,9 @@ jobs:
           candidate=$(cat "$qa/candidate.sha")
           [[ $candidate =~ ^[a-f0-9]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$candidate"
+          prior_qa=7d8d2206f3bcee6d7a9cd774f3b3ab19f8e27c12
+          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$prior_qa"
+          test "$(git show -s --format=%P "$prior_qa")" = "$candidate"
           files=("$workflow" "$qa/Dockerfile" "$qa/candidate.sha" "$qa/loopback.py" "$qa/scenario.py")
           printf 'A\t%s\n' "${files[@]}" | LC_ALL=C sort > "$CASE/expected"
           git diff --no-renames --name-status "$candidate" "$GITHUB_SHA" | LC_ALL=C sort > "$CASE/actual"

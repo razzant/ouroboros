@@ -13,8 +13,9 @@ from time import monotonic_ns
 import httpx
 
 from ouroboros.server_process import read_service_bindings
+from ouroboros.skill_install_record import read_install_record
 from ouroboros.skill_loader import (
-    find_skill, requested_core_setting_keys, requested_skill_permissions, save_enabled, save_skill_grants,
+    find_skill, load_skill, requested_core_setting_keys, requested_skill_permissions, save_enabled, save_skill_grants,
 )
 from ouroboros.skill_starter import read_marker
 from tests.candidate_checkout import require_candidate_interpreter, require_running_supervisor
@@ -141,11 +142,9 @@ def observe_posts(model, note):
 def telegram_server(data, bot, model, chat, candidate, note):
     root = Path.cwd()
     state = bot.state
-    state.mkdir(parents=True)
-    write_settings_file(state / "settings.json", {
-        "TELEGRAM_CHAT_ID": str(chat), "TELEGRAM_API_BASE": bot.origin, "TELEGRAM_MINIAPP_ENABLED": "off",
-        "TELEGRAM_MIRROR_MODE": "telegram_only", "TELEGRAM_MIRROR_PROGRESS": "off",
-    })
+    # A child of state/skills before boot classifies this guest as an upgrade,
+    # skipping the first-start starter selection entirely.
+    data.mkdir()
     settings = keyless_settings(model, OUROBOROS_MAX_WORKERS=1, OUROBOROS_UI_LANGUAGE="en",
                                 OUROBOROS_STARTER_SKILLS='["builtin/telegram"]', OUROBOROS_STARTER_SKILLS_TURN_ON=False)
     settings["TELEGRAM_BOT_TOKEN"] = _TOKEN
@@ -156,10 +155,33 @@ def telegram_server(data, bot, model, chat, candidate, note):
     try:
         note("BOOT  installing the bundled Telegram skill")
         server.start()
-        assert wait_until(lambda: read_marker(data).get("results", {}).get("builtin/telegram", {}).get("status")
-                          == "installed", 65)
+        ready = wait_until(lambda: read_marker(data).get("state") in {"upgrade", "pending", "done"}, 65)
+        marker = read_marker(data)
+        result = marker.get("results", {}).get("builtin/telegram", {})
+        phase, status = marker.get("state"), result.get("status")
+        phase = phase if phase in {"fresh", "upgrade", "running", "pending", "done"} else "unknown"
+        status = status if status in {"installed", "pending", "skipped", "failed"} else "missing"
+        note(f"STARTER  phase={phase} selected={'builtin/telegram' in (marker.get('requested') or [])} result={status}")
+        assert ready and phase == "done" and status == "installed"
         skill = find_skill(data, "telegram")
-        assert skill and skill.review.gate_for(skill.content_hash)["executable_review"]
+        bundled = load_skill(root / "skills" / "telegram", data)
+        record = read_install_record(data, "telegram") or {}
+        release = record.get("release", {})
+        native = bool(skill and skill.skill_dir == data.resolve() / "skills" / "native" / "telegram"
+                      and record.get("source", {}).get("kind") == "builtin")
+        exact = bool(skill and bundled and skill.content_hash
+                     and skill.content_hash == bundled.content_hash == release.get("digest")
+                     and str(skill.manifest.version or "") == str(bundled.manifest.version or "") == release.get("version"))
+        reviewed = bool(skill and skill.review.gate_for(skill.content_hash)["executable_review"])
+        disabled = bool(skill and not skill.enabled)
+        note(f"INSTALL  present={skill is not None} builtin={native} exact={exact} review_gate={reviewed} disabled={disabled}")
+        assert native and exact and reviewed and disabled
+        note(f"INSTALL  candidate Telegram sha256={skill.content_hash}")
+        state.mkdir(parents=True, exist_ok=True)
+        write_settings_file(state / "settings.json", {
+            "TELEGRAM_CHAT_ID": str(chat), "TELEGRAM_API_BASE": bot.origin, "TELEGRAM_MINIAPP_ENABLED": "off",
+            "TELEGRAM_MIRROR_MODE": "telegram_only", "TELEGRAM_MIRROR_PROGRESS": "off",
+        })
         keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
         perms = requested_skill_permissions(list(skill.manifest.permissions or []), list(skill.manifest.subscribe_events or []))
         save_skill_grants(data, "telegram", keys, content_hash=skill.content_hash, requested_keys=keys,
@@ -167,6 +189,7 @@ def telegram_server(data, bot, model, chat, candidate, note):
         save_enabled(data, "telegram", True)
         server.stop()
         assert not server.stop_unconfirmed
+        assert not bot.seen("getUpdates")
         note("BOOT  starting the enabled bridge and the Main page")
         server.start()
         assert server.attestation["repo_head"] == candidate
@@ -182,8 +205,11 @@ def telegram_server(data, bot, model, chat, candidate, note):
             assert js == (root / "web" / asset).read_bytes()
             language = http.get("/api/ui/i18n").raise_for_status().json()
             assert language["english"] and language["language"] == "en" and not language["memory_error"]
-        assert wait_until(lambda: bot.seen("getUpdates"), 65)
-        assert all(not e["updates"] for e in bot.seen("getUpdates"))
+        polled = wait_until(lambda: any(e.get("status") == 200 for e in bot.seen("getUpdates")), 65)
+        polls = bot.seen("getUpdates")
+        note(f"BRIDGE  getMe_ok={any(e.get('status') == 200 for e in bot.seen('getMe'))} "
+             f"poll_seen={bool(polls)} poll_ok={bool(polled)}")
+        assert polled and all(e.get("updates") == [] for e in polls)
         note(f"READY  bundled Telegram polling; English SPA asset sha256={digest(js)}")
         yield server
     finally:
