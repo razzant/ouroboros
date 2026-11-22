@@ -82,6 +82,48 @@ def test_a_fresh_route_density_witness_measures_a_new_conversations_first_refusa
     assert cw.resolve_window(cold_evidence, 65_536, root=tmp_path).input is None
 
 
+def test_a_second_conversation_builds_its_first_send_under_a_window_the_first_ones_refusal_bound(tmp_path, monkeypatch):
+    """The merge-gate question (#3896): after conversation one's numberless refusal bound the
+    route's input window, conversation two's *first* send is planned under that bound instead of
+    repeating the full view. The bound stays route-local: a control route without a fresh
+    witness keeps no ceiling."""
+    from ouroboros import context_window as cw
+    from ouroboros import capability_evidence as ce
+
+    monkeypatch.setattr("ouroboros.capability_evidence.canonical_evidence_root", lambda: tmp_path)
+    evidence = ce.CapabilityEvidence(0, "unprobeable", "none", "r")
+    assert cw.resolve_window(evidence, 65_536, root=tmp_path).usable is None
+
+    def first_send_refused(fit):
+        plan = SimpleNamespace(route_fp="r", window_witness_bound=True, provider="zai", model="zai::glm-5.3")
+        ctx = _ctx("Prompt too long")
+        ctx.context_fit_plan = plan
+        lmc._refusal_target(ctx, fit, None)
+
+    first = SimpleNamespace(measurement=SimpleNamespace(
+        estimated_input_tokens=548_000, anchor_input_tokens=None, accepted_input_tokens=545_854,
+        capacity_total_tokens=None, window_reading_tokens=None, reply_allowance_tokens=65_536,
+        capacity_deficit_tokens=None, probes_reply_reservation=False, window={"tokens": 0},
+        measurement_basis="fresh_route_usage", measurement_density=1.0,
+        route_fp="r", round_id="first", profile="owner_max", rendered_mode="max",
+        anchor_round=None, anchor_rewritten=False, window_witness_bound=True, window_observation_fp="r",
+        required_book_tokens=0, preferred_mode="max", mode_cause="", no_memory_tokens=None,
+        raw_input_tokens=548_000, target_total_tokens=None, target_deficit_tokens=None,
+        reclaim_goal_tokens=0, low_water_margin_tokens=0))
+    first_send_refused(first)
+    bound = cw.resolve_window(evidence, 65_536, root=tmp_path)
+    assert bound.input is not None and bound.input.tokens == 548_000
+
+    # Conversation two, same route: the window the first refusal bound now caps planning,
+    # so its first send is a fit *under* 548k, never the full ~2.2M-char view again.
+    second = cw.resolve_window(evidence, 65_536, root=tmp_path)
+    assert second.usable is not None and second.usable <= 548_000
+
+    # Control: another route with no fresh witness and no refusal keeps no ceiling.
+    control = ce.CapabilityEvidence(0, "unprobeable", "none", "control-route")
+    assert cw.resolve_window(control, 65_536, root=tmp_path).input is None
+
+
 def test_the_target_is_measured_on_this_conversation_or_stays_unknown():
     ctx = _ctx()
     # 86aa r1482: E = its raw 848,751 at its own density 874,829/795,458; A = the largest input Codex accepted.
