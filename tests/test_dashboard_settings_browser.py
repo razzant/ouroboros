@@ -25,6 +25,7 @@ import pytest
 from tests.settings_browser_helpers import HOME, open_settings
 from tests.test_segmented_layout_browser import _MEASURE as STRIP_MEASURE
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
+from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 pytestmark = [pytest.mark.ui_browser]
 MAX_TASKS, ALLOWANCE = "OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "OUROBOROS_CONSCIOUSNESS_DAILY_USD"
@@ -331,6 +332,132 @@ def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_ope
     page.wait_for_selector("#dashboard-panel-costs.active")
 
 
+def test_leaving_costs_by_one_columns_back_ends_its_pending_read_and_opening_it_again_reads_anew(ui):
+    """On a phone Back from Costs shows the Dashboard's list and no tab or page event says Costs was left. The quota read
+    Costs has out is released then, as when another tab is chosen, and opening Costs again reads anew."""
+    page, _ = _open(ui, width=390, height=844)
+    held = []
+    page.route("**/api/claudexor/status?view=quota", lambda route: held.append(route))  # a read that stays out
+    page.evaluate("""() => { const real = window.fetch; window.__quotaSignals = [];
+        window.fetch = function (input, init) {
+            if (String((input && input.url) || input).includes('view=quota')) window.__quotaSignals.push(init && init.signal);
+            return real.apply(this, arguments); }; }""")
+    read = lambda: page.evaluate("window.__quotaSignals.length")
+    released = lambda at: page.evaluate("(at) => window.__quotaSignals[at].aborted", at)
+
+    def until(check, what):
+        for _ in range(100):
+            if check():
+                return
+            page.wait_for_timeout(50)
+        raise AssertionError(what)
+
+    base = read()
+    _nav(page, "dashboard", 390)
+    page.click('[data-dashboard-tab="costs"]')
+    page.wait_for_selector("#dashboard-panel-costs.active")
+    until(lambda: read() == base + 1, "opening Costs reads once")
+    assert not released(base)
+    page.locator("#page-dashboard [data-shell-back]").click()
+    assert page.locator("#page-dashboard").get_attribute("data-section-view") == "auto", "the list is back"
+    until(lambda: released(base), "Costs is hidden under the list, so its read is released")
+    page.click('[data-dashboard-tab="costs"]')
+    # The page's fetch and the route's callback are two reports of one request: answer only once both have come, so the
+    # callback cannot lag the read count and leave `held[-1]` the request that was released.
+    until(lambda: read() == base + 2 and len(held) == read(), "opening Costs again reads anew and its request reaches the route")
+    assert not released(base + 1)
+    held[-1].fulfill(content_type="application/json", body=json.dumps(_quota()))
+    page.locator('#page-costs .costs-subscriptions [data-costs-account="accounts/codex"]').wait_for()
+
+
+# What Costs asks for, by the address and the way its page's fetch is called (`window.__reads` is filled where each is
+# made: a read starts inside the handler that shows the page, so nothing is left to wait for before counting it). The
+# totals, the 24 hours and the quota are Costs' alone; the limits and the allowance are told from the neighbours' by
+# the signal only Costs gives them.
+_READ = {
+    "totals": "(url) => url.pathname === '/api/cost-breakdown' && url.search === ''",
+    "period": "(url) => url.pathname === '/api/cost-breakdown' && url.search === '?period=24h'",
+    "quota": "(url) => url.pathname === '/api/claudexor/status' && url.search === '?view=quota'",
+    "limits": "(url, read) => url.pathname === '/api/settings' && read.method === 'GET' && read.signal !== null",
+    "allowance": "(url, read) => url.pathname === '/api/consciousness' && read.signal !== null",
+}
+
+
+def _record_reads(page):
+    page.evaluate("""() => { const real = window.fetch; window.__reads = [];
+        window.fetch = function (input, init) {
+            const url = String((input && input.url) || input);
+            window.__reads.push({ url, method: (init && init.method) || 'GET', signal: (init && init.signal) || null });
+            return real.apply(this, arguments); }; }""")
+
+
+def _asked(page, name):
+    return page.evaluate(f"() => window.__reads.filter((read) => ({_READ[name]})(new URL(read.url, location.href), read)).length")
+
+
+def _ended(page, name):
+    return page.evaluate(f"""() => window.__reads.filter((read) => ({_READ[name]})(new URL(read.url, location.href), read))
+        .map((read) => read.signal.aborted)""")
+
+
+def test_one_columns_arrow_keys_select_costs_without_any_of_its_reads_and_the_press_that_opens_it_reads_each_once(ui):
+    """On a phone the Dashboard's list hides every page: its arrow keys move the selection onto Costs and open nothing. The
+    sheets say the page has no box, so none of its reads (the totals, the 24 hours, the quota) starts; the press that opens
+    the page starts each once."""
+    from playwright.sync_api import expect
+
+    page, _ = _open(ui, width=390, height=844)
+    _record_reads(page)
+    _nav(page, "dashboard", 390)
+    # The drawer is still leaving under the place it handed over, and the room stays inert until its close motion ends
+    # (app.js): a focus now lands nowhere. Wait for the state the shell settles into (the drawer closed, the list live),
+    # then say where the keys start: the list's Logs row holds the focus before the first arrow.
+    wait_drawer_closed(page)
+    page.wait_for_function("() => { const row = document.querySelector('[data-dashboard-tab=\"logs\"]'); return Boolean(row) && !row.closest('[inert]'); }")
+    page.focus('[data-dashboard-tab="logs"]')
+    assert page.evaluate("() => document.activeElement === document.querySelector('[data-dashboard-tab=\"logs\"]')"), \
+        "the arrow keys start from the list's Logs row"
+    for _ in range(3):
+        page.keyboard.press("ArrowDown")
+    page.wait_for_function("() => document.querySelector('#dashboard-tab-costs').getAttribute('aria-selected') === 'true'")
+    assert page.locator("#page-dashboard").get_attribute("data-section-view") == "auto", "the list is still the page"
+    expect(page.locator("#page-costs")).not_to_be_visible()
+    assert [_asked(page, name) for name in ("totals", "period", "quota")] == [0, 0, 0], "a page that is not drawn reads nothing"
+    page.click('[data-dashboard-tab="costs"]')
+    expect(page.locator("#page-costs")).to_be_visible()
+    for name in ("totals", "period", "quota"):
+        page.wait_for_function(f"() => window.__reads.filter((read) => ({_READ[name]})(new URL(read.url, location.href), read)).length >= 1")
+    assert [_asked(page, name) for name in ("totals", "period", "quota")] == [1, 1, 1], "the press that opens the page reads each once"
+
+
+def test_costs_back_ends_every_read_it_has_out_not_the_quota_alone_and_opening_it_again_reads_anew(ui):
+    """The companion of the quota case above for the whole page: Back from Costs on a phone ends the totals, the 24 hours,
+    the quota, the limits and the allowance it has out in one stroke. They are held, so that an answer could still come;
+    none can, for each transport is ended. Opening Costs again reads each anew with a transport that is not."""
+    page, _ = _open(ui, width=390, height=844)
+    held = []
+    for pattern in ("**/api/cost-breakdown*", "**/api/claudexor/status?view=quota", "**/api/consciousness"):
+        page.route(pattern, lambda route: held.append(route))
+    page.route("**/api/settings", lambda route: held.append(route) if route.request.method == "GET" else route.fallback())
+    _record_reads(page)
+    names = ("totals", "period", "quota", "limits", "allowance")
+    _nav(page, "dashboard", 390)
+    page.click('[data-dashboard-tab="costs"]')
+    page.wait_for_selector("#dashboard-panel-costs.active")
+    for name in names:
+        page.wait_for_function(f"() => window.__reads.filter((read) => ({_READ[name]})(new URL(read.url, location.href), read)).length >= 1")
+    assert [_ended(page, name)[-1] for name in names] == [False] * 5, "opened, the page has all five out, each with a transport to end"
+    page.locator("#page-dashboard [data-shell-back]").click()
+    assert page.locator("#page-dashboard").get_attribute("data-section-view") == "auto", "the list is back"
+    for name in names:
+        page.wait_for_function(f"() => window.__reads.filter((read) => ({_READ[name]})(new URL(read.url, location.href), read)).at(-1).signal.aborted")
+    first = {name: _asked(page, name) for name in names}
+    page.click('[data-dashboard-tab="costs"]')
+    for name in names:
+        page.wait_for_function(f"(was) => window.__reads.filter((read) => ({_READ[name]})(new URL(read.url, location.href), read)).length === was + 1", arg=first[name])
+    assert [_ended(page, name)[-1] for name in names] == [False] * 5, "opened again, each reads anew and none of the new transports is ended"
+
+
 @pytest.mark.parametrize("width,height", [(1087, 740), (320, 640)])
 def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, width, height):
     page, _ = _open(ui, width=width, height=height)
@@ -512,7 +639,8 @@ def test_a_door_shares_its_row_with_a_long_value_and_keeps_its_chevron_beside_it
     assert medium["consciousness-model"]["titleLines"] == 1
     assert medium["consciousness-model"]["valueLines"] <= (1 if width >= 1000 else 2), medium["consciousness-model"]
 
-    route["value"] = "groq::meta-llama/llama-4-maverick-17b-128e-instruct"
+    # A known provider kind is stripped from the shown route; an unknown head is one OpenRouter id shown whole (#3943).
+    route["value"] = "openrouter::meta-llama/llama-4-maverick-17b-128e-instruct"
     with page.expect_response(_answers("/api/consciousness")) as refreshed:
         page.clock.fast_forward(21_000)
     _applied(page, refreshed)

@@ -1048,7 +1048,7 @@ def test_named_openrouter_search_sends_and_bills_on_its_own_resolved_connection(
                                                      "provider_routing": {"only": ["vendor-a"]}}]))
     monkeypatch.setenv("OUROBOROS_OR_PROVIDER", json.dumps({"data_collection": "deny"}))
     monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **kw: 9.0)  # what a token bound would read
-    monkeypatch.setattr(search, "estimate_cost_optional", lambda *a, **kw: pytest.fail("the event re-priced the reply"))
+    monkeypatch.setattr(pricing, "estimate_cost_optional", lambda *a, **kw: pytest.fail("the event re-priced the reply"))
     resolved = []
     real_target = search._search_target
     monkeypatch.setattr(search, "_search_target", lambda *a: resolved.append(a) or real_target(*a))

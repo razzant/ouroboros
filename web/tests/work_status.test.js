@@ -17,8 +17,9 @@ import {
 import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
-    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
-    memberPaused, memberState, ownStopPress, promoteChildCard, reasonText, reconcileWorkState, resumeAttemptClause, resumeAttemptWords,
+    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, behindWords, cardControls, cardMenuActions, cardWorkView, clock,
+    emptyWorkState, memberPaused, memberState, ownStopPress, promoteChildCard, reasonText, reconcileWorkState, resumeAttemptClause,
+    resumeAttemptWords,
     resumeTargets, roomAmber, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
 import { SERVER_REASONS, SERVER_SLEEPS, room, serverMark, work as builtWork } from './work_fixture.js';
@@ -462,6 +463,38 @@ test('a sleep says every source it chose in the server\'s words, joined by "or",
         assert.equal(reasonText(SERVER_SLEEPS.reviewer), 'Спит, пока не ответит ревьюер');
         assert.equal(reasonText(SERVER_SLEEPS.task_and_time), `Спит, пока не закончится Draft the release notes или ${clock(at)}`);
         assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Спит, пока Draft the release notes finishes or writes');
+    } finally { applyPayload(prior); }
+});
+
+test('a queued work says the work it stands behind by its name; its details give that id and the lane', () => {
+    // Owner 21.11.2026 («5A»): the queue stays as it is; beside Queued a quiet line says behind which work it stands.
+    const project = work('queued_behind_project', 1);
+    const folder = work('queued_behind_folder', 1);
+    for (const queued of [project, folder]) {
+        assert.equal(queued.activity, 'queued');
+        assert.equal(workRowView(queued).secondary, 'behind “Add Ollama support”');
+        assert.ok(!workRowView(queued).secondary.includes('qh'), 'never by its id');
+    }
+    assert.equal(behindWords(project), 'qh keeps its Project');
+    assert.equal(behindWords(folder), 'qh keeps the folder /work/shared');
+    // A retried holder and one whose queue row named nothing are named as their work reads in the list.
+    assert.equal(workRowView(work('queued_behind_retry', 1)).secondary, 'behind “Add Ollama support”');
+    assert.equal(workRowView(work('queued_behind_derived_name', 1)).secondary, 'behind “Add Ollama support”');
+    // The message card's chip says the same line; its details give the id and the lane (no new control or style).
+    assert.deepEqual([cardWorkView(project)?.secondary, cardWorkView(project)?.note],
+        ['behind “Add Ollama support”', 'qh keeps its Project']);
+    assert.equal(cardWorkView(work('queued_behind_unlisted'))?.note, undefined, 'no holder, no details line');
+    // A holder the census does not list, an older payload, a non-queued work: no claim, no details line.
+    const unlisted = work('queued_behind_unlisted');
+    assert.deepEqual([workRowView(unlisted).secondary, behindWords(unlisted)], ['', '']);
+    assert.equal(behindWords({ ...project, activity: 'waiting' }), '');
+    assert.equal(behindWords(null), '');
+    assert.equal(reasonText({ code: 'queued', text: '' }), '');
+    const prior = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            'behind “{name}”': { text: 'за «{name}»' } } });
+        assert.equal(workRowView(project).secondary, 'за «Add Ollama support»', 'a translation keeps the name as written');
     } finally { applyPayload(prior); }
 });
 

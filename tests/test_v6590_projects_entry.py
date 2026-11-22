@@ -10,10 +10,11 @@ import unicodedata
 
 import pytest
 
+from tests._workspace_git import git_repository
+
 
 def _init_git_repo(path: pathlib.Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+    git_repository(path, unborn=True)
     (path / "README.md").write_text("x\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
     subprocess.run(
@@ -184,15 +185,15 @@ def _produce(kind: str, root: pathlib.Path, tmp: pathlib.Path, data: pathlib.Pat
     from ouroboros import subagent_worktrees as sw
 
     source = tmp / "source"
-    source.mkdir()
     if kind == "standalone":  # a skill payload snapshot: its own .git, no backreference naming its spelling
+        source.mkdir()
         (source / "SKILL.md").write_text("---\nname: spelling-probe\ndescription: Disposable fixture\n---\nNothing.\n",
                                          encoding="utf-8")
         return pathlib.Path(sw.provision_payload_snapshot(
             target_root=source, task_id="probe", snapshot_id="spelling", worktree_root=root, data_dir=data).path)
+    git_repository(source, unborn=True)
     (source / "src").mkdir()
     (source / "src" / "sample.txt").write_text("fixture\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q", "--template="], cwd=source, env=sw.isolated_git_env(), check=True)
     if kind == "linked":  # a task copy: a linked worktree
         return pathlib.Path(sw.provision_worktree(
             repo_dir=source, task_id="helper", worktree_root=root, data_dir=data, source_is_system_repo=False).path)
@@ -715,9 +716,8 @@ def test_promote_source_registers_derived_project_and_mirrors_conflict(tmp_path,
     data.mkdir()
     monkeypatch.setattr(config, "DATA_DIR", data)
     folder = tmp_path / "myrepo"
-    folder.mkdir()
+    git_repository(folder, unborn=True)
     (folder / "x.txt").write_text("x", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=str(folder), check=True)
     ctx = SimpleNamespace(repo_dir=str(tmp_path / "repo"))
 
     # An ordinary folder registers and admits without an implicit git init.
@@ -747,8 +747,7 @@ def test_promote_source_registers_derived_project_and_mirrors_conflict(tmp_path,
 
     # A DIFFERENT folder for the same project id: refused (registry must not lie).
     other = tmp_path / "other"
-    other.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=str(other), check=True)
+    git_repository(other, unborn=True)
     ws3, _, err3, _, _ = resolve_promote_source(ctx, str(other), "myrepo")
     assert ws3 == "" and "conflict" in err3
     assert get_reg_project(data, "myrepo")["working_dir"] == ws

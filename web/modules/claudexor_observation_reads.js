@@ -1,6 +1,6 @@
 // Independent account/quota observations beside the slower catalog read.
 // Dispatch order belongs to this client; provider observation dates remain unchanged.
-import { apiFetch } from './api_client.js';
+import { apiFetch, withinRequestLifetime } from './api_client.js';
 
 // `resources` is optional quota evidence with its own order (see merge).
 const facets = {
@@ -20,8 +20,10 @@ export function resourceCapabilitiesRead(payload) {
     return payload?.resource_capabilities_read ?? (payload?.resource_capabilities ? 'ok' : 'not_read');
 }
 
-export function createObservationReads({ fetchImpl = apiFetch, getSnapshot, commit, changed, quotaObserved = () => {} }) {
+export function createObservationReads({ fetchImpl = apiFetch, getSnapshot, commit, changed, quotaObserved = () => {},
+    lifetimeMs } = {}) {
     let sequence = 0, flight = null, follow = null, disposed = false;
+    let flightAbort = null;
     // Two clocks in dispatch order, never one for the other. A fence orders merges: an answer begun before it is
     // older than what this client holds (a row write, a Refresh's own reading). `observed` is the last read that
     // answered a facet; only it outranks a lost status request (store.facet), so a fence dates nothing.
@@ -172,17 +174,23 @@ export function createObservationReads({ fetchImpl = apiFetch, getSnapshot, comm
             return follow;
         }
         const stamp = ticket();
+        const abort = new AbortController();
+        flightAbort = abort;
         flight = (async () => {
             try {
-                const response = await fetchImpl('/api/claudexor/status?view=quota', { cache: 'no-store' });
-                const value = await response.json().catch(() => null);
+                const { response, value } = await withinRequestLifetime(async signal => {
+                    const response = await fetchImpl('/api/claudexor/status?view=quota', { cache: 'no-store', signal });
+                    return { response, value: await response.json().catch(() => null) };
+                }, { lifetimeMs, signal: abort.signal });
                 if (!response.ok || !passiveStatusValid(value)) throw new Error(value?.error || 'Account observations unavailable');
                 if (!disposed) commit(merge(value, stamp, { passive: true }));
             } catch (error) {
                 if (!disposed) commit(merge({ reads: { accounts: 'failed', quota: 'failed' },
-                    read_errors: { discovery: { code: String(error?.message || error) } } }, stamp, { passive: true }));
+                    read_errors: { discovery: { code: error?.name === 'StateReadEnded' && error.reason === 'expired'
+                        ? 'timed out' : String(error?.message || error) } } }, stamp, { passive: true }));
             } finally {
                 flight = null;
+                if (flightAbort === abort) flightAbort = null;
                 if (!disposed) changed();
             }
             return getSnapshot();
@@ -279,6 +287,6 @@ export function createObservationReads({ fetchImpl = apiFetch, getSnapshot, comm
             return fences.quota;
         },
         action: (harness, profile) => actions.get(keyFor(harness, profile)) || {},
-        dispose() { disposed = true; },
+        dispose() { disposed = true; if (flightAbort) flightAbort.abort(); flightAbort = null; },
     };
 }

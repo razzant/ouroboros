@@ -15,6 +15,7 @@ from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_status import effective_task_result
 from ouroboros.test_evidence import diagnostic_directory, write_record
 from tests._store_shared import result_signature, unreadable_result
+from tests._workspace_git import git_repository
 from tests.test_terminal_file_boundary import (  # noqa: F401 -- shared finite worker/reaper fixtures
     file_recovery,
     terminal_context,
@@ -125,8 +126,7 @@ def promoted(worker, file_recovery, tmp_path_factory, monkeypatch):  # noqa: F81
     ctx.enqueue_task = lambda task: pending.append(task) or task
     ctx.persist_queue_snapshot = lambda **_kw: True
     ctx.load_state = lambda: {"owner_chat_id": 1}
-    workspace = tmp_path_factory.mktemp("capture-workspace")
-    subprocess.run(["git", "init", str(workspace)], check=True, capture_output=True)
+    workspace = git_repository(tmp_path_factory.mktemp("capture-workspace") / "workspace", unborn=True)
     (workspace / "answer.txt").write_text("The completed workspace work.\n", encoding="utf-8")
     fork_attempts = []
 
@@ -423,8 +423,7 @@ def test_later_write_reenrolls_history_and_discloses_recovery_time_capture(tmp_p
     from ouroboros.utils import utc_now_iso
 
     root, workspace = tmp_path / "data", tmp_path / "workspace"
-    workspace.mkdir()
-    subprocess.run(["git", "init", str(workspace)], check=True, capture_output=True)
+    git_repository(workspace, unborn=True)
     (workspace / "answer.txt").write_text("The task's original work.\n", encoding="utf-8")
     original = write_task_result(root, "historical", "completed", result="Original answer, unchanged.",
         workspace_root=str(workspace), metadata={"workspace_preflight": {"git": {"head": "(unborn)"}}},

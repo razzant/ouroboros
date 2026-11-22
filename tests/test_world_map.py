@@ -8,6 +8,7 @@ import json
 import pathlib
 
 from ouroboros import world_profiler as wprof
+from tests._workspace_git import git_repository
 
 
 def _measured(stamp: str) -> str:
@@ -309,17 +310,12 @@ def test_the_measured_block_names_the_app_copy_and_the_body_it_runs(tmp_path, mo
     """The app is a replaceable host: a moved, translocated or newer app shows at the next start. The line names
     the body's version only: its commit rides the runtime section, and a commit must not rewrite this cached block."""
     import platform
-    import subprocess
     import sys
 
     for name, value in (("_tools_found", lambda: []), ("get_cpu_info", lambda: "c"), ("get_system_memory", lambda: "m")):
         monkeypatch.setattr(wprof, name, value)
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "repo")  # a checkout with one empty commit
     (repo / "VERSION").write_text("7.9.0\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"],
-                   cwd=repo, check=True)
     body, python = "body 7.9.0", platform.python_version()
 
     def host(block):

@@ -1,8 +1,8 @@
 """The design skills' browser-side files in real engines: the comparison page, measure.js, freeze.js.
 
 Each behaviour is checked in both directions where it can be: the page swaps variants in place and
-keeps the compared element still; measure.js reports each planted defect on `defects.html` and stays
-quiet on `clean.html`; a frozen page renders alone from an empty folder with nothing fetched, and keeps
+keeps the compared element still; measure.js reports each planted defect on `defects.html`, stays
+quiet on `clean.html` and judges both sides of a target's reach by its pointer on `touch.html`; a frozen page renders alone from an empty folder with nothing fetched, and keeps
 a var() shorthand CSSOM cannot serialize by copying its sheet's text, yet names it in `missing` whether
 copied or lost, since equal serialized rules do not prove that text still holds the live value.
 WebKit is the engine of the desktop app's window, Chromium the bundled one; a missing engine skips
@@ -276,6 +276,24 @@ def test_measure_reports_planted_defects_and_stays_quiet_on_the_clean_page(engin
         assert all(set(item) == {"kind", "message", "where", "value"} for item in found)
         assert reports["defects"]["facts"]["leftEdges"] and reports["defects"]["facts"]["counts"]
         assert reports["clean"]["findings"] == [], reports["clean"]["findings"]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_measure_judges_each_side_of_a_target_reach_by_its_pointer(engine):
+    script = MEASURE.read_text(encoding="utf-8")
+    with browser(engine) as instance:
+        page = open_page(instance, (FIXTURES / "touch.html").as_uri(), width=600, height=700)
+        page.screenshot()
+        small = {coarse: {item["where"] for item in page.evaluate(script, {"coarse": coarse, "limit": 20})["findings"]
+                          if item["kind"] == "target-small"} for coarse in (False, True)}
+        assert_nothing_fetched(page)
+    # A mouse: 24 px each way, so a wide control too short fails, and so does one a wrapper cuts to 22 px for good (a
+    # scroller showing part of a control does not shorten it, nor does a clipping shell around that scroller); a link
+    # in a sentence is exempt, one alone in a list not.
+    assert small[False] == {"button#short", "button#masked", "a#listed"}, small
+    # A finger: 44 px each way through the reach the recipe adds, unless a scrolling strip clips it; no link is exempt.
+    assert small[True] == {"button#bare", "button#short", "button#clipped", "button#clipped-2", "button#masked",
+                           "a#inline", "a#listed"}, small
 
 
 @pytest.mark.parametrize("engine", ENGINES)

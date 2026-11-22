@@ -31,6 +31,7 @@ from unittest.mock import ANY
 
 import pytest
 from tests._safety_fixtures import disable_safety, clear_safety_provider_env as _clear_safety_provider_env
+from tests._workspace_git import git_repository
 
 
 # ---------------------------------------------------------------------------
@@ -1707,11 +1708,7 @@ def test_shell_post_checks_run_when_handler_errors_after_execution(tmp_path, mon
     import ouroboros.safety as safety_mod
     from ouroboros.tools.registry import ToolRegistry
 
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True, identity=True)
     (repo / "README.md").write_text("ok\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)

@@ -263,6 +263,70 @@ def test_keep_on_a_work_whose_only_material_left_is_its_saved_states_is_saved(ro
     assert _prune(root)["held"] == {"owner_keep": len(copies)}
 
 
+@pytest.mark.parametrize("operation", ["unreadable", {"state": "accounted", "files": 1}])
+def test_a_malformed_release_record_still_saves_keep_and_the_next_pass_leaves_the_saved_states(root, operation):
+    """A protective action does not depend on the evidence it protects: whatever the release record holds, an explicit
+    Keep is saved and the next eligible pass leaves the saved states; a release on the same record raises."""
+    from ouroboros.owner_keep import set_owner_keep
+    from ouroboros.payload_release_state import KEY
+    from ouroboros.task_store import patch_document, read_document
+
+    handles = _task(root, "malformed")
+    copies = _copies(handles)
+    patch_document(root, "malformed", lambda row: {**row, KEY: {"operations": {"old-record": operation}}})
+    with pytest.raises(ValueError):
+        set_owner_keep(root, "malformed", keep=False, source={"basis": "test"})
+    answer = set_owner_keep(root, "malformed", keep=True, source={"basis": "test"})
+    assert answer["keep"] and answer["unknown"] == ["canonical_payloads"], answer
+    assert read_document(root, "malformed").get("owner_keep")
+    report = _prune(root)
+    assert report["held"] == {"owner_keep": len(copies)} and report["removed"] == 0, report
+    assert all(path.is_file() for path in copies)
+
+
+def test_a_first_saved_state_arriving_after_the_folder_walk_is_kept_by_its_folder(root, monkeypatch):
+    """The only material of a work is a saved state written after Keep's first folder walk: the canonical walk names
+    its folder, so Keep is saved (never already_retired) and the next pass leaves the file."""
+    from ouroboros import saved_state_retirement
+    from ouroboros.owner_keep import set_owner_keep
+    from ouroboros.task_store import read_document
+
+    handles = _task(root, "arrival")
+    write_task_result(root, "arrival", "completed", child_drive_root=str(root / "task_drives" / "arrival-settled"))
+    copy = _file(handles / "working" / "working_checkpoint-a1.json")
+    with monkeypatch.context() as patch:
+        patch.setattr(saved_state_retirement, "worked_copies_in", lambda _folder: [])  # the first walk saw nothing
+        answer = set_owner_keep(root, "arrival", keep=True, source={"basis": "test"})
+    assert answer["status"] != "already_retired" and f"saved_states:{copy.parent}" in answer["retained"], answer
+    assert str(copy) not in answer["retained"] and read_document(root, "arrival").get("owner_keep")
+    report = _prune(root)
+    assert report["held"] == {"owner_keep": 1} and copy.is_file(), report
+
+
+@pytest.mark.parametrize("walk", ["missed", "raised"])
+def test_keep_names_a_saved_state_by_what_it_is_even_when_the_folder_walk_misses_it(root, monkeypatch, walk):
+    """Keep's per-file listing leaves a saved state out by its folder and its writer's name, not by the earlier walk:
+    one that lands after that walk, or a walk that raises, still never appears per file. Sources beside it and an
+    ordinary stored file that merely shares a saved state's name are listed."""
+    from ouroboros import saved_state_retirement
+    from ouroboros.owner_keep import inventory
+
+    handles = _task(root, "late")
+    copies, sources = _copies(handles), _sources(handles)
+    namesake = _file(handles.parent / "exports" / "working" / "working_checkpoint-a1.json")
+    if walk == "missed":
+        monkeypatch.setattr(saved_state_retirement, "worked_copies_in", lambda _folder: [])
+    else:
+        def unreadable(_folder):
+            raise PermissionError("folder not searchable")
+
+        monkeypatch.setattr(saved_state_retirement, "worked_copies_in", unreadable)
+    places, unknown, _pins = inventory(root, "late", {})
+    assert not {str(path) for path in copies} & set(places), places
+    assert {str(path) for path in sources} | {str(namesake)} <= set(places), places
+    assert ("saved_states" in unknown) == (walk == "raised")
+
+
 def test_a_carrier_kept_in_the_shared_table_still_lends_its_source(root):
     from ouroboros.utils import atomic_write_json
 
@@ -638,11 +702,12 @@ def test_a_terminal_write_beside_an_unreadable_folder_lands_and_stays_owed(root)
 
 def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkeypatch):
     from ouroboros import owner_keep
+    from tests._owner_keep_answer import outside_store
 
     handles = _task(root, "raced")
     write_task_result(root, "raced", "completed", child_drive_root=str(root / "task_drives" / "raced-settled"))
     copies = _copies(handles)
-    _sources(handles)  # the folders stay with their sources after the pass
+    sources = _sources(handles)  # the folders stay with their sources after the pass
     real = owner_keep.inventory
 
     def pass_between_inventory_and_lock(*args, **kwargs):  # the pass holds the custody lock Keep then waits for
@@ -654,7 +719,12 @@ def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkey
     monkeypatch.setattr(owner_keep, "inventory", pass_between_inventory_and_lock)
     answer = owner_keep.set_owner_keep(root, "raced", keep=True, source={"basis": "test"})
     assert not any(path.exists() for path in copies)
-    assert answer["status"] == "already_retired" and not answer["retained"], answer
+    # #3981: Keep also names every file of the canonical store; the folders' sources stay there, so the answer is
+    # partly retired (the saved states gone, the sources kept), and no saved state is ever reported retained.
+    rest = outside_store(answer, root, "raced")
+    assert answer["status"] == "partly_retired" and not rest["retained"], answer
+    assert not {str(path) for path in copies} & set(answer["retained"]), answer
+    assert {str(path) for path in sources} <= set(answer["retained"]), answer  # other stored files are listed
     assert {place for place in answer["retired"] if place.startswith("saved_states:")} == {
         f"saved_states:{handles / 'context_checkpoints'}", f"saved_states:{handles / 'working'}"}
 

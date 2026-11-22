@@ -16,7 +16,8 @@ from ouroboros.tools.edit_ops import (
     _parse_patch,
     _syntax_check,
 )
-from tests._workspace_git import git_repository
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 
 SAMPLE = "\n".join([
@@ -392,18 +393,17 @@ def test_registry_registration():
 # write_file rails (git._repo_write): syntax guard + overwrite diff
 # ---------------------------------------------------------------------------
 
-def _ws_ctx(tmp_path):
-    import subprocess
+def _lay_ws(folder):
+    ws = git_repository(folder / "extws", unborn=True)
+    (ws / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    world_git(ws, "add", "-A")
+    world_git(ws, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "seed")
 
+
+def _ws_ctx(tmp_path):
     from ouroboros.tools.registry import ToolContext
 
-    ws = tmp_path / "extws"
-    ws.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
-    (ws / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
-    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-q", "-m", "seed"], cwd=ws, check=True)
+    ws = clone_repository(world("edit-ops-extws", _lay_ws) / "extws", tmp_path / "extws")
     drive = tmp_path / "drive"
     drive.mkdir()
     return ToolContext(repo_dir=tmp_path / "repo", drive_root=drive,

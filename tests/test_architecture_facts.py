@@ -32,6 +32,7 @@ from ouroboros.code_intelligence_architecture import (
     persistence_entities_written_by,
     protected_contracts_affected,
 )
+from tests._workspace_git import git_repository
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -354,14 +355,11 @@ def test_query_code_architecture_op_refuses_bad_facts_and_foreign_roots(tmp_path
 
 
 def test_query_code_owner_of_qualifies_partial_symbol_coverage(tmp_path, monkeypatch):
-    import subprocess
-
     from ouroboros import code_intelligence
     from ouroboros.tools.registry import ToolRegistry
 
-    repo = tmp_path / "repo"
-    (repo / "ouroboros").mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True)
+    (repo / "ouroboros").mkdir()
     (repo / "ouroboros" / "domains.toml").write_text(
         '[domains]\nD01 = "Synthetic"\n\n[modules]\n'
         '"ouroboros/a.py" = "D01"\n"ouroboros/z.py" = "D01"\n', encoding="utf-8")

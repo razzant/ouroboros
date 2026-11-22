@@ -273,18 +273,33 @@ def test_a_reached_global_limit_admits_a_wave_that_needs_no_paid_admission(gate,
     """A reached global limit refuses paid admission only: a wave of subscription seats fits, a wave
     with one priced seat is declined whole, and a root cap at zero still binds every seat."""
     subscription = "claudexor::codex=gpt-6-astra"
-    monkeypatch.setattr(ua, "_reservation_cost", lambda request: {subscription: None, "triad/a": 1.0}[request.model])
+    prices = {subscription: None, "triad/free": 0.0, "triad/a": 2.5e-7}
+    monkeypatch.setattr(ua, "_reservation_cost", lambda request: prices[request.model])
     with ua.usage_scope(ua.UsageScope(drive_root=gate, task_id="other-root", root_task_id="other-root")):
         other = ua.reserve_attempt(ua.AttemptRequest(model="triad/a", provider="test", source="main"))
         ua.mark_dispatched(other)
         ua.settle_attempt(other, {}, cost_usd=100.0, cost_final=True)
     wave = dict(root_task_id=ROOT, prompt_chars=10, task_id=ROOT)
-    free = ua.review_wave_admission(gate, models=[subscription], root_limit_usd=10.0, **wave)
-    assert (free["fits"], free["binding_axis"], free["remaining_usd"]) == (True, "global", 0.0)
+    for free_seats in ([subscription], [subscription, "triad/free"]):
+        free = ua.review_wave_admission(gate, models=free_seats, root_limit_usd=10.0, **wave)
+        assert (free["fits"], free["binding_axis"], free["remaining_usd"]) == (True, "global", 0.0)
     mixed = ua.review_wave_admission(gate, models=[subscription, "triad/a"], root_limit_usd=10.0, **wave)
     assert (mixed["fits"], mixed["binding_axis"]) == (False, "global")
+    assert mixed["slot_bounds"] == [None, 2.5e-7] and mixed["estimated_wave_usd"] == 2.5e-7
     capped = ua.review_wave_admission(gate, models=[subscription], root_limit_usd=0.0, **wave)
     assert (capped["fits"], capped["binding_axis"]) == (False, "root")
+
+
+def test_sub_microdollar_seat_and_wave_are_visible_in_the_refusal(gate, tmp_path, monkeypatch):
+    _seed_settled(gate, fence=4.0, cost=4.0)
+    monkeypatch.setattr(ua, "_reservation_cost", lambda request: 1e-7)
+    llm = LedgerLLM()
+    ctx, (err, _, _, _) = _run(gate, tmp_path, monkeypatch, llm, fence=4.0)
+    said = _returned(ctx, err)
+    assert llm.calls == []
+    assert "reservation upper bound would have been <$0.000001" in said
+    for model in (COUPLING_MODEL, *PACKET_MODELS):
+        assert f"{model} <$0.000001" in said
 
 
 def test_a_fence_reached_mid_wave_refuses_the_remaining_seats_with_custody(gate, tmp_path, monkeypatch):
@@ -630,7 +645,7 @@ def test_each_seat_is_priced_under_its_own_cache_split_not_the_callers(tmp_path,
 
     model = "anthropic/claude-fable-5"
     source = {"provider": "openrouter", "model": model, "endpoint_tag": "fixture", "service_tier": None, "processing": "standard"}
-    tariff = pricing_mod.PricingSchedule((10.0, 1.0, 12.5, 50.0), cache_write_1h=20.0, source=source)
+    tariff = pricing_mod.PricingSchedule((10.0, 1.0, 12.5, 50.0), cache_write_1h=23.0, source=source)
     monkeypatch.setattr(pricing_mod, "get_pricing", lambda **k: {"fixture" if k.get("model") else model: tariff})
     ua._reset_task_cache_splits()
     provider = infer_provider_from_model(model)

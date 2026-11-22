@@ -561,7 +561,7 @@ def test_finalize_schedule_emission_surfaces_coop_tree_path():
         "role": "scout", "depth": 1, "parent_task_id": "p1", "root_task_id": "p1",
         "emitted_modes": ["live"],
     })
-    assert "write root: none (read-only child)" in out2 and "coop" not in out2
+    assert "write root" not in out2 and "writable=none (read-only)" in out2 and "coop" not in out2
 
 
 def test_zero_run_complete_is_no_longer_writable(tmp_path):

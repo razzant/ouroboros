@@ -726,7 +726,8 @@ def test_github_read_is_registered_read_only_with_one_required_method(gh):
     assert entry.schema["parameters"]["required"] == ["method"] and entry.schema["parameters"]["properties"]["method"]["enum"] == list(github_read.METHODS)
     assert "repo" in entry.schema["parameters"]["properties"]
     assert github_checks._CHECKS_WAIT_CAP_SEC + github_checks._CHECKS_READ_BUDGET_SEC < entry.timeout_sec
-    for listing in (OBSERVE_DISABLED, tool_capabilities.OBSERVE_WORLD_MUTATION_TOOLS, tool_capabilities.READ_ONLY_PARALLEL_TOOLS):
+    for listing in (OBSERVE_DISABLED, tool_capabilities.OBSERVE_WORLD_MUTATION_TOOLS, tool_capabilities.READ_ONLY_PARALLEL_TOOLS,
+                    tool_capabilities.INERT_READ_TOOLS):  # a file it publishes is visible to the next call of the response
         assert "github_read" not in listing
     assert "github_read" in ToolRegistry._FROZEN_TOOL_MODULES or "github" in ToolRegistry._FROZEN_TOOL_MODULES
     gh.answer = lambda p, argv, kw: json.dumps(_issue(7))

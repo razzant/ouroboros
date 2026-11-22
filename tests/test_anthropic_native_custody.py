@@ -485,6 +485,46 @@ class _NativeBody:
         return copy.deepcopy(self.body)
 
 
+@pytest.mark.parametrize("field,accepted_ttl", [("cache_control.ttl", "default"), ("cache_control", None)])
+def test_accepted_anthropic_retry_reports_its_own_cache_marker(tmp_path, monkeypatch, field, accepted_ttl):
+    import requests
+    from ouroboros import pricing
+    from ouroboros.usage_accounting import read_usage_records
+
+    monkeypatch.setattr(wire, "canonical_wire_evidence_root", lambda: tmp_path / "wire")
+    monkeypatch.setattr(config, "resolve_prompt_cache_ttl", lambda: "1h")
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {})
+    sent_markers = []
+
+    def post(_url, **kwargs):
+        block = kwargs["json"]["messages"][0]["content"]
+        marker = block[0].get("cache_control") if isinstance(block, list) else None
+        sent_markers.append(copy.deepcopy(marker))
+        if len(sent_markers) == 1:
+            reason = f"messages.0.content.0.{field}: Extra inputs are not permitted"
+            refused = _NativeBody({"error": {"type": "invalid_request_error", "message": reason}})
+            refused.status_code, refused.reason, refused.text = 400, "Bad Request", reason
+            return refused
+        return _NativeBody({
+            "type": "message", "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 2, "output_tokens": 1, "cache_creation_input_tokens": 3, "cost": 0.125},
+        })
+
+    monkeypatch.setattr(requests, "post", post)
+    root = tmp_path / "usage"
+    with usage_scope(UsageScope(drive_root=root, task_id="retry")):
+        message, usage = LLMClient(api_key="unused")._chat_anthropic(
+            _target(), [{"role": "user", "content": "prefix", "cache_control": {"type": "ephemeral"}}],
+            None, "none", 64, "auto",
+        )
+        accepted_attempt = last_physical_attempt_capture().attempt_id
+    assert sent_markers == [{"type": "ephemeral", "ttl": "1h"}, {"type": "ephemeral"} if accepted_ttl else None]
+    assert message["content"] == "ok" and usage.get("prompt_cache_ttl") == accepted_ttl
+    settled, = [row for row in read_usage_records(root) if row["attempt_id"] == accepted_attempt]
+    assert (settled.get("prompt_cache_ttl") or None) == accepted_ttl
+    assert settled["cost_final"] and settled["cost_usd"] == usage["cost"] == 0.125
+
+
 def test_sonnet_5_5_none_sends_its_off_state_once_and_replays_the_signed_note(tmp_path, monkeypatch):
     """Sonnet 5.5 refuses "disabled": requested none is its own between_tools, sent once and
     disclosed none/none; the signed note it writes beside a tool call replays unchanged."""

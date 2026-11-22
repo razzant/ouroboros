@@ -11,10 +11,12 @@ from typing import Any, Mapping
 
 from ouroboros import chat_chain, dialogue_store
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
-from ouroboros.consciousness_authority import FOCUS_ROUTE_FIELDS, FOCUS_TRANSPORT_KEY
+from ouroboros.consciousness_authority import FOCUS_ROUTE_FIELDS, FOCUS_TRANSPORT_KEY, is_own_clock_wake
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import RoomLabelResolver, _derives, recorded_person, recorded_speaker
 from ouroboros.store import StoreError
+
+WAKE = "wake"  # the name every wake my own clock starts has, beside Main's room; it stays with the wake, never a helper
 
 
 def starts_conversation(author):
@@ -206,27 +208,35 @@ def carried_room(task: Mapping[str, Any]) -> str | None:
 
 def helper_names(ctx: Any, root: Path) -> tuple[str, ...]:
     """The names a helper this work starts carries: the ones this work holds heads by (its room as the memory view
-    resolves it for its role); a helper passes on its carried names unchanged, and one that carries none passes none."""
+    resolves it for its role) but ``WAKE``, which stays with the wake; a helper passes on its carried names, ``WAKE``
+    never among them, and one that carries none passes none."""
     from ouroboros.memory_inventory import membership_facts
     from ouroboros.memory_view import view_role, view_room_id
 
     task = {"metadata": _mapping(getattr(ctx, "task_metadata", None)), "task_contract": getattr(ctx, "task_contract", None)}
     role = view_role(task)
     if role in DELEGATED_FOCUS_ROLES or carried_names(task) is not None:
-        return carried_names(task) or ()
-    room = view_room_id(task, ctx, root, project_chat_ids=membership_facts(root).project_chat_ids, presence=role == "presence")
-    return situation_names(task, room)
+        names = carried_names(task) or ()
+    else:
+        room = view_room_id(task, ctx, root, project_chat_ids=membership_facts(root).project_chat_ids,
+                            presence=role == "presence")
+        names = situation_names(task, room)
+    return tuple(name for name in names if name != WAKE)
 
 
 def situation_names(task: Mapping[str, Any], room_id: str) -> tuple[str, ...]:
-    """The names from host facts, given the room already resolved by the memory view; a helper's are those it carries."""
+    """The names from host facts, given the room already resolved by the memory view; a helper's are those it carries.
+    An own-clock wake (``is_own_clock_wake``, read at the top level or under ``metadata`` as the view role is) also
+    has ``WAKE``; a focus wake, a Main turn and the work a wake starts have their own names only. Carried names keep
+    ``WAKE`` only for an own-clock wake (ordinary admission keeps what a task carries; ``helper_names``' rule)."""
+    own_clock = is_own_clock_wake({**task, **_mapping(task.get("metadata"))})
     if (carried := carried_names(task)) is not None:
-        return carried
+        return tuple(name for name in carried if own_clock or name != WAKE)
     place_id, route = _place_facts(task)
     names = (f"room:{room_id}",)
     if place_id:
         names += (_place_name(place_id),)
-    return names + _route_names(route)
+    return names + _route_names(route) + ((WAKE,) if own_clock else ())
 
 
 @dataclass(frozen=True)
@@ -240,7 +250,7 @@ class SituationReceipt:
     def matching(self, names: list[str]) -> tuple[set[str], set[str]]:
         """The proved matches and the names whose evidence could not be read."""
         wanted, unverified = set(names), set()
-        known = {f"room:{WEB_UI_CHAT_ID}", *(f"room:{chat}" for chat in self.room_labels.project_chat_ids)}
+        known = {WAKE, f"room:{WEB_UI_CHAT_ID}", *(f"room:{chat}" for chat in self.room_labels.project_chat_ids)}
         known.update(self.witnessed)
         if self.places is None:
             unverified.update(name for name in wanted if name.startswith("place:"))
@@ -293,7 +303,7 @@ def receipt_situation(ctx: Any, root: Path, *, claims_written: bool = False) -> 
 
     names = situation_names(task, room)
     room_label = labels.label({"chat_id": room, "transport": route}).removesuffix(f" [chat_id={room}]")
-    descriptions = {names[0]: room_label}
+    descriptions = {names[0]: room_label, WAKE: "a wake my own clock started"}
     place = (places or {}).get(place_id)
     carried_place = _mapping(_mapping(metadata.get("presence")).get("place"))
     if place_id:

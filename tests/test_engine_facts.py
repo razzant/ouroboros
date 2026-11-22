@@ -151,13 +151,13 @@ def test_schedule_result_carries_the_row_and_still_queues(tmp_path, monkeypatch)
     assert answer.startswith("Subagent request queued")
     assert "primary" in answer and "engine:" in answer and "pool:" in answer
     assert "tree slots" not in answer
-    assert "\nwrite root: none (read-only child)" in answer
+    assert "write root" not in answer and "writable=none (read-only)" in answer  # a read-only child's profile says it
     # An acting child's result names its resolved write root and who chose it.
     project = tmp_path / "project"
     project.mkdir()
-    assert f"\nwrite root: {project} (caller)" in schedule(ctx, write_surface="external_workspace", write_root=str(project))
+    assert f"requested: write root: {project} (caller)" in schedule(ctx, write_surface="external_workspace", write_root=str(project))
     ctx.workspace_root = str(project)
-    assert f"\nwrite root: {project} (parent workspace)" in schedule(ctx, write_surface="external_workspace")
+    assert f"requested: write root: {project} (parent workspace)" in schedule(ctx, write_surface="external_workspace")
     ctx.workspace_root = ""
     minted = schedule(ctx, write_surface="external_workspace")
     assert "(host-minted coop tree) — children write there" in minted and "pool:" in minted
