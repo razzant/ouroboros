@@ -332,7 +332,8 @@ def test_three_causes_name_what_took_the_whole_books(monkeypatch):
 def test_a_start_without_a_known_window_asks_once_more_and_is_never_a_held_max(monkeypatch):
     """F1 #10: a start whose route named no window was recorded as a held Max. Before its first send it asks the
     route's window evidence once more; a window then known is walked like any answer, and one still unknown is a Max
-    not measured, never held. No bound is guessed and the Low episode is left alone (no Max room)."""
+    not measured, never held. No bound is guessed and the Low episode is left alone (no Max room). Review round 2
+    (Astra 2): that second answer is used unless it failed, one that read the route without a window too."""
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     unknown = SimpleNamespace(route_fp="r", status="failed", stale=True, window_tokens=0)
     known = ce.CapabilityEvidence(2_000_000, "confirmed", "metadata", "room-route")
@@ -358,9 +359,17 @@ def test_a_start_without_a_known_window_asks_once_more_and_is_never_a_held_max(m
     learned, asked = build(unknown, known)
     assert asked == 2 and learned.start == ("max", "") and _fact(learned)["cause"] == "held"
     assert mode_words(learned, "max") == "max"
-    # A second ask that fails keeps the first answer: its route and evidence, never the failed read's.
-    kept, asked = build(unknown, RuntimeError("route read failed"))
-    assert asked == 2 and kept.start == ("max", "unmeasured") and kept.route_fp == "r" and kept.model == "test"
+    # A second answer that read the route without a window (an account, a reply limit) is used, still unmeasured ...
+    read = ce.CapabilityEvidence(0, "unprobeable", "none", "r2", account_fingerprint="acct",
+                                 response_limit={"max_output_tokens": 4_096})
+    adopted, asked = build(unknown, read)
+    assert asked == 2 and adopted.start == ("max", "unmeasured") and (adopted.route_fp, adopted.status) == ("r2", "unprobeable")
+    assert adopted.output_reserve_tokens == 4_096 < plan.output_reserve_tokens
+    # ... and a second ask that failed, answered or raised, keeps the first: its route and evidence, never the failed read's.
+    for failed in (SimpleNamespace(route_fp="r3", status="failed", stale=True, window_tokens=0), RuntimeError("read failed")):
+        kept, asked = build(unknown, failed)
+        assert asked == 2 and kept.start == ("max", "unmeasured") and kept.route_fp == "r" and kept.model == "test"
+        assert kept.output_reserve_tokens == plan.output_reserve_tokens
     held, asked = build(known)
     assert asked == 1 and held.start == ("max", "")  # a known window is asked once
 

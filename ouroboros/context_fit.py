@@ -1335,8 +1335,9 @@ def build_context_fit_plan(
         # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view, or none,
         # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
         # the same frame is not repeated unless it was refused. A start whose route named no window asks it once more
-        # before its first send (F1 #10): a window then known is walked like any answer, an answer that still names none
-        # (or failed) keeps the first; no bound is guessed. A first answer whose read failed, live or as the probe's
+        # before its first send (F1 #10): that answer is used, a window then known walked like any answer, one that read
+        # the route without a window (an account, a reply limit) too; only a failed one (``status`` failed, as a raised
+        # ask is) keeps the first; no bound is guessed. A first answer whose read failed, live or as the probe's
         # ten-minute record of that failure (``status`` failed), is read anew, never answered from that record; a route
         # with no metadata source (``unprobeable``, no failed read) is not read again.
         failed = not state.known_window and "failed" in (getattr(state.evidence, "status", ""),
@@ -1344,7 +1345,7 @@ def build_context_fit_plan(
         with another_pass():  # a repeat by design, not work done again (``context_health`` names only the latter)
             late = frame(*answer(lambda: route_resolver.again(task, failed=failed) if early else timed(
                 "fit.route", route_resolver, {**task, "route_read_again": True} if failed else task, allow_fetch=True)))
-            if guard or late.known_window:
+            if guard or late.known_window or getattr(late.evidence, "status", "") != "failed":
                 if refused is not None or late.walked != state.walked:
                     contents, initial_mode, delivered = walk(late)
                 state = late
