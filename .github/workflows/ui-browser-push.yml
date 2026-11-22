@@ -1,147 +1,76 @@
-# Manual browser proof; retain the filename for existing dispatch clients.
-# The default `full` calls the same complete lane as ci.yml's manual/tag runs.
-# Only this entry offers a PARTIAL DIAGNOSTIC, in a separate job: it cannot
-# substitute for the complete lane required by a release. No push/PR/schedule.
-name: UI browser (manual)
-run-name: ${{ inputs.diagnostic && inputs.diagnostic != 'full' && format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic) || 'UI browser full lane' }}
-
-on:
-  workflow_dispatch:
-    inputs:
-      diagnostic:
-        description: Full lane or a partial UI-only diagnostic (never full-suite proof)
-        type: choice
-        default: full
-        options:
-          - full
-          - viewport
-          - inflight
-
+# Branch-only qualification of the work portal's synthetic Continue records.
+name: Work portal observed-time fixtures
+on: workflow_dispatch
 permissions:
   contents: read
-
-# No concurrency group: one requested qualification must not cancel or replace
-# another. Full manual runs exercise the complete lane regardless of path changes.
-
 jobs:
-  # The complete lane's one weight table, frozen once before its first leg, as ci.yml's `shard-plan` does.
-  shard-plan:
-    name: shard-plan
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
+  portal:
+    if: github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/portal-observed-time-52eb'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: ./.github/actions/shard-plan
-
-  # Exactly one of the next two jobs runs: the complete lane for `full`, otherwise one scenario.
-  ui-smoke:
-    name: ui-smoke
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
-    needs: shard-plan
-    uses: ./.github/workflows/ui-browser.yml
-    # A called workflow cannot raise its caller's token: the lane reads this run's
-    # shard plan (actions) and the accepted-failure issues (issues), as from ci.yml.
-    permissions:
-      contents: read
-      actions: read
-      issues: read
-
-  # Never full-lane proof: one scenario, with no lane guard, no shard, no manifest,
-  # no reconciliation and no browser-tools smoke. Its name says so wherever it shows.
-  ui-diagnostic:
-    name: ${{ inputs.diagnostic && inputs.diagnostic != 'full' && format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic) || 'ui-diagnostic' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic != 'full' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 115
+    timeout-minutes: 55
+    env:
+      PRODUCT: d68b232c60e1895b6b5aa7c18eb1e99d55f79325
+      BASE: 18af9c0f67059645c901b4f90a62759f15a729b7
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/browsers
+      PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+      OUROBOROS_RUN_UI_SMOKE: '1'
+      OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Check the three input trees
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$PRODUCT"
+          test "$(git rev-parse HEAD^^)" = "$BASE"
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/ui-browser-push.yml
+          test "$(git diff --name-only "$BASE" "$PRODUCT")" = tests/test_project_work_card_browser.py
+          git checkout --detach "$BASE"
+          mkdir -p "$RUNNER_TEMP/proof"
       - uses: ./.github/actions/setup-python-env
         with:
-          interpreter: shipped  # the SQLite and journal mode fresh installs run, as the full lane
+          interpreter: shipped
           install-project: 'false'
-        id: setup_python
-      # Bounded downloads with one retry, the reviewed Node first, as the full lane installs them (#2895).
-      - name: Install UI smoke Chromium and WebKit
-        id: install_browsers
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
-        timeout-minutes: 70
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+      - name: Prepare pinned Node and both browsers
         run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
-      - name: Run PARTIAL DIAGNOSTIC host UI scenario
-        id: ui_diagnostic
-        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
-        env:
-          DIAGNOSTIC: ${{ inputs.diagnostic }}
-          OUROBOROS_RUN_UI_SMOKE: "1"
-          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
-        shell: bash
+      - name: Observe the old fixture on one real portal
+        id: baseline
         run: |
-          case "$DIAGNOSTIC" in
-            viewport) target=tests/test_ui_smoke_playwright.py::test_ui_smoke_live_card_mutations_preserve_viewport ;;
-            inflight) target=tests/test_ui_smoke_inflight_indicator.py::test_ui_smoke_chat_inflight_indicator_lifecycle ;;
-            *) echo "Unknown UI diagnostic selection" >&2; exit 2 ;;
-          esac
-          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/host" \
-            -- python -m pytest "$target" -m ui_browser -q --tb=short \
-            --junitxml="${{ runner.temp }}/ci-private/ui/host.xml" \
-            --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
-      - name: Upload UI test evidence
-        id: ui_evidence
+          set -euo pipefail
+          py=$(python -c 'import sys; print(sys.executable)')
+          rc=0
+          "$py" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/base-raw" -- "$py" -m pytest -o addopts='' -n0 -m ui_browser -q --tb=short tests/test_project_work_card_browser.py -k 'test_main_portal_follows_a_continue_made_in_the_project_room and same-snapshot and chromium-light-desktop' --ci-evidence-dir="$RUNNER_TEMP/proof/base" >"$RUNNER_TEMP/base.log" 2>&1 || rc=$?
+          grep -F 'End time not recorded' "$RUNNER_TEMP/base.log" | head -c 3500 || true
+          test "$rc" = 1
+          grep -Fq 'End time not recorded' "$RUNNER_TEMP/base.log"
+          grep -Fq '13:57–14:09' "$RUNNER_TEMP/base.log"
+      - name: Check the same episode assertions on all four browser configurations
+        if: ${{ !cancelled() && steps.baseline.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "$PRODUCT"
+          py=$(python -c 'import sys; print(sys.executable)')
+          "$py" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/fixture-raw" -- "$py" -m pytest -o addopts='' -n0 -m ui_browser -q --tb=short tests/test_project_work_card_browser.py -k 'continue_made_in_the_project_room or room_card_follows_a_continue or successor_that_already_finished or later_fast_continue or empty_output_recovery' --ci-evidence-dir="$RUNNER_TEMP/proof/fixed"
+          "$GITHUB_WORKSPACE/node-standalone/bin/node" --test web/tests/task_episodes.test.js
+          "$py" -m ruff check --select F tests/test_project_work_card_browser.py
+          "$py" - <<'PY'
+          import json,os,pathlib
+          proof=pathlib.Path(os.environ['RUNNER_TEMP'])/'proof'
+          base=json.loads((proof/'base/results.json').read_text()); fixed=json.loads((proof/'fixed/results.json').read_text())
+          assert base['tests_collected']==1 and any(x['phase']=='call' and x['outcome']=='failed' for x in base['reports'])
+          groups={}
+          for x in fixed['reports']:
+              if not x.get('is_subtest'): groups.setdefault(x['nodeid'],{})[x['phase']]=x['outcome']
+          assert len(groups)==fixed['tests_collected']==36 and all(x=={'setup':'passed','call':'passed','teardown':'passed'} for x in groups.values())
+          print('PORTAL_TIME_36_BROWSER_CASES_PASSED')
+          PY
+      - name: Save the synthetic test reports
         if: ${{ !cancelled() }}
-        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ui-ci-${{ inputs.diagnostic }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ci-evidence/ui/
-          retention-days: 30
-          if-no-files-found: warn
-      # The run's declared diagnostics, apart from its projection, as the full lane publishes them.
-      - name: Select UI diagnostics for publication
-        id: ui_diagnostics_export
-        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
-        continue-on-error: true
-        run: python -m ouroboros.test_evidence export-diagnostics "${{ runner.temp }}/ci-raw/ui" "${{ runner.temp }}/ci-diagnostics/ui"
-      - name: Upload UI diagnostics
-        id: ui_diagnostics
-        if: ${{ !cancelled() && steps.ui_diagnostics_export.outcome != 'skipped' }}
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ui-diagnostics-${{ inputs.diagnostic }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ci-diagnostics/ui/
-          retention-days: 30
-          if-no-files-found: ignore
-      - name: Summarize host UI test results
-        id: ui_summary
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        env:
-          PRODUCER_OUTCOME: ${{ steps.ui_diagnostic.outcome }}
-          ARTIFACT_OUTCOME: ${{ steps.ui_evidence.outcome }}
-          ARTIFACT_URL: ${{ steps.ui_evidence.outputs.artifact-url }}
-          DIAGNOSTIC: ${{ inputs.diagnostic }}
-        run: >-
-          python -m tests.ci_evidence summarize
-          --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host"
-          --producer-outcome "$PRODUCER_OUTCOME" --scope "$DIAGNOSTIC"
-          --artifact-outcome "$ARTIFACT_OUTCOME" --artifact-url "$ARTIFACT_URL"
-          --summary "$GITHUB_STEP_SUMMARY"
-      - name: Disclose incomplete UI diagnostics
-        continue-on-error: true
-        if: >-
-          ${{ !cancelled() &&
-          (steps.ui_summary.outcome != 'success' ||
-           steps.ui_evidence.outcome != 'success' || steps.ui_evidence.outputs.artifact-url == '' ||
-           steps.ui_diagnostics_export.outcome == 'failure' || steps.ui_diagnostics.outcome == 'failure') }}
-        run: |
-          echo "::warning::UI diagnostics are incomplete; see the original test and reporting steps."
-          echo "UI diagnostics_incomplete. The original test outcomes are unchanged." >> "$GITHUB_STEP_SUMMARY"
+          name: portal-observed-time-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof/
+          if-no-files-found: error
+          retention-days: 14
