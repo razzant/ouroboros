@@ -1,7 +1,9 @@
 """Web search accounts each physical provider attempt. Failed Responses, OpenRouter and Anthropic attempts retry or
 cascade only after a proven no-send or a typed no-start refusal without contrary evidence. A router's status and words
 (OpenRouter's free 404 "No endpoints found") make another source possible, not supported. A confirmed empty Responses
-completion may advance Auto as a separate leg. DeepSeek follows its Search API contract. DDGS is an unofficial scraper."""
+completion may advance Auto as a separate leg. DeepSeek follows its Search API contract. DDGS is an unofficial scraper.
+A leg's ``llm_usage`` event states the amount its attempt row settled, final or
+the ledger's own estimate, that row's ``cost_invalid`` and its token counts; the tool prices and counts nothing itself."""
 
 from __future__ import annotations
 
@@ -15,7 +17,6 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros._usage_response import refusal_conflicts, refusal_failure_payload, typed_search_refusal
 from ouroboros.gateways import search_api
-from ouroboros.pricing import estimate_cost_optional
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.transport_custody import _capture_on_chain, is_processing_refusal, release_pre_dispatch_attempt, stream_incomplete_on_chain
 from ouroboros.usage_accounting import (
@@ -250,40 +251,39 @@ def _web_search_outer_timeout_sec() -> int:
     )
 
 
-def _emit_simple_usage(
-    ctx: ToolContext,
-    *,
-    provider: str,
-    model: str,
-    api_key_type: str = "",
-    prompt_tokens: int | None = None,
-    completion_tokens: int | None = None,
-    usage: Dict[str, Any] | None = None,
-    reported: tuple[Optional[float], bool] | None = None,
-) -> None:
-    """One ``llm_usage`` display event. ``reported`` is the reply's own normalized ``(cost, final)``
-    (``_usage_response.usage_from_response``), carried as is: an unknown amount stays unknown and non-final, never
-    re-estimated (the attempt ledger owns any estimate). Without it a missing amount is estimated, as before."""
+def _settled_fact(attempt_ids: List[str], drive_root: Any = None) -> Dict[str, Any]:
+    """The ledger's money and counts of the attempt that carried a leg's reply (its last id). ``drive_root`` is
+    that reservation's own; a leg sent through the shared driver reads it from this context's last capture, which
+    must be that very attempt's. Empty when either is missing."""
+    from ouroboros._usage_settlement import attempt_money_fact
+    from ouroboros.usage_accounting import current_physical_attempt_drive_root, last_physical_attempt_capture
+
+    if not attempt_ids:
+        return {}
+    if drive_root is None and getattr(last_physical_attempt_capture(), "attempt_id", None) == attempt_ids[-1]:
+        drive_root = current_physical_attempt_drive_root()
+    return attempt_money_fact(drive_root, attempt_ids[-1]) if drive_root is not None else {}
+
+
+def _emit_simple_usage(ctx: ToolContext, *, provider: str, model: str, api_key_type: str = "",
+                       usage: Dict[str, Any] | None = None, settled: Dict[str, Any] | None = None) -> None:
+    """One ``llm_usage`` display event of a paid leg. Its money and its four token counts are ``settled``, what the
+    attempt ledger holds for the reply's own attempt (``_usage_settlement.attempt_money_fact``): the amount, final
+    or the ledger's own estimate, whether the row found the bill unreadable, and the counts as that row normalized
+    them. Nothing is priced, judged or counted again here, and the reply's own ``cost_invalid`` label is not the
+    row's; without that fact the event states no amount, no validity and no count."""
     if not hasattr(ctx, "pending_events"):
         return
     metadata = getattr(ctx, "task_metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
     try:
-        from ouroboros._usage_response import observed_processing_mode, provider_cost_value
-        from ouroboros.event_usage import event_token_counts
+        from ouroboros.event_usage import REPORTED_TOKENS_KEY, TOKEN_COUNTER_ALIASES
 
-        mode = observed_processing_mode(provider, usage or {})
-        cost = provider_cost_value(reported[0] if reported is not None else (usage or {}).get("cost"))
-        final = None if reported is None else bool(reported[1]) and cost is not None
-        if cost is None and reported is None and not (usage or {}).get("provider_reported_cost_only"):
-            cost = estimate_cost_optional(
-                model if "/" in model or "::" in model else f"{provider}/{model}",
-                int(prompt_tokens or 0),
-                int(completion_tokens or 0),
-                provider=provider,
-                **({"processing_mode": mode} if mode else {}),
-            )
+        settled = settled or {}
+        money = {"cost": settled.get("cost"),
+                 **{key: bool(settled.get(key)) for key in ("cost_final", "cost_estimated", "cost_invalid")}}
+        counts = {name: settled.get(name) for name in TOKEN_COUNTER_ALIASES}  # None: the row does not know it
         ctx.pending_events.append({
             "type": "llm_usage",
             "task_id": str(getattr(ctx, "task_id", "") or ""),
@@ -294,12 +294,10 @@ def _emit_simple_usage(
             "model": model,
             "api_key_type": api_key_type or provider,
             "model_category": "websearch",
-            # #1578: an unreported counter stays null, never a measured zero.
-            **event_token_counts(usage, {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}),
-            "usage": ({**(usage or {}), "cost": cost, "cost_final": final, "cost_estimated": False}
-                      if reported is not None else usage or {}),
-            "cost": cost,
-            **({"cost_final": final} if final is not None else {}),
+            **counts,
+            # The supervisor reads this copy first: the row's amount and counts in both places.
+            "usage": {**(usage or {}), **money, REPORTED_TOKENS_KEY: counts},
+            **money,
             "source": "web_search",
             "ts": utc_now_iso(),
             "category": "task",
@@ -307,7 +305,7 @@ def _emit_simple_usage(
             "ledger_attempt_ids": list((usage or {}).get("ledger_attempt_ids") or []),
         })
     except Exception:
-        log.debug("Failed to emit web_search fallback cost event", exc_info=True)
+        log.debug("Failed to emit web_search usage event", exc_info=True)
 
 
 def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search_context_size: str = "",
@@ -349,8 +347,7 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
         attach_processing_receipt(target, usage, attempt_ids=attempt_ids)
         usage["ledger_attempt_ids"] = list(attempt_ids)
         _emit_simple_usage(ctx, provider="openrouter", model=str(target.get("usage_model") or active_model),
-                           prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
-                           usage=usage, reported=(cost, final))
+                           usage=usage, settled=_settled_fact(attempt_ids))
         error = LLMClient._provider_body_error(body)
         if error is not None:
             if (typed_search_refusal(error.get("status_code", error.get("code")), error.get("code"), error.get("type"))
@@ -422,8 +419,8 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
         from ouroboros.event_usage import REPORTED_TOKENS_KEY, anthropic_token_counts
 
         usage[REPORTED_TOKENS_KEY] = anthropic_token_counts(usage)  # native input_tokens is not the total (#1578)
-        _emit_simple_usage(ctx, provider="anthropic", model=target["usage_model"], prompt_tokens=usage.get("input_tokens"),
-                           completion_tokens=usage.get("output_tokens"), usage=usage)
+        _emit_simple_usage(ctx, provider="anthropic", model=target["usage_model"], usage=usage,
+                           settled=_settled_fact(attempt_ids))
         return json.dumps({
             "answer": "".join(text_parts).strip() or "(no answer)",
             "answer_type": "summary",
@@ -639,9 +636,10 @@ def _web_search_openai(
     def failed(message, **facts):
         return json.dumps({"error": message, "backend": "openai_responses", "ledger_attempt_ids": attempt_ids, **facts})
     attempt_ids = []
-    active_model = model or runtime_setting("OUROBOROS_WEBSEARCH_MODEL") or DEFAULT_SEARCH_MODEL
+    active_model = model or runtime_setting("OUROBOROS_WEBSEARCH_MODEL", DEFAULT_SEARCH_MODEL)
     resolved = _resolved_target or _search_target("openai", connection, active_model)
-    if not resolved:
+    provider = str(resolved.get("provider") or "openai") if resolved else "openai"
+    if not resolved or not str(resolved.get("api_key") or "").strip():
         return failed("Official OpenAI search is unavailable")
     active_context = search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE
     active_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
@@ -798,10 +796,8 @@ def _web_search_openai(
         if not terminal:
             return _unknown_provider_outcome("openai_responses", attempt_ids)
 
-        _emit_simple_usage(ctx, provider="openai", model=resolved["usage_model"],
-                           prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
-                           usage=usage, reported=(reported_cost, reported_cost_final)
-                           if reported_cost is not None or usage.get("cost_invalid") else None)
+        _emit_simple_usage(ctx, provider=provider, model=reservation.model, usage=usage,
+                           settled=_settled_fact([reservation.attempt_id], reservation.drive_root))
 
         if text.strip() or sources:
             return json.dumps({"answer": text or "(no answer)", "answer_type": "summary", "sources": sources, "backend": "openai_responses", "model": active_model, "reported_model": getattr(resp_obj, "model", None), "ledger_attempt_ids": attempt_ids}, ensure_ascii=False, indent=2)

@@ -26,6 +26,10 @@ import json
 import re
 from typing import Any, Callable
 
+from ouroboros._usage_response import (
+    merge_usage_reports, provider_cost_value, reported_price, update_snapshot as _snapshot,
+)
+
 
 class IncompleteProviderStream(RuntimeError):
     """The wire ended before its terminal framing: the provider outcome is unknown."""
@@ -147,15 +151,6 @@ def _closed_by_signature(last: dict, item: dict) -> bool:
     """
     return (isinstance(last.get("signature"), str) and bool(last["signature"])
             and any(item.get(field) for field in ("text", "summary", "data", "signature")))
-
-
-def _snapshot(target: dict, update: dict) -> None:
-    """Usage counters and metadata are cumulative snapshots, never token deltas."""
-    for key, value in update.items():
-        if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _snapshot(target[key], value)
-        elif value is not None:
-            target[key] = copy.deepcopy(value)
 
 
 def _delta(target: dict, update: dict, note: Callable[[str], None], *,
@@ -318,9 +313,10 @@ class ChatAccumulator(_Accumulator):
         if self.on_generation_id is not None:
             self.on_generation_id(chunk.get("id"))
         if isinstance(chunk.get("error"), dict):
+            # The exception carries this frame's total verbatim. Keep the preceding envelope as a fallback.
             _snapshot(self.body, {key: value for key, value in chunk.items()
-                                  if key not in {"choices", "usage", "object"}})
-            raise ProviderStreamError(chunk, usage=chunk.get("usage") or self.body.get("usage"),
+                                  if key not in {"choices", "usage", "object", "total_cost_usd"}})
+            raise ProviderStreamError(chunk, usage=merge_usage_reports(self.body.get("usage"), chunk.get("usage")),
                                       prior_usage=self.usage_reports)
         report = {key: chunk[key] for key in ("usage", "total_cost_usd", "openrouter_metadata")
                   if chunk.get(key) is not None}
@@ -333,7 +329,16 @@ class ChatAccumulator(_Accumulator):
             if key in {"id", "model"} and self.body.get(key) not in (None, value):
                 self._note(f"{key}: {self.body[key]!r} then {value!r}; kept first")
                 continue
-            _snapshot(self.body, {key: value})
+            if key == "total_cost_usd" and provider_cost_value(value) is None and provider_cost_value(self.body.get(key)) is not None:
+                self._note("invalid total_cost_usd after a reported price; kept the earlier amount")
+                continue
+            if key == "usage":
+                if not isinstance(value, dict):  # reports nothing; the frame itself stays in the private wire
+                    self._note(f"usage is {type(value).__name__}, not an object; skipped")
+                    continue
+                self.body[key] = merge_usage_reports(self.body.get(key), value)
+            else:
+                _snapshot(self.body, {key: value})
         choices = chunk.get("choices")
         if isinstance(choices, list):
             for position, update in enumerate(choices):
@@ -534,7 +539,7 @@ class AnthropicAccumulator(_Accumulator):
             if not self.body or self.open_blocks:
                 raise IncompleteProviderStream("Native message delta before blocks finished")
             _snapshot(self.body, chunk.get("delta") or {})
-            _snapshot(self.body.setdefault("usage", {}), chunk.get("usage") or {})
+            self.body["usage"] = merge_usage_reports(self.body.get("usage"), chunk.get("usage"))
             self.usage_final = True
         elif kind == "message_stop":
             self.done = True
@@ -728,10 +733,8 @@ class _StreamAssembly:
 
     def preserve_failure_usage(self, error: BaseException) -> None:
         """Money survives read/close/cancel errors independently of reply completeness."""
-        from ouroboros._usage_response import provider_cost_value
-
         usage = self.accumulator.body.get("usage")
-        usage = copy.deepcopy(usage) if isinstance(usage, dict) else {}
+        usage = usage if isinstance(usage, dict) else {}
         complete_usage = (self.accumulator.usage_final if isinstance(self.accumulator, AnthropicAccumulator)
                           else self.accumulator.done)
         if (isinstance(self.accumulator, ChatAccumulator) and not complete_usage and self.accumulator.usage_reports
@@ -743,18 +746,41 @@ class _StreamAssembly:
                 # A provider may finish the choices before the transport delivers [DONE]. This prices
                 # only the finish and later reports; it does not make the interrupted reply usable.
                 error.stream_terminal_usage = reports[start:]
-        if not complete_usage:
-            # message_start and unfinished Chat streams can carry partial counters.
-            # An explicit price remains authoritative even on a partial message.
-            if not any(provider_cost_value(usage.get(key)) is not None for key in self.cost_keys):
-                usage = {}
-        received = getattr(error, "stream_usage", None)
-        if isinstance(received, dict):
-            cost = next((value for source in (received, usage) for key in self.cost_keys
-                         if (value := provider_cost_value(source.get(key))) is not None), None)
-            _snapshot(usage, received)
-            if cost is not None:
-                usage["cost"] = cost
+        if self.cost_keys == ("cost",):
+            usage = copy.deepcopy(usage)
+            # The exact Go route (#3913): only its own ``usage.cost`` is a price. Its list price, plan
+            # allowance and the envelope are different units, never this route's settlement fallbacks.
+            if not complete_usage:
+                # message_start and unfinished Chat streams can carry partial counters.
+                # An explicit price remains authoritative even on a partial message.
+                if not any(provider_cost_value(usage.get(key)) is not None for key in self.cost_keys):
+                    usage = {}
+            received = getattr(error, "stream_usage", None)
+            if isinstance(received, dict):
+                cost = next((value for source in (received, usage) for key in self.cost_keys
+                             if (value := provider_cost_value(source.get(key))) is not None), None)
+                _snapshot(usage, received)
+                if cost is not None:
+                    usage["cost"] = cost
+            if usage:
+                error.stream_usage = usage
+            return
+        total = self.accumulator.body.get("total_cost_usd")
+        if not complete_usage and reported_price(usage, total)[0] is None:
+            # message_start and unfinished Chat streams can carry partial counters. Only the whole sourced amount
+            # (a BYOK gateway fee needs its provider-billed share) settles a partial message; else it stays unresolved.
+            usage = {}
+        usage = merge_usage_reports(usage, getattr(error, "stream_usage", None))
+        # Some providers report the bill on the envelope, before a read, close or terminal frame fails.
+        # It follows a price in usage and the error body's own total, never overriding either one.
+        body = getattr(error, "body", None)
+        if (total is not None and not (isinstance(body, dict) and provider_cost_value(body.get("total_cost_usd")) is not None)
+                and (usage or provider_cost_value(total) is not None)):
+            usage = merge_usage_reports({"total_cost_usd": total}, usage)
+        # The tier the envelope reported joins them too: it names those counters' tariff. An error body's own tier wins.
+        tier = self.accumulator.body.get("service_tier")
+        if usage and isinstance(tier, str) and tier and usage.get("service_tier") is None:
+            usage = {**usage, "service_tier": tier}
         if usage:
             error.stream_usage = usage
 
