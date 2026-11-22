@@ -215,6 +215,8 @@ def _record(drive_root, skill_name, *, status, version=None, sha=None, reason=""
             "process": process,
             **({"retained_companions": retained} if retained else {}),
         }
+        if process == "server" and shown == BROKEN:  # an open failure keeps its start; an older record's is unknown
+            observed["broken_since"] = prior_server.get("broken_since") if prior_server.get("status") == BROKEN else now
         if process == "worker":
             observed["server_reconcile"] = str(server_reconcile or "")
         prior_worker = observations.get("worker")
