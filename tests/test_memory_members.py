@@ -323,8 +323,8 @@ def test_the_schema_carries_members_and_words_and_its_lead_names_them():
     assert properties["words"]["description"] == ("members: keep records whose own text or one correction matches an "
                                                   "item (word prefixes, any order; quotes exact).")
     assert ("members=true with room_id lists the room's tellings in publication order, then its untold rows as runs; "
-            "with node_id, what that record seals, folds, cites, replaces or retells. Each line has its opening and "
-            "readers. words keeps records whose own text or one correction matches; runs of rows are not filtered."
+            "with node_id, what that record seals, folds, cites, replaces or retells. Each record line shows its "
+            "opening and readers. words keeps records whose own text or one correction matches; runs of rows are not filtered."
             ) in schema["description"]
     assert "members=true" in _memory_read(ctx_for(pathlib.Path("/nonexistent")), node_id="x", rows=True)
 
