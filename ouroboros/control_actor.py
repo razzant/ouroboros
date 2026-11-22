@@ -74,31 +74,92 @@ def creating_author(fence: dict | None) -> dict:
                                    if key not in {"fence_id", "requests"}}})
 
 
+def read_panic_window(drive_root=None) -> dict:
+    """The last Panic as a mind's release must see it, read once OFF any lock where a mind's control enters:
+    ``started`` (``state.panic_started_at``, taken at Panic's ingress and recorded by the boot that takes it) and
+    ``blocked``: a Panic input not yet taken by a boot, or a state read from its backup copy. Unreadable: blocked."""
+    try:
+        from ouroboros.installation_stop import installation_panic
+        from supervisor.state import load_state
+
+        state = load_state()
+        root = drive_root
+        if root is None:
+            from supervisor import queue as q
+            root = q.DRIVE_ROOT
+        read = state.get("_state_read") if isinstance(state.get("_state_read"), dict) else {}
+        degraded = read.get("source") == "backup" or read.get("quality") == "unavailable"  # never a stale start
+        return {"started": str(state.get("panic_started_at") or ""), "blocked": degraded or installation_panic(root)}
+    except Exception:
+        return {"started": "", "blocked": True}
+
+
 @contextmanager
-def citing_owner(written_at: str):
-    """Bind, for this one call, when the owner wrote the message a mind's control cites (``owner_words``, verified
-    by ``owner_words.cited_owner_basis``): ``work_stop.release_refusal`` reads it for a Panic hold, and what the door
-    selects inside this call inherits it. No time: nothing bound."""
-    token = _OWNER_WORD.set(str(written_at or "") or None)
+def citing_owner(written_at: str = "", window: dict | None = None):
+    """Bind, for this one mind control, when the owner wrote the message it cites (``owner_words``, verified with
+    its time by ``owner_words.cited_owner_message``) and the last Panic (``read_panic_window``, read here, off the
+    queue lock, unless the caller read it): ``work_stop.release_refusal`` compares them without I/O, and what the
+    door selects inside this call inherits both."""
+    token = _OWNER_WORD.set({"written": str(written_at or ""), "window": window or read_panic_window()})
     try:
         yield
     finally:
         _OWNER_WORD.reset(token)
 
 
-def owner_word_after_panic() -> bool:
-    """Whether the bound cite was written after the last Panic began (``state.panic_started_at``, taken when Panic
-    starts): the owner's own message after a Panic is his manual action (Emergency Stop Invariant, 21 Nov 2026).
-    An unknown time on either side is no."""
+def mind_release_refusal(stop: dict) -> dict | None:
+    """Emergency Stop Invariant, read 21 Nov 2026: after a Panic, a mind releases nothing the Panic stopped (a Panic
+    hold of either class) or that already stood when it began (a stop placed before it; an unknown time counts as
+    before) without the owner's own message written after it began. Unbound, a Panic hold refuses and older stops
+    are not judged; a blocked window (a Panic not yet taken, a backup state) refuses every release."""
     from ouroboros.work_stop import _instant
 
-    written = _instant(_OWNER_WORD.get() or "")
-    if written is None:
-        return False
-    from supervisor.state import load_state
+    if not stop:
+        return None  # no stop at all (the installation gate's empty read): nothing to release
+    bound = _OWNER_WORD.get() or {}
+    window = bound.get("window") or {}
+    panic = stop.get("cause") == "panic" or stop.get("door") == "panic"
+    started = _instant(window.get("started") or "")
+    if not bound:
+        return {"ok": False, "error": "panic_requires_owner_resume"} if panic else None
+    if window.get("blocked"):
+        return {"ok": False, "error": "panic_requires_owner_resume"}
+    since = _instant(next((stop[key] for key in ("held_at", "requested_at", "paused_at", "at") if stop.get(key)), ""))
+    if not panic and (started is None or (since is not None and since >= started)):
+        return None  # no Panic yet, or a stop placed after it: the door's own rules decide
+    written = _instant(bound.get("written") or "")
+    return None if started is not None and written is not None and written > started else {
+        "ok": False, "error": "panic_requires_owner_resume"}
 
-    started = _instant(load_state().get("panic_started_at") or "")
-    return started is not None and written > started
+
+def root_lends_panic_release(drive_root, snapshot: dict, task: dict, stop: dict) -> bool:
+    """Whether a member's Panic hold is its root's model's to release (``resume_child_task``, shown as ``release:
+    mind`` with the door): the root's release record says an act the owner authorised released it after the last
+    Panic began, his press (``by.at``) or a mind's release citing his word (``by.owner_word_at``), as
+    ``budget_resume.child_selection_control`` grants it. Display only; the selection checks again."""
+    from ouroboros.budget_pause import budget_pause_row
+    from ouroboros.work_stop import SELECTION_KEY, _instant
+
+    root_id = str(task.get("root_task_id") or "")
+    if not (stop.get("cause") == "panic" or stop.get("door") == "panic") or root_id in ("", task.get("id")):
+        return False
+    window = read_panic_window(drive_root)
+    started = _instant(window.get("started") or "")
+    if window.get("blocked") or started is None:
+        return False
+    rows = [row.get("task") if isinstance(row.get("task"), dict) else row
+            for lane in ("running", "pending") for row in snapshot.get(lane) or () if isinstance(row, dict)]
+    root = next((row for row in rows if str(row.get("id") or "") == root_id), {})
+    try:
+        grant = (budget_pause_row(drive_root, root_id) or {}).get("grant") or {}
+    except Exception:
+        grant = {}
+    for by in ((root.get(SELECTION_KEY) or {}).get("by"), grant.get("by")):
+        by = by if isinstance(by, dict) else {}
+        when = _instant(by.get("at") if by.get("actor") == "owner" else by.get("owner_word_at") or "")
+        if when is not None and when > started:
+            return True
+    return False
 
 
 @contextmanager
@@ -142,7 +203,7 @@ def resume_author() -> dict:
     """Who grants a Resume, recorded as its grant's ``by``: a mind's control, else the owner's own door, else nobody
     (the host's own act); a cold Resume's notice names it (``model_sleep.resumer_words``)."""
     author = control_actor() or owner_door_bound()
-    cited = _OWNER_WORD.get()  # a mind's release carrying the owner's verified word: its grant keeps when he wrote
+    cited = (_OWNER_WORD.get() or {}).get("written")  # a mind's release citing the owner: its grant keeps when he wrote
     return {**author, "owner_word_at": cited} if author and cited else author
 
 

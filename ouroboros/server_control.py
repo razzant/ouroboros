@@ -16,7 +16,7 @@ from ouroboros.platform_layer import IS_WINDOWS
 # The successor this generation spawned, published before custody I/O so Panic can stop it.
 _restart_successors: list = []
 _restart_stop_requested = False
-_PANIC_STARTED_AT = 0.0  # epoch seconds when this process's Panic began (execute_panic_stop)
+_PANIC_STARTED_AT = 0.0  # epoch seconds when this process's Panic began: its ingress latch, else execute_panic_stop
 
 
 def external_owner_binding(state: dict) -> tuple[bool, Any, tuple[int, int]]:
@@ -100,10 +100,11 @@ class PanicIngress:
         pair = self._owner[1]
         if source != "web" and (pair is None or pair != (user_id, chat_id)):
             return False
-        global _restart_stop_requested
+        global _restart_stop_requested, _PANIC_STARTED_AT
         # Claim termination before the callback is scheduled: the restart
         # watcher must leave Panic time to persist its stop even if it runs first.
         _restart_stop_requested = True
+        _PANIC_STARTED_AT = _PANIC_STARTED_AT or time.time()  # the Panic moment: the winning latch, before any kill
         try:
             from ouroboros.config import resolve_data_dir
             from ouroboros.panic_source import record_source
@@ -359,7 +360,7 @@ def execute_panic_stop(
     """
     global _restart_stop_requested, _PANIC_STARTED_AT
     _restart_stop_requested = True  # claim termination before any import, stop callback or I/O
-    _PANIC_STARTED_AT = time.time()  # the Panic moment, before any kill (the flag is written last)
+    _PANIC_STARTED_AT = _PANIC_STARTED_AT or time.time()  # the moment, if no ingress latch took it, before any kill
     requests, settlements = {}, {}
     try:
         import threading
@@ -537,10 +538,7 @@ def _persist_panic_controls(data_dir: pathlib.Path) -> None:
 
     failures = []
     for step in (
-        lambda: state.update_state(_panic_controls, confirm=PANIC_CONTROL_KEYS, lock_timeout_sec=0.5),
-        lambda: _PANIC_STARTED_AT and state.update_state(lambda st: st.update(  # the next boot's receipt keeps it
-            panic_pending_started_at=datetime.fromtimestamp(_PANIC_STARTED_AT, timezone.utc).isoformat()),
-            lock_timeout_sec=0.5),
+        lambda: state.update_state(_panic_stop_controls, confirm=PANIC_CONTROL_KEYS, lock_timeout_sec=0.5),
         lambda: record_evolution_stop_intent("panic", "panic stop"),
         # cleanup_worktree=False: Panic never runs git stash/reset; the flag + boot reconcile own it.
         lambda: complete_evolution_campaign("panic stop", status="stopped", cleanup_worktree=False),
@@ -553,6 +551,15 @@ def _persist_panic_controls(data_dir: pathlib.Path) -> None:
             failures.append(type(exc).__name__)
     if failures:
         raise OSError(f"Panic controls unconfirmed: {failures}")
+
+
+def _panic_stop_controls(st: dict) -> None:
+    """The stopping process's controls, with its Panic moment in the SAME update (``panic_pending_started_at``):
+    the boot that takes this Panic records it as ``panic_started_at`` (``worker_chat_lane.auto_resume_after_restart``).
+    The flag is written after the kills and before these controls."""
+    _panic_controls(st)
+    if _PANIC_STARTED_AT:
+        st["panic_pending_started_at"] = datetime.fromtimestamp(_PANIC_STARTED_AT, timezone.utc).isoformat()
 
 
 def _panic_controls(st: dict) -> None:

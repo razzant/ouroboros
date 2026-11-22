@@ -925,7 +925,11 @@ def get_tools() -> list[ToolEntry]:
                            "recorded as a budget_resume_child_outcome event. A held child reads status scheduled "
                            "with a current_stop whose door is this tool; a grant removes that current_stop, so "
                            "the child waits for a worker, then runs. Cancelled, completed or otherwise-stopped "
-                           "children are never revived; a child under a root that is itself still paused is refused.",
+                           "children are never revived; a child under a root that is itself still paused is refused. "
+                           "After a Panic, a child's Panic hold is yours to select only when your root was released "
+                           "after that Panic by your human's own act: their press, or a Resume citing their message "
+                           "written after it; such a child shows this door, otherwise it waits for them "
+                           "(panic_requires_owner_resume).",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "reason": {"type": "string", "default": "", "description": "Why this child is still needed (recorded)."},

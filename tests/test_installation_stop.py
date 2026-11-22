@@ -354,6 +354,49 @@ def test_a_launcher_panic_with_no_stopping_server_dates_the_panic_at_the_boot_th
     assert state.load_state()["panic_started_at"] >= earlier
 
 
+def test_the_panic_start_is_recorded_before_the_barrier_from_any_doors_ingress_and_never_goes_stale(tmp_path,
+                                                                                                     monkeypatch):
+    """The boot that takes a Panic records its start before the holds' barrier, so a failed barrier leaves no stale
+    start; until the input is taken every mind release refuses, a cite after the Panic included. The start is the
+    ingress time of any door (``panic_source.json``, the tray's too) when newer than the Panic before; an older one
+    (a record this Panic failed to rewrite) gives the boot's own time. A stopping server's time no Panic followed
+    is dropped."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from ouroboros.control_actor import citing_owner, mind_release_refusal
+    from supervisor import queue, worker_chat_lane
+    from tests.test_state_authority import _prior
+
+    _q, state, _workers = _install_queue(tmp_path, monkeypatch)
+    state.save_state(_prior())
+    tray = datetime.now(timezone.utc) - timedelta(minutes=3)
+    (tmp_path / "state/panic_source.json").write_text(json.dumps({"time": tray.isoformat()}), encoding="utf-8")
+    (tmp_path / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **_kw: False)
+    worker_chat_lane.auto_resume_after_restart()
+    assert state.load_state()["panic_started_at"] == tray.isoformat(), "recorded although the barrier failed"
+    assert installation_panic(tmp_path), "the input is kept"
+    with citing_owner((tray + timedelta(minutes=1)).isoformat()):
+        assert mind_release_refusal({"cause": "pause", "requested_at": tray.isoformat()}), "not yet taken: blocked"
+    monkeypatch.undo()
+    _q, state, _workers = _install_queue(tmp_path, monkeypatch)
+    worker_chat_lane.auto_resume_after_restart()
+    assert not installation_panic(tmp_path) and state.load_state()["panic_started_at"] == tray.isoformat()
+    with citing_owner((tray + timedelta(minutes=1)).isoformat()):
+        assert mind_release_refusal({"cause": "panic"}) is None, "taken: a later word releases"
+        assert mind_release_refusal({}) is None, "no stop at all is never refused"
+    with citing_owner((tray - timedelta(seconds=1)).isoformat()):
+        assert mind_release_refusal({"cause": "panic"}), "a word from before it does not"
+    # A second Panic whose ingress record was not rewritten: the old record is older, the boot's time stands.
+    (tmp_path / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
+    worker_chat_lane.auto_resume_after_restart()
+    assert state.load_state()["panic_started_at"] > tray.isoformat()
+    state.update_state(lambda st: st.update(panic_pending_started_at=tray.isoformat()))
+    worker_chat_lane.auto_resume_after_restart()
+    assert "panic_pending_started_at" not in state.load_state(), "no Panic input followed: dropped"
+
+
 def test_android_reader_cli_recognizes_the_receipt_without_product_import(tmp_path):
     import subprocess
     import sys

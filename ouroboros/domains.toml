@@ -569,6 +569,7 @@ D20 = "Presence"
 "ouroboros/owner_wait.py" = "D01"
 "ouroboros/continuation_tools.py" = "D01"
 "ouroboros/owner_words.py" = "D17"  # my human's words for a work: one set, by value, verbatim and dated
+"ouroboros/owner_cites.py" = "D17"  # which message a cite of my human's words names, and when it was written
 "ouroboros/packaged_cli.py" = "D18"
 "ouroboros/packaged_cli_install.py" = "D18"
 "ouroboros/force_remove.py" = "D18"  # the permission-granting recursive removal every retirer of a copied tree shares

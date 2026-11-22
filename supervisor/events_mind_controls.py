@@ -32,8 +32,10 @@ def _apply(evt: dict) -> dict:
     named = evt.get("accept_unknown") if action == "resume_task" and isinstance(evt.get("accept_unknown"), list) else ()
     if evt.get("list_call") and (stopped := _sender_stopped(actor)):
         return stopped  # one row of a list call whose sender was stopped meanwhile: nothing is done for it
-    cited_at = str(evt.get("cited_at") or "") if action == "resume_task" else ""
-    with mind_control(actor, reason), accepting_unknown(named, reason), citing_owner(cited_at):
+    from contextlib import nullcontext  # a Resume sees the last Panic (and its cite); other controls keep their rules
+
+    cited = citing_owner(str(evt.get("cited_at") or "")) if action == "resume_task" else nullcontext()
+    with mind_control(actor, reason), accepting_unknown(named, reason), cited:
         if action == "resume_task" and evt.get("general") and (kept := _kept_pause(task_id)):
             from ouroboros.work_stop import resume_outcome
 

@@ -379,3 +379,33 @@ def _drive_exact_pause_and_wake(tmp_path, monkeypatch):
     _cold_park(tmp_path, monkeypatch, workers, senders=["peer"], barrier=q.publish_queue_snapshot)
     _mail(tmp_path, "sleeper", "ready", sender="peer")
     assert wake_ready_sleepers(q)[0]["ok"]
+
+
+def test_a_cited_resume_after_panic_reads_the_panic_start_off_q(tmp_path, monkeypatch):
+    """A mind's Resume of a Panic hold citing the owner's later word: the Panic's start is read once where the cite
+    is bound, off Q; the queue-locked release check compares without reading the state (Fable M5, Astra 11).
+    The held-row Resume path's own I/O under Q is the existing inventory's business, not this check's."""
+    from datetime import datetime, timedelta, timezone
+
+    from ouroboros import control_actor
+    from ouroboros.control_actor import citing_owner, mind_control
+    from ouroboros.task_results import write_task_result
+    from supervisor.events_budget import HOLD_PANIC, hold_budget_row
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests.test_state_authority import _prior
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    state.save_state(_prior())
+    started = datetime.now(timezone.utc) - timedelta(minutes=5)
+    state.update_state(lambda st: st.update(panic_started_at=started.isoformat()))
+    task = {"id": "held", "root_task_id": "held", "_attempt": 1, "type": "task", "admitted_dispatch": "none"}
+    hold_budget_row(task, reason=HOLD_PANIC)
+    workers.PENDING.append(task)
+    write_task_result(tmp_path, "held", "scheduled", root_task_id="held")
+    reads, real = [], control_actor.read_panic_window
+    monkeypatch.setattr(control_actor, "read_panic_window",
+                        lambda *a: reads.append(q._queue_lock._is_owned()) or real(*a))
+    with mind_control("mind", "the owner said go on"), citing_owner((started + timedelta(minutes=1)).isoformat()):
+        assert reads == [False], "read once, at the bind, off Q"
+        assert q.resume_budget_paused_task("held")["ok"]
+    assert reads == [False], "the queue-locked checks compare the bound window without reading it again"

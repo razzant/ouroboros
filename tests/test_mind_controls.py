@@ -57,6 +57,43 @@ def test_mind_pause_other_root_records_actor_and_resume_keeps_attribution(tmp_pa
     assert read_fence(tmp_path, "other")["resume_actor"]["task_id"] == "mind-root"
 
 
+def test_a_stop_that_stood_before_a_panic_needs_the_owners_later_word_and_one_placed_after_does_not(tmp_path,
+                                                                                                    monkeypatch):
+    """Emergency Stop Invariant, read 21 Nov 2026: a stop that already stood when a Panic began (here Ouroboros's
+    own Pause) is released by a mind only with the owner's message written after that Panic; a Pause placed after
+    the Panic is the mind's own to lift as before. With no Panic recorded, nothing changes."""
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    from tests.test_state_authority import _prior
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    state.save_state(_prior())
+    _roots(tmp_path, workers, "before", "after", "quiet")
+    assert _apply_pause("before")["ok"] and _apply_pause("quiet")["ok"]
+    time.sleep(0.01)
+    panic = datetime.now(timezone.utc)
+    later = (panic + timedelta(seconds=1)).isoformat()
+    from supervisor.events_mind_controls import _apply
+
+    assert _apply(_event("resume_task", "quiet", "quiet-r"))["ok"], "no Panic recorded: the mind lifts its Pause"
+    state.update_state(lambda st: st.update(panic_started_at=panic.isoformat()))
+    time.sleep(0.01)
+    assert _apply_pause("after")["ok"]
+    assert _apply(_event("resume_task", "after", "after-r"))["ok"], "placed after the Panic: no word needed"
+    assert _apply(_event("resume_task", "before", "b-r1"))["error"] == "panic_requires_owner_resume"
+    old = (panic - timedelta(seconds=1)).isoformat()
+    assert _apply({**_event("resume_task", "before", "b-r2"), "cited_at": old})["error"] == (
+        "panic_requires_owner_resume"), "a word from before the Panic"
+    assert _apply({**_event("resume_task", "before", "b-r3"), "cited_at": later})["ok"]
+
+
+def _apply_pause(task_id):
+    from supervisor.events_mind_controls import _apply
+
+    return _apply(_event("pause_task", task_id, f"pause-{task_id}"))
+
+
 def test_panic_hold_survives_mind_resume_but_owner_can_select_it(tmp_path, monkeypatch):
     from ouroboros.task_results import write_task_result
     from supervisor.events_budget import HOLD_PANIC, hold_budget_row
@@ -394,14 +431,17 @@ def test_a_cascade_stop_of_a_retry_senders_logical_root_stops_its_list(tmp_path,
 
 
 def test_a_resume_cites_the_owners_message_after_a_panic_and_one_cite_covers_the_list(tmp_path, monkeypatch):
-    """``owner_words`` on resume_task is verified as for a model choice (``cited_owner_basis``) and carries when the
-    owner wrote the message (``cited_owner_time``: the carrier's send time when kept, else when the room accepted
-    it). After Panic the mind releases a Panic hold of either class only with a message written after the Panic
-    began: one cite covers every root of a list; a message from before it, or no cite, leaves the hold. A child is
-    released by the same cite when Main names it. Words not found refuse at the tool, nothing is sent."""
+    """``owner_words`` on resume_task is verified as for a model choice and dated by ``owner_cites``: the ONE
+    message under the cite, read by identity from its accepted chat row, never a copy (a window row's acceptance,
+    a skill row's own ``sent_at`` when not later than its acceptance, else unknown); a place message by its event's
+    ``sent_at``. Of several messages with the words the newest written counts. After Panic the mind releases a
+    Panic hold of either class only with a message written after the Panic began: one cite covers every root of a
+    list; one from before it, an undated one (``cite_note``) or no cite leaves the hold. A child is released by
+    the same cite when Main names it. Words not found refuse at the tool, nothing is sent."""
     from datetime import datetime, timedelta, timezone
 
-    from ouroboros.owner_words import cited_owner_basis, cited_owner_time
+    from ouroboros import dialogue_store as ds
+    from ouroboros.owner_cites import UNDATED, cited_owner_message
     from ouroboros.task_results import write_task_result
     from ouroboros.tools.control_mind import _resume_task
     from ouroboros.tool_call_log import invocation_scope
@@ -424,25 +464,47 @@ def test_a_resume_cites_the_owners_message_after_a_panic_and_one_cite_covers_the
     workers.PENDING.append(kid)
     write_task_result(tmp_path, "kid", "scheduled", root_task_id="saved", parent_task_id="saved",
                       delegation_role="subagent")
-    old, new = "Carry on with everything, please", "Now resume all of it"
+
+    def at(**delta):
+        return (started + timedelta(**delta)).isoformat()
+
+    old, new, late, undated, future, twice = ("Carry on with everything, please", "Now resume all of it",
+                                              "Go on with the queue", "Pick it all up", "Keep going there",
+                                              "Go ahead with it")
+    chat = [(old, "m-old", at(minutes=-1), {}), (new, "m-new", at(minutes=1), {}),
+            # Telegram: sent before the Panic, accepted after it; its send time decides.
+            (late, "tg-late", at(minutes=2), {"source": "skill:telegram", "sent_at": at(seconds=-30)}),
+            (undated, "tg-undated", at(minutes=3), {"source": "skill:telegram"}),  # a bridge that sends none
+            (future, "tg-future", at(minutes=4), {"source": "skill:telegram", "sent_at": at(minutes=9)}),
+            (twice, "w-before", at(minutes=-2), {}), (twice, "w-after", at(minutes=5), {})]
+    directives = []
+    for text, client, ts, extra in chat:
+        ds.append(tmp_path, "chat", {"ts": ts, "direction": "in", "chat_id": 7, "text": text,
+                                     "client_message_id": client, "task_id": "", **extra})
+        # The copy the run holds names the message; its own times (a stale or forged one) are never read.
+        directives.append({"source": "owner_mailbox", "content": text, "chat_id": 7, "client_message_id": client,
+                           "ts": at(minutes=30), "sent_at": at(minutes=30)})
+    directives += [{"source": "place_confirmed", "content": "Place says resume", "msg_id": "p-1",
+                    "ts": at(minutes=6), "sent_at": at(minutes=5)},
+                   {"source": "place_confirmed", "content": "Place says nothing dated", "msg_id": "p-2",
+                    "ts": at(minutes=6)}]
     ctx = SimpleNamespace(task_id="mind-root", drive_root=tmp_path, pending_events=[], event_queue=None,
-                          task_metadata={}, _owner_directives=[
-                              {"source": "owner_mailbox", "content": old, "msg_id": "m-old",
-                               "ts": (started - timedelta(minutes=1)).isoformat()},
-                              {"source": "owner_mailbox", "content": new, "msg_id": "m-new",
-                               "ts": (started + timedelta(minutes=1)).isoformat(),
-                               "sent_at": (started + timedelta(seconds=50)).isoformat()}])  # sent after: counts
-    assert cited_owner_time(ctx, cited_owner_basis(ctx, new)[0]) == (started + timedelta(seconds=50)).isoformat()
-    # Telegram: a message the owner SENT before the Panic but the host accepted after it carries its send time
-    # (``sent_at``, the chat row's and the owner-words record's), and that time decides; an older copy sends none.
-    late = "Go on with the queue"
-    ctx._owner_directives.append({"source": "owner_mailbox", "content": late, "chat_id": "7",
-                                  "client_message_id": "tg:7:5", "ts": (started + timedelta(minutes=2)).isoformat(),
-                                  "sent_at": (started - timedelta(seconds=30)).isoformat()})
-    assert cited_owner_time(ctx, cited_owner_basis(ctx, late)[0]) == (started - timedelta(seconds=30)).isoformat()
+                          task_metadata={}, _owner_directives=directives)
+    assert cited_owner_message(ctx, new)[1:] == (at(minutes=1), ""), "a window row: its acceptance"
+    assert cited_owner_message(ctx, late)[1:] == (at(seconds=-30), ""), "a skill row: its own send time"
+    assert cited_owner_message(ctx, undated)[1:] == ("", UNDATED), "no send time: unknown, never the copy's"
+    assert cited_owner_message(ctx, future)[1:] == ("", UNDATED), "a send time after acceptance proves nothing"
+    assert cited_owner_message(ctx, twice)[1] == at(minutes=5), "the newest message with the words counts"
+    assert cited_owner_message(ctx, "Place says resume")[1:] == (at(minutes=5), "")
+    assert cited_owner_message(ctx, "Place says nothing dated")[1:] == ("", UNDATED)
+
     _receipt, outcomes, _events = _list(ctx, _resume_task, "sent-before", reason="all", task_ids=["saved"],
                                         owner_words=late)
     assert outcomes["saved"]["error"] == "panic_requires_owner_resume", "sent before the Panic: it does not count"
+    receipt, outcomes, events = _list(ctx, _resume_task, "undated", reason="all", task_ids=["saved"],
+                                      owner_words=undated)
+    assert receipt["cite_note"] == UNDATED and "cited_at" not in events[0], receipt
+    assert outcomes["saved"]["error"] == "panic_requires_owner_resume", "undated: no authority after a Panic"
     ctx.pending_events.clear()
     with invocation_scope({"tool_call_id": "invented"}):
         refused = json.loads(_resume_task(ctx, reason="all", task_ids=["sleeping"], owner_words="never said"))
@@ -453,11 +515,11 @@ def test_a_resume_cites_the_owners_message_after_a_panic_and_one_cite_covers_the
     assert "after that Panic" in outcomes["saved"]["message"]
     _receipt, outcomes, events = _list(ctx, _resume_task, "before", reason="all", task_ids=["sleeping", "saved"],
                                        owner_words=old)
-    assert events[0]["cited_at"] < started.isoformat()
+    assert events[0]["cited_at"] == at(minutes=-1)
     assert {outcomes[t]["error"] for t in outcomes} == {"panic_requires_owner_resume"}, "written before the Panic"
     _receipt, outcomes, events = _list(ctx, _resume_task, "after", reason="all", task_ids=["sleeping", "saved"],
-                                       owner_words=new)
-    assert all(event["cited"] == new for event in events) and outcomes["saved"]["ok"], outcomes
+                                       owner_words=twice)
+    assert all(event["cited"] == twice for event in events) and outcomes["saved"]["ok"], outcomes
     assert outcomes["sleeping"]["ok"], outcomes["sleeping"]
     assert _apply(_event("resume_task", "kid", "kid-uncited"))["error"] == "panic_requires_owner_resume"
     with invocation_scope({"tool_call_id": "kid"}):

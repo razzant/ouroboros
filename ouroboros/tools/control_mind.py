@@ -48,15 +48,13 @@ def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None
         return json.dumps({"ok": False, "error": "control_call_identity_missing"})
     cite = {}
     if str(owner_words or "").strip():  # one verified cite covers every named root of this call
-        from ouroboros.owner_words import cited_owner_basis, cited_owner_time
+        from ouroboros.owner_cites import cited_owner_message
 
-        basis, error = cited_owner_basis(ctx, owner_words)
-        written = cited_owner_time(ctx, basis) if basis else ""
-        if error or not basis or not written:
-            return json.dumps({"ok": False, "error": "owner_words_unverified", "detail": error or (
-                "owner_words were not found in a message of your human that reached this run." if not basis
-                else "The host recorded no time for that message, so it cannot be placed after a Panic.")})
-        cite = {"cited": basis["cited"], "cited_source": basis["source"], "cited_at": written}
+        basis, written, error = cited_owner_message(ctx, owner_words)  # the newest verified message with the words
+        if not basis:
+            return json.dumps({"ok": False, "error": "owner_words_unverified", "detail": error})
+        cite = {"cited": basis["cited"], "cited_source": basis["source"], **({"cited_at": written} if written else {}),
+                **({"cite_note": error} if error else {})}  # undated: delivered, no authority after a Panic
     rows = []
     for target in targets:
         if action == "pause_task" and target == actor:
@@ -79,10 +77,12 @@ def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None
             return json.dumps({"ok": False, "error": row["error"]})
         return json.dumps({"ok": True, "status": "requested", "task_id": row["task_id"], "action": action,
                            "action_nonce": row["action_nonce"], "transport": row["transport"],
+                           **({"cite_note": cite["cite_note"]} if cite.get("cite_note") else {}),
                            "note": "The supervisor decides through the owner's existing control. "
                                    "The result will arrive in your task mailbox; this receipt is not completion."})
     return json.dumps({"ok": all(row["ok"] for row in rows), "status": "requested", "action": action,
                        "task_ids": targets, "list_call": call_id, "requests": rows,
+                       **({"cite_note": cite["cite_note"]} if cite.get("cite_note") else {}),
                        "note": f"{len([row for row in rows if row['ok']])} requests sent, one per root. One outcome "
                                "per requested root will arrive in your task mailbox, each marked with this list_call; "
                                "count them and treat a root whose outcome did not arrive as unknown. This receipt is "
@@ -138,11 +138,15 @@ def _citing_schema(schema: dict) -> dict:
     schema["parameters"]["properties"]["owner_words"] = {
         "type": "string",
         "description": "Your human's exact words from one of their own messages that reached this run (or the "
-                       "complete label they pressed), as the order this Resume carries. A Panic hold, of sleeping "
-                       "or of saved work, is released by you only with your human's own message written after that "
-                       "Panic began: the host verifies who wrote it and when, never what it says; whether it asks "
-                       "for this Resume is your judgment. One cite covers every root of the call. Words of a call "
-                       "never count; a message from before the Panic, or none, leaves the hold for your human."}
+                       "complete label they pressed), as the order this Resume carries. After a Panic you release "
+                       "nothing it stopped (a Panic hold, of sleeping or of saved work) and nothing that already "
+                       "stood when it began (an earlier Pause or hold) without your human's own message written after "
+                       "that Panic began: the host verifies who wrote it and when, never what it says; whether it asks "
+                       "for this Resume is your judgment. Of several messages with the words, the newest counts. One "
+                       "cite covers every root of the call. Words of a call never count; a message from before the "
+                       "Panic, or one whose writing time the host cannot prove (cite_note: a bridge that did not "
+                       "report when it was sent, a card tap through a messenger), or none, leaves those for your "
+                       "human: their press, or a new message from them."}
     return schema
 
 

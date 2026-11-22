@@ -653,7 +653,7 @@ def test_the_unstarted_roots_grant_yields_to_a_newer_pause_stop_panic_or_unknown
     outcome = _model_selects(tmp_path, workers, q, CHOSEN, ROOT)
     assert outcome["ok"] is False and outcome["error"] == {
         "new_pause": "selection_owner_held", "unknown_fence": "selection_observation_unavailable",
-        "stop": "selection_owner_held", "panic": "root_resume_grant_missing"}[change], outcome
+        "stop": "selection_owner_held", "panic": "panic_requires_owner_resume"}[change], outcome  # Panic first
     assert rows[CHOSEN] == held
     sent.clear()
     _idle_worker(workers, sent)
@@ -1319,8 +1319,12 @@ def _panic_tree(tmp_path, monkeypatch, root="saved-root"):
         _working_run(tmp_path, workers, task_id, **({"parent": parent} if parent else {}))
     (tmp_path / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
     started = datetime.now(timezone.utc) - timedelta(minutes=5)
-    state.update_state(lambda st: st.update(panic_started_at=started.isoformat()))
+    state.update_state(lambda st: st.update(panic_pending_started_at=started.isoformat()))  # the stopping latch
     assert _stop_and_boot(q, workers) == 3
+    from supervisor import worker_chat_lane
+
+    worker_chat_lane.auto_resume_after_restart()  # the boot takes the Panic input and records its moment
+    assert state.load_state()["panic_started_at"] == started.isoformat()
     rows = {t["id"]: t for t in workers.PENDING}
     assert all(eb.budget_hold_fact(t)["door"] == "panic" for t in rows.values()), rows
     eb.hold_budget_row(rows["second"], reason=eb.HOLD_PANIC)
@@ -1357,7 +1361,7 @@ def test_after_panic_the_roots_model_selects_held_children_once_an_owner_authori
         with mind_control("main", "the owner said resume"), citing_owner((started + timedelta(minutes=1)).isoformat()):
             assert q.resume_budget_paused_task("saved-root")["ok"]
     by = rows["saved-root"][eb.SELECTION_KEY]["by"]  # the release's durable record the held members bind to
-    assert by.get("actor") == "owner" if release == "owner_press" else by.get("owner_word_at"), by
+    assert (by.get("actor") == "owner") if release == "owner_press" else by.get("owner_word_at"), by
     assert select("first")["ok"], pushed[-1]
     # A newer Panic: the root's release came before it, so the remaining child stays held.
     state.update_state(lambda st: st.update(panic_started_at=(started + timedelta(hours=1)).isoformat()))
@@ -1377,3 +1381,51 @@ def test_a_root_released_without_the_owners_authority_lends_no_panic_release(tmp
     assert q.resume_budget_paused_task("saved-root")["ok"]
     eb._handle_budget_resume_child({"task_id": "first", "requested_by": "saved-root", "reason": "go on"}, ctx)
     assert pushed[-1]["error"] == "panic_requires_owner_resume"
+
+
+def test_a_root_released_under_a_word_from_before_the_panic_opens_none_of_its_childrens_panic_holds(
+        tmp_path, monkeypatch):
+    """Fable B1 / Carbon B2 / Astra 2: the child's selection binds the root release's OWN authorising time: the
+    cited word's (``by.owner_word_at``), never the grant's. A release recorded after the Panic but citing a word
+    written before it opens nothing; the same release citing a word from after it opens the child."""
+    from datetime import timedelta
+
+    from ouroboros.control_actor import owner_door
+    from supervisor import events_budget as eb
+
+    q, _state, workers, rows, started = _panic_tree(tmp_path, monkeypatch)
+    pushed = []
+    ctx = _supervisor_ctx(tmp_path, workers, q, [], pushed)
+    with owner_door("api_task_resume"):
+        assert q.resume_budget_paused_task("saved-root")["ok"]
+    selection = rows["saved-root"][eb.SELECTION_KEY]
+    assert selection["selected_at"] > started.isoformat(), "the release itself came after the Panic"
+    for word, outcome in ((started - timedelta(minutes=1), "panic_requires_owner_resume"),
+                          (started + timedelta(minutes=1), None)):
+        selection["by"] = {"actor": "ouroboros", "task_id": "main", "owner_word_at": word.isoformat()}
+        eb._handle_budget_resume_child({"task_id": "first", "requested_by": "saved-root", "reason": "go on"}, ctx)
+        assert pushed[-1].get("error") == outcome if outcome else pushed[-1]["ok"], pushed[-1]
+
+
+def test_after_the_owner_releases_a_panic_stopped_root_its_held_children_show_its_model_the_door(tmp_path, monkeypatch):
+    """Astra 10 / Fable S1: the projection says who may release a child's Panic hold. Under a root still held it is
+    the owner's (``release: owner``, no door); once the owner's press released the root after that Panic, the
+    root's model sees ``release: mind`` with its ``resume_child_task`` door, and nobody else gets the door."""
+    from ouroboros.control_actor import owner_door
+    from ouroboros.queue_observation import load_queue_document
+    from ouroboros.work_stop import stop_for_reader, task_current_stop
+
+    q, _state, workers, rows, _started = _panic_tree(tmp_path, monkeypatch)
+
+    def shown(reader):
+        assert q.persist_queue_snapshot(reason="probe")
+        stop = task_current_stop(tmp_path, load_queue_document(tmp_path, fresh=True), "first")
+        return stop, stop_for_reader(stop, rows["first"], reader)
+
+    stop, view = shown("saved-root")
+    assert stop["release"] == "owner" and "door" not in view
+    with owner_door("api_task_resume"):
+        assert q.resume_budget_paused_task("saved-root")["ok"]
+    stop, view = shown("saved-root")
+    assert stop["release"] == "mind" and view.get("door") == "resume_child_task", sorted(stop.items())
+    assert "door" not in shown("someone-else")[1]

@@ -481,6 +481,8 @@ def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
     basis cannot be read, the stop stands as read and says so (``resume_basis: unreadable``): its identity
     then cannot tell a newer root Pause from the one already shown, until the basis reads again.
     """
+    from ouroboros.control_actor import root_lends_panic_release
+
     for lane in ("running", "pending"):
         outer = next((row for row in snapshot.get(lane) or () if isinstance(row, dict)
                       and str(row.get("id") or row.get("task_id") or "") == task_id), None)
@@ -514,7 +516,8 @@ def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
     return {"state": "pausing" if live else "held",
             "cause": stop.get("cause") or ("refusal" if view.get("refusal") else "unknown"),
             "scope": stop.get("scope") or "member", "code": reason.get("code"), "text": reason.get("text"),
-            "release": "owner" if view.get("release") == "owner" else "mind" if view.get("resumable") else "none",
+            "release": "mind" if view.get("release") == "owner" and root_lends_panic_release(drive_root, snapshot, task, stop)
+            else "owner" if view.get("release") == "owner" else "mind" if view.get("resumable") else "none",
             **{key: reason[key] for key in ("since", "by") if reason.get(key)},
             **({} if queue_snapshot_observation(snapshot)["fresh"] else {"queue_freshness": "stale"}),
             **({} if tree is not None else {"resume_basis": "unreadable"}),
@@ -542,12 +545,12 @@ def stop_for_reader(stop: dict, task: dict, reader_id: str) -> dict:
 def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:
     """Release permission, not readiness; empty actor means owner, mind doors must use ``mind_control``."""
     stop, actor = stop or {}, actor or {}
-    panic = stop.get("cause") == "panic" or stop.get("door") == "panic"  # ``panic_hold``, or saved work Panic held
-    if (panic or stop.get("release") == "owner") and actor.get("actor", "owner") != "owner":
-        from ouroboros.control_actor import owner_word_after_panic  # his own message after it is his act (21 Nov)
+    if actor.get("actor", "owner") != "owner":  # a mind: after a Panic only the owner's later word (21 Nov 2026)
+        from ouroboros.control_actor import mind_release_refusal
 
-        if not (panic and owner_word_after_panic()):
-            return {"ok": False, "error": "panic_requires_owner_resume"}
+        panic = stop.get("cause") == "panic" or stop.get("door") == "panic"
+        if (refusal := mind_release_refusal(stop)) or (stop.get("release") == "owner" and not panic):
+            return refusal or {"ok": False, "error": "panic_requires_owner_resume"}
     if stop.get("release") == "none":
         return {"ok": False, "error": "stop_not_resumable"}
     return release_refusal(stop["member_stop"], actor) if stop.get("member_stop") else None

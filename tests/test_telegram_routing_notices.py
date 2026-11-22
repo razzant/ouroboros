@@ -606,6 +606,10 @@ def test_an_owner_messages_telegram_send_time_rides_to_the_accepted_row(phone):
     row, _ = message_bus.accept_local_message(receiver, phone.data, "go on", chat_id=42, user_id=42,
                                               source="skill:telegram", **fields)
     assert row["sent_at"] == fields["sent_at"] and row["ts"] != row["sent_at"]
+    from ouroboros.owner_relay import owner_row_source
+
+    # The row is the one record of when it was written: the reference a start carries names it, never a copy.
+    assert "sent_at" not in owner_row_source(row)[0] and owner_row_source(row)[0]["ts"] == row["ts"]
     older = {**{key: value for key, value in message.items() if key != "date"}, "message_id": 902}
     fields = state._owner_ingress_fields(phone.api, "", 42, older, 902)
     assert "sent_at" not in fields

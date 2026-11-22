@@ -1063,6 +1063,23 @@ def conversation_turn_live() -> bool:
         return live_turn_count() > 0
 
 
+def _record_panic_start(state: dict, root, identity: dict) -> None:
+    """``panic_started_at`` for the Panic input this boot takes, once per input (``panic_started_input``): the
+    newest of the stopping server's latch time (``panic_pending_started_at``) and the ingress record of any door,
+    the tray included (``state/panic_source.json`` ``time``), when it is newer than the Panic recorded before;
+    else this boot's time (a flag-only Panic), before which no owner message can have reached the host."""
+    from ouroboros.utils import read_json_dict
+    from ouroboros.work_stop import _instant
+
+    pending = str(state.pop("panic_pending_started_at", "") or "")
+    if state.get("panic_started_input") == identity and state.get("panic_started_at"):
+        return
+    previous = _instant(state.get("panic_started_at") or "") or 0.0
+    source = str((read_json_dict(pathlib.Path(root) / "state" / "panic_source.json") or {}).get("time") or "")
+    found = [value for value in (pending, source) if (_instant(value) or 0.0) > previous]
+    state.update(panic_started_at=max(found, key=_instant) if found else utc_now_iso(), panic_started_input=identity)
+
+
 def auto_resume_after_restart() -> None:
     """Consume boot doors only after their work stops and controls are durable."""
     try:
@@ -1083,23 +1100,25 @@ def auto_resume_after_restart() -> None:
                 record_restart(root)
                 consume_owner_restart(root, restart)
         identity = panic_input(root)
+        from supervisor.state import load_state, update_state
+
         if identity:
             if panic_received(root, identity):
                 remove_received_panic(root, identity)
                 return
+            # The moment owner words must follow, recorded before any early return below (P6).
+            update_state(lambda state: _record_panic_start(state, root, identity))
             if publish_queue_snapshot(reason="panic_holds") is not True:  # barrier (LB)
                 log.error("Panic holds are not durable; its input is kept.")
                 return
             from ouroboros.server_control import PANIC_CONTROL_KEYS, _panic_controls
-            from supervisor.state import update_state
 
             update_state(_panic_controls, confirm=PANIC_CONTROL_KEYS)
-            # The Panic moment owner words must follow: the stopping process's start time, else (a launcher's
-            # Panic with no server) this boot's, before which no owner message can have reached the host.
-            update_state(lambda state: state.update({PANIC_RECEIPT: identity, "panic_started_at": str(
-                state.pop("panic_pending_started_at", "") or utc_now_iso())}))
+            update_state(lambda state: state.update({PANIC_RECEIPT: identity}))
             remove_received_panic(root, identity)
             return
+        if load_state().get("panic_pending_started_at"):  # a stopping process's time no Panic input followed
+            update_state(lambda state: state.pop("panic_pending_started_at", None))
         if restart:
             return
 

@@ -728,14 +728,16 @@ def place_confirmed_words(confirmed: bool, text: Any, message: Any) -> str:
 def place_row_facts(conversation_id: Any, message: Any, origin: Mapping[str, Any] | None = None, *,
                     source: str = "") -> Dict[str, Any]:
     """A confirmed place event's corpus-row facts beside its words: the message it replies to (by address; with
-    ``source``, the exact reader of the event record that carried its words) and its provider identity
+    ``source``, the exact reader of the event record that carried its words), its provider identity and send time
     (``own_sends.message_identity``), so a later reader tells my own post through my human's account once that
     post's receipt is known; ``origin``: the row's other typed ids."""
     from ouroboros.own_sends import message_identity
 
     found = message_identity(conversation_id, message)
     identity = {"conversation_id": found[0], "message_id": found[1]} if found else {}
-    return {"reply_to": place_reply_target(message, source), "origin": {**(origin or {}), **identity}}
+    sent = (message if isinstance(message, Mapping) else {}).get("sent_at")  # its event's own send time (owner_cites)
+    return {"reply_to": place_reply_target(message, source), "origin": {**(origin or {}), **identity,
+                                                                       **({"sent_at": str(sent)} if sent else {})}}
 
 
 def _my_post(ctx: Any, item: Mapping[str, Any]) -> bool:
@@ -766,81 +768,16 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
     The owner's decision of 11 November 2026 admits their own call speech only for a model choice:
     its caller opts in with ``call_speech`` and carries the returned ``live_call`` span only on the lead,
     never as the new work's owner corpus (the caption rules of 7 November otherwise stand)."""
-    from ouroboros.answer_facts import word_spans
-    from ouroboros.chronicle_quotes import quote_in
+    from ouroboros.owner_cites import owner_cites
 
     wanted = str(owner_words or "").strip()
+    for basis in owner_cites(ctx, wanted, call_speech=call_speech) if wanted else ():
+        return basis, ""
     if not wanted:
         return None, ""
-    for row in directive_owner_rows(ctx):  # owner-door rows that reached this run (never a reply target's words)
-        fact = _mapping(row.get("answer_input"))
-        if row["source"] in OWNER_WORD_SOURCES and quote_in(wanted, word_spans(row["text"], fact)):
-            if row["source"] == "owner_quiz_answer" or fact.get("card_id"):
-                for item, _, ref, _ in _dated_directives(ctx):
-                    if (item["source"] == row["source"] and item.get("content") == row["text"]
-                            and (ref or row_ref(item)) == row["ref"]):
-                        return {**item, "cited": wanted, "basis": CITED, "carried": True}, ""
-            return {"source": row["source"], "content": row["text"], "cited": wanted, "basis": CITED, "carried": True,
-                    **({"msg_id": row["ref"]} if row.get("ref") else {})}, ""
-    for item, _, _, _ in _dated_directives(ctx):
-        if item["source"] != OWNER_PRESS:
-            continue
-        # A quiz bubble has the host's one-based display prefix. A living action's label is already whole.
-        content = item.get("content")
-        if not isinstance(content, str):
-            continue
-        if item.get("quiz_id") or is_answered_card(item.get("reply_to")):
-            number, sep, label = content.partition(". ")
-            if not sep or not number.isascii() or not number.isdecimal() or number.startswith("0"):
-                continue
-        else:
-            label = _mapping(item.get("reply_to")).get("pressed_label")
-        if isinstance(label, str) and wanted == label.strip():
-            return {**item, "cited": label, "basis": CITED, "carried": True}, ""
-    for item in getattr(ctx, "_owner_directives", None) or []:  # confirmed place events, with what they replied to
-        if (isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED
-                and quote_in(wanted, str(item.get("content") or "")) and not _my_post(ctx, item)):
-            return {"source": "place_owner", "content": str(item.get("content") or ""), "cited": wanted, "basis": CITED,
-                    "carried": True, **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
-    # Only the own-call owner-caption branch records live_call directives; heard speech and
-    # Presence calls do not. A model choice may cite it without granting authority to the work.
-    for item in (getattr(ctx, "_owner_directives", None) or []) if call_speech else ():
-        if (isinstance(item, dict) and item.get("source") == "live_call"
-                and quote_in(wanted, str(item.get("content") or ""))):
-            return {"source": "live_call", "cited": wanted,
-                    **({"msg_id": item["msg_id"]} if item.get("msg_id") else {})}, ""
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
                   "confirmed account, not forwarded). Copy their exact words or the complete label they pressed, or "
                   "omit owner_words to start the work as your own.")
-
-
-def cited_owner_time(ctx: Any, basis: Mapping[str, Any] | None) -> str:
-    """When my human wrote the message ``cited_owner_basis`` verified, as the host recorded it: its carrier's send time
-    (``sent_at``) when kept, else the time its room accepted it (``ts``), else its mailbox entry's (``received``);
-    ``""`` unknown. The host checks who wrote and when; what the words mean stays the citing mind's judgment."""
-    def when(item: Mapping[str, Any]) -> str:
-        return str(item.get("sent_at") or item.get("ts") or item.get("received") or "")
-
-    if not basis:
-        return ""
-    if when(basis):  # a press or confirmed place item carried whole
-        return when(basis)
-    ref, content = str(basis.get("msg_id") or ""), basis.get("content")
-    for row in directive_owner_rows(ctx):
-        if str(row.get("ref") or "") == ref and row.get("text") == content:
-            origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
-            twins = [item for item in _mapping(getattr(ctx, "_held_owner_messages", None)).values()
-                     if isinstance(item, Mapping) and _chat_ref(item) == ref]
-            twins += [item for item in getattr(ctx, "_owner_directives", None) or []
-                      if isinstance(item, Mapping) and ref and ref in (row_ref(item), str(item.get("msg_id") or ""))]
-            sent = (origin.get("sent_at") if ref == _door_ref(ctx) else "") or next(
-                (str(item["sent_at"]) for item in twins if item.get("sent_at")), "")
-            return str(sent or row.get("ts") or next((str(item["ts"]) for item in twins if item.get("ts")), "")
-                       ).removeprefix("received ")
-    for item in getattr(ctx, "_owner_directives", None) or []:
-        if isinstance(item, dict) and str(item.get("msg_id") or "") == ref and item.get("content") == content:
-            return when(item)
-    return ""
 
 
 def place_reply_target(message: Any, source: str = "") -> Dict[str, str] | None:

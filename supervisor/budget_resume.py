@@ -73,10 +73,10 @@ def observe_exact_resume(q, task, task_id, result_root, *, gaps):
 
 def child_selection_control(requester: str, reason: str, target: Dict[str, Any], named=()):
     """The control a root's model selects one held child under (owner Q9): ``mind_control``, and, when the root's
-    live Resume grant was given by an act the owner authorised (his press: ``by.actor == owner``; a mind's release
-    with a verified cite: ``by.owner_word_at``), that grant's time bound as the citing time, so the child's Panic
-    hold yields only to a root release made after that same Panic began (``work_stop.release_refusal``). The grant
-    the held members already bind to is the durable carrier; nothing else is stored."""
+    live Resume grant was given by an act the owner authorised, that act's own time bound as the citing time: his
+    press's (``by.actor == owner``, ``by.at``), or the WORD a mind's release cited (``by.owner_word_at``), never the
+    grant's own time. The child's Panic hold then yields only when that act came after the same Panic began
+    (``control_actor.mind_release_refusal``). The grant the held members already bind to is the durable carrier."""
     from contextlib import ExitStack
 
     from ouroboros.control_actor import accepting_unknown, citing_owner, mind_control
@@ -93,8 +93,8 @@ def child_selection_control(requester: str, reason: str, target: Dict[str, Any],
                 (state["pause"] or {}).get("grant") or {}, (state["owner_fence"] or {}).get("resume_grant") or {})),
                 (selection.get("root_grant_id"), selection.get("by"), selection.get("selected_at"))):
             by = by if isinstance(by, dict) else {}
-            if live and grant_id == live.get("grant_id") and (by.get("actor") == "owner" or by.get("owner_word_at")):
-                granted = str(at or "")
+            if live and grant_id == live.get("grant_id"):
+                granted = str((by.get("at") or at) if by.get("actor") == "owner" else by.get("owner_word_at") or "")
     except Exception:
         log.debug("The root grant of %s is unreadable; its child's Panic hold stays", root_id, exc_info=True)
     stack = ExitStack()
