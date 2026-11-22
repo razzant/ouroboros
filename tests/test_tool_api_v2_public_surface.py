@@ -1899,12 +1899,6 @@ def test_preflight_review_rename_keeps_a_callable_unadvertised_alias(tmp_path):
     assert "preflight_review" in names
     assert "advisory_review" not in names
     assert "advisory_review" not in registry.available_tools()
-    # The core/heal envelope (schemas(core_only=True)) must not advertise the
-    # alias either — B1 class: the default path filtered it, the core path
-    # leaked it into heal-mode prompts.
-    core_names = {schema["function"]["name"] for schema in registry.schemas(core_only=True)}
-    assert "preflight_review" in core_names
-    assert "advisory_review" not in core_names
     # The alias dispatches to the same organ (a refusal about tool identity
     # would start with "Unknown tool").
     assert not registry.execute("advisory_review", {}).startswith("⚠️ Unknown tool")

@@ -20,7 +20,7 @@ from collections import Counter
 from typing import Any, Dict, List, Mapping, Optional
 
 from ouroboros.jsonl_tail import cached_tail_objects
-from ouroboros.utils import read_json_dict, read_text
+from ouroboros.utils import read_text
 from ouroboros.store import StoreError
 from ouroboros.context_timing import timed_section
 
@@ -541,20 +541,6 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
             checks.append(f"CRITICAL: VERSION DESYNC — VERSION={ver_file}, {', '.join(desync_parts)}")
     except Exception:
         pass
-
-    # The drift check saved its own like-for-like pair and baseline (supervisor.state._apply_openrouter_ground_truth):
-    # the line says the two changes since that baseline, the ones its percentage compares (as /status prints them),
-    # with no usage-store read on a context build.
-    state_data = read_json_dict(env.drive_path("state/state.json")) or {}
-    if state_data.get("budget_drift_alert"):
-        try:
-            ledger = state_data.get("openrouter_checked_ledger_settled_usd", state_data.get("openrouter_ledger_settled_usd"))
-            ledger_since = float(ledger) - float(state_data["session_openrouter_settled_snapshot"])
-            key_since = float(state_data["openrouter_total_usd"]) - float(state_data["session_total_snapshot"])
-            checks.append(f"WARNING: BUDGET DRIFT {float(state_data['budget_drift_pct']):.1f}% — since its baseline the "
-                          f"ledger counted ${ledger_since:.2f} of OpenRouter spend, the key's usage grew ${key_since:.2f}")
-        except (KeyError, TypeError, ValueError):
-            checks.append("WARNING: BUDGET DRIFT — the saved drift figures are unreadable (state/state.json)")
 
     checks.extend(_self_update_lines(env))
 

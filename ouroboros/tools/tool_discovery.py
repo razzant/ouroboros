@@ -221,7 +221,7 @@ def _is_tool_name(registry: "ToolRegistry", name: str) -> bool:
     name, or a name this task's contract disables. Any other name may still be a skill's."""
     from ouroboros.tools.registry_guards import _disabled_tools
 
-    return (tool_namespace(name) != BUILTIN_NAMESPACE or name in getattr(registry, "_entries", {})
+    return (tool_namespace(name) != BUILTIN_NAMESPACE or registry.is_builtin(name)
             or name in _disabled_tools(getattr(registry, "_ctx", None)))
 
 
