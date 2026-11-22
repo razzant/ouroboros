@@ -92,15 +92,16 @@
  * `status`/`is_error` stay its execution outcome; exit, signal and timeout stay process facts.
  * @typedef {Object} ToolVerificationFact
  * @property {"pass"|"fail"} status  // the durable receipt's verdict
- * @property {string} contract_kind  // visible_verifier | explicit_command | explicit_metric
+ * @property {string} contract_kind  // visible_verifier | explicit_command | explicit_metric | artifact_observation
  * @property {string} expected_match  // substring | exact | exact_line | json_equals | bytes_equal
  * @property {boolean=} matched  // present only where a comparison was evaluated (never on timeout)
+ * @property {boolean=} paths_named  // a failed artifact observation had at least one named path
  * @property {string} check  // the receipt's check rendering, bounded for transport
- * @property {string} check_rendering
+ * @property {string=} check_rendering
  * @property {string=} criterion_id
  * @property {string} criterion_source  // task_stated | agent_defined
  * @property {string} receipt_ts  // the receipt's own timestamp; no separate receipt id exists
- * @property {string=} detail  // the producer's sentence for a timeout or a bytes_equal comparison
+ * @property {string=} detail  // bounded diagnostic from the producer, including missing paths
  */
 /**
  * @typedef {Object} TaskPauseRequest

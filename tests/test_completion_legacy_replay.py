@@ -74,7 +74,7 @@ def test_unknown_legacy_source_is_not_assumed_status_only(tmp_path, monkeypatch)
     assert _Rec.sent[0][1] == event["text"]
 
 
-def _pending_event(root, monkeypatch, *, salvage=False, source_failure=False):
+def _pending_event(root, monkeypatch, *, salvage=False, failed_answer=None):
     """Use the real producer, retaining its pre-upgrade (no metadata) wire shape."""
     from ouroboros.projects_registry import create_project, bind_task_to_project
     from supervisor import terminal_delivery
@@ -86,9 +86,9 @@ def _pending_event(root, monkeypatch, *, salvage=False, source_failure=False):
                terminal_origin="host_salvage" if salvage else "model_final",
                result="useful draft" if salvage else "Final answer")
     write_task_result(root, "root-project", "completed", **{k: v for k, v in row.items() if k not in {"task_id", "status"}})
-    if source_failure:
+    if failed_answer is not None:
         final = {"type": "send_message", "task_id": "root-project", "chat_id": project["chat_id"],
-                 "text": "Final answer", "delivery_id": terminal_delivery.delivery_id_for("root-project", "Final answer")}
+                 "text": failed_answer, "delivery_id": terminal_delivery.delivery_id_for("root-project", failed_answer)}
         assert terminal_delivery.register_pending_delivery(root, final)
         with monkeypatch.context() as stage:
             stage.setattr("ouroboros.utils.in_worker_process", lambda: True)
@@ -108,8 +108,7 @@ def _pending_event(root, monkeypatch, *, salvage=False, source_failure=False):
         stage.setattr(terminal_delivery, "register_pending_delivery", register_legacy)
         stage.setattr(terminal_delivery, "enqueue_terminal_delivery", lambda _root, event, **_kw: queued.append(copy.deepcopy(event)) or True)
         from ouroboros.project_dialogue import project_completion_delivery_outcome
-        assert project_completion_delivery_outcome(root, {}, "root-project", row, row, {},
-            source_delivery=terminal_projection._delivery_disposition(root, "root-project"))[1]
+        assert project_completion_delivery_outcome(root, {}, "root-project", row, row, {})[1]
     event = queued[0]
     event["progress_meta"].pop("completion_notice")
     return event
@@ -154,12 +153,17 @@ def test_quarantined_result_does_not_block_retained_message(notify, tmp_path, mo
 
 
 @pytest.mark.parametrize("lane", ["canonical", "outbox"])
-def test_legacy_replay_recovers_source_delivery_registry_warning(lane, tmp_path, monkeypatch):
+@pytest.mark.parametrize("failed_answer", ["Final answer", "Earlier answer"])
+def test_legacy_replay_recovers_source_delivery_registry_warning(lane, failed_answer, tmp_path, monkeypatch):
     from supervisor import terminal_delivery
 
     root = tmp_path / "host"
-    event = _pending_event(root, monkeypatch, source_failure=True)
-    assert "Sending the final answer was not confirmed" in event["text"]
+    event = _pending_event(root, monkeypatch, failed_answer=failed_answer)
+    [failure] = terminal_delivery.terminal_answer_receipts(root, "root-project")["exhausted"]
+    path = failure["preserved_path"]
+    applies = failed_answer == event["progress_meta"]["completion_answer"]
+    assert path and (path in event["text"]) is applies
+    assert ("Sending the final answer was not confirmed" in event["text"]) is applies
     if lane == "canonical":
         write_task_result(root, "root-project", "completed", canonical_terminal_projection_ready={
             "token": "publication-1", "main_delivery": {"event": copy.deepcopy(event), "attempts": 0}})
@@ -172,5 +176,37 @@ def test_legacy_replay_recovers_source_delivery_registry_warning(lane, tmp_path,
     send(retained)
     assert frames[-1]["content"] == event["text"]
     assert "Launch › Ship release" in _Rec.sent[0][1]
-    assert "Sending the final answer was not confirmed" in _Rec.sent[0][1]
-    assert "Review and verification details" not in _Rec.sent[0][1]
+    assert (path in _Rec.sent[0][1]) is applies
+    assert ("Sending the final answer was not confirmed" in _Rec.sent[0][1]) is applies
+    if applies:
+        assert "Review and verification details" not in _Rec.sent[0][1]
+
+
+@pytest.mark.parametrize("frozen", ["different-answer", "different-attempt", "pointer"])
+def test_legacy_mirror_cannot_borrow_a_later_answers_file(tmp_path, monkeypatch, frozen):
+    from supervisor import terminal_delivery
+
+    event = _pending_event(tmp_path, monkeypatch)
+    row = load_task_result(tmp_path, "root-project", strict=True)
+    assert event["progress_meta"]["completion_answer"] == row["result"]
+    final = terminal_delivery.build_completed_result_event(tmp_path, row, "root-project", row)
+    assert terminal_delivery.register_pending_delivery(tmp_path, final)
+    with monkeypatch.context() as worker:
+        worker.setattr("ouroboros.utils.in_worker_process", lambda: True)
+        terminal_delivery._retire_exhausted(tmp_path, [final])
+    if frozen == "different-answer":
+        event["progress_meta"]["completion_answer"] = "Earlier answer"
+    elif frozen == "different-attempt":
+        event["progress_meta"]["task_attempt"] = 1
+        row["task_attempt"] = 2
+    else:
+        event["progress_meta"].pop("completion_answer")
+    view = terminal_projection.completion_event_view(tmp_path, event, row)
+    [failure] = terminal_delivery.terminal_answer_receipts(tmp_path, "root-project")["exhausted"]
+    notice = view["progress_meta"].get("completion_notice", {})
+    assert failure["preserved_path"] and failure["preserved_path"] not in notice.get("detail", "")
+    assert view["text"] == event["text"] and view["delivery_id"] == event["delivery_id"]
+    if frozen == "pointer":
+        assert "affected answer is unknown" in notice["detail"]
+    else:
+        assert view is event

@@ -194,10 +194,25 @@ test('a collapsed visual viewport with a focused field blurs it and asks the hos
     w.win.visualViewport.height = KEYBOARD_COLLAPSE_PX + 200;
     w.win.visualViewport.listeners.get('resize')();
     assert.equal(blurred, 0, 'a normal viewport is left alone');
+    w.win.document = w.doc;
+    w.doc.documentElement.clientWidth = 390;
+    w.win.visualViewport.width = 195;
     w.win.visualViewport.height = 1;
+    w.win.visualViewport.listeners.get('resize')();
+    assert.equal(blurred, 0, 'a magnified viewport keeps the keyboard');
+    w.win.visualViewport.width = 390;
+    const heights = [];
+    w.win.Event = Event;
+    w.win.dispatchEvent = event => {
+        if (event.type === 'ouro:host-viewport') heights.push(w.win.visualViewport.height);
+    };
     sdk.fire('viewportChanged', { isStateStable: false });
     assert.equal(blurred, 1);
     assert.ok(sdk.calls.some((c) => c[0] === 'hideKeyboard'));
+    w.win.visualViewport.height = 844;
+    sdk.fire('viewportChanged', { isStateStable: true });
+    assert.deepEqual(heights, [1, 844], 'the room sees the restored height even without a DOM resize');
+    w.win.visualViewport.height = 1;
     // Nothing focused: no recovery, however small the viewport.
     w.win.visualViewport.listeners.get('resize')();
     assert.equal(blurred, 1);

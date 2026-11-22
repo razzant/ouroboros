@@ -1,4 +1,6 @@
-"""Typed transport facts for the physical-attempt custody seam."""
+"""Typed transport facts for the physical-attempt custody seam, and the processing tier a send's wire can carry,
+carries and is priced by: facts of one resolved target and its final payload. Nothing here resolves a route or sends,
+so ``llm_routing`` and ``llm_attempt`` both stand on it without importing each other."""
 
 from __future__ import annotations
 
@@ -7,8 +9,10 @@ import contextvars
 import ipaddress
 import logging
 import socket
-from typing import Any
+from typing import Any, Dict, Mapping
 from urllib.parse import urlsplit
+
+from ouroboros.openrouter_attribution import OPENROUTER_BASE_URL
 
 log = logging.getLogger(__name__)
 
@@ -60,11 +64,27 @@ def report_attempt_end(capture: Any, error: Any) -> None:
 
 
 class ProviderNotDispatched(RuntimeError):
-    """A transport owner's positive receipt that generation never started.
+    """A transport owner's positive receipt that no provider request was dispatched.
 
     A local control-plane HTTP failure cannot mint this fact: an accepted
     remote operation may already have sent its provider request.
     """
+
+
+class ProcessingNotStarted(RuntimeError):
+    """The provider received this request and refused its tier before generation."""
+
+    def __init__(self, error: BaseException, *, reason: str):
+        super().__init__(str(error))
+        self.processing_reason = reason
+        for name in ("body", "code", "type", "status_code", "response", "stream_usage", "response_body_error"):
+            if hasattr(error, name):
+                setattr(self, name, getattr(error, name))
+
+
+def is_processing_refusal(error: Any) -> bool:
+    """Only the tier retry may handle these refusals, and only with proof of no work."""
+    return isinstance(error, ProcessingNotStarted) or getattr(error, "processing_refusal_conflict", False)
 
 
 def is_loopback_base_url(base_url: Any) -> bool:
@@ -105,6 +125,8 @@ def is_loopback_base_url(base_url: Any) -> bool:
 
 def is_pre_dispatch_transport_failure(exc: BaseException) -> bool:
     """Return true only for exceptions raised before request bytes can be sent."""
+    if is_processing_refusal(exc):
+        return False
     if isinstance(exc, ProviderNotDispatched):
         return True
     try:
@@ -122,6 +144,8 @@ def is_pre_dispatch_transport_failure(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while isinstance(current, BaseException) and id(current) not in seen:
         seen.add(id(current))
+        if is_processing_refusal(current):
+            return False
         if isinstance(current, safe_types):
             return True
         # Only an explicit ``raise ... from ...`` chain carries transport
@@ -423,3 +447,141 @@ def attempt_custody_event_fields(error: BaseException) -> dict:
             break
         current = current.__cause__
     return fields
+
+
+def processing_transport_modes(target: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """Modes this adapter can transmit, not an entitlement of the selected model or key.
+
+    Sources checked 2026-11-17: https://openrouter.ai/docs/guides/features/service-tiers
+    lists ``service_tier=ultrafast`` on OpenRouter Chat; https://developers.openai.com/api/docs/guides/ultrafast-mode
+    shows it on direct Responses HTTP. We do not send Ultra on direct Chat. Recheck the guide for the exact
+    surface before widening it. Stale support can send a refused preference; stale absence can hide a usable tier.
+    """
+    from ouroboros.openai_responses import responses_route
+
+    provider = target.get("provider")
+    surface = target.get("api_surface")
+    chat = surface in (None, "", "chat_completions", "chat.completions")
+    if chat and provider in {"local", "deepseek", "minimax", "zai", "cloudru", "gigachat", "openai-compatible"}:
+        # These host adapters offer ordinary service without a native preference field.
+        return ("standard",)
+    if provider_reported_cost_only(target):
+        return None
+    if provider == "openrouter" and chat:
+        return ("standard", "economy", "fast", "ultrafast")
+    if provider == "openai":
+        if responses_route(target):
+            return ("standard", "economy", "fast", "ultrafast")
+        if chat:
+            return ("standard", "economy", "fast")
+    if provider == "anthropic" and surface in (None, "", "messages"):
+        return ("standard", "fast")
+    return None
+
+
+def provider_reported_cost_only(target: Mapping[str, Any]) -> bool:
+    """A compatible endpoint does not share the public provider's tariff or prompt cache."""
+    provider = target.get("provider")
+    public_base = {
+        "openrouter": OPENROUTER_BASE_URL, "openai": "https://api.openai.com/v1",
+        "anthropic": "https://api.anthropic.com/v1", "cloudru": "https://foundation-models.api.cloud.ru/v1",
+    }.get(provider)
+    return provider == "openai-compatible" or (
+        public_base is not None and str(target.get("base_url") or "").rstrip("/") != public_base)
+
+
+# The OpenRouter ``provider`` fields the host itself sends as filters (``openrouter_chat_routing``:
+# ``require_parameters``, recorded in DEVELOPMENT "External facts"; ``allow_fallbacks``, ``_OR_PROVIDER_PRESETS``).
+_FILTER_ROUTING = frozenset({"require_parameters", "allow_fallbacks"})
+
+
+def routing_admits_any_endpoint(routing: Any, *, flex: bool = False) -> bool:
+    """Whether an OpenRouter ``provider`` object may let a call be billed outside its tier pool
+    (``pricing.processing_pool``), so only the model's whole endpoint list bounds it. No routing admits nothing; a
+    filter only drops endpoints, except under Flex, where dropping every Flex endpoint may route the call normally.
+    Any other field (an order, an only/ignore list, a sort or price rule) or an unreadable value may admit any."""
+    if not routing:
+        return False
+    return not isinstance(routing, dict) or bool(set(routing) - _FILTER_ROUTING) or flex
+
+
+def sealed_provider_routing(payload: Mapping[str, Any]) -> Any:
+    """The ``provider`` routing object this exact candidate carries (``extra_body``, the SDK's carrier), else None."""
+    extra = payload.get("extra_body")
+    return extra["provider"] if isinstance(extra, dict) and "provider" in extra else payload.get("provider")
+
+
+def carries_add_on_charge(payload: Mapping[str, Any]) -> bool:
+    """Whether this candidate asks an OpenRouter server-side add-on billed per use beside its tokens: a server tool
+    (``openrouter:web_search``), a plugin, ``web_search_options`` or the ``:online`` model shortcut. No token tariff
+    bounds that charge; reading one more carrier as an add-on only leaves a price unknown, never narrows a request."""
+    extra = payload.get("extra_body") if isinstance(payload.get("extra_body"), dict) else {}
+    tools = payload.get("tools")
+    return (any(payload.get(key) or extra.get(key) for key in ("plugins", "web_search_options"))
+            or str(payload.get("model") or "").endswith(":online")
+            or any(isinstance(tool, dict) and str(tool.get("type") or "").startswith("openrouter:")
+                   for tool in (tools if isinstance(tools, list) else ())))
+
+
+def attempt_pricing_fields(target: dict, payload: dict) -> dict:
+    """Price the final carrier as sent. Only a genuine omission on public OpenRouter selects the whole pool; a tier
+    pool admits what this payload's own routing admits (a recovery rung's ``only`` included), never a later setting;
+    an add-on charge (``carries_add_on_charge``) leaves the price unknown."""
+    if provider_reported_cost_only(target):
+        return {"provider_reported_cost_only": True}
+    if target.get("provider") != "openrouter":
+        return {}
+    if carries_add_on_charge(payload):
+        return {"force_unknown_reservation": True, "unpriced_add_on": True}
+    extra = payload.get("extra_body")
+    carrier = extra if isinstance(extra, dict) and "service_tier" in extra else payload
+    if "service_tier" not in carrier:
+        return {"estimate_ordinary_pool": True}
+    if carrier["service_tier"] not in ("default", "flex", "priority", "ultrafast"):
+        return {"force_unknown_reservation": True}
+    return {"provider_routing_pinned": routing_admits_any_endpoint(sealed_provider_routing(payload),
+                                                                   flex=carrier["service_tier"] == "flex")}
+
+
+def submitted_processing_mode(target: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    """Read the actual native carrier, never infer execution from requested intent."""
+    provider = target.get("provider")
+    if provider in {"openai", "openrouter"}:
+        extra = payload.get("extra_body")
+        value = (extra["service_tier"] if isinstance(extra, dict) and "service_tier" in extra
+                 else payload.get("service_tier"))
+    elif provider == "anthropic":
+        value = payload.get("speed")
+    elif provider == "claudexor":
+        options = payload.get("options") or {}
+        value = options.get("processingPreference") or options.get("serviceTier")
+    else:
+        value = None
+    return value if isinstance(value, str) else ""
+
+
+def apply_processing_preference(target: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    """Project advisory intent before sealing the send copy; explicit native carriers win."""
+    preference = target.get("processing_preference")
+    if not preference:
+        return
+    provider = target.get("provider")
+    if provider not in {"openai", "openrouter", "anthropic"}:
+        if submitted_processing_mode(target, payload):
+            target["processing_native_origin"] = "native_override"
+        return
+    field = "speed" if provider == "anthropic" else "service_tier"
+    extra = payload.get("extra_body") if provider != "anthropic" else None
+    if field in payload or (isinstance(extra, dict) and field in extra):
+        target["processing_native_origin"] = "native_override"
+        return
+    modes = processing_transport_modes(target)
+    # Messages has no synchronous economy speed; its existing advisory projection is ordinary.
+    if provider == "anthropic" and preference == "economy":
+        preference = "standard"
+    if not modes or preference not in modes:
+        return
+    payload[field] = preference if provider == "anthropic" else {
+        "standard": "default", "fast": "priority", "economy": "flex", "ultrafast": "ultrafast",
+    }[preference]
+    target["processing_native_origin"] = "preference"

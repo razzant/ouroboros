@@ -329,6 +329,47 @@ def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_p
     assert run["removed"] + run["deleting"] == 1 and run["selected"] == 2
 
 
+def test_a_childs_work_folder_is_freed_while_the_trash_keeps_the_scratch_its_parent_waits_on(tmp_path, monkeypatch):
+    """The folder's own bytes are offered and freed; the session scratch its record names lies outside it and is
+    the trash pass's to keep, in an entry of its own, until the parent accepts the result
+    (``session_scratch.parent_hold``)."""
+    from ouroboros import session_scratch, test_environment
+    from ouroboros.task_status import load_effective_task_result
+    from ouroboros.task_tree_ledger import CHILD_RESULT_DISPOSITION_TYPE, tree_ledger_append
+    from ouroboros.tools.join_ledger import _child_result_sha256
+    from ouroboros.workspace_preflight import session_service_directories
+
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(test_environment, "session_scratch_parent", lambda: temp)  # keep scratch below this test
+    root = tmp_path / "data"
+    probes = _drives(root, [("child", "direct", "completed", OLD)])
+    _add(root, [document("child", "completed", ts=OLD, child_drive_root=str(root / "task_drives" / "child"),
+                         parent_task_id="lead", root_task_id="lead", delegation_role="subagent"),
+                document("lead", "running")])
+    (tmp_path / "copy").mkdir()
+    scratch = Path(session_service_directories(None, "full-route", access="full", mode="agent", data_root=root,
+                                               drive_root=root, task_id="child", key="snap-1",
+                                               execution_root=tmp_path / "copy").scratch)
+    (scratch / "snapshot.sqlite").write_bytes(b"frozen for one measurement")
+    _fake_sizer(monkeypatch)
+    owner = _owner(probes)
+
+    view = _preview(owner, root, tmp_path)
+    assert [item["id"] for item in _group(view, "work_folders")["items"]] == ["direct:child"]
+    run = _run(owner, root, tmp_path)["run"]
+    assert run["removed"] + run["deleting"] == 1 and not (root / "task_drives" / "child").exists()
+    trash = task_custody.remove_custody_trash(root)
+    held = [hold["class"] for hold in trash["holds"]]
+    assert (trash["removed"], held) == (1, [session_scratch.PARENT_DECISION_PENDING])
+    assert (scratch / "snapshot.sqlite").is_file()
+    digest = _child_result_sha256(load_effective_task_result(root, "child"))
+    assert not tree_ledger_append("lead", "decision", "consumed", task_id="lead", payload={
+        "type": CHILD_RESULT_DISPOSITION_TYPE, "child_task_id": "child", "disposition": "integrated",
+        "child_result_sha256": digest}, allow_child_result_disposition=True, data_root=root).startswith("⚠️")
+    assert task_custody.remove_custody_trash(root)["removed"] == 1 and not scratch.exists()
+
+
 @pytest.mark.parametrize("trash_deleted", [False, True])
 def test_a_folder_the_cadence_settled_first_counts_once_and_raises_nothing(tmp_path, monkeypatch, trash_deleted):
     root = tmp_path / "data"
@@ -511,6 +552,42 @@ def _windows_listing_of(monkeypatch, folder):
                         and Path(path) == folder else _REAL_SCANDIR(path))
 
 
+def _unreadable_trash_identity(monkeypatch, entry):
+    """This pass cannot read ENTRY's identity (a denied or transient ``lstat``); the name is still there."""
+    real_lstat, real_path_lstat = os.lstat, Path.lstat
+
+    def unread(path, *args, **kwargs):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == entry:
+            raise PermissionError(13, "the entry's identity is unreadable", str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", unread)
+    # Path.lstat calls stat(follow_symlinks=False) on supported interpreters, not os.lstat.
+    monkeypatch.setattr(Path, "lstat", lambda path: unread(path) if path == entry else real_path_lstat(path))
+
+
+def test_a_trash_listing_that_cannot_read_an_entry_is_not_a_confirmed_absence(tmp_path, monkeypatch):
+    """The name is listed and its identity is not read: an unread identity, never a removal.
+    Charging it as absence spawns the child on every tick for a retirement wake that was never lost;
+    the entry's own retry look still reaches it, so the job rests here."""
+    from ouroboros import maintenance, maintenance_jobs
+
+    root, owner, _released = _stuck_trash_entry(tmp_path, monkeypatch)
+    [entry] = list((root / "state" / "custody_trash").iterdir())
+    row = maintenance_jobs.job(root, "custody_trash")
+    assert entry.name in (row.get("stuck") or {}) or entry.name in (row.get("held") or {}), "the pass recorded it"
+
+    _unreadable_trash_identity(monkeypatch, entry)
+    assert "custody_trash" not in maintenance.due(root), "an unread name is no reason to spawn the child"
+    assert maintenance_jobs.job(root, "custody_trash").get("stuck") == row.get("stuck"), "the recorded entry stands"
+    assert task_custody.custody_trash_entries(root) == [], "the name is there; only its identity is unread"
+    assert task_custody.custody_trash_scan(root) == ([(entry.name, None)], True)
+    view = owner.projection(root)["run"]
+    assert (view["removed"], view["deleting"], view["stuck"], view["not_started"]) == (0, 1, 0, 0)
+    assert view["removed_bytes"] == 0
+
+
+
 def _stuck_trash_entry(tmp_path, monkeypatch):
     """A freed drive whose trash entry the maintenance child could not remove (a file in it is held
     open): the job records the entry's identity as it saw it, and both the job's due check and the
@@ -560,6 +637,49 @@ def test_a_stuck_trash_entry_is_retried_whenever_the_child_runs(tmp_path, monkey
     view = owner.projection(root)
     assert (view["run"]["removed"], view["run"]["deleting"], view["run"]["stuck"]) == (1, 0, 0)
     assert maintenance.run_job(root, "custody_trash") is None, "an empty trash rests"
+
+
+def test_a_stuck_entry_removed_just_before_storebusy_still_gets_its_retirement_scheduled(tmp_path, monkeypatch):
+    """An unchanged stuck entry leaves no ``retire_owed`` bit, so the pass that finally removes it
+    and then loses its retirement wake to StoreBusy leaves no trace in the row: the next pass must
+    read the recorded entry's absence from a complete listing, even beside an unreadable identity."""
+    import pytest
+    from ouroboros import maintenance, maintenance_jobs, maintenance_retirement, session_scratch, store
+
+    root, _owner, released = _stuck_trash_entry(tmp_path, monkeypatch)
+    assert maintenance.run_job(root, "custody_trash") == {"state": "failed", "items": 0}  # recorded stuck
+    row = maintenance_jobs.job(root, "custody_trash")
+    assert row["stuck"]
+    monkeypatch.setattr(task_custody, "_remove_entry", released)  # this attempt removes the entry
+    schedule = maintenance_retirement.schedule_in
+
+    def refused(*_args, **_kwargs):
+        raise store.StoreBusy("the store did not answer")
+
+    monkeypatch.setattr(maintenance_retirement, "schedule_in", refused)
+    with pytest.raises(store.StoreBusy):  # the removal lands; the wake that books retirement does not
+        maintenance.run_job(root, "custody_trash")
+    row = maintenance_jobs.job(root, "custody_trash")
+    assert row["stuck"] and "retire_owed" not in row  # the row still records an entry that is gone
+    gone = next(iter(row["stuck"]))
+    assert not (root / "state" / "custody_trash" / gone).exists()
+    sibling = root / "state" / "custody_trash" / "unread-0123456789ab"
+    sibling.mkdir()
+    # Its producer holds it. The name still enumerates; only its identity observation fails.
+    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda _root, _entry, owed=None, **kwargs: (True, []))
+    _unreadable_trash_identity(monkeypatch, sibling)
+    monkeypatch.setattr(maintenance_retirement, "schedule_in", schedule)
+    assert task_custody.custody_trash_scan(root) == ([(sibling.name, None)], True)
+    assert "custody_trash" in maintenance.due(root, lane="trash"), "an unreadable sibling conceals no absence"
+    assert maintenance.run_job(root, "custody_trash") == {"state": "failed", "items": 0}
+    settled = maintenance_jobs.job(root, "custody_trash")
+    assert set(settled["stuck"]) == {sibling.name} and "retire_owed" not in settled
+    assert sibling.is_dir()
+    wake = maintenance_jobs.job(root, maintenance_retirement.JOB)
+    assert wake["next_due"] is not None
+    assert "custody_trash" not in maintenance.due(root, lane="trash")
+    maintenance.run_job(root, "custody_trash")
+    assert maintenance_jobs.job(root, maintenance_retirement.JOB) == wake
 
 
 def test_a_trash_entry_the_child_could_not_delete_is_stuck_until_it_changes(tmp_path, monkeypatch):

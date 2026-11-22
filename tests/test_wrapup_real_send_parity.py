@@ -63,8 +63,18 @@ class _Captured(Exception):
 
 
 def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subtests, monkeypatch, tmp_path):
+    import httpx
+
+    from ouroboros import net_transport
+    from ouroboros.opencode_go import GO_CHAT_BASE_URL
+    from tests._openai_sse import streamed_reply
+
+    go_route = ("openai-compatible::example-model", {
+        "OPENAI_COMPATIBLE_API_KEY": "unused", "OPENAI_COMPATIBLE_BASE_URL": GO_CHAT_BASE_URL,
+    })
+    real_execute = llm_module._execute_candidate
     case_paths = case_folders(tmp_path)
-    for model, env in _ROUTES:
+    for model, env in (*_ROUTES, go_route):
         tmp_path = next(case_paths)
         with subtests.test(model=model, env=env), monkeypatch.context() as monkeypatch:
             for key, value in env.items():
@@ -73,8 +83,18 @@ def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subte
 
             def execute(request, send, before_dispatch):
                 captured["request"] = request
+                if model == go_route[0]:
+                    return real_execute(request, send, before_dispatch)
                 raise _Captured()
 
+            if model == go_route[0]:
+                def peer(request):
+                    assert str(request.url) == GO_CHAT_BASE_URL + "/chat/completions"
+                    assert request.headers["x-opencode-session"]
+                    return streamed_reply()
+
+                monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *_a, **_k: httpx.MockTransport(peer))
+                monkeypatch.setattr(net_transport, "env_proxies_configured", lambda: False)
             _patch_execute_candidate(monkeypatch, llm_module, execute)
             client = LLMClient(api_key="unused")
             logs = tmp_path / "logs"
@@ -84,13 +104,15 @@ def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subte
             )):
                 prospective = task_pacing.prospective_wrapup_attempt_request(
                     llm=client, messages=_MESSAGES, model=model, reasoning_effort="high",
-                    tools=_TOOLS, cache_affinity=cache_key_for_model(model),
+                    tools=_TOOLS, cache_affinity=cache_key_for_model(model), task_id="parity",
                 )
                 try:
-                    call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
-                                        queue.Queue(), {}, initial_messages=_MESSAGES)
+                    reply, _ = call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                                   queue.Queue(), {}, initial_messages=_MESSAGES)
+                    if model == go_route[0]:
+                        assert reply["content"] == "4" and usage_accounting.last_physical_attempt_capture().state == "settled"
                 except _Captured:
-                    pass
+                    assert model != go_route[0]
             assert "request" in captured, "the real send never reached the physical executor"
             assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
                 key: getattr(prospective, key) for key in _IDENTITY}
@@ -449,9 +471,13 @@ def test_the_forced_lookahead_and_send_share_one_measurement_allowance_and_ident
     from dataclasses import replace
 
     from ouroboros import loop_forced_finalization as forced
+    from ouroboros.context_fit import ContextCore
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
     plan = replace(_forced_plan(mode, 128_000), initial_mode=mode)
+    source = ('prompts/SYSTEM.md', '1' * 64, 128, '2' * 64)
+    plan = replace(plan, core=ContextCore('', '', '', '', '', '', plan.user_content_json, False,
+                                         base_prompt_source=source))
     owner_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, task_metadata={}, model_turn_state=None)
     captured = []
 
@@ -476,6 +502,7 @@ def test_the_forced_lookahead_and_send_share_one_measurement_allowance_and_ident
         forced._call_forced_model_once(ctx)  # a direct / drift send: its own fresh measurement of the same bytes
     assert len(captured) == 2, "both forced sends reached the physical executor"
     admitted, direct = captured
+    assert admitted.physical_context.base_prompt_source == direct.physical_context.base_prompt_source == source
     assert admitted.max_completion_tokens == direct.max_completion_tokens == request.max_completion_tokens
     assert admitted.candidate_clock_free_sha256 == request.candidate_clock_free_sha256 is not None
     if mode == "nano":

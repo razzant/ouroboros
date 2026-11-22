@@ -1,17 +1,17 @@
-// Skills → Browse: sort, filter, category counts, the recommended shelf and the
+// Extensions → Browse: sort, filter, category counts, the recommended shelf and the
 // consequence row each card shows before its one action is pressed.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-    CONNECTORS, browseCardState, categoryCounts, isConnector, matchesQuery, recommendedMissing, renderBrowseCard, shelfItems,
-    sortCatalogItems,
+    CONNECTORS, browseCardState, categoryCounts, createSkillBrowse, installPolicy, isConnector, matchesQuery, recommendedMissing, renderBrowseCard,
+    shelfItems, sortCatalogItems,
 } from '../modules/skill_browse.js';
+import { domDouble } from './dom_double.js';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/skills_v4/${name}`, import.meta.url), 'utf8'));
 const CATALOG = fixture('skill_catalog.json');
-const SOURCES = new Map(fixture('skill_sources.json').sources.map((source) => [source.id, source]));
 const LISTING = fixture('extensions_v4.json').skills;
 const item = (id) => structuredClone(CATALOG.items.find((entry) => entry.id === id));
 const installed = (name) => structuredClone(LISTING.find((skill) => skill.name === name));
@@ -70,16 +70,47 @@ test('the shelf is for an install that predates the starter skills, on the unfil
     }
 });
 
-test('not installed: the trust of the source is the consequence sentence', () => {
-    const trusted = browseCardState(item('ouroboros/duckduckgo'), { source: SOURCES.get('ouroboros') });
-    assert.equal(text(trusted.status), 'Installs without review — you trust Ouroboros');
-    assert.match(trusted.action, /class="btn btn-primary btn-sm" data-browse-action="install"[^>]*>Install</);
-    const reviewed = browseCardState(item('ouroboros-community/scholion'), { source: SOURCES.get('ouroboros-community') });
-    assert.equal(text(reviewed.status), 'Ouroboros reviews it before it runs');
+test('not installed: how the entry\'s own source was set is the consequence sentence, said only while that setting holds', () => {
+    // The entry carries its source's trust as its catalog read it; the host reads the source again when Install is
+    // pressed. The same catalog's row of that source says whether the owner confirmed the setting.
+    const says = (id, sources) => text(browseCardState(item(id), { policy: installPolicy(item(id), sources) }).status);
+    const confirmed = CATALOG.sources.map((row) => ({ ...row, confirmed: true }));
+    assert.equal(says('ouroboros/duckduckgo', confirmed), 'Installs without review while you trust Ouroboros');
+    assert.equal(says('ouroboros-community/scholion', confirmed), 'Reviewed before it runs while that is the setting for Ouroboros Community');
+    // A new install has not confirmed the hub: the setting the host installs by is said, as the suggested one.
+    assert.equal(CATALOG.sources.find((row) => row.id === 'ouroboros').confirmed, false);
+    assert.equal(says('ouroboros/duckduckgo', CATALOG.sources), 'Installs without review while that is the suggested setting for Ouroboros');
+    assert.equal(says('ouroboros-community/scholion', CATALOG.sources),
+        'Reviewed before it runs while that is the suggested setting for Ouroboros Community');
+    // Built in is where a skill comes from (its chip and who line); the sentence is its source's setting like any other.
+    const builtin = { ...item('builtin/telegram'), trust: 'review' };
+    assert.equal(text(browseCardState(builtin, { policy: installPolicy(builtin, CATALOG.sources.map((row) => ({ ...row, trust: row.id === 'builtin' ? 'review' : row.trust }))) }).status),
+        'Reviewed before it runs while that is the setting for Built in');
+    // Another source's row is never borrowed: without the entry's own row nothing is said of the owner's choice,
+    // and without the entry's own trust nothing is promised.
+    assert.equal(says('ouroboros/duckduckgo', confirmed.filter((row) => row.id !== 'ouroboros')), 'Installs without review while that is the setting for Ouroboros');
+    const bare = { ...item('ouroboros/duckduckgo'), trust: undefined };
+    assert.equal(text(browseCardState(bare, { policy: installPolicy(bare, confirmed) }).status), 'Its source’s setting decides the review');
+    assert.match(browseCardState(item('ouroboros/duckduckgo')).action, /class="btn btn-primary btn-sm" data-browse-action="install"[^>]*>Install</);
+});
+
+test('a registry hit is another answer than the catalog: only a row that is the same source with the same setting says the owner confirmed it', () => {
+    const claw = fixture('skill_catalog_search.json').items.find((entry) => entry.id === 'clawhub/steipete/weather');
+    const says = (entry, sources) => text(browseCardState(entry, { policy: installPolicy(entry, sources) }).status);
+    assert.deepEqual(installPolicy(claw, CATALOG.sources), { trust: 'review', name: 'ClawHub', confirmed: true });
+    // The search answered after the registry was set otherwise: the catalog's row is the earlier setting, so its
+    // «confirmed» is no fact of this one and «you trust» is not said.
+    const since = { ...claw, trust: 'trusted' };
+    assert.deepEqual(installPolicy(since, CATALOG.sources), { trust: 'trusted', name: 'ClawHub', confirmed: undefined });
+    assert.equal(says(since, CATALOG.sources), 'Installs without review while that is the setting for ClawHub');
+    // The id names another source in the catalog: its «suggested» is not this registry's either.
+    const another = CATALOG.sources.map((row) => (row.id === 'clawhub' ? { ...row, name: 'Another registry', confirmed: false } : row));
+    assert.equal(installPolicy(claw, another).confirmed, undefined);
+    assert.equal(says(claw, another), 'Reviewed before it runs while that is the setting for ClawHub');
 });
 
 test('install in flight: Installing… (trusted) or Reviewing with Skip review, never a timer or percent', () => {
-    const installing = browseCardState(item('ouroboros/duckduckgo'), { source: SOURCES.get('ouroboros'), pending: { phase: 'installing', startedAt: Date.now() } });
+    const installing = browseCardState(item('ouroboros/duckduckgo'), { pending: { phase: 'installing', startedAt: Date.now() } });
     assert.match(installing.status, MOVING);
     assert.equal(tone(installing.status), 'muted', 'an install goes on by itself: a neutral sentence');
     assert.equal(text(installing.status), 'Installing…');
@@ -177,8 +208,8 @@ test('before the installed listing is read, the catalog\'s own join says install
     assert.equal(early.action, '', 'every action needs the listing row');
     const taken = { ...item('ouroboros/duckduckgo'), installed: { state: 'name_taken', source_id: 'my-folder', source_name: 'My skills' } };
     assert.equal(text(browseCardState(taken, { listed: false }).status), 'You have another “duckduckgo” (from My skills)');
-    assert.match(browseCardState(item('ouroboros/duckduckgo'), { listed: false, source: SOURCES.get('ouroboros') }).action, />Install</);
-    assert.equal(text(browseCardState(item('ouroboros/weather'), { listed: true }).status), 'Ouroboros reviews it before it runs',
+    assert.match(browseCardState(item('ouroboros/duckduckgo'), { listed: false }).action, />Install</);
+    assert.equal(text(browseCardState(item('ouroboros/weather'), { listed: true }).status), 'Installs without review while that is the setting for Ouroboros',
         'once read, the listing decides (here: not installed)');
 });
 
@@ -187,6 +218,7 @@ test('a card: name opens the sheet, Official only on endorsed entries, unknown p
     const weather = renderBrowseCard(item('ouroboros/weather'), { state: { status: 'S', action: 'A' }, categoryLabels: labels });
     assert.match(weather, /data-browse-action="open" data-item="ouroboros\/weather"><span data-i18n-authored>weather/);
     assert.match(weather, /data-official-mark/);
+    assert.doesNotMatch(weather, /data-official-source/, 'the mark is explained from this entry, never a source looked up by id');
     assert.match(weather, />▲ 25 votes</);
     assert.match(weather, /<span class="ui-chip skills-chip" data-tone="neutral">City &amp; services<\/span>/);
     const hidden = renderBrowseCard(item('ouroboros/weather'), { state: { status: '', action: '' }, categoryLabels: labels, showCategory: false });
@@ -213,10 +245,10 @@ test('a connector is known by its place declaration, never a typed tag: icon, «
     assert.equal(isConnector(slack), true);
     assert.equal(isConnector(item('ouroboros/duckduckgo')), false);
     assert.equal(isConnector({ category: [CONNECTORS] }), true, 'a catalog category of the same id joins it');
-    const card = renderBrowseCard(slack, { source: SOURCES.get(slack.source_id), state: browseCardState(slack) });
+    const card = renderBrowseCard(slack, { state: browseCardState(slack) });
     assert.match(card, /<div class="skills-head-title"><span class="skills-card-icon" aria-hidden="true"><svg/);
     assert.match(card, /<div class="skills-card-cats"><span class="ui-chip skills-chip" data-tone="neutral">Connects Slack<\/span>/);
-    const plain = renderBrowseCard(item('ouroboros/duckduckgo'), { source: SOURCES.get('ouroboros'), state: browseCardState(item('ouroboros/duckduckgo')) });
+    const plain = renderBrowseCard(item('ouroboros/duckduckgo'), { state: browseCardState(item('ouroboros/duckduckgo')) });
     assert.doesNotMatch(plain, /skills-card-icon|Connects /);
 });
 
@@ -232,9 +264,173 @@ test('Browse uses the optional title or connector label while retaining its cano
     const connector = { connects: ['Mail'], contributes: [{ provides: 'place', label: 'Mailbox' }] };
     for (const [extra, title] of [[{ ...connector, title: 'Email tools' }, 'Email tools'], [connector, 'Mailbox'], [{ connects: ['Mail'] }, 'weather'], [{}, 'weather']]) {
         const candidate = { ...base, ...extra };
-        const html = renderBrowseCard(candidate, { source: SOURCES.get(candidate.source_id), state: browseCardState(candidate) });
+        const html = renderBrowseCard(candidate, { state: browseCardState(candidate) });
         assert.ok(html.includes(`<span data-i18n-authored>${title}</span>`));
         assert.match(html, /skills-card-who"><span data-i18n-authored>weather<\/span>/);
         assert.match(html, /data-item="ouroboros\/weather"/);
+    }
+});
+
+function browseDom() {
+    const { doc, el } = domDouble({ parseHtml: true });
+    const pane = el(), chrome = el(), scroller = el();
+    scroller.className = 'skills-scroll';
+    scroller.append(pane);
+    doc.body.append(chrome, scroller);
+    class Observer { observe() {} disconnect() {} }
+    const globals = { document: doc, CSS: { escape: String }, ResizeObserver: Observer, MutationObserver: Observer,
+        requestAnimationFrame: (fn) => fn(), localStorage: { getItem: () => null } };
+    const previous = Object.fromEntries(Object.keys(globals).map((key) => [key, globalThis[key]]));
+    Object.assign(globalThis, globals);
+    return { doc, pane, chrome, scroller, restore: () => Object.assign(globalThis, previous) };
+}
+
+test('a registry hit drawn from its search answer says that answer\'s setting, and nothing of a confirmation the catalog recorded for another', async (t) => {
+    const { pane, chrome, restore } = browseDom();
+    t.mock.method(globalThis, 'fetch', () => assert.fail('This display test has no network'));
+    // The catalog was read while the registry reviewed each skill; the search answers after it was set otherwise.
+    const registry = { id: 'clawhub', name: 'ClawHub', kind: 'registry', trust: 'review', confirmed: true };
+    const hit = { id: 'clawhub/acme/notes', name: 'notes', registry_slug: 'acme/notes', description: 'Notes.',
+        source_id: registry.id, source_name: registry.name, trust: 'trusted' };
+    const asked = [];
+    const browse = createSkillBrowse({ pane, chrome, host: {
+        installedByName: () => new Map(), sources: async () => {}, sourceSnapshot: () => ({ rows: [registry] }),
+        catalog: async () => ({ items: [], sources: [registry] }),
+    }, api: { search: async (query) => { asked.push(query); return { items: [hit] }; } } });
+    try {
+        await browse.show();
+        await browse.searchFor('notes');
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(asked, [{ q: 'notes', source: '' }]);
+        assert.equal(pane.querySelector('.marketplace-card .skills-status-text').textContent,
+            'Installs without review while that is the setting for ClawHub', 'its own setting; «you trust» is not said of it');
+    } finally { browse.destroy(); restore(); }
+});
+
+test('cards and the shelf say how each entry installs while its source\'s setting holds; the list of sources changes none of them', async (t) => {
+    const { pane, chrome, restore } = browseDom();
+    t.mock.method(globalThis, 'fetch', () => assert.fail('This display test has no network'));
+    const source = { id: 'ouroboros', name: 'Ouroboros', kind: 'hub', part: 'official', trust: 'review', confirmed: false };
+    const entry = (name, recommended = false) => ({ id: `ouroboros/${name}`, name, source_id: source.id, source_name: source.name,
+        trust: source.trust, recommended });
+    const catalog = { starter: { state: 'upgrade' }, sources: [source], items: [entry('tiles', true), entry('weather')] };
+    // The list of sources names the filters. Here it says something else under the same id, then cannot be read.
+    let facts = { rows: [{ ...source, trust: 'trusted', confirmed: true }], error: null };
+    const browse = createSkillBrowse({ pane, chrome, host: {
+        installedByName: () => new Map(), sources: async () => {}, sourceSnapshot: () => facts, catalog: async () => catalog,
+    } });
+    const says = () => pane.querySelectorAll('.marketplace-card .skills-status-text').map((node) => node.textContent);
+    try {
+        await browse.show();
+        const suggested = 'Reviewed before it runs while that is the suggested setting for Ouroboros';
+        assert.deepEqual(says(), [suggested, suggested], 'one recommended entry and one on the board');
+        assert.equal(pane.querySelector('.skills-group-title p').textContent, `Picked by Ouroboros · ${suggested}`);
+        assert.equal(chrome.querySelector('[data-browse-source]').textContent, 'All sourcesOuroboros (2)');
+        assert.equal(browse.repaintSourceFacts, undefined, 'a source read has nothing of Browse to repaint');
+        assert.deepEqual(browse.officialSource('ouroboros/tiles'), { trust: 'review', name: 'Ouroboros', confirmed: false, url: undefined });
+        assert.equal(browse.officialSource('removed/tiles'), null, 'an entry that is not shown says nothing of a source');
+        const cards = pane.querySelectorAll('.marketplace-card');
+        facts = { ...facts, error: new Error('display fixture: read unavailable') };
+        browse.repaintStates();  // the installed listing moved; the failed list of sources is no fact of a card
+        assert.deepEqual(says(), [suggested, suggested]);
+        assert.deepEqual(pane.querySelectorAll('.marketplace-card'), cards);
+    } finally { browse.destroy(); restore(); }
+});
+
+test('an open detail keeps the entry it shows when the catalog is read again: its words, its action and what that action acts on', async (t) => {
+    const { doc, pane, chrome, restore } = browseDom();
+    t.mock.method(globalThis, 'fetch', () => assert.fail('This display test has no network'));
+    const source = { id: 'ouroboros', name: 'Ouroboros', kind: 'hub', part: 'official', trust: 'review', confirmed: true };
+    const entry = (version, trust) => ({ id: 'ouroboros/weather', name: 'weather', version, source_id: source.id, source_name: source.name, trust });
+    let catalog = { sources: [source], items: [entry('1.0.0', 'review')] };
+    // The name is taken by a copy from a source that is not connected now: the card and the sheet offer Compare….
+    const here = installed('weather');
+    const elsewhere = { ...here, install: { ...here.install, source: { name: 'Elsewhere', kind: 'git' } } };
+    let listing = new Map([[elsewhere.name, elsewhere]]);
+    const compared = [];
+    const browse = createSkillBrowse({ pane, chrome, host: {
+        installedByName: () => listing, sources: async () => {}, sourceSnapshot: () => ({ rows: [source] }), catalog: async () => catalog,
+        compare: async (shown) => { compared.push(shown.version); return 'keep'; },
+    }, api: { item: () => new Promise(() => {}) } });
+    try {
+        await browse.show();
+        assert.equal(pane.querySelector('.marketplace-card .skills-status-text').textContent, 'You have another “weather” (from Elsewhere)');
+        pane.querySelector('.skills-card-name').click();
+        const sheet = doc.body.querySelector('.skills-detail-sheet');
+        const review = () => sheet.querySelectorAll('.skills-sheet-section')
+            .find((section) => section.querySelector('h3')?.textContent === 'Review').querySelector('p').textContent;
+        const opened = 'Ouroboros reviews it on this computer before it runs while that is the setting for the Ouroboros source. You can skip the review.';
+        assert.equal(review(), opened, 'this entry, never the review of the other installed copy');
+        const compare = sheet.querySelector('[data-sheet-action="compare"]');
+        compare.focus();
+        browse.repaintStates();  // the installed listing was read again and says the same
+        assert.equal(sheet.querySelector('[data-sheet-action="compare"]'), compare, 'an unchanged action keeps its button');
+        assert.equal(doc.activeElement, compare, 'and the keyboard its place');
+
+        // The catalog is read again: the same id now carries another version, from a source set otherwise.
+        catalog = { sources: [{ ...source, trust: 'trusted' }], items: [entry('2.0.0', 'trusted')] };
+        await browse.show();
+        browse.repaintStates();
+        assert.match(sheet.querySelector('.document-reader-meta').textContent, /v1\.0\.0/);
+        assert.equal(review(), opened, 'an id brings the open sheet no other entry\'s setting');
+        assert.equal(sheet.querySelector('[data-sheet-action="compare"]'), compare);
+        assert.equal(doc.activeElement, compare);
+        compare.click();
+        pane.querySelector('[data-browse-action="compare"]').click();
+        await Promise.resolve();
+        assert.deepEqual(compared, ['1.0.0', '2.0.0'], 'the sheet acts on the entry it shows, the card on the entry it was drawn from');
+
+        // The copy of this source lands: the head mirrors the card's one action; Review stays what the sheet opened with.
+        listing = new Map([[here.name, here]]);
+        browse.repaintStates();
+        assert.equal(sheet.querySelector('[data-sheet-action="compare"]'), null);
+        assert.ok(sheet.querySelector('[data-sheet-action="update"]'), 'the head follows the installed listing');
+        assert.equal(review(), opened);
+    } finally { browse.destroy(); restore(); }
+});
+
+test('Browse redraw keeps each detail opener; Widgets leaves a sheet through the same action with its opener', async () => {
+    const { doc, pane, chrome, restore } = browseDom();
+    const source = { id: 'fixture', kind: 'registry' };
+    const entry = { id: 'fixture/widget', name: 'widget', source_id: source.id, description: 'Long description. '.repeat(40) };
+    const ready = { name: entry.name, version: '1.0.0', type: 'extension', enabled: true, live_loaded: true,
+        review_status: 'clean' };
+    let live;
+    const jumps = [];
+    const browse = createSkillBrowse({ pane, chrome, host: {
+        installedByName: () => new Map([[ready.name, ready]]), live: () => live,
+        sources: async () => [source], sourceSnapshot: () => ({ rows: [source] }), catalog: async () => ({ items: [entry] }),
+        runInstalledAction(name, action, options) {
+            jumps.push({ name, action, options, modal: doc.body.querySelector('.skills-detail-sheet') });
+        },
+    } });
+    try {
+        await browse.show();
+        for (const selector of ['.skills-card-name', '.skills-read-more', '.skills-card-action-row [data-browse-action="open"]']) {
+            const before = pane.querySelector(selector);
+            assert.ok(before, selector);
+            before.focus();
+            await browse.show();
+            assert.equal(before.isConnected, false, 'a real board rebuild took place');
+            assert.equal(doc.activeElement, pane.querySelector(selector), selector);
+        }
+
+        live = { ui_tabs: [{ skill: ready.name }] };
+        await browse.show();
+        pane.querySelector('[data-browse-action="widgets"]').click();
+        assert.deepEqual(jumps[0], { name: 'widget', action: 'open_widgets', options: undefined, modal: null });
+
+        const opener = pane.querySelector('.skills-read-more');
+        opener.focus();
+        opener.click();
+        await browse.show();  // the modal remains up, but its opening button was replaced
+        assert.equal(opener.isConnected, false);
+        const current = pane.querySelector('.skills-read-more');
+        doc.body.querySelector('[data-sheet-action="widgets"]').click();
+        assert.deepEqual(jumps[1], { name: 'widget', action: 'open_widgets', options: { opener: current }, modal: null });
+        assert.equal(doc.activeElement, current);
+    } finally {
+        browse.destroy();
+        restore();
     }
 });

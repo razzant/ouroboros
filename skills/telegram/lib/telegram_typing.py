@@ -30,7 +30,9 @@ first success; a permanent rejection mutes that chat with one warning until a
 message reaches it again. That pacing and suppression belong to the accepted
 token's generation: after a change (the token observer wakes the cue) every chat
 starts over, and a request of the replaced token records nothing when it ends,
-success or failure. The message ordering above holds whatever the token. No
+success or failure. An action goes out only through a client of the token whose
+read chose its chat (a proven address names a bot: plugin.py ``_typing_cue``).
+The message ordering above holds whatever the token. No
 ``asyncio.wait_for``: on Python 3.10 it can swallow a concurrent cancel.
 Unloading the skill cancels the task and its in-flight sends; a late wake is
 then a no-op.
@@ -216,7 +218,13 @@ class TypingCue:
     async def _send(self, chat: int) -> None:
         scope = self._scope
         try:
-            await self._client_factory().send_chat_action(chat, "typing")
+            client = self._client_factory()
+            # The chat was chosen for another token: the next read chooses for this one. A cue no read has
+            # scoped yet (``_scope`` None) chose for no token, so it sends as before.
+            if scope is not None and getattr(client, "generation", scope) != scope:
+                self.wake()
+                return
+            await client.send_chat_action(chat, "typing")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

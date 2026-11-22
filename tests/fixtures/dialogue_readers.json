@@ -18,7 +18,8 @@
           "source": "chat",
           "offset": 0
         },
-        "row_address": "row:1@2026-10-01T00:00:01Z#7f6e6fde6789"
+        "row_address": "row:1@2026-10-01T00:00:01Z#7f6e6fde6789",
+        "reply_author_label": "You"
       },
       {
         "text": "Archived answer",
@@ -37,7 +38,8 @@
           "source": "chat",
           "offset": 220
         },
-        "row_address": "row:1@2026-10-01T00:00:03Z#7c749e59c2cc"
+        "row_address": "row:1@2026-10-01T00:00:03Z#7c749e59c2cc",
+        "reply_author_label": "Ouroboros"
       },
       {
         "text": "Archived progress",
@@ -53,7 +55,8 @@
           "offset": 0
         },
         "task_terminal_status": "completed",
-        "row_address": "row:1@2026-10-01T00:00:04Z#deb3302caf66"
+        "row_address": "row:1@2026-10-01T00:00:04Z#deb3302caf66",
+        "reply_author_label": "System"
       },
       {
         "text": "Current progress",
@@ -122,7 +125,8 @@
           "cause": "finished",
           "refusal": "author_finished"
         },
-        "row_address": "row:1@2026-10-01T00:00:06Z#0568bae630f6"
+        "row_address": "row:1@2026-10-01T00:00:06Z#0568bae630f6",
+        "reply_author_label": "System"
       },
       {
         "text": "Document",
@@ -147,7 +151,8 @@
         "download_url": "/api/tasks/golden-task/artifacts/report.txt",
         "download_url_compat": "",
         "caption": "",
-        "row_address": "row:1@2026-10-01T00:00:07Z#b33dae82086b"
+        "row_address": "row:1@2026-10-01T00:00:07Z#b33dae82086b",
+        "reply_author_label": "Ouroboros"
       },
       {
         "text": "Main newest",
@@ -166,7 +171,8 @@
           "source": "chat",
           "offset": 784
         },
-        "row_address": "row:1@2026-10-01T00:00:09Z#df82c61d434f"
+        "row_address": "row:1@2026-10-01T00:00:09Z#df82c61d434f",
+        "reply_author_label": "Ouroboros"
       }
     ],
     "window": {
@@ -223,7 +229,8 @@
           "source": "chat",
           "offset": 0
         },
-        "row_address": "row:1@2026-10-01T00:00:01Z#7f6e6fde6789"
+        "row_address": "row:1@2026-10-01T00:00:01Z#7f6e6fde6789",
+        "reply_author_label": "You"
       },
       {
         "text": "Archived answer",
@@ -242,7 +249,8 @@
           "source": "chat",
           "offset": 220
         },
-        "row_address": "row:1@2026-10-01T00:00:03Z#7c749e59c2cc"
+        "row_address": "row:1@2026-10-01T00:00:03Z#7c749e59c2cc",
+        "reply_author_label": "Ouroboros"
       },
       {
         "text": "Archived progress",
@@ -258,7 +266,8 @@
           "offset": 0
         },
         "task_terminal_status": "completed",
-        "row_address": "row:1@2026-10-01T00:00:04Z#deb3302caf66"
+        "row_address": "row:1@2026-10-01T00:00:04Z#deb3302caf66",
+        "reply_author_label": "System"
       },
       {
         "text": "Current progress",
@@ -327,7 +336,8 @@
           "cause": "finished",
           "refusal": "author_finished"
         },
-        "row_address": "row:1@2026-10-01T00:00:06Z#0568bae630f6"
+        "row_address": "row:1@2026-10-01T00:00:06Z#0568bae630f6",
+        "reply_author_label": "System"
       },
       {
         "text": "Document",
@@ -352,7 +362,8 @@
         "download_url": "/api/tasks/golden-task/artifacts/report.txt",
         "download_url_compat": "",
         "caption": "",
-        "row_address": "row:1@2026-10-01T00:00:07Z#b33dae82086b"
+        "row_address": "row:1@2026-10-01T00:00:07Z#b33dae82086b",
+        "reply_author_label": "Ouroboros"
       },
       {
         "text": "Main newest",
@@ -371,7 +382,8 @@
           "source": "chat",
           "offset": 784
         },
-        "row_address": "row:1@2026-10-01T00:00:09Z#df82c61d434f"
+        "row_address": "row:1@2026-10-01T00:00:09Z#df82c61d434f",
+        "reply_author_label": "Ouroboros"
       }
     ],
     "window": {
@@ -459,7 +471,8 @@
           "source": "chat",
           "offset": 124
         },
-        "row_address": "row:77748779@2026-10-01T00:00:02Z#8d5fc85ff9b9"
+        "row_address": "row:77748779@2026-10-01T00:00:02Z#8d5fc85ff9b9",
+        "reply_author_label": "Ouroboros"
       },
       {
         "text": "Room question",
@@ -478,7 +491,8 @@
           "source": "chat",
           "offset": 338
         },
-        "row_address": "row:77748779@2026-10-01T00:00:06Z#7a8fdfafbc62"
+        "row_address": "row:77748779@2026-10-01T00:00:06Z#7a8fdfafbc62",
+        "reply_author_label": "You"
       },
       {
         "text": "Room answer",
@@ -497,7 +511,8 @@
           "source": "chat",
           "offset": 689
         },
-        "row_address": "row:77748779@2026-10-01T00:00:08Z#78af2e502fc9"
+        "row_address": "row:77748779@2026-10-01T00:00:08Z#78af2e502fc9",
+        "reply_author_label": "Ouroboros"
       }
     ],
     "window": {
@@ -554,7 +569,8 @@
           "source": "chat",
           "offset": 124
         },
-        "row_address": "row:77748779@2026-10-01T00:00:02Z#8d5fc85ff9b9"
+        "row_address": "row:77748779@2026-10-01T00:00:02Z#8d5fc85ff9b9",
+        "reply_author_label": "Ouroboros"
       },
       {
         "text": "Room question",
@@ -573,7 +589,8 @@
           "source": "chat",
           "offset": 338
         },
-        "row_address": "row:77748779@2026-10-01T00:00:06Z#7a8fdfafbc62"
+        "row_address": "row:77748779@2026-10-01T00:00:06Z#7a8fdfafbc62",
+        "reply_author_label": "You"
       },
       {
         "text": "Room answer",
@@ -592,7 +609,8 @@
           "source": "chat",
           "offset": 689
         },
-        "row_address": "row:77748779@2026-10-01T00:00:08Z#78af2e502fc9"
+        "row_address": "row:77748779@2026-10-01T00:00:08Z#78af2e502fc9",
+        "reply_author_label": "Ouroboros"
       }
     ],
     "window": {

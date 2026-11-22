@@ -337,11 +337,17 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
                         "for a read-only child; omit it or write_surface.")
     if params.get("workspace") == "in_place":  # the documented default geometry is no folder request, as at delegate_start
-        if str(params.get("write_surface") or "").strip().lower() not in {"self_worktree", "external_workspace", "genesis"} \
-                or not default_shaped_directory_options(directory_options.get("directory_strategy"),
-                                                        directory_options.get("scope_paths")):
+        surface = str(params.get("write_surface") or "").strip().lower()
+        in_the_way = [] if surface in {"self_worktree", "external_workspace", "genesis"} else [
+            f"write_surface={params['write_surface']!r}" if params.get("write_surface") else "no write_surface"]
+        if not default_shaped_directory_options(directory_options.get("directory_strategy"),
+                                                directory_options.get("scope_paths")):
+            in_the_way += ["directory_strategy='copy'"] * (directory_options.get("directory_strategy") == "copy") + [
+                "scope_paths"] * bool(directory_options.get("scope_paths"))
+        if in_the_way:
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace='in_place' needs an acting Git write_surface "
-                        "and no directory options.")
+                        f"and no directory options; in the way: {', '.join(in_the_way)}. Omitting workspace removes "
+                        "this conflict.")
         directory_options["workspace"] = "in_place"
 
     # Folder geometry is a WRITE-side request: a read-only child reads the selected

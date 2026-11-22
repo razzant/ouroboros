@@ -59,10 +59,11 @@ def _container(data, task_id="task-1", key="snap-1"):
 
 def _hold(data, reason, task_id="task-1", key="snap-1"):
     """The typed hold one kept record reports: its class, the record folder and since the note was written."""
+    from ouroboros.maintenance_jobs import HOLD_EXAMPLE_CHARS
     from ouroboros.session_scratch import _iso
 
     note = data / OPEN_SCRATCH_DIR / task_id / f"{key}.json"
-    return {"class": reason, "count": 1, "example": str(_record(data, task_id, key).parent),
+    return {"class": reason, "count": 1, "example": str(_record(data, task_id, key).parent)[:HOLD_EXAMPLE_CHARS],
             "since": _iso(note.lstat().st_mtime)}
 
 

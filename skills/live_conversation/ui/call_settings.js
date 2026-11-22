@@ -69,11 +69,16 @@ export function scheduleSave(form, save, env = globalThis, delay = 150) {
 }
 
 export function mountCallSettings(form, { skill, env = globalThis, read = () => fetchJson(`/api/extensions/${encodeURIComponent(skill)}/config`) } = {}) {
+    // Leave an unread host form (including its explicit Edit anyway choice) to the host.
+    if (form.dataset.extensionSettingsBlocked) return { ready: Promise.resolve(), dispose() {} };
     const fields = form.querySelector('.form-grid');
     const save = form.querySelector('button[type="submit"]');
     const status = form.querySelector('[data-extension-settings-status]');
     let disposed = false, draft, devices = null;
     let stopDevices = () => {};
+    // The declarative controls are placeholders until the catalog arrives. A failed catalog read must not strand a draft.
+    form.dataset.extensionSettingsBlocked = '1';
+    for (const field of fields.querySelectorAll('input, select, textarea')) field.disabled = true;
     save.disabled = true;
     const autosave = scheduleSave(form, save, env);
     function paint() {
@@ -96,6 +101,7 @@ export function mountCallSettings(form, { skill, env = globalThis, read = () => 
     form.addEventListener('change', changed);
     const ready = read().then(config => {
         if (disposed) return;
+        if (!Array.isArray(config?.catalogs)) throw new Error('No call settings catalog');
         draft = config;
         paint();
         devices = form.ownerDocument.createElement('div');

@@ -276,7 +276,8 @@ STARTED_STR_FIELDS: Tuple[Tuple[str, str], ...] = tuple(
 # window origin. ``row_effort`` is the configured pin ('' = Auto), ``effort`` the leaf's level; ``row_processing``
 # the row's own tier, ``processing_preference`` the run's.
 STARTED_MAPPING_FIELDS = ("authority_ceiling", "promotion")
-STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort", "row_processing", "window_started_at")
+STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort", "row_processing", "window_started_at",
+                         "resume_start_state")
 # Progress carried forward from a previous row: an idempotent re-start writes a
 # SECOND started row; replacing wholesale would forget a settlement and put a
 # finished run back into the orphan sweep (which would cancel it).

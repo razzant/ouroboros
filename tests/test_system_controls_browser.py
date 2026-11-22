@@ -330,9 +330,17 @@ def test_shared_controls_material_and_real_actions(room_ui, theme, width):
         page.locator('[data-mobile-nav-toggle]').first.click()
     update = page.locator('#update-pill')
     update.wait_for()
+    # An update on offer is the crimson primary capsule, the word Update alone (owner 21.11).
+    update.hover()
+    offer = update.evaluate("""el=>{const p=el.appendChild(document.createElement('i'));
+        p.style.backgroundColor='var(--tone-crimson-hover)';const v=getComputedStyle(p).backgroundColor;p.remove();return v;}""")
+    assert update.text_content() == 'Update' and paint(update)["bg"] == offer, (paint(update), offer)
+    results["update-offer"] = paint(update)
+    # The shared button states and the pill's palette on an attempt's material (the controller swaps the crimson for
+    # the neutral capsule while an attempt shows): neutral, the owner's amber (local changes) and the failure's red.
+    # A confirmed success has no capsule (owner 1B), so no green tone is drawn for it.
+    update.evaluate("el=>el.classList.replace('btn-primary', 'btn-default')")
     results["update"] = button_states(page, update)
-    # The pill's palette: neutral, the owner's amber (local changes) and the failure's red. A confirmed success has no
-    # capsule (owner 1B), so no green tone is drawn for it.
     for tone, token in [('neutral', '--surface-capsule'), ('warn', '--tone-amber'), ('error', '--tone-red')]:
         update.evaluate('(el,tone)=>el.dataset.tone=tone', tone)
         update.hover()
@@ -367,7 +375,7 @@ def test_shared_controls_material_and_real_actions(room_ui, theme, width):
         'outcome': 'applied', 'concluded_by': 'boot', 'current_generation': True}
     transport.send({'type': 'update_progress_changed'})
     # A confirmed success wears nothing and never masks the newer version this fixture announces ...
-    page.wait_for_function("document.querySelector('#update-pill')?.textContent==='Update available'")
+    page.wait_for_function("document.querySelector('#update-pill')?.textContent==='Update'")
     assert update.get_attribute('data-tone') is None
     assert page.locator('.update-notice-close').count() == 1 and not page.locator('.update-notice-close').is_visible()
     # ... and with nothing newer to announce there is no capsule at all.

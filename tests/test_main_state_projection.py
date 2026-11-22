@@ -12,51 +12,17 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros import obligations, usage_store
-from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.gateway.state import api_state
 from ouroboros.model_wait import mutate_wait
 from ouroboros.owner_quiz import record_asked, record_publication, reconcile_terminal
 from ouroboros.projects_registry import create_project
 from ouroboros.task_results import load_task_result, write_task_result
 from supervisor.message_bus import log_chat
+from tests._queue_state import gateway, read_state as _state  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 
 
-@pytest.fixture
-def gateway(tmp_path, monkeypatch):
-    """Real gateway handlers and source readers; no supervisor lifespan or workers."""
-    from ouroboros import config
-    from supervisor import active_activity, queue, state, workers
-
-    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
-    monkeypatch.setattr(config, "REPO_DIR", tmp_path / "repo")
-    monkeypatch.setattr(state, "DRIVE_ROOT", tmp_path)
-    for name, relative in (("STATE_PATH", "state/state.json"),
-                           ("STATE_LAST_GOOD_PATH", "state/state.last_good.json"),
-                           ("STATE_LOCK_PATH", "locks/state.lock")):
-        monkeypatch.setattr(state, name, tmp_path / relative)
-    monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 0.0)
-    state.save_state({"owner_id": 1, "current_branch": "fixture", "current_sha": "a" * 40,
-                      "bg_consciousness_enabled": False, "evolution_mode_enabled": False})
-    usage_store.migrate_from_journal(tmp_path)
-    pending, running = [], {}
-    for module in (queue, workers):
-        monkeypatch.setattr(module, "DRIVE_ROOT", tmp_path)
-        monkeypatch.setattr(module, "PENDING", pending)
-        monkeypatch.setattr(module, "RUNNING", running)
-    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})
-    monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(active_activity, "_DIRECT_ACTIVITY_REGISTRY", active_activity.DirectActivityRegistry())
-    app = Starlette(routes=[Route("/api/state", api_state),
-                            Route("/api/chat/history", make_chat_history_endpoint(tmp_path))])
-    app.state.drive_root = tmp_path
-    app.state.app_start = 0.0
-    with TestClient(app) as client:
-        yield SimpleNamespace(root=tmp_path, client=client, pending=pending, running=running)
-
-
-def _project_task(gateway, task_id):
+def _project_task(gateway, task_id):  # noqa: F811
     project = create_project(gateway.root, "project", name="Older Project")
     task = {"id": task_id, "root_task_id": task_id, "project_id": project["id"],
             "chat_id": project["chat_id"], "budget_drive_root": str(gateway.root), "_attempt": 3}
@@ -65,7 +31,7 @@ def _project_task(gateway, task_id):
     return project, task
 
 
-def _ask(gateway, task_id="old-task"):
+def _ask(gateway, task_id="old-task"):  # noqa: F811
     project, task = _project_task(gateway, task_id)
     block = record_asked(gateway.root, task_id, quiz_id="format", question="Which output format?",
                          options=["PDF", "HTML"], option_details=["Printable", "Searchable"],
@@ -77,13 +43,7 @@ def _ask(gateway, task_id="old-task"):
     return project, task
 
 
-def _state(gateway):
-    response = gateway.client.get("/api/state")
-    assert response.status_code == 200, response.text
-    return response.json()
-
-
-def test_optional_terminal_question_outside_history_and_sidebar_reaches_state(gateway):
+def test_optional_terminal_question_outside_history_and_sidebar_reaches_state(gateway):  # noqa: F811
     project, task = _ask(gateway)
     write_task_result(gateway.root, task["id"], "completed", result="Result ready")
     reconcile_terminal(gateway.root, task["id"])
@@ -116,7 +76,7 @@ def test_optional_terminal_question_outside_history_and_sidebar_reaches_state(ga
     assert load_task_result(gateway.root, task["id"])["owner_quiz"]["format"]["state"] == "expired_terminal"
 
 
-def test_a_current_question_reaches_its_rooms_turn_through_the_state_composition(gateway):
+def test_a_current_question_reaches_its_rooms_turn_through_the_state_composition(gateway):  # noqa: F811
     """What Main's pill counts is its room's turn on the wire: ``state.py`` hands Main's current questions to the work
     projection, so the room of a question whose task ended stays the owner's turn (amber) at rest, and the tray's
     count holds it once."""
@@ -131,7 +91,7 @@ def test_a_current_question_reaches_its_rooms_turn_through_the_state_composition
     assert payload["work_summary"]["turn"] == 1
 
 
-def test_state_carries_current_model_access_and_budget_resume_controls(gateway):
+def test_state_carries_current_model_access_and_budget_resume_controls(gateway):  # noqa: F811
     project, task = _project_task(gateway, "access-task")
     wait = {"wait_id": "sign-in", "revision": 1, "task_attempt": 3, "state": "waiting",
             "role": "main", "reason": "auth", "model": "claudexor::codex=test-model",
@@ -173,7 +133,7 @@ def test_state_carries_current_model_access_and_budget_resume_controls(gateway):
 
 
 @pytest.mark.parametrize("damage", ["StoreBusy", "StoreMigrating", "StoreLost"])
-def test_unavailable_current_question_index_is_incomplete_not_empty_truth(gateway, monkeypatch, damage):
+def test_unavailable_current_question_index_is_incomplete_not_empty_truth(gateway, monkeypatch, damage):  # noqa: F811
     from ouroboros import store
     from ouroboros.gateway.state_publication import Publisher
     _ask(gateway)
@@ -198,7 +158,7 @@ def test_unavailable_current_question_index_is_incomplete_not_empty_truth(gatewa
         assert txn.revision() == revision
 
 
-def test_live_wait_identity_and_revision_survive_older_result_display(gateway):
+def test_live_wait_identity_and_revision_survive_older_result_display(gateway):  # noqa: F811
     _, task = _project_task(gateway, "live-revision")
     old = {"wait_id": "main", "revision": 1, "task_attempt": 3, "state": "waiting",
            "reason": "auth", "requires_owner_action": True, "auto_continue": False}
@@ -214,7 +174,7 @@ def test_live_wait_identity_and_revision_survive_older_result_display(gateway):
     assert activity["model_waits"] == {"main": settled, "review": review}
 
 
-def test_unreadable_live_wait_revision_discloses_gap_instead_of_old_controls(gateway):
+def test_unreadable_live_wait_revision_discloses_gap_instead_of_old_controls(gateway):  # noqa: F811
     _, task = _project_task(gateway, "unreadable-revision")
     old = {"wait_id": "main", "revision": 1, "task_attempt": 3, "state": "waiting",
            "reason": "auth", "requires_owner_action": True, "auto_continue": False}
@@ -279,7 +239,7 @@ def test_member_resume_belongs_to_its_root_unless_only_the_owner_can_select_it(t
                                     member, owner_paused=False) is False
 
 
-def test_census_resume_and_stop_follow_owner_facts_and_children_stay_out_of_the_census(gateway):
+def test_census_resume_and_stop_follow_owner_facts_and_children_stay_out_of_the_census(gateway):  # noqa: F811
     project, held = _project_task(gateway, "held-sleep")
     held["_budget_pause"] = {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}, "task_attempt": 3}
     held["_budget_pause_hold"] = _hold("saved_sleep_recovery")
@@ -667,7 +627,7 @@ def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, mon
         parked.join(10)
 
 
-def test_project_chat_ids_is_unknown_never_empty_while_no_row_of_the_registry_can_be_read(gateway):
+def test_project_chat_ids_is_unknown_never_empty_while_no_row_of_the_registry_can_be_read(gateway):  # noqa: F811
     """``[]`` means "no Projects" (a fresh install); a registry no row of which can be read is ``null``; an invalid
     row beside readable ones leaves the rooms they name. The feed's count says the same in the same body: unknown
     while the rooms are, never "none listed" (a reader keeps the rows it shows)."""
@@ -691,3 +651,23 @@ def test_project_chat_ids_is_unknown_never_empty_while_no_row_of_the_registry_ca
     assert rooms_and_count() == (None, None)
     registry.write_bytes(intact)
     assert rooms_and_count() == ([project["chat_id"]], 1)
+
+
+@pytest.mark.parametrize("unknown", ["lifecycle", "skipped_identity"])
+def test_unknown_project_feed_count_preserves_readable_reservations(gateway, unknown):  # noqa: F811
+    project = create_project(gateway.root, "known", name="Known")
+    registry = gateway.root / "state" / "projects.json"
+    data = json.loads(registry.read_bytes())
+    [known] = data["projects"]
+    gone = {**known, "lifecycle": "tombstoned"}
+    rows = [{**known, "lifecycle": "unknown"}] if unknown == "lifecycle" else [gone, {"chat_id": 7}]
+    registry.write_text(json.dumps({**data, "projects": rows}), encoding="utf-8")
+    payload = _state(gateway)
+    assert payload["projects"] == [] and payload["project_messages_revision"] is None
+    assert payload["project_chat_ids"] == [project["chat_id"]]
+    assert payload["project_listable_count"] is None
+
+    registry.write_text(json.dumps({**data, "projects": [gone]}), encoding="utf-8")
+    payload = _state(gateway)
+    assert payload["projects"] == [] and payload["project_listable_count"] == 0
+    assert payload["project_chat_ids"] == [project["chat_id"]]

@@ -570,7 +570,7 @@ def test_only_held_members_read_an_attempt_and_an_unreadable_one_is_a_disclosed_
             mock.patch.object(wp._Observations, "result", lambda self, task_id: None), \
             mock.patch.object(wp._Observations, "fence", lambda self, root_id, drive_root=None: {}), \
             mock.patch.object(wp._Observations, "model_handoffs", lambda self, root_id, drive_root=None: []), \
-            mock.patch.object(wp, "_open_runs", lambda drive_root: {}), \
+            mock.patch.object(wp, "_open_runs", lambda drive_root, state=None: {}), \
             mock.patch.object(wp, "_inflight_upkeep", lambda drive_root, known: []):
         # As ``work_fields``: the projection's real reads cache this root's stores (its usage store among them) and
         # Windows removes no open file, so this root's handles go back before the root does.

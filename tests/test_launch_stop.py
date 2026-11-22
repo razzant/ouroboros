@@ -954,12 +954,12 @@ def test_a_kept_service_is_listed_after_its_task_and_one_reasoned_stop_ends_only
     from ouroboros.tools.services import stop_task_services
 
     registry = _registry(tmp_path, monkeypatch, task_id="producer")
-    _start(registry, scripts, tmp_path / "kept.port", "preview", keep_alive=True)
+    started = _start(registry, scripts, tmp_path / "kept.port", "preview", keep_alive=True)
     _start(registry, scripts, tmp_path / "other.port", "sidecar", keep_alive=True)
     _start(registry, scripts, tmp_path / "plain.port", "plain")
     servers = {name: _server(tmp_path / f"{name}.port") for name in ("kept", "other", "plain")}
     drive = tmp_path / "data"
-    log = drive / "services" / "producer" / "preview.log"
+    log = Path(started["log_path"])
     with log.open("a", encoding="utf-8") as handle:
         handle.write("  Local:   http://127.0.0.1:4173/?token=secret\n")
     try:
@@ -1133,11 +1133,10 @@ def _start_late_writer(registry, scripts, tmp_path):
 def test_a_kept_services_output_written_after_its_task_ended_is_captured_into_that_task_by_the_owners_stop(
         tmp_path, monkeypatch, scripts):
     """The declared output exists only after the task ended. The owner's stop captures it as that task's own stop
-    would, into ITS store (never the stopper's), names who stopped it and why, and ordinary retention then archives
-    the log under that task while the output stays addressable."""
+    would, into ITS store (never the stopper's), names who stopped it and why, and ordinary retention then keeps the
+    log under that task, as its private copy, while the output stays addressable."""
     from ouroboros.artifacts import registered_task_artifact
     from ouroboros.launch_custody import stop_kept_service
-    from ouroboros.observability import read_blob_ref
     from ouroboros.tools.kept_service_outputs import declaration_path
     from ouroboros.tools.services import prune_service_logs, stop_task_services
 
@@ -1178,7 +1177,8 @@ def test_a_kept_services_output_written_after_its_task_ended_is_captured_into_th
         events = [json.loads(line) for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         (pruned,) = [row for row in events if row.get("type") == "service_log_pruned"]
         assert (pruned["task_id"], pruned["name"]) == ("producer", "reporter")
-        assert "(report.txt written)" in read_blob_ref(drive, pruned["full_log_ref"], expected_kind="txt")
+        private = drive / "observability" / "service_logs" / f"{pruned['private_log']['sha256']}.log"
+        assert b"(report.txt written)" in private.read_bytes() and "full_log_ref" not in pruned
         assert Path(registered_task_artifact(drive, "producer", "report.txt")["path"]).read_bytes() == payload
     finally:
         registry._ctx.task_id = "producer"
