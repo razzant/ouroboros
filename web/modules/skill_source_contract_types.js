@@ -271,7 +271,8 @@
 /**
  * A built-in skill's declared connection card on its starter item (its manifest's `connection_card`): `token` names
  * its token's secret field, `pairing.link` holds `{username}` and `{code}`; `title`, `pitch`, `steps`, `pairing.hint`,
- * `pairing.note` and `options` are the skill's own words.
+ * `pairing.note` and `options` are the skill's own words. `needs_allow`: this install grants reviewed skills nothing
+ * on its own, so the skill starts only once the owner allows it in Extensions.
  * @typedef {Object} StarterConnection
  * @property {string} skill
  * @property {string} token
@@ -280,6 +281,7 @@
  * @property {string=} pitch
  * @property {Object[]=} steps
  * @property {Object[]=} options
+ * @property {boolean=} needs_allow
  */
 
 /**

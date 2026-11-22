@@ -968,6 +968,7 @@ connection_card:
     code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}   # the skill's own settings
     link: "https://t.me/{username}?start={code}"   # https, with both places; drawn as the QR
     identity: "lib/telegram_pairing.py:bot_identity"   # stdlib-only function(token, timeout=) inside the skill
+    api_base: "lib/telegram_pairing.py:saved_api_base"   # optional: function(state_dir) naming the server to ask
     hint: "Scan it with your phone’s camera, then press Start in Telegram."
     note: "You can finish setup now; the bot answers once Ouroboros starts."
   options:                             # the skill's own settings too
@@ -977,18 +978,23 @@ connection_card:
 
 `identity` answers `{"ok": True, "username": …}`, `{"ok": False, "cause": "refused"}` (the service rejected the
 token) or `{"ok": False, "cause": "unreachable"}`; the host calls it from the app's own copy of the skill, waits a
-little longer than `timeout`, and never passes on its errors' text. The page mints the code (24 random bytes,
+little longer than `timeout`, and never passes on its errors' text. With `api_base` declared, the host first calls
+it with the skill's state directory and passes its answer as `identity`'s second argument; a reader that fails asks
+nobody. The page mints the code (24 random bytes,
 base64url, the form a skill's own minting gives). Finish saves the token alone in its one settings write, never the
 code; the completion route refuses a card's values from the Telegram Mini App, since a code names the account's owner.
 Once that write is saved, the owner's consent (the code and the options) is noted in `state/skill_starter.json`
-(`connections`), never in Settings or a log. When the skill is installed, the host grants the token key where reviewed
-skills are not granted automatically, then makes one post of every `store: skill_settings` value of the card that
-shares a route (here the code and the option) to `/api/extensions/<skill>/<route>` from the server itself over
+(`connections`), never in Settings or a log. Once the skill serves, the host makes one post of every
+`store: skill_settings` value of the card that shares a route (here the code and the option) to
+`/api/extensions/<skill>/<route>` from the server itself over
 loopback, so the route's own guard (owner changes only from the owner's local session) reads it as local; no request
 can choose what it posts. It posts on events that already happen, never on a timer: the starter install's end, a
 saved completion for a skill already installed, the skill's extension finishing its load, and the next start; a route
-that does not serve yet (409) waits for the next of them. The code leaves the record once posted or refused; each
-outcome is recorded there and none blocks Start. A card missing any part the host needs is not shown, and the skill
+that does not serve yet (409) waits for the next of them. A route that answers 200 with `owner_ignored: true` left
+the owner's values unchanged: that is recorded as not saved, never as a success. The card grants nothing: where
+reviewed skills are granted automatically, the install's own grant covers the token; where they are not, the card
+says the skill starts after the owner allows it in Extensions, and that load is the event that posts. The code leaves
+the record once posted or refused; each outcome is recorded there and none blocks Start. A card missing any part the host needs is not shown, and the skill
 stays an ordinary row.
 
 ## Grants for protected keys and host permissions

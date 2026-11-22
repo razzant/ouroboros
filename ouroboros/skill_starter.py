@@ -252,7 +252,7 @@ def schedule_starter(drive_root: pathlib.Path, ids: Optional[List[str]], *, orig
             log.warning("Starter skill installation failed", exc_info=True)
         from ouroboros.onboarding_connections import settle
 
-        settle(drive_root, repo_dir)  # a card whose skill is now installed: its grant and options (never raises)
+        settle(drive_root)  # a card whose skill is now installed: its one post (never raises)
 
     thread = threading.Thread(target=_run, daemon=True, name="starter-skills")
     with _THREADS_LOCK:
@@ -327,7 +327,7 @@ def at_startup(drive_root: pathlib.Path, settings: Dict[str, Any], *, provider_r
             return "retrying"
         from ouroboros.onboarding_connections import settle_later
 
-        settle_later(drive_root, repo_dir)  # a card's grant or options a stop interrupted
+        settle_later(drive_root)  # a card's post a stop interrupted
         return state
     except Exception:
         log.warning("Starter skill startup work failed", exc_info=True)
@@ -384,7 +384,7 @@ def onboarding_skill_choices(body: Dict[str, Any], settings: Dict[str, Any]) -> 
     starter = body.get("starter_skills")
     if starter is not None and (not isinstance(starter, list) or not all(isinstance(i, str) for i in starter)):
         raise ValueError("starter_skills must be a list of catalog ids.")
-    cards = completion_settings(body)  # a connection card's token and code, in this same write
+    cards = completion_settings(body)  # a connection card's token, in this same write (its code goes to the skill)
     trust = body.get("skill_source_trust")
     if trust in (None, {}):
         return cards

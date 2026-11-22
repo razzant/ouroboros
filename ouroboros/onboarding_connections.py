@@ -4,21 +4,24 @@ A skill shipped with the app may declare ``connection_card`` in its ``SKILL.md``
 its token (``token``), a pairing link with a one-time code (``pairing.link``), where the skill keeps that code
 (``pairing.code``: ``{key, store: skill_settings, route}``: the skill's own settings, never the core's), the
 stdlib-only function that names the account a token belongs to (``pairing.identity``, ``path.py:function`` inside the
-skill), the card's own words and options the skill keeps in its own settings too. Nothing here knows a service. The
+skill) and, optionally, the one that names the server it should ask (``pairing.api_base``, given the skill's state
+directory), the card's own words and options the skill keeps in its own settings too. Nothing here knows a service. The
 host:
 
-- carries the card on the skill's starter item (``starter_connection``);
+- carries the card on the skill's starter item (``starter_connection``), saying where the install grants nothing on
+  its own, so the skill starts only once the owner allows it in Extensions;
 - answers the card's token check by calling the declared function of a BUILT-IN skill only, never a hub skill's code
   before its review (``api_connection_identity``);
 - adds the token alone to the completion's one settings write (``completion_settings``); the completion's route
   (``guard_completion``) refuses a card's values from the Telegram Mini App, since a code names the account's owner,
   and once the write is saved records the owner's consent (the code and the options included) in the starter marker
   (``record_consent``); the code is never written to Settings or a log;
-- grants the token key where reviewed skills are not granted automatically and makes ONE post of every skill-settings
-  value of the card (the code with the options) to the route they declare, from this server over loopback: the owner's
-  local session as the route's guard reads it, reachable only from that recorded consent (``settle``, one run at a
-  time). It runs on events that already happen, never on a timer: the starter install's end, a saved completion (a
-  skill already installed), the skill's extension finishing its load, and the next start. A route not serving yet
+- makes ONE post of every skill-settings value of the card (the code with the options) to the route they declare,
+  from this server over loopback: the owner's local session as the route's guard reads it, reachable only from that
+  recorded consent (``settle``, one run at a time). It grants nothing: where reviewed skills are granted
+  automatically the install's own grant covers the token; where they are not, the owner allows the skill in
+  Extensions. It runs on events that already happen, never on a timer: the starter install's end, a saved completion
+  (a skill already installed), the skill's extension finishing its load, and the next start. A route not serving yet
   leaves the card waiting for the next of them. The code is dropped from the record once posted or refused. Every
   outcome is recorded there; none blocks Start.
 """
@@ -71,16 +74,23 @@ def _skill_setting(raw: Any) -> Optional[Dict[str, str]]:
     return {"key": key, "route": route} if _KEY.fullmatch(key) and _ROUTE.fullmatch(route) else None
 
 
+def _reference(value: Any) -> Optional[Tuple[str, str]]:
+    """``path.py:function`` inside the skill as (path, function), or None when out of shape or out of the skill."""
+    found = _FUNCTION.fullmatch(_text(value, 200))
+    return (found.group(1), found.group(2)) if found and ".." not in found.group(1).split("/") else None
+
+
 def _normalize(name: str, root: pathlib.Path, raw: Any, fields: Dict[str, str]) -> Optional[Dict[str, Any]]:
     """The declaration the host acts on, or None when any part it needs is missing or out of shape."""
     if not isinstance(raw, dict) or not isinstance(raw.get("pairing"), dict):
         return None
     pairing = raw["pairing"]
     token, link, code = _text(raw.get("token"), 64), _https(pairing.get("link")), _skill_setting(pairing.get("code"))
-    identity = _FUNCTION.fullmatch(_text(pairing.get("identity"), 200))
+    identity = _reference(pairing.get("identity"))
+    base = _reference(pairing["api_base"]) if pairing.get("api_base") is not None else ()  # optional; never guessed
     if token not in fields or code is None or "{username}" not in link or "{code}" not in link:
         return None
-    if identity is None or ".." in identity.group(1).split("/"):
+    if identity is None or base is None:
         return None
     options = []
     for option in raw.get("options") or []:
@@ -96,7 +106,7 @@ def _normalize(name: str, root: pathlib.Path, raw: Any, fields: Dict[str, str]) 
              for step in raw.get("steps") or [] if isinstance(step, dict) and _text(step.get("text"))]
     return {
         "skill": name, "token": token, "token_key": fields[token], "code": code, "link": link,
-        "identity": (root / identity.group(1), identity.group(2)),
+        "identity": (root / identity[0], identity[1]), "api_base": (root / base[0], base[1]) if base else None,
         "title": _text(raw.get("title")), "pitch": _text(raw.get("pitch")),
         "hint": _text(pairing.get("hint")), "note": _text(pairing.get("note")),
         "steps": steps[:8], "options": options[:4],
@@ -122,8 +132,11 @@ def declared_card(name: Any) -> Optional[Dict[str, Any]]:
 
 
 def starter_connection(name: Any) -> Optional[Dict[str, Any]]:
-    """What the setup's Skills step shows of a built-in skill's card (``StarterConnection``): never its function,
-    its keys or its routes."""
+    """What the setup's Skills step shows of a built-in skill's card (``StarterConnection``): never its functions,
+    its keys or its routes. ``needs_allow``: this install grants reviewed skills nothing on its own, so the skill
+    starts only once the owner allows it in Extensions (the card says so where it states its outcome)."""
+    from ouroboros.config import get_auto_grant_enabled
+
     card = declared_card(name)
     if card is None:
         return None
@@ -132,6 +145,7 @@ def starter_connection(name: Any) -> Optional[Dict[str, Any]]:
         "steps": card["steps"], "pairing": {"link": card["link"], "hint": card["hint"], "note": card["note"]},
         "options": [{key: option[key] for key in ("key", "label", "on", "off", "new_connection")}
                     for option in card["options"]],
+        "needs_allow": not get_auto_grant_enabled(),
     }
 
 
@@ -152,12 +166,13 @@ def card_root(card: Dict[str, Any]) -> pathlib.Path:
     return bundled_skills_dir() / card["skill"]
 
 
-def _declared_function(card: Dict[str, Any]) -> Callable[..., Any]:
-    """The card's declared function, loaded from its file inside the built-in skill (a link out of it is refused)."""
+def _declared_function(card: Dict[str, Any], which: str = "identity") -> Callable[..., Any]:
+    """A function the card declares (``identity`` or ``api_base``), loaded from its file inside the built-in skill (a
+    link out of it is refused)."""
     root = card_root(card).resolve()
-    path = pathlib.Path(card["identity"][0]).resolve()
+    path = pathlib.Path(card[which][0]).resolve()
     if not path.is_file() or not path.is_relative_to(root):
-        raise LookupError("the declared identity function is not a file inside the skill")
+        raise LookupError(f"the declared {which} function is not a file inside the skill")
     key = (str(path), path.stat().st_mtime)
     with _lock:
         module = _MODULES.get(key)
@@ -168,13 +183,19 @@ def _declared_function(card: Dict[str, Any]) -> Callable[..., Any]:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             _MODULES[key] = module
-    return getattr(module, card["identity"][1])
+    return getattr(module, card[which][1])
 
 
-def check_identity(card: Dict[str, Any], token: str) -> Dict[str, Any]:
+def check_identity(card: Dict[str, Any], token: str, state_dir: Optional[pathlib.Path] = None) -> Dict[str, Any]:
     """``{"ok": True, "username"}`` or ``{"ok": False, "cause": "refused" | "unreachable"}`` as the skill's declared
-    function answers; raises on anything else (the caller answers that the check failed, naming nothing)."""
-    answer = _declared_function(card)(token, timeout=_IDENTITY_TIMEOUT)
+    function answers; raises on anything else (the caller answers that the check failed, naming nothing). A card that
+    declares ``api_base`` names the server first, from the skill's state directory, and the check asks that one: a
+    reader that fails asks nobody."""
+    identity = _declared_function(card)
+    if card.get("api_base"):
+        answer = identity(token, _declared_function(card, "api_base")(state_dir), timeout=_IDENTITY_TIMEOUT)
+    else:
+        answer = identity(token, timeout=_IDENTITY_TIMEOUT)
     if isinstance(answer, dict) and answer.get("ok") is True and _ACCOUNT.fullmatch(str(answer.get("username") or "")):
         return {"ok": True, "username": str(answer["username"])}
     if isinstance(answer, dict) and answer.get("ok") is False and answer.get("cause") in ("refused", "unreachable"):
@@ -187,7 +208,8 @@ async def api_connection_identity(request: Any) -> Any:
     function of a built-in skill. Its errors never carry the token or the address the function called."""
     from starlette.responses import JSONResponse
 
-    from ouroboros.gateway._helpers import request_json_or
+    from ouroboros.gateway._helpers import request_drive_root, request_json_or
+    from ouroboros.skill_loader import skill_state_dir_path
 
     body = await request_json_or(request, None)
     if not isinstance(body, dict):
@@ -199,8 +221,10 @@ async def api_connection_identity(request: Any) -> Any:
     token = body.get("token")
     if not isinstance(token, str) or not token.strip() or len(token) > _TOKEN_MAX:
         return JSONResponse({"ok": False, "cause": "refused"})
+    state_dir = skill_state_dir_path(request_drive_root(request), card["skill"])  # read, never made, by the reader
     try:
-        answer = await asyncio.wait_for(asyncio.to_thread(check_identity, card, token.strip()), _IDENTITY_TIMEOUT + 4)
+        answer = await asyncio.wait_for(asyncio.to_thread(check_identity, card, token.strip(), state_dir),
+                                        _IDENTITY_TIMEOUT + 4)
     except asyncio.TimeoutError:
         return JSONResponse({"ok": False, "cause": "unreachable"})
     except Exception:  # noqa: BLE001 — logged without the token or its exception text
@@ -282,7 +306,7 @@ def _saved(response: Any) -> bool:
                                                                             getattr(response, "status_code", 0) == 200))
 
 
-# -- after the write: the owner's consent, the grant, the one post -------------------------------------------------
+# -- after the write: the owner's consent and the one post ----------------------------------------------------------
 
 def record_consent(drive_root: pathlib.Path, raw: Any) -> List[Dict[str, Any]]:
     """Note each card the completion saved in the starter marker (``connections``) for ``settle``: the code and the
@@ -291,7 +315,7 @@ def record_consent(drive_root: pathlib.Path, raw: Any) -> List[Dict[str, Any]]:
 
     try:
         records = [{"skill": card["skill"], "token_key": card["token_key"], "code": code, "options": options,
-                    "at": utc_now_iso(), "grant": "pending", "post": "pending"}
+                    "at": utc_now_iso(), "post": "pending"}
                    for card, _token, code, options in parse_connections(raw)]
         if records:
             kept = [old for old in read_marker(drive_root).get("connections") or []
@@ -309,24 +333,6 @@ def _installed(drive_root: pathlib.Path, name: str) -> bool:
 
     skill = find_skill(drive_root, name, repo_path=get_skills_repo_path() or None)
     return skill is not None and not getattr(skill, "load_error", "")
-
-
-def _grant(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path], record: Dict[str, Any]) -> str:
-    """The token key granted through the lifecycle (enable after grant) where reviewed skills are not granted
-    automatically; where they are, the install's own grant covers it."""
-    from ouroboros.config import REPO_DIR, get_auto_grant_enabled, get_skills_repo_path
-
-    if get_auto_grant_enabled():
-        return "automatic"
-    from ouroboros.gateway.extensions import _ApiReviewCtx
-    from ouroboros.skill_lifecycle_actions import run_skill_action
-
-    ctx = _ApiReviewCtx(pathlib.Path(drive_root), pathlib.Path(repo_dir or REPO_DIR))
-    ctx.task_id = ""
-    ctx._skill_owner_client_host = "setup"  # the owner's consent was given at the setup's Finish
-    result = run_skill_action(ctx, record["skill"], "grant", items=[str(record["token_key"])],
-                              repo_path=get_skills_repo_path(), _owner_actor="owner_ui", _enable_after_grant=True)
-    return "granted" if not result.get("error") else f"failed: {str(result.get('error'))[:200]}"
 
 
 def _server_port() -> int:
@@ -352,64 +358,69 @@ def _bodies(card: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Dict[str,
     return bodies
 
 
-def _post(record: Dict[str, Any], *, post: Optional[Callable[[str, Dict[str, str]], int]] = None) -> str:
+Answer = Tuple[int, Dict[str, Any]]  # a route's HTTP status and its JSON object ({} when it sent none)
+
+
+def _post(record: Dict[str, Any], *, post: Optional[Callable[[str, Dict[str, str]], Answer]] = None) -> str:
     """ONE post per declared route of the card's skill-settings values: «posted», «waiting» (the route does not serve
-    yet: the next event tries again), or «failed: …» (the route refused it)."""
+    yet: the next event tries again), or «failed: …» (the route refused it, or answered that it left the owner's
+    values unchanged: ``owner_ignored``, which saved nothing of them)."""
     card = declared_card(record["skill"])
     if card is None:
         return "failed: the skill no longer declares its card"
     send = post or _loopback_post
     for route, body in _bodies(card, record).items():
-        status = send(f"/api/extensions/{card['skill']}/{route}", body)
+        status, answer = send(f"/api/extensions/{card['skill']}/{route}", body)
         if status in _NOT_LIVE:
             return "waiting"
         if not 200 <= status < 300:
             return f"failed: the route answered {status}"
+        if answer.get("owner_ignored") is True:
+            return "failed: the route left the owner's values unchanged (owner_ignored)"
     return "posted"
 
 
-def _loopback_post(path: str, body: Dict[str, str]) -> int:
+def _loopback_post(path: str, body: Dict[str, str]) -> Answer:
     """This server's own request to a skill route: from 127.0.0.1, with no Origin and no Mini App mark, so the route's
     guard reads the owner's local session. Nothing reaches this but ``settle``, from a consent the owner gave at a
-    Finish the Mini App could not send; no route lets a caller choose what it posts."""
+    Finish the Mini App could not send; no route lets a caller choose what it posts. Call it off the event loop."""
     request = urllib.request.Request(f"http://127.0.0.1:{_server_port()}{path}", data=json.dumps(body).encode("utf-8"),
                                      method="POST", headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=30) as answer:
-            return int(answer.status)
+            status, raw = int(answer.status), answer.read(65536)
     except urllib.error.HTTPError as answer:
-        return int(answer.code)
+        return int(answer.code), {}
     except Exception:  # noqa: BLE001 — not answering yet
-        return 0
+        return 0, {}
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        payload = {}
+    return status, payload if isinstance(payload, dict) else {}
 
 
-def settle(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None, *,
-           post: Optional[Callable[[str, Dict[str, str]], int]] = None) -> List[Dict[str, Any]]:
-    """For each recorded card whose skill is installed: grant its token key where needed, then make its one post. The
-    outcome lands in the marker and the code leaves it once posted or refused; a skill not installed yet, or a route
-    not serving yet, waits for the next event. Never raises; call it off the server's event loop."""
+def settle(drive_root: pathlib.Path, *,
+           post: Optional[Callable[[str, Dict[str, str]], Answer]] = None) -> List[Dict[str, Any]]:
+    """For each recorded card whose skill is installed: its one post. The outcome lands in the marker and the code
+    leaves it once posted or refused; a skill not installed yet, or a route not serving yet (a skill the owner has
+    still to allow among them), waits for the next event. Never raises; call it off the server's event loop."""
     from ouroboros.skill_starter import read_marker, write_marker
 
     try:
         with _SETTLE:
-            return _settle_records(drive_root, repo_dir, read_marker, write_marker, post=post)
+            return _settle_records(drive_root, read_marker, write_marker, post=post)
     except Exception as exc:  # noqa: BLE001
         log.warning("The setup's connection cards could not be settled (%s)", type(exc).__name__)
         return []
 
 
-def _settle_records(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path], read_marker: Callable[..., Any],
-                    write_marker: Callable[..., Any], *,
-                    post: Optional[Callable[[str, Dict[str, str]], int]]) -> List[Dict[str, Any]]:
+def _settle_records(drive_root: pathlib.Path, read_marker: Callable[..., Any], write_marker: Callable[..., Any], *,
+                    post: Optional[Callable[[str, Dict[str, str]], Answer]]) -> List[Dict[str, Any]]:
     records = [dict(record) for record in read_marker(drive_root).get("connections") or [] if isinstance(record, dict)]
     for record in records:
         if record.get("post") not in ("pending", "waiting") or not _installed(drive_root, str(record.get("skill") or "")):
             continue
-        if record.get("grant") == "pending":
-            record["grant"] = _grant(drive_root, repo_dir, record)
-            write_marker(drive_root, connections=records)
-        if record["grant"].startswith("failed"):
-            continue  # a skill whose token could not be granted does not run; its code waits for the owner's grant
         record["post"] = _post(record, post=post)
         if record["post"] != "waiting":
             record.pop("code", None)  # posted, or refused by the route: the code leaves the host's record
@@ -417,13 +428,13 @@ def _settle_records(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path], 
     return records
 
 
-def settle_later(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None) -> None:
+def settle_later(drive_root: pathlib.Path) -> None:
     """``settle`` in its own background thread, when the marker holds a card still to post."""
     from ouroboros.skill_starter import read_marker
 
     if any(isinstance(record, dict) and record.get("post") in ("pending", "waiting")
            for record in read_marker(drive_root).get("connections") or []):
-        threading.Thread(target=settle, args=(drive_root, repo_dir), daemon=True, name="connection-cards").start()
+        threading.Thread(target=settle, args=(drive_root,), daemon=True, name="connection-cards").start()
 
 
 __all__ = [
