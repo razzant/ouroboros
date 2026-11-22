@@ -1505,8 +1505,8 @@ def get_tools() -> List[ToolEntry]:
                     "parent; old helpers stay outside its control). "
                     "This never commits; self-modification still requires your "
                     "commit_reviewed. For best-of-N pick a child "
-                    "and integrate it, or integrate several to synthesize. Own-body protected-path changes require "
-                    "pro runtime mode (and, for a nested acting parent outside Cyber Pro, protected_paths_grant). Conflicts "
+                    "and integrate it, or integrate several to synthesize. Own-body protected-path changes require Pro or "
+                    "Cyber Pro runtime mode (in Pro, a nested acting parent also needs protected_paths_grant). Conflicts "
                     "are reported for you to resolve (vcs_read diff) or abort (vcs_restore). Writes a "
                     "subagent_patch_verdict_<task_id>.json audit artifact; an earlier one stays readable beside it."
                 ),
