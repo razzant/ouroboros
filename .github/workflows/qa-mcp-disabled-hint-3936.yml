@@ -1,0 +1,32 @@
+# Temporary branch-only check for the MCP server navigation hint.
+name: Focused MCP disabled-server hint
+on:
+  push:
+    branches: [qa/mcp-disabled-hint-3936]
+permissions:
+  contents: read
+jobs:
+  focused-case:
+    name: focused-case (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 284fea8b9e095bc9a17516851de8f8e8dd1c8ff0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+          interpreter: ${{ runner.os == 'Windows' && 'setup-python' || 'shipped' }}
+      - name: Run the named registry case
+        run: |
+          git rev-parse HEAD
+          python -m pytest -o addopts= -vv -ra --timeout=300 tests/test_skill_mcp.py::test_registry_refuses_an_unready_skill_before_safety_and_keeps_every_other_fact
