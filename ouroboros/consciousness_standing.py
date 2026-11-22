@@ -14,8 +14,8 @@ or closing the project takes it off the list; nothing ages it out. Presence's ow
 for a binding, a carrier that lost its id) neither stand nor retire; the owner's work related to a binding does both.
 Not covered: works with no project, and a root that fails while a later-started root of its project exists. Cost per
 wake: one index probe per open project, one primary-key read of the roots bound to open projects and the bodies of
-the candidates, all in the same snapshot; nothing is stored. An unreadable binding store, or an empty registry the
-strict reader cannot vouch for (one lost beside its commit witness), is the section's named gap, never an empty list.
+the candidates, all in the same snapshot; nothing is stored. An unreadable binding store or a damaged row, or an
+empty registry the strict reader cannot vouch for (one lost beside its commit witness), is the section's named gap.
 
 Own clock (``_clock_section``): ``consciousness_clock.own_clock_lines`` over the state the alarm read when it admitted
 the wake, while a named time or my human's reported zone stands; the appointment and the bounds alone make none.
@@ -244,7 +244,7 @@ def fallen_line(row: Dict[str, Any], *, project: str, now: float) -> str:
 def fallen_works(root: Any, *, now: float, projects: Iterable[Mapping[str, Any]]) -> List[FallenWork]:
     """The works that stand, newest-started first: in each open project its newest-started work root when it ended
     failed or cancelled and ``ended_without_success`` holds. A root's project is its binding when it has one (owner
-    B4=A, ``projects_registry.project_id_for_task``; read strictly, so an unreadable store raises): the stored
+    B4=A, ``projects_registry.project_id_for_task``; read strictly: a broken store or row raises): the stored
     ``project_id`` the partial index ``tasks_project_root_ts`` walks is a copy a mid-run "Turn into project" never
     reaches, so a root bound elsewhere is skipped there and the roots bound to an open project are read beside it by
     primary key. Rows Presence's authority governs (``presence_authority_recorded``) are skipped by that typed column.

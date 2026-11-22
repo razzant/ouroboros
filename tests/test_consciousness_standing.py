@@ -292,11 +292,12 @@ def test_a_root_bound_to_the_project_later_retires_its_earlier_failure(tmp_path)
     assert _listed(tmp_path) == ["fell"]
 
 
-@pytest.mark.parametrize("damage", ["malformed", "unreadable"])
+@pytest.mark.parametrize("damage", ["malformed", "unreadable", "null_row", "bad_project_id"])
 def test_an_unreadable_binding_store_is_the_sections_gap_never_the_copy_a_root_started_with(tmp_path, damage):
-    """The binding names a converted root's project, so the store is read strictly: one that cannot be read is the
-    section's named gap, as an unreadable registry is, never "no bindings" with the root back in its old project. A
-    readable store places it by its binding, and an absent one (nothing converted yet) by its copy, with no gap."""
+    """The binding names a converted root's project, so the store is read strictly: one that cannot be read, or a row
+    the strict per-task reader refuses (not an object, or no valid ``project_id``), is the section's named gap, as an
+    unreadable registry is, never "no bindings" with the root back in its old project. A readable store places it by
+    its binding, and an absent one (nothing converted yet) by its copy, with no gap."""
     projects = [*PROJECTS, {"id": "other", "name": "Other", "lifecycle": "active"}]
     _registry(tmp_path, *projects)
     _root(tmp_path, "earlier", ts=T0 - 9000, project="other", ended=T0 - 8000)
@@ -307,11 +308,13 @@ def test_an_unreadable_binding_store_is_the_sections_gap_never_the_copy_a_root_s
         "- task converted Failed in project Audit", "- task earlier Failed in project Other"]
     assert not [gap for gap in placed.gaps if gap.startswith("fallen_work")]
     store = tmp_path / "state" / "project_task_bindings.json"
-    if damage == "malformed":
-        store.write_text("{ not json", encoding="utf-8")
-    else:  # a directory where the store is: opening it fails with the platform's OSError
+    rows = {"null_row": None, "bad_project_id": {"task_id": "converted", "project_id": "Not a project"}}
+    if damage == "unreadable":  # a directory where the store is: opening it fails with the platform's OSError
         store.unlink()
         store.mkdir()
+    else:
+        body = "{ not json" if damage == "malformed" else json.dumps({"bindings": {"converted": rows[damage]}})
+        store.write_text(body, encoding="utf-8")
     unread = _observe(tmp_path)
     [gap] = [gap for gap in unread.gaps if gap.startswith("fallen_work unreadable: ")]
     assert unread.standing == () and (damage == "unreadable" or gap == "fallen_work unreadable: ValueError")

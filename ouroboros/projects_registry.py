@@ -331,9 +331,11 @@ def bind_task_to_project(
 
 
 def project_task_bindings(drive_root: Any, *, strict: bool = False) -> Dict[str, Dict[str, Any]]:
-    """Copy of the immutable task-to-Project bindings (the shared parse); ``strict`` raises on an unreadable store."""
-    return {str(task_id): dict(row) for task_id, row in _load_bindings(drive_root, strict=strict)["bindings"].items()
-            if isinstance(row, dict)}
+    """Copy of the immutable task-to-Project bindings (the shared parse); ``strict`` raises on a broken store or row."""
+    bindings = _load_bindings(drive_root, strict=strict)["bindings"]
+    for task_id in bindings if strict else ():  # a damaged row raises in the per-task reader's own strict check
+        project_binding_for_task(drive_root, task_id, strict=True, bindings_snapshot=bindings)
+    return {str(task_id): dict(row) for task_id, row in bindings.items() if isinstance(row, dict)}
 
 
 def all_task_bindings(drive_root: Any) -> Dict[str, int]:
