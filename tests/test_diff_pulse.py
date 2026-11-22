@@ -195,13 +195,15 @@ def test_a_changed_test_source_adds_what_the_suite_declares_and_records(tmp_path
     assert "4 recorded test-seconds of changed modules (1 not recorded), test module lines: " in diff_pulse(repo)
     table.write_text("{", encoding="utf-8")
     assert "recorded test-seconds unknown" in diff_pulse(repo)  # unknown is never zero
-    for value in ('"2500"', "true", "NaN", '{"ms": 1}', "9" * 310):  # no finite number of milliseconds: unknown, no raise
+    for value in ('"2500"', "true", "NaN", '{"ms": 1}', "9" * 310, "-3000", "[" * 10000 + "]" * 10000):  # unknown, no raise
         table.write_text('{"format": 1, "platforms": {"darwin": {"tests/test_old.py": %s}}}' % value, encoding="utf-8")
         assert "recorded test-seconds unknown" in diff_pulse(repo)
         # A valid sample on another system never hides the unreadable one.
         table.write_text('{"format": 1, "platforms": {"darwin": {"tests/test_old.py": %s}, '
                          '"linux": {"tests/test_old.py": 2000}}}' % value, encoding="utf-8")
         assert "recorded test-seconds unknown" in diff_pulse(repo)
+    table.write_text('{"format": 1, "platforms": {"darwin": [], "linux": {"tests/test_old.py": 2000}}}', encoding="utf-8")
+    assert "recorded test-seconds unknown" in diff_pulse(repo)  # a system without a file map is no table
     table.unlink()
 
     # An edit shows its own files, and a shown file outside the suite adds nothing.

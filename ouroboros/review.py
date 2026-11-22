@@ -1254,22 +1254,24 @@ def _declared_tests(source: str, path: str) -> tuple[int, collections.Counter]:
 
 def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
     """What the last complete battery recorded for these test modules, on the slowest of
-    its systems, and how many it did not record; ``None`` without a readable table (one whose
-    values for them are finite numbers of milliseconds)."""
+    its systems, and how many it did not record; ``None`` without a readable table (a file map
+    per system whose values for them are finite, non-negative milliseconds)."""
     from ouroboros import config
 
     try:
         table = json.loads((pathlib.Path(config.DATA_DIR) / TEST_DURATIONS_PATH).read_text(encoding="utf-8"))
         systems = list(table["platforms"].values())
+        if not all(isinstance(files, dict) for files in systems):
+            return None
         recorded = []
         for path in paths:
             samples = [files[path] for files in systems if path in files]
-            if any(type(value) not in (int, float) or not math.isfinite(value) for value in samples):
+            if any(type(value) not in (int, float) or not (math.isfinite(value) and value >= 0) for value in samples):
                 return None  # every system's sample is checked before the slowest one is taken
             if samples:
                 recorded.append(max(samples))
         seconds = sum(recorded) / 1000
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, ArithmeticError):  # an int too large for a float
+    except Exception:  # a table of any shape Python cannot read is unknown, never a raise out of the pulse
         return None
     return (seconds, len(paths) - len(recorded)) if math.isfinite(seconds) else None
 
