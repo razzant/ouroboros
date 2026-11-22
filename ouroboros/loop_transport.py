@@ -61,7 +61,7 @@ from ouroboros.config import (
 )
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC
-from ouroboros.llm_claudexor import daemon_not_delivered
+from ouroboros.llm_claudexor import CODEX_CONTENT_POLICY_DENIED, CODEX_CONTENT_POLICY_WORDS, codex_content_policy_denial, daemon_not_delivered
 from ouroboros.llm_probe import upstream_transport_reachable
 from ouroboros.model_concurrency import capacity_refusal
 from ouroboros.owner_mailbox import OwnerMailboxPeek
@@ -317,6 +317,8 @@ def fallback_chain_allowed(
         # The round still holds an unresolved attempt (a granted transport-death
         # repeat with no usable response since): no paid candidate may dial over
         # it, whatever the last kind says.
+        return False
+    if last_error_kind == CODEX_CONTENT_POLICY_DENIED:
         return False
     if primary_refusal_wait(ctx, last_error_kind) or capacity_refusal(usage) or engine_unanswered(usage):
         return False  # a chosen wait on the primary; the install's own full queue or silent daemon is no model failure
@@ -1006,6 +1008,7 @@ _FAILURE_KIND_WORDS = {
     "llm_empty_response": "an empty response",
     "llm_output_exhausted": "a reply that reached its length limit before any visible output",
     "content_filter": "the provider's content filter stopping this request (no content returned)",
+    CODEX_CONTENT_POLICY_DENIED: CODEX_CONTENT_POLICY_WORDS,
     "provider_body_error": "an error in the provider's response",
     "provider_error": "a provider error",
     "model_substituted": "an answer from a model other than the requested one",
@@ -1046,7 +1049,8 @@ def owner_provider_fields(failure: Any) -> Dict[str, str]:
     from ouroboros.llm_claudexor import ClaudexorModelError
     from ouroboros.utils import sanitize_tool_result_for_log
 
-    if not isinstance(failure, ClaudexorModelError) or failure.code == "model_outcome_unknown":
+    if (not isinstance(failure, ClaudexorModelError) or failure.code == "model_outcome_unknown"
+            or codex_content_policy_denial(failure)):
         return {}
     context = failure.problem.get("context")
     context = context if isinstance(context, dict) else {}

@@ -28,7 +28,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros._usage_wait import receiver_abandonable
 from ouroboros.loop_llm_call import (
-    TIMEOUT_REPEAT_KEY, forced_response_cut, forced_response_is_incomplete, forced_response_parts, timeout_repeat_blocked,
+    CODEX_CONTENT_POLICY_DENIED, CODEX_CONTENT_POLICY_DISPLAY, TIMEOUT_REPEAT_KEY, forced_response_cut,
+    forced_response_is_incomplete,
+    forced_response_parts, timeout_repeat_blocked,
 )
 from ouroboros.loop_nudges import accept_handover_selection, accept_preserved_handover_stop
 from ouroboros.model_wait import ModelWaitInterrupted
@@ -1077,6 +1079,7 @@ def _forced_fallback_result(
     candidate_reason: str = "",
     provider_terminal: bool = False,
     host_words: Optional[bool] = None,
+    provider_notice: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Compose fallback. ``host_words`` is the caller's fact about ``fallback_text`` on the
     provider-death rail: the host's own notice (``host_notice``) or retained model bytes
@@ -1102,7 +1105,7 @@ def _forced_fallback_result(
     # Every rail that DISCLOSES types the fact: a host-notice fallback used to state
     # the open review in prose while nothing typed carried it.
     set_terminal_plan_review_open(ctx.accumulated_usage, plan_suffix)
-    set_terminal_host_notice(ctx.accumulated_usage, suffix)
+    set_terminal_host_notice(ctx.accumulated_usage, suffix, provider_notice)
     live_candidate = _loop()._live_delivery_candidate(ctx)
     fallback_is_retained_model_text = (
         isinstance(live_candidate, _loop().DeliveryCandidate)
@@ -1454,10 +1457,12 @@ def _forced_final_answer(
         ctx.accumulated_usage["execution_status"] = "failed"
         ctx.accumulated_usage["reason_code"] = reason_code
         late = _loop()._drain_forced_owner_directives(ctx, llm_trace)
-        unknown = str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown"
+        failure_kind = str(ctx.accumulated_usage.get("_last_llm_error_kind") or "")
+        unknown = failure_kind == "provider_outcome_unknown"
         # Stop now outranks a late directive; a carried row is no directive: the forced final stands, no fallback.
         if (stop_now := presence_stop_now(tools_ctx)) or not late or (
-                late == "carried" and (single_semantic_turn or attempt == 1 or unknown)):
+                late == "carried" and (single_semantic_turn or attempt == 1 or unknown
+                                        or failure_kind == CODEX_CONTENT_POLICY_DENIED)):
             break
         if unknown:
             return _loop()._forced_fallback_result(
@@ -1583,4 +1588,5 @@ def _forced_final_answer(
         fallback_text,
         reason_code,
         provider_terminal=provider_terminal, host_words=fallback_host_words,
+        provider_notice=CODEX_CONTENT_POLICY_DISPLAY if failure_kind == CODEX_CONTENT_POLICY_DENIED else "",
     )

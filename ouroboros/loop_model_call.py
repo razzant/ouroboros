@@ -29,7 +29,7 @@ from ouroboros.context_anchor import (CONTEXT_REFUSAL_ROUND_KEY, _restore_contex
 from ouroboros.context_budget import WHOLE_CATEGORY
 from ouroboros.context_view_facts import SIZE_REFUSAL_KEY, remember_size_refusal
 from ouroboros.llm import LLMClient
-from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
+from ouroboros.loop_llm_call import CODEX_CONTENT_POLICY_DENIED, REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
 from ouroboros.primary_route_observation import failed_attempt_facts, tell_failed_attempt, unasked_refusal_row, with_refusal_facts
@@ -413,7 +413,8 @@ def _run_cross_model_fallback_chain(
         else:
             active_model, active_use_local = retry_call.active_model, retry_call.active_use_local
             context_fit_plan = retry_call.context_fit_plan
-    elif msg is None and deferred is not None and not own_wait:  # the refused primary buys no forced final either
+    elif (msg is None and deferred is not None and not own_wait
+          and accumulated_usage.get("_last_llm_error_kind") != CODEX_CONTENT_POLICY_DENIED):
         accumulated_usage[RESOURCE_REFUSAL_KEY] = deferred.terminal(
             fallbacks_tried=tried, owner_wait="not_asked" if _asks_owner() else "not_allowed")
     return (
@@ -481,11 +482,11 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
 
 
 def _walk_fenced(tool_ctx: Any, usage: Dict[str, Any]) -> bool:
-    """A spent deadline, or an unknown outcome that permits no new generation, ends the walk."""
+    """Stop a walk at a spent deadline, a settled Codex denial or an unresolved rejoin."""
     from ouroboros.loop_transport import new_generation_after_unknown
 
     kind = str(usage.get("_last_llm_error_kind") or "")
-    return kind == "deadline_exhausted" or (
+    return kind in ("deadline_exhausted", CODEX_CONTENT_POLICY_DENIED) or (
         kind == "provider_outcome_unknown" and not new_generation_after_unknown(tool_ctx, usage))
 
 

@@ -635,3 +635,81 @@ def test_primary_refusal_wait_paces_real_requests_without_catalog_recovery(
             assert "owner requested Wrap up while the primary provider was refusing requests" in notice
             assert any(note.endswith("Stop cancels.") for note in notes)
         assert "provider connection was unavailable" not in notice and "$0" not in notice
+
+
+# --- a received, settled Codex content-policy denial ends its request (synthetic engine facts only) -----
+_DENIAL = {"code": "provider_failed", "message": "Synthetic refusal text.", "retryable": False,
+           "context": {"vendorCode": "cyber_policy"}}
+_BAD_REQUEST = {"code": "invalid_request", "message": "Synthetic bad request.", "retryable": False,
+                "context": {"httpStatus": 400, "vendorCode": "invalid_value"}}
+_WORDS = "Codex content-policy denial"
+
+
+def _denial_main(monkeypatch, ctx, owner, *, fallbacks):
+    for key, value in {"OUROBOROS_CONTEXT_MODE": "max", "OUROBOROS_TASK_REVIEW_MODE": "off", "MCP_ENABLED": "false", "OUROBOROS_MAX_ROUNDS": "4",
+                       "OUROBOROS_IMAGE_INPUT_MODE": "inline", "OUROBOROS_MODEL": MODEL,
+                       "OUROBOROS_MODEL_FALLBACKS": ",".join([MODEL] * fallbacks)}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("USE_LOCAL_MAIN", raising=False)
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-a", "fallback": ["account-b", "account-c"][:fallbacks]}))
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
+
+    def route_evidence(task, **_kwargs):
+        configured = {"main": "account-a", "fallback:0": "account-b", "fallback:1": "account-c"}[task["model_role"]]
+        explicit = task.get("credential_profile_id")
+        profile = (explicit if explicit is not None else configured) or "account-c"
+        return ({"model": MODEL, "provider": "claudexor"}, SimpleNamespace(
+            route_fp=f"capacity-{profile}", status="confirmed", stale=False, window_tokens=900_000, source_id="codex",
+            source="advertised", credential_profile_id=profile,
+            account_fingerprint=f"fingerprint-{profile.removeprefix('account-')}"))
+
+    monkeypatch.setattr(context, "_context_fit_route", route_evidence)
+    ctx.context_fit_plan = replace(ctx.context_fit_plan, model_role="main", model_route=deepcopy(ROUTE))
+    tools = _loop_tools(ctx, owner)
+    tools._ctx.task_metadata = {"model_role": "main"}
+    tools._ctx.is_direct_chat = True
+    tools._ctx.model_wait_context = owner
+    owner.worker_slot_held = False
+    return tools
+
+
+def _run_denial_loop(ctx, tools, events):
+    return loop.run_llm_loop(ctx.messages, tools, ctx.llm, ctx.drive_logs, lambda *_a, **_k: None, queue.Queue(),
+                             task_id="task-one", drive_root=ctx.drive_root, event_queue=events, initial_effort="high")
+
+
+def _decoys(count=4):
+    return [_reply(ROUTE_B, {"role": "assistant", "content": "A re-send or alternative answered."}) for _ in range(count)]
+
+
+@pytest.mark.parametrize("fallbacks", [1, 2], ids=["one-alternative", "two-alternatives"])
+def test_primary_denial_sends_nothing_after_it_through_the_real_main_walk(main_call, monkeypatch, fallbacks):
+    ctx, gateway, owner, events, _decide, _observations = main_call
+    tools = _denial_main(monkeypatch, ctx, owner, fallbacks=fallbacks)
+    gateway.results = [result(outcome="failed", problem=deepcopy(_DENIAL)), *_decoys()]
+    gateway.dispatch = ["response_received"] * len(gateway.results)
+    _bounded_creates(monkeypatch, gateway, 1)
+    text, usage, _trace = _run_denial_loop(ctx, tools, events)
+    notice = usage.get("terminal_provider_notice", text)
+    assert "A re-send or alternative answered." not in text
+    assert len(gateway.uploads) == len(gateway.creates) == len(gateway.acks) == 1
+    rows = attempt_rows_in_start_order(ctx.drive_root)
+    assert len(rows) == 1 and rows[0]["state"] == "settled"
+    assert _WORDS in notice and "cyber_policy" not in notice and "Synthetic" not in notice
+
+
+def test_denial_from_the_first_alternative_sends_nothing_after_it(main_call, monkeypatch):
+    ctx, gateway, owner, events, _decide, _observations = main_call
+    tools = _denial_main(monkeypatch, ctx, owner, fallbacks=2)  # a second alternative is still eligible
+    gateway.results = [result(outcome="failed", problem=deepcopy(_BAD_REQUEST)),
+                       result(outcome="failed", problem=deepcopy(_DENIAL), route=ROUTE_B), *_decoys()]
+    gateway.dispatch = ["response_received"] * len(gateway.results)
+    _bounded_creates(monkeypatch, gateway, 2)
+    text, usage, _trace = _run_denial_loop(ctx, tools, events)
+    assert [payload["account"] for payload, _key in gateway.uploads] == [
+        {"mode": "pin", "profileId": "account-a"}, {"mode": "pin", "profileId": "account-b"}]
+    assert len(gateway.creates) == len(gateway.acks) == 2
+    assert attempt_rows_in_start_order(ctx.drive_root)[-1]["state"] == "settled"
+    assert "A re-send or alternative answered." not in text
+    assert _WORDS in usage.get("terminal_provider_notice", text)
