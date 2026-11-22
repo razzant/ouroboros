@@ -357,3 +357,14 @@ def test_a_long_off_purpose_is_cut_as_the_cards_cut_it_and_names_where_it_is_who
                          "path='SKILL.md'). (Off: never turned on)")
     [short] = [line for line in full.splitlines() if line.startswith("- short-off: ")]
     assert short == "- short-off: Purpose of short-off."
+
+
+def test_an_off_record_with_an_actor_that_is_not_text_is_unknown_and_the_other_cards_stay(tmp_path):
+    _skill(tmp_path, "odd", enabled=False)
+    _skill(tmp_path, "card")
+    (tmp_path / "state" / "skills" / "odd" / "enabled.json").write_text(
+        json.dumps({"enabled": False, "actor": {"id": "old-client"}}), encoding="utf-8")
+    rows = {row["name"]: row for row in summarize_skills(tmp_path)["skills"]}
+    assert off_state(tmp_path, rows["odd"]) == "who turned it off is unknown"
+    full = _section(tmp_path).full_text
+    assert "\n- card (instruction, v1, " in full and "- odd: Purpose of odd. (Off: who turned it off is unknown)" in full

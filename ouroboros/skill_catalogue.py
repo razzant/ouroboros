@@ -290,7 +290,10 @@ def off_state(drive_root: Any, row: Any) -> str:
         return "its on/off record is unreadable (state unknown)"
     if choice.get("enabled"):
         return "switched on, but the host does not run it as on"
-    return "turned off after it failed to load" if choice.get("actor") in _REVERSIBLE_DISABLE_ACTORS else ""
+    actor = choice.get("actor", "")
+    if not isinstance(actor, str):  # the writer stores text; anything else names no one
+        return "who turned it off is unknown"
+    return "turned off after it failed to load" if actor in _REVERSIBLE_DISABLE_ACTORS else ""
 
 
 def _compact(row: dict, drive_root: Any = None) -> dict:
