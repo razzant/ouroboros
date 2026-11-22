@@ -16,8 +16,8 @@ import time
 import pytest
 
 from ouroboros import mcp_catalog, mcp_client, mcp_task_session, owner_pause
-from tests.test_batch4_producer_custody import _registry
-from tests.test_invocation_ownership import claims, owner, run
+from tests._invocation_harness import _registry, owner
+from tests.test_invocation_ownership import claims
 
 
 SERVER = r'''
@@ -188,24 +188,7 @@ def fixture_server(tmp_path, server_id="fx", **extra):
             "args": [str(script), str(log)], "cwd": str(tmp_path), **extra}, log
 
 
-def wire(monkeypatch, registry, *servers, timeout=20):
-    from ouroboros import config
-
-    settings = {"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": max(20, timeout), "MCP_SERVERS": list(servers)}
-    monkeypatch.setattr(config, "load_settings", lambda: settings)
-    manager = mcp_client.get_manager()
-    manager.reconfigure(settings)
-    for server in servers:
-        assert manager.refresh_server(server["id"])["ok"]
-    if settings["MCP_TOOL_TIMEOUT_SEC"] != timeout:
-        settings["MCP_TOOL_TIMEOUT_SEC"] = timeout
-        manager.reconfigure(settings)
-    monkeypatch.setattr(registry, "_mcp_name_miss", lambda _name: None)
-    return manager, settings
-
-
-def call(registry, tool, args=None, *, server_id="fx", timeout=40):
-    return run(registry, name=f"mcp_{server_id}__{tool}", args=args or {"n": 1}, timeout=timeout)["tool_result"]
+from tests._mcp_task_harness import call, wire  # noqa: F401 -- shared (tests/_mcp_task_harness.py)
 
 
 def body(result):

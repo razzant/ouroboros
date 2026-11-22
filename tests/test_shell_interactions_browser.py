@@ -610,6 +610,8 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
             assert 'btn-clear-logs' in band['controls'] and band['firstTabTop'] is None, facts
         elif page_name == 'settings':
             assert band['controls'] == ['settings-search'] and band['firstTabTop'] is None, facts
+        elif page_name == 'skills':  # Extensions (#3921): its pages are rail rows below the band, no tab strip in it.
+            assert band['controls'] == ['skills-refresh'] and band['firstTabTop'] is None, facts
         else:
             assert band['controls'], facts
             if page_name != 'files':
@@ -635,6 +637,8 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
             row.click()
             assert row.get_attribute('aria-selected') == 'true'
             page.locator('#dashboard-panel-activity.active').wait_for(state='visible')
+        elif page_name == 'skills':  # the band's one control there
+            page.locator('#skills-refresh').click()
         elif page_name != 'widgets':
             tab = page.locator(f'#page-{page_name} .app-page-lead .app-tab').nth(1)
             tab.click()

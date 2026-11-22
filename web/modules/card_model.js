@@ -234,6 +234,40 @@ function shapeFact(record, state, pressable) {
     state.part.replaceChildren(factGroup, state.why, state.pending, state.tier);
 }
 
+// A subscription's mark is drawn from the catalog's `credentialHarness` (model_source_mark.js), which only a read
+// brings: a fact that needs it asks for that read once, and every such mounted fact repaints when the catalog
+// changes, as the composer's chip does (composer_model.js). No timer: the store says when it changed.
+const catalogFacts = new WeakMap();  // store -> the records whose painted fact follows it
+const catalogAsked = new WeakSet();  // the stores this module asked for their first read
+
+function followCatalog(record, store) {
+    let records = catalogFacts.get(store);
+    if (!records) {
+        records = new Set();
+        catalogFacts.set(store, records);
+        let queued = false;
+        store.subscribe?.(() => {
+            if (queued) return;
+            queued = true;
+            queueMicrotask(() => {
+                queued = false;
+                for (const each of [...records]) {
+                    const state = each.cardModel;
+                    if (!state || each.root?.isConnected === false) { records.delete(each); continue; }
+                    paintCardModel(each, state.view);
+                }
+            });
+        });
+    }
+    records.add(record);
+    // Once per store: a failed read is the store's to say and to retry, never a loop of this one.
+    const status = store.status?.();
+    if (!catalogAsked.has(store) && status && !status.read && !status.reading) {
+        catalogAsked.add(store);
+        void store.read?.();
+    }
+}
+
 function removeFact(record) {
     const state = record.cardModel;
     if (!state) return false;
@@ -245,6 +279,7 @@ function removeFact(record) {
     record.metaEl = state.meta;
     record.cardModel = null;
     record.lead = null;
+    catalogFacts.get(state.deps.store)?.delete(record);
     state.deps.rerender(record);  // the line names the model itself again
     return true;
 }
@@ -285,14 +320,17 @@ export function paintCardModel(record, view, deps = {}) {
         rerender: renderLiveCardMeta, coarse: isCoarsePointer, stack: isStackLayout,
         place: (popup, anchor) => bindPopoverPosition(popup, { anchor, align: 'start' }), ...deps });
     const said = leadView(lead, { index: state.deps.store.index(), since: view.since || '', queued: Boolean(view.queued) });
+    // A repaint of the view a card already holds brings no new tiers, so it adopts none; only a view from the server does.
+    const replay = view === state.view;
     state.view = { ...view, lead, target: String(view.target || ''), main: normalizeRoute(view.main), said };
-    if (view.tiers) state.deps.store.adoptTiers?.(view.tiers);
+    if (view.tiers && !replay) state.deps.store.adoptTiers?.(view.tiers);
     record.lead = lead;
     shapeFact(record, state, Boolean(state.view.target));
     // The mark itself is the identity: what it is drawn from (a subscription's `credentialHarness`) can arrive
     // after the words it stands beside, and a key of hand-picked fields would hide that change.
     const mark = sourceMark(said.said);
     if (mark !== state.markKey) { state.markKey = mark; state.mark.innerHTML = mark; }
+    if (said.said.lane === 'subscription') followCatalog(record, state.deps.store);
     const [leads, id, tail] = state.name.children;
     // A separator rides at the end of the span before it, so a wrapped line never starts with one.
     write(leads, `${said.parts[0]}\u00a0·`);

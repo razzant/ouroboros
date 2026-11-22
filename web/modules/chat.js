@@ -542,8 +542,12 @@ export function createChatInstance({
                     if (task && 'project_admission_hold' in task) {
                         missingManagedTaskIds.delete(record.groupId);
                         restoreCardActivity(record, task.project_admission_hold);
-                        if (record.projectHold && !workState.memberStates && record.censusPhase
-                                && ws.isConnected?.() !== false) syncParkedPhase(record, '');
+                        if (ws.isConnected?.() !== false) {
+                            // A fresh connected read releases the park this client set when it lost the connection.
+                            const offline = record.parkedOffline;
+                            record.parkedOffline = false;
+                            if (record.projectHold && record.censusPhase && (!workState.memberStates || offline)) syncParkedPhase(record, '');
+                        }
                         record.projectHoldQueued = Boolean(record.projectHold);
                     } else if (!tasks.has(record.groupId) && record.projectHoldQueued) {
                         record.projectHoldQueued = false;
@@ -3449,6 +3453,7 @@ export function createChatInstance({
             let changed = false;
             for (const [id, record] of liveCardRecords) {
                 record.childDetailRead = undefined;
+                if (record.isSubagent) record.parkedOffline = true;  // this client's own park, not the server's view
                 changed = syncParkedPhase(record, 'unknown', activeDirectActivities.get(id)) || changed;
             }
             return changed;
