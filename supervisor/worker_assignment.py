@@ -20,6 +20,7 @@ from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION, LANE_PROJ
 from supervisor.events_budget import budget_fence_selected, budget_hold_fact
 from ouroboros.work_stop import continuation_refusal
 from supervisor.queue import _queue_lock
+from supervisor.queue_publication import mark_dirty_locked
 
 
 def _pool():
@@ -468,6 +469,7 @@ def _release_launch(queue, candidate, worker, token: str) -> None:
         if (candidate.get(_LAUNCH_CLAIM) or {}).get("token") != token:
             return
         candidate.pop(_LAUNCH_CLAIM, None)
+        mark_dirty_locked("worker_launch_released")  # who holds a lane changed: its published waits follow
         if worker.busy_task_id == str(candidate.get("id") or "") and not getattr(worker, "reaping", False):
             worker.busy_task_id = None
 

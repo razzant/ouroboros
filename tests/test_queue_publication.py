@@ -276,6 +276,11 @@ def test_a_pending_rows_lane_wait_is_published_beside_its_task_and_never_restore
     assert [row["lane_wait"] for row in independent_roots(root)["roots"] if row["task_id"] == "q"] == [behind]
     restored = queue_snapshot._saved_pending_task(rows["q"])
     assert "lane_wait" not in restored and "_lane_wait" not in restored
+    # An older build's saved note inside the task (format 1 or 2) is dropped where the old row is read, so it never
+    # rides to the worker after a Resume; the row's own fields stay.
+    old_task = {**rows["q"]["task"], "_folder_wait": {"task_id": "x"}}
+    old = queue_snapshot._saved_pending_task({**rows["q"], "task": old_task})
+    assert "_folder_wait" not in old and old["title"] == "Check CI"
     # The holder pauses: its lane is free at once, whatever any walk saw.
     del queue.RUNNING["x"]
     queue.PENDING.insert(0, {**holder, "_budget_pause": {"reason": "owner"}})
@@ -285,3 +290,34 @@ def test_a_pending_rows_lane_wait_is_published_beside_its_task_and_never_restore
     _chat_activities_snapshot_safe(root, {}, direct_turns=[], work_facts=facts)
     assert "lane_wait" not in facts["q"]
     assert all("lane_wait" not in row for row in independent_roots(root)["roots"])
+
+
+def test_a_released_launch_claim_marks_the_queue_so_both_publications_drop_its_wait(published, monkeypatch):
+    """Review round 2 (Opus S2, Carbon S1, Astra B2): a claim released without a start changes who holds a lane, and
+    only a marked revision rewrites the snapshot the mind reads; the release marks it under Q. A quiet tick after
+    it writes nothing again."""
+    from types import SimpleNamespace as Namespace
+
+    from ouroboros.peer_roster import independent_roots
+    from supervisor import worker_assignment, workers
+
+    root, _now = published
+    monkeypatch.setattr(workers, "PENDING", queue.PENDING)
+    monkeypatch.setattr(workers, "RUNNING", queue.RUNNING)
+    monkeypatch.setattr(queue, "INITIALIZED", True, raising=False)
+    claimed = {"id": "x", "type": "task", "project_id": "p", "root_task_id": "x", "title": "Add Ollama support",
+               "_launch_claim": {"token": "t", "wid": 0}}
+    queue.PENDING.extend([claimed, {"id": "q", "type": "task", "project_id": "p", "root_task_id": "q", "title": "CI"}])
+    assert queue.persist_queue_snapshot(reason="worker_launch_claimed")
+    def said():
+        return [row.get("lane_wait") for row in independent_roots(root)["roots"] if row["task_id"] == "q"]
+
+    assert said() == [{"lane": "project", "task_id": "x", "project_id": "p"}]
+    revision = queue_publication._STATE["revision"]
+    worker_assignment._release_launch(queue, claimed, Namespace(busy_task_id="x", reaping=False), "t")
+    assert queue_publication._STATE["revision"] == revision + 1, "the release marks the queue"
+    queue_publication.publish_queue_changes()
+    assert said() == [None], "the mind's list no longer names the released claim"
+    before = (root / "state" / "queue_snapshot.json").read_bytes()
+    queue_publication.publish_queue_changes()
+    assert (root / "state" / "queue_snapshot.json").read_bytes() == before, "a quiet tick writes nothing"

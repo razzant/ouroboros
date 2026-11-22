@@ -172,6 +172,7 @@ def _saved_pending_task(row: dict) -> dict:
     this restore's clock.
     """
     task = dict(row["task"])
+    task.pop("_folder_wait", None)  # an older build's display note: a wait is computed now, never restored
     value = row["queued_at"] if "queued_at" in row else task.get("queued_at")
     known = (isinstance(value, str) and value.strip()) or (
         isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0)

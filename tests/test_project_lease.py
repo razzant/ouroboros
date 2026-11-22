@@ -106,7 +106,7 @@ def _in(project, tid, folder="", *, role="", root="", **fields):
 
 def test_one_recorded_folder_is_one_lane_whichever_room_starts_work_in_it():
     """Owner 15.11.2026: independent pooled work in one external folder waits its turn across rooms."""
-    from ouroboros.project_lease import lane_holders, lane_wait
+    from ouroboros.project_lease import folder_projects, lane_holders, lane_wait
 
     shared = "/work/shared"
     writer = _in("p", "p1", shared)
@@ -130,16 +130,16 @@ def test_one_recorded_folder_is_one_lane_whichever_room_starts_work_in_it():
     assert candidate_is_leasable({**moving, "_placement_folder": ""}, leased, holders=holders)
     # The wait names the holder and its room; a free folder names nobody. Nothing is written on the row.
     before = dict(newcomer)
-    assert lane_wait(newcomer, running + [newcomer], holders) == {"lane": "folder", "task_id": "p1", "project_id": "p",
-                                                                  "folder": shared}
-    assert lane_wait(newcomer, [newcomer], lane_holders([], [newcomer])) == {} and newcomer == before
+    assert lane_wait(newcomer, holders, folder_projects(running + [newcomer])) == {
+        "lane": "folder", "task_id": "p1", "project_id": "p", "folder": shared}
+    assert lane_wait(newcomer, lane_holders([], [newcomer]), folder_projects([newcomer])) == {} and newcomer == before
 
 
 def test_a_queued_root_names_the_tree_keeping_its_projects_lane_first_and_nothing_else_ever():
     """Owner 21.11.2026 («5A»): the queue stays as it is, and a waiting root says behind which work it stands now.
     The Project's lane is the nearer cause; the folder's names a holder of another Project. Never a helper, unscoped
     work or the row's own tree (``project_lease.lane_wait``, pure: it changes no row)."""
-    from ouroboros.project_lease import lane_holders, lane_wait
+    from ouroboros.project_lease import folder_projects, lane_holders, lane_wait
 
     shared = "/work/shared"
     writer, sibling = _in("p", "p1", shared), _in("p", "p2", shared)
@@ -147,16 +147,17 @@ def test_a_queued_root_names_the_tree_keeping_its_projects_lane_first_and_nothin
     holders = lane_holders(running, [sibling])
     assert not candidate_is_leasable(sibling, running_project_ids(running), holders=holders)
     rows = running + [sibling]
-    assert lane_wait(sibling, rows, holders) == {"lane": "project", "task_id": "p1", "project_id": "p"}, \
-        "its Project's lane first"
-    assert lane_wait(_in("p", "p3"), rows, holders) == {"lane": "project", "task_id": "p1", "project_id": "p"}
-    assert lane_wait(_in("p", "p3"), [], {"p": {"zz", "aa", "p3"}})["task_id"] == "aa", "the first in sorted order"
-    assert lane_wait(sibling, [sibling], lane_holders([], [sibling])) == {}, "the holder left: nobody"
+    behind_p1 = {"lane": "project", "task_id": "p1", "project_id": "p"}
+    assert lane_wait(sibling, holders, folder_projects(rows)) == behind_p1, "its Project's lane first"
+    assert lane_wait(_in("p", "p3"), holders, folder_projects(rows)) == behind_p1
+    assert lane_wait(_in("p", "p3"), {"p": {"zz", "aa", "p3"}}, {})["task_id"] == "aa", "the first in sorted order"
+    assert lane_wait(sibling, lane_holders([], [sibling]), folder_projects([sibling])) == {}, "the holder left: nobody"
     for row in (_in("p", "kid", shared, role="subagent", root="q9"), _in("", "plain", shared),
                 _in("p", "p1-retry", root="p1")):
-        assert lane_wait(row, rows, holders) == {}, row["id"]
+        assert lane_wait(row, holders, folder_projects(rows)) == {}, row["id"]
     turn = [{**_meta(writer), "lane": "conversation"}]
-    assert lane_wait(sibling, turn + [sibling], lane_holders(turn, [sibling])) == {}, "a conversation turn holds none"
+    assert lane_wait(sibling, lane_holders(turn, [sibling]), folder_projects(turn + [sibling])) == {}, \
+        "a conversation turn holds none"
     assert "_lane_wait" not in sibling and "lane_wait" not in sibling
 
 def test_earlier_holders_of_one_folder_never_lock_each_other_and_a_newcomer_waits_for_all():

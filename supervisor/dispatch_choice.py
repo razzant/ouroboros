@@ -64,6 +64,7 @@ log = logging.getLogger(__name__)
 _ROUNDS = 3
 _ADMITTED: Dict[str, Tuple[tuple, str]] = {}  # row id -> (identity, actor): C2 admitted it under this identity
 _UNREAD_MOVES: Dict[str, Dict[str, Any]] = {}  # row id -> the move whose own resource failed to read: said once
+_LANE_WAIT_ERRORS: set = set()  # each distinct failure of ``lane_waits``, warned once
 _CONTROL_KEYS = ("_attempt", "_budget_pause", "_budget_pause_resume", "_resume_selection", "_budget_pause_hold",
                  "_owner_hold", "_owner_wait_resume", "_working_recovery", "_continuation_prepared")
 
@@ -372,23 +373,30 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
 def lane_waits() -> Dict[str, Dict[str, Any]]:
     """Under Q: each queued row another tree keeps out of its Project's or folder's lane now, by task id, as
     ``project_lease.lane_wait`` names the holder. Who holds a lane is what the walk counts before it picks
-    (RUNNING with its carriers, plus launches claimed); a returned turn takes no lane and a moved row whose own
-    resource is unread has no folder lane yet, so neither is said. Pure over memory: the queue snapshot and the
-    status census publish it, nothing stores it on a task; a display fact, so a failure says none, never raises."""
-    from ouroboros.project_lease import lane_holders, lane_wait
+    (RUNNING with its carriers, plus launches claimed); a returned turn takes no lane, and a moved row whose own
+    resource is unread keeps its Project's answer while its folder lane is unknown. Pure over memory: the queue
+    snapshot and the status census publish it, nothing stores it on a task; a display fact, so a failure says none
+    (warned once per distinct error), never raises."""
+    from ouroboros.project_lease import folder_projects, lane_holders, lane_wait
     from ouroboros.project_placement import pending_resource
     from supervisor.conversation_lane import resumes_on_lane
 
     try:
         started, pending = _assignment()._started_projection(), list(_pool().PENDING)
         holders = lane_holders(started, pending)
-        rows = started + pending if holders else []
-        waits = {_tid(row): lane_wait(row, rows, holders) for row in pending
-                 if holders and not resumes_on_lane(row) and pending_resource(row) is None}
-    except Exception:
-        log.debug("Lane waits unavailable", exc_info=True)
+        projects = folder_projects(started + pending) if holders else {}
+        waits = {}
+        for row in pending if holders else ():
+            wait = {} if resumes_on_lane(row) else lane_wait(row, holders, projects)
+            if wait and (wait["lane"] == "project" or pending_resource(row) is None):
+                waits[_tid(row)] = wait
+        return waits
+    except Exception as error:
+        said = f"{type(error).__name__}: {error}"
+        if said not in _LANE_WAIT_ERRORS:
+            _LANE_WAIT_ERRORS.add(said)
+            log.warning("Lane waits unavailable (%s); queued rows say no wait", said, exc_info=True)
         return {}
-    return {task_id: wait for task_id, wait in waits.items() if wait}
 
 
 def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, Any]], screened: Dict[str, Any],
@@ -400,12 +408,14 @@ def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
     from ouroboros import store_hot_facts
     from ouroboros.project_placement import pending_resource, settle_resource
     from supervisor.events_budget import budget_resume_dispatch_allowed
+    from supervisor.queue_publication import mark_dirty_locked
 
     wa = _assignment()
     live, admitted, stale, chosen = {id(item) for item in _pool().PENDING}, [], [], set()
     for row in rows:
-        if id(row) in live and id(row) in screened.get("placements", {}):
-            settle_resource(row, *screened["placements"][id(row)])
+        if id(row) in live and id(row) in screened.get("placements", {}) and settle_resource(
+                row, *screened["placements"][id(row)]):
+            mark_dirty_locked("placement_resource_settled")  # its folder lane is known now: its wait follows
     index = _index(queue) if undecided or any(_carrier(row) for row in rows) else ({}, {})
     memo: Dict[tuple, str] = {}
     running = wa._started_projection() + [{"task": row} for row in carried]

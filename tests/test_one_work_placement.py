@@ -413,6 +413,7 @@ def test_a_lane_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_p
         one_pass()
     with queue._queue_lock:
         assert dispatch_choice.lane_waits() == {}, "a walk's pick holds no lane"
+    fields = {row["id"]: set(row) for row in (first, second)}  # as the chooser's own passes left them
     workers.RUNNING["other"] = {"task": {"id": "other", "type": "task", "project_id": "elsewhere",
                                          "root_task_id": "other", "workspace_root": str(shared),
                                          "workspace_mode": "external"}, "worker_id": 0}
@@ -421,7 +422,10 @@ def test_a_lane_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_p
     wait = {"lane": "folder", "task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
     with queue._queue_lock:
         assert dispatch_choice.lane_waits() == {"first": wait, "second": wait}
-    assert not {"_lane_wait", "lane_wait"} & (set(first) | set(second)) and "lane_wait" not in marks, marks
+    # The chooser writes nothing for a wait: no field on either row (the old ``_folder_wait`` note included) and no
+    # publication for it (the old ``folder_wait`` reason included).
+    assert {row["id"]: set(row) for row in (first, second)} == fields
+    assert not {"folder_wait", "lane_wait"} & set(marks), marks
 
 
 def test_a_moved_rows_unreadable_own_resource_is_said_once_a_move_and_the_row_waits(tmp_path, monkeypatch, caplog):
@@ -496,8 +500,7 @@ def test_a_queued_roots_lane_wait_is_what_holds_its_lane_now_whatever_the_choose
     assert waits([member], [asleep, queued]) == {"q": behind_x}, "a sleeping tree with a running member keeps it"
     assert waits([{"task": holder, "lane": "conversation"}], [queued]) == {}, "a conversation turn holds no lane"
     assert waits([], [root("x", _launch_claim={"token": "t"}), queued]) == {"q": behind_x}, "a claimed launch holds"
-    unread = root("q", **{_OWN: {"bound_at": "2026-11-21T00:00:00Z", "kind": "move"}})
-    for row in (root("q-kid", delegation_role="subagent", root_task_id="y"), root("q", project=""), unread):
+    for row in (root("q-kid", delegation_role="subagent", root_task_id="y"), root("q", project="")):
         assert waits([{"task": holder}], [row]) == {}, row
     monkeypatch.setattr(conversation_lane, "resumes_on_lane", lambda row: row.get("id") == "q")
     assert waits([{"task": holder}], [queued]) == {}, "a returned turn takes no project lane"
@@ -515,3 +518,92 @@ def test_a_queued_roots_lane_wait_is_what_holds_its_lane_now_whatever_the_choose
     assert waits([kid, other], [sleeper]) == {"s": {"lane": "folder", "task_id": "o", "project_id": "other",
                                                     "folder": shared}}
     assert waits([kid], [sleeper]) == {}
+    # Two exclusively cold trees in one folder never wait for each other; once the second root acts, the first does.
+    other_sleeper = root("t", project="t", _budget_pause={"reason": "sleep"}, **folder)
+    other_kid = {"task": root("t-kid", project="t", delegation_role="subagent", root_task_id="t")}
+    assert waits([kid, other_kid], [sleeper, other_sleeper]) == {}
+    woken = {"task": root("t", project="t", **folder)}
+    assert waits([kid, woken], [sleeper]) == {"s": {"lane": "folder", "task_id": "t", "project_id": "t",
+                                                    "folder": shared}}
+    # A moved row whose own resource is unread keeps its Project's answer; only its folder's is unknown.
+    unread = {_OWN: {"bound_at": "2026-11-21T00:00:00Z", "kind": "move"}}
+    assert waits([{"task": root("x")}], [root("q", **unread)]) == {"q": behind_x}
+    assert waits([other], [root("q", **folder, **unread)]) == {}
+
+
+@pytest.mark.parametrize("early", [True, False])
+def test_a_moved_row_names_no_holder_of_the_folder_it_left_and_is_picked_as_before(tmp_path, monkeypatch, early):
+    """Review round 2 (Astra B1): a work moved out of a folder another Project holds is said to wait behind nobody
+    from the move on (the move gives it its next look's lane facts, ``refresh_pending_placement``), and the chooser
+    picks it as it did without that early refresh. Then, once its folder in the new room is read and another Project
+    holds it, the chooser marks the queue (``placement_resource_settled``) so the snapshot the mind reads follows."""
+    from ouroboros import project_placement
+    from supervisor import dispatch_choice, evolution_lifecycle, queue_publication, state
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path / "data"
+    data.mkdir()
+    queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    old, new = ((tmp_path / name).resolve() for name in ("old", "new"))
+    for folder in (old, new):
+        folder.mkdir()
+    create_project(data, "dest")
+    update_project(data, "dest", working_dir=str(new))
+    workers.PENDING.append({"id": "q", "type": "task", "chat_id": 0, "_attempt": 1, "project_id": "prior",
+                            "root_task_id": "q", "workspace_root": str(old), "workspace_mode": "external",
+                            "metadata": {}})
+    workers.RUNNING["x"] = {"task": {"id": "x", "type": "task", "project_id": "other", "root_task_id": "x",
+                                     "workspace_root": str(old), "workspace_mode": "external"}, "worker_id": 0}
+    real, moving = project_placement.refresh_pending_placement, [False]
+    monkeypatch.setattr(project_placement, "refresh_pending_placement",
+                        lambda *a, **kw: True if moving[0] and not early else real(*a, **kw))
+    moving[0] = True
+    place(data, "q", "dest", workers)
+    moving[0] = False
+    with queue._queue_lock:
+        said = dispatch_choice.lane_waits()
+    assert said == ({} if early else {"q": {"lane": "folder", "task_id": "x", "project_id": "other",
+                                            "folder": str(old)}}), "the early refresh closes the window"
+    assert [row["id"] for row in dispatch_choice.choose(queue, 100.0, ())] == ["q"], "the same pick either way"
+    # The other direction: its new room's folder is held by another Project; the read of its resource marks.
+    workers.RUNNING.clear()
+    workers.PENDING[:] = [{"id": "r", "type": "task", "chat_id": 0, "_attempt": 1, "project_id": "prior",
+                           "root_task_id": "r", "workspace_root": str(old), "workspace_mode": "external",
+                           "metadata": {}}]
+    workers.RUNNING["y"] = {"task": {"id": "y", "type": "task", "project_id": "other", "root_task_id": "y",
+                                     "workspace_root": str(new), "workspace_mode": "external"}, "worker_id": 0}
+    marks = []
+    monkeypatch.setattr(queue_publication, "mark_dirty_locked", lambda reason: marks.append(reason))
+    place(data, "r", "dest", workers)
+    for _ in range(2):
+        assert dispatch_choice.choose(queue, 100.0, ()) == []
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {"r": {"lane": "folder", "task_id": "y", "project_id": "other",
+                                                      "folder": str(new)}}
+    assert marks.count("placement_resource_settled") == 1, marks
+
+
+def test_a_failed_lane_wait_reads_as_none_and_is_warned_once_per_distinct_error(tmp_path, monkeypatch, caplog):
+    """Review round 2 (Opus A2, Grok, Astra A2): a display fact never stops a snapshot or the census, so a failure
+    says no wait, and an operator sees it: one warning per distinct error, not one per call."""
+    import logging
+
+    from ouroboros import project_lease
+    from supervisor import dispatch_choice
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(dispatch_choice, "_LANE_WAIT_ERRORS", set())
+    failures = iter(["first", "first", "second"])
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError(next(failures))
+
+    monkeypatch.setattr(project_lease, "lane_holders", broken)
+    with caplog.at_level(logging.WARNING, logger="supervisor.dispatch_choice"), queue._queue_lock:
+        assert [dispatch_choice.lane_waits() for _ in range(3)] == [{}, {}, {}]
+    said = [record.getMessage() for record in caplog.records if "Lane waits unavailable" in record.getMessage()]
+    assert len(said) == 2 and "first" in said[0] and "second" in said[1], said
