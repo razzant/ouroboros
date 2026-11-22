@@ -1336,10 +1336,11 @@ def _change_texts(
 
 def _suite_facts(
     rows: Mapping[str, tuple[int, int]], at_base: Mapping[str, str | None],
-    current: Mapping[str, str | None], new: Iterable[str],
+    current: Mapping[str, str | None], new: Iterable[str], unread: Iterable[str] = (),
 ) -> tuple[str, list[str]]:
     """The fact line's text on the suite and the sizes of ``rows``, the changed test sources
-    with their added and removed lines: test modules left the module band, not the pulse."""
+    with their added and removed lines: test modules left the module band, not the pulse. A
+    module named ``unread`` (a side it has that was not read) is unreadable, never empty."""
     from ouroboros.test_selection import is_test_module
 
     added = removed = unreadable = 0
@@ -1353,6 +1354,8 @@ def _suite_facts(
         if not is_test_module(path):
             continue
         try:
+            if path in unread:
+                raise ValueError(path)
             items, had = _declared_tests(at_base.get(path) or "", path)
             count, has = _declared_tests(text or "", path)
         except (SyntaxError, ValueError, RecursionError, MemoryError):  # mid-edit or too deep: unread, never none
@@ -1443,18 +1446,18 @@ def diff_pulse(
             and "tests" in pathlib.PurePosixPath(path).parts[:-1]}
     python = [path for path in shown if path in changed and path.endswith(".py")]
     at_base, current = _change_texts(root, base, staged, python, list(dict.fromkeys([*rows, *python])))
+    created = set(new)
+    # A side the file has but that was not read is unknown to both readers, never an addition or a deletion.
+    unread = [path for path in python if at_base[path] is None and path not in created
+              or current[path] is None and path not in gone]
     if rows:
-        facts, test_sizes = _suite_facts(rows, at_base, current, new)
+        facts, test_sizes = _suite_facts(rows, at_base, current, new, unread)
         suite = f"; {facts}, test module lines: {listed(test_sizes)}"
     if python:
         from ouroboros.code_shape_facts import module_names, pulse_line
 
         listing = _git_bytes(root, "--no-optional-locks", "ls-tree", "-r", "--name-only", "-z", base)
         before = None if listing is None else module_names(listing.decode("utf-8", "replace").split("\0"))
-        created = set(new)
-        # A side the file has but that was not read is unknown, never a deletion.
-        unread = [path for path in python if at_base[path] is None and path not in created
-                  or current[path] is None and path not in gone]
         after = None if before is None else (before - module_names(gone)) | module_names(created)
         shape = pulse_line([(path, at_base[path], current[path]) for path in python], before, after,
                            unreadable=unread, limit=limit)

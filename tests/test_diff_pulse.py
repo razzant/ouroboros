@@ -342,6 +342,27 @@ def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns
             "tests/test_deep.py).") in pulse
 
 
+def test_the_suite_reads_the_same_side_presence_as_the_shape_line(tmp_path, monkeypatch):
+    """A test module's side that exists but was not read is unreadable to the suite's items, as to the shape
+    line, never zero items; only a real deletion removes what it declared."""
+    from ouroboros import review
+
+    repo = _suite_repo(tmp_path / "body")
+    _write(repo, "tests/test_old.py", 1, SUITE + "# one more line\n")
+    _git(repo, "add", "-A")
+    real = review._blob_texts
+    for index_side in (True, False):  # the index side unread, then the base side
+        monkeypatch.setattr(review, "_blob_texts", lambda root, specs, index_side=index_side: {
+            spec: None if spec.startswith(":") == index_side else text for spec, text in real(root, specs).items()})
+        pulse = diff_pulse(repo, ["tests/test_old.py"], staged=True)
+        assert "tests: items +0/-0 (1 unreadable), new modules 0," in pulse
+        assert "git init call sites unknown (1 unreadable: tests/test_old.py)." in pulse
+    monkeypatch.setattr(review, "_blob_texts", real)
+    assert "tests: items +0/-0, new modules 0," in diff_pulse(repo, ["tests/test_old.py"], staged=True)
+    _git(repo, "rm", "-q", "tests/test_gone.py")
+    assert "tests: items +0/-2, new modules 0," in diff_pulse(repo, ["tests/test_gone.py"], staged=True)
+
+
 CODE = {
     "write_file": {"path": "ouroboros/loop.py", "content": "x = 1\ny = 2\n"},
     "edit_text": {"path": "ouroboros/loop.py", "old_str": "x = 1", "new_str": "x = 1\ny = 2"},
