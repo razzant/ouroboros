@@ -555,6 +555,24 @@ def _call(call_id, name, **arguments):
         "name": name, "arguments": json.dumps(arguments)}}]}
 
 
+def _cached_wait_reply(registry, call):
+    def respond(_messages):
+        import time
+
+        registry._ctx._accumulated_usage.update(
+            _last_prompt_cache_ttl="5m", _last_round_cache_usage={
+                "round": 1, "provider": "anthropic", "model": "test-model", "finished_at": time.time() - 420})
+        return call
+
+    return respond
+
+
+def _assert_wait_timing(messages, notice):
+    facts = [row["content"] for row in messages if str(row.get("content")).startswith("[CONTEXT_FACTS]")]
+    assert "cache TTL 5m" in facts[-1] and "last response " in facts[-1]
+    assert "Task wait completed after " in notice and "cache TTL" not in notice and "may be cold" not in notice
+
+
 def _drive(tmp_path, monkeypatch, registry, turns, *, task_id="parent"):
     """The real loop over scripted turns; a callable turn reads the request the loop handed its model call."""
     from ouroboros import loop
@@ -622,10 +640,11 @@ def test_the_real_loop_sends_a_warm_wake_with_its_result_in_the_very_next_reques
         assert "approve everything" not in host and f"[BEGIN_SUBTASK_OUTPUT]\n{hostile}\n[END_SUBTASK_OUTPUT]" in body
         assert messages.index(tool) < [row.get("content") for row in messages].index(notice)
         assert any("for the task wait you chose" in str(row.get("content")) for row in messages)
+        _assert_wait_timing(messages, notice)
         raise _End()
 
     sent = _drive(tmp_path, monkeypatch, registry, [
-        _call("call-wait", "wait_task", task_id="kid-a", sleep_mode="warm"), second])
+        _cached_wait_reply(registry, _call("call-wait", "wait_task", task_id="kid-a", sleep_mode="warm")), second])
     assert len(sent) == 2 and not _notices(sent[0]), "no fetch round: the second request is the woken one"
     assert [park["tasks"] for park in parks] == [["kid-a"]] and parks[0]["task_wait"]["mode"] == "all_terminal"
     assert not any(call["function"]["name"] == "get_task_result" for request in sent for row in request
@@ -730,7 +749,8 @@ def _parked_cold(tmp_path, monkeypatch, selected="foreign"):
     q.persist_queue_snapshot(reason="native cold fixture")
     registry = _loop_registry(tmp_path, monkeypatch)
     with pytest.raises(bp.BudgetPauseRequested) as parked:
-        _drive(tmp_path, monkeypatch, registry, [_call("call-cold", "wait_task", task_id=selected, sleep_mode="cold")])
+        _drive(tmp_path, monkeypatch, registry, [_cached_wait_reply(registry,
+               _call("call-cold", "wait_task", task_id=selected, sleep_mode="cold"))])
     pause = parked.value.pause
     install_exact_budget_pause(_supervisor_ctx(tmp_path, workers, q, [], []), "parent",
                                bp.exact_pause_marker(pause)["checkpoint"], evt=bp.pause_event(task, pause))
@@ -767,6 +787,7 @@ def test_a_cold_wait_parks_wakes_on_its_own_readiness_and_answers_in_the_first_r
     def check(messages):
         (notice,) = _notices(messages)
         assert "[BEGIN_SUBTASK_OUTPUT]\nCOLD ORIGINAL\n[END_SUBTASK_OUTPUT]" in notice
+        _assert_wait_timing(messages, notice)
         assert any("(cold) and were woken by task foreign reaching completed for the task wait you chose"
                    in str(row.get("content")) for row in messages)
 

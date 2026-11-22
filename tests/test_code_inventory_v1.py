@@ -1,9 +1,9 @@
 import json
 import pathlib
-import subprocess
 
 import ouroboros.code_intelligence as ci
 from ouroboros.code_intelligence import build_code_inventory, render_codebase_digest
+from tests._workspace_git import git_repository
 
 
 def test_code_inventory_indexes_python_symbols_imports_and_no_raw_source_cache(tmp_path):
@@ -117,9 +117,8 @@ def test_v2_cache_cannot_reintroduce_cross_file_joins(tmp_path):
 def test_nested_git_uses_own_ignores_and_visibility_before_entering(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     nested = repo / "vendor" / "child"
-    nested.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    git_repository(repo, unborn=True)
+    git_repository(nested, unborn=True)
     (nested / ".gitignore").write_text("ignored.py\n")
     (nested / "app.py").write_text("def visible(): pass\n")
     (nested / "ignored.py").write_text("def invisible(): pass\n")
@@ -151,9 +150,8 @@ def test_non_git_walk_discovers_nested_git_and_never_follows_directory_symlinks(
     repo = tmp_path / "repo"
     nested = repo / "child"
     outside = tmp_path / "outside"
-    nested.mkdir(parents=True)
+    git_repository(nested, unborn=True)
     outside.mkdir()
-    subprocess.run(["git", "init", "-q", str(nested)], check=True)
     (nested / "app.py").write_text("def run(): pass\n")
     (nested / ".gitignore").write_text("ignored.py\n")
     (nested / "ignored.py").write_text("def ignored(): pass\n")
@@ -281,8 +279,7 @@ def test_scoped_directory_starts_before_unrelated_enumeration_budget(tmp_path, m
 
 def test_scoped_explicit_file_uses_literal_git_pathspec_and_preserves_full_cache(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    git_repository(repo, unborn=True)
     for index in range(8):
         (repo / f"a_unrelated{index}.py").write_text("def unrelated(): pass\n")
     (repo / "z_target[1].py").write_text("def selected(): pass\n")
@@ -301,9 +298,9 @@ def test_scoped_nested_repository_keeps_ancestor_metadata_and_ignore_rules(tmp_p
     repo = tmp_path / "repo"
     nested = repo / "child"
     selected = nested / "pkg"
-    selected.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    git_repository(repo, unborn=True)
+    git_repository(nested, unborn=True)
+    selected.mkdir()
     (nested / ".gitignore").write_text("pkg/ignored.py\n")
     (selected / "app.py").write_text("def run(): pass\n")
     (selected / "ignored.py").write_text("def hidden(): pass\n")

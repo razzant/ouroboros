@@ -13,11 +13,14 @@ dispatches onto the harness, so every failed check is the pin's typed block.
 
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros.agent import (
     _blocked_executor_terminal,
     executor_blocked_outcome,
     preflight_delegate_visibility,
 )
+from ouroboros.agent_dispatch import _DELEGATE_VERBS
 from ouroboros.subagents import (
     CapabilityDelta,
     SubagentDispatch,
@@ -60,7 +63,7 @@ def _task(requested_executor="harness"):
 
 
 def _tools(available):
-    return SimpleNamespace(available_tools=lambda: list(available))
+    return SimpleNamespace(callable_rows=lambda namespace="": [{"name": name} for name in available])
 
 
 def test_visible_verbs_leave_the_dispatch_untouched():
@@ -114,9 +117,9 @@ def test_explicit_harness_pin_with_invisible_verbs_blocks_with_zero_spend():
 
 
 def _broken_tools():
-    def _boom():
+    def _boom(namespace=""):
         raise RuntimeError("registry exploded")
-    return SimpleNamespace(available_tools=_boom)
+    return SimpleNamespace(callable_rows=_boom)
 
 
 def test_broken_introspection_with_pinned_harness_fails_closed():
@@ -137,7 +140,32 @@ def test_broken_introspection_with_pinned_harness_fails_closed():
 
 def test_native_and_undispatched_children_are_not_probed():
     probe_forbidden = SimpleNamespace(
-        available_tools=lambda: (_ for _ in ()).throw(AssertionError("must not probe")))
+        callable_rows=lambda namespace="": (_ for _ in ()).throw(AssertionError("must not probe")))
     native = _dispatch(executor="native")
     assert preflight_delegate_visibility(probe_forbidden, _task(), native) == (native, False)
     assert preflight_delegate_visibility(probe_forbidden, _task(), None) == (None, False)
+
+
+@pytest.mark.parametrize("withheld", [["delegate_wait"], []])
+def test_a_verb_shown_but_refused_at_the_call_blocks_like_a_hidden_one(tmp_path, withheld):
+    """A consciousness-origin contract keeps a withheld verb's schema shown (В31=B) while dispatch refuses the
+    call: the preflight asks what the child can CALL, so that pin blocks with zero spend; without it, it stands."""
+    from ouroboros import consciousness_authority as ca
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    metadata = ca.apply_consciousness_authority({"id": "child-1", "metadata": {
+        "initiator": "consciousness", "consciousness_autonomy": "full", "disabled_tools": withheld,
+        "delegation_role": "subagent"}})["metadata"]
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="child-1", task_metadata=metadata,
+                                     task_constraint=TaskConstraint(mode="local_readonly_subagent")))
+    assert set(_DELEGATE_VERBS) <= set(registry.available_tools()), "shown either way"
+    task = _task()
+    result, amended = preflight_delegate_visibility(registry, task, _dispatch())
+    assert amended is bool(withheld)
+    if withheld:
+        assert result.blocked is True and "delegate_tools_invisible" in task["capability_delta"]["reason"]
+    else:
+        assert task["executor_route"] == "claude"

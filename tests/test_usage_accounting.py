@@ -516,7 +516,7 @@ def test_live_openrouter_catalog_produces_known_reservation(data_root, monkeypat
     ))
     row = _ledger(data_root)[-1]
     # OpenAI-family reservations retain the tokenizer envelope: 1,100 input.
-    assert row["reservation_upper_bound_usd"] == 0.0062
+    assert row["reservation_upper_bound_usd"] == pytest.approx(0.0062, rel=1e-12, abs=0)
     assert row["reservation_basis"] == "linear_pricing"
     ua.release_attempt(reservation)
 
@@ -546,26 +546,22 @@ def test_explicit_reservation_is_not_inflated_by_tokenizer_margin(data_root):
     ua.release_attempt(opaque)
 
 
-def _isolated_anthropic_catalog(monkeypatch):
+def _isolated_anthropic_catalog(monkeypatch, *, hourly_price=9.0):
     from ouroboros import pricing
 
     monkeypatch.setattr(pricing, "_cached_pricing", {})
     monkeypatch.setattr(pricing, "_pricing_fetched_at", {})
     monkeypatch.setattr(pricing, "_pricing_retry_after", {})
     monkeypatch.setattr(pricing, "_pricing_fetch_in_progress", set())
-    monkeypatch.setattr(
-        "ouroboros.llm.fetch_openrouter_pricing",
-        # (input, cached_read, cache_write(5m), output) per 1M tokens.
-        lambda **kwargs: {"anthropic/claude-test": (3.0, 0.3, 3.75, 15.0)},
-    )
+    schedule = pricing.PricingSchedule((3.0, 0.3, 3.75, 15.0), cache_write_1h=hourly_price)
+    monkeypatch.setattr("ouroboros.llm.fetch_openrouter_pricing", lambda **kwargs: {"anthropic/claude-test": schedule})
 
 
 def test_reservation_prices_the_owner_cache_ttl_not_a_hardcoded_1h(data_root, monkeypatch):
     """G3-5: `_reservation_cost` must bill the cache-write tier the owner's
     global `OUROBOROS_PROMPT_CACHE_TTL` actually ships, not an unconditional
-    worst-case "1h". With the whole prompt assumed written to cache, 1h bills
-    2.0x base input while 5m/default bill 1.25x — a 1.28x admission inflation
-    that can reject calls the budget affords."""
+    worst-case "1h". This catalog prices the same thousand write tokens at
+    $0.009 for one hour and $0.00375 for five minutes."""
     _isolated_anthropic_catalog(monkeypatch)
     request = _request(
         data_root,
@@ -575,9 +571,8 @@ def test_reservation_prices_the_owner_cache_ttl_not_a_hardcoded_1h(data_root, mo
         prompt_tokens_estimate=1_000,
         max_completion_tokens=1_000,
     )
-    # 1000 write-tokens * $3.75/M * (2.0/1.25) + 1000 out * $15/M = 0.021
     monkeypatch.setenv("OUROBOROS_PROMPT_CACHE_TTL", "1h")
-    assert ua._reservation_cost(request) == 0.021
+    assert ua._reservation_cost(request) == 0.024
     # 1000 write-tokens * $3.75/M + 1000 out * $15/M = 0.01875
     monkeypatch.setenv("OUROBOROS_PROMPT_CACHE_TTL", "5m")
     assert ua._reservation_cost(request) == 0.01875
@@ -617,8 +612,92 @@ def test_request_carried_applied_ttl_wins_over_the_global_setting(data_root, mon
 
     assert _priced("5m") == 0.01875
     assert _priced("default") == 0.01875
-    assert _priced("1h") == 0.021
-    assert _priced("24h") == 0.021  # unknown value -> owner global ("1h")
+    assert _priced("1h") == 0.024
+    assert _priced("24h") == 0.024  # unknown value -> owner global ("1h")
+
+
+@pytest.mark.parametrize("reported_cost", [None, 0.0, 0.031])
+def test_missing_hourly_price_leaves_wrapup_unknown_and_honors_the_provider_amount(data_root, monkeypatch, reported_cost):
+    from dataclasses import replace
+    from ouroboros.task_pacing import wrapup_reservation_fits
+
+    _isolated_anthropic_catalog(monkeypatch, hourly_price=None)
+    request = _request(data_root, task_id="root", model="anthropic/claude-test", provider="openrouter", prompt_cache_ttl="1h",
+                       reservation_usd=None, prompt_tokens_estimate=1000, max_completion_tokens=1000)
+    with ua.usage_scope(ua.UsageScope(drive_root=data_root, task_id="root", root_task_id="root")):
+        # Unknown on a paid route still observes the global limit, and it buys no priced wrap-up.
+        with pytest.raises(ua.BudgetExceeded):
+            ua.reserve_attempt(replace(request, global_limit_usd=0.0))
+        assert wrapup_reservation_fits(request=request, root_cap_usd=1.0, deciding_usd=0.0) is None
+        attempt = ua.reserve_attempt(request)
+        assert attempt.reservation_upper_bound_usd is None
+        ua.mark_dispatched(attempt)
+        ua.settle_attempt(attempt, {"prompt_tokens": 1000, "completion_tokens": 10, "cached_tokens": 0,
+                                    "cache_write_tokens": 1000, "prompt_cache_ttl": "1h"},
+                          cost_usd=reported_cost, cost_final=True)
+    with usage_store.read(data_root) as txn:
+        row = txn.attempt(attempt.attempt_id)
+    assert row["reservation_basis"] == "unknown_pricing"
+    assert row["cost_usd"] == reported_cost and row["cost_final"] is (reported_cost is not None)
+    assert not row["cost_estimated"]
+    assert ua.usage_projection(data_root)["settled_usd"] == (0.0 if reported_cost is None else reported_cost)
+
+
+@pytest.mark.parametrize("malformed,fallback,cash,expected_writes,expected_cost", [
+    pytest.param(-1, None, None, None, None, id="malformed-only"),
+    pytest.param(-1, None, 0, None, 0, id="reported-zero"),
+    pytest.param(-1, None, 0.021, None, 0.021, id="reported-charge"),
+    pytest.param(2.5, None, 0.021, None, 0.021, id="fractional-is-unknown-not-truncated"),
+    pytest.param(-1, 0, None, 0, 20e-6, id="valid-zero-fallback"),
+    pytest.param(-1, 12, None, 12, 44e-6, id="positive-fallback"),
+])
+def test_a_malformed_write_count_is_unknown_on_the_row_and_reads_no_tariff(
+    data_root, monkeypatch, malformed, fallback, cash, expected_writes, expected_cost,
+):
+    from queue import Queue
+
+    from ouroboros import pricing
+    from ouroboros.gateway.cost_period import cost_period
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
+
+    model = "vendor/model"
+    tariff = pricing.PricingSchedule((1, 0, 3, 0))
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {model: tariff})
+    usage = {"prompt_tokens": 20, "completion_tokens": 0, "cached_tokens": 0,
+             "prompt_tokens_details": {"cache_write_tokens": malformed}, "prompt_cache_ttl": "5m"}
+    if fallback is not None:
+        usage["cache_write_tokens"] = fallback
+    if cash is not None:
+        usage["cost"] = cash
+    body = {"usage": usage, "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+    request = _request(data_root, provider="openrouter", model=model)
+    ua.execute_physical_attempt(request, lambda: body)
+    row, = _ledger(data_root)
+    target = {"provider": "openrouter", "resolved_model": model, "base_url": OPENROUTER_BASE_URL}
+    _, reply = LLMClient(api_key="unused")._normalize_remote_response(body, target, skip_cost_fetch=True)
+    loop_cost, *_ = pricing.normalize_usage_cost(reply, model=model, use_local=False)
+    assert row["cache_write_tokens"] == reply["cache_write_tokens"] == expected_writes
+    events = Queue()
+    pricing.emit_llm_usage_event(events, "child", model, reply, loop_cost)
+    event = events.get_nowait()
+    assert (event["cache_write_tokens"], event["cached_tokens"], event["prompt_tokens"]) == (fallback, 0, 20)
+    view = cost_period(data_root, "24h")
+    period, = view["models"]
+    if fallback is None:
+        assert (period["tokens"]["cache_write"], period["tokens"]["uncached_input"]) == (0, 0)
+        assert (period["uncounted_calls"], period["uncounted_input_tokens"]) == (1, 20)
+        assert period["by_class"] is None and view["cache_writes"] == []
+    else:
+        assert (period["uncounted_calls"], period["tokens"]["uncached_input"]) == (0, 20 - fallback)
+        assert period["tokens"]["cache_write"] == fallback
+    for amount in (row["cost_usd"], loop_cost):
+        assert amount == (None if expected_cost is None else pytest.approx(expected_cost, rel=1e-12, abs=0))
+    assert row["cost_final"] is (cash is not None)
+    if cash is not None:
+        with usage_store.read(data_root) as txn:
+            call, = txn.period_settled_calls(*txn.period_bounds(0), "1970-01-01")
+        assert pricing.cost_class_weights(tariff, call) is None
 
 
 def test_admission_honors_the_cheaper_owner_tier(data_root, monkeypatch):
@@ -1289,6 +1368,57 @@ def test_body_error_zero_usage_settles_confirmed_zero():
     assert normalized["completion_tokens"] == 0
 
 
+@pytest.mark.parametrize("reported,cost,final", [
+    pytest.param({}, 0.0, True, id="strict-zero-rejection"),
+    pytest.param({"cost": 0}, 0.0, True, id="reported-zero"),
+    pytest.param({"cost": 0, "is_byok": True, "cost_details": {"upstream_inference_cost": 0}}, 0.0, True,
+                 id="byok-both-shares-zero"),
+    pytest.param({"prompt_tokens_details": {"audio_tokens": 0}}, 0.0, True, id="reported-zero-audio"),
+    pytest.param({"cost": 0, "is_byok": True}, None, False, id="byok-gateway-fee-alone"),
+    pytest.param({"is_byok": True, "cost_details": {"upstream_inference_cost": 0.031}}, None, False,
+                 id="byok-upstream-share-alone"),
+    pytest.param({"prompt_tokens_details": {"audio_tokens": 5}}, None, False, id="reported-audio-usage"),
+])
+def test_a_zero_text_rejection_is_free_only_without_a_contradicting_report(data_root, reported, cost, final):
+    """A body error with explicit zero text counts and no price settles a confirmed $0. Half a BYOK price (the
+    gateway fee without the provider's share, or that share alone) or reported non-text usage contradicts it: the
+    attempt stays unknown, never free. A reported zero and a complete BYOK zero stay final."""
+    body = {"error": {"code": 429, "message": "rate limited"},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, **reported}}
+    ua.execute_physical_attempt(_request(data_root, provider="openrouter", model="vendor/model"), lambda: body)
+    row, = _ledger(data_root)
+    assert (row["state"], row["cost_usd"], row["cost_final"]) == ("settled", cost, final)
+    assert (row["prompt_tokens"], row["completion_tokens"]) == (0, 0)
+
+
+_NATIVE_ZERO = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+_ONE_SEARCH = {"server_tool_use": {"web_search_requests": 1}}
+
+
+@pytest.mark.parametrize("reported,envelope,cost,final", [
+    pytest.param(_ONE_SEARCH, {}, None, False, id="one-search-no-bill"),
+    pytest.param(_ONE_SEARCH, {"total_cost_usd": 0}, 0.0, True, id="one-search-reported-zero-bill"),
+    pytest.param(_ONE_SEARCH, {"total_cost_usd": 0.031}, 0.031, True, id="one-search-reported-charge"),
+    pytest.param({"server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0}}, {}, 0.0, True,
+                 id="server-tools-reported-zero"),
+    pytest.param({"server_tool_use": None}, {}, 0.0, True, id="server-tools-unreported"),
+    pytest.param({}, {}, 0.0, True, id="strict-zero-rejection"),
+])
+def test_a_native_zero_text_rejection_is_never_free_after_server_tool_work(data_root, reported, envelope, cost, final):
+    """A native Messages body error with zero input, output and cache counts settles a confirmed $0 only when the
+    provider ran no server tool. One reported web search without a bill is work those counts do not show: the
+    attempt stays unknown, never free. A bill the reply states in full beside that search, $0 or $0.031, stays
+    exact and final, and the four counts stay the measured zeros either way."""
+    body = {"type": "message", "error": {"type": "overloaded_error", "message": "overloaded"},
+            "usage": {**_NATIVE_ZERO, **reported}, **envelope}
+    ua.execute_physical_attempt(_request(data_root, provider="anthropic", model="claude-opus-5-5"), lambda: body)
+    row, = _ledger(data_root)
+    assert (row["state"], row["cost_usd"], row["cost_final"]) == ("settled", cost, final)
+    assert bool(row["cost_estimated"]) is False and not row.get("cost_invalid")
+    counts = ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens")
+    assert [row[key] for key in counts] == [0] * 4
+
+
 def test_billed_tokens_with_error_field_keep_the_bound():
     # A partial stream / real completion that ALSO carries an error field but billed
     # tokens must NOT be zeroed — it keeps the normal cost path (and its bound).
@@ -1537,3 +1667,138 @@ def test_unresolved_reason_cause_suffix_leads_and_survives_truncation(data_root)
         assert ua._terminalize_failed_attempt(reservation, exc) == "unresolved"
     reason = _ledger(data_root)[-1]["reason"]
     assert reason.startswith("RuntimeError [cause: RemoteProtocolError]:")
+
+
+_AUDIO_REPLY = {"prompt_tokens": 1000, "completion_tokens": 100, "prompt_tokens_details": {"audio_tokens": 5}}
+
+
+@pytest.mark.parametrize("usage,expected,estimated", [
+    pytest.param(None, None, False, id="absent-usage"),
+    pytest.param({"prompt_tokens": None, "completion_tokens": None}, None, False, id="null-counts"),
+    pytest.param({"prompt_tokens": 0, "completion_tokens": 0}, None, False, id="zero-counts-without-cash"),
+    pytest.param({"prompt_tokens": 0, "completion_tokens": 0, "cost": 0}, 0.0, False, id="reported-zero-cash"),
+    pytest.param({"prompt_tokens": 1000, "completion_tokens": 100}, 0.0012, True, id="reported-counts"),
+    pytest.param({**_AUDIO_REPLY}, None, False, id="audio-usage-without-cash"),
+    pytest.param({**_AUDIO_REPLY, "cost": 0}, 0.0, False, id="audio-usage-reported-zero"),
+    pytest.param({**_AUDIO_REPLY, "cost": 0.031}, 0.031, False, id="audio-usage-reported-charge"),
+])
+def test_a_paid_reply_means_the_same_amount_in_the_ledger_and_the_loop(data_root, monkeypatch, usage, expected, estimated):
+    """A tariff prices only counts the reply reported: without them the paid call stays unknown in the ledger and
+    in the loop's normalizer alike, never an estimated $0; a reported $0 stays a final zero in both. Five reported
+    audio tokens are not text: no text estimate in either lane, and the reply's own bill, zero included, stays."""
+    from ouroboros import pricing
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
+
+    model = "vendor/model"
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {model: pricing.PricingSchedule((1, 0, 3, 2))})
+    body = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            **({"usage": usage} if usage is not None else {})}
+    ua.execute_physical_attempt(_request(data_root, provider="openrouter", model=model), lambda: body)
+    row, = _ledger(data_root)
+    _, reply = LLMClient(api_key="unused")._normalize_remote_response(
+        body, {"provider": "openrouter", "resolved_model": model, "base_url": OPENROUTER_BASE_URL},
+        skip_cost_fetch=True)
+    loop_cost, _, _, loop_estimated = pricing.normalize_usage_cost(reply, model=model, use_local=False)
+    for amount in (row["cost_usd"], loop_cost, reply["cost"]):
+        assert amount == (None if expected is None else pytest.approx(expected, rel=1e-12, abs=0))
+    assert bool(row["cost_estimated"]) is loop_estimated is estimated
+    assert row["cost_final"] is reply["cost_final"] is (expected is not None and not estimated)
+
+
+_HOURLY_WRITES = {"prompt_tokens": 100, "cache_creation_input_tokens": 100,
+                  "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 100}}
+_WRITES_ALONE = {key: value for key, value in _HOURLY_WRITES.items() if key != "prompt_tokens"}
+
+
+@pytest.mark.parametrize("usage,rates,expected", [
+    pytest.param(_HOURLY_WRITES, (4.0, 0.2, 5.0, None), None, id="absent-output-unknown-output-rate"),
+    pytest.param({**_HOURLY_WRITES, "completion_tokens": 0}, (4.0, 0.2, 5.0, None), 0.0011, id="explicit-zero-output"),
+    pytest.param(_HOURLY_WRITES, (4.0, 0.2, 5.0, 8.0), 0.0011, id="absent-output-known-output-rate"),
+    pytest.param(_HOURLY_WRITES, (None, 0.2, 5.0, 8.0), None, id="absent-output-unknown-input-rate"),
+    pytest.param({"completion_tokens": 5}, (None, 0.2, 5.0, 8.0), None, id="absent-prompt-unknown-input-rate"),
+    pytest.param({"completion_tokens": 5}, (4.0, 0.2, 5.0, 8.0), 4e-5, id="absent-prompt-known-input-rate"),
+    # 100 hourly writes and 5 output tokens with no prompt count: the writes are no inclusive prompt, so the
+    # unknown input rate stays relevant; the same reply with its prompt reported measures zero uncached input.
+    pytest.param({**_WRITES_ALONE, "completion_tokens": 5}, (None, 0.2, 5.0, 8.0), None,
+                 id="absent-prompt-reported-writes-unknown-input-rate"),
+    pytest.param({**_HOURLY_WRITES, "completion_tokens": 5}, (None, 0.2, 5.0, 8.0), 0.00114,
+                 id="reported-prompt-all-written-unknown-input-rate"),
+])
+def test_an_absent_text_count_keeps_its_class_rate_required_for_a_received_reply(data_root, monkeypatch, usage, rates,
+                                                                               expected):
+    """100 hourly writes at $11/M: a text count the reply did not report (absent, never zero) leaves its class's
+    unknown rate relevant, so the ledger and the loop stay unknown as Costs does; an explicit zero needs no rate, and a
+    known rate keeps the existing estimate."""
+    from ouroboros import pricing
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
+
+    model = "vendor/model"
+    tariff = pricing.PricingSchedule(rates, cache_write_1h=11.0)
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {model: tariff})
+    body = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": dict(usage)}
+    ua.execute_physical_attempt(_request(data_root, provider="openrouter", model=model), lambda: body)
+    row, = _ledger(data_root)
+    _, reply = LLMClient(api_key="unused")._normalize_remote_response(
+        body, {"provider": "openrouter", "resolved_model": model, "base_url": OPENROUTER_BASE_URL},
+        skip_cost_fetch=True)
+    loop_cost, *_ = pricing.normalize_usage_cost(reply, model=model, use_local=False)
+    for amount in (row["cost_usd"], reply["cost"], loop_cost):
+        assert amount == (None if expected is None else pytest.approx(expected, rel=1e-12, abs=0))
+    assert row["prompt_tokens"] == usage.get("prompt_tokens")  # reported writes never stand in for the prompt
+    if None in (row["prompt_tokens"], row["completion_tokens"]):
+        assert pricing.cost_class_weights(tariff, row) is None  # Costs shares nothing over an absent count
+
+
+_MALFORMED_PLACES = {
+    "output": ("completion_tokens", lambda value: {"cached_tokens": 0, "completion_tokens": value}),
+    "read": ("cached_tokens", lambda value: {"completion_tokens": 0, "cached_tokens": value}),
+    "nested-read": ("cached_tokens", lambda value: {"completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": value}}),
+}
+
+
+@pytest.mark.parametrize("cash", [None, 0, 0.031], ids=["no-bill", "reported-zero", "reported-charge"])
+@pytest.mark.parametrize("value", [-1, 0.5, "abc"], ids=["negative", "fractional", "non-numeric"])
+@pytest.mark.parametrize("place", sorted(_MALFORMED_PLACES))
+def test_a_malformed_count_is_no_observed_zero_for_a_tariff(data_root, monkeypatch, place, value, cash):
+    """100 hourly writes at $11/M beside an output or cache-read count that is not a nonnegative integer. The reply
+    stays usable and its usage folds; the count is unknown on the attempt row and in the loop, never -1, a clamped 0
+    or a truncated number, and no tariff reads it. A reported bill, zero included, stays final, and Costs keeps it
+    in the model's total unshared while a healthy neighbour keeps its split and its hourly price."""
+    from ouroboros import pricing
+    from ouroboros.event_usage import REPORTED_TOKENS_KEY
+    from ouroboros.gateway.cost_period import cost_period
+    from ouroboros.llm import LLMClient, add_usage
+
+    model = "vendor/model"
+    monkeypatch.setattr(pricing, "get_pricing",
+                        lambda **_: {model: pricing.PricingSchedule((4.0, 0.2, 5.0, 8.0), cache_write_1h=11.0)})
+    field, reported = _MALFORMED_PLACES[place]
+
+    def body(usage):
+        return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": usage}
+
+    healthy = body({**_HOURLY_WRITES, "cached_tokens": 0, "completion_tokens": 0, "cost": 0.0011})
+    ua.execute_physical_attempt(_request(data_root, provider="openrouter", model=model), lambda: healthy)
+    broken = body({**_HOURLY_WRITES, **reported(value), **({} if cash is None else {"cost": cash})})
+    ua.execute_physical_attempt(_request(data_root, provider="openrouter", model=model), lambda: broken)
+    row = _ledger(data_root)[-1]
+    _, reply = LLMClient(api_key="unused")._normalize_remote_response(
+        broken, {"provider": "openrouter", "resolved_model": model}, skip_cost_fetch=True)
+    loop_cost, _, _, loop_estimated = pricing.normalize_usage_cost(reply, model=model, use_local=False)
+    for amount in (row["cost_usd"], reply["cost"], loop_cost):
+        assert amount == cash
+    assert row["cost_final"] is reply["cost_final"] is (cash is not None)
+    assert not row["cost_estimated"] and not loop_estimated
+    assert row[field] is None and reply.get(field) is None
+    assert row["prompt_tokens"] == reply["prompt_tokens"] == 100 and row["cache_write_tokens"] == 100
+    assert row.get("cost_coverage") == reply.get("cost_coverage") == (None if cash is not None else "partial")
+    total = {}
+    add_usage(total, reply)  # the loop's own fold of this reply
+    assert total[field] == 0 and total[REPORTED_TOKENS_KEY][field] is None
+    period, = cost_period(data_root, "24h")["models"]
+    assert period["cost"] == pytest.approx(0.0011 + (cash or 0), rel=1e-12, abs=0)
+    assert period["by_class"]["cache_write"] == pytest.approx(0.0011, rel=1e-12, abs=0)
+    assert (period["unshared_calls"], period["unshared_cost"]) == (int(cash is not None), cash or 0)
+    assert (period["write_price_lifetime"], period["write_price_in_reads"]) == ("1h", 55.0)

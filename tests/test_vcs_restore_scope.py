@@ -16,6 +16,9 @@ import subprocess
 
 import pytest
 
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
+
 
 def _git(repo: pathlib.Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout.decode("utf-8")
@@ -32,26 +35,34 @@ def _allow_safety(monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
 
 
+def _lay_project(folder: pathlib.Path) -> None:
+    """The project and the system repository every restore below starts from."""
+    repo, system = folder / "project", folder / "system"
+    for root in (repo, system):
+        git_repository(root, unborn=True)
+        for args in (("config", "user.name", "Test"), ("config", "user.email", "test@example.invalid"),
+                     ("config", "core.autocrlf", "false")):
+            world_git(root, *args)
+    (system / "system.txt").write_text("system\n", encoding="utf-8")
+    world_git(system, "add", "-A")
+    world_git(system, "commit", "-qm", "system")
+    (repo / "dir").mkdir()
+    for name in ("tracked.txt", "deleted.txt", "old.txt", "neighbor.txt", "dir/a.txt"):
+        (repo / name).write_text(f"{name} base\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+    world_git(repo, "add", "-A")
+    world_git(repo, "commit", "-qm", "base")
+
+
 @pytest.fixture
 def project(tmp_path):
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
     repo, data, system = tmp_path / "project", tmp_path / "data", tmp_path / "system"
-    for path in (repo, data, system):
-        path.mkdir()
+    template = world("vcs-restore-scope-project", _lay_project)
     for root in (repo, system):
-        for args in (("init", "-q"), ("config", "user.name", "Test"), ("config", "user.email", "test@example.invalid"),
-                     ("config", "core.autocrlf", "false")):
-            _git(root, *args)
-    (system / "system.txt").write_text("system\n", encoding="utf-8")
-    _git(system, "add", "-A")
-    _git(system, "commit", "-qm", "system")
-    (repo / "dir").mkdir()
-    for name in ("tracked.txt", "deleted.txt", "old.txt", "neighbor.txt", "dir/a.txt"):
-        (repo / name).write_text(f"{name} base\n", encoding="utf-8")
-    (repo / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "base")
+        clone_repository(template / root.name, root)
+    data.mkdir()
     registry = ToolRegistry(system, data)
     registry.set_context(ToolContext(repo_dir=system, system_repo_dir=system, drive_root=data,
                                      workspace_root=repo, workspace_mode="external", task_id="restore-test"))
@@ -182,8 +193,7 @@ def test_an_untracked_nested_repository_is_kept_and_reported(project):
     """``git clean -fd`` deliberately skips a nested repository, whose history may exist nowhere
     else: the restore keeps it and says the scope still differs instead of claiming HEAD."""
     registry, repo = project
-    (repo / "vendor").mkdir()
-    _git(repo / "vendor", "init", "-q")
+    git_repository(repo / "vendor", unborn=True)
     (repo / "vendor" / "unique.txt").write_text("history only here\n", encoding="utf-8")
     _changes(repo, "modified")
 

@@ -20,7 +20,7 @@ Unmarked saved `OUROBOROS_MAX_WORKERS` 10 (Colab's first-launch 1; an explicit l
 
 Optional bounds: `OUROBOROS_MAX_ROUNDS`/`OUROBOROS_TASK_ABS_CEILING_SEC` use `parse_positive_or_unlimited` (also review cycles). Money, deadlines and Stop/Panic still bind; silence triggers attention (§5). Legacy missing keys retain 200 rounds/21600 s (`OPTIONAL_BOUND_LEGACY`); blank, zero, negative or malformed values also take those finite defaults, logged and announced once by `upgrade_notices.py`. Readers return `None` for unlimited. Operations take only true bounds (window, deadline, finite execution), else none.
 
-Five writers serialize exact bytes via `serialize_settings()`. `config.save_settings`, `owner_settings._owner_update_settings`, `packaged_cli._save_settings` use `prepare_settings_for_persist`: deployment policy, disk-authored silence, context/Safety ratchets. Only the raw compat pair bypasses this through `context_mode_compat.normalize_and_persist_context_mode_compat`; `colab_bootstrap.write_colab_settings` bypasses for foreign roots (own: `_owner_write_settings`). All persist `review_pool_receipts.persist_write_receipts` before replacement. `tests/_shared.py::settings_writers` rejects a sixth writer.
+Five writers use `serialize_settings()` for exact bytes. `config.save_settings`, `owner_settings._owner_update_settings`, `packaged_cli._save_settings` use `prepare_settings_for_persist`: unreadable disk refuses, then deployment policy, disk-authored silence, context/Safety ratchets. Exceptions: the raw compat pair via `context_mode_compat.normalize_and_persist_context_mode_compat`; `colab_bootstrap.write_colab_settings` for foreign roots (own: `_owner_write_settings`). All run `review_pool_receipts.persist_write_receipts` before replacement. `tests/_shared.py::settings_writers` rejects a sixth writer.
 
 `owner_settings._owner_update_settings` checks preconditions, saves canonical settings and captures the receipt and per-key tokens under one file lock. In-process writers hold `settings_document_mutation` through projection. Generic saves bind to the read digest, reread and remerge the original body on a miss, then return 409 on a second miss. Incidental saves (launcher, worker `set_tool_timeout`, resolved GitHub repo) preserve other fields via `fields_on_saved_document`.
 
@@ -118,7 +118,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified GC retention (`retention.py`) |
 | OUROBOROS_RESTART_DRAIN_MAX_SEC | 120 | Restart drain bound |
 | TOTAL_BUDGET | 200.0 | Global USD budget, reached by known spend; non-positive = no finite limit; resolved live at every model call (`resolve_total_budget_usd`) |
-| OUROBOROS_PER_TASK_COST_USD | 50.0 | Hard cap over one task's whole tree: new model calls are refused once its known spend (confirmed + estimated; not holds) reaches it; only an explicit `cost_hard_stop_pct` profile stops earlier (`task_pacing.py`; §6 Budget tracking) |
+| OUROBOROS_PER_TASK_COST_USD | 50.0 | Hard cap over one task's whole tree (confirmed and estimated spend; §6 Budget tracking) |
 | OUROBOROS_RUB_USD_RATE | "" | Manual RUB→USD rate for RUB-priced providers |
 | OUROBOROS_PRICING_TTL_SEC | 21600 | Provider-catalog pricing cache TTL |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Default tool timeout |
@@ -203,8 +203,8 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_CLAUDEXOR_HARNESS_INSTALL_TIMEOUT_SEC | 300 | Connect wait; expiry leaves the durable install running |
 | OUROBOROS_CLAUDEXOR_QUOTA_REFRESH_TIMEOUT_SEC | 90 | Quota-refresh POST ceiling (clamped 1-90) |
 | OUROBOROS_BUNDLE_DIR | unset | Env-only: launcher-owned bundle root passed to embedded children for Node/ripgrep discovery |
-| OUROBOROS_BG_WAKEUP_MIN | 900 | Lower bound (s) of the model-chosen wake interval (`set_next_wakeup`), re-read at each alarm |
-| OUROBOROS_BG_WAKEUP_MAX | 14400 | Upper bound (s); with no chosen interval the alarm uses `runtime_limits.WAKE_DEFAULT_SEC`, below the default cache TTL to keep the shared prefix warm |
+| OUROBOROS_BG_WAKEUP_MIN | 900 | Lower bound (s) of each step to the next wake (`set_next_wakeup`), re-read at each alarm |
+| OUROBOROS_BG_WAKEUP_MAX | 14400 | Upper bound (s) of each step; a named time beyond it is kept; with no chosen interval the alarm uses `runtime_limits.WAKE_DEFAULT_SEC`, below the default cache TTL to keep the shared prefix warm |
 | OUROBOROS_CONSCIOUSNESS_AUTONOMY | act | Closed enum `observe`/`act`/`full` of what a wake may do; `act` excludes own code/prompts, evolution, restart and settings, `full` adds evolution (`consciousness_authority.py`) |
 | OUROBOROS_CONSCIOUSNESS_DAILY_USD | 20.0 | Rolling-24h ceiling over wakes and the tasks they start, on known spend; exhausted blocks new wakes; `0` is a real choice |
 | OUROBOROS_CONSCIOUSNESS_MAX_TASKS | 2 | Concurrent consciousness-started tasks; `0` = it never starts tasks |

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import artifact_storage as storage, artifacts, workspace_patch_capture
+from tests._workspace_git import git_repository
 
 
 def _identity(raw):
@@ -154,8 +155,7 @@ def _write_patch(tmp_path, monkeypatch, writer):
     content = b"The generated result retains the complete original source bytes.\n" * 8192
     if writer == "workspace":
         root, output = tmp_path / "repo", tmp_path / "artifacts"
-        root.mkdir()
-        subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+        git_repository(root, unborn=True)
         (root / "result.txt").write_bytes(content)
         rows, manifest = workspace_patch_capture.write_workspace_patch_artifacts(root, output, task={})
         row = next(row for row in rows if row["kind"] == "workspace_patch")
