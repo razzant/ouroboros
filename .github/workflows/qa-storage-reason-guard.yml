@@ -1,0 +1,55 @@
+# This file belongs only on the separate verification branch.
+name: QA storage reason guard v1
+on:
+  push:
+    branches: [qa/storage-reason-guard-v1]
+permissions:
+  contents: read
+env:
+  PRODUCT_SHA: 'd72df3d001e89ddcb09808c400bf1b9e1d146892'
+  PRODUCT_TREE: '613dc6a4a0948c7a96efc141556bf128485bc67d'
+  PYTHONUTF8: '1'
+  MSYS_NO_PATHCONV: '1'
+jobs:
+  reason-guard:
+    name: Reason guard (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out the verified product parent
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-list --parents -n 1 HEAD)" == "$GITHUB_SHA $PRODUCT_SHA" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT_SHA" HEAD --)" == $(printf 'A\t.github/workflows/qa-storage-reason-guard.yml') ]]
+          git checkout --detach "$PRODUCT_SHA"
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          printf 'Product %s, tree %s\n' "$PRODUCT_SHA" "$PRODUCT_TREE"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+          interpreter: shipped
+      - name: Run the complete provenance guard without live credentials
+        run: |
+          set -euo pipefail
+          python -m pytest -o addopts='' -q --junitxml=reason-guard.xml tests/test_benchmark_provenance_v6810.py
+          python - <<'PY'
+          import os
+          from xml.etree import ElementTree as ET
+          cases = list(ET.parse('reason-guard.xml').iter('testcase'))
+          assert len(cases) == 3 and all(not len(case) for case in cases)
+          assert 'test_every_runtime_reason_code_has_a_recorded_truncation_decision' in {case.attrib['name'] for case in cases}
+          print(f"REASON_GUARD_3_PASS {os.environ['PRODUCT_SHA']} {os.environ['PRODUCT_TREE']}")
+          PY
