@@ -370,3 +370,24 @@ def test_a_list_row_whose_sender_was_stopped_does_nothing_and_a_door_failure_is_
     outcomes = [json.loads(json.loads(line)["text"])["outcome"] for line in lines]
     assert outcomes[0]["error"] == "control_outcome_unknown" and "door down" in outcomes[0]["detail"]
     assert outcomes[1]["ok"], outcomes[1]
+
+
+def test_a_cascade_stop_of_a_retry_senders_logical_root_stops_its_list(tmp_path, monkeypatch):
+    """A timeout-retry attempt sends a list; the owner's graceful cascade Stop is keyed by its LOGICAL root, so each
+    remaining row checks that root too (lineage validated as the owner's Pause does): before the Stop the row acts,
+    after it the row refuses ``sender_stopped``. A sender whose retry lineage cannot be validated refuses."""
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import write_task_result
+    from supervisor.events_mind_controls import _sender_stopped
+
+    _install_queue(tmp_path, monkeypatch)
+    write_task_result(tmp_path, "original", "interrupted", root_task_id="original", delegation_role="root",
+                      retry_task_id="retry", superseded_by="retry")
+    write_task_result(tmp_path, "retry", "running", root_task_id="original", delegation_role="root",
+                      original_task_id="original", timeout_retry_from="original", supersedes_task_id="original")
+    assert _sender_stopped("retry") is None
+    request_cancel(tmp_path, "original", reason="owner stop", source="owner", scope="cascade")
+    assert _sender_stopped("retry") == {"ok": False, "error": "sender_stopped"}
+    write_task_result(tmp_path, "stale", "running", root_task_id="original", delegation_role="root",
+                      original_task_id="original", timeout_retry_from="original")
+    assert _sender_stopped("stale") == {"ok": False, "error": "sender_state_unreadable"}, "not the root's actor"

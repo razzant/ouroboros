@@ -50,14 +50,25 @@ def _apply(evt: dict) -> dict:
 
 def _sender_stopped(actor: str) -> dict | None:
     """A list call's rows are ordinary events emitted together; each first asks whether its sender was stopped
-    since (its Stop recorded, or its result cancelled): then the row refuses and does nothing."""
+    since: its result cancelled, or a Stop pending on it or, for a timeout-retry attempt, on its LOGICAL root
+    (a graceful cascade Stop stays keyed by that root), with the lineage validated as the owner's Pause does
+    (``owner_pause.root_actor``). Then the row refuses and does nothing; an unreadable state refuses too."""
     from ouroboros.cancel_intents import cancel_pending
-    from ouroboros.task_results import load_task_result
+    from ouroboros.owner_pause import root_actor
+    from ouroboros.task_results import load_task_result, resolve_task_lineage
     from supervisor import queue as q
 
     try:
-        stopped = cancel_pending(q.DRIVE_ROOT, actor, strict=True) or str(
-            (load_task_result(q.DRIVE_ROOT, actor, strict=True) or {}).get("status") or "") == "cancelled"
+        stored = load_task_result(q.DRIVE_ROOT, actor, strict=True) or {}
+        lineage = resolve_task_lineage(actor, **{key: stored.get(key) for key in (
+            "metadata", "root_task_id", "parent_task_id", "delegation_role", "original_task_id", "timeout_retry_from")})
+        members = {actor}
+        if lineage["is_retry_root_attempt"]:
+            if not root_actor(q.DRIVE_ROOT, lineage["root_task_id"], actor, strict=True):
+                return {"ok": False, "error": "sender_state_unreadable"}
+            members.add(lineage["root_task_id"])
+        stopped = str(stored.get("status") or "") == "cancelled" or any(
+            cancel_pending(q.DRIVE_ROOT, member, strict=True) for member in members)
     except Exception:
         return {"ok": False, "error": "sender_state_unreadable"}
     return {"ok": False, "error": "sender_stopped"} if stopped else None
