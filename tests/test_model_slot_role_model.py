@@ -1326,7 +1326,20 @@ def test_a_require_lane_refusal_states_the_facts_not_the_lane_default(tmp_path):
     # The facts it does hold, and a REACHABLE remedy: "ask for the lane explicitly"
     # is not one when the install has no such slot, so the constraint has to give.
     assert "'heavy'" in refusal.detail and "'auto'" in refusal.detail and "'main'" in refusal.detail
-    assert "override_delegation_constraint('c1')" in refusal.detail
+    # The remedy is the call that changes the outcome: model_lane is refused beside the required
+    # subagent_id (subagent_selector_conflict), so it is never advised; the release names its
+    # emitter when the row has one (two authors of one id otherwise refuse the release), and an
+    # emitter's rationale is added after the lanes, never in their place.
+    assert refusal.detail.endswith(
+        "override_delegation_constraint(constraint_id='c1', reason=…) releases it where your tools include it.")
+    assert "model_lane" not in refusal.detail
+    reasoned = effective_delegation_budget(
+        {}, unresolved_constraints=[{"task_id": "kid7", "payload": {**row["payload"], "rationale": "needs a stronger lane"}}],
+        role="critic", requested_lane="auto", intended_lane="main")
+    assert reasoned.detail == (
+        "Unresolved delegation constraint 'c1' from task 'kid7' requires lane 'heavy' (requested 'auto', intended "
+        "'main'). Its reason: needs a stronger lane. override_delegation_constraint(constraint_id='c1', "
+        "constraint_task_id='kid7', reason=…) releases it where your tools include it.")
 
     # An omitted lane that INHERITS the required one is admitted: the gate reads the
     # same predicate the resolution does, so it cannot disagree with it about `auto`.

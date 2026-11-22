@@ -88,16 +88,18 @@ test('each ending says what happened and offers its one next step', () => {
     }
     // The host's own refusals are the host's words, never framed as Google's.
     assert.deepEqual(show(ended('engine_refused', { detail: 'A live route requires the provider’s model ID.' })),
-        ['The call could not start: A live route requires the provider’s model ID.', ['Open Settings'], 'error']);
+        ['The call could not start: A live route requires the provider’s model ID.', ['Open Calls'], 'error']);
+    assert.deepEqual(show(ended('calls_disabled')), ['Calls are off — turn on Calls (beta) in Extensions › Skills', ['Open Calls'], 'error']);
     assert.deepEqual(show(ended('backpressure')), ['The call fell behind the voice stream', ['Try again'], 'error']);
     // The server's own action wins over the page's table; an action this page does not know offers nothing.
-    assert.deepEqual(show(ended('engine_unavailable', { action: 'settings' })), ['Can’t reach the selected voice service', ['Open Settings'], 'error']);
+    assert.deepEqual(show(ended('engine_unavailable', { action: 'settings' })), ['Can’t reach the selected voice service', ['Open Calls'], 'error']);
     assert.deepEqual(show(ended('provider_closed', { action: 'other_engine' })), ['The voice service closed the call', [], 'error']);
     // Settings opens where the step is: the key among the keys skills asked for, the model on the skill's own page,
     // the spending limit on the Dashboard's Costs.
     const target = (code) => callPresentation(ended(code)).actions.map(a => a.path);
     assert.deepEqual(target('missing_credential'), ['accounts']);
     assert.deepEqual(target('authentication'), ['accounts']);
+    assert.deepEqual(target('calls_disabled'), ['skill/live_conversation']);
     assert.deepEqual(target('engine_refused'), ['skill/live_conversation']);
     assert.deepEqual(target('budget_exceeded'), ['dashboard:costs']);
     // Nothing about another engine is left in the words.

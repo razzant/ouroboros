@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { noteToolCall, toolEvidenceView } from '../modules/chat_activity.js';
-import { summarizeChatLiveEvent } from '../modules/log_events.js';
+import { summarizeChatLiveEvent, summarizeLogEvent } from '../modules/log_events.js';
 import { replayedEvidenceTs } from '../modules/chat_render_batch.js';
 import { checkFailureCause, checkFailureView, checkProcessSentence } from '../modules/verification_presentation.js';
 import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
@@ -217,6 +217,132 @@ const replayed = (id, fact) => {
         { ...base, fact: 'settled', status: 'ok', hostError: false, verification: fact, ts: TS, exit_code: 0,
             ...(fact.status === 'fail' ? { result_preview: preview } : {}) }];
 };
+
+for (const [status, title] of [['git_error', 'Git refused the operation'], ['review_blocked', 'Review blocked the operation']]) {
+    test(`a handled ${status} stays one call with its recorded refusal, live and on reload`, async () => {
+        const tool = status === 'git_error' ? 'vcs_read' : 'commit_reviewed';
+        const result_preview = 'The requested operation was declined.';
+        const diagnostic = { status, result_preview };
+        const seen = { key: KEY('domain'), tool, fact: 'settled', status, diagnostic, ts: TS };
+        const f = fixture([carrier([seen])]);
+        try {
+            await f.instance.refreshHistory({ revision: 1 });
+            f.open();
+            assert.equal(f.titles().filter(t => t === title).length, 1, 'a cold read restores the typed refusal');
+            for (const type of ['tool_call', 'tool_call_finished']) {
+                const frame = { ...call('domain', { tool }), type, ...diagnostic, is_error: false };
+                assert.equal(summarizeLogEvent(frame).headline, title);
+                const view = summarizeChatLiveEvent(frame);
+                assert.equal(view.toolCall.status, status);
+                assert.deepEqual([view.dedupeKey, view.headline, view.body], [seen.key, title, result_preview]);
+                f.log(frame);
+            }
+            f.open();
+            assert.equal(f.titles().filter(t => t === title).length, 1);
+            await f.instance.refreshHistory({ revision: 2 });
+            f.open();
+            assert.equal(f.titles().filter(t => t === title).length, 1);
+            assert.match(f.meta(), /1 tool call/);
+            assert.doesNotMatch(f.meta(), /error/);
+            assert.equal(f.phase(), 'Done');
+            for (const fake of ['git_error', 'review_blocked', 'warning']) {
+                const view = summarizeChatLiveEvent({ ...call('routine'), type: 'tool_call_finished',
+                    status: 'ok', is_error: false, result_preview: fake });
+                assert.equal(view.toolCall.status, 'ok');
+                assert.equal(view.headline, '');
+            }
+        } finally { f.close(); }
+    });
+}
+
+test('reloading distinguishes returned and unread calls without turning either into a call error', async () => {
+    const why = ['A command was returned by the Safety Supervisor', 'A command was not run: the Safety Supervisor could not read it'];
+    const entries = ['safety_returned', 'safety_unavailable'].map((status, i) => ({
+        key: KEY(`hold-${i}`), tool: 'run_command', fact: 'settled', status: 'held', ts: TS,
+        diagnostic: { status, result_preview: `Recorded detail ${i}` },
+    }));
+    const f = fixture([carrier(entries)]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        f.open();
+        for (const [i, entry] of entries.entries()) {
+            assert.ok(f.titles().includes(why[i]));
+            assert.match(f.text(), new RegExp(`Recorded detail ${i}`));
+            f.log({ ...call(`hold-${i}`, { tool: entry.tool }), ...entry.diagnostic, type: 'tool_call_finished', is_error: true });
+        }
+        for (const title of why) assert.equal(f.titles().filter(t => t === title).length, 1);
+        assert.match(f.text() + f.meta(), /2 tool calls/);
+        assert.doesNotMatch(f.text(), /1 error|2 errors/);
+        assert.equal(f.phase(), 'Done');
+    } finally { f.close(); }
+});
+
+test('a failed file observation shows the missing path once without a command or exit', async () => {
+    const fact = { status: 'fail', contract_kind: 'artifact_observation', paths_named: true, detail: 'missing: report.pdf' };
+    const seen = { key: KEY('file'), tool: 'verify_and_record', fact: 'settled', status: 'ok', verification: fact, ts: TS };
+    const f = fixture([carrier([seen])]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        f.open();
+        assert.equal(f.checks().length, 1, 'the cold file observation has its own diagnostic');
+        for (const frame of settledFrames('file', fact, { exit_code: null, result_preview: fact.detail })) f.log(frame);
+        f.open();
+        assert.equal(f.checks().length, 1);
+        assert.match(f.checks()[0].innerHTML, /a named file was not found/);
+        assert.match(f.checks()[0].innerHTML, /report\.pdf/);
+        assert.doesNotMatch(f.checks()[0].innerHTML, /exit code|process ran|expected text/i);
+        assert.equal(f.phase(), 'Done');
+        assert.equal(checkFailureCause({}, { ...fact, paths_named: false }), 'no files were named');
+    } finally { f.close(); }
+});
+
+test('cold replay keeps the task-wide tool journal separate from the selected attempt’s counters', async () => {
+    // This fixture retains the rendered timeline markup, including its diagnostic titles.
+    const summary = { task_id: TASK, role: 'system', system_type: 'task_summary', text: '', status: 'completed',
+        outcome_final: true, reason_code: 'final_message', outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } } };
+    const first = { ...summary, history_id: 'old', ts: TS, task_attempt: 1, rounds: 9, tool_calls: 12, duration_sec: 98,
+        tool_evidence: { observations: [{ key: KEY('old-call'), tool: 'run_command', fact: 'settled', status: 'error', ts: TS,
+            diagnostic: { status: 'non_zero_exit', exit_code: 4 } }] } };
+    const second = { ...summary, history_id: 'current', ts: '2026-10-13T02:00:00Z', task_attempt: 2, rounds: 4,
+        tool_calls: 5, duration_sec: 37, wake_summary: 'Second attempt finished.' };
+    for (const rows of [[first, second], [second, first]]) {
+        const f = fixture(rows);
+        try {
+            await f.instance.refreshHistory({ revision: 1 });
+            f.open();
+            assert.match(f.meta(), /37s.*5 tool calls/);
+            assert.match(f.facts(), /<dt>Rounds<\/dt><dd>4 · usable solve responses<\/dd>/);
+            assert.equal(f.card().dataset.ts, String(Date.parse(TS)), 'the actual earlier invocation anchors the card');
+            assert.equal(f.titles().filter(t => t === 'A command returned exit code 4').length, 1);
+        } finally { f.close(); }
+    }
+});
+
+test('reloaded command diagnostics retain their invocation through duplicate and late frames', async () => {
+    const entries = [
+        ['exit', 'error', { status: 'non_zero_exit', exit_code: 7, args: { cmd: 'make report' }, result_preview: 'build log' }],
+        ['pause', 'interrupted', { status: 'interrupted', control_reason: 'owner_pause' }],
+    ];
+    const seen = entries.map(([id, status, diagnostic]) => ({ key: KEY(id), tool: 'run_command', fact: 'settled', status, diagnostic, ts: TS }));
+    const f = fixture([carrier(seen, { tool_errors: 1 })]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        f.open();
+        assert.ok(f.titles().includes('A command returned exit code 7'));
+        assert.ok(f.titles().includes('Interrupted by Pause · run_command'));
+        assert.match(f.text(), /make report/);
+        for (const [id, , diagnostic] of entries) f.log({ ...call(id, { tool: 'run_command' }), type: 'tool_call_finished',
+            ...diagnostic, is_error: true });
+        f.log({ ...call('exit', { tool: 'run_command' }), type: 'tool_call', status: 'host_error', is_error: true });
+        assert.equal(f.titles().filter(t => t === 'A command returned exit code 7').length, 1);
+        assert.equal(f.titles().filter(t => t === 'Interrupted by Pause · run_command').length, 1);
+        assert.match(f.text(), /make report/);
+        assert.match(f.text(), /build log/);
+        assert.ok(f.titles().includes('2 tool calls · 1 error'), 'the timeline keeps the exact count');
+        assert.doesNotMatch(f.meta(), /error/, 'a Done card does not repeat step errors in its heading');
+        assert.equal(f.phase(), 'Done');
+    } finally { f.close(); }
+});
 
 test('reload draws the same row from replayed evidence, and a live duplicate stays one row', async () => {
     const f = fixture([carrier([...replayed('inv-1', verdict()), ...replayed('inv-2', verdict({ status: 'pass', matched: true }))])]);

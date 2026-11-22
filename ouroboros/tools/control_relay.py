@@ -62,12 +62,14 @@ def _tell_task(ctx, task_id: str, note: str = "", quote: list | None = None, sum
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", meta={"reason_code": "QUOTE_NOT_HELD" if error else "argument_invalid"},
             text=error or "TOOL_ARG_ERROR: tell_task needs a task_id and a note or held owner quote."))
     relay_id = uuid.uuid4().hex
-    message_id = next((q["source"]["client_message_id"] for q in quotes if q["source"]["client_message_id"]), "")
+    # The receipt names ONE quoted message by its own room and id (the first that has an id, else the first's room);
+    # every other quoted message gets its own pair's receipt (``steering._steer_receipt``).
+    primary = next((q["source"] for q in quotes if q["source"]["client_message_id"]), quotes[0]["source"] if quotes else {})
     event = {"type": "steer_task", "routing_token": relay_id, "relay_id": relay_id,
              "target_task_id": target, "message": note, "quotes": quotes,
              "summary": summary.strip() if isinstance(summary, str) else "",
-             "chat_id": int(quotes[0]["source"]["chat_id"] if quotes else _teller_room(ctx)),
-             "client_message_id": message_id or f"{AGENT_RECEIPT_ID_PREFIX}{relay_id}",
+             "chat_id": int(primary["chat_id"] if primary else _teller_room(ctx)),
+             "client_message_id": primary.get("client_message_id") or f"{AGENT_RECEIPT_ID_PREFIX}{relay_id}",
              "issuer": {**_routing_issuer(ctx), "task_id": str(getattr(ctx, "task_id", "") or "")},
              "ts": utc_now_iso()}
     _attach_client_surface(ctx, event)

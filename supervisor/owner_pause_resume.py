@@ -12,6 +12,7 @@ from ouroboros.work_stop import release_refusal
 
 def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | None:
     """``gaps`` receives the damaged rows this Resume's tree census ties to no tree."""
+    from ouroboros.delegate_resume import decisions_in_use, names_start
     from ouroboros.owner_pause import FENCE_RELEASED, fence_closed, launch_lock, read_fence, set_fence_state
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
     from supervisor import queue as q
@@ -33,6 +34,8 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
     if not children:
         return None  # the existing late-phase door still owns review-only work
     if not fence_closed(fence):
+        if names_start():
+            return {"ok": False, "error": "selection_authority_changed"}
         if (fence.get("resume_grant") or {}).get("tree_only"):
             with q._queue_lock:
                 latch = q.BUDGET_ROOT_FENCES.get(task_id)
@@ -67,7 +70,7 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
         grant = {"by": resume_author(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(),
                  "granted_at_ts": time.time(), "authority": "explicit_resume", "selected_by": "owner",
                  "generation": int(fence.get("generation") or 0), "root_resume_basis": state["basis"],
-                 "tree_only": True}
+                 "tree_only": True, **({"accepted_start_risks": risks} if (risks := decisions_in_use(task_id)) else {})}
         try:
             with launch_lock(root, task_id, wait=False):
                 if read_fence(root, task_id) != fence:

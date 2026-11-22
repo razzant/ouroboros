@@ -15,13 +15,19 @@ TWO_PANES = """async () => (await import('/static/modules/layout.js'))
     .sectionHoldsTwoPanes(document.getElementById('page-settings'))"""
 
 
+# Extensions (extensions.js) opens its pages with the same levels: its header holds the same name and one Back.
+EXTENSIONS_BACK = "#page-skills > .app-page-header [data-shell-back]"
+EXTENSIONS_NAME = "#page-skills [data-extensions-lead-name]"
+
+
 def header_back(page):
-    return page.locator(HEADER_BACK)
+    """The shown section's Back: Settings', or Extensions' where a page of Extensions is shown."""
+    return page.locator(f"{SETTINGS}.active > .app-page-header [data-shell-back], #page-skills.active > .app-page-header [data-shell-back]")
 
 
 def lead_name(page) -> str:
-    """The open page's name in the header ('' over the list or Ouroboros's pane)."""
-    return page.locator(LEAD_NAME).inner_text().strip()
+    """The open page's name in the shown section's header ('' over the list or Ouroboros's pane)."""
+    return page.locator(f"{SETTINGS}.active [data-settings-lead-name], #page-skills.active [data-extensions-lead-name]").inner_text().strip()
 
 
 def two_panes(page) -> bool:

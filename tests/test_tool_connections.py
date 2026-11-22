@@ -367,11 +367,14 @@ def test_a_load_goes_first_under_a_route_ceiling_after_selectors_and_history(reg
     from ouroboros import loop as loop_module, provider_models
 
     _servers()
-    resident = [schema for schema in initial_tool_schemas(registry) if schema["function"]["name"] != "call_mcp_tool"]
+    from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES, ROUTE_TAIL_TOOL_NAMES
+
+    # Without the route tail, which a ceiling leaves out first (tests/test_route_tool_schema_limit.py).
+    resident = [schema for schema in initial_tool_schemas(registry)
+                if schema["function"]["name"] not in ROUTE_TAIL_TOOL_NAMES | {"call_mcp_tool"}]
     loop_module._setup_dynamic_tools(registry, resident, [])
     registry._ctx.active_model, registry._ctx.active_use_local = "openai::gpt-fixture", False
-    from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
-    # The last optional built-in: a plain fit would leave it out, so only the history rank keeps it.
+    # The last ordinary built-in: a plain fit would leave it out, so only the history rank keeps it.
     called = [name for name in _names(resident) if name not in CORE_TOOL_NAMES | META_TOOL_NAMES
               and not name.startswith("mcp_")][-1]
     registry._ctx.messages = [{"role": "assistant", "tool_calls": [{"function": {"name": called}}]}]
@@ -544,7 +547,11 @@ def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_phy
             "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": "weather",
         })
     monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
-    initial = initial_tool_schemas(registry)
+    from ouroboros.tool_capabilities import ROUTE_TAIL_TOOL_NAMES
+
+    # Without the route tail, which a ceiling leaves out first (tests/test_route_tool_schema_limit.py).
+    initial = [schema for schema in initial_tool_schemas(registry)
+               if schema["function"]["name"] not in ROUTE_TAIL_TOOL_NAMES]
     pinned = "mcp_slack__history"
     initial.sort(key=lambda schema: schema["function"]["name"] == pinned)  # the schema to displace
     limit = len(initial) - 1
@@ -561,7 +568,7 @@ def test_a_child_gateway_takes_only_mcp_names_and_a_nano_child_keeps_loading_phy
     assert len(resident) == limit and ext in _names(resident) and lookup not in _names(resident)
     assert f"leaves out: {pinned}." in receipt
     notice = route_tool_limit_notice(registry._ctx.active_model, limit, len(initial), [pinned],
-                                     selectors=usable_selectors(registry, resident))
+                                     selectors=usable_selectors(registry, resident), schemas=initial)
     assert "shows an MCP schema" in notice and pinned in notice
     before = json.dumps(resident)
     shown = registry.execute("enable_tools", {"tools": pinned})

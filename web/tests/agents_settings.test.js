@@ -9,8 +9,12 @@ import { forgetSettingRows, readSettings } from '../modules/settings_controls.js
 import { settingsPageFor } from '../modules/settings_pages.js';
 import { HAND_WRITTEN, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { agentName, rosterResult } from '../modules/subagents_settings.js';
+import { createAgentModelCatalog } from '../modules/agent_model_catalog.js';
+import { modelCatalog } from '../modules/model_catalog_store.js';
+import { claudexorStatus } from '../modules/claudexor_status_store.js';
 import { recheckDraft, recheckSaved } from '../modules/safety_recheck.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
+import '../modules/settings_ui.js';  // the shared ownerCap codec, registered before any page as settings.js does
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
 const KEY = 'OUROBOROS_SUBAGENTS';
@@ -39,9 +43,9 @@ const ROSTER = () => [
 ];
 
 // The settings server's roster half: the stored list, its token, and one queue of scripted answers.
-function fakeServer(env, { items = ROSTER(), saved = true } = {}) {
-    const server = { roster: { enabled: true, items }, saved, version: 0, posts: [], generic: [], answers: [], reads: 0,
-        plain: { OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: '', OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT: 6, OUROBOROS_MAX_SUBAGENT_DEPTH: 3,
+function fakeServer(env, { items = ROSTER(), saved = true, meta = {}, delay = 0 } = {}) {
+    const server = { roster: { enabled: true, items }, saved, version: 0, posts: [], generic: [], answers: [], reads: 0, delay,
+        meta, plain: { OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: '', OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT: 6, OUROBOROS_MAX_SUBAGENT_DEPTH: 3,
             OUROBOROS_SUBAGENT_WORKTREE_ROOT: '', OUROBOROS_SUBAGENT_PROJECTS_ROOT: '' } };
     server.token = () => `roster@${server.version}`;
     server.agent = (id) => server.roster.items.find((item) => item.subagent_id === id);
@@ -49,7 +53,7 @@ function fakeServer(env, { items = ROSTER(), saved = true } = {}) {
         [KEY]: server.saved ? JSON.stringify(server.roster) : '', ...server.plain,
         OUROBOROS_RUNTIME_MODE: 'pro',
         _meta: { tokens: { [KEY]: server.token() }, effects: { [KEY]: 'next_task', OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: 'next_task' },
-            available_subagents: { source: server.saved ? 'configured' : 'undecided', candidate: server.saved ? null : server.roster } },
+            available_subagents: { source: server.saved ? 'configured' : 'undecided', candidate: server.saved ? null : server.roster }, ...server.meta },
     });
     server.accept = (body) => {
         const roster = body.settings[KEY];
@@ -61,6 +65,7 @@ function fakeServer(env, { items = ROSTER(), saved = true } = {}) {
         return response({ ok: true, changes: { [KEY]: { withheld: 'structure', token: server.token() } } });
     };
     env.routes.set('/api/settings', async (_url, init = {}) => {
+        if (server.delay) await new Promise((resolve) => setTimeout(resolve, server.delay));
         if (init.method !== 'POST') { server.reads += 1; return response(server.document()); }
         const body = JSON.parse(init.body);
         server.generic.push(body);
@@ -89,7 +94,9 @@ async function open(t, path = 'agents', options = {}) {
     if (!options.env) {
         // The shared status store and the model catalogue read by themselves; neither is this page's subject.
         const fetch = globalThis.fetch;
-        globalThis.fetch = async (url, init) => (/^\/api\/(claudexor|model-catalog)/.test(url) ? response({}, 503) : fetch(url, init));
+        globalThis.fetch = async (url, init) => (options.catalog && /^\/api\/model-catalog/.test(url) ? options.catalog(url)
+            : options.status && /^\/api\/claudexor\/status/.test(url) ? response(options.status)
+            : /^\/api\/(claudexor|model-catalog)/.test(url) ? response({}, 503) : fetch(url, init));
         const createElement = env.document.createElement;
         env.document.createElement = (tag) => {
             const node = createElement(tag);
@@ -153,7 +160,8 @@ test('the list draws one head per agent with its switch, and the roster\'s own s
     assert.deepEqual(page.heads(), ['reviewer', 'recheck', 'scout']);
     assert.deepEqual(page.heads().map((id) => isOn(page.toggle(id))), [true, true, true]);
     assert.match(page.head('reviewer').querySelector('.ui-row-title').textContent, /^gpt-testReviewer/);
-    assert.match(page.head('scout').querySelector('.ui-row-meta').textContent, /scout notes$/);
+    assert.equal(page.head('scout').querySelector('.ui-row-meta').textContent, 'API · OpenAI');
+    assert.equal(page.head('scout').querySelector('.agents-head-use').textContent, 'scout notes');
     assert.equal(page.head('scout').querySelectorAll('textarea').length, 0, 'a head holds no form');
     assert.equal(page.container.querySelectorAll('[data-subagent-field="recommended_use"]').length, 0);
     const delegation = page.container.querySelector(`[data-setting-row="${KEY}"]`).querySelector('[data-setting-control]');
@@ -164,6 +172,408 @@ test('the list draws one head per agent with its switch, and the roster\'s own s
     await page.head('scout').querySelector('[data-subagent-field="open"]').fire('click', {});
     await page.container.querySelector('[data-subagent-add]').fire('click', {});
     assert.deepEqual(page.opened, ['agents/scout', 'agents/new']);
+});
+
+test('the list\'s first open draws an OpenRouter key\'s own rates and each program\'s mark from its scoped reads', async (t) => {
+    const asked = [];
+    const priced = (items) => response({ read_state: 'ok', items, errors: [], model_sources: [] });
+    const answers = {
+        'provider_id=openrouter': priced([{ value: 'vendor/model-a', price: { input: 3, output: 15 } },
+            { value: 'vendor/model-b', price: { input: 1, output: 2 } }, { value: 'vendor/model-c', price_condition: 'off_peak_usd' }]),
+        // The same model id on a named key is that key's entry, at that key's price.
+        'provider_id=openrouter%40work': priced([{ value: 'openrouter@work::vendor/model-a', price: { input: 8, output: 9 } }]),
+        'harness_id=agy': response({ read_state: 'ok', items: [], errors: [], session_catalog: { models: [{ id: 'claude-x' }] } }),
+        'view=sources': response({ read_state: 'ok', sources_read_state: 'ok', items: [], errors: [],
+            model_sources: [{ id: 'agy-models', label: 'Antigravity models', credentialHarness: 'agy' }] }),
+    };
+    const items = [api('a', 'vendor/model-a'), api('b', 'openrouter::vendor/model-b', { review_eligible: true }),
+        api('c', 'vendor/model-c'), api('w', 'openrouter@work::vendor/model-a'), api('direct', 'openai::gpt-x'),
+        session('s', 'agy=claude-x'), api('sub', 'claudexor::agy-models=claude-x')];
+    const meta = { setup_contract: { scopedModelCatalogs: true }, connections: [{ id: 'openrouter', configured: true },
+        { id: 'openrouter@work', kind: 'openrouter', name: 'work', configured: true, display: 'OpenRouter · work' },
+        { id: 'openai', configured: true }] };
+    const page = await open(t, 'agents', { items, meta, catalog: (url) => {
+        const query = url.split('?')[1] || '';
+        asked.push(query);
+        return answers[query] || response({}, 503);
+    } });
+    // One read per key or program a head needs, never a model list per row, another provider's or a subscription's.
+    const counts = () => asked.reduce((all, query) => ({ ...all, [query]: (all[query] || 0) + 1 }), {});
+    assert.deepEqual(counts(), { 'harness_id=agy': 1, 'provider_id=openrouter': 1, 'provider_id=openrouter%40work': 1, 'view=sources': 1 });
+    const rate = (id) => page.head(id).querySelector('[data-subagent-rate]');
+    assert.equal(rate('a').textContent, '$3 in / $15 out per 1M tokens');
+    assert.equal(rate('b').textContent, '$1 in / $2 out per 1M tokens', 'two agents of one key, each its own model\'s price');
+    assert.equal(rate('w').textContent, '$8 in / $9 out per 1M tokens', 'an equal model id on another key keeps that key\'s price');
+    assert.equal(rate('a').dataset.i18nFmt, 'model price');
+    assert.equal(page.head('a').querySelector('.ui-row-meta').textContent, 'API · OpenRouter · $3 in / $15 out per 1M tokens');
+    for (const id of ['c', 'direct', 's', 'sub']) assert.equal(rate(id), null, `${id}: a condition, an unread key or a seat says no figure`);
+    // The description is the owner's own words, never interface text; the program behind a seat is its mark.
+    assert.equal(page.head('a').querySelector('.agents-head-use').hasAttribute('data-i18n-authored'), true);
+    // The source label (product text + the user connection name) is authored, never a translation key; the rate stays
+    // one `model price` template beside it.
+    const metaLabel = page.head('a').querySelector('[data-i18n-authored]');
+    assert.match(metaLabel.textContent, /OpenRouter/, 'the connection name lives in the authored span, out of translation');
+    assert.equal(page.head('a').querySelector('[data-subagent-rate]').hasAttribute('data-i18n-fmt'), true);
+    const mark = (id) => page.head(id).querySelector('[data-harness-identity]').dataset.harnessIdentity;
+    assert.deepEqual(['s', 'sub', 'a'].map(mark), ['agy', 'agy', 'api']);
+    const box = (id) => page.head(id).querySelector('.harness-identity-mark').getAttribute('viewBox');
+    assert.deepEqual(['s', 'sub', 'a'].map(box), ['0 0 180 180', '0 0 180 180', '0 0 24 24'], 'Antigravity\'s own mark; an API key the neutral one');
+    // A failed refresh keeps the key's rows for the chooser, never as the price now; a successful one brings it back.
+    const good = answers['provider_id=openrouter'];
+    answers['provider_id=openrouter'] = response({}, 503);
+    await page.shown();
+    assert.deepEqual([rate('a'), rate('b')], [null, null]);
+    assert.equal(rate('w').textContent, '$8 in / $9 out per 1M tokens', 'another key\'s read is its own');
+    answers['provider_id=openrouter'] = good;
+    await page.shown();
+    assert.equal(rate('a').textContent, '$3 in / $15 out per 1M tokens');
+    assert.deepEqual(counts(), { 'harness_id=agy': 3, 'provider_id=openrouter': 3, 'provider_id=openrouter%40work': 3, 'view=sources': 3 },
+        'each showing reads each once');
+    // An answer of the named key that lists the built-in spelling prices neither row: its read is the named key's only.
+    const work = answers['provider_id=openrouter%40work'];
+    answers['provider_id=openrouter%40work'] = priced([{ value: 'vendor/model-a', price: { input: 99, output: 99 } }]);
+    await page.shown();
+    answers['provider_id=openrouter%40work'] = work;
+    assert.equal(rate('a').textContent, '$3 in / $15 out per 1M tokens');
+    assert.equal(rate('w'), null);
+    await page.shown();
+    assert.equal(rate('w').textContent, '$8 in / $9 out per 1M tokens');
+    // A key removed meanwhile keeps no price, even while its earlier read is still held.
+    page.server.meta.connections = meta.connections.filter((entry) => entry.id !== 'openrouter@work');
+    await page.shown();
+    assert.equal(rate('w'), null);
+    assert.equal(rate('a').textContent, '$3 in / $15 out per 1M tokens');
+    // Another reader's global catalogue update is not this core's key read: it costs no scoped query and moves no price.
+    const before = counts();
+    modelCatalog.adopt({ read_state: 'ok', errors: [], items: [{ value: 'vendor/model-a', price: { input: 99, output: 99 } }] });
+    await settle();
+    assert.deepEqual(counts(), before, 'a global update asks nothing of this core');
+    assert.equal(rate('a').textContent, '$3 in / $15 out per 1M tokens', 'the key\'s own read is still the price');
+});
+
+test('a sign-in renews the list\'s session verdicts, never its source descriptors or its keys\' rates', async (t) => {
+    const asked = [];
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (url) => { asked.push(String(url).split('?')[1]); return response({ read_state: 'ok', items: [], errors: [], model_sources: [] }); };
+    t.after(() => { globalThis.fetch = fetch; });
+    const rows = [api('a', 'vendor/model-a'), session('s', 'agy=claude-x'), api('sub', 'claudexor::agy-models=claude-x')];
+    const catalog = createAgentModelCatalog({ state: { providers: [{ id: 'openrouter' }], modelSources: [] }, saved: true,
+        rows: () => rows, apiCatalogAllowed: () => true, supportsScopes: () => true, changed() {}, adoptSources() {} });
+    catalog.refresh({ list: true, accounts: true });
+    await settle();
+    assert.deepEqual(asked, ['harness_id=agy']);
+    catalog.refresh({ list: true });
+    await settle();
+    assert.deepEqual(asked.slice(1).sort(), ['harness_id=agy', 'provider_id=openrouter', 'view=sources']);
+});
+
+test('a legacy core: the list follows the one catalogue read — a failed refresh hides the price, a new one brings it back', async (t) => {
+    const asked = [];
+    const items = [api('a', 'vendor/model-a'), api('w', 'openrouter@work::vendor/model-b')];
+    // A core without scoped catalogues: one full read answers every head.
+    const meta = { connections: [{ id: 'openrouter', configured: true },
+        { id: 'openrouter@work', kind: 'openrouter', name: 'work', configured: true, display: 'OpenRouter · work' }] };
+    // What a refresh event hands the window's catalogue store: the read outcome, with or without rows.
+    const figures = [{ value: 'vendor/model-a', price: { input: 3, output: 15 } },
+        { value: 'openrouter@work::vendor/model-b', price: { input: 8, output: 9 } }];
+    const full = (read_state, errors = [], rows = figures) => modelCatalog.adopt({ read_state, errors,
+        items: read_state === 'ok' ? rows : undefined });
+    full('ok');
+    t.after(() => modelCatalog.adopt({ read_state: 'ok', errors: [], items: [] }));
+    const page = await open(t, 'agents', { items, meta, catalog: (url) => { asked.push(String(url)); return response({}, 503); } });
+    const rate = (id) => page.head(id).querySelector('[data-subagent-rate]');
+    const label = (id) => page.head(id).querySelector('.ui-row-meta').textContent;
+    assert.equal(rate('a').textContent, '$3 in / $15 out per 1M tokens', 'the head shows the rate the one full read published');
+    assert.equal(rate('w').textContent, '$8 in / $9 out per 1M tokens', 'a named key\'s own entry, at that key\'s own rate');
+    assert.equal(label('w'), 'API · OpenRouter · work · $8 in / $9 out per 1M tokens', 'the key\'s own name is the label');
+    assert.deepEqual(asked, [], 'the list reads no catalogue of its own');
+    // The refresh fails: the price goes at once; the head, its label and the rows the last read listed stay.
+    full('transport', [{ provider_id: 'catalog', error: 'offline' }]);
+    await settle();
+    assert.equal(rate('a'), null, 'a failed refresh says no price');
+    assert.equal(rate('w'), null);
+    assert.equal(label('a'), 'API · OpenRouter', 'the label stays; only the figure goes');
+    assert.deepEqual(page.heads(), ['a', 'w'], 'the agents stay on the list');
+    assert.deepEqual(modelCatalog.catalog().items.map((item) => item.value), ['vendor/model-a', 'openrouter@work::vendor/model-b'],
+        'the rows the last good read listed stay for a chooser, never as the price now');
+    // A new success brings the price back, at the figures it now publishes.
+    full('ok', [], [{ value: 'vendor/model-a', price: { input: 4, output: 16 } },
+        { value: 'openrouter@work::vendor/model-b', price: { input: 1, output: 2 } }]);
+    await settle();
+    assert.equal(rate('a').textContent, '$4 in / $16 out per 1M tokens');
+    assert.equal(rate('w').textContent, '$1 in / $2 out per 1M tokens');
+    assert.deepEqual(asked, [], 'still no catalogue read from the list');
+});
+
+test('a background rate arrival patches the mounted list in place: the price appears, the row, the control and the focus stay', async (t) => {
+    const items = [api('a', 'vendor/model-a'), api('w', 'openrouter@work::vendor/model-b')];
+    const meta = { connections: [{ id: 'openrouter', configured: true },
+        { id: 'openrouter@work', kind: 'openrouter', name: 'work', configured: true, display: 'OpenRouter · work' }] };
+    modelCatalog.adopt({ read_state: 'ok', errors: [], items: [] });
+    t.after(() => modelCatalog.adopt({ read_state: 'ok', errors: [], items: [], model_sources: [] }));
+    const page = await open(t, 'agents', { items, meta, catalog: () => response({}, 503) });
+    const head = page.head('a');
+    const keep = page.container.querySelector('[data-review-pool-keep-one]');
+    const origin = page.container.querySelector('[data-review-pool-history]');
+    keep.focus();
+    origin.open = true;
+    assert.equal(page.head('a').querySelector('[data-subagent-rate]'), null, 'no price before the read lands');
+    // The window's one catalogue read lands: the price arrives in the background.
+    modelCatalog.adopt({ read_state: 'ok', errors: [], items: [{ value: 'vendor/model-a', price: { input: 3, output: 15 } }] });
+    await settle();
+    assert.equal(page.head('a').querySelector('[data-subagent-rate]').textContent, '$3 in / $15 out per 1M tokens');
+    assert.equal(page.head('a'), head, 'the row that was drawn is the row that is shown');
+    assert.equal(page.container.querySelector('[data-review-pool-keep-one]'), keep, 'the control keeps its place');
+    assert.equal(page.container.querySelector('[data-review-pool-history]'), origin, 'the disclosure is the same one');
+    assert.equal(origin.open, true, 'and it stays open');
+    assert.equal(globalThis.document.activeElement, keep, 'the caret is not taken away');
+    // A tick that changes nothing keeps all of it: the price, the row, the control, the disclosure and the caret.
+    await page.shown();
+    assert.equal(page.head('a').querySelector('[data-subagent-rate]').textContent, '$3 in / $15 out per 1M tokens');
+    assert.equal(page.head('a'), head, 'the row that was drawn is the row that is shown');
+    assert.equal(page.container.querySelector('[data-review-pool-keep-one]'), keep, 'the control keeps its place');
+    assert.equal(page.container.querySelector('[data-review-pool-history]'), origin, 'the disclosure is the same one');
+    assert.equal(origin.open, true, 'and it stays open');
+    assert.equal(globalThis.document.activeElement, keep, 'the caret is not taken away');
+    // A key removed meanwhile takes its price away, and the list around it stays where it is.
+    page.server.meta.connections = meta.connections.filter((entry) => entry.id !== 'openrouter');
+    await page.shown();
+    assert.equal(page.head('a').querySelector('[data-subagent-rate]'), null, 'a key that is gone says no price');
+    assert.equal(page.container.querySelector('[data-review-pool-keep-one]'), keep, 'the control keeps its place');
+    assert.equal(page.container.querySelector('[data-review-pool-history]'), origin, 'the disclosure is the same one');
+    assert.equal(origin.open, true, 'and it stays open');
+});
+
+test('a late session verdict reaches the mounted list: the warning, the Unavailable count and the row itself', async (t) => {
+    // A late session verdict reaches the mounted list: the warning, the Unavailable count and the row itself
+    // — including negative -> positive Unavailable filter existence and exact roster-ordered filtered insertion.
+    const status = {
+        daemon: { state: 'running' },
+        harnesses: [{ id: 'agy', display_name: 'Antigravity' }, { id: 'cursor', display_name: 'Cursor' }],
+        profiles: { profiles: [
+            { profile: { harness_id: 'agy', profile_id: 'agy-1', enabled: true }, status: { verification: 'passed' } },
+            { profile: { harness_id: 'cursor', profile_id: 'cur-1', enabled: true }, status: { verification: 'passed' } },
+        ] },
+        quota: [],
+        reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' },
+    };
+    const fetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = fetch; void claudexorStatus.refresh(); });
+
+    // Negative -> positive Unavailable filter witness from All view (inactive zero-count chip omitted until verdict arrives).
+    const fromAll = await open(t, 'agents', {
+        items: [api('a', 'vendor/model-a'), session('s', 'agy=claude-x')], status,
+        meta: { setup_contract: { scopedModelCatalogs: true }, connections: [] },
+        catalog: async (url) => {
+            if (url.includes('harness_id=agy')) await new Promise((resolve) => setTimeout(resolve, 40));
+            return response({ read_state: 'ok', items: [], errors: [], session_catalog: { models: [{ id: 'claude-other' }] } });
+        },
+    });
+    assert.equal(fromAll.container.querySelector('[data-agents-filter="unavailable"]'), null, 'inactive zero-count Unavailable chip is omitted');
+    const allChip = fromAll.container.querySelector('[data-agents-filter="all"]');
+    allChip.focus();
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    await settle();
+    assert.equal(fromAll.container.querySelector('[data-agents-filter="all"]'), allChip, 'surviving filter retains its element');
+    assert.equal(globalThis.document.activeElement, allChip, 'surviving filter retains focus');
+    const appearedChip = fromAll.container.querySelector('[data-agents-filter="unavailable"]');
+    assert.ok(appearedChip, 'Unavailable filter chip appears once verdict turns positive');
+    assert.equal(appearedChip.textContent, 'Unavailable 1');
+    await appearedChip.fire('click', {});
+    assert.deepEqual(fromAll.heads(), ['s']);
+    fromAll.handle.unmount();
+
+    // Initial view=unavailable: empty before agy settles, then ['s'] with Unavailable 1.
+    const single = await open(t, 'agents', {
+        view: 'unavailable', items: [session('s', 'agy=claude-x')], status,
+        meta: { setup_contract: { scopedModelCatalogs: true }, connections: [] },
+        catalog: async (url) => {
+            if (url.includes('harness_id=agy')) await new Promise((resolve) => setTimeout(resolve, 40));
+            return response({ read_state: 'ok', items: [], errors: [], session_catalog: { models: [{ id: 'claude-other' }] } });
+        },
+    });
+    assert.deepEqual(single.heads(), [], 'the model list is not read yet, so nothing is unavailable yet');
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    await settle();
+    assert.deepEqual(single.heads(), ['s'], 'the row that became unavailable joins the list it is filtered by');
+    assert.equal(single.container.querySelector('[data-agents-filter="unavailable"]').textContent, 'Unavailable 1');
+    single.handle.unmount();
+
+    // Selected zero-count filter is kept, and a late Antigravity verdict inserts in roster order without re-entry.
+    const page = await open(t, 'agents', {
+        view: 'unavailable',
+        items: [session('s', 'agy=claude-x'), session('last', 'cursor=grok-missing')], status,
+        meta: { setup_contract: { scopedModelCatalogs: true }, connections: [] },
+        catalog: async (url) => {
+            if (url.includes('harness_id=agy')) await new Promise((resolve) => setTimeout(resolve, 40));
+            return response({ read_state: 'ok', items: [], errors: [], session_catalog: { models: [{ id: 'claude-other' }] } });
+        },
+    });
+    const survivingLast = page.head('last');
+    assert.deepEqual(page.heads(), ['last'], 'only the already-unavailable trailing row shows before agy settles');
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    await settle();
+    assert.deepEqual(page.heads(), ['s', 'last'], 'late unavailable row inserts in roster order');
+    assert.equal(page.head('last'), survivingLast, 'surviving filtered row keeps its element');
+    assert.match(page.head('s').querySelector('.ui-row-title').textContent, /Unavailable/, 'the head says it');
+    const chip = page.container.querySelector('[data-agents-filter="unavailable"]');
+    assert.equal(chip.textContent, 'Unavailable 2', 'the filter says how many');
+    assert.equal(chip.getAttribute('aria-pressed'), 'true', 'and it is the one shown');
+    page.handle.unmount();
+
+    // Selected zero-count filter chip stays rendered with count 0 when its view is active.
+    const emptySelected = await open(t, 'agents', { view: 'unavailable', items: [api('a', 'vendor/model-a')] });
+    const zeroChip = emptySelected.container.querySelector('[data-agents-filter="unavailable"]');
+    assert.ok(zeroChip, 'selected zero-count filter stays present');
+    assert.equal(zeroChip.textContent, 'Unavailable 0');
+    assert.equal(zeroChip.getAttribute('aria-pressed'), 'true');
+    assert.equal(emptySelected.container.querySelector('[data-agents-filter="reviewers"]'), null, 'inactive zero-count filter is omitted');
+});
+
+test('no-op pool tick and review-pool chrome arrival preserve Add, Keep one per model, filter and open Reviewer origin', async (t) => {
+    const env = setup(t);
+    const items = [api('r1', 'vendor/model-a', { review_eligible: true }), api('r2', 'vendor/model-a', { review_eligible: true })];
+    const server = fakeServer(env, { items });
+    let poolPayload = { pool: [], last_executions: {}, row_costs: {}, migration: { outcome: 'converted', source: 'file', snapshot: 'snap-1' } };
+    env.routes.set('/api/review-pool', () => response(poolPayload));
+    const page = await open(t, 'agents', { env, server });
+    const origin = page.container.querySelector('[data-review-pool-history]');
+    const addBtn = page.container.querySelector('[data-subagent-add]');
+    const keepBtn = page.container.querySelector('[data-review-pool-keep-one]');
+    const filterBtn = page.container.querySelector('[data-agents-filter="all"]');
+    assert.equal(origin.hidden, false);
+    origin.open = true;
+    addBtn.focus();
+    await page.shown();
+    assert.equal(page.container.querySelector('[data-review-pool-history]'), origin);
+    assert.equal(origin.open, true, 'open Reviewer origin stays open on no-op pool tick');
+    assert.equal(page.container.querySelector('[data-subagent-add]'), addBtn);
+    assert.equal(globalThis.document.activeElement, addBtn, 'Add keeps its element and focus');
+    assert.equal(page.container.querySelector('[data-review-pool-keep-one]'), keepBtn);
+    assert.equal(page.container.querySelector('[data-agents-filter="all"]'), filterBtn);
+    filterBtn.focus();
+    poolPayload = { ...poolPayload, pool_without_credentials: ['r1'] };
+    await page.shown();
+    assert.match(page.container.querySelector('[data-review-pool-note]').textContent, /r1/);
+    assert.equal(page.container.querySelector('[data-agents-filter="all"]'), filterBtn);
+    assert.equal(globalThis.document.activeElement, filterBtn, 'surviving filter keeps focus on chrome update');
+    assert.equal(origin.open, true, 'open Reviewer origin stays open on non-row chrome update');
+});
+
+test('translated chrome and live in-flight switch differences do not force full repaint or clobber translations', async (t) => {
+    const env = setup(t);
+    const items = [api('r1', 'vendor/model-a', { review_eligible: true }), api('r2', 'vendor/model-a', { review_eligible: true })];
+    const server = fakeServer(env, { items });
+    let poolPayload = { pool: [], last_executions: {}, row_costs: {}, migration: { outcome: 'converted', source: 'file', snapshot: 'snap-1' } };
+    env.routes.set('/api/review-pool', () => response(poolPayload));
+    const page = await open(t, 'agents', { env, server });
+    const origin = page.container.querySelector('[data-review-pool-history]');
+    const keepBtn = page.container.querySelector('[data-review-pool-keep-one]');
+    const addBtn = page.container.querySelector('[data-subagent-add]');
+    const filterBtn = page.container.querySelector('[data-agents-filter="all"]');
+    const titleEl = page.container.querySelector('.agents-card-title');
+    const copiesText = page.container.querySelector('[data-review-pool-copies-text]');
+    const rowTitle = page.head('r1').querySelector('.ui-row-title');
+    const rowSwitch = page.toggle('r1');
+    // Simulate i18n MutationObserver localization and an in-flight live checkbox toggle.
+    titleEl.textContent = '2 агента';
+    filterBtn.textContent = 'Все 2';
+    copiesText.textContent = 'Переведённый текст копий';
+    rowTitle.textContent = 'переведённый-заголовок';
+    rowSwitch.setAttribute('aria-label', 'Доступен: model-a');
+    rowSwitch.checked = false;
+    origin.open = true;
+    keepBtn.focus();
+
+    poolPayload = { ...poolPayload, pool_without_credentials: ['r1'] };
+    await page.shown();
+    assert.match(page.container.querySelector('[data-review-pool-note]').textContent, /r1/);
+    assert.equal(page.container.querySelector('[data-review-pool-keep-one]'), keepBtn);
+    assert.equal(globalThis.document.activeElement, keepBtn, 'Keep one per model keeps element and focus');
+    assert.equal(page.container.querySelector('[data-subagent-add]'), addBtn);
+    assert.equal(page.container.querySelector('[data-agents-filter="all"]'), filterBtn);
+    assert.equal(page.container.querySelector('[data-review-pool-history]'), origin);
+    assert.equal(origin.open, true, 'open Reviewer origin stays open');
+    assert.equal(titleEl.textContent, '2 агента', 'translated card title stays intact');
+    assert.equal(filterBtn.textContent, 'Все 2', 'translated unchanged filter text stays intact');
+    assert.equal(copiesText.textContent, 'Переведённый текст копий', 'translated unchanged copies text stays intact');
+    assert.equal(rowTitle.textContent, 'переведённый-заголовок', 'translated unchanged row title stays intact');
+    assert.equal(rowSwitch.getAttribute('aria-label'), 'Доступен: model-a', 'translated unchanged switch aria-label stays intact');
+});
+
+test('discovery-only automatic chrome change falls back to full paint without stale state.html cache', async (t) => {
+    const { createAvailableSubagentsEditor } = await import('../modules/subagents_settings.js');
+    const env = setup(t);
+    const createElement = env.document.createElement;
+    env.document.createElement = (tag) => {
+        const node = createElement(tag);
+        if (tag === 'template') node.content = node;
+        return node;
+    };
+    const host = new NodeStub();
+    host.id = 'agents-chrome-test';
+    env.mount.appendChild(host);
+    const editor = createAvailableSubagentsEditor({
+        hostId: 'agents-chrome-test',
+        page: { entry: '', ctx: { ask: async () => true, openSettings: () => true }, reload: async () => {}, shown: () => true, filter: 'all' },
+    });
+    editor.mount({ bindStatus: false });
+    const setting = { enabled: true, items: [api('a', 'vendor/model-a')] };
+    editor.load(setting, { source: 'undecided', automatic: false });
+    assert.ok(host.querySelector('[data-agents-automatic]'), 'automatic notice shown initially');
+    // Same items with source changing to configured triggers discoveryOnly=true; outer chrome must update.
+    editor.applyGeneratedPreview({ available_subagents: setting, source: 'configured', diagnostics: [] });
+    assert.equal(host.querySelector('[data-agents-automatic]'), null, 'automatic notice removed on chrome fallback');
+    editor.destroy();
+});
+
+test('an agent\'s page names its source from a descriptor that arrives late, and the form keeps what the owner typed', async (t) => {
+    const items = [api('sub', 'claudexor::agy-models=claude-x')];
+    const meta = { setup_contract: { scopedModelCatalogs: true }, connections: [] };
+    const page = await open(t, 'agents/sub', { items, meta, catalog: async (url) => {
+        if (url.includes('view=sources')) await new Promise((resolve) => setTimeout(resolve, 40));
+        return response({ read_state: 'ok', items: [], errors: [], model_sources: url.includes('view=sources')
+            ? [{ id: 'agy-models', label: 'Antigravity models', credentialHarness: 'agy' }] : [] });
+    } });
+    const lead = () => page.container.querySelector('.settings-page-lead').textContent;
+    assert.match(lead(), /agy-models/, 'before the descriptor the source names its own id');
+    const purpose = page.container.querySelector('[data-subagent-field="recommended_use"]');
+    purpose.value = 'my own words';
+    await purpose.fire('input', { target: purpose });
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    await settle();
+    assert.match(lead(), /Antigravity models/, 'the descriptor that arrived late names the program');
+    assert.equal(page.container.querySelector('[data-subagent-field="recommended_use"]').value, 'my own words',
+        'the form keeps what the owner typed');
+});
+
+test('a legacy core takes the source descriptors from the one catalogue read: the program\'s own mark, with no second read', async (t) => {
+    const asked = [];
+    const items = [api('sub', 'claudexor::agy-models=claude-x')];
+    modelCatalog.adopt({ read_state: 'ok', errors: [], items: [] });
+    t.after(() => modelCatalog.adopt({ read_state: 'ok', errors: [], items: [], model_sources: [] }));
+    const page = await open(t, 'agents', { items, meta: { connections: [] },
+        catalog: (url) => { asked.push(String(url)); return response({}, 503); } });
+    const mark = () => page.head('sub').querySelector('[data-harness-identity]').dataset.harnessIdentity;
+    assert.equal(mark(), '', 'without a descriptor the opaque source id names no program');
+    assert.match(page.head('sub').querySelector('[data-subagent-identity]').textContent, /agy-models/);
+    // The one full read lands and names the source: the program's own mark follows it, with no second read.
+    modelCatalog.adopt({ read_state: 'ok', errors: [], items: [],
+        model_sources: [{ id: 'agy-models', label: 'Antigravity models', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(mark(), 'agy', 'the descriptor earns the program\'s own mark');
+    assert.match(page.head('sub').querySelector('[data-subagent-identity]').textContent, /Antigravity models/);
+    assert.deepEqual(asked, [], 'the list reads no catalogue of its own');
+});
+
+test('a page left while its settings read is out starts no catalogue read of its own', async (t) => {
+    const asked = [];
+    const meta = { setup_contract: { scopedModelCatalogs: true }, connections: [{ id: 'openrouter', configured: true }] };
+    const page = await open(t, 'agents', { items: [api('a', 'vendor/model-a')], meta, delay: 60,
+        catalog: (url) => { asked.push(String(url)); return response({}, 503); } });
+    page.handle.unmount();
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    assert.deepEqual(asked, [], 'the page that was left asks for no catalogue');
 });
 
 test('a door\'s view is the list\'s first filter: Reviewers opens the list on its reviewers, any other on all', async (t) => {
@@ -457,6 +867,40 @@ test('Subagents may change files is a strip over the stored spelling: Auto is th
     await page.shown();
     assert.deepEqual(pressed(), ['Off']);
     assert.equal(page.server.posts.length, 0, 'the roster is no part of these rows');
+});
+
+test('At once, for one task is the owner\'s optional number: the server\'s blank is No limit, both ways', async (t) => {
+    const page = await open(t);
+    const key = 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT';
+    const fold = page.container.querySelector('[data-agents-fold]');
+    const row = fold.querySelector(`[data-setting-row="${key}"]`);
+    const field = row.querySelector('[data-setting-control]');
+    const noLimit = row.querySelector('[data-setting-no-limit]');
+    assert.equal(row.querySelector('[data-setting-meta]').textContent,
+        'A number caps the subagents one task runs at once. No limit: Ouroboros decides; this computer\u2019s memory still limits.');
+    assert.deepEqual([field.value, noLimit.getAttribute('aria-pressed')], ['6', 'false'], 'a saved number is shown as itself');
+    await fold.fire('click', { target: noLimit });
+    await settle();
+    assert.deepEqual(page.server.generic.at(-1), { [key]: '' }, 'No limit is sent as the server\'s blank');
+    assert.deepEqual([field.value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
+    const type = async (text) => {
+        field.value = text;
+        await fold.fire('input', { target: field });
+        await fold.fire('change', { target: field });
+        await settle();
+    };
+    for (const typo of ['0', '-2', '1000', 'six']) {  // a number outside 1..500 is refused here, as before No limit
+        const writes = page.server.generic.length;
+        await type(typo);
+        assert.equal(page.server.generic.length, writes, `${typo} is not sent`);
+        assert.match(row.querySelector('[data-setting-result]').textContent, /Enter a number from 1 to 500\./, typo);
+    }
+    await type('4');
+    assert.deepEqual(page.server.generic.at(-1), { [key]: 4 });
+    assert.equal(noLimit.getAttribute('aria-pressed'), 'false');
+    page.server.plain[key] = '';  // a fresh install: nothing chosen reads as No limit
+    await page.shown();
+    assert.deepEqual([field.value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
 });
 
 test('a roster write says Saved with when it applies, a refusal with the server\'s sentence, and nothing for no change', () => {

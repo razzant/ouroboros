@@ -102,6 +102,111 @@ def test_custody_tree_and_health_cost_do_not_grow_with_closed_history(tmp_path, 
     assert old[1]["unrelated_bytes"] > old[0]["unrelated_bytes"] * 10
 
 
+def test_cascade_stop_cost_does_not_grow_with_other_trees_open_work(tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    from ouroboros.delegate_custody_reconcile import tree_open_runs
+
+    monkeypatch.setattr(current, "json_loads", lambda raw: json.loads(raw))
+    measurements = []
+    for size in (8, 256):
+        root = tmp_path / str(size)
+        with store.open_store(root, write=True) as txn:
+            for tid, parent in (("tree", ""), ("child", "tree"), ("leaf", "child"), ("sibling", "tree"),
+                                ("bound", "tree"), ("bound-leaf", "bound")):
+                txn.store_task({"task_id": tid, "root_task_id": "tree", "parent_task_id": parent, "status": "completed"})
+            for index in range(size):
+                txn.store_task({"task_id": f"foreign-{index}", "parent_task_id": "elsewhere",
+                                "root_task_id": "elsewhere", "status": "completed", "result": "UNRELATED_BODY"})
+                _put(txn, f"foreign-{index}", state="held", _payload="UNRELATED_BODY")
+                txn.put_row("custody_open", f"invocation:{index}", {"resume_decisions": {"foreign": {}},
+                            "request": {"task_id": "foreign", "root_task_id": "foreign", "_payload": "UNRELATED_BODY"}})
+            # Legacy starts without a root are indexed under their starter, even after its queue row is gone.
+            txn.put_row("custody_open", "invocation:lost", {"resume_decisions": {"tree": {}},
+                        "request": {"task_id": "leaf"}})
+            _put(txn, "live", state="held", task_id="bound-leaf", root_task_id="tree")
+            txn.conn.execute("ANALYZE")
+        with patch.object(store, "open_store", wraps=store.open_store) as reads:
+            results, counts = _measure(root, monkeypatch, lambda r: (
+                [current.cascade_work_open(r, tid) for tid in ("tree", "child", "sibling")],
+                [row.run_id for row in tree_open_runs(r, "bound")]))
+        assert reads.call_count == 4  # one snapshot per selection, across pending -> STARTED
+        assert results == ([True, True, False], ["live"]) and counts["unrelated_bytes"] == 0
+        measurements.append(counts)
+    assert measurements[1]["steps"] <= measurements[0]["steps"] + 128
+
+
+def test_activity_and_boot_read_current_custody_without_replaying_closed_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(current, "json_loads", lambda raw: json.loads(raw))
+    counts = []
+    for size in (8, 256):
+        root = tmp_path / str(size)
+        with store.open_store(root, write=True) as txn:
+            for index in range(size):
+                task = f"old-{index}"
+                txn.store_task({"task_id": task, "status": "completed", "result": "UNRELATED_BODY",
+                                "owner_pause": {"state": "released", "active_delegated_start": {"root_task_id": task}}})
+                _put(txn, task, _payload="UNRELATED_BODY")
+                txn.put_row("custody_refused", task, {"request": {"task_id": task, "note": "UNRELATED_BODY"}})
+            _put(txn, "held", state="held", root_task_id="tree")
+            txn.put_row("custody_open", "invocation:lost", {"resume_decisions": {"tree": {}},
+                        "request": {"task_id": "starter", "root_task_id": "tree"}})
+            txn.store_task({"task_id": "tree", "status": "completed", "owner_pause": {
+                "state": "requested", "active_delegated_start": {"root_task_id": "tree"}}})
+            txn.store_task({"task_id": "manual", "status": "scheduled", "owner_pause": {"state": "paused"}})
+            txn.conn.execute("ANALYZE")
+        result, measured = _measure(root, monkeypatch, lambda r: (
+            current.open_work_custody(r), hot.recovered_owner_pause_roots(r)))
+        ((runs, starts, unreadable), recovered) = result
+        assert sorted(runs) == ["held"] and starts == {"tree": [("lost", True)]} and not unreadable
+        assert recovered == ["tree"]  # no released history or independent owner Pause was selected
+        assert measured["unrelated_bytes"] == 0
+        counts.append(measured)
+    assert counts[0]["statements"] == counts[1]["statements"]
+    assert counts[1]["steps"] <= counts[0]["steps"] + 64
+
+
+@pytest.mark.parametrize("lineage", ["absent", "implicit_self", "old_metadata", "damaged_body"])
+def test_cascade_stop_finds_the_requests_owner_with_incomplete_task_lineage(tmp_path, lineage):
+    with store.open_store(tmp_path, write=True) as txn:
+        if lineage != "absent":
+            txn.store_task({"task_id": "child", "status": "completed",
+                            **({"metadata": {"root_task_id": "tree"}} if lineage == "old_metadata" else {})})
+        if lineage in ("old_metadata", "damaged_body"):
+            txn.conn.execute("UPDATE tasks SET root_task_id=NULL WHERE task_id='child'")
+        if lineage == "damaged_body":
+            txn.conn.execute("UPDATE task_bodies SET body='{' WHERE task_id='child'")
+        request = {"task_id": "child", "root_task_id": "tree"}
+        txn.put_row("custody_open", "invocation:lost", {"request": request})
+    assert not current.cascade_work_open(tmp_path, "child")
+    with store.open_store(tmp_path, write=True) as txn:
+        # The older writer invalidates the request's tree projection.
+        txn.conn.execute("UPDATE obligations SET facts=? WHERE set_name='custody_open' AND id='invocation:lost'",
+                         (json.dumps({"request": request, "resume_decisions": {"tree": {}}}),))
+    assert current.cascade_work_open(tmp_path, "child")
+    assert current.cascade_work_open(tmp_path, "tree")
+    assert not current.cascade_work_open(tmp_path, "elsewhere")
+
+
+@pytest.mark.parametrize("pre_index_schema", [False, True])
+@pytest.mark.parametrize("damage", ["invalid_json", "missing_request"])
+def test_cascade_stop_reads_legacy_held_facts_and_propagates_unreadable_requests(tmp_path, pre_index_schema, damage):
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.store_task({"task_id": "child", "root_task_id": "tree", "status": "completed"})
+        txn.store_task({"task_id": "unrelated", "root_task_id": "unrelated", "status": "completed"})
+        _put(txn, "old", legacy=True, task_id="child", root_task_id="tree", state="held", spend=float("nan"))
+        if damage == "invalid_json":
+            txn.conn.execute("INSERT INTO obligations(set_name,id,facts) VALUES ('custody_open','invocation:bad','{')")
+        else:
+            txn.put_row("custody_open", "invocation:bad", {"resume_decisions": {"tree": {}}})
+        if pre_index_schema:
+            txn.set_meta("schema_version", hot.VERSION - 1)
+    assert current.cascade_work_open(tmp_path, "tree")
+    assert current.cascade_work_open(tmp_path, "child")
+    with pytest.raises(ValueError, match="Expecting|no task or tree"):
+        current.cascade_work_open(tmp_path, "unrelated")
+
+
 @pytest.mark.parametrize("complete,consumed,settled,disposed", [
     (None, None, None, None), (False, False, False, ""), (True, True, True, "applied"),
     ("0", "1", "1", []), ([], {}, 2, {}),
@@ -135,3 +240,45 @@ def test_emit_commits_run_columns_and_outbox_together_or_neither(tmp_path, monke
         assert txn.custody_row("run")["output_complete"] is True
         assert tuple(txn.conn.execute("SELECT root_task_id,output_unread FROM custody_runs").fetchone()) == ("tree", 1)
         assert len(txn.outbox_rows()) == 2
+
+
+def _legacy_task(txn, tid, **fields):
+    """An older writer's row: the body carries the control facts, the derived columns stay NULL."""
+    document = {"task_id": tid, "status": "running", "_schema_version": 1, **fields}
+    columns = {key: value for key, value in store.typed_columns(document).items() if key not in hot.TASK_COLUMNS}
+    columns["root_task_id"] = document.get("root_task_id")
+    columns["write_seq"] = (txn.row(tid, "write_seq") or 0) + 1
+    txn.conn.execute("INSERT OR REPLACE INTO task_bodies VALUES (?,?)", (tid, store.encode_document(document)))
+    names = ("task_id", *columns)
+    txn.conn.execute(f"INSERT OR REPLACE INTO tasks ({','.join(names)}) VALUES ({','.join('?' * len(names))})",
+                     (tid, *columns.values()))
+
+
+def test_boot_fence_discovery_reads_an_older_writers_body_kept_fence(tmp_path):
+    """A supported older writer keeps a closed fence in the task body while its derived columns
+    stay NULL: boot discovery must read that body (the cold_custody_rows pattern), not infer the
+    fence absent from the cleared columns while read_fence still finds it."""
+    from ouroboros import owner_pause
+
+    fence = {"state": "requested", "fence_id": "fence-legacy", "root_task_id": "legacy-tree",
+             "active_delegated_start": {"root_task_id": "legacy-tree", "run_id": "run", "choice_id": "choice"}}
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.store_task({"task_id": "modern-tree", "status": "completed", "owner_pause": {
+            "state": "requested", "active_delegated_start": {"root_task_id": "modern-tree"}}})
+        _legacy_task(txn, "legacy-tree", owner_pause=fence)
+        txn.store_task({"task_id": "legacy-quiet", "status": "completed", "owner_pause": {
+            "state": "requested"}})  # a closed fence without an active delegated start names no root
+    assert owner_pause.fence_closed(owner_pause.read_fence(tmp_path, "legacy-tree"))
+    assert sorted(hot.recovered_owner_pause_roots(tmp_path)) == ["legacy-tree", "modern-tree"]
+
+
+def test_boot_fence_discovery_skips_a_fenced_tree_whose_body_read_fails(tmp_path):
+    """An underived row whose body is damaged names no root, but it never poisons the discovery
+    of the other underived rows."""
+    with store.open_store(tmp_path, write=True) as txn:
+        _legacy_task(txn, "broken", owner_pause={"state": "requested", "root_task_id": "broken",
+                                                "active_delegated_start": {"root_task_id": "broken"}})
+        _legacy_task(txn, "whole", owner_pause={"state": "paused", "root_task_id": "whole",
+                                               "active_delegated_start": {"root_task_id": "whole"}})
+        txn.conn.execute("UPDATE task_bodies SET body='{' WHERE task_id='broken'")
+    assert hot.recovered_owner_pause_roots(tmp_path) == ["whole"]

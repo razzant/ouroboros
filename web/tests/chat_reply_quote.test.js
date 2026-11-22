@@ -12,6 +12,19 @@ function withDom(run) {
 }
 const fixedTime = () => ({ short: '00:37', full: 'Oct 12, 00:37' });
 
+test('a sender selection names its source separately in the bubble and composer', () => withDom(() => {
+    for (const composer of [true, false]) {
+        const panel = createReplyQuote({ address: 'row:1@a#1', role: 'assistant',
+            excerpt: { text: 'North quay', start_utf16: 12 } }, { composer });
+        const main = panel.children[0];
+        const [head, words] = main.children;
+        assert.equal(head.children[0].textContent, 'Selected by sender · Source:');
+        assert.equal(head.children[1].textContent, 'Ouroboros');
+        assert.equal(words.textContent, 'North quay');
+        assert.equal(main.getAttribute('aria-label'), 'Selected by sender · Source: Ouroboros: North quay');
+    }
+}));
+
 test('a reply quote is one jump button in the QUOTED author\'s voice, words set as text', () => withDom(() => {
     const jumps = [];
     const panel = createReplyQuote({ address: 'row:1@a#1', role: 'user', snippet: '<b>not markup</b>', ts: 't' },
@@ -27,6 +40,18 @@ test('a reply quote is one jump button in the QUOTED author\'s voice, words set 
     assert.match(main.getAttribute('aria-label'), /^Reply to You, 00:37: /);
     main.click();
     assert.deepEqual(jumps, ['row:1@a#1']);
+}));
+
+test('a recorded choice has owner ink and its jump keeps the system row identity', () => withDom(() => {
+    const raw = { address: 'row:1@a#1', role: 'system', author_label: 'You', snippet: 'First' };
+    const jumps = [];
+    const panel = createReplyQuote({ ...raw, quote_role: 'user' }, { onJump: ref => jumps.push(ref) });
+    assert.equal(panel.dataset.author, 'user');
+    panel.children[0].click();
+    assert.equal(jumps[0].role, 'system');
+    assert.equal(jumps[0].address, raw.address);
+    assert.equal(createReplyQuote(raw).dataset.author, 'system');
+    assert.equal(createReplyQuote({ ...raw, quote_role: 'unknown' }).dataset.author, 'system');
 }));
 
 test('the composer strip is the same panel with a lead word and a cancel control', () => withDom(() => {

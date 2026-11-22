@@ -118,7 +118,7 @@ def _cancel_unauthorized_evolution(task: Dict[str, Any], reason: str) -> bool:
         write_task_result(
             _pool().DRIVE_ROOT,
             task_id,
-            STATUS_CANCELLED,
+            STATUS_CANCELLED, _cancel_observed=True,
             reason_code="evolution_authority_missing",
             authority_reason=str(reason or "unknown"),
             metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
@@ -722,8 +722,9 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
             w.busy_task_id == task_id for w in _pool().WORKERS.values()):
         # The carrier that parked this Presence turn still holds its slot until its own settlement (#2566).
         return True
-    if str(candidate.get("delegation_role") or "") == "subagent":  # the root's limit counts its acting children
-        if (acting_children(root_task_id, running) >= get_max_active_subagents_per_root()
+    if str(candidate.get("delegation_role") or "") == "subagent":  # the owner's number counts acting children
+        limit = get_max_active_subagents_per_root()
+        if (limit is not None and acting_children(root_task_id, running) >= limit
                 and not _pool()._assignment_depth_reservation_admits(candidate, running)):
             return True
     if stat and not refresh_pending_placement(_pool().DRIVE_ROOT, candidate, lane=True):  # a moved room's binding first
@@ -790,11 +791,13 @@ def assign_tasks() -> None:
     read only when chosen work needs a new process), then growth to the demand that pass found, admitted by that
     pass's reading."""
     from ouroboros.store_hot_facts import statuses_ahead
+    from ouroboros.task_results import (STATUS_CANCELLED, STATUS_FAILED, STATUS_SCHEDULED,
+                                        observed_cancel_axes, write_task_result)
     from supervisor import queue
     from supervisor.dispatch_choice import run_pass
     from supervisor.state import budget_remaining
     from supervisor.worker_owner_wait import grant_warm_returns
-    from supervisor.conversation_lane import reconcile_under_project_fence
+    from supervisor.conversation_lane import note_returns_waiting, reconcile_under_project_fence, resumes_on_lane
     from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK, reconcile_worker_capacity
 
     # The loop never waits behind an off-loop respawn or generation stop holding the lifecycle
@@ -832,7 +835,6 @@ def assign_tasks() -> None:
                 "Invalid-depth rows deferred until terminal custody is available; continuing assignment for other tasks: %s",
                 ", ".join(unresolved_invalid_ids),
             )
-        from supervisor.conversation_lane import note_returns_waiting, resumes_on_lane
 
         fenced = bool(_pool()._WORKER_POOL_DISABLED_REASON)  # the project pool's fence, never the lane's
         if fenced and not any(resumes_on_lane(task) for task in _pool().PENDING):
@@ -907,8 +909,6 @@ def assign_tasks() -> None:
                 task_id = str(task.get("id") or "")
                 result_root = pathlib.Path(task.get("budget_drive_root") or _pool().DRIVE_ROOT)
                 try:
-                    from ouroboros.task_results import STATUS_FAILED, STATUS_SCHEDULED, write_task_result
-
                     if pause["replay_safe"]:
                         task["_budget_pause"] = pause
                         newly_paused.append(task_id)
@@ -964,23 +964,23 @@ def assign_tasks() -> None:
                         "them automatically: Resume continues each one.",
                         role="system", system_type="budget_notice")
                 queue.persist_queue_snapshot(reason="budget_paused_before_dispatch")
-            # Selection still runs (and repairs stale grants); quiescent capacity
-            # maintenance also remains possible after money admission closes.
+            # Selection still runs (and repairs stale grants); capacity upkeep stays possible at zero money.
 
-        # Evolution is hard-blocked in light runtime mode at the assignment
-        # chokepoint too: a task restored from a snapshot or created before the
-        # mode switch must never actually run. Cancel them terminally.
+        # Evolution is hard-blocked in light runtime mode here too: a restored or pre-switch row never runs.
         from supervisor.evolution_lifecycle import evolution_block_reason
+        # Its own cause, never a budget pause the row still carries; its other axes stay.
+        def light_mode_cancel(row, fields):
+            return {**fields, "outcome_axes": observed_cancel_axes(
+                row.get("outcome_axes"), status=STATUS_CANCELLED, reason_code=STATUS_CANCELLED,
+                cancel_policy_reason="evolution_disabled_in_light_mode")}
         evo_block = "" if fenced else evolution_block_reason()
         blocked_ids = _pool()._drop_assignable_evolution_tasks(unresolved_invalid_id_set) if evo_block else []
         if blocked_ids:
-            from ouroboros.task_results import STATUS_CANCELLED, write_task_result
             for tid in blocked_ids:
                 try:
-                    write_task_result(
-                        _pool().DRIVE_ROOT, tid, STATUS_CANCELLED,
-                        result="Evolution is disabled in light runtime mode.",
-                    )
+                    write_task_result(_pool().DRIVE_ROOT, tid, STATUS_CANCELLED, _cancel_observed=True,
+                                      reason_code=STATUS_CANCELLED, _field_projector=light_mode_cancel,
+                                      result="Evolution is disabled in light runtime mode.")
                 except Exception:
                     log.debug("Failed to cancel light-mode evolution task %s", tid, exc_info=True)
             if st.get("owner_chat_id"):

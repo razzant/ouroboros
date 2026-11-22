@@ -73,6 +73,7 @@ def _seed(root, monkeypatch):
     workers.PENDING.append({"id": "paused-root", "type": "task", "chat_id": 1, "root_task_id": "paused-root",
                             "title": "Budget-paused draft", "_budget_pause": {"reason": "budget"}})
     assert queue.persist_queue_snapshot("activity outcome fixture")
+    return workers
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -267,6 +268,125 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                 expect(queue).not_to_contain_text("Nothing running")
                 (evidence / f"activity-outcomes-{engine}-posts.json").write_text(json.dumps(posts, indent=2),
                                                                                 encoding="utf-8")
+            finally:
+                browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_resume_withdrawn_by_the_accepted_state_while_an_unrelated_read_is_held(tmp_path, monkeypatch, engine):
+    """One accepted state settles a Resume. After the POST and the fresh ``/api/state`` that withdraws the
+    control, no Activity door offers Resume again while an unrelated section (schedules) is still reading:
+    one state GET serves the settle and the repaint, and the row's Stop stays its own live action. The real
+    module runs on the real service page; the POST is answered at the route, which also does to the fixture's
+    real store what the server's resume does (the budget pause leaves the pending row), so the state read the
+    settle awaits is a real revoked snapshot, not a canned one."""
+    from playwright.sync_api import expect, sync_playwright
+    from ouroboros.gateway.tasks import _queue_snapshot
+    from ouroboros.outcomes import public_task_result
+    from ouroboros.task_results import load_task_result
+
+    workers = _seed(tmp_path, monkeypatch)
+    posts = []
+    state_gets = []
+    reads = {"hold_schedules": False}
+
+    def api(route):
+        request = route.request
+        path = request.url.split("/api/", 1)[1]
+        if request.method == "POST":
+            posts.append({"path": path, "body": request.post_data_json})
+            if path == "tasks/paused-root/resume":
+                # The server's own resume, on the fixture's real store: the budget pause leaves the pending
+                # row, so the next census/work-projection read no longer carries the Resume control.
+                for row in workers.PENDING:
+                    if row.get("id") == "paused-root":
+                        row.pop("_budget_pause", None)
+            body = {"ok": True, "status": "accepted"}
+        elif path.startswith("tasks?"):
+            body = {"tasks": [], "queue": _queue_snapshot(tmp_path)}
+        elif path == "state":
+            state_gets.append(path)
+            body = {"bg_consciousness_enabled": False,
+                    **state_fields(tmp_path, availability={"complete": True}),
+                    "active_chat_activities_complete": True}
+        elif path == "schedules":
+            if reads["hold_schedules"]:
+                return  # the unrelated section's read stays in flight; nothing of the queue waits for it
+            body = {"tasks": []}
+        elif path.startswith("tasks/"):
+            body = public_task_result(load_task_result(tmp_path, path.split("/", 1)[1]) or {})
+        else:
+            return route.fulfill(status=404, body="{}")
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    class Handler(SimpleHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/fixture"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(HTML.encode())
+            else:
+                super().do_GET()
+
+    evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR") or tmp_path / "evidence")
+    evidence.mkdir(parents=True, exist_ok=True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(WEB)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/fixture"
+    try:
+        with sync_playwright() as pw:
+            browser = getattr(pw, engine).launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1200, "height": 620})
+                errors = []
+                page.on("pageerror", lambda exc: errors.append(str(exc)))
+                page.route("**/api/**", api)
+                page.goto(f"{url}?theme=dark")
+                page.wait_for_function("window.ready === true")
+                queue = page.locator('[data-activity-section="queue"]')
+                menu = page.locator("body > .task-control-menu")
+
+                def row(task_id):
+                    return queue.locator(".activity-row").filter(has=page.locator(f'[data-id="{task_id}"]'))
+
+                # Before the press: the paused row offers Resume beside its Stop, on both of its inputs.
+                trigger = page.locator('[data-act="task-control"][data-id="paused-root"]')
+                expect(trigger).to_have_attribute("data-resume", "1")
+                trigger.click()
+                expect(menu).to_be_visible()
+                assert menu.locator("[data-task-control]").all_text_contents() == ["Resume", "Stop now"]
+                # The unrelated schedules read stays in flight from here to the end of the scenario.
+                reads["hold_schedules"] = True
+                before = len(state_gets)
+                menu.locator('[data-task-control="resume"]').click()
+
+                # The queue repaints from the accepted state although the schedules read never returns:
+                # the withdrawn control is gone from the row, one state GET behind settle and repaint.
+                expect(row("paused-root")).not_to_contain_text("Spending limit reached")
+                expect(trigger).not_to_have_attribute("data-resume", "1")
+                assert len(state_gets) - before == 1
+                assert [post["path"] for post in posts] == ["tasks/paused-root/resume"]
+                page.screenshot(path=str(evidence / f"activity-resume-settled-{engine}.png"))
+
+                # The trigger did not stick: the fresh snapshot's menu offers no repeat Resume, and the
+                # adjacent Stop stays a live action of its own.
+                trigger.click()
+                expect(menu).to_be_visible()
+                assert menu.locator("[data-task-control]").all_text_contents() == ["Pause", "Stop now"]
+                menu.locator('[data-task-control="stop_now"]').click()
+                deadline = time.monotonic() + 10
+                while len(posts) < 2 and time.monotonic() < deadline:
+                    page.wait_for_timeout(50)
+                assert [post["path"] for post in posts] == ["tasks/paused-root/resume", "tasks/paused-root/cancel"]
+                assert errors == []
             finally:
                 browser.close()
     finally:

@@ -19,37 +19,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import custody_owed, store, tool_custody
+from ouroboros import custody_owed, platform_layer, store, tool_custody
 from ouroboros import local_custody_repair as repair
-# Bind these modules' platform names BEFORE any test patches ``platform_layer``: a module first
-# imported under a patch would keep the fake for every later test in this process.
-from ouroboros import platform_layer, process_containment, process_custody, process_identity  # noqa: F401
 from ouroboros.task_results import load_task_result, write_task_result
-
-
-INCIDENT_BIRTH = "Tue Oct 27 14:57:17 2026"
-
-
-def _claim(root, holder, op, *, pid, birth=INCIDENT_BIRTH, attempt=1, kernel="", state="claimed", extra=None,
-           tree="root"):
-    row = load_task_result(root, holder) or {}
-    claims = dict(row.get("launch_handoffs") or {})
-    claim = {"tool": "run_command", "task_id": holder, "root_task_id": tree, "state": state,
-             "claimed_at": "2026-10-27T17:23:28+00:00",
-             "local_owner": {"pid": pid, "process_birth": birth, "task_attempt": attempt}}
-    if kernel:
-        claim["owner_proof"] = {"pid": pid, "kernel_birth": kernel, "session": "an-earlier-session"}
-    claim.update(extra or {})
-    claims[op] = claim
-    write_task_result(root, holder, row.get("status") or "completed", root_task_id=tree, launch_handoffs=claims)
+from tests._tool_claim_custody_helpers import INCIDENT_BIRTH, _claim, _platform, _retired
 
 
 def _claims(root, holder):
     return dict((load_task_result(root, holder) or {}).get("launch_handoffs") or {})
-
-
-def _retired(root, holder):
-    return dict((load_task_result(root, holder) or {}).get("retired_tool_invocations") or {})
 
 
 def _busy():
@@ -155,13 +132,6 @@ def test_retirement_keeps_a_known_return_and_rewrites_nothing_twice(tmp_path):
 
 
 # --- positive evidence at startup and at addressed actions ------------------------------------------------------
-
-
-def _platform(monkeypatch, *, gone=(), kernel=None, lstart="Tue Oct 27 23:28:21 2026"):
-    monkeypatch.setattr(platform_layer, "pid_provably_gone", lambda pid: pid in set(gone))
-    monkeypatch.setattr(process_containment, "pid_is_zombie", lambda _pid: False)
-    monkeypatch.setattr(process_identity, "process_kernel_birth", lambda pid: (kernel or {}).get(pid))
-    monkeypatch.setattr(platform_layer, "process_start_time", lambda _pid: lstart)
 
 
 @pytest.mark.parametrize("live, recorded, ended", [
@@ -720,3 +690,82 @@ def test_an_undelivered_wake_is_tried_again_by_the_next_owe():
     custody_owed.owe("first", _busy, label="first")
     custody_owed.owe("second", _busy, label="second")
     assert calls == [1, 1], "a wake that failed to deliver is not counted as sent"
+
+
+def test_a_known_live_local_sender_vetoes_an_otherwise_acceptable_start(tmp_path, monkeypatch):
+    from tests._owner_pause_ended_helpers import _paused, _pending, _resume
+    from ouroboros import delegate_custody as custody
+    from tests._delegated_transport_shared import _rows
+
+    _paused(tmp_path, monkeypatch, lambda root: _pending(root, "child-dead", "lost"))
+    choice, = _resume("mind")["acceptable_unknown"]
+    _platform(monkeypatch, kernel={7: LIVE_KERNEL})
+    _claim(tmp_path, "child-dead", "sending", pid=7, kernel=LIVE_KERNEL, tree="root-1")
+    refusal = _resume("mind", [choice, "sending"])
+    assert any(b.get("reason") == "local_call_live" for b in refusal["blockers"])
+    assert not refusal.get("acceptable_unknown") and not _rows(tmp_path, custody.START_RISK_ACCEPTED)
+
+
+def test_two_kinds_of_unknown_are_named_together_on_a_budget_park(tmp_path, monkeypatch):
+    from tests._owner_pause_ended_helpers import _pending, _resume
+    from tests._budget_pause_exact_helpers import _install_queue, _parked
+
+    _, state, _ = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    with monkeypatch.context() as park:
+        _parked(tmp_path, park, task_id="root-1")
+    _platform(monkeypatch, kernel={})
+    _claim(tmp_path, "root-1", "local", pid=63888, tree="root-1")
+    _pending(tmp_path, "root-1", "lost")
+    refused = _resume("owner")
+    choice, = set(refused["acceptable_unknown"]) - {"local"}
+    assert "local" in refused["acceptable_unknown"]
+    assert _resume("owner", [choice])["acceptable_unknown"] == ["local"]
+    assert _resume("owner", ["local"])["ok"]
+
+
+def test_mixed_confirmation_after_snapshot_failure_can_use_a_fresh_resume(tmp_path, monkeypatch):
+    from ouroboros import delegate_custody as custody
+    from tests._delegated_transport_shared import _rows
+    from tests._owner_pause_ended_helpers import _paused, _pending, _resume
+
+    queue, _workers, engine = _paused(tmp_path, monkeypatch, lambda root: _pending(root, "child-dead", "lost"))
+    _platform(monkeypatch, kernel={})
+    _claim(tmp_path, "child-dead", "local", pid=63888, tree="root-1")
+    ids = _resume("owner")["acceptable_unknown"]
+    assert len(ids) == 2 and "local" in ids
+    publish = queue.publish_queue_snapshot
+    with monkeypatch.context() as fault:
+        fault.setattr(queue, "publish_queue_snapshot", lambda *, reason: (
+            False if reason == "budget_exact_resume_granted" else publish(reason=reason)))
+        assert _resume("owner", ids)["error"] == "snapshot_not_persisted"
+    local = _retired(tmp_path, "child-dead")["local"]
+    assert local["effect_outcome"] == "unknown_accepted" and not local["replay_authorized"]
+    assert _resume("owner", ids)["error"] == "selection_authority_changed"
+    assert _resume("owner")["ok"]  # neither writer remains an outstanding choice on this pause
+    assert len(_rows(tmp_path, custody.START_RISK_ACCEPTED, "lost")) == 1
+    assert _retired(tmp_path, "child-dead")["local"] == local and not engine.starts
+
+
+def test_child_without_root_grant_cannot_retire_its_or_a_siblings_unknown_calls(tmp_path, monkeypatch):
+    from supervisor.events_budget import _handle_budget_resume_child
+    from tests._budget_pause_exact_helpers import _install_queue, _parked, _supervisor_ctx
+    from tests._owner_pause_ended_helpers import REASON, _pending
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    with monkeypatch.context() as park:
+        _parked(tmp_path, park, task_id="child", root_task_id="root", extra={"parent_task_id": "root"})
+    _platform(monkeypatch, kernel={})
+    for holder in ("child", "sibling"):
+        _claim(tmp_path, holder, holder + "-call", pid=63888, tree="root")
+    write_task_result(tmp_path, "root", "running", root_task_id="root")
+    _pending(tmp_path, "child", "lost", tree="root")
+    events = []
+    ctx = _supervisor_ctx(tmp_path, workers, queue, [], events)
+    _handle_budget_resume_child({"task_id": "child", "requested_by": "root", "reason": REASON,
+                                 "accept_unknown": ["sibling-call", "child-call"]}, ctx)
+    assert events[-1]["error"] == "root_resume_grant_missing"
+    for holder in ("child", "sibling"):
+        assert holder + "-call" in _claims(tmp_path, holder)
+        assert not _retired(tmp_path, holder)

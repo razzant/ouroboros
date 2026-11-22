@@ -214,7 +214,7 @@ function appRefreshProjectsNav(stateSnapshots) {
     return new Function('stateSnapshots', 'readStateSnapshot', `${text}\nreturn refreshProjectsNav;`)(stateSnapshots, readStateSnapshot);
 }
 
-function mountMain(t, tr) {
+function mountRoom(t, tr, chatId = 1) {
     const env = installDom(tr.fetch);
     const handlers = new Map();
     const socket = {
@@ -230,7 +230,8 @@ function mountMain(t, tr) {
     const stateSnapshots = createStateSnapshotSequencer((data, at) => chat?.hydrateStateSnapshot(data, at), undefined,
         (at) => { unavailable.push(at); chat?.hydrateStateSnapshot(null, at); });
     const state = { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 };
-    chat = createChatInstance({ ws: socket, state, updateUnreadBadge() {}, stateSnapshots, chatId: 1, idPrefix: 'chat', mountEl: env.mount });
+    chat = createChatInstance({ ws: socket, state, updateUnreadBadge() {}, stateSnapshots, chatId, idPrefix: 'chat',
+        mountEl: env.mount, asPanel: chatId !== 1, projectId: chatId === 1 ? '' : `project-${chatId}` });
     t.after(() => { chat.destroy(); restoreDom(env.prior); });  // hooks run in order: the instance first
     return { socket, stateSnapshots, state, unavailable };
 }
@@ -240,11 +241,33 @@ const assistantText = () => (globalThis.document.byId.get('chat-messages')?.chil
     .filter((node) => node.classList?.contains('chat-bubble') && node.classList.contains('assistant'))
     .map((node) => node.innerHTML).join('\n');
 
+for (const [name, chatId, expected] of [
+    ['Main', 1, ['legacy', 'telegram']], ['primary Project', 7, ['project', 'legacy']],
+    ['additional Project', 23, ['project']], ['unrelated Project', 41, []],
+]) {
+    test(`failed state routes owner echoes in ${name}`, async (t) => {
+        const room = mountRoom(t, transport([{ status: 503 }], chatHistory), chatId);
+        await flush();
+        assert.ok(room.unavailable.length > 0);
+        assert.equal(room.state.projectChatIds.size, 0);
+        const web = { type: 'chat', role: 'user', source: 'web', ingress_accepted: true, chat_id: 7,
+            sender_session_id: 'another-tab', ts: '2026-10-29T00:00:00Z' };
+        const project = { ...web, content: 'In the garden', kind: 'room_echo', also_rooms: [23], client_message_id: 'project' };
+        room.socket.emit('chat', project);
+        room.socket.emit('chat', project); // rejoin of the same row
+        room.socket.emit('chat', { ...web, content: 'An older receipt', client_message_id: 'legacy' });
+        room.socket.emit('chat', { type: 'chat', role: 'user', source: 'skill:telegram', chat_id: 197422551,
+            ts: web.ts, content: 'From Telegram', client_message_id: 'telegram' });
+        const bubbles = document.byId.get('chat-messages').children.filter(node => node.classList.contains('user'));
+        assert.deepEqual(bubbles.map(node => node.dataset.clientMessageId), expected);
+    });
+}
+
 for (const hang of ['fetch', 'body']) {
     test(`boot: when Main's first read's ${hang} never answers the socket still opens, and a stamped Project frame stays out of Main`, async (t) => {
         const advance = clock(t);
         const tr = transport([{ hang }, { body: FRESH }], chatHistory);
-        const main = mountMain(t, tr);
+        const main = mountRoom(t, tr);
         assert.equal(APP_SOURCE.split(BOOT).length, 2, 'app.js boots with exactly this statement');
         assert.equal(POLL?.length, 1, 'app.js polls the state with exactly this statement');
         const refreshProjectsNav = appRefreshProjectsNav(main.stateSnapshots);
@@ -269,7 +292,7 @@ for (const hang of ['fetch', 'body']) {
 
 test('Main\'s socket-open read, queued behind a hung read, runs at once when app.js retires on open', async (t) => {
     const tr = transport([{ hang: 'fetch' }, { body: FRESH }], chatHistory);
-    const main = mountMain(t, tr);
+    const main = mountRoom(t, tr);
     await flush();
     assert.equal(tr.calls.length, 1, 'mount issues Main\'s forced header read, which hangs');
     main.socket.emit('open', { previouslyConnected: true });  // the instance's own open handler: a forced read

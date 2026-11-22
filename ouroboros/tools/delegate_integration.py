@@ -371,6 +371,10 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
                            retry_of=retry_token, recorded_max_seconds=seconds)
     if (accepted := _accepted_retry(drive, retry_token, record)) is not None:
         return None, accepted  # the start the engine already holds: a receipt, never a second POST
+    if record.get("resume_decisions"):
+        from ouroboros.delegate_resume import LOOKUP_ONLY
+        return None, _fail("delegate_start", LOOKUP_ONLY, "Resume accepted the unknown outcome. Only lookup is allowed.",
+                           pending_invocation_id=retry_token)
     execution = (request_body.get("execution")
                  if isinstance(request_body.get("execution"), dict) else {})
     scope = request_body.get("scope") if isinstance(request_body.get("scope"), dict) else {}

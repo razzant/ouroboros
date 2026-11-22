@@ -64,7 +64,7 @@ test('the list says every unmet requirement, a missing package included, and not
     const deployment = { when_unmet: 'hold', required: [MET, { ...MET, name: 'audit_log', state: 'unmet', reason: 'missing',
         detail: 'No package named audit_log is installed.' }] };
     const notice = renderRequirementNotice(deployment);
-    assert.match(notice, /Your organization requires an extension that isn’t running here\./);
+    assert.match(notice, /Your organization requires an extension skill that isn’t running here\./);
     assert.match(notice, /<li data-required-name="audit_log"><code data-i18n-authored>audit_log<\/code> · No package named audit_log is installed\.<\/li>/);
     assert.doesNotMatch(notice, /data-required-name="error_tracker"/, 'a running one is not listed');
     assert.match(notice, /Seen by the server process; each worker checks its own before it starts work\./);
