@@ -81,12 +81,12 @@ def test_the_start_notice_dates_a_broken_server_on_its_one_line_and_is_silent_wh
 def test_mcp_configuration_facts_join_the_notice(monkeypatch, tmp_path):
     manager = _manager(monkeypatch, ("demo", True), ("idle", False))
     assert breakage.start_notice_rows(_work(tmp_path), []) == [
-        {"surface": "mcp", "reason": "configuration", "error": "disabled in Settings → Tools: idle"}]
+        {"surface": "mcp", "reason": "configuration", "error": "disabled in Extensions → MCP servers: idle"}]
     manager.reconfigure({"MCP_ENABLED": False, "MCP_SERVERS": [{"id": "demo", "enabled": True,
                                                                  "url": "https://demo.example.test/mcp"}]})
     monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda **_kw: None)
     assert breakage.start_notice_rows(_work(tmp_path), []) == [{"surface": "mcp", "reason": "configuration", "error": (
-        "MCP is off in Settings → Tools; its 1 configured servers are not offered")}]
+        "MCP is off in Extensions → MCP servers; its 1 configured servers are not offered")}]
     blocked = [{"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"}]
     assert breakage.start_notice_rows(_work(tmp_path), blocked) == blocked  # a surface out of reach is not read
     odd = SimpleNamespace(task_metadata=None, budget_drive_root=object())  # an unusable work context

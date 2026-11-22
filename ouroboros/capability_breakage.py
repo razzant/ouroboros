@@ -57,11 +57,11 @@ def _mcp_facts() -> Tuple[Facts, Facts]:
     working: Facts = {}
     if not manager.is_enabled():
         if records:
-            broken["mcp-config:off"] = f"MCP is off in Settings → Tools; its {len(records)} configured servers are not offered"
+            broken["mcp-config:off"] = f"MCP is off in Extensions → MCP servers; its {len(records)} configured servers are not offered"
         return broken, working
     disabled = sorted(cfg.id for cfg, _catalog in records if not cfg.enabled)
     if disabled:
-        broken["mcp-config:disabled"] = "disabled in Settings → Tools: " + ", ".join(disabled)
+        broken["mcp-config:disabled"] = "disabled in Extensions → MCP servers: " + ", ".join(disabled)
     for cfg, catalog in sorted(records, key=lambda record: record[0].id):
         if not cfg.enabled:
             continue
