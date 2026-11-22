@@ -1320,8 +1320,9 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             meta.update(projection_fields(stored), **rooms, **frame_project(DATA_DIR, stored, rooms.get("also_rooms", [])))
         if _text.strip() in ("", "\u200b"):
             return {"chat_id": chat_id}
-        if "transport" not in meta and (carried := live_transport(DATA_DIR, meta, get_bridge().chat_transport(
-                chat_id), task_id, role=role, system_type=system_type, is_progress=is_progress)):
+        if "transport" not in meta and (carried := live_transport(
+                DATA_DIR, meta, lambda: get_bridge().chat_transport(chat_id), task_id,
+                role=role, system_type=system_type, is_progress=is_progress)):
             meta["transport"] = carried  # live only, after the rows are written: a room's binding stays its own
         # Budget footers belong in dashboard/status flows, not every chat reply.
         full = _text
