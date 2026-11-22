@@ -153,13 +153,14 @@ _UNCOVERED = ("SELECT d.seq FROM import_ledger l CROSS JOIN dialogue d INDEXED B
 
 def candidates(conn: sqlite3.Connection, query: Any, *, upper: int) -> Optional[Candidates]:
     """The candidate coordinates on this read connection, or ``None`` when the reader must scan (no FTS5, no
-    sound generation, an expression the table refuses)."""
+    sound generation, a first pass not finished yet, an expression the table refuses). During the first build
+    every unposted row would be a candidate and the postings window would move under each posted chunk."""
     if not fts5_available():
         return None
     try:
         facts = generation(conn)
-        if not facts or not facts["sound"]:
-            return None
+        if not facts or not facts["sound"] or facts["built_epoch"] < 0:
+            return None  # a generation whose first full pass has not finished is the job's, not a reader's
         posted = {seq for (seq,) in conn.execute("SELECT rowid FROM dw_post WHERE dw_post MATCH ? AND rowid < ?",
                                                  (match_expression(query), int(upper)))}
         dirty = {seq for (seq,) in conn.execute("SELECT seq FROM dw_dirty WHERE seq < ?", (int(upper),))}

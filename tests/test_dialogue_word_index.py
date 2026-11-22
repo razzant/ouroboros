@@ -355,3 +355,14 @@ def test_the_uncovered_rows_are_found_by_the_ordinal_index_whatever_the_history(
             conn.set_progress_handler(None, 0)
             steps[root.name] = counted[0]
     assert steps["large"] == steps["small"], steps  # thirty times the rows, the same work
+
+
+def test_a_generation_still_on_its_first_pass_leaves_the_read_to_the_scan(tmp_path, monkeypatch):
+    _corpus(tmp_path)
+    monkeypatch.setattr(dwi, "CHUNK_ROWS", 5)
+    assert dwi.run(tmp_path, lambda: True)["state"] == "pending"  # one chunk posted, the pass stopped
+    partial = _read(tmp_path, words=["fox"])
+    assert "Read by scan of every row" in partial and re.search(r"total=\d+;", partial)
+    assert dwi.run(tmp_path, lambda: False)["state"] == "done"
+    built = _read(tmp_path, words=["fox"])
+    assert "Read by postings" in built and _total(built) == _total(partial)
