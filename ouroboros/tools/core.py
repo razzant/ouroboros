@@ -1208,7 +1208,15 @@ def _forward_to_worker(
     if not data:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ TASK_NOT_FOUND: task {tid} is not registered.")))
     if status in FINAL_STATUSES:
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}.")))
+        # The record is on the caller's status root, so get_task_result reads it where the caller may call it
+        # (a not-started promotion answers with its own notice instead, so no read is named for it).
+        from ouroboros.promotion_intent import promotion_intent_notice
+        from ouroboros.tools.arg_feedback import repair_call_available
+
+        read = (f" get_task_result(task_id={tid!r}) reads its result."
+                if repair_call_available(ctx, "get_task_result") and not promotion_intent_notice(tid, data) else "")
+        return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(
+            f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}; the message was not delivered.{read}")))
     # A requested child's mailbox exists in its recorded drive from the request on: its words are
     # read when it starts, or stay in its result as unread mail, the same receipt a queued one gives.
     if status not in (STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED):
@@ -1318,9 +1326,9 @@ def _forward_to_worker(
         as_from = (f" as a message from a peer task ({as_peer}; never owner text or an ancestor's steering)"
                    if provenance == PROVENANCE_PEER_TASK else " as a message from this task (never owner text)"
                    if listed_root is not None else "")
-        return (f"Message forwarded to task {tid}: written to its mailbox{as_from} ({MAIL_QUEUED}); task {tid} has not "
-                "started, so nothing has read it: it reads it when it starts, and if it ends unstarted its result keeps "
-                f"it as unread mail.{observed} Files cannot be attached to messages between tasks.")
+        return (f"Message forwarded to task {tid}: written to its mailbox{as_from} ({MAIL_QUEUED}). "
+                "Read status is unconfirmed. If the task ends before reading the message, its result keeps it "
+                f"as unread mail.{observed} Files cannot be attached to messages between tasks.")
     if provenance == PROVENANCE_PEER_TASK:
         # A Presence turn may already be over: persistence is proven, a read is not.
         read_note = ("This proves persistence, not that its model read it; if the turn continues, "
@@ -1521,10 +1529,9 @@ def get_tools() -> List[ToolEntry]:
                 "inline Presence turn (a message from an independent task). Presence observation gaps "
                 "are disclosed, also when the Presence root is in your own tree; a write never "
                 "proves a read. It is never labelled owner dialogue, files cannot be attached, the body "
-                "is limited to 8000 chars (longer is refused, never truncated), and the "
-                "result says written, not read: a running task drains it at its next checkpoint, a queued "
-                "one when it starts, and a task that ends without reading it keeps it as unread mail in its "
-                "result. To wait for a reply without spending model rounds, call await_messages."
+                "is limited to 8000 chars (longer is refused, never truncated). The task can read it on its "
+                "next mailbox check. If it ends before reading it, its result keeps it as unread mail. "
+                "To wait for a reply without spending model rounds, call await_messages."
             ),
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string", "description": "ID of the running, queued or requested task to forward to"},

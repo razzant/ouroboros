@@ -467,6 +467,8 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
                 str(row.get("provider") or ""), row.get("reservation_upper_bound_usd"),
                 str(row.get("processing_preference") or ""), str(row.get("submitted_processing_mode") or ""),
                 row.get("processing_basis"),
+                provider_reported_cost_only=bool(row.get("provider_reported_cost_only")),
+                unpriced_add_on=bool(row.get("unpriced_add_on")),
             )
             try:
                 recovered = None

@@ -75,11 +75,13 @@ CHECK_BYPRODUCTS = ("build or dependency output that only serves your checks (en
 # What the host declares about the scratch it made for one run, before the run uses it.
 # Purpose and ownership, never a promise that the contents come back byte for byte.
 DISPOSABLE_SCRATCH = (
-    "disposable by the host's declaration: never captured; it follows this task, or a reviewer's checking "
-    "copy through continuation, until release, unless the producer or owner retains it (the OS "
-    "may clear it sooner), so anything left only there may be lost: keep edits in your working tree and "
-    "return the results you need; nothing installed there is reinstalled for a later session, which "
-    "builds its own from the project's files")
+    "disposable by the host's declaration: never captured. It follows this task or its reviewer's checking "
+    "copy through continuation. A child's scratch also waits for the parent's exact decision or the end "
+    "of its continued line. Keep it deferred while another step needs a path you handed on. The producer "
+    "or owner can retain it; the OS may clear it sooner. Create a snapshot used only for measurement here. "
+    "Return the report, method, script, results, source and snapshot hash. If exact bytes matter, return "
+    "them explicitly as evidence: the hash alone cannot restore a released snapshot. Keep edits in your working "
+    "tree; a later session rebuilds its environment")
 
 
 def scratch_fact(*, launcher: bool = False, granted: str = "") -> str:

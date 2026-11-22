@@ -311,13 +311,13 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             page.screenshot(path=str(evidence / f"update-foot-{engine}-{width}-focus.png"), clip={
                 "x": max(0, box["x"] - 12), "y": max(0, box["y"] - 12), "width": box["width"] + 24, "height": box["height"] + 24})
             page.keyboard.press("Enter")
-            expect(pill).to_have_text("Update available")
+            expect(pill).to_have_text("Update")
             expect(close).to_be_hidden()
             assert page.evaluate(_NOTICE)["active"] == "update-pill", "focus never falls to the page"
             expect(page.locator("#updates-attempt-headline")).to_have_text("No update was applied.")
             # Reload: this browser remembers the hide for that attempt.
             _reload(page, width)
-            expect(pill).to_have_text("Update available")
+            expect(pill).to_have_text("Update")
             expect(close).to_be_hidden()
             # The next attempt is a new notice, closable; an unconfirmed outcome stays beside a newer version, and
             # pressing the close with a pointer hides it the same way.
@@ -341,12 +341,12 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             finally:
                 other.close()
             close.click()
-            expect(pill).to_have_text("Update available")
+            expect(pill).to_have_text("Update")
             expect(close).to_be_hidden()
             # A confirmed success wears nothing: no capsule, no toast, no timer; a newer version still shows.
             conclude(page, operation_id="attempt-c", outcome="applied", result="applied", concluded_by="boot", blockers=[],
                      work_stop="", reason="")
-            expect(pill).to_have_text("Update available")
+            expect(pill).to_have_text("Update")
             expect(pill).not_to_have_attribute("data-tone", "ok")
             expect(close).to_be_hidden()
             status["available"] = False

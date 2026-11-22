@@ -15,25 +15,8 @@ from types import SimpleNamespace
 import pytest
 
 from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx
-from tests._owner_pause_ended_helpers import _owner_park
+from tests._owner_pause_ended_helpers import _live_tree, _owner_park
 from tests.worker_pool_support import affirm_ready
-
-
-def _live_tree(tmp_path, workers):
-    """A RUNNING root, its RUNNING child and a never-started PENDING child."""
-    from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, write_task_result
-
-    write_task_result(tmp_path, "root-1", STATUS_RUNNING, chat_id=0)
-    write_task_result(tmp_path, "child-run", STATUS_RUNNING, chat_id=0)
-    write_task_result(tmp_path, "child-new", STATUS_SCHEDULED, chat_id=0)
-    workers.RUNNING["root-1"] = {"task": {"id": "root-1", "type": "task", "chat_id": 0,
-                                          "root_task_id": "root-1"}, "worker_id": 0, "attempt": 1}
-    workers.RUNNING["child-run"] = {"task": {
-        "id": "child-run", "type": "task", "chat_id": 0, "root_task_id": "root-1",
-        "parent_task_id": "root-1", "delegation_role": "subagent"}, "worker_id": 1, "attempt": 1}
-    workers.PENDING.append({"id": "child-new", "type": "task", "chat_id": 0, "_attempt": 1,
-                            "root_task_id": "root-1", "parent_task_id": "root-1",
-                            "delegation_role": "subagent"})
 
 
 def _mail_kinds(root, task_id):

@@ -6,8 +6,8 @@ Files, Widgets, the Skills cards) is held to what remains while a part with an <
 top, or part of the way under what stands above the part, so Settings "teleported up" every few seconds while the
 owner read it (owner, 2026-11-13).
 
-For every place in the registry (pages.js), every Dashboard and Skills tab, and every Settings view a module
-registered, each box that scrolls is moved most of the way down and then its content is drawn again in place, the way a
+For every place in the registry (pages.js), every Dashboard tab and Extensions page, and every Settings view a module
+registered (those that moved to Extensions by their old addresses), each box that scrolls is moved most of the way down and then its content is drawn again in place, the way a
 page's repaint does (the part that holds most of it gets fresh, identical children). The box must not end above where
 it was, or above its new end. A new place, tab or Settings page is walked with no edit here. A room's feed and the Logs
 list keep their own reading place (page_places.js OWN_PLACE) and are left to their own tests. The second test drives a
@@ -116,7 +116,17 @@ def test_a_repaint_keeps_every_scrolled_box_where_the_owner_left_it(gate_ui, tmp
                               skill='gate_skill', settle=lambda: rest(page))
                 continue
             if name == 'skills':
-                page.wait_for_selector('.skills-card')
+                # Extensions' pages are its list's rows (one column: opened from the list, which Back returns to).
+                for row in page.locator('#page-skills [data-extensions-open]').all():
+                    if not row.is_visible():
+                        page.locator('#page-skills [data-shell-back]').click()
+                        rest(page)
+                    row.click()
+                    if row.get_attribute('data-extensions-open') == 'installed':
+                        page.wait_for_selector('.skills-card')
+                    rest(page)
+                    check(page, f"skills/{row.get_attribute('data-extensions-open')}", facts, failures)
+                continue
             if name == 'widgets':
                 page.wait_for_selector('.widgets-card')
             selector = '[data-dashboard-tab]' if name == 'dashboard' else '.app-tab-strip [role="tab"]'

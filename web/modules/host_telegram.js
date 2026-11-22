@@ -16,7 +16,9 @@
  * `--inset-*`); Telegram's
  * `colorScheme` is the "System" appearance source through theme.js's one hook; and when the visual viewport
  * collapses under ~100px while a field is focused (Telegram-iOS #2235) the field is blurred and `hideKeyboard()`
- * (9.1) asked for. NOT `viewportStableHeight → --vvh`: that rewrites the keyboard path and needs a device. */
+ * (9.1) asked for. An SDK viewport event also asks the shell to sample its visual viewport. */
+
+import { pinchMagnified } from './layout.js';
 
 export const KEYBOARD_COLLAPSE_PX = 100;
 const SDK_SCRIPT = 'script[src*="telegram-web-app.js"]';
@@ -120,7 +122,7 @@ export function createTelegramHost({
     };
     function recoverKeyboard() {
         const height = Number(win?.visualViewport?.height ?? win?.innerHeight) || 0;
-        if (height <= 0 || height >= KEYBOARD_COLLAPSE_PX) return false;
+        if (height <= 0 || height >= KEYBOARD_COLLAPSE_PX || pinchMagnified(win)) return false;
         const field = editable();
         if (!field) return false;
         field.blur();
@@ -167,7 +169,10 @@ export function createTelegramHost({
             vv.addEventListener('resize', recoverKeyboard);
             disposers.push(() => vv.removeEventListener('resize', recoverKeyboard));
         }
-        on('viewportChanged', recoverKeyboard);
+        on('viewportChanged', () => {
+            recoverKeyboard();
+            if (win?.Event) win.dispatchEvent?.(new win.Event('ouro:host-viewport'));
+        });
         return true;
     }
 

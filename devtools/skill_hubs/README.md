@@ -40,7 +40,7 @@ python -m devtools.skill_hubs.gitverse_hub \
 Publishing is the operator's act. Review the report and the output, copy the files you accept
 into the working tree of a hub repository you control and commit them there (the first time, the
 new folder itself can become that repository: `git -C ~/gitverse-hub-new init`, `add -A`,
-`commit`). Push it where your installations can read it and add its address in Skills → Sources:
+`commit`). Push it where your installations read it and add its address in Extensions → Sources:
 `https://`, `ssh://`, or `file://` for a repository on this computer; choose its trust there. Add
 the repository, not the folder: a folder on this computer is read as plain skills, and a hub's
 entries are offered only from a repository.

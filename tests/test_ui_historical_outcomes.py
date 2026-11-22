@@ -112,30 +112,67 @@ def test_partial_activity_keeps_other_positive_source(tmp_path, monkeypatch):
 
 
 def test_routing_destination_address_survives_annotation_live_and_history(tmp_path, monkeypatch):
-    from ouroboros.projects_registry import create_project, bind_task_to_project
-    from ouroboros.project_dialogue import latest_chat_annotations
+    from ouroboros.projects_registry import create_project, bind_task_to_project, project_chat_id
+    from ouroboros.project_dialogue import scoped_chat_annotations
     from supervisor import message_bus
     from supervisor.events_project_routing import _emit_routing_receipt
 
+    source_chat = project_chat_id("seed-table")
+    originals = [{"direction": "in", "chat_id": room, "user_id": 1, "text": "Check the seed table",
+                  "client_message_id": "owner-row", "ts": f"2024-04-08T13:45:0{i}Z"}
+                 for i, room in enumerate((1, source_chat, source_chat))]
+    dialogue_test.seed(tmp_path, live={"chat": originals})
+    dialogue_test.import_all(tmp_path)
     project = create_project(tmp_path, "destination", name="Destination")
+    source = create_project(tmp_path, "seed-table", name="Seed table")
     bind_task_to_project(tmp_path, "destination-task", project["id"], project["chat_id"], origin={"absent": "system"})
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     bridge = message_bus.LocalChatBridge({})
     frames = []
     bridge._broadcast_fn = frames.append
-    event = {"client_message_id": "owner-row", "routing_token": "token", "chat_id": 1}
+    from ouroboros.owner_relay import owner_row_address, owner_row_source
+    from ouroboros.project_dialogue import append_chat_annotation
+    from ouroboros import chat_annotations
+    from ouroboros.routing_wait import message_routing_acts
+    monkeypatch.setattr(chat_annotations, "_COMPACT_AT_BYTES", 1)
+    entry = originals[-1]
+    append_chat_annotation(tmp_path, "owner-row", action="steer_task", target="old", status="read")
+    event = {"client_message_id": "owner-row", "routing_token": "token", "chat_id": 1,
+             "source_ref": owner_row_source(entry)[0], "owner_source": owner_row_address(entry)}
     receipt = _emit_routing_receipt(SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=bridge), event,
                                     action="promote_chat_to_task", target="destination-task", status="scheduled")
     assert receipt["persisted"] is True
-    annotation = latest_chat_annotations(tmp_path)["owner-row"]
+    annotation = scoped_chat_annotations(tmp_path)[source["chat_id"], "owner-row"]
     frame = next(row for row in frames if row.get("type") == "message_annotation")
-    message_bus.log_chat("in", 1, 1, "Work in the project", client_message_id="owner-row", drive_root=tmp_path)
-    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
-    replay = next(row for row in json.loads(response.body)["messages"] if row.get("client_message_id") == "owner-row")
+    assert frame["chat_id"] == source["chat_id"]
+    endpoint = make_chat_history_endpoint(tmp_path)
+    main = asyncio.run(endpoint(SimpleNamespace(query_params={"chat_id": "1"})))
+    assert "chat_annotation" not in next(row for row in json.loads(main.body)["messages"] if row.get("client_message_id") == "owner-row")
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"chat_id": str(source["chat_id"])})))
+    shown = [row for row in json.loads(response.body)["messages"] if row.get("client_message_id") == "owner-row"]
+    address = owner_row_address(entry)
+    [replay] = [row for row in shown if row["row_address"] == address]
+    [other] = [row for row in shown if row["row_address"] != address]
+    assert "chat_annotation" not in other
+    assert annotation["source_row_address"] == frame["source_row_address"] == replay["chat_annotation"]["source_row_address"] == address
+    key = (source["chat_id"], "owner-row")
+    assert not message_routing_acts(tmp_path, [key, (*key, other["row_address"])])
+    [act] = message_routing_acts(tmp_path, [(*key, address)])
+    assert act["target"] == "destination-task"
+    assert chat_annotations.chat_annotation_receipt(tmp_path, "owner-row", "token") == annotation
     for row in (annotation, frame, replay["chat_annotation"]):
         assert row["project_id"] == "destination"
         assert row["project_chat_id"] == project["chat_id"]
         assert row["target"] == "destination-task"
+    # Even a reused legacy token cannot merge the two addressed rows during compaction.
+    assert append_chat_annotation(tmp_path, "owner-row", action="steer_task", target="other-task", status="delivered",
+                                  routing_token="token", source_chat_id=source_chat,
+                                  source_row_address=other["row_address"])
+    [other_act] = message_routing_acts(tmp_path, [(*key, other["row_address"])])
+    assert other_act["target"] == "other-task"
+    [selected_act] = message_routing_acts(tmp_path, [(*key, address)])
+    assert selected_act["target"] == "destination-task"
+    assert not chat_annotations.chat_annotation_receipt(tmp_path, "owner-row", "token")
 
 
 def test_existing_malformed_bindings_keep_activity_coverage_unknown(tmp_path):

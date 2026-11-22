@@ -1,6 +1,6 @@
 ---
 name: ui_design
-version: 2.0.6
+version: 2.0.7
 type: instruction
 os: any
 permissions: []

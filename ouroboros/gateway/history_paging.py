@@ -32,8 +32,9 @@ from ouroboros.checkpoint_waits import wait_episode
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_positions import skipped_between
 from ouroboros.subagent_messages import DELIVERY_KINDS, is_conversation_card_content as _card_content
+from ouroboros.chat_annotations import _ANNOTATIONS_NAME
 from ouroboros.project_dialogue import (
-    _ANNOTATIONS_NAME, MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, WORK_SPEECH_ELSEWHERE_TYPES, entry_matches_source_ref,
+    MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, WORK_SPEECH_ELSEWHERE_TYPES, owner_message_entries,
 )
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import subagent_message_meta
@@ -224,6 +225,9 @@ def decode_cursor(value, thread_id, view):
         ):
             raise ValueError
         if cursor["kind"] == "page":
+            answer = cursor.get("answer_seq")
+            if answer is not None and (type(answer) is not int or not 0 <= answer < cursor["upper"]["chat"]):
+                raise ValueError
             if type(cursor.get("recent")) is not bool or set(cursor["lower"]) != set(_SOURCES):
                 raise ValueError
             if any(type(cursor["lower"][source]) is not int
@@ -311,22 +315,8 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
         keys.extend(("task_id", task) for task in descendants)
         # Rows written elsewhere that this room also shows (``room_membership.appearance_keys``).
         shown = (("appearance", f"room:{thread_id}"), *(("appearance", f"task:{task}") for task in (*bound, *descendants)))
-        owners, seqs = [], []
-        for ref in source_refs:
-            if not isinstance(ref, dict):
-                continue
-            if ref.get("client_message_id"):
-                owners.append(("client_message_id", str(ref["client_message_id"])))
-            elif ref.get("ts"):  # a binding older than client ids names its owner row by chat and time
-                try:
-                    chat = int(ref["chat_id"]) if ref.get("chat_id") not in (None, "") else 1
-                except (TypeError, ValueError):
-                    chat = 1
-                candidates = ds.rows_by_identity(data_dir, chat, str(ref["ts"]))
-                if chat == 1:
-                    candidates += ds.rows_by_identity(data_dir, None, str(ref["ts"]))
-                seqs.extend(row.seq for row in candidates if entry_matches_source_ref(row.row, [ref]))
-        return {"chat": RoomLens((*keys, *shown, *dict.fromkeys(owners)), tuple(sorted(set(seqs)))),
+        seqs = {entry.seq for entry in owner_message_entries(data_dir, source_refs).values() if entry is not None}
+        return {"chat": RoomLens((*keys, *shown), tuple(sorted(seqs))),
                 "progress": RoomLens(tuple(keys))}
     if thread_id != 1:
         from ouroboros.place_arrivals import holds_history_import
@@ -340,7 +330,11 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
     keys = [("chat_id", chat) for chat in chats] + [("chat_id", None)]
     placed = place_room_chats(data_dir)
     spoken = [key for key in keys if key[1] not in placed]
-    return {"chat": RoomLens((*spoken, ("kind", "quiz"), ("kind", "quiz_answer"), ("kind", "quiz_closed"))),
+    # A Project number can also be the physical address of the owner bot. The indexed
+    # inbound candidates still pass the canonical row/room check, including for old rows.
+    telegram = tuple(("telegram_inbound_chat", chat) for chat in sorted(project_chat_ids))
+    return {"chat": RoomLens((*spoken, *telegram, ("appearance", "room:1"),
+                              ("kind", "quiz"), ("kind", "quiz_answer"), ("kind", "quiz_closed"))),
             "progress": RoomLens(tuple(keys))}
 
 
@@ -391,11 +385,15 @@ class HistorySource:
                        if isinstance(row, dict)} - {""})
         return rows
 
+    def _stored_entry(self, row):
+        from ouroboros.chat_chain import source_row_id
+        from ouroboros.chat_references import projection_fields
+        body = {**row.row, ds.ROW_SHA_KEY: source_row_id(row.row)}
+        return {**body, **projection_fields(body, self.root), "history_id": row.history_id,
+                "history_position": {"source": self.source, "offset": row.seq}, "_history_end": row.end}
+
     def _entries(self, rows):
-        from ouroboros.chat_references import projection_fields  # the row's address, from the stored row alone
-        return self._warmed([{**row.row, **projection_fields(row.row), "history_id": row.history_id,
-                              "history_position": {"source": self.source, "offset": row.seq},
-                              "_history_end": row.end} for row in rows])
+        return self._warmed([self._stored_entry(row) for row in rows])
 
     def _candidates(self, lower: int, before: int, *, newest_first: bool = True, max_bytes=None):
         """One probe page of the room's rows in ``[lower, before)`` plus the named owner rows the
@@ -584,7 +582,15 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
             importing.append(source)
     if importing and not any(selections[source][0] for source in _SOURCES):
         raise StoreMigrating("Dialogue history is still importing")  # nothing on this page is readable yet
+    evidence = []
+    answer_seq = continuation.get("answer_seq") if continuation and continuation["kind"] == "page" else None
+    if answer_seq is not None:
+        entry = ds.row_at(data_dir, "chat", answer_seq)
+        if not entry or entry.row.get("type") != "quiz_answer" or not room_member_predicate(*thread_filter)(entry.row, False):
+            raise HistoryCursorError("history_cursor_invalid", 400)
+        evidence = [entry.row]
     return {"v": 1, "chat_id": thread_id, "view": view, "upper": upper, "unfinished": [],
+            "answer_seq": answer_seq, "projection_entries": evidence,
             "quotas": quotas, "recent": recent, "after": after, "replayed": bool(continuation),
             "quiet": bool(continuation and continuation["quiet"]), "lens": lens, "notes": notes,
             "selections": selections, "before": before, "page_ends": page_ends, "importing": importing,
@@ -599,15 +605,15 @@ def _select_around(data_dir, thread_id, view, task_id, quotas, predicates, lens,
     and the row a client lands on, ``moved`` (the task's rows belong to another room) or ``absent``
     (the store holds no row of it a client could show; while the archive still imports that is not
     known yet: 503 ``migrating``). ``row_target`` instead pins one resolved source/seq, with no task
-    fallback. A stream holding none of the target's rows has no known place near
-    it: the page and the chain it starts carry none of that stream (its quota is 0, so its coverage
-    is unknown) and the page names the gap (``around_unpositioned``)."""
+    fallback; an owner's answer to a card pins its question's row (DESIGN "Replies"), the anchor still the answer's.
+    A stream holding none of the target's rows has no known place near it: the page and the chain it starts carry
+    none of that stream (its quota is 0, so its coverage is unknown) and the page names the gap (``around_unpositioned``)."""
     quotas = dict(quotas)
     page = {"v": 1, "chat_id": thread_id, "view": view, "upper": {}, "unfinished": [], "quotas": quotas,
             "recent": False, "after": False, "replayed": False, "quiet": False, "lens": lens, "notes": notes,
             "selections": {}, "before": {}, "page_ends": {}, "importing": [], "horizon": {}, "chains": {},
             "chrono": {}}
-    readers, pivots, states = {}, {}, set()
+    readers, pivots, states, target = {}, {}, set(), None
     for source in _SOURCES:
         reader = readers[source] = history_source(data_dir, source, lens[source])
         reader.warm = warm
@@ -620,6 +626,12 @@ def _select_around(data_dir, thread_id, view, task_id, quotas, predicates, lens,
             state = "none"
             if pivots[source] is not None:
                 quotas["progress" if progress else "human"] = max(1, quotas["progress" if progress else "human"])
+                target = pivots[source]
+                question = row_target.get("question")
+                if question and member(question.row, False):
+                    pivots[source] = reader._entries([question])[0]
+                    # One exact source is projection evidence, not a delivered span. Its page replay keeps it.
+                    page.update(answer_seq=entry.seq, projection_entries=[entry.row])
         else:
             state, pivots[source] = reader.task_pivot(task_id, lambda row, progress=progress: member(row, progress),
                                                       lambda row, progress=progress: member.in_room(row, progress))
@@ -646,7 +658,7 @@ def _select_around(data_dir, thread_id, view, task_id, quotas, predicates, lens,
                                       "origin": reader.keys.get("origin")}
         if 0 < reader.floor == lower:
             page["importing"].append(source)
-    anchor = pivots["chat"] or pivots["progress"]
+    anchor = target or pivots["chat"] or pivots["progress"]  # an exact target keeps its own id, wherever the page stands
     identity = {"row_address": task_id, "chat_id": thread_id} if row_target else {"task_id": task_id}
     page["anchor"] = ({"state": "found", **identity, "history_id": anchor["history_id"]} if anchor else
                       {"state": "unavailable" if row_target else "moved" if "moved" in states else "absent", **identity})
@@ -765,6 +777,7 @@ def history_page_tokens(page, messages=(), reads=None):
                                       "quiet": page.get("quiet_below", False), **older_keys}) if has_more else None,
         "page_cursor": encode_cursor({**state, "kind": "page", "before": page["page_ends"], "quiet": page["quiet"],
                                       "lower": {source: value[1] for source, value in page["selections"].items()},
+                                      **({"answer_seq": page["answer_seq"]} if page.get("answer_seq") is not None else {}),
                                       "recent": page["recent"], **page_keys}),
         # The newest page names where the next read of new arrivals starts.
         **({"after_cursor": after_cursor} if after_cursor and page["recent"] and not page["replayed"] else {}),
@@ -972,24 +985,24 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
         offset(row) < offset(latest) and str(row.get("ts") or "") > ts and not words(row) for row in feed)}}
 
 
-def replay_evidence_rows(messages, evidence, results=None, drive_root=None):
-    """Carry cross-page evidence only when this page has no equivalent fact. A task's ending-row fact stays as it was
-    recorded; when a late review revised the stored outcome since, the row also carries that current outcome
-    (``late_review_marks.late_current_outcome``), read from the results this page already loaded, never a new read."""
+def replay_evidence_rows(messages, evidence):
+    """Emit the page's annotated receipts once, respecting the phase of an early answer on a visible row."""
+    from ouroboros.project_completion_facts import recorded_ending_details
+
     visible = {row.get("history_id") for row in messages if row.get("history_id")}
     settled = {(row.get("task_id"), row["quiz"].get("quiz_id"), row["quiz"].get("state")) for row in messages
                if row.get("msg_type") == "quiz" and row["quiz"].get("state") in {"answered", "closed"}}
-    terminals = {row["task_id"]: row["historical_terminal"] for row in messages
-                 if row.get("task_id") and row.get("historical_terminal")}
+    terminals = {row["task_id"]: row for row in messages if row.get("task_id") and row.get("historical_terminal")}
     rows = [row for row in evidence if row.get("history_id") not in visible
             and not (row.get("system_type") in {"quiz_answer", "quiz_closed"}
                      and (row.get("task_id"), row["quiz"].get("quiz_id"), row["quiz"].get("state")) in settled)
-            and not (row.get("historical_terminal")
-                     and terminals.get(row.get("task_id")) == row["historical_terminal"])]
-    from ouroboros.late_review_marks import late_current_outcome  # D11->D15
-
+            and not (row.get("historical_terminal") and (other := terminals.get(row.get("task_id")))
+                     and all(other.get(key) == value for key, value in recorded_ending_details(row).items())
+                     and all(other.get(key) == row.get(key) for key in ("historical_terminal", "task_outcome", "current_outcome")))]
+    # A frozen receipt keeps its own ending even when the stored work reopened. It follows a visible early
+    # answer's phase, whichever other row of the task (another attempt's summary) sorts beside it.
+    answered = {row["task_id"] for row in messages if row.get("task_id") and row.get("task_phase") == "finalizing"}
     for row in rows:
-        loaded = (results or {}).get(row.get("task_id")) if row.get("historical_terminal") else None
-        if isinstance(loaded, dict) and (current := late_current_outcome(drive_root, loaded)):
-            row["current_outcome"] = current
+        if row.get("historical_terminal") and row["task_id"] in answered:
+            row.update(task_phase="finalizing", outcome_final=False)
     return rows

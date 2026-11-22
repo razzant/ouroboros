@@ -41,7 +41,7 @@ STOP_POLICIES = frozenset({STOP_POLICY_OBSERVE, STOP_POLICY_TASK_OWNED, STOP_POL
 
 def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_uncovered_cost",
                       read_error: str = "", request_stop: bool = True,
-                      stop_policy: Optional[str] = None,
+                      pause_tree: str = "", stop_policy: Optional[str] = None,
                       prior: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The ONE observer body behind the loop-side pause and the supervisor-side grant.
 
@@ -81,6 +81,8 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
             # The store answers or raises; a raise is UNKNOWN custody, never "no
             # open runs" (Astra run-a882315dbcd7 #2).
             from ouroboros.delegate_custody_current import task_snapshot
+            from ouroboros.delegate_invocation import decision_facts
+            from ouroboros.delegate_resume import address
 
             view = task_snapshot(pathlib.Path(root), mine)
             runs = [run for run in view["runs"].values() if not getattr(run, "settled", True)]
@@ -91,7 +93,8 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
             # reader may filter on: the registering ``source`` and whether the
             # row is an independent review without candidate-apply possibility
             # (``delegate_registration_policy``). The census itself never filters.
-            pending_rows = [{"run_id": "", "invocation_id": str(row.get("invocation_id") or ""),
+            pending_rows = [{"run_id": "", "invocation_id": str(row.get("invocation_id") or ""), "task_id": mine,
+                             **({"ordinary_start": start} if (start := address(row)) else {}), **decision_facts(row),
                              "route": str(row.get("route") or ""),
                              "cost_coverage": "unproven_preterminal", "stop_policy": "reconcile_first",
                              "review_owned": review_owned_source(row.get("source")),
@@ -113,8 +116,17 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
                     "coverage_basis": "pending_invocations_unbound"}
         return {"runs": [], "observed_at": time.time(), "custody_read": "ok", "coverage_basis": "no_open_runs"}
 
+    from ouroboros.delegate_custody import TERMINAL_STATES
+
+    def accepted_activity(run: Any) -> str:
+        first = getattr(run, "resume_start_state", None)
+        return (getattr(run, "terminal_state", "") or first) if first is not None else ""
+
     def _row(run: Any, **fields: Any) -> Dict[str, Any]:
-        return {"run_id": str(getattr(run, "run_id", "") or ""),
+        state = accepted_activity(run)
+        activity = ({"state": "terminal", "stop_outcome": "awaiting_collection"} if state in TERMINAL_STATES else
+                    {"state": EXTERNAL_STOP_UNKNOWN, "stop_outcome": "accepted_activity_unknown"} if state == "unknown" else {})
+        return {"run_id": str(getattr(run, "run_id", "") or ""), "task_id": str(task_id),
                 "invocation_id": str(getattr(run, "invocation_id", "") or ""),
                 "terminal_state": str(getattr(run, "terminal_state", "") or ""),
                 "terminal_source": getattr(run, "terminal_source", {}) or {},
@@ -128,8 +140,21 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
                 "review_owned": review_owned_source(getattr(run, "source", "")),
                 "source": str(getattr(run, "source", "") or ""),
                 "independent_review": independent_review_without_apply(run),
-                "state": EXTERNAL_RUNNING, "stop_outcome": "", "detail": "", **fields}
+                "state": EXTERNAL_RUNNING, "stop_outcome": "", "detail": "", **activity, **fields}
 
+    if stop_policy == STOP_POLICY_TASK_OWNED:
+        # All Pause consumers (cold, warm, recovered and ended) share this policy edge.
+        # Older run rows may omit their tree. The addressed task still carries its lineage.
+        from ouroboros.owner_pause import fence_closed, read_fence
+        from ouroboros.task_results import load_task_result
+        try:
+            tree = pause_tree or str((load_task_result(root, mine, strict=True) or {}).get("root_task_id") or mine)
+            fence = read_fence(root, tree)
+            if fence_closed(fence) and fence.get("observe_only"):
+                stop_policy = STOP_POLICY_OBSERVE
+        except Exception as exc:
+            return {"runs": [], "custody_read": "failed", "error": str(exc), "observed_at": time.time(),
+                    "coverage_basis": "pause_authority_unreadable"}
     if stop_policy == STOP_POLICY_OBSERVE:
         observed = {"runs": [_row(run) for run in runs] + pending_rows, "observed_at": time.time(),
                     "custody_read": "ok", "coverage_basis": "observed_without_stop_request"}
@@ -141,8 +166,8 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
         except Exception:
             log.debug("Cold-return body observation unavailable", exc_info=True)
         return observed
-    stopping = [run for run in runs
-                if stop_policy == STOP_POLICY_ALL or not review_owned_source(getattr(run, "source", ""))]
+    stopping = [run for run in runs if accepted_activity(run) not in TERMINAL_STATES
+                and (stop_policy == STOP_POLICY_ALL or not review_owned_source(getattr(run, "source", "")))]
     # The owner's exception: an already-started critic finishes the same check
     # separately; it is observed beside the task's own stopped runs, never cancelled.
     rows = [_row(run) for run in runs if run not in stopping]
@@ -178,7 +203,8 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
                     result = (_reread_requested_stop(root, engine, run) if run_id in issued
                               else custody.cancel_and_verify(pathlib.Path(root), engine, run, reason))
                     outcome = str(result.get("outcome") or "")
-                    row.update(stop_outcome=outcome, detail=str(result.get("detail") or ""))
+                    row.update(stop_outcome="not_issued" if result.get("control_owed") else outcome,
+                               detail=str(result.get("detail") or ""))
                     if outcome == custody.CANCEL_CONFIRMED:
                         row["state"] = EXTERNAL_STOP_CONFIRMED
                     elif outcome == getattr(custody, "CANCEL_REQUESTED", "requested"):
@@ -209,8 +235,12 @@ def _reread_requested_stop(root: Any, gateway: Any, run: Any) -> Dict[str, Any]:
     keeps the earlier ``requested`` fact, and an unreachable read is unknown.
     """
     from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_resume import recovered_cancel_detail, recovered_cancel_store
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
+    recovered = getattr(run, "resume_start_state", None) is not None
+    if recovered and not recovered_cancel_store(gateway, run):
+        return {"outcome": "unverified", "detail": "The run's owning store was not verified."}
     try:
         detail = gateway.get_run(run.run_id)
     except ClaudexorUnavailable as exc:
@@ -218,9 +248,15 @@ def _reread_requested_stop(root: Any, gateway: Any, run: Any) -> Dict[str, Any]:
             custody.close_absent_run(pathlib.Path(root), gateway, run, "get_run_absent", absence=exc)
             return {"outcome": custody.CANCEL_CONFIRMED, "detail": "absent"}
         return {"outcome": "unverified", "detail": f"{exc.code}: {exc}"}
+    if custody.names_another_run(detail, run.run_id) or recovered and not recovered_cancel_detail(gateway, run, detail):
+        return {"outcome": "unverified", "detail": "read-back belongs to another run"}
     if custody.is_terminal(detail):
         custody.settle_run(pathlib.Path(root), gateway, run, detail)
         return {"outcome": custody.CANCEL_CONFIRMED, "detail": "terminal"}
+    prior = getattr(run, "_recovered_cancel", "")
+    if prior and prior != custody.CANCEL_REQUESTED:
+        return {"outcome": custody.CANCEL_FAILED if prior == custody.CANCEL_FAILED else "unverified",
+                "detail": "The earlier cancellation is unconfirmed. The run is still open."}
     return {"outcome": custody.CANCEL_REQUESTED, "detail": "stop requested earlier; run not terminal yet"}
 
 
@@ -307,17 +343,6 @@ def episode_fields(record: Any, observation: Any, *, starts: bool = False) -> Di
 # reads this fence.
 ENDED_MEMBER_RUNS = "ended_member_runs"
 _ENDED_RUN_FACTS = ("run_id", "invocation_id", "route", "review_owned", "state", "stop_policy", "stop_outcome")
-
-
-def unbound_starts(fence: Any) -> List[str]:
-    """The starts a closed fence names for its ended members with no run bound yet: UNKNOWN, with nothing to cancel."""
-    from ouroboros.owner_pause import fence_closed
-
-    records = (fence.get(ENDED_MEMBER_RUNS) or {}) if isinstance(fence, dict) and fence_closed(fence) else {}
-    return sorted({str(run["invocation_id"]) for record in records.values() if isinstance(record, dict)
-                   for run in (record.get("external_runs") or {}).get("runs") or []
-                   if isinstance(run, dict) and run.get("invocation_id") and not run.get("run_id")
-                   and not run.get("review_owned")})
 
 
 def member_stop_record(row: Any, fence_id: str) -> Dict[str, Any]:
@@ -417,7 +442,7 @@ def episode_disclosure(root: Any, task_id: str, participants: Any, *, reader: st
     except Exception as exc:
         return (f"- custody unreadable now ({type(exc).__name__}): what became of "
                 + ", ".join(_name(row) for row in rows) + f" is UNKNOWN; {each}")
-    pending = {str(item.get("invocation_id") or "") for item in view["pending"] if isinstance(item, dict)}
+    pending = {str(item.get("invocation_id") or ""): item for item in view["pending"] if isinstance(item, dict)}
     lines = [_participant_line(root, task_id, row, view["runs"], pending, reader) for row in rows[:_DETAILED]]
     if len(rows) > _DETAILED:
         lines.append(f"- {len(rows) - _DETAILED} more, not detailed here: "
@@ -449,8 +474,9 @@ def held_run_line(row: Dict[str, Any]) -> str:
             + ("; independent review that cannot change this work" if row.get("independent_review") is True else ""))
 
 
-def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[str, Any], pending: set,
+def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[str, Any], pending: dict,
                       reader: str) -> str:
+    from ouroboros.delegate_custody import TERMINAL_STATES
     from ouroboros.delegate_custody_current import collection_pending
 
     run_id, invocation = str(row.get("run_id") or ""), str(row.get("invocation_id") or "")
@@ -465,6 +491,9 @@ def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[s
                  if review else f"this Pause requested its stop (stop outcome: {row.get('stop_outcome') or 'unrecorded'})"
                  if row.get("stop_requested") else "this Pause did not request its stop")]
     if run is None:
+        if decision := (pending.get(invocation, {}).get("resume_decisions") or {}).get(reader):
+            from ouroboros.delegate_resume import risk_words
+            return "; ".join([*facts, risk_words(decision)])
         facts.append((f"no run is bound to start {invocation} yet: its start outcome is UNKNOWN; "
                       + ("it may be running; never start a second writer over it" if foreign else
                          f'delegate_start(retry_of="{invocation}") retrieves it without starting another'))
@@ -472,7 +501,9 @@ def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[s
         return "; ".join(facts)
     inspection = (f'get_task_result("{task_id}")' if foreign
                   else f'delegate_wait(run_id="{run.run_id}")')
-    if not run.terminal_state:
+    if not run.terminal_state and getattr(run, "resume_start_state", None) in TERMINAL_STATES:
+        facts.append(f"the start lookup observed {run.resume_start_state}; its terminal output awaits collection")
+    elif not run.terminal_state:
         facts.append("custody closed it without a recorded engine terminal: what became of its work is UNKNOWN"
                      if run.settled else
                      "no engine terminal observed yet: it may still be running; never start a second writer over it")

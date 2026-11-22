@@ -121,6 +121,25 @@ test('a send saved while the room was away is not put in doubt by an earlier dis
     } finally { f.close(); }
 });
 
+test('a saved row of an ended host reaching the room while it is away is a kept doubt that its return shows and the host\'s fact removes', async () => {
+    const f = fixture();
+    const kept = () => JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_unconfirmed:7') || '[]');
+    const echo = (cmid, extra = {}) => f.socket.fire('chat', { type: 'chat', role: 'user', chat_id: 7, ts: TS, source: 'web',
+        content: 'look at the logs', sender_session_id: ME, client_message_id: cmid, ingress_accepted: true, ...extra });
+    try {
+        const cmid = await f.send('look at the logs');
+        f.away();
+        echo(cmid);  // no dispatch fact: the host process that saved the row has since ended
+        assert.equal(kept()[0]?.deliveryUnknown, true, 'the receipt is kept while the room is away');
+        assert.equal(f.instance.hasPendingWork(), false, 'a saved delivery doubt is not pending work');
+        await f.back();
+        assert.deepEqual(f.actions(f.bubbleOf(cmid)), ['Send as new'], 'back, the bubble wears the doubt and its one action');
+        echo(cmid, { ingress_dispatched: true });  // later, the host confirms its dispatch
+        assert.deepEqual(f.actions(f.bubbleOf(cmid)), [], 'Send as new is gone with the warning');
+        assert.deepEqual(kept(), []);
+    } finally { f.close(); }
+});
+
 test('a frame the socket queue wrote after the disconnect is not in doubt for that disconnect', async () => {
     const f = fixture();
     try {

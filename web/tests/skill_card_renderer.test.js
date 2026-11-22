@@ -1,4 +1,4 @@
-// Installed skill cards (Skills → Installed): one head shared with Browse, the switch as
+// Installed skill cards (Extensions → Skills): one head shared with Browse, the switch as
 // the run state (a chip only for a state it cannot show), at most two attention trays (one sentence + its actions), and
 // Details for the record. Rows come from the listing fixture shaped as SPEC §8.1.
 import assert from 'node:assert/strict';

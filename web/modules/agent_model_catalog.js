@@ -2,7 +2,7 @@
 // The native program's session model catalog is independent of a raw transport with a similar name.
 import { fetchJson } from './api_client.js';
 import { modelCatalog } from './model_catalog_store.js';
-import { ROUTE_KIND_AGENT_SESSION, routeModelFields } from './route_editor_primitives.js';
+import { DEFAULT_API_PROVIDER, ROUTE_KIND_AGENT_SESSION, connectionParts, routeModelFields, tierPriced } from './route_editor_primitives.js';
 import { createScopedModelCatalog, mergeHarnessModelCatalog, modelSlotCatalogQuery } from './settings_catalog.js';
 
 function catalogQuery(row) {
@@ -36,6 +36,8 @@ export function createAgentModelCatalog({ state, saved, rows, readApiCatalog, ap
         const query = catalogQuery(row);
         if (!query || (!saved && !readApiCatalog)) return;
         const { provider } = routeModelFields(row.route);
+        // Automatic list suppression before dedup lives in `refresh` (fields.local); an explicit `open()` for a
+        // configured selected connection is allowed to load provider alternatives.
         if (provider && (!apiCatalogAllowed() || !state.providers.some(entry => entry.id === provider))) return;
         const had = requested.has(query);
         requested.add(query);
@@ -53,15 +55,33 @@ export function createAgentModelCatalog({ state, saved, rows, readApiCatalog, ap
         },
         get(row) { return scoped.get(catalogQuery(row)); },
         session(row) { return sessions.get(catalogQuery(row)); },
-        refresh({ descriptors = false, accounts = false, sessionsOnly = false, harness = '', force = true } = {}) {
-            if (descriptors && saved) void scoped.read('view=sources', { force });
-            const current = new Map(rows().filter(Boolean).map(row => [catalogQuery(row), row]));
-            for (const [query, row] of current) {
-                if (saved || requested.has(query)) {
-                    const fields = routeModelFields(row.route, state.modelSources);
-                    if ((sessionsOnly && row.route.kind !== ROUTE_KIND_AGENT_SESSION) || (accounts && fields.provider) || (harness && fields.harness !== harness)) continue;
-                    void read(row, force);
-                }
+        // `list`: only what a list head draws — a session's verdict, an OpenRouter key's published rate, and the
+        // program behind a subscription source (its descriptors, read with the roster, not on a sign-in; never that
+        // source's model list).
+        refresh({ descriptors = false, accounts = false, list = false, harness = '', force = true } = {}) {
+            const roster = rows().filter(Boolean);
+            const marks = list && !harness && !accounts && roster.some((row) => {
+                const fields = routeModelFields(row.route);
+                return fields.subscription && !fields.local;
+            });
+            if ((descriptors || marks) && saved) void scoped.read('view=sources', { force });
+            // The screen comes BEFORE the roster's dedup: one query can serve a row that shows a rate and a row that
+            // shows none (a Fast or Economy twin pays another rate), and only the row that shows one needs the read.
+            const asked = new Set();
+            for (const row of roster) {
+                const fields = routeModelFields(row.route, state.modelSources);
+                // A local row runs the local runtime: it has no provider or session catalog to price or mark, so
+                // the automatic pass never reads one for it. An explicit chooser opening still reads its own
+                // source and offers its models as the alternatives.
+                if (fields.local) continue;
+                if ((list && row.route.kind !== ROUTE_KIND_AGENT_SESSION
+                        && (tierPriced(row.processing_preference || state.processingPreference)
+                            || connectionParts(fields.provider).kind !== DEFAULT_API_PROVIDER))
+                    || (accounts && fields.provider) || (harness && fields.harness !== harness)) continue;
+                const query = catalogQuery(row);
+                if (!query || asked.has(query)) continue;
+                asked.add(query);
+                if (saved || requested.has(query)) void read(row, force);
             }
         },
         reset() { requested.clear(); sessions.clear(); scoped.reset(); },

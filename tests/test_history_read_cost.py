@@ -107,6 +107,37 @@ def test_a_delta_reads_its_new_tasks_lineage_in_batches(tmp_path, monkeypatch):
     assert costs[30]["connect"] <= costs[3]["connect"] + 1, costs
 
 
+def test_hidden_endings_share_the_pages_visible_result_batch(tmp_path, monkeypatch):
+    from ouroboros import task_store
+    from ouroboros.terminal_projection import _project_row
+
+    current = {"retried": {"status": "failed"}, "open": {"status": "running"},
+               "finishing": {"status": "completed", "root_phase_checkpoint": {"post_task_synthesis": "running"}}}
+    receipts = []
+    for tid, fields in current.items():
+        receipts.append(_project_row(tid, {"root_task_id": tid, "task_attempt": 0, "status": "completed"}, {}, {"chat_id": 1}))
+        seed_result(tmp_path, tid, {"task_attempt": 1, "chat_id": 1, **fields})
+    write(tmp_path / "logs" / "chat.jsonl", receipts)
+    write(tmp_path / "logs" / "progress.jsonl", [row(1, "progress", task_id="visible")])
+    seed_result(tmp_path, "elsewhere", {"status": "completed", "chat_id": 2})
+    batches, fetch = [], task_store.display_documents
+
+    def counted(root, ids, versions=None):
+        batches.append(set(ids))
+        return fetch(root, ids, versions)
+
+    monkeypatch.setattr(task_store, "display_documents", counted)
+    status, page = request(tmp_path)
+    assert status == 200
+    assert batches == [set(current) | {"visible"}]
+    by_id = {r["task_id"]: r for r in page["messages"] if r.get("historical_terminal")}
+    assert set(by_id) == set(current)
+    assert by_id["retried"]["current_outcome"]["status"] == "failed"
+    for tid, phase in (("open", "unfinished"), ("finishing", "finalizing")):
+        assert by_id[tid]["task_phase"] == phase and by_id[tid]["outcome_final"] is False
+        assert by_id[tid]["historical_terminal"]["status"] == "completed" and "current_outcome" not in by_id[tid]
+
+
 def test_remembered_bound_children_read_their_parents_lineage_in_one_batch(tmp_path, monkeypatch):
     """A legacy child row names no parent: the anchor pass takes it from the task's lineage and then asks the
     parent's room. The room rule stops at the child's binding, so the warm before the rows reads no parent;

@@ -165,18 +165,18 @@ def _ask(ctx: Any) -> str:
 
 
 def _verification(ctx: Any) -> str:
-    from ouroboros.outcomes import read_context_verification_receipts
+    from ouroboros import outcomes, utils
     from ouroboros.review_evidence_sections import _accept_receipt_exhibits, _accept_verification_summary
 
     task_id = str(getattr(ctx, "task_id", "") or "")
     try:
-        receipts = read_context_verification_receipts(ctx, task_id, fallback_root=getattr(ctx, "drive_root", None)) if task_id else []
+        receipts = outcomes.read_context_verification_receipts(ctx, task_id) if task_id else []
     except Exception as exc:
         return _ASK_WORDS["unreadable"].format(error=f"{type(exc).__name__}: {exc}")
     if not receipts:
         return _ASK_WORDS["no_receipts"]
-    return json.dumps({"summary": _accept_verification_summary(receipts), "receipts": _accept_receipt_exhibits(receipts)},
-                      ensure_ascii=False, indent=1, default=str)
+    return utils.json_dumps_utf8({"summary": _accept_verification_summary(receipts), "receipts": _accept_receipt_exhibits(receipts)},
+                                 ensure_ascii=False, indent=1, default=str)
 
 
 _SUBJECT_HEAD = "# Task result under review\n\n## What was asked\n\n"

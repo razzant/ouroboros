@@ -27,7 +27,7 @@ RESERVED_TEMPLATE_FIELDS = frozenset({
     # The owner door's stamp (``run_origin.owner_ingress``) is minted by owner
     # routing for one accepted turn; a machine-fired template never carries it,
     # nor ``start_task``'s recorded absence of one.
-    "origin_message_ref",
+    "origin_message_ref", "origin_message_snapshot",
     "origin_suppressed", "origin_message_absent",
     "billing_group", "continuation", "followup_relation", "followup_origin",
     "followup_hold", "followup_released", "followup_wait",

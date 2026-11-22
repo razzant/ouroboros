@@ -10,6 +10,10 @@ const THEME = { background: '#fff', tint: 'pink', text: '#000', meta: '#555', li
     wash: '#eee', sans: 'system-ui' };
 const measure = (value) => [...String(value)].length * 10;  // every character 10 px wide
 const paragraph = (index, ...runs) => ({ index, kind: 'paragraph', depth: 0, quote: 0, runs });
+// A rendered message as the share model walks it: text nodes and elements.
+const text = (value) => ({ nodeType: 3, nodeValue: value, textContent: value });
+const el = (tag, ...childNodes) => ({ nodeType: 1, tagName: tag, childNodes, getAttribute: () => null,
+    get textContent() { return childNodes.map((child) => child.textContent).join(''); } });
 
 test('every word stays at its size inside the card: long words break between letters, links show their site', () => {
     const blocks = [
@@ -32,10 +36,51 @@ test('every word stays at its size inside the card: long words break between let
     assert.ok(plan.height > 0 && plan.height <= CARD_MAX_HEIGHT);
 });
 
+test('inline code keeps each of its spaces from the message to the drawn card, left to right and right to left', async () => {
+    // As the chat renders it: prose spaces fold to one, inline code keeps its own, and the words set the direction.
+    const sentence = (word, rest) => el('P', text(`${word} `), el('CODE', text('a  b')), text(`  ${rest}`));
+    const blocks = shareBlocks(el('DIV', sentence('Run', 'now'), sentence('הרץ', 'עכשיו')));
+    assert.deepEqual(blocks.map((item) => [item.rtl, item.runs.map((run) => [run.text, Boolean(run.code)])]), [
+        [false, [['Run ', false], ['a  b', true], [' now', false]]],
+        [true, [['הרץ ', false], ['a  b', true], [' עכשיו', false]]],
+    ]);
+    const plan = layoutCard(blocks, { theme: THEME, measure });
+    const ltr = plan.lines.find((line) => !line.rtl && line.pieces.some((piece) => piece.text === 'b'));
+    const b = ltr.pieces.find((piece) => piece.text === 'b');
+    assert.equal(ltr.pieces.map((piece) => piece.text).join(''), 'Run a  b now', 'code keeps both spaces, plain words one');
+    assert.equal(b.x - ltr.pieces[0].x, 'Run a  '.length * 10, 'the second space keeps its width');
+    assert.deepEqual(plan.lines.filter((line) => line.rtl).map((line) => line.pieces.map((piece) => piece.text).join('')),
+        ['הרץ a  b עכשיו'], 'a right-to-left paragraph keeps them too');
+    // The paint draws those pieces: each left-to-right one at its place, a right-to-left line whole.
+    const drawn = [];
+    const ctx = { measureText: (value) => ({ width: measure(value) }), scale() {}, beginPath() {}, roundRect() {}, rect() {},
+        fill() {}, fillRect() {}, fillText: (words, x) => drawn.push([words, x]) };
+    const canvas = { getContext: () => ctx, toBlob(done) { done(new Blob(['png'])); } };
+    const doc = { createElement: (tag) => (tag === 'canvas' ? canvas : {}), documentElement: {}, body: {} };
+    assert.ok((await renderShareCard(blocks, { doc, win: {}, logo: '' })).blob);
+    assert.ok(drawn.some(([words, x]) => words === 'b' && x === b.x), drawn);
+    assert.ok(drawn.some(([words]) => words === 'הרץ a  b עכשיו'), drawn);
+});
+
+test('inline code is drawn on one background across its own spaces; a plain space between two codes parts them', async () => {
+    const blocks = [paragraph(0, { text: 'Run ' }, { text: 'a  b', code: true }, { text: ' or ' }, { text: 'c', code: true })];
+    const plan = layoutCard(blocks, { theme: THEME, measure });
+    const [line] = plan.lines.filter((each) => each.pieces.some((piece) => piece.style?.wash));
+    const at = (words) => line.pieces.find((piece) => piece.text === words);
+    const [a, b, c] = ['a', 'b', 'c'].map(at);
+    assert.equal(at('  ')?.style.wash, true, 'the doubled space is the code\'s own');
+    const washes = [];
+    const ctx = { measureText: (value) => ({ width: measure(value) }), scale() {}, beginPath() {}, rect() {}, fill() {},
+        fillRect() {}, fillText() {},
+        roundRect(x, y, w, h) { if (y === line.y + 3 && h === line.height - 6) washes.push([x, w]); } };
+    const canvas = { getContext: () => ctx, toBlob(done) { done(new Blob(['png'])); } };
+    const doc = { createElement: (tag) => (tag === 'canvas' ? canvas : {}), documentElement: {}, body: {} };
+    assert.ok((await renderShareCard(blocks, { doc, win: {}, logo: '' })).blob);
+    assert.deepEqual(washes, [[a.x - 3, b.x + b.width - a.x + 6], [c.x - 3, c.width + 6]],
+        'one background from a through b, its spaces included, and c on its own');
+});
+
 test('a deeply nested excerpt stays whole as Text and refuses a card before drawing outside its width', async () => {
-    const text = (value) => ({ nodeType: 3, nodeValue: value, textContent: value });
-    const el = (tag, ...childNodes) => ({ nodeType: 1, tagName: tag, childNodes, getAttribute: () => null,
-        get textContent() { return childNodes.map((child) => child.textContent).join(''); } });
     let source = el('PRE', el('CODE', text('deep payload\n')));
     for (let depth = 0; depth < 20; depth += 1) source = el('UL', el('LI', text('Parent'), source));
     const excerpt = shareBlocks(el('DIV', source)).filter((item) => item.kind === 'code');

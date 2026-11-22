@@ -97,7 +97,7 @@ export function connectListHtml({ connectors = null, places = [], error = '', se
     if (selected) return whereHtml({ selected, choices, places, status, busy, connectorStatus, connectNote });
     const back = `<div class="place-sheet-actions">${button('back-words', tr('places.connect.back', 'Back'))}</div>`;
     if (!connectors.length) return `<section class="place-sheet-section">${back}<p>${tr('places.connect.empty', 'No installed connector can connect a place yet.')}</p>
-        ${button('browse', tr('places.connect.browse', 'Find connectors in Skills'))}</section>`;
+        ${button('browse', tr('places.connect.browse', 'Find connectors in Extensions'))}</section>`;
     return `<section class="place-sheet-section">${back}<h3>${tr('places.where_from', 'Where is it?')}</h3><p class="place-sheet-note">${silentCopy({ connectNote })}</p>
         <div class="place-accounts">${connectors.map((connector) => {
             const n = places.filter((place) => place.connector === connector.connector).length;

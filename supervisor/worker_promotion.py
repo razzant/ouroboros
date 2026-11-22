@@ -37,10 +37,13 @@ def _origin_from_mapping(mapping: Any, *, absent: str) -> dict:
     """Typed binding origin from an event/metadata mapping (ref passed BY VALUE
     from chat ingress; ``absent`` is the closed-enum reason when none rode along)."""
     source = mapping if isinstance(mapping, dict) else {}
-    ref = source.get("origin_message_ref") or source.get("source_ref")
+    metadata = source.get("metadata") or {}
+    ref = source.get("origin_message_ref") or source.get("source_ref") or metadata.get("origin_message_ref")
     if isinstance(ref, dict) and ref:
-        text = source.get("origin_message_text") or source.get("source_text")
-        origin = {"ref": dict(ref)}
+        snapshot = source.get("origin_message_snapshot") or metadata.get("origin_message_snapshot") or {}
+        text = (snapshot.get("placeholder_text") or source.get("origin_message_text")
+                or source.get("source_text") or metadata.get("origin_message_text"))
+        origin = {"ref": dict(ref), **({"snapshot": snapshot} if snapshot else {})}
         if isinstance(text, str) and text:
             origin["text"] = text
         return origin
@@ -60,10 +63,9 @@ def _origin_from_task_record(task_id: str) -> Optional[dict]:
         from ouroboros.task_status import load_effective_task_result
 
         record = load_effective_task_result(_pool().DRIVE_ROOT, task_id) or {}
-        ref = record.get("origin_message_ref")
-        text = record.get("origin_message_text")
-        if isinstance(ref, dict) and ref and isinstance(text, str) and text.strip():
-            return {"ref": dict(ref), "text": text}
+        origin = _origin_from_mapping(record, absent="mid_task_no_origin")
+        if origin.get("text"):
+            return origin
     except Exception:
         log.debug("origin task-record lookup failed for %s", task_id, exc_info=True)
     return None
@@ -314,6 +316,22 @@ def _admit_project_scope(
     return None
 
 
+def _promotion_origin_error(evt: dict) -> str:
+    """A present by-value source must pass the binder's identity and integrity checks before preparing a Project."""
+    from ouroboros.projects_registry import _validated_origin, get_reserved_project, project_chat_id
+    if evt.get("source_ref") is not None:
+        try:
+            ref = evt["source_ref"]
+            room = ref.get("chat_id") if isinstance(ref, dict) else 0
+            if evt.get("source_text") is None and (pid := evt.get("project_id")):
+                project = get_reserved_project(_pool().DRIVE_ROOT, pid) or {}
+                room = project.get("chat_id", project_chat_id(pid))
+            _validated_origin({"ref": ref, "text": evt.get("source_text")}, room)
+        except ValueError as exc:
+            return str(exc)
+    return ""
+
+
 def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     """Enqueue a first-class pooled owner task from a conversation-lane promote.
     The task carries the originating ``chat_id`` (its live card and replies
@@ -329,6 +347,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     objective = str(evt.get("objective") or "")
     if not objective.strip():
         return {"status": "needs_manual_target", "reason": "empty_objective", "task_id": tid}
+    if detail := _promotion_origin_error(evt):
+        return {"status": "needs_manual_target", "reason": "project_binding_failed", "detail": detail, "task_id": tid}
     # Reject before project/source/workspace side effects. enqueue_task repeats
     # the check atomically for the tiny race before queue insertion.
     duplicate_reason = _promote_duplicate_reason(tid, ctx, admission_token=admission_token)
@@ -404,6 +424,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     attachment_manifest, attachment_rejection = _pool()._stage_promoted_initial_attachments(
         evt, task, tid, inherited_manifest=inherited_attachment_manifest,
     )
+    historical_files = bool(task.pop("_historical_attachments", False))  # the staging owner's fact, never on the row
     if attachment_rejection is not None:
         return _pool()._reject_promoted_after_attachment_stage(attachment_rejection, attachment_manifest)
     if repair_constraint is not None:
@@ -437,8 +458,11 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # reads it from the persisted result — never re-derived from content).
     if isinstance(evt.get("source_ref"), dict) and evt.get("source_ref"):
         task["origin_message_ref"] = dict(evt["source_ref"])
+        snapshot = evt.get("origin_message_snapshot") or {}
+        if snapshot:
+            task["metadata"]["origin_message_snapshot"] = snapshot
         if isinstance(evt.get("source_text"), str) and evt.get("source_text"):
-            task["origin_message_text"] = evt["source_text"]
+            task["origin_message_text"] = "" if snapshot.get("placeholder_text") else evt["source_text"]
     elif evt.get("origin_suppressed") is True:
         # The door's other stamp (an owner message it never logged) rides the root
         # in METADATA, where run_origin reads it, the way a ref rides by value.
@@ -453,9 +477,10 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
                                                owner_corpus=[dict(row) for row in task["owner_corpus"]])
     if isinstance(evt.get("predecessor_authority_source"), dict):
         task["predecessor_authority_source"] = dict(evt["predecessor_authority_source"])
-    # Owner Surface Fact: the promoting turn's sending-surface fact lands in
-    # METADATA (the renderer reads task["metadata"]["client_surface"]), never a
-    # top-level key — and metadata may not exist yet.
+    # Owner Surface Fact: the start's source message's sending-surface fact (the
+    # promoting turn's, or the row its owner_source selected; none when that row
+    # recorded none, as a card answer does) lands in METADATA (the renderer reads
+    # task["metadata"]["client_surface"]), never a top-level key — and metadata may not exist yet.
     if isinstance(evt.get("client_surface"), dict) and evt.get("client_surface"):
         task.setdefault("metadata", {})["client_surface"] = dict(evt["client_surface"])
     if isinstance(evt.get("ui_control"), dict) and evt.get("ui_control"):
@@ -464,6 +489,11 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     rejection = _admit_project_scope(evt, task, tid, pid, attachment_manifest)
     if rejection is not None:
         return rejection
+    if pid and not _presence_promotion(evt) and origin.get("work_kind") == "owner":
+        from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+
+        if evt.get(TURN_ADDRESS) and (surface := reply_transport_from_metadata(_pool().DRIVE_ROOT, evt)):
+            task["metadata"][TURN_ADDRESS] = surface
     # The answer the task was actually admitted with, so the promote's own receipt
     # names the room the binding names.
     effective_pid = pid
@@ -477,21 +507,27 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # The receipt's one note (routing detail, durable promotion_admission) also names an unrecorded folder.
     source_note = "; ".join(note for note in (source_note, task.pop("_room_folder_note", "")) if note)
     if not _pool()._relocate_promoted_attachments(task, tid, attachment_manifest):
-        return _pool()._reject_promoted_after_attachment_stage({
-            "status": "needs_manual_target",
-            "reason": "attachment_admission_rejected",
-            "detail": "Attachment staging could not be finalized (reason=staging_unavailable).",
-            "attachment_manifest": [
-                {
-                    "ordinal": row.get("ordinal", index),
-                    "status": "rejected",
-                    "reason": "staging_unavailable",
-                    "label": str(row.get("label") or f"attachment {index + 1}"),
-                }
-                for index, row in enumerate(attachment_manifest)
-            ],
-            "task_id": tid,
-        }, attachment_manifest)
+        unstaged = [
+            dict(row) if row.get("status") != "staged" else {
+                "ordinal": row.get("ordinal", index),
+                "status": "rejected",
+                "reason": "staging_unavailable",
+                "label": str(row.get("label") or f"attachment {index + 1}"),
+            }
+            for index, row in enumerate(attachment_manifest)
+        ]
+        if not historical_files:
+            return _pool()._reject_promoted_after_attachment_stage({
+                "status": "needs_manual_target",
+                "reason": "attachment_admission_rejected",
+                "detail": "Attachment staging could not be finalized (reason=staging_unavailable).",
+                "attachment_manifest": unstaged,
+                "task_id": tid,
+            }, attachment_manifest)
+        from ouroboros.artifacts import remove_staged_attachments
+
+        remove_staged_attachments(attachment_manifest)  # inherited files never refuse a start: named, not staged
+        attachment_manifest = unstaged
     if attachment_manifest:
         from ouroboros.gateway.tasks import _render_attachment_lines
 
@@ -500,7 +536,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         task.update(authority)
         task["text"] = f"{task['text']}\n\n[ATTACHMENTS]\n{_render_attachment_lines(authority)}\n[END_ATTACHMENTS]"
         task["attachments"] = authority["attachment_manifest"]
-        task["attachment_images"] = [row for row in attachment_manifest if row.get("is_image")]
+        task["attachment_images"] = [row for row in attachment_manifest if row.get("is_image") and not row.get("path_only")]
         if isinstance(task.get("task_contract"), dict):
             task["task_contract"].update(authority)
     # Popped BEFORE the row is built/queued so the announce fact never rides it.
