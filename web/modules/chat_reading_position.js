@@ -12,7 +12,13 @@ const MOVE_FRAMES = 3, WIDTH_HELD_FRAMES = 12;
 export function createChatReadingPosition({ visible, alive, ready, feed, anchors, changed, afterWrite, activity, updateButton }) {
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
-    const feedOrigin = () => feed.offsetTop || 0;
+    // Where the feed is laid out in the page (its offsetTop up the offsetParent chain; a transform does not count): a
+    // Project room's bar lies outside the feed's own offsetParent, so its offsetTop alone misses the bar entering the flow.
+    const feedOrigin = () => {
+        let y = 0;
+        for (let node = feed; node; node = node.offsetParent) y += node.offsetTop || 0;
+        return y;
+    };
     let viewportAnchor = null, viewportTop = null, width = feed.clientWidth, anchorOrigin = feedOrigin();
     // Every room first opens following its newest message (owner decision 2026-10-05).
     let intent = null;
