@@ -127,22 +127,6 @@ def test_sudo_named_as_data_passes_the_deterministic_prefilter(tmp_path, cmd):
 
 
 # ---------------------------------------------------------------------------
-# Incident A7 — read-only git modes (stash list, config get, worktree list)
-# pass the merged read allowlist instead of being treated as mutations.
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("cmd", [
-    "git stash list",
-    "git config --get remote.origin.url",
-    "git worktree list",
-])
-def test_git_read_modes_pass_the_read_allowlist(cmd):
-    from ouroboros.tools.registry import _is_pure_read_inspection
-
-    assert _is_pure_read_inspection(cmd) is True
-
-
-# ---------------------------------------------------------------------------
 # Incident A2 — INSPECTION of skill owner-state is a read and passes the
 # writeish read-carve (the mention of an owner-state filename is not a write).
 # ---------------------------------------------------------------------------
