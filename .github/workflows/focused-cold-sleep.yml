@@ -1,0 +1,55 @@
+name: Focused cold-sleep QA
+on:
+  push:
+    branches: [qa/repeated-cold-sleep]
+permissions:
+  contents: read
+jobs:
+  wake:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, interpreter: shipped}
+          - {os: windows-latest, interpreter: setup-python}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out the product commit, the sole parent of this workflow overlay
+        run: |
+          set -eu
+          test "$(git show --name-only --format= HEAD)" = '.github/workflows/focused-cold-sleep.yml'
+          test "$(git cat-file -p HEAD | grep -c '^parent ')" = '1'
+          git checkout --detach "$(git rev-parse HEAD^1)"
+          git log -1 --format='Product %H tree %T'
+      - name: Put Windows test temp on the work disk
+        if: runner.os == 'Windows'
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - name: Run the synthetic sleep and resume checks
+        run: |
+          python -m pytest -q -o addopts="" \
+            tests/test_model_sleep.py \
+            tests/test_budget_pause_monetary_selection.py \
+            tests/test_budget_pause_exact_resume.py \
+            tests/test_budget_pause_holds.py \
+            tests/test_execution_clock_consumed_recovery.py \
+            tests/test_budget_pause_lineage_restore.py \
+            tests/test_consumed_selection_retention.py \
+            tests/test_mind_detach.py \
+            tests/test_root_resume_selection_survival.py \
+            tests/test_saved_root_resume_grant.py \
+            tests/test_dispatch_choice.py \
+            tests/test_technical_pause_recovery.py::test_late_direct_park_vs_resume
