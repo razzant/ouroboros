@@ -95,6 +95,19 @@ test('a route is called by its short name, its source, how the source is paid an
     assert.equal(routeSource({ model: 'openrouter@work::z-ai/glm-5.3' }), 'openrouter@work');
 });
 
+test('a published route with the flag off keeps its subscription identity despite a local suffix', () => {
+    const index = buildModelIndex({ catalog: CATALOG });
+    const route = { model: 'claudexor::codex=gpt-test (local)', use_local: false };
+    const said = describeRoute(index, route);
+    assert.deepEqual([said.route, said.key, said.lane, said.source], [route, `route|${route.model}`, 'subscription', 'subscription:codex']);
+    assert.equal(said.source, routeSource({ model: ASTRA }), 'the same source as Main keeps its account pin');
+    assert.deepEqual(index.tiers(route), index.tiers({ model: ASTRA }), 'the catalog still supplies the same source and tier facts');
+    assert.equal(sameRoute(said.route, { ...route, use_local: true }), false, 'the saved spelling and the local flag are distinct picks');
+    assert.deepEqual([said.sourceLabel, said.harness, said.facts], ['Codex', 'codex', 'Codex · subscription']);
+    const local = describeRoute(index, { ...route, use_local: true });
+    assert.deepEqual([local.sourceLabel, local.harness, local.facts], ['Local', '', 'Local · on this computer']);
+});
+
 test('a saved API source that cannot send keeps Settings\' own words, once the settings document names its keys', () => {
     const route = { model: 'deepseek::deepseek-v4' };
     const blind = buildModelIndex({ catalog: CATALOG });
@@ -257,4 +270,18 @@ test('a route names the catalog\'s price only where its context pays it: Flex, F
     for (const tier of ['fast', 'economy', 'ultrafast']) {
         assert.deepEqual([said({ tier }).price, said({ tier }).facts], ['', 'OpenRouter · paid by key'], tier);
     }
+});
+
+test('published locality, not the suffix, determines whether a route has API prices and warnings', () => {
+    const price = { input: 4, output: 20, cache_write: 6.4, cache_write_ttl: '1h' };
+    const remote = api('openrouter', 'vendor/model', { price });
+    const suffixed = api('openrouter', 'vendor/model (local)', { price });
+    const index = buildModelIndex({ catalog: { items: [remote, suffixed] }, cacheTier: '1h', connections: [] });
+    const said = (model) => describeRoute(index, { model }, { tier: 'standard' });
+    assert.deepEqual([said(remote.value).price, said(remote.value).cacheWrite], ['$4 in / $20 out', 'Cache write: $6.40 per 1M tokens.']);
+    const paid = said(suffixed.value);
+    assert.deepEqual([paid.sourceLabel, paid.kind, paid.price, paid.cacheWrite],
+        ['OpenRouter (no key)', 'openrouter', '$4 in / $20 out', 'Cache write: $6.40 per 1M tokens.']);
+    const local = describeRoute(index, { model: suffixed.value, use_local: true }, { tier: 'standard' });
+    assert.deepEqual([local.sourceLabel, local.kind, local.price, local.cacheWrite], ['Local', '', '', '']);
 });

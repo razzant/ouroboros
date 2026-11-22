@@ -23,7 +23,7 @@ import { clampWithToggle } from './chat_reply_quote.js';
 import { observeLayout } from './capsule.js';
 import { fmt, tr, translateString } from './i18n.js';
 import { isCoarsePointer, isStackLayout } from './layout.js';
-import { modelCatalog } from './model_catalog_store.js';
+import { modelCatalog, watchModelCatalog } from './model_catalog_store.js';
 import { closeModelSheet, openModelSheet } from './model_sheet.js';
 import { sourceMark } from './model_source_mark.js';
 import { receiptWords, resolvedTier, routeTiers, servedWords, tierNamed, tierWord } from './processing_choice.js';
@@ -234,32 +234,13 @@ function shapeFact(record, state, pressable) {
     state.part.replaceChildren(factGroup, state.why, state.pending, state.tier);
 }
 
-// A subscription's mark is drawn from the catalog's `credentialHarness` (model_source_mark.js), which only a read
-// brings: a fact that needs it asks for that read once, and every such mounted fact repaints when the catalog
-// changes, as the composer's chip does (composer_model.js). No timer: the store says when it changed.
-const catalogFacts = new WeakMap();  // store -> the records whose painted fact follows it
+// A subscription's mark is drawn from the catalog's descriptor (model_source_mark.js), which only a read brings:
+// a fact that needs it asks for that read once per store (askCatalog). The repaint when the catalog changes is the
+// room's (followCardCatalogue): over its own live record map, through its stable-viewport seam. No timer: the store
+// says when it changed, and the composer's chip repaints on the same notify (composer_model.js).
 const catalogAsked = new WeakSet();  // the stores this module asked for their first read
 
-function followCatalog(record, store) {
-    let records = catalogFacts.get(store);
-    if (!records) {
-        records = new Set();
-        catalogFacts.set(store, records);
-        let queued = false;
-        store.subscribe?.(() => {
-            if (queued) return;
-            queued = true;
-            queueMicrotask(() => {
-                queued = false;
-                for (const each of [...records]) {
-                    const state = each.cardModel;
-                    if (!state || each.root?.isConnected === false) { records.delete(each); continue; }
-                    paintCardModel(each, state.view);
-                }
-            });
-        });
-    }
-    records.add(record);
+function askCatalog(store) {
     // Once per store: a failed read is the store's to say and to retry, never a loop of this one.
     const status = store.status?.();
     if (!catalogAsked.has(store) && status && !status.read && !status.reading) {
@@ -268,20 +249,51 @@ function followCatalog(record, store) {
     }
 }
 
-function removeFact(record) {
-    const state = record.cardModel;
+function removeFact(record, { teardown = false } = {}) {
+    const state = record?.cardModel;
     if (!state) return false;
     if (openPopover?.record === record) openPopover.close({ focus: false });
     state.watch?.disconnect();
-    state.part.remove();
-    state.meta.append(...[...state.rest.children]);
-    state.rest.remove();
     record.metaEl = state.meta;
     record.cardModel = null;
     record.lead = null;
-    catalogFacts.get(state.deps.store)?.delete(record);
+    if (teardown) return true;  // the card itself goes: its nodes are released with it, its line needs no rewrite
+    state.part.remove();
+    state.meta.append(...[...state.rest.children]);
+    state.rest.remove();
     state.deps.rerender(record);  // the line names the model itself again
     return true;
+}
+
+/** Releases a card's model fact when the card itself is torn down (chat.js disposeLiveCard): the open popover and
+ *  the line's observer stop, and the line is not rewritten — the card's own nodes are released right after. */
+export function disposeCardModel(record) {
+    return removeFact(record, { teardown: true });
+}
+
+/** The room's repaint when its catalogue changes, so a descriptor that arrives late reaches a subscription
+ *  fact's mark: one watch for the room's life, over the room's OWN live record map (`records`), each pass inside
+ *  the room's stable-viewport seam (`viewport`, chat.js). Only a new catalogue can move a mark, so the store's own
+ *  watch says when: a pin press or a tier announce enters the seam no time. Only records the room still holds are
+ *  repainted — its own teardown (disposeLiveCard: disposeCardModel, then the map's removal) took the disposed ones,
+ *  and a card detached only for a remount or a reveal stays on the map and repaints. The same view object goes back
+ *  in, so a repaint adopts no tiers (paintCardModel) and asks no read. Returns the disposer. */
+export function followCardCatalogue({ store = modelCatalog, records, viewport = (write) => write() } = {}) {
+    if (!records || typeof store?.subscribe !== 'function') return () => {};
+    const mounted = () => [...records.values()].filter((record) => {
+        const state = record?.cardModel;
+        return Boolean(state?.view?.lead) && state.view.said?.said?.lane === 'subscription';
+    });
+    return watchModelCatalog(() => {
+        const cards = mounted();
+        if (!cards.length) return;  // nothing to repaint: the seam is not entered
+        viewport(() => {
+            for (const record of cards) {
+                const state = record.cardModel;
+                if (state) paintCardModel(record, state.view);
+            }
+        });
+    }, store);
 }
 
 /**
@@ -330,7 +342,7 @@ export function paintCardModel(record, view, deps = {}) {
     // after the words it stands beside, and a key of hand-picked fields would hide that change.
     const mark = sourceMark(said.said);
     if (mark !== state.markKey) { state.markKey = mark; state.mark.innerHTML = mark; }
-    if (said.said.lane === 'subscription') followCatalog(record, state.deps.store);
+    if (said.said.lane === 'subscription') askCatalog(state.deps.store);
     const [leads, id, tail] = state.name.children;
     // A separator rides at the end of the span before it, so a wrapped line never starts with one.
     write(leads, `${said.parts[0]}\u00a0·`);
@@ -355,8 +367,11 @@ export function paintCardModel(record, view, deps = {}) {
     state.part.dataset.basis = said.fallback ? 'fallback' : said.basis === 'main' ? 'main' : 'own';
     state.fact.classList.toggle('model-fallback', said.fallback);
     if (state.view.target) {
-        state.fact.setAttribute('aria-label', [fmt('This work\'s model: {model}, {source}', { model: said.said.short, source: said.said.sourceLabel }),
-            said.fallback ? said.name : basisWords(said.basis)].filter(Boolean).join(', '));
+        // Set only when its words change: the room repaints every live card on each catalog notify, and an
+        // unchanged label is no announcement (DESIGN §4).
+        const label = [fmt('This work\'s model: {model}, {source}', { model: said.said.short, source: said.said.sourceLabel }),
+            said.fallback ? said.name : basisWords(said.basis)].filter(Boolean).join(', ');
+        if (state.fact.getAttribute('aria-label') !== label) state.fact.setAttribute('aria-label', label);
     }
     syncSeparator(state);
     if (fresh || detailChanged) state.deps.rerender(record);  // the fact names the model now; Details say its last call

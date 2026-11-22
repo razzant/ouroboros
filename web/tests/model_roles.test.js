@@ -41,6 +41,12 @@ test('Models shows only model-capable sources and only providers with a stored k
     const saved = modelSourceGroups({ current: 'subscription:future' });
     assert.equal(saved[0].options[0].value, 'subscription:future');
     assert.match(saved[0].options[0].label, /not checked/);
+    const sources = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    const sourceDescriptors = [...sources, { id: 'claude', label: 'Studio models', credentialHarness: '' }];
+    const choices = (current) => modelSourceGroups({ sources, sourceDescriptors, current })[0].options;
+    assert.deepEqual(choices('subscription:codex').map(({ value }) => value), ['subscription:codex']);
+    assert.deepEqual(choices('subscription:claude').at(-1),
+        { value: 'subscription:claude', label: 'Studio models (model) · not checked' });
 });
 
 test('Models and the route editors draw the same groups, in the same order, from one builder', () => {

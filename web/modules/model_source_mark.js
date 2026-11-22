@@ -2,10 +2,9 @@
 // monochrome and inherit currentColor. OpenAI's is the harness SSOT's (harness_presentation.js, the same knot as
 // web/providers/openai.svg); Anthropic's and OpenRouter's are Simple Icons' (CC0; OpenRouter's from simple-icons
 // 16.36.0, sourced from openrouter.ai, the split arrows of web/providers/openrouter.ico); the OpenAI-compatible mark
-// is the stroke of web/providers/openai-compatible.svg without its tile. A source without a mark of its own shows
-// its initial, never an invented logo.
-import { escapeHtmlAttr as esc } from './ui_primitives.js';
-import { HARNESS_MARKS, harnessPresentation } from './harness_presentation.js';
+// is the stroke of web/providers/openai-compatible.svg without its tile. A source whose own mark is unknown shows the
+// generic harness mark (harness_presentation.js), never a letter or an invented logo.
+import { GENERIC_HARNESS_MARK, HARNESS_MARKS, harnessPresentation } from './harness_presentation.js';
 
 const MARKS = Object.freeze({
     openai: { viewBox: HARNESS_MARKS.codex.viewBox, body: `<path fill="currentColor" d="${HARNESS_MARKS.codex.path}"/>` },
@@ -14,21 +13,29 @@ const MARKS = Object.freeze({
     'openai-compatible': { viewBox: '0 0 64 64', body: '<path d="M20 18h24a10 10 0 0 1 0 20H32a8 8 0 0 0 0 16h12M18 46h14" fill="none" stroke="currentColor" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>' },
 });
 const svg = (viewBox, body) => `<svg class="model-source-mark" viewBox="${viewBox}" aria-hidden="true" focusable="false">${body}</svg>`;
-const initial = (label) => `<span class="model-source-mark model-source-initial" aria-hidden="true">${esc((String(label || '').trim()[0] || '·').toUpperCase())}</span>`;
+const filled = ({ viewBox, path }) => svg(viewBox, `<path fill="currentColor" d="${path}"/>`);
 
 /**
- * A source's mark as markup: its harness's (a subscription), its provider's (an API key), else its initial.
- * A subscription's brand mark comes from the descriptor's `credentialHarness`, never the opaque source id —
- * a globally registered harness mark must not brand an unrelated source.
- * @param {?{lane?: string, harness?: string, credentialHarness?: string, kind?: string, label?: string, sourceLabel?: string}} source
+ * A source's own mark facts (`{viewBox, body}`) when it has one — a subscription's program's, an API key's
+ * provider's — else null, so a caller with its own neutral (Settings' home door: the cube) keeps it. A
+ * subscription's `harness` is the program that presents it (harness_presentation.sourcePresentation), never its
+ * opaque id.
+ * @param {?{lane?: string, harness?: string, kind?: string}} source
+ */
+export function ownSourceMark(source) {
+    if (source?.lane === 'subscription') {
+        const presentation = harnessPresentation(source.harness || '');
+        return presentation.generic ? null
+            : { viewBox: presentation.viewBox, body: `<path fill="currentColor" d="${presentation.path}"/>` };
+    }
+    return MARKS[source?.kind] || null;
+}
+
+/**
+ * A source's mark as markup: its own (ownSourceMark), else the generic harness mark. Decorative: the source's
+ * name stands beside it — never a letter, never a logo guessed from an id's spelling.
  */
 export function sourceMark(source) {
-    const label = source?.label || source?.sourceLabel || '';
-    if (source?.lane === 'subscription') {
-        const harness = String(source.credentialHarness || '');
-        const mark = harness ? harnessPresentation(harness) : null;
-        return mark && !mark.generic ? svg(mark.viewBox, `<path fill="currentColor" d="${mark.path}"/>`) : initial(label);
-    }
-    const mark = MARKS[source?.kind];
-    return mark ? svg(mark.viewBox, mark.body) : initial(label);
+    const own = ownSourceMark(source);
+    return own ? svg(own.viewBox, own.body) : filled(GENERIC_HARNESS_MARK);
 }

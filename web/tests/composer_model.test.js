@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { describeRoute } from '../modules/chat_model_routes.js';
+import { GENERIC_HARNESS_MARK, HARNESS_MARKS } from '../modules/harness_presentation.js';
 import { MAIN_CACHE_NOTE, MAIN_RULE, confirmMainChange } from '../modules/composer_model.js';
 import { createModelCatalogStore } from '../modules/model_catalog_store.js';
 import { closeModelSheet } from '../modules/model_sheet.js';
@@ -132,15 +133,16 @@ test('a room follows Main until it chooses, and says so: the name word is Main, 
     r.controls.destroy();
 });
 
-test('a source confirmed late wears its harness mark: the capsule repaints the mark when the catalog names it', async () => {
-    const r = room();
+test('a source wears its program\'s mark before the catalog, and the capsule repaints it when the record names none', async () => {
+    const unbound = { ...CATALOG, model_sources: [{ id: 'codex', label: 'Codex', credentialHarness: '' }] };
+    const r = room({ storeOptions: { catalog: unbound } });
     const glyph = () => r.el.querySelector('.chat-capsule-glyph').innerHTML;
-    // The catalog has not been read: the source is an unknown one, so only its initial stands.
-    assert.match(glyph(), /model-source-initial" aria-hidden="true">C</, 'an unknown source wears its initial, never an invented mark');
-    await r.store.read();  // the read brings the source's descriptor (id codex, credentialHarness codex)
+    // Not read yet (or timed out): the engine's own declaration names Codex, so its mark stands at once, never a letter.
+    assert.ok(glyph().includes(HARNESS_MARKS.codex.path), 'Codex before any read');
+    await r.store.read();  // a record that binds the source to no program
     await flush();
-    // The same words (Codex) now stand beside the harness's own mark: the mark is what changed.
-    assert.match(glyph(), /^<svg class="model-source-mark"/, 'the harness mark stands where the descriptor names it');
+    // The same words (Codex) now stand beside the generic mark: the mark is what changed.
+    assert.ok(glyph().includes(GENERIC_HARNESS_MARK.path), 'the record wins: the generic mark');
     r.controls.destroy();
 });
 
@@ -396,6 +398,181 @@ test('the confirming sheet says what Main becomes, what running work does, and i
     // The same subscription keeps Main's account, so only the window is said.
     await confirmMainChange({ next: { ...next, source: 'subscription:codex', lane: 'subscription' }, previous, dialog, doc });
     assert.equal(calls[2].body, 'A context window set by hand for Main is cleared.');
+});
+
+test('an open Change Main dialog updates its source mark and name on a late descriptor while preserving selection, price snapshot, ticks, focus and binding', async () => {
+    const CUSTOM = 'claudexor::custom=model-one';
+    const initialCatalog = {
+        model_sources: [{ id: 'custom', label: 'Custom Source', credentialHarness: 'codex' }],
+        items: [{ provider_id: 'claudexor', provider: 'Custom Source', source_id: 'custom', id: 'model-one', name: 'model-one',
+            value: CUSTOM, max_context_window: 128000, price: { input: 2, output: 10 } }],
+    };
+    let resolveConfirm;
+    let mountedContent;
+    let disposeMounted;
+    const labels = [];
+    const moved = [];
+    const works = [{ work_id: 'w1', room: 7, name: 'Keep work', kind: 'task', project_id: 'p7',
+        episode: { task_id: 't9', live: true }, activity: 'working', live: true, confirmed: true,
+        controls: [{ action: 'model', target: 't9' }], lead: { ...route(GLM), basis: 'owner' } }];
+    const r = room({
+        projectId: '', chatId: 1,
+        storeOptions: { catalog: initialCatalog, recents: [route(CUSTOM)] },
+        model: {
+            moveWork: async (taskId) => { moved.push(taskId); return { ok: true, task_id: taskId, applied: 'next_step' }; },
+            sayMoves: async () => {},
+            askMain: (opts) => confirmMainChange({
+                ...opts,
+                dialog: (dialogOpts) => new Promise((resolve) => {
+                    mountedContent = opts.doc.createElement('section');
+                    const seam = { setConfirmLabel: (words, params = null) => labels.push(params ? words.replace('{n}', String(params.n)) : words) };
+                    disposeMounted = dialogOpts.content.mount(mountedContent, seam);
+                    resolveConfirm = (ok) => { disposeMounted?.(); resolve(ok); };
+                }),
+            }),
+        },
+    });
+    r.controls.syncState(r.state({ works, works_complete: true, supervisor_ready: true }));
+    await r.open();
+    const pickPromise = r.take(`route|${CUSTOM}`);
+    await flush();
+
+    const row = mountedContent.children[0];
+    const facts = mountedContent.children[1];
+    const checkbox = mountedContent.querySelectorAll('.ui-checkbox')[0];
+    assert.ok(row.innerHTML.includes(HARNESS_MARKS.codex.path), 'initial mark while dialog is open');
+    assert.equal(facts.textContent, 'Custom Source · $2 in / $10 out · 128K window.');
+
+    // Tick a checkbox and place focus on it before the late descriptor arrives.
+    checkbox.checked = true;
+    (mountedContent.listeners.get('change') || []).forEach((fn) => fn({}));
+    r.doc.activeElement = checkbox;
+    assert.equal(labels.at(-1), 'Change Main and move 1 more');
+
+    // A late catalog update changes the selected source's mark & label AND alters price/window in the catalog.
+    r.store.adopt({
+        model_sources: [{ id: 'custom', label: 'Claude Custom', credentialHarness: 'claude' }],
+        items: [{ provider_id: 'claudexor', provider: 'Claude Custom', source_id: 'custom', id: 'model-one', name: 'model-one',
+            value: CUSTOM, max_context_window: 999000, price: { input: 99, output: 199 } }],
+    });
+    assert.ok(row.innerHTML.includes(HARNESS_MARKS.claude.path), 'source mark updates in place');
+    assert.match(row.innerHTML, />model-one<\/b><span data-i18n-skip>was gpt-6-astra<\/span>$/);
+    assert.equal(facts.textContent, 'Claude Custom · $2 in / $10 out · 128K window.',
+        'source name updates while displayed price and window snapshot stay frozen');
+    assert.equal(checkbox.checked, true, 'tick stays checked');
+    assert.equal(r.doc.activeElement, checkbox, 'focus is preserved');
+    assert.equal(labels.at(-1), 'Change Main and move 1 more', 'confirm button label stays intact');
+
+    // Confirming writes the original selected route with its exact binding and executes the ticked move.
+    resolveConfirm(true);
+    await pickPromise;
+    await flush();
+    assert.deepEqual(r.modelPosts(), [{ kind: 'model', model: CUSTOM, use_local: false, if_unchanged: MAIN_TOKENS }]);
+    assert.deepEqual(moved, ['t9']);
+
+    // After dialog closes, further catalog updates do not mutate the closed dialog's DOM.
+    r.store.adopt({
+        model_sources: [{ id: 'custom', label: 'After Close', credentialHarness: 'agy' }],
+        items: [],
+    });
+    assert.ok(row.innerHTML.includes(HARNESS_MARKS.claude.path));
+    assert.equal(facts.textContent, 'Claude Custom · $2 in / $10 out · 128K window.');
+    r.controls.destroy();
+});
+
+test('an open Change Main dialog refreshes the listed rows\' model words on the same late rename, in place: their nodes, ticks and targets stay the sheet\'s own', async () => {
+    const CUSTOM = 'claudexor::custom=model-one';
+    const initialCatalog = {
+        model_sources: [{ id: 'custom', label: 'Custom Source', credentialHarness: 'codex' }],
+        items: [{ provider_id: 'claudexor', provider: 'Custom Source', source_id: 'custom', id: 'model-one', name: 'model-one',
+            value: CUSTOM, max_context_window: 128000, price: { input: 2, output: 10 } }],
+    };
+    let resolveConfirm;
+    let mountedContent;
+    let disposeMounted;
+    const labels = [];
+    const moved = [];
+    const works = [{ work_id: 'w1', room: 7, name: 'Keep work', kind: 'task', project_id: 'p7',
+        episode: { task_id: 't9', live: true }, activity: 'working', live: true, confirmed: true,
+        controls: [{ action: 'model', target: 't9' }], lead: { ...route(CUSTOM), basis: 'owner' } }];
+    const rooms = [
+        { id: 'p7', name: 'Work room', model_choice: { kind: 'main' } },
+        { id: 'p8', name: 'Own room', model_choice: { kind: 'model', model: CUSTOM, use_local: false } },
+    ];
+    const r = room({
+        projectId: '', chatId: 1,
+        storeOptions: { catalog: initialCatalog, recents: [route(CUSTOM)] },
+        model: {
+            moveWork: async (taskId) => { moved.push(taskId); return { ok: true, task_id: taskId, applied: 'next_step' }; },
+            sayMoves: async () => {},
+            askMain: (opts) => confirmMainChange({
+                ...opts,
+                dialog: (dialogOpts) => new Promise((resolve) => {
+                    mountedContent = opts.doc.createElement('section');
+                    const seam = { setConfirmLabel: (words, params = null) => labels.push(params ? words.replace('{n}', String(params.n)) : words) };
+                    disposeMounted = dialogOpts.content.mount(mountedContent, seam);
+                    resolveConfirm = (ok) => { disposeMounted?.(); resolve(ok); };
+                }),
+            }),
+        },
+    });
+    r.controls.syncState(r.state({ works, projects: rooms, works_complete: true, supervisor_ready: true }));
+    await r.open();
+    const pickPromise = r.take(`route|${CUSTOM}`);
+    await flush();
+
+    const rowsOf = () => mountedContent.querySelectorAll('.chat-model-off');
+    const tickOf = (row) => row.querySelector('.ui-checkbox');
+    const rowOf = (move) => rowsOf().find((row) => tickOf(row)?.dataset.move === move);
+    const modelWords = (row) => row.querySelector('.chat-model-off-meta').children[0].textContent;
+    const workRow = rowOf('work:t9');
+    const roomRow = rowOf('room:p8');
+    assert.ok(workRow && roomRow, 'a work on other models and a room with its own, both on the picked route\'s source');
+    assert.deepEqual([modelWords(workRow), modelWords(roomRow)], ['Custom Source · model-one · ', 'Custom Source · model-one'],
+        'the rows beneath the heading say the source as the catalog the census met');
+    const workTick = tickOf(workRow);
+    const roomTick = tickOf(roomRow);
+    workTick.checked = true;
+    roomTick.checked = true;
+    (mountedContent.listeners.get('change') || []).forEach((fn) => fn({}));
+    r.doc.activeElement = workTick;
+    assert.equal(labels.at(-1), 'Change Main and move 2 more');
+
+    // A late catalog update renames the source both rows and the heading name.
+    const readsBefore = [r.reads.catalog, r.reads.recents, r.reads.settings];
+    r.store.adopt({
+        model_sources: [{ id: 'custom', label: 'Lab Claude', credentialHarness: 'claude' }],
+        items: [{ provider_id: 'claudexor', provider: 'Lab Claude', source_id: 'custom', id: 'model-one', name: 'model-one',
+            value: CUSTOM, max_context_window: 128000, price: { input: 2, output: 10 } }],
+    });
+    assert.equal(mountedContent.children[1].textContent, 'Lab Claude · $2 in / $10 out · 128K window.', 'the heading said the renamed source');
+    assert.deepEqual([modelWords(workRow), modelWords(roomRow)], ['Lab Claude · model-one · ', 'Lab Claude · model-one'],
+        'the rows beneath say the renamed source too, written in place');
+    assert.ok(rowsOf().includes(workRow) && rowsOf().includes(roomRow), 'the same nodes, not a rebuild');
+    assert.deepEqual([workTick.checked, roomTick.checked], [true, true], 'the ticks stay checked');
+    assert.equal(r.doc.activeElement, workTick, 'the focus stays where the owner put it');
+    assert.equal(labels.at(-1), 'Change Main and move 2 more', 'the confirm label stays intact');
+    assert.deepEqual([r.reads.catalog, r.reads.recents, r.reads.settings], readsBefore,
+        'no fetch: the words come from the store the sheet already holds');
+
+    // Confirming writes the picked route with its binding, and each tick moves its own original target.
+    resolveConfirm(true);
+    await pickPromise;
+    await flush();
+    assert.deepEqual(r.modelPosts(), [
+        { kind: 'model', model: CUSTOM, use_local: false, if_unchanged: MAIN_TOKENS },
+        { kind: 'main', project_id: 'p8' },
+    ]);
+    assert.deepEqual(moved, ['t9']);
+
+    // After the dialog closed, its rows keep their words: the sheet's subscription went with it.
+    r.store.adopt({
+        model_sources: [{ id: 'custom', label: 'After Close', credentialHarness: 'agy' }],
+        items: [],
+    });
+    assert.deepEqual([modelWords(workRow), modelWords(roomRow)], ['Lab Claude · model-one · ', 'Lab Claude · model-one'],
+        'a closed sheet is not repainted');
+    r.controls.destroy();
 });
 
 test('a Pin chooses nothing: it writes the pins alone, keeps the sheet open, and the pinned model stands under Pinned', async () => {

@@ -813,9 +813,15 @@ test('the summary warns, and still offers Start, when no reviewer reads the work
 // work before any wait (PR #1443); without one the work waits for the reset. A model row names its source in words.
 test('Summary says what an exhausted subscription quota does, with and without a Fallback', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    let unlabelled = false;   // a source record that states no label of its own
     const fetch = async (url, init = {}) => {
         let body = {};
-        if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) body = subscription.catalog;
+        if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) {
+            body = unlabelled
+                ? { ...subscription.catalog, model_sources: subscription.catalog.model_sources
+                    .map(({ id, credentialHarness }) => ({ id, credentialHarness })) }
+                : subscription.catalog;
+        }
         else if (String(url) === '/api/claudexor/status') body = subscription.status;
         else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
@@ -845,6 +851,15 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const waits = await summary('quota-without-fallback', '');
     assert.match(waits.html, /When quota runs out[\s\S]*?Waits for the reset, then continues/);
     assert.match(waits.html, /Codex · gpt-test · Auto rotation/, 'a subscription source by its catalog label, not its id');
+    // A record that states no label of its own still names its source by the one visual answer every other surface
+    // draws — the program its credential is reached with — never by the raw id's spelling. Both rows that say the
+    // connected source agree.
+    unlabelled = true;
+    const own = await summary('quota-source-without-label', '');
+    unlabelled = false;
+    assert.match(own.html, /Codex · gpt-test · Auto rotation/, 'the program the record binds, in words');
+    assert.match(own.html, />Codex subscription · no API key</, 'the access row names it the same way');
+    assert.doesNotMatch(own.html, /\bcodex · gpt-test|>codex subscription/, 'never the source id as a name');
     assert.match(waits.budget, /If the pool is exhausted, Ouroboros waits for the reset\./, 'no Fallback is promised when none is set');
     const routed = await summary('quota-with-fallback', 'openai/gpt-5.6-luna');
     assert.match(routed.html, /When quota runs out[\s\S]*?Tries the Fallback, then waits for the reset/);
@@ -1167,6 +1182,119 @@ test('Summary names a model the local runtime serves as Local, and a cloud one b
     const fallbackOnly = await summary('local-fallback-summary', 'fallback');
     assert.match(row(fallbackOnly, 'Main'), /^OpenRouter · google\/gemini-3\.8-flash/);
     assert.match(row(fallbackOnly, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/);
+});
+
+// Review r4 (witness): a saved subscription source no connected account serves keeps the name its held record
+// gives it — an explicitly unbound one ('Studio models') is never renamed by the brand its raw id would borrow
+// ('Claude Code'). The connected filter decides what can be CHOSEN, never what a saved value is called, and the
+// connected-access row still lists only connected sources.
+test('Summary names a saved unbound source by its record, including when the descriptors arrive late', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const catalog = { ...subscription.catalog, model_sources: [...subscription.catalog.model_sources,
+        { id: 'claude', label: 'Studio models', credentialHarness: '' }] };
+    let holdSources = false, release, catalogReads = 0;
+    const fetch = async (url, init = {}) => {
+        let body = {};
+        if (String(url) === '/api/model-catalog?view=sources') {
+            catalogReads++;
+            if (holdSources) await new Promise((resolve) => { release = resolve; });
+            body = catalog;
+        } else if (String(url).startsWith('/api/onboarding/model-catalog')) { catalogReads++; body = catalog; }
+        else if (String(url) === '/api/claudexor/status') body = subscription.status;
+        else if (String(url) === '/api/onboarding/subagents/preview') {
+            const payload = JSON.parse(init.body);
+            body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: [], partly_counted_spend: [],
+                model_settings: Object.fromEntries(Object.keys(subscription.preview.model_settings).map((key) => [key, payload[key]])) };
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    let html = '';
+    const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState,
+        mainModel: 'claudexor::codex=gpt-test', fallbackModel: 'claudexor::claude=studio-fixture', automaticModels: [] } };
+    await withWizard(bootstrap, 'summary-saved-source-name', async ({ doc }) => {
+        await settle();
+        for (const step of BOOTSTRAP.stepOrder.slice(1)) { doc.getElementById('next-btn').fire('click'); await settle(); }
+        html = doc.getElementById('root').innerHTML;
+    }, { fetch });
+    const row = (label) => html.match(new RegExp(`<strong>${label}</strong>\\s*<span>([^<]*)`))?.[1] || '';
+    assert.match(row('Fallback'), /^Studio models · studio-fixture · Auto rotation/, 'the held record\'s label names the saved source');
+    assert.doesNotMatch(row('Fallback'), /Claude Code/, 'never the brand the raw id would borrow');
+    assert.match(row('Main'), /^Codex · gpt-test · Auto rotation/, 'the connected source is unchanged');
+    assert.match(html, />Codex subscription · no API key</, 'the connected-access row still lists only connected sources');
+
+    holdSources = true;
+    const visibleRows = inertElement();
+    const prepare = (doc) => {
+        const root = doc.getElementById('root'), query = root.querySelector;
+        root.querySelector = (selector) => selector === '.summary-card-rows' ? visibleRows : query(selector);
+    };
+    await withWizard({ ...bootstrap, initialState: { ...bootstrap.initialState,
+        mainModel: 'vendor/test', openrouterKey: 'sk-or-v1-test-not-a-secret' } }, 'summary-late-source-name', async ({ doc }) => {
+        await settle();
+        for (const step of BOOTSTRAP.stepOrder.slice(1)) { doc.getElementById('next-btn').fire('click'); await settle(); }
+        const root = doc.getElementById('root'), shown = root.innerHTML, reads = catalogReads;
+        assert.match(shown, /<strong>Fallback<\/strong>\s*<span>Claude Code · studio-fixture/, 'Summary is open before descriptors land');
+        assert.equal(typeof release, 'function');
+        release(); await settle();
+        assert.match(visibleRows.innerHTML, /<strong>Fallback<\/strong>\s*<span>Studio models · studio-fixture/);
+        assert.equal(root.innerHTML, shown, 'the step did not remount');
+        assert.equal(catalogReads, reads, 'the descriptor reply does not start another catalog read');
+    }, { fetch, prepare });
+});
+
+test('Summary and quota guidance follow effective locality, not a chat slot’s saved suffix', async () => {
+    const summary = async (query, initialState) => {
+        let html = '';
+        const bootstrap = { ...BOOTSTRAP, stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
+            initialState: { ...BOOTSTRAP.initialState, ...initialState } };
+        await withWizard(bootstrap, query, ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+        return html;
+    };
+    const row = (html, label) => html.match(new RegExp(`<strong>${label}</strong>\\s*<span>([^<]*)`))?.[1] || '';
+    const routed = await summary('local-subscription-route', { localSource: '/models/local-test.gguf',
+        localRoutingMode: 'all', mainModel: 'claudexor::claude=studio-route', fallbackModel: 'openai/gpt-5.6-luna', automaticModels: [] });
+    assert.match(row(routed, 'Main'), /^Local · studio-route/, 'the local runtime serves the slot, not the subscription its id implies');
+    assert.doesNotMatch(row(routed, 'Main'), /Auto rotation|Claude Code/, 'no rotation or brand is promised for a local lane');
+    assert.match(row(routed, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/, 'the API-source local row is unchanged');
+    assert.equal(row(routed, 'When quota runs out'), '', 'no active subscription slot consumes quota');
+    const labelled = await summary('local-value-label', { mainModel: 'claudexor::claude=studio-suffix (local)', automaticModels: [] });
+    assert.match(row(labelled, 'Main'), /^Claude Code · studio-suffix \(local\) · Auto rotation/);
+    assert.notEqual(row(labelled, 'When quota runs out'), '', 'the suffix alone does not bypass subscription quota');
+});
+
+// Review r4: the unsupported-Main reason names the source by the one visual answer (the held record's label),
+// never its raw id — while the decision itself still follows connected accounts.
+test('an unsupported subscription Main is named by its record, never by its raw id', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const catalog = { ...subscription.catalog, model_sources: [...subscription.catalog.model_sources,
+        { id: 'claude', label: 'Studio models', credentialHarness: '' }] };
+    const fetch = async (url, init = {}) => {
+        let body = {};
+        if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) body = catalog;
+        else if (String(url) === '/api/claudexor/status') body = subscription.status;
+        else if (String(url) === '/api/onboarding/subagents/preview') {
+            body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: [], partly_counted_spend: [],
+                model_settings: {} };
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const error = { textContent: '' };   // the held footer line: the wizard rebinds it on every render
+    const prepare = (doc) => {
+        const root = doc.getElementById('root');
+        const others = root.querySelector;
+        root.querySelector = (selector) => (selector === '.wizard-error' ? error : others(selector));
+    };
+    const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState,
+        mainModel: 'claudexor::claude=studio-main', automaticModels: [] } };
+    await withWizard(bootstrap, 'unsupported-main-name', async ({ doc }) => {
+        await settle();
+        doc.getElementById('next-btn').fire('click');   // Accounts → Models: the reason is drawn there
+        await settle();
+        assert.equal(error.textContent, 'Main uses Studio models, which has no configured access in this setup.');
+        assert.equal(doc.getElementById('next-btn').disabled, true, 'the decision itself is unchanged: unsupported Main blocks Continue');
+    }, { fetch, prepare });
 });
 
 // PR #1560: walk the real wizard from Accounts to the completion POST. A fresh Z.ai-only

@@ -5,7 +5,7 @@
 
 import { accountRows, accountName, accountModelUnsupported } from './claudexor_status_store.js';
 import { formatRelativeAge } from './ui_helpers.js';
-import { API_PROVIDER_LABELS, META_PART_SEPARATOR, harnessPresentation } from './harness_presentation.js';
+import { API_PROVIDER_LABELS, META_PART_SEPARATOR, harnessPresentation, sourcePresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { fmt, tr, translateString, tx } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
@@ -630,7 +630,9 @@ export function sourceIdentityParts(route, {
     // its chip names no API provider whose catalog or tariff it never touches.
     if (fields.local) return [{ kind: 'static', text: 'Local' }, { kind: 'static', text: 'model' }];
     return fields.subscription
-        ? [{ kind: 'authored', text: fields.sourceLabel || fields.source }, { kind: 'static', text: 'model' }]
+        // The source's name is the one visual answer (harness_presentation.sourcePresentation): the record's label
+        // when one is held, else its own known name — the id's spelling alone never picks a brand.
+        ? [{ kind: 'authored', text: sourcePresentation(fields.source, modelSources).label }, { kind: 'static', text: 'model' }]
         : [{ kind: 'static', text: 'API' }, { kind: 'authored', text: fields.providerLabel }];
 }
 
@@ -681,7 +683,8 @@ function undiscoveredLabel(value, known) {
  * a surface that cannot deliver a group omits it instead of renaming it.
  * @param {object} args
  * @param {Array} [args.harnesses] discovered agent harnesses
- * @param {Array} [args.modelSources] discovered subscription model sources
+ * @param {Array} [args.modelSources] subscription model sources offered for selection
+ * @param {Array} [args.sourceDescriptors] held records for presentation, including sources not offered here
  * @param {Array<{id:string,label?:string}>} [args.providers] configuredApiProviders() output
  * @param {Array} [args.connections] apiConnections() output, naming a saved choice that cannot send
  * @param {string} [args.currentChoice] the saved choice, so it survives a read gap
@@ -692,7 +695,7 @@ function undiscoveredLabel(value, known) {
  * @param {object} [args.providerProfiles] setup-contract profiles, for a saved provider's label
  */
 export function routeChoiceGroups({
-    harnesses = [], modelSources = [], providers = [], connections = [], currentChoice = '',
+    harnesses = [], modelSources = [], sourceDescriptors = modelSources, providers = [], connections = [], currentChoice = '',
     catalogKnown = true, sourcesKnown = catalogKnown, accountsKnown = true, includeSessions = true,
     includeSubscriptions = true, providerProfiles = {}, hasConfiguredAccounts = false,
 } = {}) {
@@ -712,12 +715,16 @@ export function routeChoiceGroups({
             label: `${harnessPresentation(savedChoice.slice('session:'.length)).label} (agent) · ${catalogKnown ? 'not in discovery' : 'not checked'}`,
         });
     }
+    // A source option is named by the one visual answer (harness_presentation.sourcePresentation): the held record's
+    // label, else, for a saved source no record lists, its own exact mark entry. An opaque id's spelling never picks
+    // a brand and never borrows the API channel word (a session id above is a program's own name, not an opaque id).
+    const sourceName = (id) => sourcePresentation(id, sourceDescriptors).label;
     const modelValues = modelSources.map((source) => ({
-        value: `subscription:${source.id}`, label: `${source.label || source.id} (model)`,
+        value: `subscription:${source.id}`, label: `${sourceName(source.id)} (model)`,
     }));
     if (savedChoice.startsWith('subscription:')
         && !modelValues.some((option) => option.value === savedChoice)) {
-        modelValues.push({ value: savedChoice, label: `${harnessPresentation(savedChoice.slice(13)).label} (model) · not checked` });
+        modelValues.push({ value: savedChoice, label: `${sourceName(savedChoice.slice(13))} (model) · not checked` });
     }
     // One entry per enabled connection that holds its key. A saved choice that
     // cannot send stays selectable and says why, so a save cannot silently

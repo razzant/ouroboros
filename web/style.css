@@ -5877,16 +5877,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-model-mode .chat-capsule-tier::before { content: "·"; margin-inline-end: var(--space-1); color: var(--text-disabled); }
 .chat-model-mode[data-sheet-open="true"] { border-color: var(--focus-accent-border); }
 .model-source-mark { display: block; flex: 0 0 auto; }
-.model-source-initial {
-    display: grid;
-    place-items: center;
-    box-sizing: border-box;
-    border-radius: var(--space-1);
-    box-shadow: inset 0 0 0 1.5px currentColor;
-    font-size: var(--type-meta);
-    font-weight: 700;
-    line-height: 1;
-}
 /* The Model sheet: the popups' floating material above its anchor (a composer row, a work's fact), so nothing under it
    moves. From the top: what the caller puts first, the field, the list scrolling inside itself, and the tier strip at
    its foot. In the stack layout it is a bottom sheet over a scrim, the whole width less the popups' margin. */

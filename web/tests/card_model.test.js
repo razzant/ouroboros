@@ -6,7 +6,8 @@
 // contract's shapes; geometry and the real page are covered by the browser tests.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { APPLIED_WORDS, basisWords, causeWords, closeCardModel, leadView, openCardModel, paintCardModel, refusalWords } from '../modules/card_model.js';
+import { APPLIED_WORDS, basisWords, causeWords, closeCardModel, disposeCardModel, followCardCatalogue, leadView, openCardModel, paintCardModel, refusalWords } from '../modules/card_model.js';
+import { GENERIC_HARNESS_MARK, HARNESS_MARKS } from '../modules/harness_presentation.js';
 import { createModelCatalogStore } from '../modules/model_catalog_store.js';
 import { applyCardWorkViews, emptyWorkState, reconcileWorkState } from '../modules/work_status.js';
 import { modelSheetOutline, modelSheetRows, stubDocument } from './composer_controls_fixture.js';
@@ -27,7 +28,7 @@ const CATALOG = {
 const flush = async () => { for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
 /* One card's meta line as chat_activity.js leaves it, with everything the fact's acts reach injected. */
-function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATALOG, settings = {}, processing = null } = {}) {
+function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATALOG, settings = {}, processing = null, follow = true } = {}) {
     const doc = stubDocument();
     doc.body = doc.createElement('body');
     const meta = doc.createElement('div');
@@ -38,16 +39,18 @@ function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATA
     tools.textContent = '3 tool calls';
     meta.append(tools);
     const record = { groupId: 't1', metaEl: meta };
+    // The room's own live record map (chat.js): a repaint on a store notify is the room's, over the cards it holds.
+    const records = new Map([['t1', record]]);
     const calls = [];
     const ids = [];  // each act's request id, in order
     const toasts = [];
     const rerenders = [];
     const reply = { value: answer };
     const pinned = { routes: pins, writes: [] };
-    // `reads`: the settings documents read, and the key models whose own endpoints were asked for (`processing`
-    // answers them by routed value; without it that read fails, as offline).
-    const reads = { settings: 0, processing: [] };
-    const store = createModelCatalogStore({ readCatalog: async () => catalog,
+    // `reads`: the settings documents read, the catalog reads, and the key models whose own endpoints were asked
+    // for (`processing` answers them by routed value; without it that read fails, as offline).
+    const reads = { catalog: 0, settings: 0, processing: [] };
+    const store = createModelCatalogStore({ readCatalog: async () => { reads.catalog += 1; return catalog; },
         readPreferences: async () => ({ model_recents: recents, model_pins: pinned.routes }),
         readSettings: async () => {
             reads.settings += 1;
@@ -62,6 +65,7 @@ function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATA
             pinned.routes = [...pinned.routes.filter((seen) => !unpin.some((gone) => gone.model === seen.model)), ...pin];
             return { model_pins: pinned.routes };
         } });
+    const unfollow = follow ? followCardCatalogue({ store, records, viewport: (write) => write() }) : () => {};
     const deps = {
         store, coarse: () => false, place: () => ({ reposition() {}, destroy() {} }),
         toast: (message, tone) => toasts.push([message, tone]),
@@ -115,7 +119,7 @@ function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATA
         scope: strip().querySelector('.model-tier-scope').textContent,
         means: strip().querySelector('.model-tier-means').textContent,
     });
-    return { doc, meta, record, tools, calls, ids, toasts, rerenders, reply, store, pinned, reads, paint, part, fact, said, popup, acts, pressAct, list,
+    return { doc, meta, record, records, unfollow, tools, calls, ids, toasts, rerenders, reply, store, pinned, reads, paint, part, fact, said, popup, acts, pressAct, list,
         rows, outline: () => modelSheetOutline(list().innerHTML), take, pin, chooseTier, tierView, fire };
 }
 
@@ -275,19 +279,130 @@ test('the fact is the first node of the line and a repaint of the line never tou
     assert.equal(c.part().querySelector('.chat-live-meta-sep').hidden, true, 'none when the fact stands alone');
 });
 
-test('a source confirmed late wears its harness mark: the card repaints the mark when the catalog names it', () => {
+test('a subscription source wears a program mark before any catalog read, and a late descriptor repaints the mounted card', async () => {
     const c = card();
     const mark = () => c.part().querySelector('.card-model-mark').innerHTML;
     c.paint({ lead: lead(ASTRA, 'main') });
-    // The catalog has not been read: the source is an unknown one, so only its initial stands.
-    assert.match(mark(), /model-source-initial" aria-hidden="true">C</, 'an unknown source wears its initial, never an invented mark');
-    c.store.adopt(CATALOG);  // the catalog read brings the source's descriptor (id codex, credentialHarness codex)
-    c.paint({ lead: lead(ASTRA, 'main') });
-    // The same words (Codex) now stand beside the harness's own mark: the mark is what changed.
-    assert.match(mark(), /^<svg class="model-source-mark"/, 'the harness mark stands where the descriptor names it');
+    // Cold start: the source's id is Codex's own key, so the program's glyph stands before any read answers.
+    assert.equal(c.reads.catalog, 1, 'the fact asks for the store\'s one first read');
+    assert.ok(mark().includes(HARNESS_MARKS.codex.path), 'Codex wears its own glyph, never a letter');
+    await flush();  // the read the paint asked for settles before its descriptor is replaced
+    // A late descriptor whose harness binding is explicitly empty repaints to the neutral mark.
+    c.store.adopt({ ...CATALOG, model_sources: [{ id: 'codex', label: 'Codex Work', credentialHarness: '' }] });
+    await flush();
+    assert.ok(mark().includes(GENERIC_HARNESS_MARK.path), 'the record wins: the generic mark, never an invented logo');
+    assert.equal(c.said('name'), 'Codex Work · gpt-6-astra');
+    assert.equal(c.reads.catalog, 1, 'a repaint starts no second read');
+    // The descriptor naming the program again repaints back.
+    c.store.adopt(CATALOG);
+    await flush();
+    assert.ok(mark().includes(HARNESS_MARKS.codex.path), 'the descriptor names the program again');
+    assert.equal(c.said('name'), 'Codex · gpt-6-astra');
+    assert.equal(c.reads.catalog, 1);
 });
 
-test('a catalog repaint brings no tiers back: a Main tier press stands after the store announces it', async () => {
+test('a truly unknown subscription source wears the generic mark beside its own name, and a descriptor overrides it', async () => {
+    const c = card();
+    const mark = () => c.part().querySelector('.card-model-mark').innerHTML;
+    c.paint({ lead: lead('claudexor::claude-code=claude-opus-5.5', 'main') });
+    // claude-code is no HARNESS_MARKS key: the neutral mark beside its own name, never a letter or a guess.
+    assert.ok(mark().includes(GENERIC_HARNESS_MARK.path), 'a source no key names keeps the neutral mark');
+    assert.equal(c.said('name'), 'claude-code · claude-opus-5.5');
+    await flush();  // the read the paint asked for settles before its descriptor is replaced
+    c.store.adopt({ ...CATALOG, model_sources: [{ id: 'claude-code', label: 'Claude Code', credentialHarness: 'claude' }] });
+    await flush();
+    assert.ok(mark().includes(HARNESS_MARKS.claude.path), 'the descriptor\'s program takes over the mark');
+    assert.equal(c.said('name'), 'Claude Code · claude-opus-5.5');
+});
+
+test('the room\'s catalogue follow repaints its mounted subscription cards through the viewport seam, and teardown releases it', async () => {
+    // Only the instrumented room listener below subscribes to `store`, so teardown cannot be masked by a second one.
+    const c = card({ follow: false });
+    const record2 = { groupId: 't2', metaEl: c.doc.createElement('div') };
+    c.records.set('t2', record2);
+    let subscribes = 0;
+    let unsubscribes = 0;
+    const origSubscribe = c.store.subscribe.bind(c.store);
+    c.store.subscribe = (fn) => {
+        subscribes += 1;
+        const off = origSubscribe(fn);
+        return () => { unsubscribes += 1; off(); };
+    };
+    // The room's one follow over its own record map; each pass into the viewport seam counts here.
+    const seams = [];
+    // A name's real words are its own three spans, joined. A parent's stub textContent is empty whatever the card
+    // says, so it could never show a repaint or its absence.
+    const nameOf = (node) => node.children.map((span) => span.textContent).join('').replaceAll('\u00a0', ' ');
+    const unfollow = followCardCatalogue({ store: c.store, records: c.records, viewport: (write) => { seams.push(1); return write(); } });
+    assert.equal(subscribes, 1, 'one subscription for the room, whatever it holds');
+    c.paint({ lead: lead(ASTRA, 'main') });
+    paintCardModel(record2, { target: 't2', main: route(ASTRA), lead: lead('claudexor::claude-code=claude-opus-5.5', 'main') },
+        { store: c.store, coarse: () => false, place: () => ({ reposition() {}, destroy() {} }), toast() {}, rerender() {}, act: async () => ({}) });
+    await flush();
+    // The follow repaints only subscription cards; a plain API card is not its pass.
+    seams.length = 0;
+    c.store.adopt({ ...CATALOG, model_sources: [{ id: 'claude-code', label: 'Claude Code', credentialHarness: 'claude' }] });
+    await flush();
+    assert.ok(seams.length >= 1, 'a new catalogue repaints through the room\'s seam');
+    assert.ok(c.part().querySelector('.card-model-mark').innerHTML.includes(HARNESS_MARKS.codex.path));
+    assert.ok(record2.cardModel.part.querySelector('.card-model-mark').innerHTML.includes(HARNESS_MARKS.claude.path));
+    // An announce that brings no new catalogue is no reason to touch the room: a tier press or a pin enters the
+    // seam no time, and one new catalogue enters it once.
+    seams.length = 0;
+    c.store.adoptTiers({ main: 'fast', default: 'standard' });
+    await c.store.setPinned(route(GLM), true);
+    await flush();
+    assert.equal(seams.length, 0, 'a tier or pin announce repaints no card: the seam is not entered');
+    c.store.adopt({ ...CATALOG, model_sources: [{ id: 'codex', label: 'Codex II', credentialHarness: 'codex' },
+        { id: 'claude-code', label: 'Claude Code', credentialHarness: 'claude' }] });
+    await flush();
+    assert.equal(seams.length, 1, 'one new catalogue, one pass through the room\'s seam');
+    // A card the room let go is not repainted; its disposal needs no rerender of the dying card. The words of both
+    // cards are read from their own spans: the catalogue now names the released card's source by another label,
+    // which the held card took and the released one never saw.
+    const rerendersBefore = c.rerenders.length;
+    const goneName = c.record.cardModel.name;
+    const goneSaid = nameOf(goneName);
+    assert.equal(disposeCardModel(c.record), true);
+    assert.equal(c.rerenders.length, rerendersBefore, 'teardown does not rerender the dying card');
+    c.records.delete('t1');
+    c.store.adopt({ ...CATALOG, model_sources: [{ id: 'codex', label: 'Codex Later', credentialHarness: 'codex' },
+        { id: 'claude-code', label: 'CC Later', credentialHarness: 'claude' }] });
+    await flush();
+    assert.equal(nameOf(record2.cardModel.name), 'CC Later · claude-opus-5.5', 'the card the room holds follows the rename');
+    assert.equal(goneSaid, 'Codex II · gpt-6-astra', 'before it went, the released card carried the words it was given');
+    assert.equal(nameOf(goneName), goneSaid, 'a disposed card is not the room\'s anymore: the rename left its words alone');
+    // The disposer ends the room's subscription: a store change repaints nothing after it,
+    // and any card still held keeps the label and mark it already drew.
+    seams.length = 0;
+    unfollow();
+    assert.equal(unsubscribes, 1, 'the room\'s teardown unsubscribes its one follow');
+    c.store.adopt({ ...CATALOG, model_sources: [{ id: 'claude-code', label: 'CC After Teardown', credentialHarness: '' }] });
+    await flush();
+    assert.equal(seams.length, 0, 'no repaint pass after the room\'s disposer');
+    assert.equal(nameOf(record2.cardModel.name), 'CC Later · claude-opus-5.5', 'a held card keeps its label after room teardown');
+    assert.ok(record2.cardModel.part.querySelector('.card-model-mark').innerHTML.includes(HARNESS_MARKS.claude.path),
+        'a held card keeps its mark after room teardown');
+});
+
+test('a detached card stays the room\'s: a remount or a reveal repaints, and no catalogue read is asked again', async () => {
+    const c = card();
+    c.paint({ lead: lead(ASTRA, 'main') });
+    await flush();
+    assert.equal(c.reads.catalog, 1);
+    const node = c.fact();
+    // A reveal detaches the DOM only: the record stays on the room\'s map and repaints when the catalogue changes.
+    c.record.root = { isConnected: false };
+    c.store.adopt({ ...CATALOG, model_sources: [{ id: 'codex', label: 'Codex Detached', credentialHarness: '' }] });
+    await flush();
+    assert.ok(c.part().querySelector('.card-model-mark').innerHTML.includes(GENERIC_HARNESS_MARK.path),
+        'a detached card is repainted like any other: the room decides what is live, not isConnected');
+    assert.equal(c.said('name'), 'Codex Detached · gpt-6-astra');
+    assert.equal(c.fact(), node, 'the same nodes: the repaint never re-created the fact');
+    assert.equal(c.reads.catalog, 1, 'a repaint asks for no read');
+});
+
+test('a catalogue repaint brings no tiers back: a Main tier press stands after the store announces it', async () => {
     const c = card();
     c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: '', default: 'standard' } });
     await flush();

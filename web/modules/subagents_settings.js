@@ -567,7 +567,7 @@ function subagentFormParts(row, state, index) {
     const catalog = catalogForRow(row, state), items = catalog?.items ?? state.apiModels;
     const routeGroups = routeChoiceGroups({
         harnesses: state.catalogKnown ? (state.snapshot?.harnesses || []) : [],
-        modelSources: state.modelSources, providers: state.providers, connections: state.connections,
+        modelSources: state.modelSources, sourceDescriptors: state.sourceDescriptors, providers: state.providers, connections: state.connections,
         providerProfiles: state.providerProfiles, currentChoice: encodeRouteChoice(row),
         catalogKnown: state.catalogKnown, accountsKnown: state.accountsKnown,
         sourcesKnown: state.sourcesKnown, hasConfiguredAccounts: accountRows(state.snapshot || {}).length > 0,
@@ -661,7 +661,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.snapshot?.subagent_last_delegation || null,
         (state.setting?.items || []).map((row) => row?.route?.kind === ROUTE_KIND_AGENT_SESSION
             ? sessionRouteVerdict(row, state, nowMs).text : ''),
-        state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
+        state.apiModels, state.sourceDescriptors, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
         state.filter, state.tickCaption, state.unsavedId,
         currentLanguage(), dictionaryRevision(),  // prices and tariffs are composed words: another language, or its dictionary arriving, is another paint
@@ -730,6 +730,7 @@ export function createAvailableSubagentsEditor({
     function adoptSources(data) {
         state.sourcesKnown = data.sources_read_state === 'ok';
         state.modelSources = data.model_sources || [];
+        state.sourceDescriptors = data.sourceDescriptors;
         state.sourceProblem = ['failed', 'transport'].includes(data.sources_read_state) ? 'Subscription sources could not be read.' : '';
         state.signature = ''; paint({ discoveryOnly: true });
     }

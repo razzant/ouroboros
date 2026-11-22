@@ -23,6 +23,7 @@ import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
 import { SERVER_ANSWERS_EVENT } from './ws.js';
+import { disposeCardModel, followCardCatalogue } from './card_model.js';
 import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, memberActivityEvidenced, openCardControls, ownStopPress, promoteChildCard, reconcileWorkState, roomStatusView } from './work_status.js';
 import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
@@ -365,10 +366,14 @@ export function createChatInstance({
         record?.timelineDispose?.();
         record?.regions?.forEach((dispose) => dispose());
         record?.episodeDisclosureDispose?.();
+        if (record) disposeCardModel(record);
         if (record?.episodeDisclosure) releaseMessageNode(record.episodeDisclosure);
         if (record?.root) releaseMessageNode(record.root);
         liveCardRecords.delete(id);
     }
+    // A subscription fact's mark follows the window's catalog (card_model.js): one listener for the room's life,
+    // over the room's own live cards, each pass inside the stable-viewport seam. Disposed by destroy().
+    const unfollowCatalogue = followCardCatalogue({ records: liveCardRecords, viewport: withStableViewport });
     const markReviewAnchor = (r, on = false) => setReviewAnchor(r, on, setLiveCardPhase);
     const explicitCardExpansion = new Map();
     const reviewDisclosureByTask = new Map();
@@ -3574,6 +3579,7 @@ export function createChatInstance({
             historyResyncScheduler.cancel();
             preview.destroy();
             for (const id of liveCardRecords.keys()) disposeLiveCard(id);
+            unfollowCatalogue();
             reviewHydrator.clear();
             // The buffered collections go last; a page replay never clears the subagent lineage, only this does.
             for (const held of [explicitCardExpansion, reviewDisclosureByTask, pendingSuggestedNames, subagentChildParents,
