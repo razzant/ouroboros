@@ -328,28 +328,35 @@ def test_keep_endpoint_keeps_last_canonical_material_after_drive_retirement(real
     assert pr.holds(root, TASK, read_document(root, TASK), lambda _task: False) == "owner_keep"
 
 
-def test_keep_saves_fact_when_payload_read_fails(real_finished, monkeypatch):
-    """From f6bfcc318, in this branch's per-file format: an OSError reading the canonical release facts under the
-    custody lock still saves an explicit Keep (``canonical_payloads`` unknown, files listed by the inventory without a
-    release state); a release (keep=False) on the same error raises and leaves the saved fact in place."""
+@pytest.mark.parametrize("failure", ["unreadable", "malformed"])
+def test_keep_saves_fact_when_payload_read_fails(real_finished, monkeypatch, failure):
+    """From f6bfcc318, in this branch's per-file format: a canonical store that cannot be read (OSError) or a release
+    record that is malformed (ValueError from ``release_record``) still saves an explicit Keep; the listed store files
+    are answered ``unknown`` (``canonical_payloads``), never retained without a state. A release (keep=False) on the
+    same failure raises and leaves the saved fact in place."""
     root, canonical = _retire_empty_drive(real_finished)
     assert _propose(root)["ok"]
+    if failure == "unreadable":
+        def unreadable_store(*_args):
+            raise PermissionError(errno.EACCES, "synthetic canonical inventory unavailable")
 
-    def unreadable_store(*_args):
-        raise PermissionError(errno.EACCES, "synthetic canonical inventory unavailable")
-
-    monkeypatch.setattr(release_state, "keep_places", unreadable_store)
+        monkeypatch.setattr(release_state, "keep_places", unreadable_store)
+        expected = PermissionError
+    else:
+        patch_document(root, TASK, lambda row: {**row, "payload_release": {"released": []}})
+        expected = ValueError
     with _client(root) as client:
         answer = _keep(client)
     assert answer["keep"] and answer["status"] == "partly_retired", answer
     assert "canonical_payloads" in answer["unknown"]
     for rel in (SNAP, REPORT, SCRIPT, CARRIER):
         path = str(canonical / rel)
-        assert path in answer["retained"] and path not in answer["releases"], answer
+        assert answer["releases"].get(path) == "unknown", answer
+        assert path not in answer["retained"] and path not in answer["retired"], answer
     fact = read_document(root, TASK)["owner_keep"]
     assert fact["source"]["basis"] == "authenticated_gateway_request"
     assert pr.holds(root, TASK, read_document(root, TASK), lambda _task: False) == "owner_keep"
-    with pytest.raises(PermissionError):
+    with pytest.raises(expected):
         owner_keep.set_owner_keep(root, TASK, keep=False, source={"basis": "test"})
     assert read_document(root, TASK)["owner_keep"] == fact
 

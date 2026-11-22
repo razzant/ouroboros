@@ -360,7 +360,7 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
     managed-import release saves Keep with ``release_unconfirmed``."""
     from ouroboros.task_custody import task_custody_lock
     from ouroboros.delegate_documents import managed_keep_places
-    from ouroboros.payload_release_state import keep_places
+    from ouroboros.payload_release_state import keep_places, store_of
     from ouroboros.task_results import load_task_result
     from ouroboros.task_store import patch_document
     from ouroboros.utils import utc_now_iso
@@ -400,10 +400,11 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
         releases.update(documents)
         try:  # fresh canonical facts under the same custody lock as the owner's keep
             payloads = keep_places(base, task_id, row, places)
-        except OSError:
+        except (OSError, ValueError):  # an unreadable store or a malformed release record (``release_record``)
             if not keep:
                 raise
-            payloads = {}
+            store = store_of(base, task_id)  # the listed store files: nothing is claimed about them, the keep is saved
+            payloads = {place: ("unknown", None) for place in places if pathlib.Path(place).is_relative_to(store)}
             if "canonical_payloads" not in unknown:
                 unknown.append("canonical_payloads")
         places = sorted(set(places) | set(payloads))
