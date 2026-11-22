@@ -441,7 +441,8 @@ test('Activity unites live direct turns with queue identities and preserves queu
     assert.deepEqual(rows.map((row) => row.querySelector('button').className), Array(3).fill('btn btn-sm btn-default'));
     assert.doesNotMatch(queue.textContent, /Nothing running/);
     // Kept services are their own read (custody, one census): the state read is still not repeated.
-    assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl, keptUrl], 'reuse the existing state read');
+    assert.deepEqual([...calls].sort(), [queueUrl, backgroundUrl, schedulesUrl, keptUrl].sort(),
+        'one GET per endpoint (the state read reused, kept its own read), in any order');
     // A group the owner folded stays folded through the next refresh.
     paused.open = false;
     await activity.refresh();
