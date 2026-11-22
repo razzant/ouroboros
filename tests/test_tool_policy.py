@@ -162,7 +162,10 @@ def test_live_extension_tools_are_initial_not_non_core(monkeypatch):
 
 
 def test_list_skills_is_core_visible_for_repair(tmp_path):
+    """Repair finds list_skills in the catalog, and as a core tool it keeps its place first when a route's schema
+    ceiling cuts the request (``fit_tool_schemas_to_limit`` ranks core names first)."""
     from ouroboros.tools.registry import ToolRegistry
+    assert "list_skills" in CORE_TOOL_NAMES
     registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
     names = {schema.get("name") or schema.get("function", {}).get("name") for schema in registry.schemas()}
     assert "list_skills" in names
