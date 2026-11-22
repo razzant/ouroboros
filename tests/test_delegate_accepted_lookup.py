@@ -100,7 +100,8 @@ def test_an_explicit_retry_reads_its_accepted_start_before_route_health_and_send
     assert payload["run_id"] == accepted["run"] and payload["idempotent_recovery"] is True
     # The accepted start answers with its receipt, measured from the recorded body it did not send again.
     assert payload["note"].startswith("The engine had already accepted") and "\nreceipt:\n" in payload["note"]
-    assert "sent: prompt " in payload["note"] and "automatic lineage, no record" in payload["note"]
+    # A read-only start outside a folderless Project could receive no automatic lineage copies: none is claimed.
+    assert "sent: prompt " in payload["note"] and "automatic lineage" not in payload["note"], payload["note"]
     assert ("GET", "/v2/agent-capabilities") not in engine.paths, "no route health is asked of work already accepted"
     assert [(kind, key) for kind, key, _ in engine.lookups] == [("run", token)]
     assert engine.lookups[0][2] == engine.creates[0][2], "the lookup carries the recorded start's exact body"
@@ -113,6 +114,41 @@ def test_an_explicit_retry_reads_its_accepted_start_before_route_health_and_send
     again = _start(registry, retry_of=token)
     assert (again["reason"], again["run_id"]) == ("invocation_already_started", accepted["run"])
     assert len(engine.creates) == 1 and len(engine.lookups) == 1
+
+
+@pytest.mark.parametrize("selected", [True, False], ids=["selected", "lineage"])
+def test_an_accepted_retry_names_its_recorded_selection_and_lineage_only_where_copies_could_be(
+        tmp_path, monkeypatch, selected):
+    """A found start answers with what this invocation recorded: its selected copies, from the invocation row (the
+    binding this read makes carries no request row), and "no record" of automatic lineage only for a folderless
+    read-only start that selected nothing, the one start that could have received such copies."""
+    from ouroboros.tools import delegate
+    from tests._delegated_transport_shared import _REAL_GATEWAY
+
+    registry, engine = _delegating(tmp_path, monkeypatch)
+    ctx = registry._ctx
+    ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}  # Project work without a folder
+    # The scripted engine knows one root; the start's own scratch scope registers as a new project (``None``: an
+    # answer without ``created``, so no engine trait is learned for the tests after this one).
+    monkeypatch.setattr(_REAL_GATEWAY, "project_registration", lambda _self, _root: ("prj-scratch", None))
+    drive = tmp_path / "task_drives" / ctx.task_id
+    drive.mkdir(parents=True, exist_ok=True)
+    (drive / "one.md").write_text("known", encoding="utf-8")
+    engine.lose = 1
+    chosen = {"input_files": [{"root": "task_drive", "path": "one.md"}]} if selected else {}
+    lost = json.loads(delegate._delegate_start(ctx, "Read it.", max_seconds=120, **chosen).text)
+    token = lost.get("pending_invocation_id")
+    assert token, json.dumps(lost)
+    recorded = c.invocation_record(tmp_path, token).get("input_files")
+    c._CUSTODY.clear()  # the worker that held the reply is gone
+    answer = _start(registry, retry_of=token)
+    assert answer["recovered_without_start"] and len(engine.creates) == len(engine.lookups) == 1, answer
+    if selected:
+        assert [(row["path"], row["size"]) for row in recorded] == [("one.md", 5)], recorded
+        assert "inputs: 1 file, 5 bytes, prepared before the first send" in answer["note"], answer["note"]
+        assert "automatic lineage" not in answer["note"], "a nonempty selection replaces lineage copies"
+    else:
+        assert recorded is None and "inputs: automatic lineage, no record" in answer["note"], answer["note"]
 
 
 @pytest.mark.parametrize("consumer", ["retry", "sweep"])

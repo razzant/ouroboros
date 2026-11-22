@@ -501,6 +501,17 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
     return inputs._replace(selected=inputs.selected if asked else None), None
 
 
+def replayed_lineage(ctx: Any, access: str, investigation: bool, selected: Any) -> Optional[str]:
+    """What a replayed start may say of automatic lineage copies it holds no count of: ``NO_RECORD`` only where it
+    could have received them (a read-only or investigation start with a folderless scratch directory and no
+    nonempty selection, as ``prepare_readonly_inputs`` decides), else None: nothing to say."""
+    from ouroboros.helper_receipt import NO_RECORD
+    from ouroboros.tool_access import folderless_scratch_dir
+
+    possible = (access == "readonly" or investigation) and not selected and folderless_scratch_dir(ctx) is not None
+    return NO_RECORD if possible else None
+
+
 def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List[Dict[str, Any]]] = None,
                             prepared: Optional[List[Dict[str, Any]]] = None, *,
                             thread_folder: Optional[str] = None) -> ReadonlyInputs:

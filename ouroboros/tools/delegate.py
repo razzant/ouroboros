@@ -105,8 +105,8 @@ from ouroboros.delegate_directory import (
     prepare_directory_execution, snapshot_checkout, started_receipt)
 from ouroboros.delegate_registration_policy import minted_root, resolve_registration
 from ouroboros.delegate_documents import NO_DOCUMENTS, attach_selected_documents, attachment_parameters
-from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, start_inputs
-from ouroboros.helper_receipt import NO_RECORD, build as build_receipt, render as render_receipt, start_facts
+from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, replayed_lineage, start_inputs
+from ouroboros.helper_receipt import build as build_receipt, render as render_receipt, start_facts
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
@@ -665,7 +665,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         if definite and requested:
             definite = close_unsent_start(drive, str(ctx.task_id), invocation_id, code)
         if (start_attempted and isinstance(exc, ClaudexorUnavailable)
-                and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body)) is not None):
+                and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body, inputs.selected,
+                                                   _start_lineage(ctx, authority, inputs, recovering))) is not None):
             return accepted
         try:
             cleanup = _retire_orphaned_registration(
@@ -712,7 +713,14 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
                             snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
-                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, inputs.lineage or (NO_RECORD if recovering and not inputs.selected else None)))
+                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, _start_lineage(ctx, authority, inputs, recovering)))
+
+
+def _start_lineage(ctx: ToolContext, authority: "DelegatedRunShape", inputs: Any, recovering: bool) -> Any:
+    """The automatic lineage fact this start may state: its copies' count, else, for a replay, ``NO_RECORD`` only
+    where it could have had copies (``replayed_lineage``)."""
+    return inputs.lineage or (replayed_lineage(ctx, authority.access, authority.investigation, inputs.selected)
+                              if recovering else None)
 
 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,
@@ -739,7 +747,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
     facts["access"] = [("access", authority.access + (
         " (scoped HOME selects native state and credentials, not filesystem confinement)"
         if authority.isolation == "live" else ""), None)]
-    if snapshot_id:
+    if snapshot_id and access != "readonly":  # a plan turn keeps its snapshot for its continuation, writes nothing
         facts["write_root"] = ("private copy (execution_root) of authority_target_root, its changes kept as evidence and "
                                "never applied (integrate_delegated_patch refuses)" if authority.investigation
                                else "private snapshot (execution_root) of authority_target_root: only a diff captured at "

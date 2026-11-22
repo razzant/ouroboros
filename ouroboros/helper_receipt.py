@@ -101,15 +101,17 @@ def _memory_text(view: Any, role: str) -> str:
 
 
 def owner_words_text(task: Mapping[str, Any], *, session: bool) -> str:
-    """How many rows of my human's words the work carries by value, never a reply target (another author's words),
-    A session's work order carries its rows, one per identity
+    """How many rows of my human's words the work carries by value: never a reply target (another author's words)
+    nor a press or card input without words (their act, carried as such). A session's work order carries its rows,
+    one per identity
     (``subagent_work_order.work_order_owner_rows``); a native child reads its room's, origin and marked rows at
     its own start, so those are named as read there."""
-    from ouroboros.owner_words import REPLY_TARGET, task_governing_words
+    from ouroboros.owner_words import OWNER_CARD_INPUT, OWNER_PRESS, REPLY_TARGET, task_governing_words
     from ouroboros.subagent_work_order import work_order_owner_rows
 
     carried = work_order_owner_rows(task) if session else (task_governing_words(task)[0], "", True)
-    rows = [row for row in (carried or ([],))[0] if isinstance(row, Mapping) and row.get("source") != REPLY_TARGET]
+    rows = [row for row in (carried or ([],))[0] if isinstance(row, Mapping)
+            and row.get("source") not in (REPLY_TARGET, OWNER_PRESS, OWNER_CARD_INPUT)]
     told = (_plural(len(rows), "row") + " by value") if rows else (
         "none by value" if carried is not None else "none: declared inputs omit them")
     return told + ("" if session else "; room, origin and marked rows read at its start")
@@ -234,12 +236,16 @@ def run_result_line(ctx: Any, entry: Any, access_evidence: Optional[Mapping[str,
     evidence = access_evidence or {}
     effective = str(evidence.get("effective") or "")
     request = (getattr(entry, "request_event", None) or {}).get("request")
-    requested = str((request.get("access") if isinstance(request, Mapping) else "") or evidence.get("requested")
-                    or getattr(entry, "access", "") or "")
+    # Only what this run recorded: its request body, else its own STARTED access. An older record holds neither, and
+    # the evidence's ``requested`` may then be today's derivation, which nobody asked of this run.
+    requested = str((request.get("access") if isinstance(request, Mapping) else "") or getattr(entry, "access", "")
+                    or "")
     if not effective:
-        differences.append(f"access applied: not disclosed by the engine (requested {requested or 'unknown'}) "
+        differences.append(f"access applied: not disclosed by the engine (requested {requested or 'not on record'}) "
                            f"[{OBSERVED}]")
-    elif requested and effective != requested:
+    elif not requested:
+        differences.append(f"access applied {effective}; this run's original request is not on record [{OBSERVED}]")
+    elif effective != requested:
         differences.append(f"access applied {effective}, requested {requested} [{OBSERVED}]")
     rows = (getattr(entry, "request_event", None) or {}).get("input_files") or []
     if outside := sum(1 for row in rows if isinstance(row, Mapping) and row.get("carrier") == "outside_scope_path"):

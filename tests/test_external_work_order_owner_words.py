@@ -554,7 +554,8 @@ def test_the_receipt_counts_exactly_the_rows_of_my_human_the_work_order_carries(
     origin and marked rows are read at its own start instead of claiming none."""
     from ouroboros.helper_receipt import owner_words_text
     from ouroboros.owner_relay import _stamp_blocks
-    from ouroboros.owner_words import ABSENT_FIELD, FIELD, REPLY_TARGET, ROOM_FIELD, _row
+    from ouroboros.owner_words import (ABSENT_FIELD, FIELD, OWNER_CARD_INPUT, OWNER_PRESS, REPLY_TARGET, ROOM_FIELD,
+                                       _row)
     from ouroboros.subagent_work_order import _owner_words_section
 
     mine = _row("Do it", source="room_message", carrier="room", ts="2026-11-21T10:00:00Z", ref="chat 1 / a")
@@ -567,6 +568,17 @@ def test_the_receipt_counts_exactly_the_rows_of_my_human_the_work_order_carries(
     assert owner_words_text({ABSENT_FIELD: "none_recorded"}, session=True) == "none by value"
     native = owner_words_text({ABSENT_FIELD: "none_recorded"}, session=False)
     assert native == "none by value; room, origin and marked rows read at its start"
+    # A press without words and a card input whose words are unknown are their acts: carried, never counted as words.
+    press = _row("Publish it", source=OWNER_PRESS, carrier="room", ts="2026-11-21T11:00:00Z", ref="chat 1 / d")
+    lost = _row("Card input received. Its submission is unavailable.", source=OWNER_CARD_INPUT, carrier="room",
+                ts="2026-11-21T11:01:00Z", ref="chat 1 / e")
+    typed = _row("Publish it, but shorter", source="owner_quiz_answer", carrier="room", ts="2026-11-21T11:02:00Z",
+                 ref="chat 1 / f")
+    acts = {FIELD: [press, lost]}
+    assert len(_stamp_blocks(_owner_words_section(acts))) == 2, "the work order still carries both acts"
+    assert owner_words_text(acts, session=True) == "none by value"
+    assert owner_words_text(acts, session=False).startswith("none by value;")
+    assert owner_words_text({FIELD: [press, typed]}, session=True) == "1 row by value", "a typed answer is words"
 
 
 def test_a_direct_start_never_counts_stamps_found_in_its_own_text():

@@ -290,6 +290,7 @@ def test_a_copy_failure_is_never_prepared(tmp_path, monkeypatch, failure):
     assert [row["status"] for row in result["input_files"]] == ["prepared", "copy_failed", "not_attempted"]
     assert result["input_files"][1]["detail"] == str(failure)
     assert result["host_code"] == "TOOL_REPORTED_FAILURE", result
+    assert "receipt" not in result and "receipt:" not in json.dumps(result), "a refusal is its own answer"
     assert engine.requests == [] and not custody.pending_invocations(ctx.drive_root)
 
 
@@ -349,7 +350,22 @@ def test_a_lost_start_retry_returns_exactly_the_recorded_receipt_or_none(tmp_pat
     assert retried["status"] == "started" and retried["idempotent_recovery"] is True, retried
     assert engine.requests[0] == engine.requests[1], "the receipt rides custody, never the request body"
     assert ("input_files" in retried) is (selection is not None) and retried.get("input_files", selection) == selection
+    assert "automatic lineage" not in retried["note"], "outside a folderless Project no lineage copies were possible"
     assert not _retained_home(ctx).exists() and not (_drive(ctx) / "delegated_readonly_inputs").exists()
+
+
+def test_a_folderless_replay_that_selected_nothing_names_its_lineage_gap(tmp_path, monkeypatch):
+    """The one start that could have received automatic lineage copies, replayed: their count is not recorded."""
+    ctx, engine = _ctx(tmp_path, monkeypatch, folderless=True)
+    _drive(ctx).mkdir(parents=True, exist_ok=True)
+    (_drive(ctx) / "fact.txt").write_bytes(b"old\n")
+    engine.fail_first = True
+    lost = _start(ctx, input_files=[])
+    retried = _start(ctx, retry_of=lost["pending_invocation_id"], subagent_id=None, access=None, prompt="")
+    assert retried["status"] == "started" and retried["idempotent_recovery"] is True, retried
+    manifest = json.loads((pathlib.Path(engine.requests[0]["scope"]["root"]) / "inputs.json").read_text(encoding="utf-8"))
+    assert manifest and all("selected_path" not in row for row in manifest), "the first send carried lineage copies"
+    assert "inputs: automatic lineage, no record" in retried["note"], retried["note"]
 
 
 def test_continuation_copies_only_its_own_new_selection(tmp_path, monkeypatch):
@@ -1739,7 +1755,9 @@ def test_ordinary_input_respects_presence_in_the_receiving_workspace(tmp_path, m
 
     _presence(ctx, *grants, ("active_workspace", "one.md"))
     refused = control._schedule_task(ctx, **options, input_files=[nested_file, inherited_file])
-    assert '"status": "checked"' in refused and "PRESENCE_RESOURCE_BLOCKED" in refused, refused
+    assert "PRESENCE_RESOURCE_BLOCKED" in refused, refused
+    rows = json.loads(refused.partition("input_files: ")[2])  # each entry keeps its own status
+    assert [(row["path"], row["status"]) for row in rows] == [("nested/one.md", "checked"), ("other.md", "denied")]
     assert not ctx.pending_events and not _retained_home(ctx).exists()
 
     _presence(ctx, ("active_workspace", "."))  # ordinary inherited reads remain available
@@ -2002,6 +2020,7 @@ def test_every_kind_of_helper_answers_with_the_one_receipt(tmp_path, monkeypatch
     assert "read at its start" not in answers[1], "a session's work order carries its rows by value"
     # The session child and the direct start both lie outside a session's folder; the native child reads its copies.
     assert ["outside the session's folder" in answer for answer in answers] == [False, True, True]
+    assert "evidence-only private copy" not in answers[1], "scheduling promises no copy a later start may not make"
     assert started["input_files"] and all(row["carrier"] == "outside_scope_path" for row in started["input_files"])
 
 
