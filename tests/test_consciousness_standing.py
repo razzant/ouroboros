@@ -374,6 +374,15 @@ def test_bodies_are_read_only_for_candidates_and_the_line_stays_compact(tmp_path
     assert "w" * 20 not in line and "chars omitted]" in line and len(line) < 300
 
 
+def test_a_root_is_named_by_its_title_then_its_description_then_its_request(tmp_path):
+    """A root titled "Friday report" is named so, never by the instructions it was given."""
+    request = "Collect the week's numbers and mail them to the board"
+    for fields, named in (({"title": "Friday report"}, "Friday report"), ({}, "do fell"), ({"description": ""}, request)):
+        _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600, text=request, **fields)
+        [work] = standing.fallen_works(tmp_path, now=T0, projects=PROJECTS)
+        assert f", ended 10 min ago: {named}; cause provider_unavailable;" in work.line, work.line
+
+
 def test_no_open_project_reads_nothing_and_no_section_is_printed(tmp_path, monkeypatch):
     from ouroboros import task_store
 

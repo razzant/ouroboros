@@ -208,9 +208,9 @@ def open_projects(projects: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
 
 
 def fallen_line(row: Dict[str, Any], *, project: str, now: float) -> str:
-    """One work, card-like: id, its outcome word and when it ended, its title, its recorded cause, the Continue offer
-    as ``owner_continue.offer_view`` reads it now, the work it continues when its own body records that, its reader;
-    never its summary again (its terminal line carried that once)."""
+    """One work, card-like: id, its outcome word and when it ended, its title (else its description, else its request),
+    its recorded cause, the Continue offer as ``owner_continue.offer_view`` reads it now, the work it continues when its
+    own body records that, its reader; never its summary again (its terminal line carried that once)."""
     from ouroboros.outcomes import recorded_cause
     from ouroboros.owner_continue import offer_view
     from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
@@ -219,7 +219,7 @@ def fallen_line(row: Dict[str, Any], *, project: str, now: float) -> str:
     task_id = str(row.get("task_id") or "")
     stamp = _parse_iso(terminal_time_fact(row).get("occurred_at"))
     ended = f"ended {ago_text(now - stamp)}" if stamp is not None else "end time not recorded"
-    title = _clip_preview(row.get("description") or row.get("text") or "title not recorded", 100)
+    title = _clip_preview(row.get("title") or row.get("description") or row.get("text") or "title not recorded", 100)
     origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
     cause = recorded_cause(row) or "not recorded"
     if origin.get("source"):  # a cancel records its cause as its origin
