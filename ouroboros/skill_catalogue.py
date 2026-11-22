@@ -3,9 +3,10 @@
 Without a name, ``list_skills`` pages compact whole records under its ordinary
 result cap. A name returns that skill's complete summary row plus the
 ``read_file`` arguments of the manifest the loader parsed: instruction text is
-read there, never copied here. Every call is a fresh read; ``snapshot`` only
-detects skills added or removed between pages. A named row longer than the cap
-rides the loop's generic result source like any other tool result.
+read there, never copied here; an unknown name answers ``found: false``. Every
+call is a fresh read; ``snapshot`` only detects skills added or removed between
+pages. A named row longer than the cap rides the loop's generic result source
+like any other tool result.
 
 The one exception to read-on-demand is an instruction skill whose manifest declares
 ``always_in_context``: its reviewed body is copied whole into every context build
