@@ -431,3 +431,13 @@ def test_a_folds_refresh_leaves_every_index_before_its_note_and_retires_or_repla
     retired = view.refresh_compacted_review_context(ctx, deepcopy([*after, current]), floor=1)
     assert stale not in retired and retired.count(current) == 1 and retired[:2] == after[:2]
     assert view.refresh_compacted_review_context(ctx, deepcopy([*messages, note]))[messages.index(stale)] == current
+
+    # The last copy of each identity ends current: [current, stale] before the note gets the current one appended,
+    # which a departure's retirement of superseded copies then keeps; [stale, current] there gets nothing.
+    rest = [m for m in messages if m is not stale]
+    last_stale = [*rest, current, stale, note]
+    appended = view.refresh_compacted_review_context(ctx, deepcopy(last_stale), floor=len(last_stale) - 1)
+    assert appended == [*last_stale, current]
+    assert view.obsolete_review_index_positions(appended) == (len(rest), len(rest) + 1)  # the appended copy stays
+    last_current = [*rest, stale, current, note]
+    assert view.refresh_compacted_review_context(ctx, deepcopy(last_current), floor=len(last_current) - 1) == last_current

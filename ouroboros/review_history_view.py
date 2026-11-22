@@ -1255,8 +1255,8 @@ def refresh_compacted_review_context(ctx: Any, candidate: list, *, selection: An
     replaces that index in place before final measurement, openly changing the
     prefix there (the caller passes no floor when the fold carries the mind's own review
     selection). Unknown typed rows are not reinterpreted or removed. No copy before ``floor``
-    (an ordinary fold's note) is removed or replaced: when all are there and none is current,
-    the current index is appended and the stale ones leave at a departure.
+    (an ordinary fold's note) is removed or replaced, and the last copy of each identity ends
+    current: a stale last copy before the floor gets the current index appended after it.
     """
     families = dict(getattr(ctx, "_pending_review_context", {}) or {})
     for row in candidate:
@@ -1277,11 +1277,11 @@ def refresh_compacted_review_context(ctx: Any, candidate: list, *, selection: An
             continue
         current = desired.pop(identity)
         same = [i for i in indices if candidate[i].get(REVIEW_CONTEXT_INDEX_KEY) == current[REVIEW_CONTEXT_INDEX_KEY]]
-        at = same[-1] if same else indices[-1]
+        at = (same[-1] if same else indices[-1]) if floor is None else indices[-1]  # with a floor: the last copy
         removed.update(i for i in indices if i != at and (floor is None or i >= floor))
-        if not same and (floor is None or at >= floor):
+        if at not in same and (floor is None or at >= floor):
             replacements[at] = current
-        elif not same:
+        elif at not in same:
             desired[identity] = current  # appended at the tail
     return [replacements.get(i, row) for i, row in enumerate(candidate) if i not in removed] + [
         *desired.values(), *(row for row in updates if _review_index_identity(row) is None)]
