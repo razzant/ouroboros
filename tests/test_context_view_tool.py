@@ -648,6 +648,13 @@ def test_a_full_fold_stands_after_the_start_and_releasing_its_note_or_omitting_i
 
     second = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-2", keep_unit_ids=[])
     assert second[:len(request)] == request and _notes(second) == [at, len(request)]
+    from ouroboros.tools.compact_context import receipt_row
+    again = [_own_call("again", {"working_note": "Note written by fold-1.", "keep_unit_ids": []}),
+             {"role": "tool", "tool_call_id": "again", "content": "Working view requested."},
+             receipt_row({"status": "fit_rejected", "fit": {"accepted": False}})]  # a rejected call repeating the note
+    assert not set(range(len(request), len(request) + 3)) & set(standing_rows([*request, *again]))
+    taken = _fold(tmp_path, monkeypatch, ctx, [*request, *again, *_long_read("two")], "fold-7", keep_unit_ids=[])
+    assert taken[:len(request)] == request and "again" not in _calls(taken)
 
     note_id = _unit_at(request, at).unit_id
     released = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-3", keep_unit_ids=[],
@@ -912,6 +919,14 @@ def test_a_source_view_a_fold_restores_after_earlier_rows_that_stand_stays_folda
     assert units[_unit_at(view, source).unit_id]["eligible"] and "stands" not in units[_unit_at(view, source).unit_id]
     third = _fold(tmp_path, monkeypatch, ctx, [*view, *_long_read("three")], "fold-3", keep_unit_ids=[], root=tmp_path)
     assert third[:source] == request and second[source] not in third and "fold-2" not in _calls(third)
+    # A handed-over account arriving in a fold's own round (a late answer's asker notes) ends that fold's rows.
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    from ouroboros.main_context_authority import LATE_ANSWER_NOTES_NAME
+    late = {"role": "user", HOST_CONTEXT_KIND_KEY: LATE_ANSWER_NOTES_NAME, "content": "[Late answer]\nThe asker's notes."}
+    arrived = [*first, late, _facts("round 3")]
+    assert set(range(4, len(first))) <= set(standing_rows(arrived)) and len(first) not in standing_rows(arrived)
+    folded = _fold(tmp_path, monkeypatch, ctx, [*arrived, *_long_read("two")], "fold-4", keep_unit_ids=[], root=tmp_path)
+    assert folded[:len(first)] == first and late not in folded
 
 
 def test_a_folds_leftover_rows_after_an_emergency_record_took_its_call_are_not_start_rows(tmp_path, monkeypatch):
@@ -939,14 +954,14 @@ def test_a_folds_leftover_rows_after_an_emergency_record_took_its_call_are_not_s
 def test_a_reviewer_style_notice_after_an_own_call_stands_nothing_of_that_fold(tmp_path):
     """A fold's own call followed by a notice that is not the host's receipt row (a reviewer session's fold) leaves
     nothing of that fold standing; the same rows with the host's receipt row stand (the other direction)."""
-    from ouroboros.tools.compact_context import RECEIPT_ROW_PREFIX, standing_rows
+    from ouroboros.tools.compact_context import receipt_row, standing_rows
     from tests._working_notes import _note
 
     note = {**_note(tmp_path, "Note written by reviewer."), "role": "assistant"}
     rows = [*_start(), note, _own_call("reviewer", {"working_note": "Note written by reviewer."}),
             {"role": "tool", "tool_call_id": "reviewer", "content": "Working view requested."}]
     reviewer = [*rows, {"role": "user", "content": "[Review context view]\n{}"}, _facts("round 3")]
-    host = [*rows, {"role": "user", "content": RECEIPT_ROW_PREFIX + "\n{}"}, _facts("round 3")]
+    host = [*rows, receipt_row({"status": "applied"}), _facts("round 3")]
     assert sorted(standing_rows(reviewer)) == [2]
     assert sorted(standing_rows(host)) == [2, *range(4, len(host))]
 

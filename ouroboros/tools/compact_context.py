@@ -23,6 +23,14 @@ _NOTE_REQUIRED = ("authored_note_required: supply your own working_note "
 RECEIPT_ROW_PREFIX = "[Context view receipt]"
 
 
+def receipt_row(notice: dict) -> dict:
+    """The host's receipt row: ``RECEIPT_ROW_PREFIX``, a newline, the notice JSON (its first key ``status``)."""
+    return {"role": "user", "content": RECEIPT_ROW_PREFIX + "\n" + json.dumps(notice, ensure_ascii=False)}
+
+
+_APPLIED_RECEIPT = receipt_row({"status": "applied"})["content"][:-1]  # what an applied fold's receipt row begins with
+
+
 def _own_call_arguments(messages: list, index: int):
     """The arguments of the assistant row at ``index`` when its only call is ``compact_context`` and the next row is
     that call's result, else None."""
@@ -67,7 +75,7 @@ def _handed_over(row) -> bool:
                                                                                    LATE_ANSWER_NOTES_NAME}
 
 
-def standing_rows(messages: list, released=()) -> dict:
+def standing_rows(messages: list) -> dict:
     """Positions that stand through an ordinary fold (default selectors), each with the position of the note whose
     own rows they are (None for the start). One walk; nothing is hashed and only the calls the walk reaches are
     parsed (it runs whenever a round's facts row is written).
@@ -75,10 +83,10 @@ def standing_rows(messages: list, released=()) -> dict:
     The start: every row between the assignment and the model's first answer (or a host source view, whichever comes
     first), typed or not, except capsules and the accounts handed over for the mind to fold (``_handed_over``), which
     an ordinary fold takes as before. Then, in order: a note (a capsule that is not a host source view) is
-    remembered by its text unless its position is in ``released``; a start row, owner words or a row that is no unit
+    remembered by its text; a start row, owner words or a row that is no unit
     continue the walk; a lone ``compact_context`` call with its result whose ``working_note`` is a remembered note's
     text is that note's own call: when the rows after its result, up to the next assistant row, capsule or handed-over
-    account, hold the host's receipt row (``RECEIPT_ROW_PREFIX``), the call, its result and those rows (the input of
+    account, hold the host's receipt row of an applied fold (``receipt_row``), the call, its result and those rows (the input of
     the request sent after that fold) stand, owned by that note. A fold that left something foldable between its note
     and its call, or shared its row with another call, leaves nothing that stands, and neither does a reviewer
     session's fold, whose notice is not the host's receipt row. Anything else a full fold takes (a tool unit, prose,
@@ -100,7 +108,7 @@ def standing_rows(messages: list, released=()) -> dict:
         if meta is not None:
             if meta.get("retention") == "source_view":
                 break
-            if i not in released and _note_body(row).strip():
+            if _note_body(row).strip():
                 notes[_note_body(row)] = i
         elif not (i in standing or row.get(HOST_CONTEXT_KIND_KEY) in OWNER_ROW_KINDS):
             calls = row.get("role") == "assistant" and bool(row.get("tool_calls"))
@@ -111,7 +119,7 @@ def standing_rows(messages: list, released=()) -> dict:
                 stop = owner is not None and next((j for j in range(i + 2, len(messages)) if messages[j].get(
                     "role") == "assistant" or _note_meta(messages[j]) is not None or _handed_over(messages[j])),
                     len(messages))
-                if owner is None or not any(str(messages[j].get("content") or "").startswith(RECEIPT_ROW_PREFIX)
+                if owner is None or not any(str(messages[j].get("content") or "").startswith(_APPLIED_RECEIPT)
                                             for j in range(i + 2, stop)):
                     break  # what a full fold takes: no later rows stand
                 standing.update(dict.fromkeys(range(i, stop), owner))

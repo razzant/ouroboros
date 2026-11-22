@@ -734,8 +734,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
         if exceptions:
             notice["request_exceptions"] = exceptions
-        from ouroboros.tools.compact_context import RECEIPT_ROW_PREFIX
-        with_receipt = [*candidate, {"role": "user", "content": RECEIPT_ROW_PREFIX + "\n" + json.dumps(notice, ensure_ascii=False)}]
+        from ouroboros.tools.compact_context import receipt_row
+        with_receipt = [*candidate, receipt_row(notice)]
         try:
             final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
             for detail in ("request_exceptions", "bodies_removed", "notes_kept"):
@@ -744,8 +744,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 notice[f"{detail}_omitted"] = len(notice.pop(detail))  # an inline list (no address); notes stay in view
                 if detail == "bodies_removed":
                     notice.pop("restore_checkpoint", None)
-                with_receipt = [*candidate, {"role": "user", "content": RECEIPT_ROW_PREFIX + "\n"
-                    + json.dumps(notice, ensure_ascii=False)}]
+                with_receipt = [*candidate, receipt_row(notice)]
                 final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
         except Exception as exc:
             final_fit = {"accepted": False, "reason": type(exc).__name__}
