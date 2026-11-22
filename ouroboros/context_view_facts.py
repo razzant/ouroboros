@@ -174,8 +174,9 @@ def low_start_episode(root, plan, mode, task_id, send):
     moves between rooms. Every other start (a delegated child or nanny, the owner's Low or Nano, an unknown window, a
     held room in a lower mode, as a voice envelope fitted below Max) leaves the file as it is. The single episode
     written before periods (a top-level ``since``) holds no period: the first lowered start replaces it. Residual, by
-    design: a period whose opener room never starts again stays open, so later starts of its cause send no line; the
-    work's own facts and task card always say Low and the cause. The file is rewritten under its lock in the terminal
+    design: a period stays open until a start of its opener's room and kind holds Max (a room that never starts again,
+    or keeps starting crowded, keeps it open), so later starts of its cause send no line; the work's own facts and task
+    card always say Low and the cause. The file is rewritten under its lock in the terminal
     outbox's failure domain; ``send`` runs inside that lock and a period opens only when it queued the line."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room") or {}
