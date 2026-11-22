@@ -499,7 +499,8 @@ class PlaceMixin:
             return payload
         dropped = "accessibility" in text.lower() and "not enabled" in text.lower()
         untyped = re.findall(r"Unable to get key code for (\S+)", text)
-        if untyped or dropped:
+        unread = not untyped and not dropped and "keyboard layout could not be read" in text
+        if untyped or dropped or unread:
             payload.pop("observed_effect", None)
             payload["ok"] = False
             method = payload.get("method")
@@ -524,6 +525,8 @@ class PlaceMixin:
                          "not sent: switch the keyboard layout (a Latin one for Latin keys), type the text with "
                          "type_text, or use the app's own commands")
                 payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
+            elif unread:  # no layout data: nothing is known about the keys, which is not "no key gives it"
+                payload.update({"reason": "layout_unread", "error": f"the active keyboard layout could not be read, so the {what} was not sent"})
             else:
                 payload.update({"reason": "permission_denied", **permission_refusal("post_events"),
                                 "permission": {"accessibility": "untrusted", "source": "helper stderr"},

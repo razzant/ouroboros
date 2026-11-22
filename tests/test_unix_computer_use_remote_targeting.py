@@ -413,13 +413,39 @@ def test_a_command_longer_than_a_host_command_line_goes_on_ssh_stdin(tmp_path, m
     impl._ssh_run(conn, "echo short")
     long_command = "printf %s 'line\nnext' " + "x" * 140_000
     impl._ssh_run(conn, long_command)
-    (short_argv, short_input), (long_argv, long_input) = seen
+    impl._ssh_run(conn, long_command, raw=True)
+    (short_argv, short_input), (long_argv, long_input), (raw_argv, raw_input) = seen
     assert short_argv[-1] == "echo short" and short_input is None
-    assert long_argv[-1] == "owner@mac.invalid" and long_input == long_command.encode("utf-8") and long_command not in long_argv
+    # The skill's own commands go to /bin/sh whatever the account's shell (tcsh cannot run them); -T: no terminal.
+    assert long_argv[:2] == ["ssh", "-T"] and long_argv[-1] == "/bin/sh -s" and long_input == long_command.encode("utf-8")
+    assert long_command not in long_argv
+    # A user's own script goes to the account's own shell, not as a login, its stdin closed.
+    assert raw_argv[:2] == ["ssh", "-T"] and raw_argv[-1] == remote._RAW_SCRIPT_RUNNER and raw_input == long_command.encode("utf-8")
     quotes = "printf %s " + '"' * 5000 + " " + "q" * 23_900
     dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "owner@mac.invalid"]
-    assert len(quotes) < 30_000 and remote._fits_command_line([*dest, quotes])  # a POSIX host carries it
+    assert len(quotes) < 30_000 and remote._fits_command_line([*dest, quotes], windows=False)  # a POSIX host carries it
     assert not remote._fits_command_line([*dest, quotes], windows=True) and remote._fits_command_line([*dest, "echo short"], windows=True)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("sh"), reason="the runner is a POSIX shell command")
+@pytest.mark.parametrize("login_shell", ["sh", "zsh", "tcsh"])
+def test_a_raw_script_runs_in_the_accounts_shell_with_its_stdin_closed(tmp_path, login_shell):
+    """The runner line as the account's login shell parses it (sh, zsh, tcsh: single quotes mean the same), then sh
+    reads the whole script and runs it in $SHELL: a command reading stdin gets nothing, so the script's later lines
+    still run, and the account shell's own syntax works (zsh's ${(U)s})."""
+    shell = shutil.which(login_shell)
+    if not shell:
+        pytest.skip(f"{login_shell} is not installed here")
+    remote = sys.modules[load_plugin().__name__ + ".remote"]
+    script = "echo one; cat; echo two; exit 7\n"
+    done = subprocess.run([shell, "-c", remote._RAW_SCRIPT_RUNNER], input=script.encode("utf-8"), capture_output=True,
+                          timeout=20, env={"PATH": "/usr/bin:/bin", "SHELL": shell})
+    assert (done.returncode, done.stdout.decode()) == (7, "one\ntwo\n"), (login_shell, done)
+    zsh = shutil.which("zsh")
+    if login_shell == "zsh" and zsh:
+        upper = subprocess.run([shell, "-c", remote._RAW_SCRIPT_RUNNER], input=b's=abc; echo ${(U)s}\n', capture_output=True,
+                               timeout=20, env={"PATH": "/usr/bin:/bin", "SHELL": zsh})
+        assert upper.stdout.decode() == "ABC\n", upper
 
 
 def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):

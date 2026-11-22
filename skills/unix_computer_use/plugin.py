@@ -906,7 +906,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                     + scale_note
                     + (" Multi-display scale is approximate; prefer ax_tree marks." if approx else "")
                 )
-        return _json(mac_input.proved(result, "screen_recording") if plat == "macos" else result)
+        return _json(mac_input.proved(result, "screen_recording") if display.get("screen_recording") == "granted" else result)
 
     # ------------------------------------------------------------------
     # pointer actions
@@ -1132,7 +1132,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
         if plat == "macos" and _which("osascript"):
             # Each grapheme is one key event pair carrying its own string (#63): any layout, any script; the receipt
             # says so (method, chars_sent, override_only). The program has its own deadline below the helper timeout.
-            seconds = min(170, 10 + len(text) * (max(0, int(interval_ms or 0)) + 10) // 1000)
+            seconds = mac_input.type_seconds(text, interval_ms)
             cmd = mac_input.argv([{"op": "type", "text": text, "interval_ms": max(0, int(interval_ms or 0))}],
                                  budget_ms=seconds * 1000 - 2000)
             return self._exec_input(cmd, timeout=seconds, app=app, raise_policy=raise_policy, connection=connection)
@@ -1266,7 +1266,8 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
             if refusal.get("reason") == "stopped" and len(steps) > 1:
                 refusal.update(steps_done=0, steps_total=len(steps), keys=combo)
             return self._key_result(refusal)
-        if len(prepared) > 1 and (unknown := self._unresolved_keys(prepared, connection)):  # the target's layout, before any step
+        looked = len(prepared) > 1 and mac_input.resolve_argv(prepared)[0] is not None  # a lookup between switch and step 1
+        if looked and (unknown := self._unresolved_keys(prepared, connection)):  # the target's layout, before any step
             if (ctx.get("target") or {}).get("activated"):
                 unknown.update(observed_effect=True, activation_done=True)  # the switch ran before the refusal
             unknown = self._finish(unknown, ctx, **({"after": None} if connection[0] != "local" else {}))
@@ -1275,7 +1276,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
             return self._key_result(self._send_key(prepared[0], connection, ctx=ctx, raise_policy=raise_policy, keys=combo, ask_stop=True))
         results: list[dict[str, Any]] = []
         for index, command in enumerate(prepared):
-            results.append(self._send_key(command, connection, ctx=ctx, recheck=index > 0, ask_stop=True,
+            results.append(self._send_key(command, connection, ctx=ctx, recheck=index > 0 or looked, ask_stop=True,
                                            raise_policy=raise_policy, keys=steps[index]))
             if not results[-1].get("ok"):
                 break
@@ -1574,7 +1575,7 @@ def register(api: Any) -> None:
     api.register_tool("mouse_up", impl.mouse_up, description="Release a held mouse button at the pointer without coordinates or observation_id. With screenshot-space coordinates, observation_id is required unless raw=true. Never changes which app is in front.", schema={"type": "object", "properties": {**_xy, "button": {"type": "string", "default": "left"}}}, timeout_sec=60)
     api.register_tool("cursor_position", lambda: impl.cursor_position(), description="Report the current pointer position in native input coordinates.", schema={"type": "object", "properties": {}}, timeout_sec=10)
     api.register_tool("type_text", impl.type_text, description="Type text into the focused field of the frontmost app, or of app=. raise_policy=never requires app already in front and never activates it. On a local or SSH Mac text goes as Unicode key events in any layout (method, chars_sent, override_only say how); via=paste writes the clipboard and pastes there instead (long text, or an app that ignores typed text; the clipboard is replaced); an OSWorld guest pastes such text through its clipboard by itself.", schema={"type": "object", "properties": {"text": {"type": "string"}, "interval_ms": {"type": "integer", "default": 0}, **_input_app, "via": {"type": "string", "default": ""}}, "required": ["text"]}, timeout_sec=180)
-    api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); on a Mac, Command plus one character presses the key giving it under Command (cmd+g, not a layout's own cmd+п), other combos the key giving the character alone or with Shift/Option, media names (play-pause, volume-up, mute, brightness-up, keys-light-up, ...) the system key; all steps and their characters are validated before activation/input and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
+    api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); on a Mac, Command plus one character presses the key giving it under Command (cmd+g, not a layout's own cmd+п), other combos the key giving the character alone or with Shift/Option, media names (play-pause, volume-up, mute, brightness-up, keys-light-up, ...) the system key; all steps are validated before activation/input, their characters after the switch in the target's layout and before the first key and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
     api.register_tool("hold_key", impl.hold_key, description="Hold a key or modifier combo for a duration (50-10000 ms). " + _targeted, schema={"type": "object", "properties": {"keys": {"type": "string"}, "duration_ms": {"type": "integer", "default": 500}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
     api.register_tool("scroll", impl.scroll, description="Scroll 1-20 wheel steps; app= acts in that app (verified first, else nothing is sent). up/down/left/right (Wayland: up/down); on macOS the window under the pointer receives the wheel, app= only checks who is in front (move the pointer over the window first). The result names who was in front at dispatch.", schema={"type": "object", "properties": {"clicks": {"type": "integer", "default": 3}, "direction": {"type": "string", "default": "down"}, **_input_app}}, timeout_sec=90)
     api.register_tool("wait", impl.wait, description="Sleep up to 10s so the UI can settle before the next observation.", schema={"type": "object", "properties": {"ms": {"type": "integer", "default": 500}}}, timeout_sec=12)

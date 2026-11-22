@@ -32,6 +32,11 @@ from . import mac_input
 from .macos_native import parse_info, parse_list, resolve
 from .place import parse_wmctrl_rows, parse_x11_front, window_id_int, x11_resolve, x11_same
 
+# Run by the account's login shell, whatever it is (single quotes mean the same to sh, zsh, bash and tcsh): sh reads
+# the whole script from stdin, then hands it to the account's shell as one -c argument with stdin closed.
+_RAW_SCRIPT_RUNNER = """/bin/sh -c 'script=$(cat); exec "${SHELL:-/bin/sh}" -c "$script" </dev/null'"""
+
+
 def _fits_command_line(argv: list[str], windows: bool = os.name == "nt") -> bool:
     """Whether the host can start this argv: on Windows the command line the launcher builds (quoting and escaping
     included), measured in UTF-16 units against CreateProcess's 32,767 with its terminator; elsewhere one argument
@@ -809,14 +814,17 @@ class RemoteBackends:
         src = f"{dest}:{remote_path}"
         return ["-P", str(port), src] if port != 22 else [src]
 
-    def _ssh_run(self, conn: dict[str, Any], command: str, *, timeout: int = 30) -> tuple[int, str, str]:
+    def _ssh_run(self, conn: dict[str, Any], command: str, *, timeout: int = 30, raw: bool = False) -> tuple[int, str, str]:
         """One remote command through the user's ssh, as its argument while the host's command line can carry it, else
-        on ssh's stdin to the account's own login shell (no remote command: the same shell that would run it, so a
-        raw ``remote_exec`` keeps its syntax), as UTF-8 bytes (a text pipe on Windows would turn LF into CRLF)."""
+        on ssh's stdin (``-T``, as UTF-8 bytes: a text pipe on Windows would turn LF into CRLF). The skill's own POSIX
+        commands are read by /bin/sh whatever the account's shell (tcsh cannot run them); a ``raw`` remote_exec script is
+        read first and then run by the account's own shell, not as a login, with its stdin closed so that a command
+        in it cannot swallow the rest of the script."""
         dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self._ssh_destination(conn)]
         if _fits_command_line([*dest, command]):
             return self._run_cmd([*dest, command], timeout=timeout)
-        proc = subprocess.run(dest, input=command.encode("utf-8"), capture_output=True, timeout=timeout)
+        remote = _RAW_SCRIPT_RUNNER if raw else "/bin/sh -s"
+        proc = subprocess.run(["ssh", "-T", *dest[1:], remote], input=command.encode("utf-8"), capture_output=True, timeout=timeout)
         return int(proc.returncode), (proc.stdout or b"").decode("utf-8", "replace"), (proc.stderr or b"").decode("utf-8", "replace")
 
     def _ssh_macos_screenshot(self, conn: dict[str, Any], *, max_width: int, max_height: int,
@@ -948,7 +956,8 @@ class RemoteBackends:
                 conn, typewrite_code, note={"method": "typewrite", "clipboard_fallback": True}, timeout=60, target=target, ctx=ctx,
                 raise_policy=raise_policy,
             )
-        return self._remote_pyautogui(conn, typewrite_code, note={"method": "typewrite"}, timeout=60, target=target,
+        timeout = max(60, mac_input.type_seconds(text, interval_ms)) if backend == "ssh_macos" else 60
+        return self._remote_pyautogui(conn, typewrite_code, note={"method": "typewrite"}, timeout=timeout, target=target,
                                       ctx=ctx, raise_policy=raise_policy)
 
     def remote_exec(self, *, command: str, timeout: int = 60) -> str:
@@ -975,7 +984,7 @@ class RemoteBackends:
                     payload["error"] = err
                 return self._json_text(payload)
             if backend == "ssh_macos":
-                rc, stdout, stderr = self._ssh_run(conn, cmd, timeout=timeout)
+                rc, stdout, stderr = self._ssh_run(conn, cmd, timeout=timeout, raw=True)
                 return self._json_text({"ok": rc == 0, "backend": backend, "returncode": rc, "output": stdout, "error": stderr})
         except Exception as exc:  # noqa: BLE001
             return self._json_text({"ok": False, "backend": backend, "error": f"{type(exc).__name__}: {exc}"})

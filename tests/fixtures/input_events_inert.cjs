@@ -23,10 +23,11 @@ const CLASS = (code) => ([123, 124, 125, 126].includes(code) ? 0xa00000
 // as JXA's bridge gives it; a C function bound with void* would receive NULL from one. Only ObjC.castObjectToRef
 // turns it into the pointer: the stand-ins of void* parameters refuse a wrapper outright.
 const wrapper = (object) => ({kind: "ObjectSpecifier", wrapped: object, isNil: () => object === null});
+const nullRef = () => ({kind: "NullRef"});
 
 function trace(program, scenario) {
   const t = {calls: [], log: [], posted: [], delays: [], error: null, returned: null};
-  const owned = [], held = new Set(), bound = new Set(), count = {event: 0, post: 0};
+  const owned = [], bridged = [], held = new Set(), bound = new Set(), count = {event: 0, post: 0};
   let clock = 0;
   const fault = (what) => [].concat(scenario.fail || []).includes(`${what}:${count[what]++}`); // one or a list
   const own = (kind, fields) => { const object = {kind, alive: true, fields: {}, ...fields}; owned.push(object); return object; };
@@ -67,16 +68,28 @@ function trace(program, scenario) {
     CFDataGetBytePtr: (data) => ({kind: "uchr", owner: live(data.owner, "TISInputSource", "CFDataGetBytePtr")}),
     LMGetKbdType: () => 198,
     UCKeyTranslate: (layout, code, action, mods, kbdType, options, dead, max, length, text) => {
-      const {planes, dead: deadKeys} = live(layout.owner, "TISInputSource", "UCKeyTranslate on layout data").layout;
+      const {planes, dead: deadKeys, arming} = live(layout.owner, "TISInputSource", "UCKeyTranslate on layout data").layout;
       const isDead = options === 0 && ((deadKeys || {})[mods] || []).includes(code);
+      // "arming": a key that types its character and leaves a composition armed (a nonzero dead-key state).
+      if (options === 0 && (isDead || ((arming || {})[mods] || []).includes(code))) dead.bytes.writeUInt32LE(1, 0);
       const out = isDead ? "" : ((planes[mods] || {})[code] || "").slice(0, max);
       Buffer.from(out, "utf16le").copy(text.bytes);
       length.bytes[0] = out.length;
       return 0;
     },
     CFRelease: (object) => {
+      if (object && object.bridged) { // an event the bridge handed out: released only as often as it was retained
+        if (object.retains <= 0) throw new Error("CFRelease of a system key event never retained (an over-release)");
+        object.retains -= 1;
+        return;
+      }
       if (!owned.includes(object)) throw new Error(`CFRelease of ${object ? object.kind + ", not its own" : "NULL"}`);
       live(object, object.kind, "CFRelease").alive = false;
+    },
+    CFRetain: (object) => {
+      if (!object || !object.bridged || !object.alive) throw new Error("CFRetain of something not a live bridged event");
+      object.retains += 1;
+      return object;
     },
     CGPreflightPostEventAccess: () => scenario.post !== false,
     CGEventSourceCreate: (state) => { t.source_state = state; return own("CGEventSource", {}); },
@@ -128,8 +141,12 @@ function trace(program, scenario) {
           if (type !== 14 || subtype !== 8 || data2 !== -1 || typeof at.x !== "number") throw new Error("not a system-defined key event");
           if (fault("event")) return null;
           const cg = {kind: "CGEvent", alive: true, fields: {}, type: "system", n: data1 >> 16, down: ((data1 >> 8) & 0xff) === 0xa,
-                      flags, subtype};
-          return {isNil: () => false, get CGEvent() { return wrapper(cg); }};
+                      flags, subtype, bridged: true, retains: 0};
+          bridged.push(cg);
+          // As measured on macOS 26.4: the property hands out a Ref holding NULL (no isNil; a void* call with it is
+          // refused here), the selector hands out the object, and only castObjectToRef of the object is the pointer.
+          return {isNil: () => false, get CGEvent() { return nullRef(); },
+                  performSelector: (sel) => (sel === "CGEvent" ? wrapper(cg) : wrapper(null))};
         },
     },
     NSScreen: {screens: {objectAtIndex: (i) => ({frame: {origin: {x: 0, y: 0}, size: {width: 1728, height: scenario.screen_height || 1117}}})}},
@@ -143,6 +160,7 @@ function trace(program, scenario) {
     },
     castRefToObject: (ref) => { live(ref.owner, "TISInputSource", "castRefToObject"); return string(ref.value); },
     castObjectToRef: (object) => {
+      if (object && object.kind === "NullRef") return object;  // a Ref already: the cast keeps its NULL
       if (!object || object.kind !== "ObjectSpecifier") throw new Error("castObjectToRef of something not an object wrapper");
       return object.wrapped;
     },
@@ -153,7 +171,9 @@ function trace(program, scenario) {
     if (Object.hasOwn(Foundation, name)) return Foundation[name];
     if (!bound.has(name)) throw new Error(`$.${name} without ObjC.bindFunction`);
     return (...args) => {
-      if (args.some((arg) => arg && arg.kind === "ObjectSpecifier")) throw new Error(`${name}: an object wrapper where a pointer goes (NULL in JXA)`);
+      if (args.some((arg) => arg && (arg.kind === "ObjectSpecifier" || arg.kind === "NullRef"))) {
+        throw new Error(`${name}: an object wrapper or a NULL Ref where a pointer goes (the call would act on nothing)`);
+      }
       t.calls.push(name); clock += scenario.tick_ms || 0; return C[name](...args);
     };
   }});
@@ -168,7 +188,9 @@ function trace(program, scenario) {
     t.error = error && error.message !== undefined ? String(error.message) : String(error);
   }
   t.held = [...held];
-  t.leaked = owned.filter((object) => object.alive).map((object) => object.kind);
+  t.leaked = owned.filter((object) => object.alive).map((object) => object.kind)
+    .concat(bridged.filter((object) => object.retains > 0).map(() => "system CGEvent (retained, never released)"));
+  t.retained = bridged.map((object) => object.retains);
   return t;
 }
 

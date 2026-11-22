@@ -97,6 +97,8 @@ def test_text_goes_one_grapheme_per_event_pair_in_any_layout():
     assert answer["override_only"] == sum(1 for r in downs if r["key"] == 0x5A), "characters without a key of their own"
     assert all(r["flags"] in (0, SHIFT) for r in abc["posted"]), "the Option the keyboard holds never rides along"
     assert 0.007 in abc["delays"] and all(r["tap"] == 1 and r["tag"] == TAG for r in abc["posted"])
+    # One pause per grapheme, after its key up: a real delay() costs several ms (the hosted runs of 21.11.2026).
+    assert len(abc["delays"]) == answer["chars_total"], abc["delays"]
     # Latin under a Russian layout: no key gives it, the string still goes (the former helper typed nothing here).
     assert [r["unicode"] for r in russian["posted"] if r["down"]] == ["H", "i"]
     assert json.loads(russian["returned"])["override_only"] == 2
@@ -149,13 +151,28 @@ def test_system_keys_and_option_characters_are_keys_again():
                               {"spec": spec({"op": "hold", "mods": [], "system": 0, "ms": 150})},
                               {"spec": spec({"op": "keys", "mods": ["cmd"], "char": "Å"}), "layout": ABC})
     for run in (play, held, option):
-        clean(run)
+        clean(run)  # a system event retained and not released, or released once too often, fails here
+    # The bridge hands each -CGEvent out autoreleased: the program retains its own reference and releases it once.
+    assert play["calls"].count("CFRetain") == 2 and play["retained"] == [0, 0], play
     assert [(r["system"], r["down"], r["flags"], r["subtype"], r["tap"], r["tag"]) for r in play["posted"]] == [
         (16, True, 0xa00, 8, 0, TAG), (16, False, 0xb00, 8, 0, TAG)]
     assert [r["system"] for r in held["posted"]] == [0, 0] and 0.15 in held["delays"]
     assert [(r["key"], r["down"]) for r in option["posted"]] == [(55, True), (56, True), (58, True), (0, True), (0, False),
                                                                  (58, False), (56, False), (55, False)]
     assert option["posted"][3]["flags"] == COMMAND | SHIFT | OPTION
+
+
+def test_a_key_that_arms_a_composition_never_stands_for_its_character():
+    """A custom layout can type a character and leave a composition armed (a nonzero dead-key state): that key is not
+    the character's key. Typing it goes on the neutral key with its string; a chord naming it is refused."""
+    arming = {"id": "custom", "planes": {0: {39: "'", 0: "a"}}, "arming": {0: [39]}}
+    typed, chord = runs({"spec": spec({"op": "type", "text": "'"}), "layout": arming},
+                        {"spec": spec({"op": "keys", "mods": ["ctrl"], "char": "'"}), "layout": arming})
+    clean(typed)
+    assert [(r["key"], r["unicode"]) for r in typed["posted"] if r["down"]] == [(0x5A, "'")]
+    assert chord["posted"] == [] and chord["log"][0].startswith("Unable to get key code for '"), chord
+    plain, = runs({"spec": spec({"op": "type", "text": "a"}), "layout": arming})
+    assert [r["key"] for r in plain["posted"]] == [0, 0], "a key that arms nothing keeps its character"
 
 
 def test_a_dead_key_never_stands_for_its_character_and_a_crlf_is_one_return():
@@ -200,13 +217,22 @@ def test_a_character_counts_when_its_key_goes_down_and_each_press_has_its_own_re
     assert late["override_only"] == 0 and late["chars_sent"] == 1, "the emoji never went out, so it is not counted"
 
 
-def test_a_sequence_resolves_its_characters_without_the_right_to_post_and_posts_nothing():
-    found, = runs({"spec": spec({"op": "resolve", "chars": ["å", "Ж", "a"], "command_chars": ["g", "п"]}), "layout": ABC,
-                   "post": False})
-    assert found["posted"] == [] and found["error"] is None and found["leaked"] == []
-    assert json.loads(found["returned"]) == {"layout": "com.apple.keylayout.ABC", "post_events": False, "missing": ["Ж"],
-                                             "missing_command": ["п"]}, "the grant is reported beside the keys, read without a prompt"
-    assert "CGEventSourceCreate" not in found["calls"], "no event exists"
+def test_a_sequence_lookup_answers_the_grant_first_then_the_keys_and_posts_nothing():
+    """Without the right to post the lookup answers that alone and never reads the layout; with it, the keys no layout
+    key gives; a layout without key data is said as unread, never as "no key gives it"."""
+    lookup = spec({"op": "resolve", "chars": ["å", "Ж", "a"], "command_chars": ["g", "п"]})
+    denied, found, unread = runs({"spec": lookup, "layout": ABC, "post": False}, {"spec": lookup, "layout": ABC},
+                                 {"spec": lookup, "layout": {"id": "com.apple.inputmethod.Kotoeri", "planes": None}})
+    for run in (denied, found, unread):
+        assert run["posted"] == [] and run["error"] is None and run["leaked"] == [] and "CGEventSourceCreate" not in run["calls"], run
+    assert json.loads(denied["returned"]) == {"post_events": False}
+    assert not any(call.startswith("TIS") for call in denied["calls"]), "the grant answers before any layout read"
+    assert json.loads(found["returned"]) == {"layout": "com.apple.keylayout.ABC", "post_events": True, "missing": ["Ж"],
+                                             "missing_command": ["п"]}
+    assert json.loads(unread["returned"]) == {"post_events": True, "layout_unread": True}
+    chord, = runs({"spec": spec({"op": "keys", "mods": ["ctrl"], "char": "a"}), "layout": {"id": "x", "planes": None}})
+    assert chord["posted"] == [] and chord["log"] == [
+        "WARNING: the active keyboard layout could not be read (no layout data); nothing was sent"], chord
 
 
 def test_without_the_right_to_post_nothing_is_posted_and_reading_the_pointer_needs_no_right():
@@ -285,6 +311,9 @@ def test_the_argv_hands_one_ascii_spec_locally_and_the_source_over_ssh():
     assert mac_input.shown(remote)[3] == "-e input_events.js" and mac_input.shown(["xdotool", "key"]) == ["xdotool", "key"]
     assert mac_input.position_of('{"x":3,"y":-4}\n') == {"x": 3, "y": -4, "coordinate_space": "input (macOS logical points)"}
     assert mac_input.position_of("pos 3 4") == {} and mac_input.position_of(None) == {}
+    # The typing budget is the measured per-character rate with room (40 ms), plus the fixed start.
+    assert mac_input.type_seconds("x" * 600) == 10 + 600 * 40 // 1000 and mac_input.type_seconds("x" * 9000) == 170
+    assert mac_input.type_seconds("x" * 100, interval_ms=60) == 10 + 100 * 100 // 1000
 
 
 def test_the_remote_snippets_translate_to_the_same_operations():

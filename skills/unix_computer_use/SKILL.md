@@ -405,7 +405,9 @@ Input receipts (the same contract on every backend):
   sequence looks all its characters up in one call that posts nothing, after
   any switch to `app=` and before its first step, so in the target's own layout
   `key("return Ж")` on ABC sends no Return; a lookup that cannot be read is
-  `layout_unread` and sends nothing; a switch before it keeps its mark); either refusal posts
+  `layout_unread` and sends nothing, as is a layout without key data; a switch
+  before it keeps its mark, and the front is read again after the lookup, so a
+  window the owner switched to meanwhile gets no key); either refusal posts
   nothing, warns on stderr and exits 0. Such receipts are `ok: false` with
   `reason: permission_denied` / `untypable_characters`, no input mark and, for
   the input and Command chord programs, `dispatched: false` (a completed
@@ -420,7 +422,9 @@ Input receipts (the same contract on every backend):
   asks the system to show a grant prompt. A successful answer names the
   permission the call proved it holds, `permissions_available`: `post_events`
   for posted input (local or on the SSH Mac), `screen_recording` for a macOS
-  screenshot, `accessibility` for `ax_tree` and `element_act`. A local
+  screenshot whose preflight read `granted` (an unread preflight still captures
+  but proves nothing) and for a window capture, `accessibility` for `ax_tree`
+  and `element_act`. A local
   display `screenshot` without the Screen Recording grant (read with the display
   list) is refused the same way, `note: "nothing was captured"`, instead of
   returning the wallpaper. With `app=` the switch runs before the input program
@@ -553,8 +557,10 @@ Backend matrix (honest limitations):
   The receipt says how (see "Input receipts"). A command the host could not
   start as an argument (Windows: the quoted command line over 32,767 UTF-16
   units; elsewhere an argument over 128 KiB) reaches an SSH Mac as UTF-8 bytes
-  on ssh's stdin, read by the account's own login shell, so `remote_exec` keeps
-  its shell syntax.
+  on ssh's stdin (`ssh -T`): the skill's own POSIX commands are read by
+  `/bin/sh` whatever the account's shell (tcsh included), and a `remote_exec`
+  script is read whole and then run by the account's own shell, not as a
+  login, with its stdin closed, so it keeps its shell's syntax.
   `key(cmd+v)` sends only the shortcut, without changing the clipboard.
   `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
   UTF-8 and told so whatever locale the process inherited, as over SSH) and

@@ -67,7 +67,9 @@ class CaptureMixin:
         if not displays:
             reason = res.get("error") or "no display list"
             return {"display_unread": reason, **({"app_display_unread": reason} if query else {})}
-        chosen = {**next((d for d in displays if d.get("main")), displays[0]), "selected_by": "default"}
+        # The grant as the display list read it travels with the display: only "granted" proves it.
+        chosen = {**next((d for d in displays if d.get("main")), displays[0]), "selected_by": "default",
+                  "screen_recording": res.get("screen_recording")}
         if query:
             tree = self._native("observe", json.dumps({"app": query, "max_nodes": 1, "timeout_ms": 1500}), timeout=15)
             target = tree.get("target")
@@ -78,7 +80,7 @@ class CaptureMixin:
                 cx, cy = node["x"] + node["w"] // 2, node["y"] + node["h"] // 2
                 for d in displays:
                     if d["x"] <= cx < d["x"] + d["width"] and d["y"] <= cy < d["y"] + d["height"]:
-                        return {**d, "selected_by": "app", "app": target}
+                        return {**d, "selected_by": "app", "app": target, "screen_recording": res.get("screen_recording")}
                 chosen["app_window_unread"] = f"the window's centre ({cx},{cy}) lies on no active display"
             else:
                 chosen["app_window_unread"] = str(tree.get("error") or tree.get("reason") or "the window's bounds could not be read")

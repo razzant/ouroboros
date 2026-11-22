@@ -46,6 +46,19 @@ _GRANT_PANES = {"accessibility": "Accessibility", "post_events": "Accessibility"
 _GRANT_REASONS = {"accessibility_untrusted": "accessibility", "screen_recording_denied": "screen_recording"}
 
 
+# Typing budget per grapheme, a delivery limit, not a judgement. Measured 21.11.2026 on hosted Macs typing 600
+# characters at interval_ms=0 with a pause after each key down and up: 15.44 ms (macos-15-intel), 19.56 and 21.86 ms
+# (arm64 macos-15 / macos-26), where 10 ms ran into the deadline at 485 and 514 characters; the pause after the down
+# is gone since, and 40 ms keeps about twice the slowest measured rate.
+TYPE_MS_PER_CHAR = 40
+
+
+def type_seconds(text: str, interval_ms: int = 0) -> int:
+    """The helper timeout for typing ``text``: a fixed part for starting the program and reading the layout, plus the
+    per-character budget and the asked interval; the program's own deadline is 2 s below it."""
+    return min(170, 10 + len(text) * (max(0, int(interval_ms or 0)) + TYPE_MS_PER_CHAR) // 1000)
+
+
 def permission_refusal(grant: str) -> dict[str, Any]:
     """The one structured field of a refusal for a missing macOS grant, in the shape the host's other capabilities
     use: the capability is unavailable, which permission it lacks, that only the owner can repair it and where
@@ -151,14 +164,16 @@ def resolve_refusal(rc: int, stdout: str, stderr: str) -> dict[str, Any] | None:
         answer = json.loads(stdout.strip().splitlines()[-1]) if rc == 0 else None
     except (ValueError, IndexError):
         answer = None
-    if not isinstance(answer, dict) or not isinstance(answer.get("missing"), list):
-        return {"ok": False, "reason": "layout_unread", "dispatched": False, "note": "the input was not sent",
-                "error": "the characters of the key sequence could not be looked up in the active keyboard layout "
-                         f"({(stderr or stdout or f'exit {rc}').strip()[:300]}), so no step was sent"}
-    if answer.get("post_events") is False:
+    if isinstance(answer, dict) and answer.get("post_events") is False:  # the grant answers before any layout fact
         return {"ok": False, "reason": "permission_denied", **permission_refusal("post_events"), "dispatched": False,
                 "note": "the input was not sent",
                 "error": "this process may not post input events (the Accessibility grant), so no step was sent"}
+    if not isinstance(answer, dict) or answer.get("layout_unread") or not isinstance(answer.get("missing"), list):
+        why = "the layout has no key data" if isinstance(answer, dict) and answer.get("layout_unread") else (
+            (stderr or stdout or f"exit {rc}").strip()[:300])
+        return {"ok": False, "reason": "layout_unread", "dispatched": False, "note": "the input was not sent",
+                "error": f"the characters of the key sequence could not be looked up in the active keyboard layout ({why}), "
+                         "so no step was sent"}
     if not (answer.get("missing") or answer.get("missing_command")):
         return None
     missing, command = list(answer.get("missing") or []), list(answer.get("missing_command") or [])

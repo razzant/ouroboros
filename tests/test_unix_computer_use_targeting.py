@@ -143,6 +143,34 @@ def test_a_sequence_with_a_character_no_key_gives_sends_no_step_and_keeps_its_sw
     assert whole["ok"] is True and inputs(state) == [[RETURN], [key(None, char="Ж")]], (whole, inputs(state))
 
 
+def test_a_switch_during_the_lookup_stops_the_sequence_before_its_first_key(tmp_path, monkeypatch):
+    """The lookup is a process of its own between the switch and step 1: if the front changes meanwhile, the first
+    key is not sent to whoever is in front, and the receipt names who was there, never the unverified target."""
+    module, api, state = mac(tmp_path, monkeypatch)
+    fake = module.subprocess.run
+
+    def run(cmd, *a, **k):
+        argv = [str(part) for part in cmd]
+        if argv[:1] == ["osascript"] and '"op":"resolve"' in argv[-1]:
+            state["front"] = SAFARI  # the owner clicks another window while the layout is read
+        return fake(cmd, *a, **k)
+    monkeypatch.setattr(module.subprocess, "run", run)
+    out = receipt(api.tools["key"](keys="a b", app="Keynote"))
+    assert out["ok"] is False and out["reason"] == "target_lost" and out["steps_done"] == 0 and inputs(state) == [], out
+    assert out["activation_done"] is True and (out.get("delivered_to") or {}).get("app") != "Keynote", out
+    module, api, state = mac(tmp_path, monkeypatch)
+    kept = receipt(api.tools["key"](keys="a b", app="Keynote"))
+    assert kept["ok"] is True and inputs(state) == [[key(None, char="a")], [key(None, char="b")]], kept
+
+
+def test_an_unreadable_layout_is_its_own_refusal_not_a_missing_key(tmp_path, monkeypatch):
+    unread = "WARNING: the active keyboard layout could not be read (no layout data); nothing was sent\n"
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, "", unread))
+    out = receipt(api.tools["key"](keys="ctrl+a"))
+    assert out["ok"] is False and out["reason"] == "layout_unread" and out["dispatched"] is False and "untyped" not in out, out
+    assert "could not be read" in out["error"] and "not sent" in out["note"]
+
+
 def test_an_element_act_without_accessibility_carries_the_one_refusal_field(tmp_path, monkeypatch):
     def helper(args, state):
         if args[0] == "element":
@@ -379,6 +407,10 @@ def test_a_display_capture_without_the_screen_recording_grant_is_refused_and_one
     taken = receipt(api.tools["screenshot"](job_id="granted"))
     assert taken["ok"] is True and "refusal" not in taken and any(argv[0] == "screencapture" for argv in state["calls"])
     assert taken["permissions_available"] == ["screen_recording"] and "permissions_available" not in out
+    # An unread preflight still captures (a wrong refusal would cost a working screenshot) but proves nothing.
+    module, api, state = mac(tmp_path, monkeypatch, helper=helper("unknown"))
+    unproved = receipt(api.tools["screenshot"](job_id="unknown"))
+    assert unproved["ok"] is True and "permissions_available" not in unproved, unproved
 
 
 # --- registration -------------------------------------------------------------------------------
@@ -390,6 +422,8 @@ def test_surface_exposes_targeting_on_input_tools(tmp_path, monkeypatch):
     for tool in ("click", "double_click", "triple_click", "left_click_drag", "mouse_down", "type_text", "key", "hold_key", "scroll"):
         assert api.meta[tool]["schema"]["properties"]["app"] == {"type": "string", "default": ""}, tool
     assert "window under the pointer receives the wheel" in api.meta["scroll"]["description"], "app= does not pick the wheel's window"
+    assert "their characters after the switch in the target's layout" in api.meta["key"]["description"]
+    assert "characters are validated before activation" not in api.meta["key"]["description"]
     lead = api.meta["key"]["description"]
     assert lead.startswith("Press keys in the front app or app=") and "not that the app reacted" in lead[:120]
     assert "run_command" in lead

@@ -47,7 +47,8 @@ function run(argv) {
   }
   var started = Date.now(), budget = Math.max(500, Number(spec.budget_ms) || 8000);
   [["TISCopyCurrentKeyboardLayoutInputSource", ["void*", []]], ["TISGetInputSourceProperty", ["void*", ["void*", "id"]]],
-   ["CFDataGetBytePtr", ["void*", ["void*"]]], ["CFRelease", ["void", ["void*"]]], ["LMGetKbdType", ["unsigned char", []]],
+   ["CFDataGetBytePtr", ["void*", ["void*"]]], ["CFRelease", ["void", ["void*"]]], ["CFRetain", ["void*", ["void*"]]],
+   ["LMGetKbdType", ["unsigned char", []]],
    ["UCKeyTranslate", ["int", ["void*", "unsigned short", "unsigned short", "unsigned int", "unsigned int", "unsigned int",
                                "void*", "unsigned long", "void*", "void*"]]],
    ["CGPreflightPostEventAccess", ["bool", []]], ["CGEventSourceCreate", ["void*", ["int"]]],
@@ -63,10 +64,12 @@ function run(argv) {
     var at = $.NSEvent.mouseLocation, primary = $.NSScreen.screens.objectAtIndex(0).frame;
     return [Math.round(at.x), Math.round(primary.size.height - at.y)];
   }
-  var layoutId = "", planes = {};
+  var layoutId = "", planes = {}, layoutRead = true;
   function typed(layout, code, state, options) { /* the key's characters at a modifier state, else "" */
     var dead = $.NSMutableData.dataWithLength(4), count = $.NSMutableData.dataWithLength(8), text = $.NSMutableData.dataWithLength(8);
     if ($.UCKeyTranslate(layout, code, 0, state, $.LMGetKbdType(), options, dead.mutableBytes, 4, count.mutableBytes, text.mutableBytes) !== 0) { return ""; }
+    /* A dead-key state left nonzero (read as its four bytes) means the key arms a composition: not that character's key. */
+    if (options === 0 && /[^\u0000]/.test(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(dead, $.NSUTF16LittleEndianStringEncoding)))) { return ""; }
     return ObjC.unwrap($.NSString.alloc.initWithDataEncoding(text, $.NSUTF16LittleEndianStringEncoding)).replace(/\u0000+$/, "");
   }
   function plane(state, options) { /* {chars: {character: lowest code}, codes: [character by code]}, read once */
@@ -80,6 +83,7 @@ function run(argv) {
         data = $.TISGetInputSourceProperty(source, $("TISPropertyUnicodeKeyLayoutData"));
       }
       var layout = data ? $.CFDataGetBytePtr(data) : null;
+      if (!layout) { layoutRead = false; } /* no layout data: nothing is known, which is not "no key gives it" */
       for (var code = 0; layout && code < 128; code++) {
         var ch = typed(layout, code, state, options);
         found.codes[code] = ch;
@@ -112,9 +116,12 @@ function run(argv) {
     var now = where();
     return JSON.stringify({x: now[0], y: now[1]});
   }
-  if (spec.ops.length === 1 && spec.ops[0].op === "resolve") {
+  if (spec.ops.length === 1 && spec.ops[0].op === "resolve") { /* the grant first, then the layout (if it reads) */
     var r = spec.ops[0];
-    return JSON.stringify({layout: (plane(0, 0), layoutId), post_events: Boolean($.CGPreflightPostEventAccess()),
+    if (!$.CGPreflightPostEventAccess()) { return JSON.stringify({post_events: false}); }
+    plane(0, 0);
+    if (!layoutRead) { return JSON.stringify({post_events: true, layout_unread: true}); }
+    return JSON.stringify({layout: layoutId, post_events: true,
                            missing: (r.chars || []).filter(function (ch) { return !keyFor(ch); }),
                            missing_command: (r.command_chars || []).filter(function (ch) { return !commandKey(ch); })});
   }
@@ -128,7 +135,11 @@ function run(argv) {
     if (op.op === "keys" || op.op === "hold") {
       if (typeof op.code === "number") { key = {code: op.code, mods: []}; }
       if (typeof op.system === "number") { key = {system: op.system, mods: []}; }
-      if (typeof op.char === "string" && !(key = keyFor(op.char))) {
+      if (typeof op.char === "string" && !(key = keyFor(op.char)) && !layoutRead) {
+        console.log("WARNING: the active keyboard layout could not be read (no layout data); nothing was sent");
+        return "";
+      }
+      if (typeof op.char === "string" && !key) {
         console.log("Unable to get key code for " + op.char + " (no key of " + (layoutId || "the active keyboard layout") +
                     " gives " + op.char + " alone or with Shift or Option); nothing was sent");
         return "";
@@ -169,15 +180,19 @@ function run(argv) {
     }
     return event;
   }
-  function systemEvent(n, down) { /* NX key type n as a keyboard's media key sends it; the NSEvent owns its CGEvent */
+  function systemEvent(n, down) { /* NX key type n as a keyboard's media key sends it */
     var ns = $.NSEvent.otherEventWithTypeLocationModifierFlagsTimestampWindowNumberContextSubtypeData1Data2(
       SYSTEM_DEFINED, {x: 0, y: 0}, down ? 0xa00 : 0xb00, 0, 0, null, 8, (n << 16) | ((down ? 0xa : 0xb) << 8), -1);
-    var wrapped = ns && !ns.isNil() ? ns.CGEvent : null; /* an object wrapper: a void* parameter would get NULL */
-    var ref = wrapped && !wrapped.isNil() ? ObjC.castObjectToRef(wrapped) : null;
+    /* Measured on macOS 26.4 (21.11.2026, nothing posted): reading ns.CGEvent as a property gives a Ref that holds
+       NULL (a void* call then acts on nothing); asking the object for it by its selector gives the object, which
+       castObjectToRef turns into the real pointer. The wrapper is kept so the object lives as long as the program. */
+    var obj = ns && !ns.isNil() ? ns.performSelector("CGEvent") : null;
+    var ref = obj && !obj.isNil() ? ObjC.castObjectToRef(obj) : null;
     if (!ref) { throw new Error("the system made no system key event; nothing was sent"); }
-    kept.push(ns);
-    $.CGEventSetIntegerValueField(ref, 42, TAG);
-    return ref;
+    kept.push(obj);
+    /* -CGEvent hands back a new autoreleased event the NSEvent does not keep: this program holds its own reference,
+       released with every other event it made. */
+    return own($.CFRetain(ref), "system key");
   }
   function chord(mods, key, holdMs) { /* modifiers down in order, the key down and up with all their flags, modifiers up */
     var flags = 0, names = mods.slice();
@@ -237,14 +252,14 @@ function run(argv) {
                    "scroll"), HID_TAP, 0.02);
         }
       } else if (op.op === "type") {
-        var parts = pieces(String(op.text || "")), wait = Math.max(0.004, (op.interval_ms || 0) / 1000);
+        var parts = pieces(String(op.text || "")), wait = Math.max(0.004, (op.interval_ms || 0) / 1000); /* after each up only */
         answer = {posted: 0, method: "unicode_events", chars_total: parts.length, chars_sent: 0, override_only: 0};
         parts.forEach(function (piece) {
           var ch = piece === "\n" || piece === "\r\n" ? "\r" : piece;
           var key = ch === "\r" ? {code: 36, mods: []} : (ch === "\t" ? {code: 48, mods: []} : keyFor(ch));
           var code = key ? key.code : NEUTRAL_KEY, flags = 0;
           (key ? key.mods : []).forEach(function (m) { flags |= MODS[m][1]; });
-          step(keyEvent(code, true, flags, ch), SESSION_TAP, 0.002, {down: ["k" + code, code], typed: true, override: !key});
+          step(keyEvent(code, true, flags, ch), SESSION_TAP, 0, {down: ["k" + code, code], typed: true, override: !key});
           step(keyEvent(code, false, flags, ch), SESSION_TAP, wait, {up: "k" + code});
         });
       } else if (op.op === "keys" || op.op === "hold") {
