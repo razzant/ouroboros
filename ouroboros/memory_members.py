@@ -155,12 +155,15 @@ def _search_line(words: List[str], what: str, room: str, runs: List[List[memory_
     rows = [meta for run in runs for _address, meta, _pos in run]
     span = _time_span(meta.get("ts") for meta in rows)
     dates = f", date_from='{span['start']}', date_to='{span['end']}'" if span["start"] else ""
-    undated = sum(1 for meta in rows if not meta.get("ts"))
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    undated = sum(1 for meta in rows if parse_deadline_ts(meta.get("ts")) is None)  # empty or unreadable alike
     return (f"- {what} rows of room:{room}: {_n(len(rows), 'row')} in {_n(len(runs), 'run')}, not filtered by words "
             f"here (this listing reads no row's words); a word search of room:{room} over their period, which also "
             f"returns told rows of that period: chat_history(words={words!r}, room_id='{room}'{dates})"
-            + (f"; {undated} of them carry no time" if undated else "") + "; the unfiltered listing prints each run's "
-            "exact readers")
+            + (f"; {undated} of them {'carries' if undated == 1 else 'carry'} no readable time: chat_history(words="
+               f"{words!r}, room_id='{room}') searches the room at every time" if undated else "")
+            + "; the unfiltered listing prints each run's exact readers")
 
 
 class _Entry:
@@ -181,6 +184,14 @@ class _Lister:
         self.root, self.store = root, store
         self.lineage = row_lineage(root)
         self._units: Optional[Dict[str, Any]] = None
+        self._maps: Dict[int, Tuple[List[memory_inventory.Entry], Dict[int, int]]] = {}
+
+    def _positions(self, stored: List[memory_inventory.Entry]) -> Dict[int, int]:
+        """The position map of one room read, built once per answer however many runs it holds."""
+        held = self._maps.get(id(stored))
+        if held is None or held[0] is not stored:
+            held = self._maps[id(stored)] = (stored, _position_map(stored))
+        return held[1]
 
     # --- addresses ------------------------------------------------------------------------------------
 
@@ -305,18 +316,21 @@ class _Lister:
                                       "NOT in this chronicle: its words cannot be read here"))
                 continue
             source = self.store.interpret([found])[0]
-            try:  # what words judge: the text as of the revision cited, which the printed reader opens
-                then = self.store.interpret([found], revision=str(src.get("revision")))[0] if src.get(
-                    "revision_known", True) and src.get("revision") else source
-            except ValueError:
-                then = source
+            fields: List[Tuple[str, str]] = []  # what words judge: the cited revision's text, never today's in its place
+            known = bool(src.get("revision_known", True) and src.get("revision"))
+            if known:
+                try:
+                    fields = self._fields(self.store.interpret([found], revision=str(src.get("revision")))[0])
+                except ValueError:
+                    known = False
             since = [f"later corrections not in this account: {', '.join(src['later_corrections'])}"
                      if src.get("later_corrections") else "",
-                     "" if src.get("revision_known", True) else "that revision is not in this chronicle",
+                     "" if known else "that revision is not in this chronicle; its words cannot be judged here",
                      f"now {src['status_now']}" if src.get("status_now") and src.get("status_now") != src.get("status") else ""]
-            entries.append(_Entry(self._record_line(source, extra=[cited, *filter(None, since)],
-                                                    reader=f"memory_read(node_id='{src['id']}', revision='{src.get('revision')}')"),
-                                  source, self._fields(then)))
+            reader = (f"memory_read(node_id='{src['id']}', revision='{src.get('revision')}')" if known
+                      else f"memory_read(node_id='{src['id']}')")
+            entries.append(_Entry(self._record_line(source, extra=[cited, *filter(None, since)], reader=reader),
+                                  source, fields))
         return f"{_n(len(sources), 'source version')}, in its recorded order; nothing sealed or folded", entries
 
     def _under_selection(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:
@@ -408,7 +422,7 @@ class _Lister:
                            for _address, meta, pos in run)
         named = ", ".join(f"{label} {count}" for label, count in speakers.most_common())
         readers = "; ".join(f"memory_read(room_id='{room}', rows=true, from='{chat_chain.format_address(a)}', "
-                            f"to='{chat_chain.format_address(b)}')" for a, b in _slices(run, stored))
+                            f"to='{chat_chain.format_address(b)}')" for a, b in _slices(run, stored, self._positions(stored)))
         return (f"- {what} rows of room:{room}: {_n(len(run), 'row')}, {span}; speakers: {named}; from {first} to {last} "
                 f"in reading order; " + readers)
 
@@ -463,10 +477,16 @@ class _Lister:
         return added
 
 
-def _slices(run: List[memory_inventory.Entry], stored: List[memory_inventory.Entry]) -> List[Tuple[Any, Any]]:
+def _position_map(stored: List[memory_inventory.Entry]) -> Dict[int, int]:
+    """Each row's place in one read of a room in stored order, by stream position: built once per read."""
+    return {entry[2]: at for at, entry in enumerate(stored)}
+
+
+def _slices(run: List[memory_inventory.Entry], stored: List[memory_inventory.Entry],
+            index: Mapping[int, int]) -> List[Tuple[Any, Any]]:
     """The run's maximal stored-contiguous slices, ``(first, last)`` addresses in stored order: rows=true between
-    each pair returns exactly those rows of the run, whatever the room's reading order."""
-    index = {entry[2]: at for at, entry in enumerate(stored)}
+    each pair returns exactly those rows of the run, whatever the room's reading order (``index``: ``_position_map``
+    of ``stored``)."""
     places = sorted(index[entry[2]] for entry in run if entry[2] in index)
     slices, begin = [], None
     for at, place in enumerate(places):

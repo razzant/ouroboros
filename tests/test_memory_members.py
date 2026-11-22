@@ -323,8 +323,8 @@ def test_the_schema_carries_members_and_words_and_its_lead_names_them():
     assert properties["words"]["description"] == ("members: keep records whose own text or one correction matches an "
                                                   "item (word prefixes, any order; quotes exact).")
     assert ("members=true with room_id lists the room's tellings in publication order, then its untold rows as runs; "
-            "with node_id, what that record seals, folds, cites, replaces or retells. Each line has its opening and "
-            "readers. words keeps records whose own text or one correction matches; runs of rows are not filtered."
+            "with node_id, what that record seals, folds, cites, replaces or retells. Each record line shows its "
+            "opening and readers. words keeps records whose own text or one correction matches; runs of rows are not filtered."
             ) in schema["description"]
     assert "members=true" in _memory_read(ctx_for(pathlib.Path("/nonexistent")), node_id="x", rows=True)
 
@@ -510,6 +510,24 @@ def test_words_judge_each_field_alone_and_a_cited_source_at_its_cited_revision(t
     assert len(opening) == 1 and "excerpt" not in opening[0]
 
 
+def test_a_cited_revision_missing_from_this_chronicle_has_no_searchable_words(tmp_path, monkeypatch):
+    """A partial journal keeps the source but not the revision an account cites: its words are not judged by today's
+    text (an excerpt its reader could not open); the line names the missing revision and matches nothing."""
+    ctx, _rows, page, note = install(tmp_path)
+    zebra = write(ctx, kind="correction", target_id=page, text="Zebra stripes were the cause.")["node_id"]
+    account = write(ctx, kind="account", text="Across the build work.", sources=[page, note])["node_id"]
+    assert ": 1 of 2 listed records match" in members(ctx, node_id=account, words=["zebra"]).split("\n")[0]
+    original = ChronicleStore._revisions
+    monkeypatch.setattr(ChronicleStore, "_revisions",
+                        lambda store, db, ident: [rev for rev in original(store, db, ident) if rev != zebra])
+    for words in (["zebra"], ["found build"]):
+        text = members(ctx, node_id=account, words=words)
+        assert ": 0 of 2 listed records match" in text.split("\n")[0], words
+    line = next(line for line in listed(members(ctx, node_id=account)) if line.startswith(f"- page {page} ["))
+    assert f"cites revision {zebra}" in line and "that revision is not in this chronicle; its words cannot be judged" in line
+    assert f"revision='{zebra}'" not in line and f"memory_read(node_id='{page}')" in line
+
+
 def test_a_room_with_incomplete_appearances_observes_no_untold_rows_without_claiming_none(tmp_path, monkeypatch):
     ctx, _rows, _page, _note = install(tmp_path)
     assert members(ctx, room_id="1").split("\n")[0].endswith("untold rows: 3 in 2 runs")
@@ -531,3 +549,35 @@ def test_an_excerpt_comes_from_the_shared_locator_on_the_original_text(tmp_path)
     line = next(line for line in listed(members(ctx, room_id="1", words=["history"])) if long in line)
     assert "; excerpt: «…" in line and "chat_history reader answered." in line
     assert f"[{len('Opening sentence. ' + 'filler ' * 80 + 'the chat_history reader answered.')} chars in full]" in line
+
+
+def test_a_row_whose_time_cannot_be_read_is_counted_with_the_room_wide_search(tmp_path):
+    """A malformed time beside valid ones is left out of the offered period; the line counts it and names the search
+    of the room at every time, so it is not silently outside every reader offered."""
+    ctx, _rows, _page, _note = install(tmp_path)
+    dialogue_store.append(tmp_path, "chat", {"chat_id": 1, "direction": "in", "ts": "yesterday-ish", "text": "Odd."})
+    line = next(line for line in listed(members(ctx, room_id="1", words=["flaky"])) if line.startswith("- untold"))
+    assert "date_from='2026-10-01T00:00:00+00:00', date_to='2026-10-01T00:00:04+00:00'" in line
+    assert ("; 1 of them carries no readable time: chat_history(words=['flaky'], room_id='1') searches the room at "
+            "every time") in line
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    ok = listed(members(install(clean)[0], room_id="1", words=["flaky"]))
+    assert not any("no readable time" in item for item in ok)
+
+
+def test_a_rooms_position_map_is_built_once_per_answer(tmp_path, monkeypatch):
+    """A fragmented room (sealed and open rows alternating) has many runs; the stored-position map their readers use
+    is built once per read of a room's rows, never once per run."""
+    import ouroboros.memory_members as members_module
+
+    ctx, rows, _page, _note = install(tmp_path)
+    write(ctx, kind="page", text="Row three alone.", covers={"from": addr(rows[3]), "to": addr(rows[3])})
+    built: list = []
+    real = members_module._position_map
+    monkeypatch.setattr(members_module, "_position_map", lambda stored: built.append(id(stored)) or real(stored))
+    text = members(ctx, room_id="1")
+    assert "untold rows: 2 in 2 runs" in text.split("\n")[0]
+    assert len(built) == len(set(built))  # one build for each read (the room's, each expanded page's), not each run
+    untold = [line for line in listed(text) if line.startswith("- untold")]
+    assert len(untold) == 2 and built.count(built[0]) == 1
