@@ -2128,6 +2128,17 @@ of effects; only your state retains them. This reads immediate task Stop, not Wr
 Stop after the read cannot reach an action already starting. Never split one action (key press/release, drag).
 The host checks between whole calls for extensions that never ask. Bundled `unix_computer_use` also checks before `key` can raise the target and before each chord.
 
+### Reporting a permission the skill lacks
+
+A failing result (`{"ok": false, ...}`) may name why with a string `reason` (a snake_case code) and an optional
+`refusal` object: `capability_unavailable` (bool), `permission` (an id such as `accessibility`), `repair` (`owner`,
+`retry` or `self`) and `where` (a short hint). The host copies the valid fields into `meta.extension_reason`, ignores any
+other type and keeps the code `TOOL_REPORTED_FAILURE`. With `capability_unavailable` true and a `permission`, the
+skill's health record, once it exists, keeps that permission open and dated, and every work that reaches extensions
+is told. Only a success that lists it in
+`permissions_available` (`{"ok": true, "permissions_available": ["accessibility"], ...}`) closes it: a skill that
+reports refusals but never what is available keeps the line open.
+
 ### Async tool handlers
 
 Tool handlers may be plain functions or `async def`. A coroutine runs on a helper thread's own loop or in the
@@ -2782,7 +2793,9 @@ bundling is uninstalled on update when its copy is unchanged (its grants survive
 and stays as the owner's copy when edited or when another folder uses its name;
 `design_demo` was merged into `ui_design` this way. An owner's edited `ui_design`
 keeps its own text, which may still name `design_demo`.
-`unix_computer_use` and `windows_computer_use` are bundled extensions.
+`unix_computer_use`, `windows_computer_use` and `ui_look` are bundled extensions; `ui_look` adds one
+read-only tool that runs `ui_design`'s live stand, so `ui_design` stays an instruction that delegated
+sessions keep in their index.
 
 Non-declared delegated sessions receive an index of enabled, accepted or reviewed
 instruction skills from every installed bucket: bounded descriptions, triggers and

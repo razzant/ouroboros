@@ -23,6 +23,7 @@ import pytest
 from ouroboros import review_checking as rc
 from ouroboros.subagent_worktrees import RawStagingIncomplete, isolated_git_env, stage_raw_payload_inventory
 from ouroboros.unindexed import COPIES
+from tests._workspace_git import git_repository
 from tests.group_run import run_in_group
 from tests.test_delegated_skill_payload import (  # noqa: F401
     _owned_gateway_uses_each_test_transport,
@@ -43,11 +44,8 @@ def _blob_id(data: bytes) -> str:
 
 
 def _repo(tmp_path: pathlib.Path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    env = isolated_git_env()
-    subprocess.run(["git", "init", "-q", "--template="], cwd=root, env=env, check=True, capture_output=True)
-    return root, env
+    """A copy of the run's template-free unborn repository, and the environment the staging reads use."""
+    return git_repository(tmp_path / "repo", unborn=True), isolated_git_env()
 
 
 def _staged(root, env, *, ref=":0") -> dict:

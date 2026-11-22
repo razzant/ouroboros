@@ -22,9 +22,14 @@ def ready_plan(p):
 
 def test_starter_implements_frozen_plan_with_authorization_before_send(plan_setup):
     p = plan_setup
-    prior = ready_plan(p)
+    p.engine.questions = {"parse": "found", "questions": []}
+    plan = p.start(mode="plan")
+    prior = p.finish(plan["run_id"])[0]
     result = p.start("Implement it", continue_from=prior.run_id, mode="agent")
     assert result["status"] == "started", result
+    # Only the writing turn names a write root; the read-only plan turn keeps its snapshot for this continuation.
+    assert "write root: private snapshot" in result["note"] and "write root" not in plan["note"], plan["note"]
+    assert "evidence-only investigation" not in plan["note"], "a plan keeps a snapshot, yet it is no investigation"
     path, request, key = p.engine.calls[-1]
     assert path == f"/v2/threads/{prior.thread_id}/turns"
     assert request["mode"] == "agent" and request["access"] == "workspace_write"

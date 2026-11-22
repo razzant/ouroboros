@@ -48,7 +48,7 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
     from ouroboros import delegate_custody as custody
     from ouroboros.claudexor_daemon import read_owned_gateway
     from ouroboros.deadline_utils import window_within_deadline
-    from ouroboros.delegate_shared import _fail, _owned_run, delegate_result, retry_result_status
+    from ouroboros.delegate_shared import _fail, _owned_run, retry_result_status
     from ouroboros.gateways.claudexor import ClaudexorUnavailable, _READ_TIMEOUT_SEC
 
     drive = custody.custody_root(ctx)
@@ -58,8 +58,7 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
         return refusal or _fail("delegate_wait", "run_not_owned", "No retry result authority.")
     retained = retained_terminal_result(ctx, run_id, retry_money=True)
     if retained is not None:
-        return delegate_result({**retained, "owner_task_id": predecessor,
-            "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""), "terminal_result_only": True})
+        return _retry_answer(ctx, entry, retained, predecessor)
     borrowed = gateway is not None
     try:  # the run's own engine (``execution_domain``) unless a caller lends its transport
         from ouroboros.execution_domain import run_gateway
@@ -80,18 +79,26 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
         from ouroboros.delegate_containment import granted_shape
 
         payload = collect_and_deliver_terminal(ctx, run_id, detail, granted_shape(entry), entry, gateway)
-        return delegate_result({**payload, "owner_task_id": predecessor,
-                                "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""),
-                                "terminal_result_only": True})
+        return _retry_answer(ctx, entry, payload, predecessor)
     except ClaudexorUnavailable as exc:
         retained = retained_terminal_after_gap(ctx, run_id, str(exc.code))
         if retained is not None:
-            return delegate_result({**retained, "owner_task_id": predecessor,
-                "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""), "terminal_result_only": True})
+            return _retry_answer(ctx, entry, retained, predecessor)
         return _fail("delegate_wait", exc.code, str(exc), run_id=run_id)
     finally:
         if gateway is not None and not borrowed:
             gateway.close()
+
+
+def _retry_answer(ctx: ToolContext, entry: Any, payload: Dict[str, Any], predecessor: str) -> ToolResult:
+    """A retry successor's read of its predecessor's finished run, with the same receipt line ``delegate_wait``
+    gives its starter (``helper_receipt.run_result_line``)."""
+    from ouroboros.delegate_shared import delegate_result
+    from ouroboros.helper_receipt import run_result_line
+
+    receipt = run_result_line(ctx, entry, payload.get("access_evidence")) if payload.get("status") == "terminal" else None
+    return delegate_result({**payload, **({"receipt": receipt} if receipt else {}), "owner_task_id": predecessor,
+                            "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""), "terminal_result_only": True})
 
 
 def _containment_breach(detail: Dict[str, Any], authority: "DelegatedRunShape") -> Optional[_Breach]:

@@ -192,7 +192,9 @@ def test_the_guard_is_per_connection_and_leaves_no_hook_behind(loopback):  # noq
     finally:
         mcp_client._CredentialOriginGuard.client = original
     assert len(seen) == 2 and seen[0] is not seen[1]
-    assert all(client.is_closed and len(client.event_hooks["request"]) == len(client.event_hooks["response"]) == 1
+    # Per connection: the guard's request and response hooks, plus the transport's pair that notes a 404 to a tool
+    # call (``mcp_catalog.http_transport``); a client shared across connections would hold twice as many.
+    assert all(client.is_closed and len(client.event_hooks["request"]) == len(client.event_hooks["response"]) == 2
                for client in seen)
 
 

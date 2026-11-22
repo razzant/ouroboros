@@ -154,35 +154,26 @@ class LoadedSkill:
 
     @property
     def available_for_execution(self) -> bool:
-        """True when an enabled script skill has a fresh executable review."""
-        if self.load_error:
-            return False
-        if not self.enabled:
-            return False
-        if not self.manifest.is_script():
-            # instruction has no payload; extension runs through PluginAPI.
-            return False
-        if not self.review.gate_for(self.content_hash)["executable_review"]:
-            return False
+        """True when an enabled script skill has a fresh executable review and nothing in ``entry_gap``."""
+        if self.load_error or not self.enabled or not self.manifest.is_script():
+            return False  # an instruction has no payload; an extension runs through PluginAPI
+        return bool(self.review.gate_for(self.content_hash)["executable_review"]) and not self.entry_gap
+
+    @property
+    def entry_gap(self) -> str:
+        """What ``skill_exec`` lacks to start this script, whatever its switch and review: its runtime's interpreter
+        (with the resolver's reason) or every declared script file; ``""`` when it can start one."""
         from ouroboros.tools.skill_exec import _resolve_runtime_binary, _resolve_script_path
 
         runtime = (self.manifest.runtime or "").strip().lower()
-        if _resolve_runtime_binary(runtime)[0] is None:
-            return False
-        for entry in self.manifest.scripts or []:
-            if not isinstance(entry, dict):
-                continue
-            declared_name = str(entry.get("name") or "").strip()
-            if not declared_name:
-                continue
-            relpath = (
-                declared_name
-                if "/" in declared_name or declared_name.startswith(".")
-                else f"scripts/{declared_name}"
-            )
-            if _resolve_script_path(self.skill_dir, relpath) is not None:
-                return True
-        return False
+        binary, why = _resolve_runtime_binary(runtime)
+        if binary is None:
+            return f"no interpreter for runtime {runtime!r}" + (f": {why}" if why else "")
+        names = [str(entry.get("name") or "").strip() for entry in self.manifest.scripts or [] if isinstance(entry, dict)]
+        paths = [name if "/" in name or name.startswith(".") else f"scripts/{name}" for name in names if name]
+        if any(_resolve_script_path(self.skill_dir, relpath) is not None for relpath in paths):
+            return ""
+        return "no declared script file exists" + (f" ({', '.join(paths)})" if paths else "")
 
 
 @dataclass(frozen=True)
@@ -896,16 +887,36 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
 def _safe_listdir(root: pathlib.Path, *, strict: bool = False) -> List[pathlib.Path]:
     try:
         return sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
-    except OSError:
+    except OSError as exc:
         if strict:
             raise
         log.warning("Failed to list skills repo %s", root, exc_info=True)
+        from ouroboros.skill_discovery_reuse import note_unreadable
+
+        note_unreadable(root, exc)  # the walk says this folder, never that it is empty
         return []
 
 
+def _mode(path: pathlib.Path) -> int:
+    """``st_mode`` of ``path``, 0 when it is absent; any other failure (a permission fault) raises: ``Path.is_file``
+    answers False for one on Python 3.14."""
+    try:
+        return path.stat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return 0
+
+
 def _looks_like_skill_dir(path: pathlib.Path) -> bool:
-    """Return True when ``path`` directly contains a skill manifest."""
-    return path.is_dir() and any((path / candidate).is_file() for candidate in _MANIFEST_NAMES)
+    """Return True when ``path`` directly contains a skill manifest; a check that cannot be made is a noted gap of
+    the walk, so its neighbours still load."""
+    try:
+        return stat.S_ISDIR(_mode(path)) and any(stat.S_ISREG(_mode(path / name)) for name in _MANIFEST_NAMES)
+    except OSError as exc:
+        from ouroboros.skill_discovery_reuse import note_unreadable
+
+        if not note_unreadable(path, exc):  # no fail-soft walk in progress (a strict scan, the RC audit): it raises
+            raise
+        return False
 
 
 def load_skill(
@@ -1358,7 +1369,9 @@ def discover_skills(
     """Scan data-plane skills plus the optional user checkout; ``strict`` raises on an unlistable directory."""
     candidates = _skill_location_inventory(
         drive_root, repo_path=repo_path, listdir=(lambda root: _safe_listdir(root, strict=True)) if strict else None)
-    return _load_skill_location_candidates(candidates, drive_root=drive_root)
+    from ouroboros.skill_discovery_reuse import WalkedSkills
+
+    return WalkedSkills(_load_skill_location_candidates(candidates, drive_root=drive_root), getattr(candidates, "gaps", ()))
 
 
 def discover_selected_skill_candidates(
@@ -1507,6 +1520,8 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
             "executable_review": gate["executable_review"],
             "available_for_execution": runnable,
             "runnable_via_skill_exec": s.available_for_execution,
+            "entry_gap": s.entry_gap if s.manifest.is_script() and not s.identity_collision else "",
+            "declares_mcp": bool(s.manifest.mcp_servers),  # its own servers run apart from skill_exec
             "tool_surfaces": tool_surfaces_by_skill.get(s.name, []),
             "static_ready": runnable,
             "blocked_by_grants": not grants_usable,
@@ -1536,13 +1551,14 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
                 # Read-only: a worker's row also names the companion failures the server last recorded.
                 live = show_recorded_companion_health(
                     runtime_state_for_loaded_skill(s, drive_root, skills=skills), drive_root, s.name)
-            except Exception:
+            except Exception:  # a gap, never "not an extension": the catalog says it could not read this state
                 log.debug("extension liveness projection failed for %s", s.name, exc_info=True)
                 live = {}
         rows[-1].update({
             "desired_live": bool(live.get("desired_live")),
             "live_loaded": bool(live.get("live_loaded")),
-            "live_reason": str(live.get("reason") or "not_extension"),
+            "live_reason": str(live.get("reason") or ("load_state_unreadable" if s.manifest.is_extension()
+                                                       and not s.identity_collision else "not_extension")),
             "process": str(live.get("process") or ""),
         })
         if live.get("load_error"):
@@ -1566,6 +1582,7 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
         "warning_review": warning_review,
         "broken": broken,
         "skills": rows,
+        "unreadable_sources": list(getattr(skills, "gaps", ())),  # rows exist only for the folders that were read
     }
 
 

@@ -394,8 +394,10 @@ def test_every_admitted_skill_keeps_purpose_and_trigger_in_each_catalogue_form(t
         assert "OMISSION NOTE: truncated at 260 chars; original length" in text
         assert f"Instructions: {reader}" in text
         assert "- cipher (instruction, v1, pass): No description.\n  Trigger: Not specified." in text
-        assert "  Live (worker): no (not_loaded)" in text
-        assert "list_skills" not in text and "unadmitted" not in text
+        assert "Live (" not in text  # process liveness is the start-of-work notice's, never block C's (C07)
+        # An enabled skill no review admits is one line after the cards, never a card (п.57: once per install).
+        assert text.count("unadmitted") == 1 and "\n- unadmitted " not in text.split("Enabled, not ready")[0]
+        assert "list_skills" not in text
     assert "desk_tool_0" in part.full_text and "Model experience" in part.full_text
     assert "desk_tool_0" not in part.operative_view and "Model experience" not in part.operative_view
 

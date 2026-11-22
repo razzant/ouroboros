@@ -1,13 +1,13 @@
 ---
 name: ui_design
-version: 2.0.8
+version: 2.0.9
 type: instruction
 os: any
 permissions: []
 description: "Design, change or show anything people look at (app UI, widget, mockup, HTML page or report, chart, icon): it fits the existing system, uses real content and states, and is judged by eye at the viewer's real size."
 when_to_use: "Before designing or changing how something looks, judging screenshots of such work, putting visual variants before a person, or briefing another model that will draw. Not software architecture."
 model_experience:
-  what_model_sees: "A few lines of metadata while enabled. On read: a one-screen playbook; references hold the craft floor, the render-and-measure recipe, the author brief, a one-file comparison page and two browser-side snippets (measure.js, freeze.js), and an optional read-only stand for Ouroboros's own interface (live_stand.py). No tools."
+  what_model_sees: "A few lines of metadata while enabled. On read: a one-screen playbook; references hold the craft floor, the render-and-measure recipe, the author brief, a one-file comparison page and two browser-side snippets (measure.js, freeze.js), and an optional read-only stand for Ouroboros's own interface (live_stand.py, with place_plan.py beside it). No tools."
   token_effect: "A few context lines while enabled. The body costs about two and a half thousand tokens when read; each reference costs tokens only when opened."
 ---
 
@@ -36,6 +36,7 @@ A surface looks designed when every choice on it is explained by what the viewer
 ## 3. Look, then let another eye look
 
 - Open the delivered thing as its viewer will: the entry file or page, alone, at their size, theme and engine. Look at the first screen at 1:1, then at 2× crops of what changed; never a stitched sheet or a scaled grid.
+- Ouroboros's own interface: the `ui_look` skill's `look` tool opens it read-only on the live data, the places a change touches at the owner's window and a second one in both themes, measured, with frames as files when asked (beside the served version when there is a draft).
 - Then measure what eyes miss: overflow, clipped or covered text, bars over content, stuck controls, small targets, contrast (`references/browser.md`, `references/measure.js`). Check primary text space with long content at intermediate container widths: fitting without overflow can still be unreadable. Measure after a paint; WebKit may change widths then.
 - When another eye is useful, ask what the thing is, who speaks to whom and what the viewer would do next. For an unbriefed first impression, its first request contains only the scene and those questions; send your intent after its answer. Putting frames before your explanation in one request is still briefed. Both kinds of critique help; neither replaces the complete context a formal review requires. If the reading differs from your viewer sentence, investigate the mismatch before polishing geometry.
 - Findings are evidence, never a verdict. A green test, a saved screenshot or a check count is not a look. If you could not render or see the result, say so and give what you measured.

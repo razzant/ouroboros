@@ -22,6 +22,8 @@ import pytest
 
 import ouroboros.launcher_bootstrap as bootstrap_module
 from ouroboros import platform_layer
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 from tests.test_launcher_handoff_stop import native_guard as native_guard
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -47,19 +49,23 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True).stdout.strip()
 
 
-def checkout(tmp_path):
-    """A managed checkout and a seed whose manifest names the commit it was cut from."""
-    repo, seed = tmp_path / "repo", tmp_path / "seed"
-    repo.mkdir()
-    git(repo, "init", "-q")
-    git(repo, "config", "user.email", "t@example.invalid")
-    git(repo, "config", "user.name", "t")
+def _lay_checkout(folder):
+    """The managed checkout every handoff test starts from: one commit "seed" by the author it keeps for ``land``."""
+    repo = git_repository(folder / "repo", unborn=True)
+    world_git(repo, "config", "user.email", "t@example.invalid")
+    world_git(repo, "config", "user.name", "t")
     for rel in ("launcher.py", "server.py", "ouroboros/launcher_tray.py", "ouroboros/not_imported_yet.py",
                 "supervisor/queue.py"):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         (repo / rel).write_text("GEN = 1\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-q", "-m", "seed")
+    world_git(repo, "add", "-A")
+    world_git(repo, "commit", "-q", "-m", "seed")
+
+
+def checkout(tmp_path):
+    """A managed checkout and a seed whose manifest names the commit it was cut from."""
+    repo = clone_repository(world("launcher-source-checkout", _lay_checkout) / "repo", tmp_path / "repo")
+    seed = tmp_path / "seed"
     seed.mkdir()
     origin = git(repo, "rev-parse", "HEAD")
     (seed / bootstrap_module.BUNDLE_MANIFEST_NAME).write_text(json.dumps({"source_sha": origin}), encoding="utf-8")

@@ -233,7 +233,7 @@ def _validated_invocation(drive: Any, retry_token: str, task_id: str,
     return record, None
 
 
-def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any]) -> Optional[ToolResult]:
+def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any], lineage: Any = None) -> Optional[ToolResult]:
     """An explicit retry first reads what its recorded start already holds in the engine (#3138).
 
     It runs once ownership and the stored body are proven (``_validated_invocation``) and before any
@@ -267,27 +267,45 @@ def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any]) -> Opt
             retry_of=retry_token, pending_invocation_id=retry_token, lookup=read)
     return _accepted_result(held, read, retry_token, record.get("request"), (
         "The engine had already accepted this invocation's start; its run is now in custody and nothing was "
-        "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."))
+        "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."),
+        record.get("input_files"), lineage)
 
 
 def accepted_refused_start(drive: Any, gateway: Any, invocation_id: str, error: BaseException,
-                           request: Any) -> Optional[ToolResult]:
+                           request: Any, selected: Any = None, lineage: Any = None) -> Optional[ToolResult]:
     """A start whose POST the engine answered with an error: the run it nonetheless accepted, read and bound
-    once on the start's own gateway (``delegate_accepted.accepted_after_refusal``), answered as started; else
-    ``None`` and the start keeps its pending token, registration and snapshot, its outcome unknown."""
+    once on the start's own gateway (``delegate_accepted.accepted_after_refusal``), answered as started, naming the
+    start's own selection and lineage fact; else ``None`` and the start keeps its pending token, registration and
+    snapshot, its outcome unknown."""
     from ouroboros.delegate_accepted import accepted_after_refusal
 
     held, read = accepted_after_refusal(drive, gateway, invocation_id, error)
     return None if held is None else _accepted_result(held, read, invocation_id, request, (
         "The engine answered this start with an error, yet it had accepted the start: its run is now in custody "
-        "and nothing was sent again. Poll with delegate_wait; the run's own claims are evidence to check."))
+        "and nothing was sent again. Poll with delegate_wait; the run's own claims are evidence to check."),
+        selected, lineage)
 
 
-def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, request: Any, note: str) -> ToolResult:
-    """The started result of the run custody bound for ``invocation_id`` from the engine's own read."""
+def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, request: Any, note: str,
+                     selected: Any = None, lineage: Any = None) -> ToolResult:
+    """The started result of the run custody bound for ``invocation_id`` from the engine's own read: ``selected``
+    is the invocation's recorded copies (a binding made by this read carries no request row), ``lineage`` what
+    the caller may state of automatic lineage copies (``_start_lineage``; None says nothing)."""
     from ouroboros.delegate_shared import delegate_result
 
+    from ouroboros.helper_receipt import NO_RECORD, PREPARED, build, render, start_facts
+
     scope = (request.get("scope") if isinstance(request, dict) else None) or {}
+    rows = selected if isinstance(selected, list) else (held.request_event or {}).get("input_files")
+    facts = {**(start_facts(request, lineage) if isinstance(request, dict) else {"assignment": (NO_RECORD, PREPARED),
+                                                                                  "lineage": lineage}),
+             "access": [("access", held.access, None)] + ([(  # its key found an investigation: say so, briefly
+                 "investigation", "evidence-only investigation: nothing from it is applied", False)]
+                 if evidence_only(held) and held.mode == "agent" else [])}
+    if isinstance(rows, list):  # this invocation's recorded copies
+        facts.update(inputs=rows, inputs_when="prepared before the first send", inputs_outside=sum(
+            1 for row in rows if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
+    note = f"{note}\n{render(build(facts))}"
     return delegate_result({
         "status": "started", "run_id": held.run_id, "invocation_id": invocation_id, "idempotent_recovery": True,
         "recovered_without_start": True, "custody_durable": True, "route": held.route_id, "model": held.model,
@@ -358,7 +376,11 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         return None, _fail("delegate_start", "retry_selector_conflict",
                            f"A retry replays its recorded max_seconds={seconds}; omit max_seconds to retry.",
                            retry_of=retry_token, recorded_max_seconds=seconds)
-    if (accepted := _accepted_retry(drive, retry_token, record)) is not None:
+    from ouroboros.delegate_readonly_inputs import replayed_lineage
+
+    lineage = replayed_lineage(request_body, retry_token, record.get("authority_source") == INVESTIGATION_AUTHORITY,
+                               record.get("input_files"))
+    if (accepted := _accepted_retry(drive, retry_token, record, lineage)) is not None:
         return None, accepted  # the start the engine already holds: a receipt, never a second POST
     if record.get("resume_decisions"):
         from ouroboros.delegate_resume import LOOKUP_ONLY

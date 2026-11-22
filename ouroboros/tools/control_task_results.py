@@ -68,6 +68,17 @@ def disclosable_effort_fact(data: Dict[str, Any]) -> Dict[str, str]:
             "source": str(fact["source"] or "")}
 
 
+def _handoff_disclosures(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The SEMANTIC handoff facts that decide how far to trust a child's answer, for both parent surfaces
+    (``[SUBTASK_OUTCOME]`` and the compact batch row a fan-out parent absorbs its children through), so the
+    batch and the singleton cannot disagree: a capability reduction, a moved effort request and the receipt's
+    repeat of what differed from the request (``helper_receipt.task_result_line``)."""
+    from ouroboros.helper_receipt import task_result_line
+
+    facts = {"capability_delta": disclosable_capability_delta(data), "effort": disclosable_effort_fact(data)}
+    return {key: value for key, value in {**facts, "receipt": task_result_line(data)}.items() if value}
+
+
 def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None, reader: str = "",
                              task_id: str = "") -> str:
     from ouroboros.delegate_output import project_task_output_readers
@@ -151,11 +162,7 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
         summary["delegated_custody"] = custody
     if isinstance(data.get("task_contract"), dict):
         summary["task_contract"] = data.get("task_contract")
-    _delta = disclosable_capability_delta(data)
-    if _delta:
-        summary["capability_delta"] = _delta
-    if _effort := disclosable_effort_fact(data):
-        summary["effort"] = _effort
+    summary.update(_handoff_disclosures(data))
     if isinstance(data.get("artifact_bundle"), dict):
         summary["artifact_bundle"] = data.get("artifact_bundle")
     if ledger := verification_ledger_view(data.get("verification_ledger")):
@@ -1229,15 +1236,7 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
         projected["test_evidence_gap"] = gap
     if data.get("duplicate_of"):
         projected["duplicate_of"] = str(data.get("duplicate_of"))
-    # A capability reduction is a SEMANTIC handoff fact, not forensics: it is
-    # what decides how far to trust this answer, and this is the surface a
-    # fan-out parent absorbs its children through. Same predicate as the
-    # single-child read, so the batch and the singleton cannot disagree.
-    _delta = disclosable_capability_delta(data)
-    if _delta:
-        projected["capability_delta"] = _delta
-    if _effort := disclosable_effort_fact(data):
-        projected["effort"] = _effort
+    projected.update(_handoff_disclosures(data))
     # Delegation honesty (Q1A, 2026-08-10 amendments): whether a
     # harness-dispatched child ACTUALLY delegated is a handoff fact the
     # fan-out parent absorbs here — the e9108a09 incident hid nine
