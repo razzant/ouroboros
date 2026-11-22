@@ -212,6 +212,9 @@ def test_read_file_end_line_reads_its_inclusive_window_and_an_unclear_end_names_
                        ({"end_line": True}, "end_line=True is not a whole line number"),
                        ({"end_line": 2.9}, "end_line=2.9 is not a whole line number"),
                        ({"end_line": "five"}, "end_line='five' is not a whole line number"),
+                       ({"end_line": "--2", "max_chars": 1}, "end_line='--2' is not a whole line number"),
+                       ({"end_line": 2001, "max_lines": 2000}, "asks for 2001 lines from start_line=1"),
+                       ({"max_lines": 1, "end_char": 40}, "end_char=40 could count"),
                        ({"start_line": 2, "start_char": 4, "end_char": 40},
                         "end_char=40 could count from the window or from the file")):
         refused = registry.execute_result("read_file", {"path": "f.txt", "root": "active_workspace", **args})
@@ -219,6 +222,8 @@ def test_read_file_end_line_reads_its_inclusive_window_and_an_unclear_end_names_
         assert says in refused.text and 'read_file(path="f.txt", root="active_workspace"' in refused.text
         assert refused.text.endswith("Nothing was read.") and "line 1\n" not in refused.text
         assert registry._ctx.last_read_view is None
+        other = "max_lines" if "end_char" in args else "max_chars"  # the call's other limit stays in the named call
+        assert other not in args or f"{other}={args[other]}, start_line=" in refused.text, refused.text
     assert 'start_char=4, start_line=2, max_chars=<characters>)' in refused.text
     world = tmp_path / "drive" / "memory" / "WORLD.md"
     world.parent.mkdir(parents=True, exist_ok=True)

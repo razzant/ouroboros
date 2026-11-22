@@ -217,14 +217,14 @@ def inferred_file_root(ctx: Any, name: str, root: str | None, paths: list[str]) 
 
 def _share_edit_batch_path(name: str, args: Dict[str, Any]) -> str:
     """edit_batch's top-level ``path`` (outside its schema; the handler lists it) becomes the path of
-    each edit that names none and leaves the call, before root inference, binding or any guard reads
+    each edit without a ``path`` key and leaves the call, before root inference, binding or any guard reads
     the call, so every reader sees only per-edit targets. Returns the dispatch note."""
     if name != "edit_batch" or "path" not in args:
         return ""
     shared, edits = args.pop("path"), args.get("edits")
     if not isinstance(shared, str) or not shared.strip() or not isinstance(edits, list):
         return f"path={shared!r} ignored: edit_batch takes each edit's path"
-    filled = [isinstance(item, dict) and item.get("path") in (None, "") for item in edits]
+    filled = [isinstance(item, dict) and "path" not in item for item in edits]  # a present path, even empty, stays
     args["edits"] = [{**item, "path": shared} if fill else item for item, fill in zip(edits, filled)]
     return (f"path={shared!r} named the {sum(filled)} edit(s) that had no path" if any(filled)
             else f"path={shared!r} ignored: every edit names its own path")

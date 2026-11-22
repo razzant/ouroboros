@@ -864,7 +864,7 @@ def _read_file(
     ctx.last_read_view = None  # a blocked or missing read must not inherit the previous extent
     if end_line is not ABSENT or end_char is not ABSENT:  # outside the schema (arg_feedback.read_end_spelling)
         call = {"path": path, "root": root, "bucket": bucket, "skill_name": skill_name,
-                "start_line": start_line, "start_char": start_char}
+                "start_line": start_line, "start_char": start_char, "max_chars": max_chars}
         window, notes, refusal = read_end_spelling(ctx, call, max_lines, end_line, end_char)
         return refusal or with_argument_notes(ctx, _read_file(
             ctx, path, root, window, start_line, start_char, bucket, skill_name, _resolved_binding, max_chars,

@@ -673,6 +673,10 @@ def test_edit_batch_shared_path_reaches_every_write_guard(tmp_path, monkeypatch)
     own = registry.execute("edit_batch", {"path": "other.py", "edits": [
         {"path": "other.py", "old_str": "C = 2", "new_str": "C = 3"}]})
     assert own.startswith("✅") and "path='other.py' ignored: every edit names its own path" in own, own
+    empty = {"path": "", "old_str": "C = 3", "new_str": "C = 4"}  # a present path stays, even empty (a host binding)
+    canonical = registry.execute("edit_batch", {"edits": [empty]})
+    kept_empty = registry.execute("edit_batch", {"path": "other.py", "edits": [empty]})
+    assert not canonical.startswith("✅") and canonical in kept_empty, kept_empty
     note = {"path": "Desktop/absent-note.txt", "old_str": "N", "new_str": "M"}
     per_item = registry.execute("edit_batch", {"root": "user_files", "edits": [note]})
     unused = registry.execute("edit_batch", {"root": "user_files", "path": str(project / "mod.py"), "edits": [note]})
