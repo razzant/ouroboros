@@ -530,6 +530,34 @@ def test_earlier_dispatched_rotation_cannot_hide_behind_final_not_started(setup)
     assert len(gateway.accepted_operations) == 2
 
 
+@pytest.mark.parametrize("dispatch,problem,asks", [
+    ("not_started", {"code": "credential_pool_exhausted", "message": "quota", "context": {"poolCause": "quota"}}, True),
+    ("response_received", {"code": "subscription_window_exhausted", "message": "spent", "retryable": True,
+                           "context": {"resetsAt": "2099-01-01T00:00:00Z", "httpStatus": 429}}, True),
+    ("response_received", {"code": "rate_limited", "message": "slow down", "context": {"httpStatus": 429}}, True),
+    ("not_started", {"code": "credential_pool_exhausted", "message": "no account serves it",
+                     "context": {"poolCause": "structural"}}, False),
+    ("response_received", {"code": "provider_failed", "message": "ordinary"}, False),
+    ("response_received", None, False),  # an answer
+])
+def test_a_caller_owned_model_call_on_a_limit_asks_the_subscription_census_for_a_read(setup, monkeypatch, dispatch,
+                                                                                      problem, asks):
+    """Main's own calls are the most common limit event: an engine refusal before dispatch or a provider limit after
+    it leaves the census duty's request; a structural pool, an ordinary failure or an answer does not."""
+    from ouroboros import claudexor_daemon
+    from ouroboros import subscription_census as census
+
+    _root, gateway, client = setup
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    gateway.results = [result(outcome="completed" if problem is None else "failed", problem=problem)] * 4
+    gateway.dispatch = [dispatch] * 4
+    try:
+        client.chat([{"role": "user", "content": "hi"}], MODEL)
+    except transport.ClaudexorModelError:
+        assert problem is not None
+    assert (census.request_mtime() is not None) is asks
+
+
 @pytest.mark.parametrize("code,label", [("provider_failed", "provider_error_type"), ("invalid_request", "provider_error_type"),
                                         ("rate_limited", "vendor_code")])
 def test_a_vendor_code_is_labelled_by_the_event_field_only_when_it_fills_that_field(code, label):

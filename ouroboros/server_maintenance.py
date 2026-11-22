@@ -51,8 +51,7 @@ _LAST_COLD_CUSTODY_SWEEP = [0.0]
 _CUSTODY_SWEEP_LOCK = threading.Lock()
 _RECONCILE_SWEEP_LOCK = threading.Lock()
 _SCHEDULE_SWEEP_LOCK = threading.Lock()
-_CENSUS_SWEEP_LOCK = threading.Lock()
-_LAST_CENSUS_PASS = [0.0]  # the subscription census duty's dispatch stamp (``subscription_census.duty_due``)
+_CENSUS_SWEEP_LOCK = threading.Lock()  # the subscription census duty (``subscription_census.dispatch``)
 CUSTODY_SWEEP_SEC = 600  # the custody block's cadence (stamped at dispatch)
 RECONCILE_SWEEP_SEC = 300  # the reconcile block's cadence (stamped when its pass ends, issue #1230)
 
@@ -123,15 +122,9 @@ def _run_cold_custody(stop_event: Any, latch: Any) -> None:
 
 
 def _run_census_duty(stop_event: Any, latch: Any) -> None:
-    """One subscription census pass, off the custody sweep so neither delays the other; ``refresh`` never
-    raises and logs its own outcome."""
-    try:
-        if not _stop_requested(stop_event):
-            from ouroboros.subscription_census import refresh
-
-            refresh(stop_requested=lambda: _stop_requested(stop_event))
-    finally:
-        latch.release()
+    """One subscription census pass on this module's root (``subscription_census.duty_pass``; never raises)."""
+    from ouroboros.subscription_census import duty_pass
+    duty_pass(lambda: _stop_requested(stop_event), latch, root=DATA_DIR)
 
 
 @contextmanager
@@ -360,9 +353,8 @@ def _periodic_supervisor_maintenance(
     owner-Pause look (started by the tick that finds it owed, or that a member transition marked); every 600 s
     the custody block (reaping, delegated runs, the engine's route-health facts, then the working copies'
     retirers); every 300 s the reconcile
-    block (zombie heal, the age-only retirers, drive settlement, then the maintenance dispatcher); the subscription
-    census every 600 s while an actor lives, or 15 s after a refresh request (``subscription_census.duty_due``). The
-    first two stamp here before handing off; the reconcile pass stamps when it ENDS (issue #1230). A due cadence
+    block (zombie heal, the age-only retirers, drive settlement, then the maintenance dispatcher). The first
+    two stamp here before handing off; the reconcile pass stamps when it ENDS (issue #1230). A due cadence
     whose latch is still held journals the duty's stall once, with its thread's stack (``_duty_busy``).
     ``stop_event`` is the loop's per-generation token: both long passes stop mutating
     once it closes. History-sized work is the maintenance child's (``ouroboros/maintenance.py``):
@@ -413,15 +405,10 @@ def _periodic_supervisor_maintenance(
         _LAST_COLD_CUSTODY_SWEEP[0] = now
         _start_maintenance_thread(_COLD_CUSTODY_SWEEP_LOCK, "cold-custody", _run_cold_custody,
                                   (stop_event, _COLD_CUSTODY_SWEEP_LOCK))
-    from ouroboros import subscription_census
-
-    if subscription_census.duty_due(now, _LAST_CENSUS_PASS[0], has_actors):
-        if _CENSUS_SWEEP_LOCK.acquire(blocking=False):
-            _LAST_CENSUS_PASS[0] = now
-            _start_maintenance_thread(_CENSUS_SWEEP_LOCK, "subscription-census", _run_census_duty,
-                                      (stop_event, _CENSUS_SWEEP_LOCK))
-        else:
-            _duty_busy(_CENSUS_SWEEP_LOCK, subscription_census.DUTY_SEC)
+    from ouroboros.subscription_census import dispatch  # its own clock; running or direct actors, never a pending-only queue
+    dispatch(now, bool(queue.RUNNING or get_direct_activity_registry().actors()), _CENSUS_SWEEP_LOCK, DATA_DIR,
+             lambda: _start_maintenance_thread(_CENSUS_SWEEP_LOCK, "subscription-census", _run_census_duty,
+                                               (stop_event, _CENSUS_SWEEP_LOCK)), _duty_busy)
     # A cheap scheduling hint. The off-loop owner re-reads the exact fences and reads
     # nothing for a tree at rest; a network stop must never run on the assignment tick.
     from supervisor.owner_pause_control import settlement_look_owed

@@ -26,6 +26,7 @@ synthesis.
 from __future__ import annotations
 
 import pathlib
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -227,8 +228,9 @@ def tick_pass(sm: Any, name: str, stop: threading.Event) -> None:
     if name != "maintenance-child":
         sm._tick_maintenance_child = lambda: None
     sm._LAST_CANCEL_INTENT_SWEEP[0] = sm._LAST_COLD_CUSTODY_SWEEP[0] = 0.0
-    if hasattr(sm, "_LAST_CENSUS_PASS"):  # an older body measured by the driver has no census duty
-        sm._LAST_CENSUS_PASS[0] = 0.0
+    census = sys.modules.get("ouroboros.subscription_census")  # absent from an older measured body
+    if census is not None:
+        census._PASS["dispatched"] = 0.0
     try:
         sm._periodic_supervisor_maintenance([0.0], [0.0], stop_event=stop)
     finally:

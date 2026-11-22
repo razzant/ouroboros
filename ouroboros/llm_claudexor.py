@@ -155,6 +155,12 @@ class _ClaudexorProcessingRefused(ProcessingNotStarted, ClaudexorModelError):
         self.processing_reason = problem["context"]["processingRefusal"]
 
 
+def _note_limit_failure(problem: Any) -> None:
+    from ouroboros.subscription_census import note_limit_failure
+
+    note_limit_failure(problem.get("code") if isinstance(problem, dict) else None, problem)
+
+
 # The install's own control daemon left unanswered before any model create (no status: not a received refusal).
 DAEMON_UNANSWERED_CODES = frozenset({"daemon_unreachable", "daemon_not_answering", "daemon_starting",
                                      "daemon_descriptor_changed"})
@@ -567,6 +573,8 @@ class _ModelInvocation:
     def error(self, problem: dict | None, detail: dict | None = None, *, unknown: bool = False, rejoinable: bool = False):
         route = ((detail or {}).get("dispatch") or {}).get("route") or {}
         cls = ClaudexorModelError if unknown else ClaudexorModelNotDispatched
+        if not unknown:  # an engine refusal on a limit asks the subscription census for a read
+            _note_limit_failure(problem)
         return cls(problem or {"code": "model_operation_failed", "message": "The engine returned no model result."}, model_role=self.role,
                    operation_id=self.operation_id, route=route, unknown=unknown, same_operation_recoverable=rejoinable)
 
@@ -772,6 +780,7 @@ class _ModelInvocation:
             problem = ({"code": "model_operation_cancelled", "message": "The engine cancelled this model operation."}
                        if self.detail.get("state") == "cancelled" else result.get("problem") or {})
             identity = {"model_role": self.role, "operation_id": self.operation_id, "route": route}
+            _note_limit_failure(problem)  # a provider limit asks the subscription census for a read
             if problem.get("code") == "processing_unavailable" and _proved_processing_refusal(result):
                 error = _ClaudexorProcessingRefused(problem, **identity)
             else:

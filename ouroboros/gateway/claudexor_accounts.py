@@ -1064,6 +1064,8 @@ def _login_create(body: Dict[str, Any]) -> Dict[str, Any]:
                     # or transport failure still becomes the proxy's honest 503.
                     exc.login_profile_verdict = True
                     raise
+            else:  # a new account: the revision moves and the subscription census reads again
+                _account_changed(harness, profile_id, True)
 
         def _create() -> Dict[str, Any]:
             try:

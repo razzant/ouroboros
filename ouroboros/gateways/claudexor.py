@@ -167,9 +167,6 @@ def _window_exhausted_refusal(code: str, message: str, resets_at: Any, *,
     if code not in WINDOW_EXHAUSTED_CODES or (
             code != "subscription_window_exhausted" and not dated):
         return None
-    from ouroboros.subscription_census import request_refresh
-
-    request_refresh(code)  # the engine named a spent window: the census duty reads again (never raises)
     return ClaudexorSubscriptionWindowExhausted(
         message, reset_at=str(resets_at or ""), status_code=status_code, code=code)
 
@@ -959,11 +956,16 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
 
             return start_review_thread_turn(self, request["_thread_id"], request,
                                             idempotency_key=str(idempotency_key))
-        body = self._request(
-            "POST", "/v2/runs",
-            json_body=dict(request),
-            headers={"Idempotency-Key": str(idempotency_key or "") or uuid.uuid4().hex, **metadata.STORE_IDENTITY},
-        )
+        try:
+            body = self._request(
+                "POST", "/v2/runs",
+                json_body=dict(request),
+                headers={"Idempotency-Key": str(idempotency_key or "") or uuid.uuid4().hex, **metadata.STORE_IDENTITY},
+            )
+        except ClaudexorUnavailable as error:  # a start refused on a limit asks the subscription census for a read
+            from ouroboros.subscription_census import note_limit_failure
+            note_limit_failure(error.code, getattr(error, "problem", None))
+            raise
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "run start returned no handle")
         return body

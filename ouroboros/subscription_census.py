@@ -1,14 +1,16 @@
 """The subscription census: the engine's verdicts on this install's subscription accounts, counted per family,
-kept as one dated file and shown in the round's facts row when what it states changes (owner 21.11.2026 «1A»).
+kept as one dated file and shown in the round's facts row when its counts change (owner 21.11.2026 «1A»).
 
 The engine owns every verdict (``claudexor_observations.quota_availability``, the reader Accounts, admission and the
 primary observation share); this module only counts them. ``build_census`` is the pure count over one passive read
 (``gateway/claudexor_passive``: the roster and one quota epoch, no handshake, no refresh) and ``census_text`` its
-facts-only words. The census duty (``server_maintenance``) runs ``refresh`` every ``DUTY_SEC`` while a live actor
-exists, or ``REQUEST_MIN_SEC`` after a refresh request (a delegated run settled on a limit code, a spent window the
-engine named, a confirmed account change); it writes ``CENSUS_FILE`` only when what the text states changed.
-``quota_part`` is the round's reader: the file alone, never a connection, for the foci that may choose an executor,
-change-only against the latest part still in view. Nothing here selects, starts, refreshes, switches or advises.
+facts-only words. The census duty (``dispatch``, ticked by ``server_maintenance``) runs ``refresh`` every ``DUTY_SEC``
+while someone works, or ``REQUEST_MIN_SEC`` after a refresh request (a run, seat or model call refused or settled on
+a limit code, a confirmed account change), and retries a request until a read lands. ``refresh`` rewrites
+``CENSUS_FILE`` when what the text states changed; its ``since`` moves only with the trigger (the counts, resets and
+model-scoped blocks; share ranges are not in it). ``quota_part`` is the round's reader: the file alone, never a
+connection, for the foci that may choose an executor, change-only against the latest part still in view. Nothing
+here selects, starts, refreshes, switches or advises.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from ouroboros.claudexor_observations import (
     _applicable_measurement, _future_instant, quota_availability, scope_honored,
@@ -32,22 +34,26 @@ log = logging.getLogger(__name__)
 
 CENSUS_TYPE = "subscription_census"
 CENSUS_FILE = "state/subscription_census.json"  # one record replaced in place: about 2 KB for 50 accounts
-REQUEST_FILE = "state/subscription_census.request"  # a refresh request: its mtime against the duty's last pass
-DUTY_SEC = 600.0  # the duty's cadence while a live actor exists; an idle install reads nothing
+REQUEST_FILE = "state/subscription_census.request"  # a refresh request: its mtime against the duty's passes
+DUTY_SEC = 600.0  # the duty's cadence while someone works; an idle install reads nothing
 REQUEST_MIN_SEC = 15.0  # a refresh request is answered no sooner than this after the previous pass
 _MAX_BYTES = 262_144  # the read bound of the file
 # ``subject.credential_route`` of a vendor login; ``managed_api_key`` is a paid key and ``local`` a local model.
 SUBSCRIPTION_ROUTES = frozenset({"vendor_native"})
-# A settled delegated run that failed on one of these engine codes asks for a fresh census.
+# A run, seat or model call refused or settled on one of these engine codes asks for a fresh census.
 LIMIT_FAILURE_CODES = frozenset({"vendor_limit_rejected", "subscription_window_exhausted",
                                  "credential_pool_exhausted", "rate_limited"})
 LABEL = "subscription accounts"
 RETRACTION = f"({LABEL}, engine verdicts): no enabled subscription accounts now"
 UNCONFIRMED = f"({LABEL}): the previous summary is no longer confirmed"
 _SLOT = "quota "  # the facts row writes each part as ``quota <text>`` (``loop_messages.context_facts_line``)
+_FAILED_HEAD = f"({LABEL}, engine not read since "
+_SINCE = re.compile(r"(?:counts unchanged since|values from) ([^;]*)")  # the part's ``since`` in either head
+_ROOM_DETAIL = re.compile(r" with room \([^()]*\)")  # shares and coverage: shown, never a trigger
 _RETRACTED, _UNCONFIRMED = "retracted", "unconfirmed"
-# A Presence task receives the part only when its capability ceiling grants one of these.
-_EXECUTOR_TOOLS = ("schedule_subagent", "delegate_start", "start_task", "review_change", "commit_reviewed", "plan_task")
+# A Presence task receives the part only when its ceiling grants one of these; an explicit denial withholds it.
+_EXECUTOR_TOOLS = ("schedule_subagent", "delegate_start", "start_task", "review_change", "commit_reviewed",
+                   "vcs_commit_reviewed", "preflight_review", "plan_task")
 # Counted classes in their text order; with room and at limit carry their own details.
 _CLASSES = (("with_room", "with room"), ("at_limit", "at limit"), ("verification_failed", "verification failed"),
             ("no_measured_window", "available (no measured general window)"),
@@ -55,8 +61,10 @@ _CLASSES = (("with_room", "with room"), ("at_limit", "at limit"), ("verification
 _SAFE_CODE = re.compile(r"[a-z0-9_]{1,64}")
 
 _LOCK = threading.Lock()  # one publication, failure record or invalidation at a time in this process
-_PASS: Dict[str, Any] = {"confirmed_at": None, "failures": 0}  # memory only: the last successful read and the streak
-_WRITES = frozenset({"written", "recovered", "confirmed", "none", "failure_recorded"})
+# Memory only: the last accepted read, the start of the current failed streak, the start of the last pass the engine
+# answered (a request older than it is answered) and the duty's last dispatch.
+_PASS: Dict[str, Any] = {"confirmed_at": None, "failing_since": None, "landed": 0.0, "dispatched": 0.0}
+_WRITES = frozenset({"written", "refreshed", "recovered", "confirmed", "none", "failure_recorded"})
 
 
 # ---- the count -----------------------------------------------------------------------------------------------------
@@ -68,37 +76,41 @@ def verification_failed(status: Any) -> bool:
     return isinstance(value, str) and bool(value) and value not in ("passed", "not_run")
 
 
+def _subscription_profiles(payload: Mapping[str, Any]) -> Iterator[Tuple[str, str, Mapping[str, Any]]]:
+    """``(harness, profile_id, status)`` of the roster's enabled named profiles of a subscription credential kind
+    (the core's include-list, ``gateway.onboarding._SUBSCRIPTION_CREDENTIAL_KINDS``)."""
+    from ouroboros.gateway.onboarding import _SUBSCRIPTION_CREDENTIAL_KINDS
+
+    for wrapper in _dicts(_mapping(payload.get("profiles")).get("profiles")):
+        profile = _mapping(wrapper.get("profile"))
+        harness, profile_id = profile.get("harness_id"), profile.get("profile_id")
+        if (_named(harness) and _named(profile_id) and profile.get("enabled") is not False
+                and profile.get("credential_kind") in _SUBSCRIPTION_CREDENTIAL_KINDS):
+            yield harness, profile_id, _mapping(wrapper.get("status"))
+
+
 def build_census(payload: Mapping[str, Any], now: float) -> Optional[Dict[str, Dict[str, Any]]]:
     """Each family's counted accounts from one passive read (``claudexor_passive._quota_payload``'s shape), or None
     when the engine did not certify the model-agnostic text scope (an older engine): there is then no census.
 
-    Counted: the roster's enabled named profiles of a subscription credential kind (the core's include-list,
-    ``gateway.onboarding._SUBSCRIPTION_CREDENTIAL_KINDS``), each judged on its subscription-route rows and absences
-    alone, so a paid key never gives a subscription account room. In this order: verification failed (the Accounts
-    rule), the engine's verdict at the limit or with room, then the engine's unknowns by cause. Profiles with room add
-    each window length's highest fresh measured share; model-scoped blocks still ahead count once per profile and
-    engine model list. The result is JSON-safe: dicts keyed by family, lists, strings and numbers.
+    Counted: the roster's subscription profiles (``_subscription_profiles``), each judged on its subscription-route
+    rows and absences alone, so a paid key never gives a subscription account room. In this order: verification failed
+    (the Accounts rule), the engine's verdict at the limit or with room, then the engine's unknowns by cause. Profiles
+    with room add each window length's highest fresh measured share; model-scoped blocks still ahead count once per
+    profile and model list. The result is JSON-safe: dicts keyed by family, lists, strings and numbers.
     """
-    from ouroboros.gateway.onboarding import _SUBSCRIPTION_CREDENTIAL_KINDS
-
     scope = payload.get("availability_scope")
     if not scope_honored({"availability_scope": scope}, None, "text"):
         return None
-    roster = _mapping(payload.get("profiles"))
     snapshots, absences = _dicts(payload.get("quota")), _dicts(payload.get("quota_absences"))
     tallies: Dict[str, Dict[str, Any]] = {}
-    for wrapper in _dicts(roster.get("profiles")):
-        profile = _mapping(wrapper.get("profile"))
-        harness, profile_id = profile.get("harness_id"), profile.get("profile_id")
-        if (not _named(harness) or not _named(profile_id) or profile.get("enabled") is False
-                or profile.get("credential_kind") not in _SUBSCRIPTION_CREDENTIAL_KINDS):
-            continue
+    for harness, profile_id, status in _subscription_profiles(payload):
         tally = tallies.setdefault(harness, {"counts": dict.fromkeys((key for key, _ in _CLASSES), 0), "resets": [],
                                              "windows": {}, "blocks": {}})
         rows, gone = _own_rows(snapshots, harness, profile_id), _own_rows(absences, harness, profile_id)
         for key, block in _profile_blocks(rows, now).items():
             tally["blocks"].setdefault(key, []).append(block)
-        category, reset = _judge(rows, gone, _mapping(wrapper.get("status")), harness, profile_id, scope, now)
+        category, reset = _judge(rows, gone, status, harness, profile_id, scope, now)
         tally["counts"][category] += 1
         if reset is not None:
             tally["resets"].append(reset)
@@ -143,22 +155,23 @@ def _highest_shares(rows: List[dict]) -> Dict[int, float]:
 
 
 def _profile_blocks(rows: List[dict], now: float) -> Dict[tuple, Tuple[float, str, Optional[str]]]:
-    """A profile's model-scoped blocks still ahead, once per engine model list, as ``(instant, reset, seen)``: a fresh
-    row's reading wins over a stale one of the same list; a stale one carries its observation time; passed or
+    """A profile's model-scoped blocks still ahead, once per model list, as ``(instant, reset, seen)``: the earliest
+    reset across its rows (a fresh reading breaks a tie), ``seen`` the observation time of that block's row when it
+    is stale. The list is the engine's prefixes when it names any (shorter), else its sorted model names; passed or
     malformed resets drop (``_future_instant``, the core's parser)."""
-    found: Dict[tuple, Tuple[bool, float, str, Optional[str]]] = {}
+    found: Dict[tuple, Tuple[float, bool, str, Optional[str]]] = {}
     for row in rows:
         fresh = row.get("freshness") == "fresh"
         for block in _dicts(_mapping(row.get("availability")).get("model_scoped_exhaustions")):
             at = _future_instant(block.get("resets_at"), now)
             if at is None:
                 continue
-            key = (_strings(block.get("applies_to_models")), _strings(block.get("applies_to_model_prefixes")))
-            held = found.get(key)
-            if held is None or (fresh, -at) > (held[0], -held[1]):
+            prefixes = tuple(sorted(_strings(block.get("applies_to_model_prefixes"))))
+            key = (() if prefixes else tuple(sorted(_strings(block.get("applies_to_models")))), prefixes)
+            if key not in found or (at, not fresh) < found[key][:2]:
                 seen = None if fresh else (row.get("observed_at") if isinstance(row.get("observed_at"), str) else "")
-                found[key] = (fresh, at, block["resets_at"], seen)
-    return {key: (at, reset, seen) for key, (_fresh, at, reset, seen) in found.items()}
+                found[key] = (at, not fresh, block["resets_at"], seen)
+    return {key: (at, reset, seen) for key, (at, _stale, reset, seen) in found.items()}
 
 
 def _family(tally: Dict[str, Any]) -> Dict[str, Any]:
@@ -168,10 +181,9 @@ def _family(tally: Dict[str, Any]) -> Dict[str, Any]:
                           "profiles": len(shares)} for length, shares in sorted(tally["windows"].items())]
     family["model_scoped"] = []
     for (models, prefixes), blocks in sorted(tally["blocks"].items()):
-        stale = [(_instant(seen) or float("inf"), seen) for _at, _reset, seen in blocks if seen is not None]
+        _at, reset, seen = min(blocks, key=lambda block: (block[0], block[2] is not None))  # its own row's seen
         family["model_scoped"].append({"models": list(models), "prefixes": list(prefixes), "profiles": len(blocks),
-                                       "earliest_reset": min(blocks, key=lambda block: block[0])[1],
-                                       "seen": min(stale)[1] if stale else None})
+                                       "earliest_reset": reset, "seen": seen})
     return family
 
 
@@ -179,20 +191,27 @@ def _family(tally: Dict[str, Any]) -> Dict[str, Any]:
 
 def census_text(census: Mapping[str, Any]) -> str:
     """The facts row's part without its slot word (the row writes ``quota <text>``): the engine's verdicts as counted,
-    dated by the first read that gave them; after a failed read, also when the engine was last read and why not."""
+    with the read that first gave these counts and the read the shares come from; after a failed read, when the
+    engine was last read and why not."""
     since, code = _clock(census.get("since")), census.get("code")
     if census.get("read") == "failed":
         code = code if isinstance(code, str) and _SAFE_CODE.fullmatch(code) else "read_failed"
-        head = f"({LABEL}, engine not read since {_clock(census.get('confirmed_at'))} ({code}); values from {since})"
+        head = f"{_FAILED_HEAD}{_clock(census.get('confirmed_at'))} ({code}); values from {since})"
     else:
-        head = f"({LABEL}, engine verdicts, unchanged since {since})"
+        head = f"({LABEL}, engine verdicts; counts unchanged since {since}; shares read {_clock(census.get('read_at'))})"
     return f"{head}: {body_text(_mapping(census.get('families')))}"
 
 
 def body_text(families: Mapping[str, Any]) -> str:
-    """The families as the text states them, in name order: what the signature and the in-view comparison cover."""
+    """The families as the text states them, in name order."""
     return "; ".join(_family_text(name, family) for name, family in sorted(families.items())
                      if isinstance(family, Mapping)) or "none"
+
+
+def _trigger(body: str) -> str:
+    """What makes the part due: the body without the with-room shares and coverage (counts, resets, model-scoped
+    blocks stay), read the same way from the file and from a part in view."""
+    return _ROOM_DETAIL.sub(" with room", body)
 
 
 def _family_text(name: str, family: Mapping[str, Any]) -> str:
@@ -206,14 +225,14 @@ def _family_text(name: str, family: Mapping[str, Any]) -> str:
         if key == "with_room":
             spans = [f"{_length(window.get('window_seconds'))} {_shares(window)}% used, "
                      f"{_count(window.get('profiles'))} of {room} measured" for window in _dicts(family.get("windows"))]
-            detail = f" ({'; '.join(spans)})" if spans else ""
+            detail = f" ({'; '.join(spans)})" if spans else " (no fresh measured window)"
         elif key == "at_limit" and family.get("earliest_reset"):
-            detail = f" (earliest reset {_clock(family['earliest_reset'])})"
+            detail = f" (earliest reset {_clock(family['earliest_reset'], nearest=True)})"
         bits.append(f"{number} {words}{detail}")
     for block in _dicts(family.get("model_scoped")):
         seen = f", seen {_clock(block['seen'])}" if block.get("seen") is not None else ""
         bits.append(f"{_models(block)} spent on {_count(block.get('profiles'))} "
-                    f"(earliest reset {_clock(block.get('earliest_reset'))}{seen})")
+                    f"(earliest reset {_clock(block.get('earliest_reset'), nearest=True)}{seen})")
     return f"{_clean(name)} " + ", ".join(bits)
 
 
@@ -243,9 +262,12 @@ def _models(block: Mapping[str, Any]) -> str:
     return _clean(",".join(names)) or "models the engine did not name"
 
 
-def _clock(value: Any) -> str:
+def _clock(value: Any, *, nearest: bool = False) -> str:
+    """An instant to the minute; an engine reset to the NEAREST minute (vendor resets jitter around :00)."""
     at = _instant(value)
-    return datetime.fromtimestamp(at, timezone.utc).strftime("%d.%m %H:%MZ") if at is not None else "an unreadable time"
+    if at is None:
+        return "an unreadable time"
+    return datetime.fromtimestamp(round(at / 60) * 60 if nearest else at, timezone.utc).strftime("%d.%m %H:%MZ")
 
 
 def _instant(value: Any) -> Optional[float]:
@@ -253,12 +275,14 @@ def _instant(value: Any) -> Optional[float]:
 
 
 def census_signature(census: Mapping[str, Any]) -> str:
-    """What the text states without its times or code: the read status (ok or failed) and the families."""
-    return _signature("failed" if census.get("read") == "failed" else "ok", body_text(_mapping(census.get("families"))))
+    """What makes the part due: the read status (ok or failed), the trigger and its ``since`` as the text states it;
+    the shares, ``read_at``, ``confirmed_at`` and the code are shown, never compared."""
+    return _signature("failed" if census.get("read") == "failed" else "ok", _clock(census.get("since")),
+                      _trigger(body_text(_mapping(census.get("families")))))
 
 
-def _signature(read: str, body: str) -> str:
-    return hashlib.sha256(f"{read}\n{body}".encode("utf-8")).hexdigest()[:20]
+def _signature(read: str, since: str, trigger: str) -> str:
+    return hashlib.sha256(f"{read}\n{since}\n{trigger}".encode("utf-8")).hexdigest()[:20]
 
 
 # ---- the file ------------------------------------------------------------------------------------------------------
@@ -308,8 +332,8 @@ def _iso(epoch: float) -> str:
 # ---- the writer ----------------------------------------------------------------------------------------------------
 
 def refresh(*, stop_requested: Optional[Callable[[], bool]] = None, root: Any = None) -> str:
-    """One census pass of the census duty (``server_maintenance``), its outcome logged here (nothing in it raises into
-    the duty's step helpers). Never raises."""
+    """One census pass of the census duty, its outcome logged here (nothing in it raises into the duty's step
+    helpers). Never raises."""
     try:
         outcome = _refresh(stop_requested or (lambda: False), root)
     except Exception:
@@ -325,19 +349,23 @@ def _refresh(stop: Callable[[], bool], root: Any) -> str:
 
     if not owned_daemon_provisioned() and not (_data_dir(root) / CENSUS_FILE).exists():
         return "no_engine"  # never provisioned: nothing is read and no file appears
+    started = time.time()
     revision = claudexor_accounts.account_read_revision()
     payload = claudexor_passive._quota_payload()  # discovery, roster and one quota epoch; no handshake or refresh
     if stop():
         return "stopped"
     now, reads = time.time(), _mapping(payload.get("reads"))
-    if reads.get("accounts") != "ok" or reads.get("quota") != "ok":
-        return _record_failure(_failure_code(payload), root)
-    families = build_census(payload, now)
-    with _LOCK:
-        _PASS.update(confirmed_at=now, failures=0)
-    if families is None:
-        return "scope_unhonored"  # an older engine certifies no text scope: nothing to state, a known file stays
-    return _publish(families, now, revision, claudexor_accounts.account_read_revision, stop, root)
+    if reads.get("accounts") == "ok" and next(_subscription_profiles(payload), None) is None:
+        families: Optional[Dict[str, Any]] = {}  # the roster answered: no subscription account, whatever the quota
+    elif reads.get("accounts") != "ok" or reads.get("quota") != "ok":
+        return _record_failure(_failure_code(payload), started, root)
+    else:
+        families = build_census(payload, now)
+    if families is None:  # an older engine certifies no text scope: the engine answered, its verdicts are no census
+        with _LOCK:
+            _PASS["landed"] = started
+        return _record_failure("availability_scope_unhonored", started, root)
+    return _publish(families, started, now, revision, claudexor_accounts.account_read_revision, stop, root)
 
 
 def _failure_code(payload: Mapping[str, Any]) -> str:
@@ -350,12 +378,13 @@ def _failure_code(payload: Mapping[str, Any]) -> str:
     return "read_failed"
 
 
-def _record_failure(code: str, root: Any) -> str:
-    """A failed read keeps the values, ``since`` and ``confirmed_at``; it is recorded on the second failed pass in a
-    row (a first pass after a start can meet an engine still warming up), once until a read succeeds."""
+def _record_failure(code: str, started: float, root: Any) -> str:
+    """A failed read keeps the values, ``since`` and ``confirmed_at``; it is recorded once a failed streak has lasted
+    ``DUTY_SEC`` (an engine warming up after a start fails a pass or two), once until a read is accepted."""
     with _LOCK:
-        _PASS["failures"] += 1
-        if _PASS["failures"] < 2:
+        if _PASS["failing_since"] is None:
+            _PASS["failing_since"] = started
+        if started - _PASS["failing_since"] < DUTY_SEC:
             return "failure_debounced"
         existing = read_file(root)
         if existing is None:
@@ -363,54 +392,58 @@ def _record_failure(code: str, root: Any) -> str:
         if existing["read"] == "failed":
             return "failure_unchanged"  # the code may alternate; it is printed, never compared
         confirmed = _PASS["confirmed_at"]
-        record = {**existing, "read": "failed", "code": code,
-                  "confirmed_at": _iso(confirmed) if confirmed is not None else existing.get("confirmed_at")}
-        record["digest"] = census_signature(record)
-        _write(record, root)
+        _write({**existing, "read": "failed", "code": code, "confirmed_at": _iso(confirmed) if confirmed is not None
+                else existing.get("confirmed_at") or existing.get("read_at")}, root)
     return "failure_recorded"
 
 
-def _publish(families: Dict[str, Any], now: float, revision: int, current_revision: Callable[[], int],
+def _publish(families: Dict[str, Any], started: float, now: float, revision: int, current_revision: Callable[[], int],
              stop: Callable[[], bool], root: Any) -> str:
-    """Write the census when what it states changed (or a pending file awaits it); never over a confirmed account
-    change that crossed this read (the accounts module's revision), which requested its own pass."""
-    record: Dict[str, Any] = {"type": CENSUS_TYPE, "read": "ok", "code": None, "families": families}
-    digest = census_signature(record)
+    """Accept the read and write the census when what it states changed (or a pending or failed file awaits it);
+    never over a confirmed account change that crossed this read (the accounts module's revision), which requested
+    its own pass. Only an accepted read confirms: ``confirmed_at``, the failed streak and the answered requests."""
+    body = body_text(families)
     with _LOCK:
         if current_revision() != revision:
             return "roster_changed"
-        existing = read_file(root)
-        if existing is not None and not existing.get("pending") and census_signature(existing) == digest:
-            return "unchanged"
         if stop():
             return "stopped"
-        same = existing is not None and body_text(existing["families"]) == body_text(families)
-        record.update(digest=digest, since=existing.get("since") if same and existing.get("since") else _iso(now),
-                      confirmed_at=_iso(now))
-        _write(record, root)
+        _PASS.update(confirmed_at=now, failing_since=None, landed=started)
+        existing = read_file(root)
+        if (existing is not None and existing["read"] == "ok" and not existing.get("pending")
+                and body_text(existing["families"]) == body):
+            return "unchanged"
+        same = existing is not None and _trigger(body_text(existing["families"])) == _trigger(body)
+        _write({"type": CENSUS_TYPE, "read": "ok", "code": None, "families": families,
+                "since": existing.get("since") if same and existing.get("since") else _iso(now), "read_at": _iso(now)},
+               root)
     if not same:
         return "written" if families else "none"
-    return "recovered" if existing["read"] == "failed" else "confirmed"
+    return "recovered" if existing["read"] == "failed" else "confirmed" if existing.get("pending") else "refreshed"
 
 
-# ---- requests and invalidation -------------------------------------------------------------------------------------
+# ---- requests, invalidation and the duty ---------------------------------------------------------------------------
 
 def request_refresh(reason: str, root: Any = None) -> None:
-    """Ask the census duty for a pass, answered at most every ``REQUEST_MIN_SEC``: the request is a file whose mtime
-    the duty compares with its last pass, so any process may ask. Never raises."""
+    """Ask the census duty for a pass: the request is a file whose mtime the duty compares with its passes, so any
+    process may ask. A no-op when no engine was ever provisioned (nothing to read). Never raises."""
     try:
+        from ouroboros.claudexor_daemon import owned_daemon_provisioned
         from ouroboros.utils import atomic_write_json, utc_now_iso
 
-        atomic_write_json(_data_dir(root) / REQUEST_FILE, {"type": "subscription_census_request",
-                                                           "reason": str(reason)[:64], "requested_at": utc_now_iso()})
+        if owned_daemon_provisioned():
+            atomic_write_json(_data_dir(root) / REQUEST_FILE, {"type": "subscription_census_request",
+                                                               "reason": str(reason)[:64], "requested_at": utc_now_iso()})
     except Exception:
         log.debug("Subscription census refresh request not written", exc_info=True)
 
 
-def note_limit_failure(code: Any) -> None:
-    """A settled delegated run failed: a limit code asks for a fresh census (``LIMIT_FAILURE_CODES``)."""
-    if code in LIMIT_FAILURE_CODES:
-        request_refresh(str(code))
+def note_limit_failure(code: Any, problem: Any = None, root: Any = None) -> None:
+    """A run, seat or model call refused or settled on a limit code (``LIMIT_FAILURE_CODES``) asks for a fresh census,
+    except a pool the engine calls structural (its problem's ``context.poolCause``). Never raises."""
+    if (isinstance(code, str) and code in LIMIT_FAILURE_CODES
+            and _mapping(_mapping(problem).get("context")).get("poolCause") != "structural"):
+        request_refresh(code, root)
 
 
 def invalidate(reason: str, root: Any = None) -> None:
@@ -428,7 +461,7 @@ def invalidate(reason: str, root: Any = None) -> None:
 
 def account_changed(enabled: Optional[bool]) -> None:
     """A confirmed Settings › Accounts change (``gateway.claudexor_accounts._account_changed``): a disable or removal
-    invalidates, an enable only asks for a pass."""
+    invalidates, an enable or a new account only asks for a pass."""
     if enabled is True:
         request_refresh("account_enabled")
     else:
@@ -442,15 +475,43 @@ def request_mtime(root: Any = None) -> Optional[float]:
         return None
 
 
-def duty_due(now: float, last_pass: float, has_actors: bool, root: Any = None) -> bool:
-    """The census duty's due condition: ``DUTY_SEC`` after the last pass while a live actor exists, or a refresh
-    request newer than the last pass once ``REQUEST_MIN_SEC`` have passed since it."""
-    if now - last_pass < REQUEST_MIN_SEC:
+def duty_due(now: float, working: bool, root: Any = None) -> bool:
+    """The census duty's due condition, never sooner than ``REQUEST_MIN_SEC`` after its last dispatch: ``DUTY_SEC``
+    after it while someone works (a running task or a direct actor; a pending-only queue reads nothing), or a refresh
+    request newer than it; while someone works, also a request no read has answered yet. Only an engine once
+    provisioned, or a census file to keep, has anything to read."""
+    last = _PASS["dispatched"]
+    if now - last < REQUEST_MIN_SEC:
         return False
-    if has_actors and now - last_pass >= DUTY_SEC:
-        return True
     requested = request_mtime(root)
-    return requested is not None and requested > last_pass
+    due = ((working and (now - last >= DUTY_SEC or (requested is not None and requested > _PASS["landed"])))
+           or (requested is not None and requested > last))
+    if not due:
+        return False
+    from ouroboros.claudexor_daemon import owned_daemon_provisioned
+
+    return owned_daemon_provisioned() or (_data_dir(root) / CENSUS_FILE).exists()
+
+
+def dispatch(now: float, working: bool, latch: Any, root: Any, start: Callable[[], Any],
+             busy: Callable[[Any, float], Any]) -> None:
+    """The census duty's tick (``server_maintenance``): when due and its latch is free, stamp and ``start`` one pass
+    (``duty_pass``); a due pass whose latch is still held reports the stall (``busy``)."""
+    if not duty_due(now, working, root):
+        return
+    if latch.acquire(blocking=False):
+        _PASS["dispatched"] = now
+        start()
+    else:
+        busy(latch, DUTY_SEC)
+
+
+def duty_pass(stop_requested: Callable[[], bool], latch: Any, root: Any = None) -> str:
+    """One pass of the census duty, then its latch goes back; a closed generation reads nothing. Never raises."""
+    try:
+        return "stopped" if stop_requested() else refresh(stop_requested=stop_requested, root=root)
+    finally:
+        latch.release()
 
 
 # ---- the round's part ----------------------------------------------------------------------------------------------
@@ -459,24 +520,31 @@ def quota_part(ctx: Any) -> Tuple[Optional[str], str]:
     """``(part, term)``: this round's part for the facts row's quota slot, or None, and the term the row's reuse key
     carries (the file's signature for a recipient, ``""`` for any other focus).
 
-    Reads the census file only, never a connection. The part is due when what the file states differs from the
-    latest part of this module in an intact facts row still in view, every facts row searched newest first, or when
-    none is in view; times are not compared, so A→B→A shows B, then A. A stored «none» retracts a part in view once;
-    a file gone absent or unreadable says once that the summary in view is no longer confirmed; a pending file (an
-    account change awaiting its read) keeps what is in view.
+    Reads the census file only, never a connection. The part is due when what the file states (its read status, its
+    trigger and that trigger's ``since``) differs from the latest part of this module in an intact facts row still in
+    view, every facts row searched newest first, or when none is in view; so A→B→A shows B, then A, also once B's
+    row has left the view. A stored «none» retracts a part in view once; a failed read of an empty roster says so
+    once where a part is in view; a file gone absent or unreadable, or a pending file whose read failed, says once
+    that the summary in view is no longer confirmed; a pending file (an account change awaiting its read) otherwise
+    keeps what is in view.
     """
     try:
         if not chooses_executors(ctx):
             return None, ""
         state, census = _file_state()
-        if state == "pending":
-            return None, "pending:" + census_signature(census)
-        latest = _latest_in_view(getattr(ctx, "messages", None) or [])
         if census is None:
+            latest = _latest_in_view(getattr(ctx, "messages", None) or [])
             return (UNCONFIRMED if latest not in (None, _UNCONFIRMED) else None), state
         signature = census_signature(census)
-        if not census["families"]:
+        if state == "pending" and census["read"] != "failed":
+            return None, signature
+        latest = _latest_in_view(getattr(ctx, "messages", None) or [])
+        if state == "pending":
+            return (UNCONFIRMED if latest not in (None, _UNCONFIRMED) else None), signature
+        if not census["families"] and census["read"] != "failed":
             return (RETRACTION if latest not in (None, _RETRACTED) else None), signature
+        if not census["families"] and latest is None:
+            return None, signature  # a failed read of an empty roster tells a fresh view nothing
         return (census_text(census) if latest != signature else None), signature
     except Exception:
         log.debug("Subscription census part unavailable for the facts row", exc_info=True)
@@ -485,18 +553,20 @@ def quota_part(ctx: Any) -> Tuple[Optional[str], str]:
 
 def _latest_in_view(messages: List[Any]) -> Optional[str]:
     """The newest part of this module in an intact facts row in view: its signature, ``_RETRACTED`` or
-    ``_UNCONFIRMED``; None when no facts row in view carries one."""
+    ``_UNCONFIRMED``; None when no facts row in view carries one. The row's kind is checked first; its whole text
+    is searched (an earlier part, an owner's quote say, may span lines)."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, host_row_intact
     from ouroboros.context_view_facts import CONTEXT_FACTS_NAME
 
     marker = f"{_SLOT}({LABEL}"
     for row in reversed(messages):
-        content = row.get("content") if isinstance(row, dict) else None
-        if (isinstance(content, str) and marker in content and row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME
-                and host_row_intact(row)):
-            for segment in content.split("\n", 1)[0].split(" | "):
+        if not isinstance(row, dict) or row.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME:
+            continue
+        content = row.get("content")
+        if isinstance(content, str) and marker in content and host_row_intact(row):
+            for segment in content.split(" | "):
                 if segment.startswith(marker):
-                    return _part_signature(segment[len(_SLOT):])
+                    return _part_signature(segment.split("\n", 1)[0][len(_SLOT):])
     return None
 
 
@@ -506,14 +576,16 @@ def _part_signature(text: str) -> str:
     if text == UNCONFIRMED:
         return _UNCONFIRMED
     head, _sep, body = text.partition("): ")
-    return _signature("failed" if head.startswith(f"({LABEL}, engine not read") else "ok", body)
+    since = _SINCE.search(head)
+    return _signature("failed" if head.startswith(_FAILED_HEAD) else "ok", since.group(1) if since else "",
+                      _trigger(body))
 
 
 def chooses_executors(ctx: Any) -> bool:
     """Whether this focus may choose an executor, so the census concerns it: every integrating focus (Main, project
-    roots, consciousness); a Presence task only when its ceiling grants an executor-starting or reviewer tool; a
-    delegated child or nanny that may call ``review_change`` (an acting profile; a read-only child is refused there)
-    or holds the delegation right."""
+    roots, consciousness); a Presence task when its ceiling grants an executor-starting or reviewer tool; a delegated
+    child or nanny that may call ``review_change`` (an acting profile) or holds the delegation right. A tool the
+    task's contract withholds (``disabled_tools``) grants nothing."""
     from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
     from ouroboros.memory_view import view_role
 
@@ -523,17 +595,21 @@ def chooses_executors(ctx: Any) -> bool:
     contract = getattr(tool_ctx, "task_contract", None)
     contract = contract if isinstance(contract, Mapping) else _mapping(metadata.get("task_contract"))
     role = view_role({"metadata": metadata, "task_contract": dict(contract)})
+    if role != "presence" and role not in DELEGATED_FOCUS_ROLES:
+        return True
+    from ouroboros.tools.registry_guards import _disabled_tools
+
+    denied = _disabled_tools(tool_ctx)
     if role == "presence":
         from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
 
         ceiling = presence_ceiling_from_context(tool_ctx)
-        return ceiling is None or any(presence_ceiling_allows_tool(ceiling, name) for name in _EXECUTOR_TOOLS)
-    if role not in DELEGATED_FOCUS_ROLES:
-        return True
+        return any(name not in denied and (ceiling is None or presence_ceiling_allows_tool(ceiling, name))
+                   for name in _EXECUTOR_TOOLS)
     from ouroboros.tool_access import active_tool_profile
 
-    acting = active_tool_profile(tool_ctx) == "acting_subagent"  # review_change is callable for this profile
-    return acting or holds_delegation_right(contract.get("delegation_budget"))
+    acting = active_tool_profile(tool_ctx) == "acting_subagent" and "review_change" not in denied
+    return acting or ("schedule_subagent" not in denied and holds_delegation_right(contract.get("delegation_budget")))
 
 
 def holds_delegation_right(budget: Any) -> bool:

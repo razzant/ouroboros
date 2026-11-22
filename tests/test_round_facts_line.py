@@ -271,6 +271,9 @@ def test_an_owner_turn_names_its_own_wait_so_far_and_a_wake_has_none(monkeypatch
 
 # ---- the subscription census part (C09; C07 consensus C1) ------------------------------------------------------------
 
+_HEAD = "quota (subscription accounts, engine verdicts; counts unchanged since 21.11 13:05Z; shares read 21.11 13:05Z): "
+
+
 def _census_ctx(tmp_path, monkeypatch, **tool_attrs):
     from ouroboros import config
 
@@ -280,21 +283,24 @@ def _census_ctx(tmp_path, monkeypatch, **tool_attrs):
     return _facts_ctx(tmp_path, monkeypatch, **tool_attrs)
 
 
-def _store_census(root, share=0.5, *, families=None, **fields):
-    """The census file as the duty writes it: one codex account with room at ``share`` unless ``families`` is given."""
+def _store_census(root, share=0.5, *, families=None, spent=False, **fields):
+    """The census file as the duty writes it: one codex account with room at ``share``, or at its limit when
+    ``spent``, unless ``families`` is given."""
     from ouroboros import subscription_census as census
     from tests.test_subscription_census import NOW, WEEK, _payload, _profile, _row
 
     if families is None:
-        families = census.build_census(_payload([_profile("codex", "a")], [_row("codex", "a", windows=[(share, WEEK)])]), NOW)
-    record = {"type": census.CENSUS_TYPE, "read": "ok", "code": None, "families": families,
-              "since": "2026-11-21T13:05:21+00:00", "confirmed_at": "2026-11-21T13:05:21+00:00", **fields}
-    census._write({**record, "digest": census.census_signature(record)}, root)
+        row = (_row("codex", "a", state="exhausted", resets_at="2026-11-22T12:00:00Z", windows=[(1.0, WEEK)]) if spent
+               else _row("codex", "a", windows=[(share, WEEK)]))
+        families = census.build_census(_payload([_profile("codex", "a")], [row]), NOW)
+    census._write({"type": census.CENSUS_TYPE, "read": "ok", "code": None, "families": families,
+                   "since": "2026-11-21T13:05:21+00:00", "read_at": "2026-11-21T13:05:21+00:00", **fields}, root)
 
 
 def _quota_of(row) -> str:
-    """The quota part of one facts row, "" without one."""
-    return next((part for part in row["content"].split("\n", 1)[0].split(" | ") if part.startswith("quota (")), "")
+    """The quota part of one facts row, "" without one: the row's whole text is searched (an earlier part may span
+    lines)."""
+    return next((part.split("\n", 1)[0] for part in row["content"].split(" | ") if part.startswith("quota (")), "")
 
 
 def _next_round(context) -> str:
@@ -303,23 +309,42 @@ def _next_round(context) -> str:
     return _quota_of(context.messages[-1])
 
 
-def test_the_census_part_is_printed_when_it_changes_and_never_repeated(tmp_path, monkeypatch):
+def test_the_census_part_is_printed_when_its_counts_change_and_never_repeated(tmp_path, monkeypatch):
     """Change-only against the latest part in an intact facts row in view, every facts row searched: rows without
-    the part between do not make it due again; A -> B -> A shows B, then A."""
+    the part between do not make it due again, shares alone do not either (they show the next time it is due), and
+    A -> B -> A shows B, then A."""
     context = _census_ctx(tmp_path, monkeypatch)
     assert _next_round(context) == ""  # no census file, nothing in view: no part
     _store_census(tmp_path, 0.5)
-    assert _next_round(context) == ("quota (subscription accounts, engine verdicts, unchanged since 21.11 13:05Z): "
-                                    "codex 1 with room (7d 50% used, 1 of 1 measured)")
+    assert _next_round(context) == _HEAD + "codex 1 with room (7d 50% used, 1 of 1 measured)"
     assert [_next_round(context) for _ in range(3)] == ["", "", ""]  # the part stands in an older facts row
-    _store_census(tmp_path, 0.7)
-    assert "codex 1 with room (7d 70% used" in _next_round(context)
+    _store_census(tmp_path, 0.7, read_at="2026-11-21T13:15:21+00:00")
+    assert _next_round(context) == ""  # the shares alone moved
+    _store_census(tmp_path, spent=True, since="2026-11-21T13:25:21+00:00", read_at="2026-11-21T13:25:21+00:00")
+    assert _next_round(context).endswith("codex 1 at limit (earliest reset 22.11 12:00Z)")
+    _store_census(tmp_path, 0.7, since="2026-11-21T13:35:21+00:00", read_at="2026-11-21T13:35:21+00:00")
+    assert _next_round(context) == ("quota (subscription accounts, engine verdicts; counts unchanged since 21.11 13:35Z; "
+                                    "shares read 21.11 13:35Z): codex 1 with room (7d 70% used, 1 of 1 measured)")
+    _store_census(tmp_path, 0.7, since="2026-11-21T13:35:21+00:00", read_at="2026-11-21T15:00:00+00:00")
+    assert _next_round(context) == ""  # the read time is shown, never compared
+
+
+def test_a_return_to_earlier_counts_is_shown_after_the_newer_row_left_the_view(tmp_path, monkeypatch):
+    """C07's case: A's row stays in view and B's row left in the same round as the census returned to A. The part
+    carries its ``since``, which moves only with the counts: a new one says the return, the same one is no change."""
+    context = _census_ctx(tmp_path, monkeypatch)
     _store_census(tmp_path, 0.5)
-    assert "codex 1 with room (7d 50% used" in _next_round(context)  # A -> B -> A: the return is shown
-    _store_census(tmp_path, 0.5, since="2026-11-21T15:00:00+00:00", confirmed_at="2026-11-21T15:00:00+00:00")
-    assert _next_round(context) == ""  # times are not compared
-    assert not any("(subscription accounts" in str(row.get("content")) for row in context.messages
-                   if row.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME)  # nothing in the system part or elsewhere
+    assert _next_round(context)
+    _store_census(tmp_path, spent=True, since="2026-11-21T13:25:21+00:00")
+    assert _next_round(context)
+    context.messages[:] = [row for row in context.messages if "at limit" not in str(row.get("content"))]
+    _store_census(tmp_path, 0.5, since="2026-11-21T13:35:21+00:00")
+    assert "counts unchanged since 21.11 13:35Z" in _next_round(context)
+    other = _census_ctx(tmp_path, monkeypatch)
+    _store_census(tmp_path, 0.5)
+    assert _next_round(other)
+    _store_census(tmp_path, 0.6)  # the same counts and since: nothing returned
+    assert _next_round(other) == ""
 
 
 def test_the_census_part_returns_once_its_rows_left_the_view_or_changed(tmp_path, monkeypatch):
@@ -332,6 +357,25 @@ def test_the_census_part_returns_once_its_rows_left_the_view_or_changed(tmp_path
     assert _next_round(context).startswith("quota (subscription accounts, engine verdicts")
     context.messages[:] = [row for row in context.messages if row.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME]
     assert _next_round(context).startswith("quota (subscription accounts, engine verdicts")  # a rewrite retired them
+    assert _next_round(context) == ""
+
+
+def test_a_multiline_lead_before_the_part_keeps_it_change_only(tmp_path, monkeypatch):
+    """A lead the owner's words chose carries their quote verbatim, line breaks included, in a part before quota."""
+    from ouroboros import subscription_census as census
+
+    lead = {"source": "owner_words", "cited": "use this model\nfor the whole room"}
+    context = _census_ctx(tmp_path, monkeypatch, task_model_override="same-model", task_route_source="owner_words",
+                          task_metadata={"lead": lead})
+    _store_census(tmp_path, 0.5)
+    assert "codex 1 with room" in _next_round(context)
+    before, _sep, _rest = context.messages[-1]["content"].partition(" | quota ")
+    assert "«use this model\nfor the whole room»" in before  # the quota part sits on the quote's last line
+    assert [_next_round(context) for _ in range(2)] == ["", ""]
+    _store_census(tmp_path, families={})
+    assert _next_round(context) == "quota " + census.RETRACTION
+    (tmp_path / census.CENSUS_FILE).write_text("{torn", encoding="utf-8")
+    assert _next_round(context) == "quota " + census.UNCONFIRMED
     assert _next_round(context) == ""
 
 
@@ -367,20 +411,61 @@ def test_none_retracts_a_part_in_view_once_and_a_lost_file_says_so_once(tmp_path
     assert _next_round(context) == ""  # said once: the latest part in view already says so
 
 
-def test_a_pending_census_keeps_what_is_in_view(tmp_path, monkeypatch):
+def test_a_failed_read_of_an_empty_roster_says_so_once_where_a_part_is_in_view(tmp_path, monkeypatch):
+    """Only a successful empty read retracts; a failed one says the engine was not read, once, and only to a view
+    holding an earlier part."""
+    from ouroboros import subscription_census as census
+
+    failed = {"read": "failed", "code": "daemon_unreachable", "confirmed_at": "2026-11-21T14:09:00+00:00"}
+    fresh = _census_ctx(tmp_path, monkeypatch)
+    _store_census(tmp_path, families={}, **failed)
+    assert _next_round(fresh) == ""
+    context = _census_ctx(tmp_path, monkeypatch)
+    _store_census(tmp_path, 0.5)
+    _next_round(context)
+    _store_census(tmp_path, families={})  # an empty roster read, no round between
+    _store_census(tmp_path, families={}, **failed)  # then an account was enabled and the reads failed
+    assert _next_round(context) == ("quota (subscription accounts, engine not read since 21.11 14:09Z "
+                                    "(daemon_unreachable); values from 21.11 13:05Z): none")
+    assert _next_round(context) == ""
+    _store_census(tmp_path, families={})  # the read lands: no subscription account
+    assert _next_round(context) == "quota " + census.RETRACTION
+    _store_census(tmp_path, families={}, **failed)
+    assert "engine not read since" in _next_round(context)  # the failed form, never a second retraction
+    _store_census(tmp_path, 0.5, since="2026-11-21T15:00:00+00:00")
+    assert "codex 1 with room" in _next_round(context)
+
+
+def test_a_pending_census_keeps_what_is_in_view_also_across_a_same_round_reprepare(tmp_path, monkeypatch):
+    from ouroboros import subscription_census as census
+
+    context = _census_ctx(tmp_path, monkeypatch)
+    _store_census(tmp_path, 0.5)
+    assert append_context_facts(context) is True
+    census.invalidate("account_disabled")  # a confirmed disable: pending until the duty's read lands
+    assert census.read_file()["pending"] is True
+    rows = len(context.messages)
+    assert append_context_facts(context) is False and len(context.messages) == rows  # the same row: no new clock
+    assert _next_round(context) == ""
+    fresh = _census_ctx(tmp_path, monkeypatch)  # a work with nothing in view is not told the roster that changed
+    assert _next_round(fresh) == ""
+    _store_census(tmp_path, spent=True, since="2026-11-21T13:25:21+00:00")
+    assert "at limit" in _next_round(context)
+    assert "at limit" in _next_round(fresh)
+
+
+def test_a_pending_census_whose_read_failed_says_once_the_summary_is_no_longer_confirmed(tmp_path, monkeypatch):
     from ouroboros import subscription_census as census
 
     context = _census_ctx(tmp_path, monkeypatch)
     _store_census(tmp_path, 0.5)
     _next_round(context)
-    census.invalidate("account_disabled")  # a confirmed disable: pending until the duty's read lands
-    assert census.read_file()["pending"] is True
+    _store_census(tmp_path, 0.5, pending=True, read="failed", code="daemon_unreachable",
+                  confirmed_at="2026-11-21T14:09:00+00:00")
+    assert _next_round(context) == "quota " + census.UNCONFIRMED
     assert _next_round(context) == ""
-    fresh = _census_ctx(tmp_path, monkeypatch)  # a work with nothing in view is not told the roster that changed
-    assert _next_round(fresh) == ""
-    _store_census(tmp_path, 0.6)
-    assert "7d 60% used" in _next_round(context)
-    assert "7d 60% used" in _next_round(fresh)
+    fresh = _census_ctx(tmp_path, monkeypatch)
+    assert _next_round(fresh) == ""  # nothing in view to withdraw
 
 
 def test_a_same_round_reprepare_reevaluates_a_new_census(tmp_path, monkeypatch):
@@ -388,9 +473,11 @@ def test_a_same_round_reprepare_reevaluates_a_new_census(tmp_path, monkeypatch):
     _store_census(tmp_path, 0.5)
     assert append_context_facts(context) is True
     assert append_context_facts(context) is False  # unchanged: the row is reused
-    _store_census(tmp_path, 0.8)  # a quota wait in the same round, then a new reading
+    _store_census(tmp_path, 0.8, read_at="2026-11-21T13:15:21+00:00")
+    assert append_context_facts(context) is False  # the shares alone: the row is reused
+    _store_census(tmp_path, spent=True, since="2026-11-21T13:25:21+00:00")  # a quota wait in the same round, then a limit
     assert append_context_facts(context) is True
-    assert "7d 80% used" in _quota_of(context.messages[-1])
+    assert "codex 1 at limit" in _quota_of(context.messages[-1])
 
 
 def test_building_the_row_opens_no_connection(tmp_path, monkeypatch):
@@ -410,34 +497,69 @@ def test_building_the_row_opens_no_connection(tmp_path, monkeypatch):
     assert "codex 1 with room" in _next_round(context)
 
 
-def _child(tmp_path, *, acting=False, budget=None, profile=None):
+@pytest.mark.parametrize("lane", ["claudexor", "openrouter-anthropic"])
+def test_two_quota_values_reach_the_wire_in_their_conversation_row_alone(tmp_path, monkeypatch, lane):
+    """The part rides in the user-role facts row: two different values leave the leading system text and the tool
+    schemas byte-identical, each value only in its own conversation row (the lane's own request builder)."""
+    import json
+
+    from tests.test_message_cache_boundary import _payload
+
+    def leading(payload):
+        return (payload.get("system"), payload.get("instructions"), payload.get("tools"),
+                [message for message in payload.get("messages") or [] if message.get("role") in ("system", "developer")])
+
+    sent = []
+    for census_state in ({"share": 0.5}, {"spent": True, "since": "2026-11-21T13:25:21+00:00"}):
+        context = _census_ctx(tmp_path, monkeypatch)
+        _store_census(tmp_path, **census_state)
+        assert _next_round(context)
+        assert next(row for row in context.messages if _quota_of(row))["role"] == "user"
+        sent.append(_payload(lane, context.messages, monkeypatch))
+    assert json.dumps(leading(sent[0])) == json.dumps(leading(sent[1]))
+    for payload, words in zip(sent, ("codex 1 with room", "codex 1 at limit")):
+        holders = [message for message in payload["messages"] if words in json.dumps(message, ensure_ascii=False)]
+        assert [message["role"] for message in holders] == ["user"], holders
+
+
+def _child(tmp_path, *, acting=False, budget=None, profile=None, denied=()):
     from ouroboros.contracts.task_constraint import TaskConstraint
 
     metadata = {"delegation_role": "subagent", **({"tool_profile": profile} if profile else {})}
     constraint = (TaskConstraint(mode="acting_subagent", surface="self_worktree", write_root=str(tmp_path)) if acting
                   else TaskConstraint(mode="local_readonly_subagent"))
     return {"task_metadata": metadata, "task_constraint": constraint,
-            "task_contract": {"delegation_budget": budget if budget is not None else {"may_delegate": False}}}
+            "task_contract": {"delegation_budget": budget if budget is not None else {"may_delegate": False},
+                              **({"disabled_tools": list(denied)} if denied else {})}}
 
 
 @pytest.mark.parametrize("kind,room_mode,expected", [
     ("integrating", "auto", True),
     ("acting child without the delegation right", "auto", True),  # review_change is callable for its profile
+    ("acting child whose review_change is withheld", "auto", False),
     ("read-only child without the delegation right", "auto", False),
     ("read-only child with the delegation right", "auto", True),
+    ("read-only child with the right and schedule_subagent withheld", "auto", False),
+    ("read-only child with the right left implicit", "auto", True),  # an omitted may_delegate: admission's default
+    ("read-only child with an unreadable depth", "auto", True),  # unknown, not spent
     ("read-only child with the right, subagents Off in its room", "off", False),
     ("read-only child whose depth is spent", "auto", False),
 ])
 def test_the_part_goes_to_the_foci_that_may_choose_an_executor(tmp_path, monkeypatch, kind, room_mode, expected):
     from ouroboros import settings_integrity
 
+    right = {"may_delegate": True, "depth_remaining": 2}
     attrs = {"integrating": {},
              "acting child without the delegation right": _child(tmp_path, acting=True),
+             "acting child whose review_change is withheld": _child(tmp_path, acting=True, denied=("review_change",)),
              "read-only child without the delegation right": _child(tmp_path),
-             "read-only child with the delegation right": _child(tmp_path, budget={"may_delegate": True,
-                                                                                   "depth_remaining": 2}),
-             "read-only child with the right, subagents Off in its room": _child(
-                 tmp_path, budget={"may_delegate": True, "depth_remaining": 2}),
+             "read-only child with the delegation right": _child(tmp_path, budget=right),
+             "read-only child with the right and schedule_subagent withheld": _child(
+                 tmp_path, budget=right, denied=("schedule_subagent",)),
+             "read-only child with the right left implicit": _child(tmp_path, budget={"depth_remaining": 2}),
+             "read-only child with an unreadable depth": _child(tmp_path, budget={"may_delegate": True,
+                                                                                  "depth_remaining": "two"}),
+             "read-only child with the right, subagents Off in its room": _child(tmp_path, budget=right),
              "read-only child whose depth is spent": _child(tmp_path, budget={"may_delegate": True,
                                                                               "depth_remaining": 0})}[kind]
     monkeypatch.setattr(settings_integrity, "effective_subagents_mode", lambda **_kw: room_mode)
@@ -449,15 +571,29 @@ def test_the_part_goes_to_the_foci_that_may_choose_an_executor(tmp_path, monkeyp
     assert (census.quota_part(context)[1] == "") is (not expected)  # a non-recipient's reuse term is constant
 
 
-@pytest.mark.parametrize("grants,expected", [(None, True), ({"web_search", "send_message"}, False),
-                                             ({"schedule_subagent"}, True), ({"review_change"}, True)])
-def test_a_presence_task_receives_the_part_only_with_an_executor_or_reviewer_grant(tmp_path, monkeypatch, grants,
-                                                                                    expected):
-    from ouroboros import presence_authority
+@pytest.mark.parametrize("grants,denied,expected", [
+    (None, (), True),  # an unrestricted Presence task
+    (None, ("schedule_subagent", "delegate_start", "start_task", "review_change", "commit_reviewed",
+            "vcs_commit_reviewed", "preflight_review", "plan_task"), False),
+    (("web_search", "send_message"), (), False),
+    (("schedule_subagent",), (), True),
+    (("schedule_subagent",), ("schedule_subagent",), False),
+    (("review_change",), (), True),
+    (("vcs_commit_reviewed",), (), True),  # the alias a sealed grant may name alone
+    (("preflight_review",), (), True),
+    (("preflight_review",), ("preflight_review",), False),
+])
+def test_a_presence_task_receives_the_part_by_its_real_ceiling_and_denials(tmp_path, monkeypatch, grants, denied,
+                                                                          expected):
+    from ouroboros.presence_authority import PresenceCapabilityCeiling, PresenceToolGrant, presence_ceiling_payload
 
-    ceiling = None if grants is None else SimpleNamespace(names=frozenset(grants))
-    monkeypatch.setattr(presence_authority, "presence_ceiling_from_context", lambda _ctx: ceiling)
-    monkeypatch.setattr(presence_authority, "presence_ceiling_allows_tool", lambda held, name: name in held.names)
-    context = _census_ctx(tmp_path, monkeypatch, task_metadata={"presence": {"place_id": "place-1"}})
+    contract = {"disabled_tools": list(denied)} if denied else {}
+    if grants is not None:
+        contract["capability_ceiling"] = presence_ceiling_payload(PresenceCapabilityCeiling(
+            skill_name="helper", skill_content_hash="a" * 64, profile_fingerprint="b" * 64, state_fingerprint="c" * 64,
+            selection_fingerprint="d" * 64, model_slot="main", inline_max_rounds=10,
+            tool_grants=tuple(PresenceToolGrant(name) for name in grants), resource_grants=(), digest="e" * 64))
+    context = _census_ctx(tmp_path, monkeypatch, task_metadata={"presence": {"place_id": "place-1"}},
+                          task_contract=contract)
     _store_census(tmp_path, 0.5)
     assert bool(_next_round(context)) is expected

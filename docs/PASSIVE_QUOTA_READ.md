@@ -147,22 +147,30 @@ unproven or mixed-scope replacement clears it. No new request is made.
 ## Subscription census
 
 `subscription_census.py` reads this passive path (`_quota_payload`: the roster and one quota epoch, no handshake
-or refresh) from its own maintenance duty, every 600 s while a live actor exists or 15 s after a refresh request (a
-delegated run settled on a limit code, a spent window the engine named, a confirmed account change). Per family it
-counts the enabled named profiles of a subscription credential kind (`gateway/onboarding._SUBSCRIPTION_CREDENTIAL_KINDS`),
-each judged by the shared `quota_availability` on its subscription-route rows and absences alone (`vendor_native`; a
-paid key's rows of the same id stay out): verification failed first (the Accounts rule), then the engine's at-limit
-and with-room verdicts, then its unknowns by cause (no measured general window, no quota source, not freshly read).
-Profiles with room add each window length's highest fresh measured share (least and greatest over profiles, cut to
-two decimals, with their coverage); model-scoped blocks still ahead count once per profile and model list, a stale
-row's with the time it was seen. The census adds no availability interpretation: the rules above stand. Its dated
-result is `state/subscription_census.json` (PERSISTENCE), written when what it states changed; the round's facts row
-reads only that file (ARCHITECTURE §6). A failed read, a missing descriptor included, is recorded on its second failed
-pass in a row and keeps the values; an engine never provisioned is never read and gets no file. The part goes to the
-foci that may choose an executor (`subscription_census.chooses_executors`): every integrating focus, a Presence task
-whose ceiling grants an executor or reviewer tool, and a delegated focus holding the delegation right or an acting
-profile (so almost every acting child). Disclosed: after an idle period the file is as old as that period until the
-duty's first read lands; after a restart `confirmed_at` is the stored one; a duty that stops silently cannot say so.
+or refresh) from its own maintenance duty: every 600 s while a task runs or a direct actor works (a pending-only queue
+reads nothing), or 15 s after a refresh request, which any process leaves when the engine refuses or settles a run,
+a reviewer seat or a model call on a limit code (a structural pool excepted), or Settings confirms an account
+created, enabled, disabled or removed. While someone works, a request is retried until a read lands; an engine never
+provisioned is never asked. Per family it counts the enabled named profiles of a subscription credential kind
+(`gateway/onboarding._SUBSCRIPTION_CREDENTIAL_KINDS`), each judged by the shared `quota_availability` on its
+subscription-route rows and absences alone (`vendor_native`; a paid key's rows of the same id stay out):
+verification failed first (the Accounts rule), then the engine's at-limit and with-room verdicts, then its unknowns
+by cause (no measured general window, no quota source, not freshly read). Profiles with room add each window
+length's highest fresh measured share (least and greatest over profiles, cut to two decimals, with their coverage,
+or that no fresh window measured them); model-scoped blocks still ahead count once per profile and model list (the
+engine's prefixes when it names any), with the earliest reset to the nearest minute and, when that block's row is
+stale, the time it was seen. The census adds no availability interpretation: the rules above stand. Its dated result
+is `state/subscription_census.json` (PERSISTENCE): rewritten when what it states changes, its `since` moving only
+with the counts, resets and blocks; share ranges and their read time are refreshed but never make the part due (the
+owner's 1A). A roster that names no subscription account is a stored `none` whatever the quota read says. The
+round's facts row reads only that file (ARCHITECTURE §6). A failed read, a missing descriptor or a text scope the
+engine no longer certifies included, is recorded once a failed streak has lasted 600 s and keeps the values; only an
+accepted read confirms. The part goes to the foci that may choose an executor (`subscription_census.chooses_executors`):
+every integrating focus, a Presence task whose ceiling grants an executor or reviewer tool, and a delegated focus
+holding the delegation right or an acting profile, a tool its contract withholds granting nothing. Disclosed: after
+an idle period the file is as old as that period until the duty's first read lands; after a restart `confirmed_at`
+is the stored one; a duty that stops silently cannot say so; an outstanding request costs two engine reads every
+15 s while someone works and the engine does not answer; two value epochs inside one minute compare equal.
 
 ## Primary-route observation
 
