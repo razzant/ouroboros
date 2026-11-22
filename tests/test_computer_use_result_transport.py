@@ -104,12 +104,12 @@ def test_every_transport_writes_the_compact_text_of_the_object_it_wrote_before(t
     ctx = _floor_ctx(tmp_path, monkeypatch)
     if backend == "mac":
         # cmd+c fails: the Command chord program given "c" (key() of Command and one character) exits 1.
-        desktop = mac(ctx, tmp_path, monkeypatch, answer=lambda argv, _index: int(argv[0] == "osascript" and argv[-1] == "c"))
+        desktop = mac(ctx, tmp_path, monkeypatch, answer=lambda argv, _index: (0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}') if '"op":"resolve"' in argv[-1] else int(argv[0] == "osascript" and argv[-1] == "c"))
         native_facts(desktop, monkeypatch)
         seen = serialized(desktop, monkeypatch)
         rows = run(desktop, seen, ("screenshot", {}), ("window_list", {}), ("type_text", {"text": TEXT}),
                    ("key", {"keys": "cmd+a cmd+c"}), ("key", {"keys": "return", "app": "Nowhere"}))
-        assert decoded(rows, "type_text")["cmd"] == ["cliclick", "t:" + TEXT]
+        assert json.loads(decoded(rows, "type_text")["cmd"][-1])["ops"] == [{"op": "type", "text": TEXT, "interval_ms": 0}]
         listed = decoded(rows, "window_list")
         assert listed["frontmost"] is None and listed["windows"][0]["windows"][0]["title"] == TEXT
         assert listed["windows"][0]["windows"][1] == {"title": "", "minimized": True, "main": False, "bounds": None,
@@ -128,7 +128,7 @@ def test_every_transport_writes_the_compact_text_of_the_object_it_wrote_before(t
     elif backend == "ssh":
         desktop = ssh(ctx, tmp_path, monkeypatch)
         desktop.transport.answer = lambda argv, _index: (
-            (0, TEXT) if argv[-1] == "uname -a" else 255 if argv[0] == "ssh" and "kp:return" in argv[-1] else 0)
+            (0, TEXT) if argv[-1] == "uname -a" else 255 if argv[0] == "ssh" and '"code":36' in argv[-1] else 0)
         seen = serialized(desktop, monkeypatch)
         rows = run(desktop, seen, ("remote_exec", {"command": "uname -a"}), ("type_text", {"text": "hello"}),
                    ("key", {"keys": "down down return"}))
@@ -172,7 +172,7 @@ def test_the_host_readers_take_the_same_facts_from_the_compact_text(tmp_path, mo
         attached.append((path, capture_source))
         return True, "attached"
     monkeypatch.setattr("ouroboros.tools.vision.attach_local_image_to_context", attach)
-    desktop = mac(ctx, tmp_path, monkeypatch, answer=lambda argv, _index: int(argv[0] == "osascript" and argv[-1] == "c"))
+    desktop = mac(ctx, tmp_path, monkeypatch, answer=lambda argv, _index: (0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}') if '"op":"resolve"' in argv[-1] else int(argv[0] == "osascript" and argv[-1] == "c"))
     native_facts(desktop, monkeypatch)
     seen = serialized(desktop, monkeypatch)
 
@@ -188,15 +188,16 @@ def test_the_host_readers_take_the_same_facts_from_the_compact_text(tmp_path, mo
     # The observation: coordinates read off this image map through the transform this text names.
     transform = receipt["coord_transform"]
     clicked = desktop.call("click", x=10, y=20, observation_id=receipt["observation_id"])
-    point = f"c:{round(10 * transform['sx'] + transform['ox'])},{round(20 * transform['sy'] + transform['oy'])}"
-    assert desktop.transport.calls[-1] == ["cliclick", point] and clicked["tool_result_code"] == "OK"
+    point = (round(10 * transform["sx"] + transform["ox"]), round(20 * transform["sy"] + transform["oy"]))
+    assert json.loads(desktop.transport.calls[-1][-1])["ops"] == [{"op": "click", "x": point[0], "y": point[1], "button": "left",
+                                                                  "count": 1}] and clicked["tool_result_code"] == "OK"
 
     failed = desktop.call("key", keys="cmd+a cmd+c")
     noted = desktop.call("type_text", warning=WARNING, text=TEXT)
     # What the model saw carries the host note; the retained producer source is the compact text, byte for byte.
     source = artifacts.read_actor_source_bytes(ctx.drive_root, ctx.task_id, noted["producer_source_ref"])
     assert source == seen[-1]["text"].encode("utf-8") and noted["host_annotations"] == [WARNING]
-    assert json.loads(source)["cmd"] == ["cliclick", "t:" + TEXT]
+    assert json.loads(json.loads(source)["cmd"][-1])["ops"] == [{"op": "type", "text": TEXT, "interval_ms": 0}]
 
     # The result review's effect receipts are exactly these compact texts (the failed step keeps its mark).
     effects = rr.produced_material(ctx)["effects"]

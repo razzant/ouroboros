@@ -16,6 +16,7 @@ import pytest
 
 from ouroboros import i18n_memory as memory
 from ouroboros.contracts.task_constraint import TaskConstraint
+from ouroboros.tool_policy import initial_tool_schemas
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 RU_CATEGORIES = ["one", "few", "many", "other"]
@@ -378,7 +379,8 @@ def test_children_presence_and_observe_are_refused_by_the_existing_gates(tmp_pat
         mode="acting_subagent", surface="self_worktree", write_root=str(worktree)))
     for reg, why in ((readonly, "read-only subagent"), (acting, "acting subagent")):
         for name, args in (("pin_ui_translation", pin), ("search_ui_translations", {"query": "Разделы"})):
-            assert why in reg.policy_hidden_reason(name) and name not in reg.initial_tool_names()
+            assert why in reg.policy_hidden_reason(name)
+            assert name not in {schema["function"]["name"] for schema in initial_tool_schemas(reg)}
             assert reg.execute_result(name, args).status != "ok"
 
     presence = _registry(tmp_path)

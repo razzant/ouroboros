@@ -512,14 +512,21 @@ def get_tools() -> List[ToolEntry]:
         }, _toggle_consciousness),
         ToolEntry("set_next_wakeup", {
             "name": "set_next_wakeup", "description": (
-                "Choose the consciousness wake-up interval: how long after a wake-up ends the next one starts, "
-                "clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A wake-up calling this sets its own next "
-                "one; one already pending keeps its time; with consciousness off it is stored for later. The alarm "
-                "adjusts it: a failed wake-up doubles the interval (up to MAX), a skipped one retries after MIN (an "
-                "exhausted allowance waits for its reset or a changed daily limit), and no wake-up starts sooner "
-                "than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward; the next one "
-                "observes them."),
-            "parameters": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one"}}, "required": ["seconds"]},
+                "Choose the next consciousness wake-up: seconds, how long after a wake-up ends the next one starts, "
+                "and/or at, a named time; the earlier wins, clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A "
+                "wake-up calling this sets its own next one; one already pending keeps its time; with consciousness "
+                "off it is stored for later. A failed wake-up doubles the interval (up to MAX), a skipped one retries "
+                "after MIN (an exhausted allowance waits for its reset or a changed daily limit), and none starts "
+                "sooner than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward."),
+            "parameters": {"type": "object", "properties": {
+                "seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one (the interval)"},
+                "at": {"type": "string", "description": (
+                    "A named time: ISO 8601 with an explicit UTC offset or Z, e.g. 2026-11-21T09:00:00+03:00; a time "
+                    "without an offset, or not in the future, is refused, and so is one at or before a wake-up already "
+                    "appointed (that one keeps its time). It stands until a wake-up appointed after it was stored ends "
+                    "at or after it, so a time beyond MAX is reached through intermediate wake-ups and one a wake-up "
+                    "outlives adds none; seconds leaves it standing, a later at replaces it.")},
+            }, "required": []},
         }, _set_next_wakeup),
         ToolEntry("switch_model", {
             "name": "switch_model",

@@ -106,7 +106,7 @@ ouroboros/ — agent core and shared runtime (§6)
   cli.py — source/headless CLI over gateway tasks, logs, settings, skills, local model and MCP (CLI / Headless Boundary below)
   packaged_cli.py, packaged_cli_install.py — packaged desktop CLI bridge and its command-shim installer
   agent.py — task orchestrator; a loop crash is projected from captured evidence or an explicit `loop_evidence_unavailable`, never invented counters (§6 Task lifecycle)
-  startup_historical_audit.py — explicit seal-audit child in its own process group (`python -m ouroboros.startup_historical_audit`; §2; docs/MODEL_SEND_OBSERVABILITY.md)
+  startup_historical_audit.py — explicit seal-audit child in its own process group (§2; docs/MODEL_SEND_OBSERVABILITY.md); background children's launch and stop list
   maintenance.py, maintenance_jobs.py, maintenance_retirement.py, plan_collection_job.py, record_compression.py, saved_state_retirement.py, temp_sweep.py — maintenance child jobs, `job:<name>` facts (§5)
   focus.py — authored focus with typed source ref; no dialogue or path escapes
   agent_startup_checks.py — agent-boot verification (warning-only health) and native-host adoption for self-restart (§2)
@@ -216,7 +216,7 @@ ouroboros/ — agent core and shared runtime (§6)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
   safety_records.py, safety_evidence.py — Safety verdict parsing/accounting; the bundle's evidence diet and who wrote each row
   ouroboros/gateway/safety_settings.py — owner Safety level, rules and checker endpoints
-  consciousness.py, consciousness_wake.py, consciousness_transitions.py, consciousness_view.py — the background alarm admitting an ordinary Main turn on the supervisor tick; the wake input, accepted transition chain and `wake_task_metadata` envelope; read-only facts: places, counted roots, bounded recent wakes (§6 Background consciousness)
+  consciousness.py, consciousness_wake.py, consciousness_standing.py, consciousness_transitions.py, consciousness_view.py, consciousness_clock.py — the background alarm admitting an ordinary Main turn on the supervisor tick; the wake input and what stands in it, accepted transition chain and `wake_task_metadata` envelope; read-only facts: places, counted roots, bounded recent wakes; named-time and zone facts (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — dispatch-bound autonomy ceilings and the rolling 24-hour allowance (§6 Background consciousness and Evolution)
   chat_chain.py, chat_references.py, chronicle_store.py, chronicle_quotes.py — addressed dialogue reads: content identities, legacy `(gen, line)` hints, Reply facts, `retain_memory_source`; append-only chronicle: pages/parts, version-bound accounts, separate common-view selections, disposable index (§6)
   mark_anchors.py — a mark tied to a tool (optional call text) or a path trails that call's result once per task; later changes of its room's and global marks reach a running task's next round as a host row (§6)
@@ -290,7 +290,7 @@ ouroboros/ — agent core and shared runtime (§6)
   workspace_admission.py — Task/promotion workspace admission: disjoint roots and Project binding, never a system-repo fallback (§6 Owner routing verbs; CLI / Headless Boundary below)
   local_model.py, local_model_autostart.py — llama-cpp lifecycle over proxy-free loopback and its startup helper (§3 Settings)
   deep_self_review.py — Whole-system diagnostic review on a named enabled row, defaulting to the direct Main row (§6 Deep self-review)
-  review.py — Size and complexity inventory behind the shrink-only ceilings and the diff pulse (§6 Structural gates, Commit preflight)
+  review.py, code_shape_facts.py — Size and complexity inventory behind the shrink-only ceilings and the diff pulse (§6 Structural gates, Commit preflight)
   size_ratchet_manifest.py — Generated data-only size-debt manifest (`scripts/regenerate_size_ratchet.py`)
   review_execution_projection.py — Reviewer-execution projection; kinds `api` | `harness` | `native`, so the owner can tell a retrieving review from a packet review on the same model
   preflight_runner.py, preflight_probe.py, preflight_node.py, preflight_receipts.py, test_parallelism.py, test_evidence.py, test_environment.py, test_bytecode.py, safe_test_supervisor.py — Gate, probe, Node, receipts, slot ledger, results, scratch, warm prefix, command lifetime (§6; §8)

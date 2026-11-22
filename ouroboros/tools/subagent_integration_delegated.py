@@ -22,11 +22,8 @@ from ouroboros.review_state import invalidate_advisory_after_mutation
 from ouroboros.delegate_named_evidence import (
     retain_named as _retain_named_evidence, run_named_evidence,
 )
-from ouroboros.runtime_mode_policy import (
-    mode_allows_protected_write,
-    protected_paths_in,
-)
-from ouroboros.workspace_copies import protected_apply_refusal
+from ouroboros.runtime_mode_policy import protected_paths_in
+from ouroboros.workspace_copies import protected_apply_refusal, protected_write_admitted
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.workspace_patch_rules import declared_capture_paths, format_patch_exclusions
 from ouroboros.tools.patch_staging import (
@@ -834,14 +831,14 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     if protected:
         constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
         is_acting = bool(constraint and getattr(constraint, "mode", "") == ACTING_SUBAGENT_MODE)
-        grant_ok = not is_acting or bool(getattr(constraint, "protected_paths_grant", False))
-        if not (mode_allows_protected_write(runtime_mode) and grant_ok):
+        grant = bool(getattr(constraint, "protected_paths_grant", False))
+        if not protected_write_admitted(runtime_mode, acting=is_acting, grant=grant):
             _si()._write_verdict(
                 ctx, f"run_{rid}", outcome="blocked_protected", reason=reason, files=touched,
                 manifest=manifest, applied=False, conflicts=[],
                 protected=[p.path for p in protected], target=str(target))
             return protected_apply_refusal(
-                path=protected[0].path, runtime_mode=runtime_mode, grant_ok=grant_ok,
+                path=protected[0].path, runtime_mode=runtime_mode, grant_ok=not is_acting or grant,
                 action=f"integrate delegated run {rid} patch touching")
 
     def admission_refusal():

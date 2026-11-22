@@ -542,6 +542,7 @@ def test_requested_result_view_classifies_declared_range_parameters():
     assert requested_result_view({"view_tail_chars": "500"}) == (0, 500)
     assert requested_result_view({"view_head_chars": -3}) == (0, 0)
     assert requested_result_view({"path": "a", "max_lines": 10}) == (None, None)
+    assert requested_result_view({"path": "a", "end_line": 100}) == (None, None)  # read_file's accepted spelling
     assert requested_result_view({"task_id": "t", "source_start_char": 0, "source_end_char": 9}) == (None, None)
     assert requested_result_view({"task_id": "t", "offset": 2, "limit": 5}) == (None, None)
     assert requested_result_view({"run_id": 7, "page": 2}) is None
