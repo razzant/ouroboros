@@ -643,7 +643,7 @@ def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkey
     handles = _task(root, "raced")
     write_task_result(root, "raced", "completed", child_drive_root=str(root / "task_drives" / "raced-settled"))
     copies = _copies(handles)
-    _sources(handles)  # the folders stay with their sources after the pass
+    sources = _sources(handles)  # the folders stay with their sources after the pass
     real = owner_keep.inventory
 
     def pass_between_inventory_and_lock(*args, **kwargs):  # the pass holds the custody lock Keep then waits for
@@ -660,6 +660,7 @@ def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkey
     rest = outside_store(answer, root, "raced")
     assert answer["status"] == "partly_retired" and not rest["retained"], answer
     assert not {str(path) for path in copies} & set(answer["retained"]), answer
+    assert {str(path) for path in sources} <= set(answer["retained"]), answer  # other stored files are listed
     assert {place for place in answer["retired"] if place.startswith("saved_states:")} == {
         f"saved_states:{handles / 'context_checkpoints'}", f"saved_states:{handles / 'working'}"}
 
