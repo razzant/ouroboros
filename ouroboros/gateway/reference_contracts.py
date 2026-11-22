@@ -15,6 +15,7 @@ class ChatReplyReference(TypedDict, total=False):
     row_sha256: str  # full digest of a resolved row; older references only carry the display address
     chat_id: int
     role: Literal["user", "assistant", "system"]
+    quote_role: Literal["user"]  # ink of the owner's recorded card answer on its System row
     author_label: str
     kind: str
     excerpt: ReplyExcerpt

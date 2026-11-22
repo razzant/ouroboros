@@ -614,6 +614,7 @@
  * @property {string} ts
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {string=} answer_row_address  // replay: the answer row its card shows (DESIGN "Replies"); never quiz_state
  * @property {string=} host_facts
  * @property {number=} chat_id
  * @property {string=} task_id
@@ -648,10 +649,8 @@
  * @property {string} state
  * @property {string} ts
  * @property {number=} answered_index
- * @property {string=} comment
- *   The owner's recorded free-text answer, when one was recorded.
- * @property {boolean=} wait_for_answer
- *   False once a bounded wait closed and the task resumed; the card stays open and answerable.
+ * @property {string=} comment  The owner's recorded free-text answer, when one was recorded.
+ * @property {boolean=} wait_for_answer  False once a bounded wait closed and the task resumed; the card stays open and answerable.
  * @property {number=} chat_id
  * @property {import('./decision_types.js').SecretOutcome=} secret_outcome A secret request's typed completion, metadata only.
  */
@@ -713,6 +712,7 @@
  * @property {"routing_ack"} annotation_type
  * @property {number=} chat_id
  * @property {string} client_message_id
+ * @property {string=} source_row_address
  * @property {string} action
  * @property {string=} target
  * @property {string=} target_label

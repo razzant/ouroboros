@@ -435,7 +435,26 @@ test('relay shape F: one Ouroboros bubble, his words in a relay panel above the 
     } finally { f.close(); }
 });
 
-test('the owner\'s echo adopts the saved row\'s address and with it Reply', () => {
+test('a canonical row read into a room adopts the retained copy it verified by origin, an id-less one included', () => {
+    const f = fixture();
+    try {
+        const copy = f.bubble('user', 'Original request');
+        Object.assign(copy.dataset, { originId: 'origin-a', originProjected: '1' });
+        f.feed.append(copy);
+        f.replies.decorate(copy, { role: 'user', origin_projected: true });
+        assert.equal(copy.querySelector('.chat-message-reply'), null, 'a copy whose original is unread has no Reply');
+        const canonical = { role: 'user', client_message_id: '', row_address: 'row:1@then#origin' };
+        assert.equal(f.replies.adopt(canonical), false, 'an id-less row finds no bubble by itself');
+        assert.equal(f.replies.adopt({ ...canonical, origin_projected: true }, copy), false, 'a copy verifies nothing');
+        assert.equal(copy.dataset.rowAddress, undefined);
+        assert.equal(f.replies.adopt(canonical, copy), true);
+        assert.equal(copy.dataset.rowAddress, canonical.row_address);
+        assert.ok(copy.querySelector('.chat-message-reply'));
+        assert.equal(f.replies.adopt(canonical, copy), false, 'once');
+    } finally { f.close(); }
+});
+
+test('the owner\'s echo adopts the saved row\'s address and with it Reply; Send as new prepares the composer', () => {
     const f = fixture();
     try {
         const echo = f.bubble('user', 'hello');
@@ -443,9 +462,12 @@ test('the owner\'s echo adopts the saved row\'s address and with it Reply', () =
         f.feed.append(echo);
         f.replies.decorate(echo, null);
         assert.equal(echo.querySelector('.chat-message-reply'), null, 'an unsaved echo has no address yet');
+        assert.equal(f.replies.adopt({ role: 'user', client_message_id: 'cm-1', row_address: 'row:2@f#2' }), false);
         assert.equal(f.replies.adopt({ role: 'user', client_message_id: 'cm-1', row_address: 'row:1@f#1' }), true);
         assert.equal(echo.dataset.rowAddress, 'row:1@f#1');
         assert.ok(echo.querySelector('.chat-message-reply'));
+        assert.equal(f.replies.adopt({ role: 'user', client_message_id: 'cm-1', row_address: 'row:2@f#2' }), false);
+        assert.equal(echo.dataset.rowAddress, 'row:1@f#1', 'the same client id in another room is a different row');
         assert.equal(f.replies.adopt({ role: 'user', client_message_id: 'cm-1', row_address: 'row:1@f#1' }), false, 'once');
         assert.equal(f.replies.adopt({ role: 'assistant', client_message_id: 'cm-1', row_address: 'x' }), false);
     } finally { f.close(); }

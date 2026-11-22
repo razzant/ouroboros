@@ -111,9 +111,9 @@ _TRANSPORT_NESTED = {
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
 # fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
 # closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest; 10: the row's
-# ``kind`` stamp): a prefix of another version is another source, read live until the maintenance job
-# ``memory_tail`` refills it.
-_META_VERSION = 10
+# ``kind`` stamp; 11: whole-row identity for a bound opening, including an answered card): a prefix of another
+# version is another source, read live until the maintenance job ``memory_tail`` refills it.
+_META_VERSION = 11
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
@@ -147,13 +147,15 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
                         "secret_outcome": {key: outcome[key] for key in ("event", "pluginName", "fields") if key in outcome}}
     if isinstance(ref := row.get("reply_to"), dict):  # ``room_membership.reply_target_room`` reads these, a
         meta["reply_to"] = {key: ref[key] for key in _REPLY_FIELDS if key in ref}  # saved target by its address
-    if str(row.get("direction") or "") == "in":
+    if str(row.get("direction") or "") == "in" or row.get("type") == "quiz_answer":
         from ouroboros.project_dialogue import _entry_source_identities, _text_sha256  # D15->D17 is lazy-only
 
-        meta["text_sha256"] = _text_sha256(row.get("text"))
-        if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
-            meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
-        meta["source_keys"] = tuple(sorted(_entry_source_identities(row)))
+        if row.get("direction") == "in":
+            meta["text_sha256"] = _text_sha256(row.get("text"))
+            if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
+                meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
+        if keys := _entry_source_identities(row):
+            meta["source_keys"] = tuple(sorted(keys))
     return meta
 
 
@@ -186,18 +188,22 @@ def membership_facts(root: Any) -> MembershipFacts:
 
 
 def _membership_facts(root: Any) -> MembershipFacts:
-    from ouroboros.project_dialogue import _source_ref_identity  # D15->D17 is lazy-only
+    from ouroboros.project_dialogue import _source_ref_identity, physical_origin_refs  # D15->D17 is lazy-only
     from ouroboros.projects_registry import all_task_bindings, list_reserved_projects, project_task_bindings, RoomResolver
 
     projects = frozenset(int(project["chat_id"]) for project in list_reserved_projects(root))
     by_key: Dict[Tuple[Any, ...], set] = {}
+    bound = []
     for binding in project_task_bindings(root).values():
         try:
             chat = int(binding.get("project_chat_id") or 0)
         except (TypeError, ValueError):
             continue
-        ref = binding.get("source_ref")
-        key = _source_ref_identity(ref) if chat in projects and isinstance(ref, dict) and ref else None
+        if chat in projects:
+            bound.append((chat, binding))
+    # Every older partial address of the snapshot resolves in one read, never one lookup per binding.
+    for (chat, _binding), ref in zip(bound, physical_origin_refs(root, [binding for _chat, binding in bound])):
+        key = _source_ref_identity(ref) if ref else None
         if key is not None:
             by_key.setdefault(key, set()).add(chat)
     return MembershipFacts(projects, dict(all_task_bindings(root)),

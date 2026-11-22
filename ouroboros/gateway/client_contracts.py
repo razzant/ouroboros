@@ -690,21 +690,17 @@ class ChatUploadDeleteResponse(TypedDict):
 
 
 class ProjectListResponse(TypedDict):
-    """``GET /api/projects``: active and deleting projects, at most 200, newest message first (``last_message_at``);
-    ``?all=1`` lists every one of them. ``?id=<project_id>`` answers that project while active or deleting,
-    ``?chat_id=<n>`` the active project of that room; either answers none otherwise.
-    Rows are the compact projection ``GET /api/state`` also carries: id, name, pinned, chat_id, working_dir,
-    provenance, last_active_at, last_message_at, lifecycle, optional closed, routing_generation, visible_revision,
-    delete_error and has_thread_activity."""
+    """``GET /api/projects``: up to 200 active/deleting projects by newest message (``?all=1``: all).
+    ``?id=`` selects an active/deleting project, ``?chat_id=`` the room's active project; no match returns none.
+    Same compact rows as ``GET /api/state``: id, name, pinned, chat_id, working_dir, provenance, last_active_at,
+    last_message_at, lifecycle, optional closed, routing_generation, visible_revision, delete_error, has_thread_activity."""
 
     projects: List[ProjectEntry]
 
 
 class ProjectCreateResponse(TypedDict):
-    """``POST /api/projects``: ``project`` is the full registry row. ``project.created`` is false when
-    the id already existed and no source was named: an idempotent repeat that changes nothing and
-    announces nothing. ``init_git_warnings``/``init_git_skipped`` disclose what an ``init_git``
-    attach snapshot left out."""
+    """``POST /api/projects`` returns the full registry row. Existing id and no source: ``created=false``,
+    no change or announcement. ``init_git_warnings``/``init_git_skipped`` name attach-snapshot omissions."""
 
     project: ProjectEntry
     init_git_warnings: NotRequired[List[Any]]
@@ -745,6 +741,11 @@ class ProjectTaskBinding(TypedDict, total=False):
     source_ref: Dict[str, Any]  # the owner message the task came from
     origin_absent: Any  # present instead of source_ref when no origin message is known
     source_text: str
+    source_projectable: bool
+    source_attachments: List[Dict[str, Any]]
+    source_channel: str
+    source_text_placeholder: bool
+    source_input: Dict[str, str | Dict[str, Any]]  # bound card kind, asker, label and exact submitted content/fields
 
 
 class ProjectFromTaskResponse(TypedDict):

@@ -119,11 +119,12 @@ EXPOSURE_ATOMS_BASIS = "source_atoms_v1_pre_redaction"
 
 
 def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
-    """Hash/count identities of the prepared messages; empty when the candidate has none."""
-    messages = candidate.get("messages") if isinstance(candidate, dict) else None
-    if not isinstance(messages, list) or not messages:
+    """Hash/count identities of the prepared wire rows; empty when the candidate has none."""
+    from ouroboros.context_compaction import UNENCODABLE_SOURCE_ATOM, _source_atoms, physical_message_rows
+
+    messages = physical_message_rows(candidate)
+    if not messages:
         return {}
-    from ouroboros.context_compaction import UNENCODABLE_SOURCE_ATOM, _source_atoms
 
     try:
         atoms = _source_atoms([m for m in messages if isinstance(m, dict)])

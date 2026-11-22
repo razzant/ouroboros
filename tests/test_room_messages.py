@@ -482,7 +482,14 @@ def test_retained_origins_date_binding_and_history_without_a_dialogue_copy(bus):
     dated(root)
     text = "The retained request"
     ref = build_owner_message_ref(chat_id=1, client_message_id="gone", text=text, ts=PAST("08:00"))
-    registry.bind_task_to_project(root, "retained", "retained", room, origin={"ref": ref, "text": text})
+    registry.bind_task_to_project(root, "retained", "retained", room,
+                                  origin={"ref": ref, "text": text, "snapshot": {"projectable": True}})
+    unknown = "Review the table legend"
+    weak = build_owner_message_ref(chat_id=1, client_message_id="older", text=unknown, ts=PAST("09:00"))
+    registry.bind_task_to_project(root, "older", "retained", room, origin={"ref": weak, "text": unknown})
+    visible, omission = _origin_fallback_rows(root, room, [])
+    assert visible["text"] == text and omission["system_type"] == "origin_omission" and unknown not in str(omission)
+    assert registry.project_binding_for_task(root, "older")["source_text"] == unknown
     assert _origin_fallback_rows(root, room, [])[0]["ts"] == PAST("08:00")
     assert time_of(root, room) == PAST("08:00")
     forget_dating(root)

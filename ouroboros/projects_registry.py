@@ -38,8 +38,8 @@ _BINDINGS_NAME = "project_task_bindings.json"
 # Additive schema: unstamped rows are version 0; reconstructed rows may lack
 # optional provenance fields, whose defaults must remain compatible.
 _REGISTRY_SCHEMA_VERSION = 2
-# v6.73.0: project_task_bindings.json gains source_text / origin_absent fields; a copied origin with
-# attachments adds source_attachments / source_channel / source_text_placeholder (optional).
+# Bindings optionally retain source_text, source_projectable, measured source_attachments, source_channel,
+# source_text_placeholder and a card answer's typed source_input. origin_absent records an explicitly absent opening.
 _BINDINGS_SCHEMA_VERSION = 1
 _LOCK = threading.RLock()
 
@@ -180,14 +180,8 @@ _ORIGIN_REF_KEYS = ("chat_id", "client_message_id", "ts", "text_sha256")
 
 
 def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
-    """Validate the REQUIRED typed origin of a binding; raise ValueError otherwise.
-
-    Content-derived identity lookups are forbidden (DEVELOPMENT.md anti-pattern):
-    the caller must pass the origin ref BY VALUE (captured at chat ingress) or a
-    typed absence reason. ``text`` is required exactly when the origin lives in a
-    DIFFERENT chat than the project room (cross-thread projection needs the
-    retention-proof copy); a same-room origin renders natively and stores no copy.
-    """
+    """Require an ingress ref by value or typed absence, never an identity inferred from text.
+    Retain a verified text copy only across rooms; a same-room origin renders natively."""
     if not isinstance(origin, dict) or ("ref" in origin) == ("absent" in origin):
         raise ValueError(
             "bind_task_to_project requires origin={'ref': {...}, 'text': ...} for a "
@@ -201,47 +195,55 @@ def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
             )
         return {"origin_absent": reason}
     ref = origin.get("ref")
-    if not isinstance(ref, dict) or any(ref.get(key) in (None, "") for key in _ORIGIN_REF_KEYS):
-        raise ValueError(f"origin['ref'] must carry non-empty {_ORIGIN_REF_KEYS}")
+    from ouroboros.project_dialogue import _text_sha256, owner_message_ref_is_valid
+    if not owner_message_ref_is_valid(ref):
+        raise ValueError("origin['ref'] requires a room, client id (possibly empty), non-empty timestamp and SHA-256")
     clean_ref = {key: ref.get(key) for key in _ORIGIN_REF_KEYS}
+    if "row_sha256" in ref:
+        clean_ref["row_sha256"] = ref["row_sha256"]
     try:
         cross_thread = int(clean_ref.get("chat_id") or 0) != int(resolved_chat or 0)
     except (TypeError, ValueError):
         cross_thread = True
     text = origin.get("text")
-    if not cross_thread:
+    if not cross_thread and text is None:
         return {"source_ref": clean_ref}
     if not isinstance(text, str) or not text.strip():
         raise ValueError(
             "origin['text'] (the full original message) is required for a cross-thread "
             "origin — it is the retention-proof copy the Project lens projects"
         )
-    from ouroboros.project_dialogue import _text_sha256
-
     if _text_sha256(text) != str(clean_ref.get("text_sha256") or ""):
         raise ValueError("origin['text'] does not match origin['ref']['text_sha256'] (integrity check)")
-    return {"source_ref": clean_ref, "source_text": text}
+    return {"source_ref": clean_ref, **({"source_text": text} if cross_thread else {})}
 
 
 def _origin_media(drive_root: Any, origin: Any) -> Dict[str, Any]:
-    """The attachment refs, ``source`` and placeholder mark the origin's canonical row recorded —
-    found by the ref's own ids and verified against the whole ref, never guessed from the text.
-    No row, another row or an unreadable chain records nothing; the text copy still stands."""
+    """Keep the canonical row's projection decision, media and a card answer's typed facts (``opening_input``: a press
+    is never kept as words). A held row can attest visibility across drives."""
     ref = origin.get("ref") if isinstance(origin, dict) else None
-    if not isinstance(ref, dict) or not isinstance(origin.get("text"), str):
+    from ouroboros.project_dialogue import opening_input, owner_message_ref_is_valid, resolve_owner_message_source
+    if not owner_message_ref_is_valid(ref) or not isinstance(origin.get("text"), str):
         return {}
     from ouroboros.chat_uploads import stored_refs
-    from ouroboros.project_dialogue import entry_matches_source_ref
-    from supervisor.message_ingress import accepted_chat_message
+    from ouroboros.room_membership import binding_origin_allowed
+    from ouroboros.store import StoreError
+    snapshot = origin.get("snapshot") or {}
     try:
-        row = accepted_chat_message(drive_root, int(ref.get("chat_id") or 0), str(ref.get("client_message_id") or ""))
-    except (OSError, TypeError, ValueError):
-        log.debug("origin attachments unreadable for %r", ref, exc_info=True)
-        return {}
-    if not row or not row.get("attachments") or not entry_matches_source_ref(row, [ref]):
-        return {}
-    return {"source_attachments": stored_refs(row["attachments"]), "source_channel": str(row.get("source") or ""),
-            **({"source_text_placeholder": True} if row.get("text_placeholder") is True else {})}
+        row = resolve_owner_message_source(drive_root, ref)
+    except (OSError, StoreError):
+        row = None
+    facts = {"source_projectable": snapshot["projectable"]} if type(snapshot.get("projectable")) is bool else {}
+    if snapshot.get("attachments"):
+        facts.update(source_attachments=stored_refs(snapshot["attachments"]), source_channel=str(snapshot.get("source") or ""))
+    if row:
+        facts["source_projectable"] = snapshot.get("projectable") is not False and binding_origin_allowed(ref["chat_id"], row)
+        if row.get("attachments") and "source_attachments" not in facts:
+            facts.update(source_attachments=stored_refs(row["attachments"]), source_channel=str(row.get("source") or ""))
+    if snapshot.get("placeholder_text") or (row or {}).get("text_placeholder"):
+        facts["source_text_placeholder"] = True
+    typed = opening_input(row, drive_root, retained=snapshot.get("input"))
+    return {**facts, **({"source_input": typed} if typed else {})}
 
 
 def bind_task_to_project(
@@ -260,11 +262,8 @@ def bind_task_to_project(
     their original files, while history/live routing can resolve the task's
     project chat from this lightweight binding.
 
-    ``origin`` is REQUIRED and typed (see ``_validated_origin``): either the
-    owner-message ref captured at chat ingress (+full text for a cross-thread
-    origin) or a closed-enum absence reason. A same-task same-project re-bind
-    that supplies a valid ref UPGRADES a ref-less existing row (one-way
-    enrichment); an existing valid ref is never changed.
+    ``origin`` is REQUIRED and typed (see ``_validated_origin``). A same-task same-project re-bind that supplies a
+    valid ref UPGRADES a ref-less existing row (one-way enrichment); an existing valid ref is never changed.
     """
     tid = str(task_id or "").strip()
     pid = sanitize_project_id(project_id)
@@ -273,6 +272,7 @@ def bind_task_to_project(
     if not pid:
         raise ValueError(f"unusable project id: {project_id!r}")
     if admission_basis is None and get_reserved_project(drive_root, pid) is None:
+        _validated_origin(origin, int(chat_id) if chat_id is not None else project_chat_id(pid))
         create_project(drive_root, pid)
     media = _origin_media(drive_root, origin)  # a chat read: never under the registry's cross-process lock
     # Registry lock linearizes binding with destination deletion.

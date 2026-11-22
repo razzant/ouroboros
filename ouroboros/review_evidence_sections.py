@@ -346,16 +346,22 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
     def add(source: str, content: Any, msg_id: str = "", origin: Any = None, reply_to: Any = None,
             exact: Any = ()) -> None:
         text = _owner_content_projection(content)
-        if not text.strip():
+        if not text.strip() and not dict(exact).get("attachments"):
             return
         # One source is one row: an identified row repeats only a row of one of its ids (a mailbox msg_id, a chat
         # message's room and client id), never another message in the same words; a row with no id repeats words.
         client = str((origin or {}).get("client_message_id") or "")
-        ids = {("msg", str(msg_id))} if msg_id else set()
-        ids |= {("client", str((origin or {}).get("chat_id") or ""), client)} if client else set()
+        digest = (origin or {}).get("row_sha256")
+        ids = {("row", digest)} if digest else set()
+        if msg_id and not digest:
+            ids.add(("msg", str(msg_id)))
+        if client and not digest:
+            ids.add(("client", str((origin or {}).get("chat_id") or ""), client))
         if ids & seen_ids or (not ids and text in seen_texts):
             return
         seen_ids.update(ids)
+        if digest and msg_id:
+            seen_ids.add(("msg", str(msg_id)))  # the exact mailbox may also be read by its delivery id
         seen_texts.add(text)
         row = {"source": source, "content": text}
         if msg_id:
@@ -373,15 +379,21 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
     if isinstance(recorded, list):
         for item in recorded:
             if isinstance(item, dict):
+                facts = {key: item[key] for key in ("words", "ts", "received") if key in item}
+                if item.get("source") in {"initial_user", "origin_message"} and item.get("carried"):
+                    facts["carried"] = True
+                if item.get("attachments"):
+                    from ouroboros.chat_uploads import stored_refs
+                    facts["attachments"] = stored_refs(item["attachments"])
                 add(
                     str(item.get("source") or "task_local"),
                     item.get("content"),
                     str(item.get("msg_id") or ""),
                     {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
-                                                    "client_message_id", "chat_id", "relay_source_root",
+                                                    "client_message_id", "chat_id", "row_sha256", "relay_source_root",
                                                     # a schedule's text keeps its schedule, field and supplier
                                                     "schedule_id", "field", "supplier", "supplier_task_id", "supplied_at")},
-                    item.get("reply_to"), {key: item[key] for key in ("words",) if key in item},
+                    item.get("reply_to"), facts,
                 )
 
     messages = getattr(ctx, "messages", None)

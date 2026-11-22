@@ -1248,6 +1248,36 @@ def carried_ids(root: Any, client_message_ids: Iterable[str], *, stream: str = "
     return {wanted[index] for index in json.loads(found or "[]")}
 
 
+def annotation_rooms(root: Any, message_ids: Iterable[str]) -> dict:
+    """Resolve pre-room receipt ids in one indexed read. Only a unique readable owner row can wear the receipt;
+    an unread line hides only itself."""
+    return {message: source[0] for (room, message), source in annotation_sources(root, message_ids).items()
+            if room is None and source}
+
+
+def annotation_sources(root: Any, message_ids: Iterable[str]) -> dict:
+    """Room/id and pre-room ids with one identifiable owner row, addressed together."""
+    from ouroboros.chat_chain import format_address, row_address
+    wanted = set(message_ids)
+    if not wanted or not range_coverage(root, "chat")["imported"]:
+        return {}  # an unread line hides only itself
+    sources = {}
+    with transaction(root, write=False) as conn:
+        for record in conn.execute(
+            "SELECT body FROM dialogue INDEXED BY dialogue_named WHERE stream='chat' "
+            "AND client_message_id IN (SELECT value FROM json_each(?)) AND (direction='in' OR kind='quiz_answer')",
+            (json.dumps(sorted(wanted)),),
+        ):
+            row = decode(record["body"])
+            address = row_address(row)
+            identity = (address["chat_id"], format_address(address))
+            for room in (None, address["chat_id"]):
+                key = (room, row["client_message_id"])
+                if sources.setdefault(key, identity) != identity:
+                    sources[key] = None
+    return sources
+
+
 def rows_by_identity(root: Any, chat_id: Optional[int], ts: str, *, stream: str = "chat") -> List[Row]:
     """The rows of one chat stamped ``ts`` (a ``chat_chain`` row address's chat and time), in order."""
     with transaction(root, write=False) as conn:

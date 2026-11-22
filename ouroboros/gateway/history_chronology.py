@@ -139,10 +139,7 @@ class ChronologicalSource(HistorySource):
         return [(ds._row(records[seq]) if seq in records else None, key) for seq, key in keyed]
 
     def _entry(self, row, key, coordinate):
-        from ouroboros.chat_references import projection_fields
-        return {**row.row, **projection_fields(row.row, self.root), "history_id": row.history_id,
-                "history_position": {"source": self.source, "offset": row.seq},
-                "_history_end": coordinate + 1, "_chrono_key": _public(key)}
+        return {**self._stored_entry(row), "_history_end": coordinate + 1, "_chrono_key": _public(key)}
 
     def _entries(self, rows):
         """An around target: its row at the pivot of the chain it begins (``pin``)."""

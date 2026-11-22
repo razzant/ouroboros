@@ -1378,3 +1378,26 @@ test('touchmove series of 2 and 5 events at 16-60 ms spacing keep owedShift for 
             `touch 400px card face lowerRow count=${count} spacing=${spacingMs}ms`);
     }
 });
+
+test('an opening\'s saved-preview follow yields to a Reply that claimed the room and left the newest message', t => {
+    const f = fixture(t);
+    f.reading.cancel();
+    Object.assign(f.feed, { scrollHeight: 2000, scrollTop: 0, clientHeight: 400 });
+    // A Reply landed here first (chat_reply.reveal): its claim, and the newest message left.
+    const reply = f.reading.claim(); f.reading.stick = false;
+    f.reading.followAfterLayout(true); f.frame(); f.frame();
+    assert.deepEqual([f.feed.scrollTop, f.reading.stick, reply()], [0, false, true], 'the opening moves nothing of the landing');
+    // With no navigation, or one that keeps following (an unread opening, claim(true)), the opening follows.
+    for (const stick of [true, false]) {
+        f.feed.scrollTop = 0; f.reading.cancel(); f.reading.stick = stick;
+        f.reading.followAfterLayout(true); f.frame(); f.frame();
+        assert.equal(f.feed.scrollTop, f.feed.scrollHeight, `no navigation in charge (stick ${stick}): the opening follows`);
+    }
+    f.feed.scrollTop = 0; f.reading.claim(true);
+    f.reading.followAfterLayout(true); f.frame(); f.frame();
+    assert.equal(f.feed.scrollTop, f.feed.scrollHeight, 'an unread opening still starts from the newest message');
+    // A follow asked for (↓, a sent message) never yields.
+    f.feed.scrollTop = 0; f.reading.claim(); f.reading.stick = false;
+    f.reading.followAfterLayout(); f.frame(); f.frame();
+    assert.equal(f.feed.scrollTop, f.feed.scrollHeight);
+});

@@ -368,14 +368,13 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
     names by chat and time, whether a candidate row is the room's, the frozen upper)``. ``gaps`` collects what a
     Project's chat rows read so may lack (``room_appearances.read_gaps``) once the read starts.
     ``binding`` restricts the candidates to what that binding newly admits: its tree and origin."""
-    from ouroboros.project_dialogue import room_membership, source_refs_for_project
+    from ouroboros.project_dialogue import owner_message_entries, room_membership, source_refs_for_project
     from ouroboros.projects_registry import list_reserved_projects, RoomResolver
     from ouroboros.store import open_store, store_path
 
     chat = int(room_id)
     projects = {int(project["chat_id"]) for project in list_reserved_projects(root)}
-    refs = ([binding["source_ref"]] if isinstance(binding.get("source_ref"), dict) else []) if binding is not None else (
-        source_refs_for_project(root, chat) if chat in projects else [])
+    refs = source_refs_for_project(root, chat, bindings={0: binding} if binding is not None else None) if chat in projects else []
     resolver = RoomResolver(root)
     member = room_membership(chat, projects, refs, resolver)
     keys = [] if binding is not None else [("chat_id", chat)]
@@ -402,20 +401,9 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
                 from ouroboros.room_appearances import read_gaps
 
                 gaps.update(read_gaps(root, chat, shown, lower, upper))
-        for ref in refs:
-            if ref.get("client_message_id"):
-                keys.append(("client_message_id", ref["client_message_id"]))
-            elif ref.get("ts"):
-                source_chat = int(ref.get("chat_id") or 1)
-                for cid in ([source_chat, None] if source_chat == 1 else [source_chat]):
-                    for entry in ds.rows_by_identity(root, cid, str(ref["ts"]), stream=stream):
-                        if lower <= entry.seq < upper:
-                            identities[entry.seq] = entry
-            else:
-                # Hash-only legacy references still name a chat; membership checks their text.
-                keys.append(("chat_id", int(ref.get("chat_id") or 1)))
-                if int(ref.get("chat_id") or 1) == 1:
-                    keys.append(("chat_id", None))
+            for entry in owner_message_entries(root, refs).values():  # every origin of the room in one read
+                if entry is not None and lower <= entry.seq < upper:
+                    identities[entry.seq] = entry
     return keys, identities, lambda row: member(_row_chat_id(row), row), upper
 
 

@@ -1,3 +1,4 @@
+import { ownerMessageBubble } from './chat_history_replay.js';
 import { isPanicFrame } from './panic.js';
 // Owner attachments inside the owner's own chat bubble (docs/DESIGN.md "Chat
 // attachments"): one message, attachments above the caption, whole images
@@ -450,8 +451,10 @@ export function placeIngressNote(bubble, note) {
  */
 export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, storage = null, storageKey = '' }) {
     const frames = new Map();  // id -> { frame, reply, views, ts, restored, queued, deliveryUnknown }
-    const bubbleOf = (id) => [...(root()?.querySelectorAll('.chat-bubble.user[data-client-message-id]') || [])]
-        .find((node) => node.dataset.clientMessageId === id) || null;
+    const bubbleOf = id => {
+        const frame = frames.get(id)?.frame;
+        return ownerMessageBubble(root(), frame, Number(frame?.chat_id ?? 1));
+    };
     let unreadable = false;  // a kept copy this tab cannot read restores nothing, and says so
     try {
         const kept = storage && storageKey ? storage.getItem(storageKey) : null;

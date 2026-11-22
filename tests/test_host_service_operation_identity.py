@@ -54,7 +54,12 @@ def test_atomic_acceptance_before_dequeue_and_exact_source_consumption(tmp_path,
     ref = message_bus.record_inbound_message(
         bridge, update, chat_id=CHAT, user_id=0, client_message_id=MSG, text="one message", ts="later",
     )
-    assert ref == build_owner_message_ref(chat_id=CHAT, client_message_id=MSG, ts=rows[0]["ts"], text="one message")
+    from ouroboros.owner_relay import owner_row_source
+
+    # The one accepted row by its physical identity: its four older fields and the digest of that very row.
+    assert ref == owner_row_source(rows[0])[0]
+    assert {key: ref[key] for key in ("chat_id", "client_message_id", "ts", "text_sha256")} == build_owner_message_ref(
+        chat_id=CHAT, client_message_id=MSG, ts=rows[0]["ts"], text="one message")
     assert len(chat_rows(tmp_path)) == 1
     assert not update.get("task_metadata", {}).get("origin_message_ref")
     replay = client.post("/chat/inject", headers=_headers(), json=body)
@@ -361,9 +366,13 @@ def test_real_server_consumes_one_source_and_authors_only_its_operation_marker(t
     ctx = SimpleNamespace(load_state=lambda: {"owner_id": 1}, update_state=lambda mutator: mutator({"owner_id": 1}))
     client = _client(tmp_path, bridge)
     client.post("/chat/inject", headers=_headers(), json={"chat_id": CHAT, "client_message_id": MSG, "text": "hello"})
+    from ouroboros.owner_relay import owner_row_source
+
     ref = _origin_ref(tmp_path)
     server._process_bridge_updates(bridge, 0, ctx)
-    assert routed[-1]["origin_message_ref"] == ref
+    [stored] = chat_rows(tmp_path)
+    assert routed[-1]["origin_message_ref"] == owner_row_source(stored)[0]  # the one source, by its physical row
+    assert {key: routed[-1]["origin_message_ref"][key] for key in ref} == ref
     assert routed[-1]["task_metadata"]["_host_operation"] is True
     assert len(chat_rows(tmp_path)) == 1
     bridge.enqueue_local_message("ordinary", task_metadata={"_host_operation": True})

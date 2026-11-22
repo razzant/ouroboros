@@ -1568,6 +1568,55 @@ def test_continue_labels_a_later_unavailable_answer_and_preserves_the_words_arou
     assert order.index("Owner words (verbatim): " + notice) < order.index("Host record: " + notice) < order.index(after)
 
 
+@pytest.mark.parametrize("has_snapshot", [True, False])
+def test_continue_reads_the_retained_form_opening(tmp_path, monkeypatch, has_snapshot):
+    from types import SimpleNamespace
+
+    from ouroboros.card_store import owner_press_text, record_submission, write_card
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source
+    from ouroboros.owner_words import owner_words_contain
+    from ouroboros.projects_registry import bind_task_to_project, create_project, project_binding_for_task
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, label = "map-desk", "Save map notes"
+    values = {"notes": "line one\nline two", "copies": 2}
+    source = tmp_path / "source"
+    card = write_card(source, chat_id=1, task_id=asker, title="Map notes", fallback_text="Map notes",
+                      kind="components", body={"components": []})
+    record_submission(source, card["card_id"], request_id="notes-1", action_id="save", label=label,
+                      values=values, once=False, revision=1)
+    original = {"direction": "in", "chat_id": 1, "client_message_id": "map-form", "ts": "2040-01-01T00:00:00Z",
+                "text": owner_press_text(label, values), "card_press": {"task_id": asker,
+                    "card_id": card["card_id"], "request_id": "notes-1"}}
+    ref, display = owner_row_source(original)
+    snapshot = origin_snapshot({**original, "_owner_source_root": str(source)}, tmp_path, include_reply=True)
+
+    project = create_project(tmp_path, "notes")
+    bound = bind_task_to_project(tmp_path, "pred-1", project["id"], origin={"ref": ref, "text": display, "snapshot": snapshot})
+    meta = {"origin_message_ref": ref, "origin_message_text": display}
+    if has_snapshot:
+        meta["origin_message_snapshot"] = snapshot
+    _interrupted(tmp_path, metadata=meta,
+                 origin_message_ref=ref, origin_message_text=display, owner_mailbox={"read_complete": True, "rows": []})
+    receipt = admit_continuation("pred-1", action_nonce=NONCE)
+    assert receipt["ok"]
+    [successor] = workers.PENDING
+    assert successor["chat_id"] == project["chat_id"]
+    retained = project_binding_for_task(tmp_path, successor["id"])
+    assert retained["source_ref"] == ref and retained["source_text"] == display
+    assert retained["source_input"] == bound["source_input"] == snapshot["input"]
+    assert "Owner's original instruction (verbatim):\nline one\nline two\n2" in successor["text"]
+    assert '"notes": "line one\\nline two", "copies": 2' in successor["text"]
+    ctx = SimpleNamespace(task_metadata=successor["metadata"], drive_root=tmp_path)
+    _initialize_owner_directives(ctx, [{"role": "user", "content": successor["text"]}])
+    [row] = ctx._owner_directives
+    assert row["source"] == "owner_mailbox" and row["row_sha256"] == ref["row_sha256"] and row["ts"] == ref["ts"]
+    assert row["reply_to"]["submitted_values"] == values and row["reply_to"]["pressed_label"] == label
+    assert owner_words_contain(ctx, values["notes"]) and not owner_words_contain(ctx, label)
+
+
 @pytest.mark.parametrize("conflict", [None, "selection", "quiz_id", "comment"],
                          ids=["released", "changed-option", "other-card", "trimmed-comment"])
 def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, monkeypatch, conflict):
