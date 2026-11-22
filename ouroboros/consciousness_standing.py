@@ -275,10 +275,10 @@ def fallen_works(root: Any, *, now: float, projects: Iterable[Mapping[str, Any]]
                 if (bound.get(task_id) or project_id) == project_id:  # one bound elsewhere is that project's root
                     keep(project_id, task_id, status, ts)
                     break
-        if moved:
-            for task_id, status, ts in txn.conn.execute(
-                    f"SELECT task_id, status, ts FROM tasks WHERE task_id IN (SELECT value FROM json_each(?)) AND {own}",
-                    (json.dumps(moved),)):
+        if moved:  # by primary key: the ids lead (CROSS JOIN); the parent index, null for every root, is never walked
+            bound_roots = ("SELECT tasks.task_id, status, ts FROM json_each(?) CROSS JOIN tasks "
+                           f"ON tasks.task_id = json_each.value WHERE {own}")
+            for task_id, status, ts in txn.conn.execute(bound_roots, (json.dumps(moved),)):
                 keep(bound[task_id], task_id, status, ts)
         candidates = [(known, ts, task_id, project_id) for project_id, (known, ts, task_id, status) in best.items()
                       if status in FALLEN_STATUSES]

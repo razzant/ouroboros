@@ -321,6 +321,34 @@ def test_an_unreadable_binding_store_is_the_sections_gap_never_the_copy_a_root_s
     assert not [gap for gap in absent.gaps if gap.startswith("fallen_work")]
 
 
+def test_the_roots_bound_to_an_open_project_are_read_by_primary_key(tmp_path, monkeypatch):
+    """A wake reads the bound roots by their ids, so its cost does not grow with the roots history holds: the plan
+    searches the primary key, never the parent index every root shares (a null parent) for the root predicate."""
+    import contextlib
+
+    from ouroboros import task_store
+
+    for index in range(3):
+        _root(tmp_path, f"old{index}", ts=T0 - 9000 + index, project="", status="completed", ended=T0 - 8000)
+    _root(tmp_path, "moved", ts=T0 - 600, project="", ended=T0 - 300)
+    _bind(tmp_path, moved="p1")
+    real, statements = task_store.open_store, []
+
+    @contextlib.contextmanager
+    def traced(*args, **kwargs):  # the statements as SQLite runs them, bound values in place
+        with real(*args, **kwargs) as txn:
+            txn.conn.set_trace_callback(statements.append)
+            yield txn
+            txn.conn.set_trace_callback(None)
+
+    monkeypatch.setattr(task_store, "open_store", traced)
+    assert _listed(tmp_path) == ["moved"]
+    [bound] = [sql for sql in statements if "json_each" in sql and "presence_authority_recorded" in sql]
+    with real(tmp_path, write=False) as txn:
+        plan = " | ".join(str(row[-1]) for row in txn.conn.execute("EXPLAIN QUERY PLAN " + bound))
+    assert "tasks_parent" not in plan and "(task_id=?)" in plan, plan
+
+
 def test_bodies_are_read_only_for_candidates_and_the_line_stays_compact(tmp_path, monkeypatch):
     from ouroboros import task_store
 
