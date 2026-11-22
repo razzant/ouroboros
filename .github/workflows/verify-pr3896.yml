@@ -1,0 +1,178 @@
+# One-off acceptance for PR #3896 (DISPOSABLE: this file lives only on the branch
+# ci/context-3896-314ce99d, never merged into the product).
+# It runs the same keyless system_e2e wire file against BOTH trees and enforces the
+# exact expected RED on the product baseline and GREEN on the reviewed candidate,
+# through JUnit: a collection error, a skip, a missing case or a wrong failure set is
+# NOT acceptance. The story is the real owner WS + the stock keyless server booted by
+# tests/system_e2e's own clone + the loopback HTTP synthetic provider A/A/B: no
+# product or fixture shims.
+#
+# PLACEHOLDERS, filled by the integrator after review, before pushing the branch:
+#   __BASE_SHA__  = the pinned Development base including final #3858 (scenario
+#                   servers boot stock from this committed tree; the test blob is
+#                   not needed in it: only the test file below is copied from
+#                   __HEAD_SHA__ into the workdir, uncommitted. Verified locally
+#                   2026-11-21: git clone --no-local of such a shallow detached
+#                   workdir transports the baseline commit alone; the staged test
+#                   copy does not reach the clone the servers boot from).
+#   __HEAD_SHA__  = the reviewed PRODUCT candidate commit, which does NOT contain
+#                   this temporary workflow: a commit cannot name its own SHA, so the
+#                   non-default CI branch (the context-gate is absent on the default
+#                   branch, so a manual dispatch is not relied on) adds this file as
+#                   one separate top commit on top of __HEAD_SHA__. That branch-tip ->
+#                   parent = __HEAD_SHA__ link is the integrator's own Git readback
+#                   before the branch is pushed (git rev-parse <tip>^): this workflow
+#                   adds no extra checkout, metadata API call or job to check it. Both
+#                   jobs still check out a pinned SHA, so the tree under test is always
+#                   the reviewed product one, never the commit that carries this file.
+#   __TEST_SHA256__ = sha256 of tests/system_e2e/test_new_chat_after_unitless_
+#                   length_refusal.py in the reviewed product commit.
+# No secrets: the lane is keyless by construction; read-only permissions;
+# persist-credentials off; ubuntu; -s prints only the wire tables (HTTP, bytes,
+# counts, key letters — no payloads, no keys).
+name: "PR3896 first-contact wire RED/GREEN (disposable)"
+on:
+  push:
+    branches:
+      - ci/context-3896-314ce99d
+permissions:
+  contents: read
+concurrency:
+  group: "verify-pr3896-${{ github.ref }}"
+  cancel-in-progress: false
+jobs:
+  verify:
+    name: "first-contact wire: ${{ matrix.expect }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      TEST_FILE: tests/system_e2e/test_new_chat_after_unitless_length_refusal.py
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - expect: green
+            sha: a0cd2e2057f58998d0b060fb541e7a1d300f3d88
+          - expect: red
+            sha: d0bd1cbb6761b1924dd82765b70f40eb674f872f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Pin the exact checkout
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "${{ matrix.sha }}" ]
+          # detached (a SHA ref checkout): the harness clone then transports no local branch
+          [ "$(git rev-parse --abbrev-ref HEAD)" = "HEAD" ]
+      - name: Candidate only - pin the exact test blob inside the reviewed commit
+        if: matrix.expect == 'green'
+        run: |
+          set -euo pipefail
+          sha256sum "$TEST_FILE" | cut -d' ' -f1 | grep -qx 38ce76b6ae0352faa88c1984d42da48155fc8ce2cf14549747597cab939300f5
+      - name: Baseline only - copy exactly the test file from the candidate, product unchanged
+        if: matrix.expect == 'red'
+        run: |
+          set -euo pipefail
+          # only the exact reviewed SHA: on this branch the ref would resolve to the
+          # top commit carrying this workflow, i.e. a different tree than the product
+          git fetch -q --depth 1 origin a0cd2e2057f58998d0b060fb541e7a1d300f3d88
+          [ "$(git rev-parse --verify FETCH_HEAD)" = "a0cd2e2057f58998d0b060fb541e7a1d300f3d88" ]
+          git checkout a0cd2e2057f58998d0b060fb541e7a1d300f3d88 -- "$TEST_FILE"
+          [ "$(git rev-parse HEAD)" = "d0bd1cbb6761b1924dd82765b70f40eb674f872f" ]  # HEAD stays the baseline: only the test file is staged
+          if git status --porcelain | cut -c4- | grep -vqxF "$TEST_FILE"; then
+            echo "the copy touched more than the one test file"; exit 1
+          fi
+          sha256sum "$TEST_FILE" | cut -d' ' -f1 | grep -qx 38ce76b6ae0352faa88c1984d42da48155fc8ce2cf14549747597cab939300f5
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          interpreter: shipped   # the Python/SQLite fresh installs run, as in the product lane
+          install-project: 'false'  # candidate servers must import their own checkout (#1644)
+      - name: Recheck the changed first-contact home modules on the pinned candidate
+        if: matrix.expect == 'green'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "a0cd2e2057f58998d0b060fb541e7a1d300f3d88" ]
+          TMPDIR="$RUNNER_TEMP" python -I -S scripts/safe_test.py --timeout 275 -- \
+            python -m pytest -o addopts='' -p no:cacheprovider -q \
+            tests/test_first_contact_seams.py tests/test_context_refusal_passes.py tests/test_size_refusal.py
+      - name: Run the file (E/M/N scenarios; stock keyless servers from the pinned tree) and enforce the pinned outcome via JUnit
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        env:
+          PYTHONUNBUFFERED: "1"
+          OUROBOROS_E2E_DEEP: mock
+          OUROBOROS_APP_ROOT: ${{ runner.temp }}/app
+          OUROBOROS_REPO_DIR: ${{ runner.temp }}/repo
+          OUROBOROS_DATA_DIR: ${{ runner.temp }}/data
+          OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/data/settings.json
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -o addopts='' -p no:cacheprovider -q -s \
+            --junitxml="$RUNNER_TEMP/${{ matrix.expect }}.xml" "$TEST_FILE"
+          pytest_rc=$?
+          python - "$RUNNER_TEMP/${{ matrix.expect }}.xml" "$pytest_rc" "${{ matrix.expect }}" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+
+          xml_path, rc, expect = sys.argv[1], sys.argv[2], sys.argv[3]
+          A2 = {
+              "test_enough_candidate_a2_first_send_is_the_smaller_max_form":
+                  "AssertionError: A2 re-sent before settling (the route hint did not shape its first send)",
+              "test_maps_candidate_a2_first_send_is_the_maps":
+                  "AssertionError: A2 re-sent before settling (its first send was not the maps)",
+          }
+          ALL = set(A2) | {"test_enough_cold_walk_and_control", "test_maps_cold_walk_and_control",
+                      "test_below_every_legal_form_nothing_mandatory_is_dropped_or_refused_unsent",
+                      "test_none_a3_after_the_line_recovers_does_not_inflate_its_first_send"}
+          want_rc = "0" if expect == "green" else "1"
+          problems, status, failure_first_line = [], {}, {}
+          if rc != want_rc:
+              problems.append(f"pytest exit code {rc}, expected {want_rc} "
+                              "(2=collection error, 5=no tests: neither is acceptance)")
+          try:
+              tree = ET.parse(xml_path)
+          except Exception as exc:
+              problems.append(f"no readable JUnit at {xml_path}: {exc!r}")
+          else:
+              for case in tree.iter("testcase"):
+                  name = case.get("name", "")
+                  outcomes = [c for c in case if c.tag in {"failure", "error", "skipped"}]
+                  if name in status:
+                      problems.append(f"duplicate JUnit case: {name}")
+                  if len(outcomes) > 1:
+                      problems.append(f"{name}: multiple JUnit outcomes are not acceptance")
+                  outcome = outcomes[0] if outcomes else None
+                  status[name] = {"failure": "failed", "error": "error", "skipped": "skipped"}.get(
+                      outcome.tag if outcome is not None else "", "passed")
+                  if outcome is not None and outcome.tag == "failure":
+                      # Pytest puts the assertion reason first in @message, before wire details and introspection.
+                      # The element body is a traceback (and can quote other assertions as source). Never read it.
+                      failure_first_line[name] = (outcome.get("message") or "").split("\n", 1)[0]
+              if set(status) != ALL:
+                  problems.append(f"the cases that ran are not the pinned six: {sorted(status)}")
+              for name, st in sorted(status.items()):
+                  if st in ("error", "skipped"):
+                      problems.append(f"{name}: {st} is not acceptance")
+                  elif expect == "green" and st != "passed":
+                      problems.append(f"candidate must pass everything: {name} {st}")
+                  elif expect == "red":
+                      want = "failed" if name in A2 else "passed"
+                      if st != want:
+                          problems.append(f"baseline expectation broken: {name} {st}, want {want}")
+                      elif name in A2 and failure_first_line.get(name) != A2[name]:
+                          problems.append(f"{name}: failure/@message first line {failure_first_line.get(name)!r}, "
+                                          f"expected {A2[name]!r} (HTTP 400 first POST, then a successful retry)")
+          print("== PR #3896 first-contact wire verification ==")
+          for name, st in sorted(status.items()):
+              print(f"  {st:7s} {name}")
+          if problems:
+              print("ACCEPTANCE: NO")
+              for p in problems:
+                  print("  ! " + p)
+              sys.exit(1)
+          print(f"ACCEPTANCE: {expect.upper()} exactly as pinned")
+          PY
