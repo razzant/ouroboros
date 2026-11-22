@@ -641,7 +641,7 @@ async def _http_with_guards(cfg: MCPServerConfig):
     client_factory = bearer_client if bearer is not None else guard.client
     sse = cfg.transport == "sse"
     with _redacted_sdk_logs(cfg, "mcp.client.sse" if sse else "mcp.client.streamable_http"):
-        opened = (sse_client if sse else streamablehttp_client)(
+        opened = mcp_catalog.http_transport(sse_client if sse else streamablehttp_client)(  # notes its own 404 stand-ins
             cfg.url, headers=cfg.wire_headers(), httpx_client_factory=client_factory, auth=bearer)
         try:
             async with opened as streams:
@@ -765,13 +765,13 @@ async def _call_tool_async(
     from ouroboros.store import StoreError
     from ouroboros.mcp_result_images import with_returned
     from ouroboros.work_domain import WorkDomainUnsettled
-    unsent_joined = False
-    returned = None
+    unsent_joined, returned, used = False, None, None
 
     async def _do() -> ToolResult:
-        nonlocal unsent_joined, returned
+        nonlocal unsent_joined, returned, used
         refusal = None
         async with _session(cfg) as session:
+            used = session  # whether its call was answered outlives a timeout in the SDK's own checks
             try:
                 await session.initialize()
             except BaseException as exc:
@@ -816,7 +816,7 @@ async def _call_tool_async(
                 # wait_for replaces CancelledError with TimeoutError; carry proof,
                 # not exception-class inference, over that conversion.
                 exc.mcp_unsent_joined = True
-            if returned is not None:  # the server answered; only leaving its session ran out of time
+            if returned is not None or getattr(used, "mcp_call_answered", False):  # answered; what came after ran out
                 exc.mcp_server_answered = True
             raise
 

@@ -411,6 +411,7 @@ class TaskSession:
         """One serialized call: the raw ``CallToolResult`` and the session's restart note, or a raise.
 
         The note is ``restarted`` for the first call this session answers, then ``""``; ``exited`` runs exactly once."""
+        from ouroboros.mcp_catalog import with_answer
         from ouroboros.owner_pause import operation_start
         from ouroboros.tool_custody import hold_invocation
 
@@ -462,13 +463,15 @@ class TaskSession:
                 ended.wait(MCP_TASK_SESSION_CLOSE_WAIT_SEC)  # the session cancels its calls before it leaves the transport
                 if future.done() and not sent.is_set():
                     raise self._closing_unsent(f"MCP server {self.server_id!r}: the call was never sent") from None
-                raise TimeoutError(f"MCP server {self.server_id!r} did not answer; its session is closing and "
-                                   "the call's outcome is unknown") from None
+                raise with_answer(self._session, TimeoutError(  # an answer that came before stays one (mcp_catalog)
+                    f"MCP server {self.server_id!r} did not answer; its session is closing and "
+                    "the call's outcome is unknown")) from None
             except concurrent.futures.CancelledError:
                 ended.wait(MCP_TASK_SESSION_RETURN_WAIT_SEC)
                 if not sent.is_set():
                     raise _unsent(TaskSessionUnavailable("the session closed before this call was sent")) from None
-                raise ConnectionError("the session closed during this call; its outcome is unknown") from None
+                raise with_answer(self._session, ConnectionError(
+                    "the session closed during this call; its outcome is unknown")) from None
             ended.wait(MCP_TASK_SESSION_RETURN_WAIT_SEC)
             note, self.restarted = self.restarted, ""  # under the call lock: named by one answered call only
             return value, note

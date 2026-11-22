@@ -837,7 +837,8 @@ def test_a_local_refusal_or_interruption_leaves_the_record_and_a_transport_failu
     assert call_now() == failing  # and an open series keeps its start
 
 
-RAW_SERVER = r'''import json, sys
+RAW_SERVER = r'''import json, sys, time
+slow = 0  # a "slow_listing" call's seconds: the SDK's output-schema listing after it takes that long
 for line in sys.stdin:
     request = json.loads(line)
     if "id" not in request:
@@ -847,6 +848,9 @@ for line in sys.stdin:
         reply["result"] = {"protocolVersion": request["params"]["protocolVersion"],
                            "capabilities": {"tools": {}}, "serverInfo": {"name": "raw", "version": "1"}}
     elif request["method"] == "tools/list":
+        if slow:
+            open(__file__ + ".listed", "w").close()
+            time.sleep(slow)
         reply["result"] = {"tools": [{"name": "ping", "inputSchema": {"type": "object"}},
                                     {"name": "typed", "inputSchema": {"type": "object"},
                                      "outputSchema": {"type": "object", "required": ["value"]}}]}
@@ -855,8 +859,12 @@ for line in sys.stdin:
         if mode == "disconnect":
             break
         if mode == "protocol":
-            reply["error"] = {"code": -32602, "message": "raw server: invalid params"}
+            reply["error"] = {"code": request["params"]["arguments"].get("code", -32602),
+                              "message": "raw server: invalid params"}
+        elif mode == "invalid_result":  # the call's id with a result the SDK cannot parse
+            reply["result"] = {"content": [{"type": "text", "text": {"wrong": "type"}}]}
         else:
+            slow = request["params"]["arguments"].get("seconds", 0) if mode == "slow_listing" else 0
             reply["result"] = {"content": [{"type": "text", "text": mode}], "isError": mode == "tool_error"}
             if mode == "bad_output":
                 reply["result"]["structuredContent"] = {}
@@ -902,13 +910,85 @@ def test_a_task_session_server_answering_with_a_json_rpc_error_is_answering(tmp_
         with owner(registry):
             # The answer first: a dropped connection ends the task's session, so a later call would meet
             # the closed session rather than the server.
-            refused = call(registry, "ping", {"mode": "protocol"}, server_id="demo")
+            refused = call(registry, "ping", {"mode": "protocol", "code": -32000}, server_id="demo")
             assert refused.code == "MCP_ERROR" and "invalid params" in refused.text
             assert call_now()["ok"] is True
             assert call(registry, "ping", {"mode": "disconnect"}, server_id="demo").code == "MCP_ERROR"
             assert call_now()["ok"] is False
     finally:
         mcp_task_session.close_context_sessions(registry._ctx)
+
+
+def test_a_task_session_answer_stays_one_when_the_sdks_listing_after_it_runs_out_of_time(tmp_path, monkeypatch):
+    from ouroboros import mcp_task_session
+    from tests._invocation_harness import _registry, owner
+    from tests._mcp_task_harness import call, wire
+
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    wire(monkeypatch, registry, raw_server(tmp_path, task_session=True), timeout=3)
+    try:
+        with owner(registry):
+            late = call(registry, "ping", {"mode": "slow_listing", "seconds": 6}, server_id="demo")
+            assert (tmp_path / "raw_server.py.listed").exists() and late.code == "MCP_TIMEOUT", (late.code, late.text)
+            assert call_now()["ok"] is True  # its session closed on the deadline; the server had answered first
+    finally:
+        mcp_task_session.close_context_sessions(registry._ctx)
+
+
+@pytest.mark.parametrize("answer", [{"mode": "protocol", "code": -32000}, {"mode": "protocol", "code": 408},
+                                    {"mode": "invalid_result"}])
+def test_a_reply_with_the_calls_id_is_an_answer_whatever_its_code_or_content(tmp_path, answer):
+    manager = mcp_client.MCPManager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 20, "MCP_SERVERS": [raw_server(tmp_path)]})
+    assert manager.refresh_server("demo")["tool_count"] == 2
+    assert manager._call_tool_result("mcp_demo__ping", {"mode": "disconnect"}).code == "MCP_ERROR"
+    assert call_now()["ok"] is False
+    result = manager._call_tool_result("mcp_demo__ping", answer)
+    assert result.code == "MCP_ERROR" and call_now()["ok"] is True  # the caller still gets its error
+
+
+def test_an_answer_stays_one_when_the_sdks_output_schema_listing_runs_out_of_time(tmp_path):
+    value = {"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 20, "MCP_SERVERS": [raw_server(tmp_path)]}
+    manager = mcp_client.MCPManager()
+    manager.reconfigure(value)
+    assert manager.refresh_server("demo")["tool_count"] == 2
+    manager.reconfigure({**value, "MCP_TOOL_TIMEOUT_SEC": 2})
+    assert manager._call_tool_result("mcp_demo__ping", {"mode": "disconnect"}).code == "MCP_ERROR"
+    assert call_now()["ok"] is False
+    late = manager._call_tool_result("mcp_demo__ping", {"mode": "slow_listing", "seconds": 4})
+    assert (tmp_path / "raw_server.py.listed").exists() and late.code == "MCP_TIMEOUT"  # the caller timed out
+    assert call_now()["ok"] is True  # but the server had answered the call itself
+
+
+def test_an_http_404_to_the_calls_post_is_no_answer_though_the_sdk_raises_an_error_for_it(loopback):  # noqa: F811
+    expired = threading.Event()
+
+    def expire(app):
+        async def route(scope, receive, send):
+            if not expired.is_set() or scope.get("type") != "http" or scope.get("method") != "POST":
+                return await app(scope, receive, send)
+            events = []
+            while not events or events[-1].get("more_body"):
+                events.append(await receive())
+            if json.loads(b"".join(event.get("body", b"") for event in events)).get("method") == "tools/call":
+                await send({"type": "http.response.start", "status": 404, "headers": []})
+                await send({"type": "http.response.body", "body": b"session expired"})
+                return
+
+            async def replay():
+                return events.pop(0) if events else await receive()
+            return await app(scope, replay, send)
+        return route
+
+    _app, url = loopback("http", {}, wrap=expire)
+    manager = mcp_client.MCPManager()
+    manager.reconfigure(settings(url=url, transport="streamable_http"))
+    assert manager.refresh_server("demo")["ok"]
+    assert manager._call_tool_result("mcp_demo__echo", {"text": "live"}).status == "ok" and call_now()["ok"] is True
+    expired.set()  # the server lost the session: its POST answers 404 with no JSON-RPC message
+    lost = manager._call_tool_result("mcp_demo__echo", {"text": "expired"})
+    assert lost.code == "MCP_ERROR" and "Session terminated" in lost.text  # the SDK's own error for that id
+    assert call_now()["ok"] is False
 
 
 def test_an_answer_received_before_its_session_failed_to_close_is_an_answer(loopback, monkeypatch, tmp_path):  # noqa: F811
