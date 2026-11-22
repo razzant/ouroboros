@@ -412,7 +412,7 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             # (keep=False) still raises.
             if not keep:
                 raise
-            log.warning("owner keep of %s saved without canonical release facts: %s", task_id, type(exc).__name__)
+            log.warning("owner keep of %s: canonical release facts unavailable: %s", task_id, type(exc).__name__)
             store = store_of(base, task_id)  # the listed store files: nothing is claimed about them, the keep is saved
             payloads = {place: ("unknown", None) for place in places if pathlib.Path(place).is_relative_to(store)}
             if "canonical_payloads" not in unknown:
