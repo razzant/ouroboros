@@ -20,9 +20,10 @@ dispatch refusal of a withheld name (owner decision В31=B). A description edit
 does not move the record.
 
 Byte identity was proven once, for the change that unified the five readers:
-the record of that time held every schema's bytes, was written on the unchanged
-base (b9513746d) and stayed green, untouched, through the unification
-(165089dc6). What stays pinned is the decisions.
+the record of that time held every schema's bytes and was written green on the
+unchanged base (b9513746d); after one deliberate move (985e90ccd: the network
+gate in available_tools) the unification itself (165089dc6) did not change its
+parent's fixture and stayed green. What stays pinned is the decisions.
 
 A deliberate change of what any context sees or may call regenerates the record
 with ``OURO_TOOL_VISIBILITY_GOLDEN=write``; name it in the PR. An unintended one
