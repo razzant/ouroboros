@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, List, Literal, Tuple
 
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
+from ouroboros.host_notice import mind_text as notice_text
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -614,14 +615,14 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
 
     A task summary without text is the host's typed facts row: its recorded facts are
     its text (``_host_facts_text``), the same words in chat history, its search and
-    memory rows."""
+    memory rows. A host notice's step and raw details follow its phrase (``host_notice``)."""
     if entry.get("type") == "task_summary" and not _text(entry.get("text")):
         return _host_facts_text(entry)
     from ouroboros.chat_uploads import attachment_ref_delivery_block
 
     delivery = attachment_ref_delivery_block(entry.get("attachments")) if entry.get("source") == "skill:telegram" else ""
     content = "" if delivery and entry.get("text_placeholder") else str(entry.get("text", ""))
-    text = _with_reaction(entry, content)
+    text = _with_reaction(entry, content) + notice_text(entry)
     if delivery:
         text = "\n\n".join(part for part in (text, delivery) if part)
     transport = _mapping(entry.get("transport"))

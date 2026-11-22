@@ -205,7 +205,7 @@ def test_restarted_clock_requires_a_carrier_witness(clock, witness):
     assert restarted.tick(restarted.next_wake_at) == ("launched" if witness == "none" else "wake_live")
 
 
-@pytest.mark.parametrize("outcome", ["allowance_unknown", "first_conversation", "refused"])
+@pytest.mark.parametrize("outcome", ["allowance_unknown", "owner_chat_unknown", "refused"])
 def test_skips_refusals_and_restart_keep_the_appointment(clock, monkeypatch, outcome):
     finished = _launched(clock)
     monkeypatch.setattr(clock_module.time, "time", lambda: T0 + 5000)
@@ -213,8 +213,8 @@ def test_skips_refusals_and_restart_keep_the_appointment(clock, monkeypatch, out
     appointment = clock.store[APPOINTMENT_STATE_KEY]
     if outcome.startswith("allowance"):
         monkeypatch.setattr(clock_module, "allowance_window", lambda *a, **k: {"status": outcome})
-    elif outcome == "first_conversation":
-        clock.store["owner_chat_id"] = None
+    elif outcome == "owner_chat_unknown":
+        clock.store["_recovery"] = {"unconfirmed": ["owner_chat_id"]}
     else:
         clock.receipt.update(admitted=False, reason="repo_writer_gate_closed")
     assert clock.clock.tick(appointment).startswith(("skipped:", "rejected:"))

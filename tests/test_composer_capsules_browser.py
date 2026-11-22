@@ -1231,9 +1231,9 @@ def test_a_project_rooms_context_reads_only_its_own_root_works(direct_server_wit
             browser.close()
 
 
-# What the capsule says for the owner's Max whose books went to chapter maps, and for Low's missed target where Low
-# is chosen (owner 15.11.2026, 3A and 4A; words settled by the consilium, 17.11), at the owner's two desk widths of
-# the transcript and on a phone.
+# What the capsule says for a work the window took from the owner's Max (Low, temporarily, for the window, owner
+# 21.11.2026; the row is one of 17-22 Nov that named it Max with chapter maps), and for Low's missed target where Low
+# is chosen (owner 15.11.2026, 3A), at the owner's two desk widths of the transcript and on a phone.
 WORDS = """() => {
     const el = document.querySelector('#page-chat .chat-context-mode');
     const hint = el.querySelector('.ui-hint');
@@ -1288,13 +1288,13 @@ def test_context_names_chapter_maps_and_lows_missed_target_at_every_width(direct
             head = f"{CONTEXT} .chat-capsule-head"
             rows[:] = [_maps("memory")]
             page.wait_for_function(f"() => document.querySelector('{CONTEXT} .chat-capsule-head').getAttribute('aria-label')"
-                                   " === 'Context: Max now, chapter maps'", timeout=15_000)
+                                   " === 'Context: Low now, Max chosen'", timeout=15_000)
             page.locator(head).click()
             page.wait_for_function(f"() => document.querySelector('{CONTEXT}').dataset.open === 'true'")
             page.wait_for_timeout(450)
             seen["maps"] = facts = page.evaluate(WORDS)
             _shot(page, tmp_path, f"context-maps-{engine}-{tag}")
-            assert facts["word"] == "Max" and facts["fact"].startswith("Chapter maps: the history does not fit beside the whole books."), facts
+            assert facts["word"] == "Low" and facts["fact"].startswith("Low for now, not Max: the whole books do not fit beside the history."), facts
             left, top, right, bottom = facts["box"]
             assert left >= 0 and top >= 0 and right <= facts["viewport"][0] and bottom <= facts["viewport"][1] and not facts["docScroll"], facts
             page.keyboard.press("Escape")

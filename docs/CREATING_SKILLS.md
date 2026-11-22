@@ -887,7 +887,7 @@ calls and runtime behaviours:
 | `supervised_task` | The skill may register an in-process host-supervised async task. It runs on the shared host extension loop, not the HTTP loop. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. An async subscriber runs on the shared host extension loop; a synchronous subscriber runs on the publisher's thread. Chat topics require owner permission grants; `skill.lifecycle` does not. |
-| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied to `data/uploads` and staged; only the bundled Telegram owner bridge additionally records a failed download as `{name, mime?, size?, unavailable: "too_large"|"download_failed", limit_bytes?}`; no path or bytes; caption optional). Optional `reply_to` names a row or `task:<task_id>` as a reference (routing only for the bundled [Telegram bridge](../skills/telegram/SKILL.md)'s Project Reply). For one authored row, sibling `reply_excerpt: {text, start_utf16}` is the sender’s rendered citation (CLIENT_CONTRACT §5). Optional `ui_control` (`{name}`) marks text one of the skill's controls composed (an inline button's command): the press is the owner's and the words are not, so the host writes no owner message for it (it takes no `client_message_id`; `owner_text`, malformed or combined: `400`). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract); only the bundled Telegram bridge may add `surface` (`{kind: "telegram", conversation_id, bot_id}`) to retain the reply address of a late answer (other skills: 400; malformed: ignored). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — matching words, ordered attachments (byte identity or failure facts), Reply address, and excerpt text and UTF-16 offset — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409; a `reply_excerpt` with no readable authored source with 400, named or not); `503` with `code: "not_accepted"` allows the same delivery to retry, not a delivery with unknown outcome; an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy; the image still reaches the model (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
+| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). The bundled Telegram owner bridge may send a failed download as `{name, mime?, size?, unavailable, limit_bytes?}` instead of a file (`unavailable` is `too_large` or `download_failed`), without a path or bytes and with an optional caption. Optional `reply_to` names a row or `task:<task_id>` as a reference (routing only for the bundled [Telegram bridge](../skills/telegram/SKILL.md)'s Project Reply). For one authored row, sibling `reply_excerpt: {text, start_utf16}` is the sender’s rendered citation (CLIENT_CONTRACT §5). Optional `ui_control` (`{name}`) marks text one of the skill's controls composed (an inline button's command): the press is the owner's and the words are not, so the host writes no owner message for it (it takes no `client_message_id`; `owner_text`, malformed or combined: `400`). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract); only the bundled Telegram bridge may add `surface` (`{kind: "telegram", conversation_id, bot_id}`) to retain the reply address of a late answer (other skills: 400; malformed: ignored). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — matching words, ordered attachments (byte identity or delivery failure facts), Reply address, and excerpt text and UTF-16 offset — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409; a `reply_excerpt` with no readable authored source with 400, named or not); `503` with `code: "not_accepted"` allows the same delivery to retry, not a delivery with unknown outcome; an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer (a host notice's is its phrase, with its `notice`: code, step, raw details and line), a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
 | `notify_owner` | The skill may tell the owner one thing through `POST /notify` after an explicit owner permission grant (see "Telling the owner something" below): one bounded plain sentence the host shows in the owner's chat as a System row signed with the skill's name. It wakes no model; narrower than `inject_chat`. |
 
@@ -946,6 +946,61 @@ answers from memory, reading no Settings, so you can confirm at each read that o
 after exhausted restarts) still carries it. A refused spawn raises `OSError`. Say in your SKILL.md which your
 skill does (Telegram applies saves itself). Chat transports receive such a request as a note saying where to
 enter it; a transport must not offer a reply as an answer to it.
+
+## A connection card in the setup wizard (`connection_card`)
+
+A skill that ships with the app (a built-in) may let the setup wizard connect it before Start: its Skills step then
+shows the skill as a card, first, with the skill's own steps to get a token, a token field, a check that names the
+account, a QR of a link with a one-time code, and options. Hub skills cannot: the host never runs a hub skill's code
+before its review. The card is one top-level manifest key beside `secret_fields`, which holds only the token:
+
+```yaml
+env_from_settings: [TELEGRAM_BOT_TOKEN]
+secret_fields: {botToken: TELEGRAM_BOT_TOKEN}
+connection_card:
+  title: "Phone via Telegram"          # the card's words; without them the catalog's title and pitch
+  pitch: "Chat with Ouroboros anywhere"
+  steps:                               # numbered; the token field stands under the last one
+    - {text: "Open @BotFather in Telegram", link: "https://t.me/BotFather", action: "Open @BotFather"}
+    - {text: "BotFather replies with a token: paste it here and press Check"}
+  token: botToken                      # the secret field holding the token, saved to Settings at Finish
+  pairing:
+    code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}   # the skill's own settings
+    link: "https://t.me/{username}?start={code}"   # https, with both places; drawn as the QR
+    identity: "lib/telegram_pairing.py:bot_identity"   # stdlib-only function(token, timeout=) inside the skill
+    api_base: "lib/telegram_pairing.py:saved_api_base"   # optional: function(state_dir) naming the server to ask
+    hint: "Scan it with your phone’s camera, then press Start in Telegram."
+    note: "You can finish setup now; the bot answers once Ouroboros starts."
+  options:                             # the skill's own settings too
+    - {key: TELEGRAM_NOTIFY_TASKS, label: "Send results and errors of work here", "on": "on", "off": "off",
+       new_connection: true, store: skill_settings, route: settings/save}
+```
+
+`identity` answers `{"ok": True, "username": …}`, `{"ok": False, "cause": "refused"}` (the service rejected the
+token) or `{"ok": False, "cause": "unreachable"}`; the host calls it from the app's own copy of the skill, waits a
+little longer than `timeout`, and never passes on its errors' text. With `api_base` declared, the host first calls
+it with the skill's state directory and passes its answer as `identity`'s second argument; a reader that fails asks
+nobody. The page mints the code (24 random bytes,
+base64url, the form a skill's own minting gives) and sends it, with the options, only once it drew the QR and the
+link that hold it: a check that failed, is still running or never ran sends the token alone, so no code nobody saw is
+armed. A draft that is no token (a space or line break inside, more than 512 characters) is said so in the page and
+never checked or sent; the identity route answers it 400, never `refused`. Finish saves the token alone in its one
+settings write, never the code; the completion route refuses a card's values from the Telegram Mini App, since a code names the account's owner.
+Once that write is saved, the owner's consent (the code and the options) is noted in `state/skill_starter.json`
+(`connections`), never in Settings or a log. Once the skill serves, the host makes one post of every
+`store: skill_settings` value of the card that shares a route (here the code and the option) to
+`/api/extensions/<skill>/<route>` from the server itself over
+loopback, so the route's own guard (owner changes only from the owner's local session) reads it as local; no request
+can choose what it posts. It posts on events that already happen, never on a timer: the starter install's end, a
+saved completion for a skill already installed, the skill's extension finishing its load, and the next start; a route
+that does not serve yet (409) waits for the next of them. A route that answers 200 with `owner_ignored: true` left
+the owner's values unchanged: that is recorded as not saved, never as a success. Where reviewed skills are granted
+automatically, that policy covers the owner's consent too: a skill installed but not granted and on (its own install
+never granted it, e.g. a payload a Reset kept) gets the lifecycle's grant of every key and permission it asks, enable
+after grant, before the post (the record's `grant` says what happened). Where they are not, the card grants nothing:
+it says the skill starts after the owner allows it in Extensions, and that load is the event that posts. The code leaves
+the record once posted or refused; each outcome is recorded there and none blocks Start. A card missing any part the host needs is not shown, and the skill
+stays an ordinary row.
 
 ## Grants for protected keys and host permissions
 
@@ -2128,6 +2183,17 @@ of effects; only your state retains them. This reads immediate task Stop, not Wr
 Stop after the read cannot reach an action already starting. Never split one action (key press/release, drag).
 The host checks between whole calls for extensions that never ask. Bundled `unix_computer_use` also checks before `key` can raise the target and before each chord.
 
+### Reporting a permission the skill lacks
+
+A failing result (`{"ok": false, ...}`) may name why with a string `reason` (a snake_case code) and an optional
+`refusal` object: `capability_unavailable` (bool), `permission` (an id such as `accessibility`), `repair` (`owner`,
+`retry` or `self`) and `where` (a short hint). The host copies the valid fields into `meta.extension_reason`, ignores any
+other type and keeps the code `TOOL_REPORTED_FAILURE`. With `capability_unavailable` true and a `permission`, the
+skill's health record, once it exists, keeps that permission open and dated, and every work that reaches extensions
+is told. Only a success that lists it in
+`permissions_available` (`{"ok": true, "permissions_available": ["accessibility"], ...}`) closes it: a skill that
+reports refusals but never what is available keeps the line open.
+
 ### Async tool handlers
 
 Tool handlers may be plain functions or `async def`. A coroutine runs on a helper thread's own loop or in the
@@ -2782,7 +2848,9 @@ bundling is uninstalled on update when its copy is unchanged (its grants survive
 and stays as the owner's copy when edited or when another folder uses its name;
 `design_demo` was merged into `ui_design` this way. An owner's edited `ui_design`
 keeps its own text, which may still name `design_demo`.
-`unix_computer_use` and `windows_computer_use` are bundled extensions.
+`unix_computer_use`, `windows_computer_use` and `ui_look` are bundled extensions; `ui_look` adds one
+read-only tool that runs `ui_design`'s live stand, so `ui_design` stays an instruction that delegated
+sessions keep in their index.
 
 Non-declared delegated sessions receive an index of enabled, accepted or reviewed
 instruction skills from every installed bucket: bounded descriptions, triggers and

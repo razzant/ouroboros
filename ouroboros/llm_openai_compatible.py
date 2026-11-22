@@ -46,8 +46,11 @@ from ouroboros.request_wire_recovery import (
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
-from ouroboros._usage_response import normalize_go_price, observed_processing_mode, response_reported_price
-from ouroboros.event_usage import REPORTED_TOKENS_KEY
+from ouroboros._usage_response import (
+    _reported_token_count, cache_pricing_usage, cache_read_count, cache_write_total, malformed_token_counts,
+    normalize_go_price, observed_processing_mode, response_reported_price, text_token_counts,
+)
+from ouroboros.event_usage import REPORTED_TOKENS_KEY, event_token_counts
 
 
 # The moved warnings keep the logger identity they were emitted under.
@@ -561,31 +564,34 @@ class _OpenAICompatibleLaneMixin:
             # message-level 400 recovery. Only strings enter the transcript.
             msg.pop("reasoning_content", None)
 
-        if not usage.get("cached_tokens"):
-            prompt_details = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
-                usage["cached_tokens"] = int(prompt_details["cached_tokens"])
-        if not usage.get("cached_tokens") and usage.get("prompt_cache_hit_tokens"):
-            # DeepSeek mirrors its automatic-cache split as top-level
-            # prompt_cache_hit/miss_tokens beside the details block; the
-            # details block wins when present, this is the fallback.
-            try:
-                usage["cached_tokens"] = int(usage["prompt_cache_hit_tokens"])
-            except (TypeError, ValueError):
-                pass
+        # The billing-shaped counters hold a reported count or nothing: a malformed one (negative, fractional,
+        # not a number) is neither lifted nor left for a later fold or tariff to read as a number.
+        malformed = malformed_token_counts(usage)
+        # The ledger's reading of the reply as reported (``cache_read_count``): the details block wins, DeepSeek's
+        # top-level prompt_cache_hit_tokens mirror is the fallback, and a reported zero is a measurement.
+        cache_read = cache_read_count(usage)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
+            if usage.get(key) is not None:
+                usage[key] = _reported_token_count(usage, key)
+        # A positive count is lifted to the top level. A zero is written there only when the reply's other names
+        # would read as something else in the event (``event_token_counts``, whose own order puts the top-level
+        # names first); reported nowhere else, it stays where the reply put it.
+        if cache_read or (cache_read == 0 and event_token_counts(usage)["cached_tokens"] != 0):
+            usage["cached_tokens"] = cache_read
         # LM Studio MLX exposes prefix-cache hits only in stderr/logs, not
         # OpenAI-compatible usage; cached_tokens=0 is therefore expected.
 
-        if not usage.get("cache_write_tokens"):
-            prompt_details_for_write = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details_for_write, dict):
-                cache_write = (
-                    prompt_details_for_write.get("cache_write_tokens")
-                    or prompt_details_for_write.get("cache_creation_tokens")
-                    or prompt_details_for_write.get("cache_creation_input_tokens")
-                )
-                if cache_write:
-                    usage["cache_write_tokens"] = int(cache_write)
+        write_split = self._cache_write_split(usage)
+        written, invalid_write = cache_write_total(usage, write_split)
+        usage.pop("cache_write_tokens_invalid", None)
+        if invalid_write:
+            usage["cache_write_tokens_invalid"] = True
+            usage["cache_write_tokens"] = written
+        if write_split:
+            usage["cache_write_tokens_by_ttl"] = write_split
+        # A zero reported only inside Responses details stays there. A complete pair of bins establishes a total.
+        if written is not None and (responses_facts is None or written or write_split or "cache_write_tokens" in usage):
+            usage["cache_write_tokens"] = written
 
         usage["provider"] = str(target.get("provider") or "openrouter")
         usage["resolved_model"] = str(target.get("usage_model") or target.get("resolved_model") or "")
@@ -593,32 +599,22 @@ class _OpenAICompatibleLaneMixin:
         prompt_cache_ttl = _applied_payload_cache_ttl(terminal.physical_payload()) if terminal is not None else prompt_cache_ttl
         if prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
             usage["prompt_cache_ttl"] = prompt_cache_ttl
-        # Anthropic's per-tier write split, when the route passed it through.
-        _write_split = self._cache_write_split(usage)
-        if _write_split and not usage.get("cache_write_tokens_by_ttl"):
-            usage["cache_write_tokens_by_ttl"] = _write_split
         if usage["provider"] == "deepseek" and usage.get("cost") is None and not usage.get("cost_invalid"):
             from ouroboros._usage_settlement import settled_cost_facts
 
             usage.update(settled_cost_facts(usage))  # its attempt row's pinned amount, never a fresh price
+        counts = text_token_counts(usage)  # the ledger's reading: an unreported count stays None, never 0
         if (usage.get("cost") is None and not usage.get("cost_invalid") and not usage.get("provider_reported_cost_only")
-                and (usage.get("prompt_tokens") or usage.get("completion_tokens"))):
+                and any(counts)):
+            from ouroboros._usage_settlement import has_nontext_usage
             from ouroboros.pricing import estimate_cost_optional
 
-            estimated_cost = estimate_cost_optional(
+            # The ledger's rules: reported audio or image usage is never priced as text, and a malformed count is
+            # no observed zero. A reported bill stays.
+            estimated_cost = None if has_nontext_usage(usage) or malformed else estimate_cost_optional(
                 usage["resolved_model"],
-                int(usage.get("prompt_tokens") or 0),
-                int(usage.get("completion_tokens") or 0),
-                cache_usage={
-                    "cached_tokens": int(usage.get("cached_tokens") or 0),
-                    "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-                    "prompt_cache_ttl": usage.get("prompt_cache_ttl"),
-                    "cache_write_tokens_by_ttl": (
-                        usage.get("cache_write_tokens_by_ttl")
-                        if isinstance(usage.get("cache_write_tokens_by_ttl"), dict)
-                        else None
-                    ),
-                },
+                *counts,
+                cache_usage=cache_pricing_usage(usage, written, write_split),
                 allow_live_fetch=not skip_cost_fetch,
                 provider=usage["provider"],
                 **({"processing_mode": observed_processing_mode(usage["provider"], usage)}
@@ -629,6 +625,8 @@ class _OpenAICompatibleLaneMixin:
                 usage["cost_estimated"] = True
         if usage.get("cost") is None:
             usage["cost"] = None
+            if malformed:  # settlement's own fact: the loop's estimator stays off the malformed count as well
+                usage["cost_coverage"] = "partial"
         usage["cost_final"] = bool(
             usage.get("cost") is not None and not usage.get("cost_estimated")
         )

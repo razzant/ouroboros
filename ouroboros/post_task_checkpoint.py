@@ -303,7 +303,8 @@ CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "reti
 # own owners.
 _ENDING_FIELDS = (
     "status", "result", "error", "ts", "reason_code", "outcome_axes", "loop_outcome", "review_status",
-    "final_answer", "terminal_origin", "terminal_host_notice", "terminal_provider_notice", "terminal_salvage_path",
+    "final_answer", "terminal_origin", "terminal_host_notice", "terminal_provider_notice", "terminal_provider_cause",
+    "terminal_salvage_path",
     "trace_summary", "trace_refs", "model_execution", "completion_observations", "tool_calls", "resource_limit",
     "child_status", "wake_summary", "suggested_name", "wake_silent", "fold_read", "owner_message_sent",
     "_result_text_present", "cancel_origin", "schedule_name", "review_overrides", "finalization_recovery",

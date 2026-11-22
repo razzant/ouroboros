@@ -518,7 +518,10 @@ def test_an_openrouter_row_carries_the_price_its_catalog_states(pricing, expecte
     # A tier accounting cannot read or skips leaves the price partial: no price rather than the base alone.
     {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "n/a", "completion": "0.000015"}]},
     {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "inf"}]},
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": None}]},
     {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.002"}]},
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [
+        {"min_prompt_tokens": 200000, "input_cache_read": "n/a", "prompt": "0.000004"}]},
     # A price that changes with the hour is not an input-length tier the picker can state.
     {"prompt": "0.00000015", "completion": "0.0000006", "overrides": [{"utc_start": 1500, "utc_end": 100, "prompt": "0.000000075"}]},
     # A charge four decimals per 1M would print as zero is never shown as free.
@@ -544,6 +547,13 @@ def test_an_openrouter_row_without_a_complete_token_price_has_no_price_field(pri
     assert item["value"] == "vendor/model", "a price never decides whether a model is listed"
 
 
+@pytest.mark.parametrize("meter", ["input_cache_write_1h", "input_cache_read", "image"])
+def test_zero_token_rates_with_a_paid_override_do_not_advertise_free(meter):
+    pricing = {"prompt": "0", "completion": "0", "overrides": [{"min_prompt_tokens": 100, meter: "0.000004"}]}
+    [item] = _openrouter_items([{"id": "vendor/model", "pricing": pricing}])
+    assert item["value"] == "vendor/model" and "price" not in item
+
+
 @pytest.mark.parametrize("pricing, cache_ttl, expected", [
     # The record's own figure for the cache tier the install sends: 1h reads the 1-hour field, any other named tier the base.
     ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "default", 5.0),
@@ -560,6 +570,7 @@ def test_an_openrouter_row_without_a_complete_token_price_has_no_price_field(pri
     ({"input_cache_write": "0.00000000001"}, "5m", None),
     # A price that changes with input length states no single cache-write figure.
     ({"input_cache_write": "0.000005", "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.000008"}]}, "5m", None),
+    ({"input_cache_write_1h": "0.000008", "overrides": [{"min_prompt_tokens": 200000, "input_cache_write": "0.000006"}]}, "1h", None),
 ])
 def test_a_price_states_the_cache_write_figure_of_the_installs_cache_tier_or_none(pricing, cache_ttl, expected):
     from ouroboros.llm_pricing import openrouter_catalog_price
@@ -856,6 +867,8 @@ def test_a_draft_read_binds_a_kept_key_to_its_own_saved_row_or_pair(monkeypatch,
 
 def test_the_shown_price_is_the_catalog_row_fetch_openrouter_pricing_reads():
     from unittest.mock import MagicMock, patch
+    from ouroboros.gateway.management_contracts import ModelPrice
+    from ouroboros.gateway.schema import validate_ingress
     from ouroboros.llm_pricing import fetch_openrouter_pricing, openrouter_catalog_price
 
     record = {"id": "vendor/tiered", "pricing": {"prompt": "0.00000125", "completion": "0.00001", "overrides": [
@@ -867,7 +880,12 @@ def test_the_shown_price_is_the_catalog_row_fetch_openrouter_pricing_reads():
         row = fetch_openrouter_pricing(timeout_sec=5.0)["vendor/tiered"]
     assert openrouter_catalog_price(record) == {"input": row[0], "output": row[3], "tiers": [
         {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in row.tiers]}
-    assert [tier["min_prompt_tokens"] for tier in openrouter_catalog_price(record)["tiers"]] == [100000, 200000]
+    [item] = _openrouter_items([record])
+    assert item["price"] == {"input": 1.25, "output": 10.0, "tiers": [
+        {"min_prompt_tokens": 100000, "input": 1.25, "output": 12.0},
+        {"min_prompt_tokens": 200000, "input": 2.5, "output": 12.0},
+    ]}  # the last supplied output price also wins at the longer tier
+    assert not validate_ingress(item["price"], ModelPrice)
 
 
 def test_a_direct_route_with_the_same_model_id_gets_no_openrouter_price(monkeypatch):

@@ -116,7 +116,7 @@ def test_the_deep_review_acknowledgement_is_typed_and_cannot_be_read_as_an_answe
     SYSTEM row, so a run's recorded answer cannot be replaced by it.
     """
     source = (REPO / "supervisor/queue.py").read_text(encoding="utf-8")
-    ack = next(line for line in source.splitlines() if "Deep self-review queued" in line)
+    ack = next(line for line in source.splitlines() if "Deep self-review is queued" in line)
     assert 'role="system"' in ack and "system_type=" in ack, ack.strip()
 
 

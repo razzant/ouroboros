@@ -16,24 +16,11 @@ from ouroboros import budget_pause, owner_pause, task_store, tool_custody
 from ouroboros.loop_tool_execution import _execute_with_timeout
 from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import load_task_result, write_task_result
-from tests.test_batch4_producer_custody import _registry
+from tests._invocation_harness import _registry
 
 
 
-@contextmanager
-def owner(registry, *, attempt=1, control=None):
-    ctx = registry._ctx
-    with task_model_wait_scope(task={"id": ctx.task_id, "_attempt": attempt},
-            drive_root=ctx.drive_root, event_queue=None, worker_slot_held=False,
-            **({"owner_control": lambda: control[0]} if control is not None else {})) as held:
-        held.tool_context = ctx
-        yield held
-
-
-def run(registry, *, timeout=3, name="knowledge_read", args=None):
-    return _execute_with_timeout(registry, {"id": "call", "function": {
-        "name": name, "arguments": json.dumps(args or {"topic": "fixture"})}},
-        registry._ctx.drive_root / "logs", timeout, task_id=registry._ctx.task_id)
+from tests._invocation_harness import owner, run  # noqa: F401 -- shared (tests/_invocation_harness.py)
 
 
 def claims(root):

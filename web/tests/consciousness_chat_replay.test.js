@@ -129,6 +129,9 @@ test('replay keeps the sentence when history stamps completion on progress befor
         const progress = checkpoint('stamped', { ...named, task_terminal_status: 'completed',
             text: 'Checking the disk and the gateway.', outcome_phase: 'done', outcome_final: true });
         delete progress.task_phase;
+        // The fixture's running checkpoint is its task's outcome carrier (no summary on its page); beside a summary
+        // the producer gives that truth to the summary and stamps the progress row with status alone.
+        delete progress.outcome_axes; delete progress.reason_code;
         assert.ok(!Object.hasOwn(progress, 'wake_summary') && !Object.hasOwn(row, 'task_terminal_status'));
         await replay({ messages: [progress, row], window: { complete: true } }, feed => {
             assert.equal(view(feed, 'stamped').title, 'Daily check');

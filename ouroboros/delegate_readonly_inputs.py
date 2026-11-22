@@ -64,6 +64,7 @@ class ReadonlyInputs(NamedTuple):
     instruction: str      # appended to the run's instructions
     selected: Optional[List[Dict[str, Any]]]  # the receipt: None when nothing was asked, else one row per retained file
     selection_note: str   # the selection's own text, restated in a continuation's prompt
+    lineage: Optional[tuple] = None  # (count, bytes) of the automatic lineage copies this start made, else None
 
     @property
     def custody(self) -> Dict[str, Any]:
@@ -500,6 +501,21 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
     return inputs._replace(selected=inputs.selected if asked else None), None
 
 
+def replayed_lineage(request: Any, invocation_id: str, investigation: bool, selected: Any) -> Optional[str]:
+    """What a replayed start may say of automatic lineage copies it holds no count of, from what THAT start's own
+    request recorded and nothing else (no folder is read or made before the engine's lookup): ``NO_RECORD`` only
+    where it was prepared for them (a read-only or investigation start without a nonempty selection whose recorded
+    ``scope.root`` is this invocation's own local preparation address, ``<task drive>/CONTAINER/<invocation_id>``),
+    else None: a managed copy's address is kept by its scratch owner, so the record alone does not decide it."""
+    from ouroboros.helper_receipt import NO_RECORD
+
+    body = request if isinstance(request, dict) else {}
+    root = pathlib.PurePath(str((body.get("scope") if isinstance(body.get("scope"), dict) else {}).get("root") or ""))
+    prepared = bool(invocation_id) and root.name == invocation_id and root.parent.name == CONTAINER
+    possible = (body.get("access") == "readonly" or investigation) and not selected and prepared
+    return NO_RECORD if possible else None
+
+
 def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List[Dict[str, Any]]] = None,
                             prepared: Optional[List[Dict[str, Any]]] = None, *,
                             thread_folder: Optional[str] = None) -> ReadonlyInputs:
@@ -556,7 +572,7 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
         "inputs.json maps the selected files, or default native lineage sources, to verified local copies. "
         "Read those local paths when the work order names the original sources. "
         "The manifest describes staged copies, not an additional filesystem-read boundary.\n"
-    ) + note, receipt, note)
+    ) + note, receipt, note, (len(lineage), sum(int(row["size"]) for row in lineage)) if lineage else None)
 
 
 def _selected_rel(row: Dict[str, Any]) -> str:

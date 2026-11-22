@@ -64,7 +64,7 @@ keeps its factory value:
 | Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
 | Access level | `advanced` | the level chosen |
 | Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
-| Consciousness | off ($20 over 24 hours once started); on when a copied settings document carries the setup choice | on unless switched off |
+| Consciousness | off ($15 over 24 hours once started); on when a copied settings document carries the setup choice | on unless switched off |
 
 Reviewers and helpers are proposed from the reachable Main at each read (none while
 the keys present do not settle which provider serves Main) until they are edited on
@@ -301,10 +301,19 @@ marks the container unhealthy.
 
 ## Trusted Docker / Kubernetes Non-Local Binds
 
-By default, saving `OUROBOROS_SERVER_HOST=0.0.0.0` through the Settings UI
-requires `OUROBOROS_NETWORK_PASSWORD` in the same save. This keeps desktop and
-local-network launches from accidentally exposing the full Ouroboros HTTP and
-WebSocket surface without the built-in password gate.
+A Settings save changes `OUROBOROS_SERVER_HOST` and `OUROBOROS_NETWORK_PASSWORD` only
+when it assigns or unsets them. Any other save, such as an API-key update, keeps what
+`settings.json` holds for the two and copies in neither a bind nor a password that
+only the launch environment sets (a container's, for example), so it needs no flag.
+A save that cannot read `settings.json` is refused and leaves the file untouched.
+
+By default, saving a non-loopback `OUROBOROS_SERVER_HOST` such as `0.0.0.0`
+through the Settings UI requires a durable `OUROBOROS_NETWORK_PASSWORD` in the
+same save: one `settings.json` already holds or the save writes. A password that only
+the launch environment sets does not count, because the saved bind outlives that
+environment. Save the password with the bind, or keep the bind on loopback. This
+keeps desktop and local-network launches from accidentally exposing the full
+Ouroboros HTTP and WebSocket surface without the built-in password gate.
 
 Trusted container deployments may opt out with:
 
@@ -320,10 +329,9 @@ infrastructure, for example:
 - private Kubernetes service/network policy
 - an authenticated reverse proxy
 
-With the flag enabled, Ouroboros still warns when saving a non-localhost bind
-without `OUROBOROS_NETWORK_PASSWORD`, but the Settings UI no longer blocks
-ordinary settings saves such as API-key updates. Do not use this flag on an
-open LAN or public port.
+With the flag enabled, the Settings UI no longer requires the password to save a
+non-localhost bind, and Ouroboros warns when it is saved without one. Do not use
+this flag on an open LAN or public port.
 
 ## The Main Interface and a Separately Hosted One
 

@@ -37,9 +37,13 @@ jobs:
           candidate=$(cat "$qa/candidate.sha")
           [[ $candidate =~ ^[a-f0-9]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          prior_qa=7d8d2206f3bcee6d7a9cd774f3b3ab19f8e27c12
-          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$prior_qa"
-          test "$(git show -s --format=%P "$prior_qa")" = "$candidate"
+          last_run_qa=33702f8045cfca98f93872dab6779171429d2116
+          product_base=d0bd1cbb6761b1924dd82765b70f40eb674f872f
+          for commit in "$GITHUB_SHA" "$last_run_qa" "$candidate" "$product_base"; do
+            git cat-file -e "$commit^{commit}"
+          done
+          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$last_run_qa $candidate"
+          test "$(git show -s --format=%P "$candidate")" = "$product_base"
           files=("$workflow" "$qa/Dockerfile" "$qa/candidate.sha" "$qa/loopback.py" "$qa/scenario.py")
           printf 'A\t%s\n' "${files[@]}" | LC_ALL=C sort > "$CASE/expected"
           git diff --no-renames --name-status "$candidate" "$GITHUB_SHA" | LC_ALL=C sort > "$CASE/actual"

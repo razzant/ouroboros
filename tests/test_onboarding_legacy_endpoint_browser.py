@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
-from tests._wizard_walk import walk
+from tests._wizard_walk import untick_starter_skills, walk
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
@@ -230,8 +230,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         # The saved OpenAI key never chose an API, so the summary says the one it keeps.
         assert summary["OpenAI"] == f"configured · also used by the legacy address {legacy_url} · Chat Completions API"
         report["frames"]["summary"] = _frame(page, evidence, "summary-980x780")
-        page.locator('[data-starter-toggle]').click()  # no public starter install from this isolated root
-        page.locator('[data-starter-all="0"]').click()
+        untick_starter_skills(page)  # no public starter install from this isolated root
         sent = {}
 
         def keep_body(route):
@@ -450,8 +449,7 @@ def test_both_pairs_test_and_discovery_follow_the_cleared_dedicated_address(dire
         # Finish from the cleared draft saves the pair Test probed: the legacy pair untouched, the dedicated address
         # blank, and no key moved or copied between pairs.
         walk(page, 'accounts', 'summary')
-        page.locator('[data-starter-toggle]').click()  # no public starter install from this isolated root
-        page.locator('[data-starter-all="0"]').click()
+        untick_starter_skills(page)  # no public starter install from this isolated root
         with page.expect_response('**/api/onboarding/complete') as completion:
             page.click('#next-btn')
         assert completion.value.status == 200, completion.value.text()

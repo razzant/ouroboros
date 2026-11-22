@@ -1607,6 +1607,54 @@ def test_profile_create_suppresses_only_typed_or_exactly_read_back_duplicate(mon
     assert state["setups"] == 2
 
 
+def test_a_created_account_moves_the_accounts_revision_and_asks_the_subscription_census_for_a_read(
+        monkeypatch, tmp_path):
+    """A genuinely new profile is a roster change (the revision fences a read in flight, the census reads again); a
+    duplicate or a refused registration changes nothing."""
+    from ouroboros import config
+    from ouroboros import subscription_census as census
+    from ouroboros.gateway import claudexor_accounts
+    from ouroboros.gateway.claudexor_accounts import _login_create
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    state = {"error": None}
+
+    class Gateway:
+        def agent_capabilities(self):
+            return {"harnesses": [{"id": "one", "setupLogin": {"mode": "in_app"}}]}
+
+        def create_credential_profile(self, *_args):
+            if state["error"]:
+                raise state["error"]
+
+        def setup_job_create(self, _body):
+            return {"id": "job", "state": "queued"}
+
+    class GatewayCtx:
+        def __enter__(self):
+            return Gateway()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr("ouroboros.claudexor_daemon.owned_daemon_provisioned", lambda: True)
+    monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway", lambda: GatewayCtx())
+    monkeypatch.setattr(claudexor_accounts, "_ACCOUNTS_REVISION", 0)
+    monkeypatch.setattr(claudexor_accounts, "_FACET_MEMORY", {})
+    for error in (ClaudexorUnavailable("credential_profile_exists", "already exists", status_code=409),
+                  ClaudexorUnavailable("credential_profile_ambiguous", "choose one", status_code=409)):
+        state["error"] = error
+        try:
+            _login_create({"harness": "one", "profile_id": "named"})
+        except ClaudexorUnavailable:
+            pass
+        assert claudexor_accounts.account_read_revision() == 0 and census.request_mtime() is None
+    state["error"] = None
+    assert _login_create({"harness": "one", "profile_id": "named"})["job_id"] == "job"
+    assert claudexor_accounts.account_read_revision() == 1 and census.request_mtime() is not None
+
+
 def test_legacy_360_internal_error_duplicate_requires_exact_profile_reread(monkeypatch):
     """The real 3.6.0 409 code is generic ``internal_error``. It is safe only
     after one canonical read finds the exact legacy profile row."""

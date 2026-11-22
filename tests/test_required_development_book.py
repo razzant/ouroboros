@@ -439,7 +439,7 @@ def test_a_low_start_line_does_not_call_the_required_book_a_map(tmp_path, fixed_
     assert "(this task's directly required handbook stays whole)" in low_start_line(plan, "low", "t")
     plain = _plan(tmp_path, _core(tmp_path, **shape), "max", 330_000)
     assert _choices(plan) == _choices(plain)  # its words follow the choices, never enter them
-    assert "stays whole" not in low_start_line(plain, "low", "t") and "started in Max with chapter maps:" in low_start_line(plain, "low", "t")
+    assert "stays whole" not in low_start_line(plain, "low", "t") and "runs in Low for now, not in your Max:" in low_start_line(plain, "low", "t")
 
 
 def test_reprojection_keeps_the_book_and_asks_nothing_of_memory_for_it(tmp_path, fixed_density):

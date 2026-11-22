@@ -16,6 +16,7 @@ import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createTextBubbles } from './chat_text_bubble.js';
+import { noticeLine } from './host_notice_text.js';
 import { createCatchUp } from './room_retire.js';
 import { createChatPreview } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
@@ -542,8 +543,12 @@ export function createChatInstance({
                     if (task && 'project_admission_hold' in task) {
                         missingManagedTaskIds.delete(record.groupId);
                         restoreCardActivity(record, task.project_admission_hold);
-                        if (record.projectHold && !workState.memberStates && record.censusPhase
-                                && ws.isConnected?.() !== false) syncParkedPhase(record, '');
+                        if (ws.isConnected?.() !== false) {
+                            // A fresh connected read releases the park this client set when it lost the connection.
+                            const offline = record.parkedOffline;
+                            record.parkedOffline = false;
+                            if (record.projectHold && record.censusPhase && (!workState.memberStates || offline)) syncParkedPhase(record, '');
+                        }
                         record.projectHoldQueued = Boolean(record.projectHold);
                     } else if (!tasks.has(record.groupId) && record.projectHoldQueued) {
                         record.projectHoldQueued = false;
@@ -596,10 +601,9 @@ export function createChatInstance({
 
     const ACTUAL_BOTTOM_TOLERANCE_PX = 6;
 
-    const isNearBottom = threshold => reading.nearBottom(threshold);
-
+    const band = () => readBand(messagesDiv, pageHeader, inputArea);
     const { captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor, serializeTimelineAnchor, anchorOwnersReady } =
-        createTimelineAnchors({ messagesDiv, liveCardRecords });
+        createTimelineAnchors({ messagesDiv, liveCardRecords, band });
     // Far rows skipped once laid out (style.css); a restyle may change every row's size at once, and the reading owner
     // places the passage again.
     let rowSleep = createRowSleep({ feed: messagesDiv, onRestyle: () => reading.reflow() });
@@ -1070,9 +1074,11 @@ export function createChatInstance({
                     changed = Boolean(record.reviewController.update(pointer.group));
                 } else if (showPointerAck) {
                     const ack = String(row?.text || row?.content || '').trim();
+                    // A notice is a System row (its line; the original job behind Details); an older row, a progress note.
+                    const said = Boolean(noticeLine(row));
                     if (ack) changed = Boolean(addMessage(
-                        ack, 'assistant', !!row?.markdown, rawTs || row?.ts || null,
-                        true, { systemType: 'lifecycle_pointer' },
+                        ack, said ? 'system' : 'assistant', !said && !!row?.markdown, rawTs || row?.ts || null,
+                        !said, { systemType: 'lifecycle_pointer', ...(said ? { reply: row } : {}) },
                     ));
                 }
                 return changed;
@@ -2555,7 +2561,7 @@ export function createChatInstance({
     const newestFacts = { delivered: id => retainedHistoryIds().has(id), nodes: id => historyNodes(id),
         viewport: messagesDiv, header: pageHeader, composer: inputArea };
     // A message this room shares with another is read once wherever it was shown whole (read_ahead.js).
-    const sharedRead = createSharedReadTracker({ chatId, feed: messagesDiv, band: () => readBand(messagesDiv, pageHeader, inputArea),
+    const sharedRead = createSharedReadTracker({ chatId, feed: messagesDiv, band,
         shown: () => !destroyed && !leaving && !page.hidden && isInstanceVisible() });
     const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
         read: async (fresh, whole) => {
@@ -2566,7 +2572,7 @@ export function createChatInstance({
         isShown: () => !destroyed && !leaving && !page.hidden,
         // A place still being restored is not where the reader is.
         isReadingLatest: latest => !destroyed && !catchUp.owed && !reading.pending && !replies.revealing && isInstanceVisible() && isAtNewestMessage(latest, {
-            ...newestFacts, atBottom: () => isNearBottom() && !historyPager.getState().canNewer,
+            ...newestFacts, atBottom: () => reading.nearBottom() && !historyPager.getState().canNewer,
         }),
         onReadingLatest, arriving: () => reading.arriving, delivered: newestFacts.delivered,
         older: async current => {
@@ -2646,7 +2652,7 @@ export function createChatInstance({
     // ↓: navigation, coalesced remote activity (not a live region), and busy/Retry for the present read (style.css).
     function updateScrollButton() {
         if (!scrollBottomBtn) return;
-        _hasNewActivity &&= !isNearBottom(ACTUAL_BOTTOM_TOLERANCE_PX);
+        _hasNewActivity &&= !reading.nearBottom(ACTUAL_BOTTOM_TOLERANCE_PX);
         const busy = reading.returning;
         const retry = historyWindow?.failed || catchUp.retry && !historyWindow?.waiting;
         const label = busy ? 'Loading latest messages…' : retry ? 'Retry loading latest messages'
@@ -2656,7 +2662,7 @@ export function createChatInstance({
         scrollBottomBtn.title = label;
         scrollBottomBtn.setAttribute('aria-busy', String(busy));
         if (scrollActivityDot) scrollActivityDot.hidden = !_hasNewActivity;
-        scrollBottomBtn.classList.toggle('visible', isInstanceVisible() && (busy || retry || !isNearBottom() || (!reading.stick && historyWindow?.gaps)));
+        scrollBottomBtn.classList.toggle('visible', isInstanceVisible() && (busy || retry || !reading.nearBottom() || (!reading.stick && historyWindow?.gaps)));
     }
     // Freshness gates reads, not retained movement.
     function presentHeld() {
@@ -3450,6 +3456,7 @@ export function createChatInstance({
             let changed = false;
             for (const [id, record] of liveCardRecords) {
                 record.childDetailRead = undefined;
+                if (record.isSubagent) record.parkedOffline = true;  // this client's own park, not the server's view
                 changed = syncParkedPhase(record, 'unknown', activeDirectActivities.get(id)) || changed;
             }
             return changed;

@@ -25,7 +25,7 @@ PROTECTED_KNOWN = {
     ('skills/telegram/lib/telegram_connection.py', 204): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 450): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_token.py', 214): _TELEGRAM_DEBT,
-    ('skills/telegram/plugin.py', 1481): _TELEGRAM_DEBT,
+    ('skills/telegram/plugin.py', 1484): _TELEGRAM_DEBT,
     ('skills/telegram/scripts/companion.py', 519): _TELEGRAM_DEBT,
 }
 ADDRESS = re.compile(r"\bSettings\s*(?:→|›|->|>)\s*(?=[A-Za-z])")

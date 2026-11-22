@@ -5,6 +5,7 @@ import { escapeHtmlAttr, sinceLocalTime } from './utils.js';
 import { isStoreMigrating, taskSourceDownloadUrl } from './api_client.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import { reconcileReviewMarkup } from './review_dom_patch.js';
+import { noticeLine } from './host_notice_text.js';
 import {
     actorAnswered, actorAwaiting, actorUnresolved, authorDoctrineLines, formatReviewProjection, seatAdviser, seatOwed,
 } from './review_record_card.js';
@@ -338,6 +339,8 @@ export function classifyReviewLifecycle(row) {
         count_is_authoritative: lifecycle.count_is_authoritative === true,
         attempts: lifecycle.job_id || lifecycle.id ? [{
             ...lifecycle,
+            // A host notice says its line (its phrase and its step, e.g. a fresh review), never its raw reason (`error`).
+            ...(noticeLine(row) ? { summary: noticeLine(row) } : {}),
             ts: timestamp,
             job_id: lifecycle.job_id || lifecycle.id,
             status: reviewStatus,

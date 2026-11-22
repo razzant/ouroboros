@@ -1100,6 +1100,7 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     task is disclosed, not cancelled.
     """
     from ouroboros import dialogue_store
+    from ouroboros.host_notice import view as notice_view
     from ouroboros.project_dialogue import entry_matches_source_ref, owner_message_ref_is_valid
     from ouroboros.task_carrier import conversation_origin
     from ouroboros.task_status import SETTLED_STATUSES, load_effective_task_result
@@ -1193,7 +1194,8 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
         row = entry.row
         terminal = str(row.get("task_terminal_status") or "")
         if row.get("direction") in {"out", "system"} and terminal in SETTLED_STATUSES and owns(row):
-            state.update({"status": terminal, "text": str(row.get("text") or "")})
+            # A host notice answers with its phrase, and its notice (step, raw details, line) beside it; a read.
+            state.update({"status": terminal, "text": str(row.get("text") or ""), **notice_view(row, drive_root=ctx.data_dir)})
             turn = str(row.get("task_id") or "")
             if turn in direct:  # the turn's own record: its post-task work may still spend
                 state["task_id"] = turn

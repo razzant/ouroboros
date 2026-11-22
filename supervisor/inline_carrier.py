@@ -168,13 +168,15 @@ def _disclose(task: Dict[str, Any], executor: str, reason: str) -> None:
         log.debug("inline executor row not written", exc_info=True)
     if executor == EXECUTOR_INLINE_DEGRADED:
         try:
+            from ouroboros.host_notice import notice
+
             _pool().send_with_budget(
                 int(task.get("chat_id") or 0),
-                f"⚠️ No conversation carrier could start ({reason}); continuing this turn in direct-chat "
-                "mode inside the server process.",
+                "No conversation carrier could start, so this turn continues inside the server process.",
                 is_progress=True, task_id=str(task.get("id") or ""),
                 progress_meta={"task_incident": "conversation_degraded_executor",
-                               "toast_once": f"{task.get('id')}:conversation_degraded_executor"},
+                               "toast_once": f"{task.get('id')}:conversation_degraded_executor",
+                               "notice": notice("conversation_degraded_executor", details=reason)},
                 role="system", system_type="worker_failure")
         except Exception:
             log.debug("degraded executor notice failed", exc_info=True)

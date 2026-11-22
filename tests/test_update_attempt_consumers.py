@@ -554,7 +554,7 @@ def test_every_boot_rollback_branch_reports_its_own_unfinished_rollback(
 
     monkeypatch.setattr(update_merge, "rollback_managed_update", rollback)
     monkeypatch.setattr(update_merge, "_boot_smoke_rollback",
-                        lambda _tx, reason: update_merge.rollback_managed_update_on_boot(reason))
+                        lambda _tx, reason: (*update_merge.rollback_managed_update_on_boot(reason), {}))
     monkeypatch.setattr(update_merge, "_assisted_head_state", lambda _tx: "committed")
 
     result = retained_attempt.boot("server-b")

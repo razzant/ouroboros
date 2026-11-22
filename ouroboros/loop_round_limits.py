@@ -510,7 +510,7 @@ def _run_round_compaction(
     """The round's transcript maintenance before the send: the mind's pending authored
     view (Main fit owns every automatic decision), then -- on the transcript that will
     actually go out -- the host roster of independent roots as a TAIL row when it changed
-    (owner 6C), and the mark changes no row or memory_mark result in view states yet
+    (owner 6C; held back one round after an applied fold), and the mark changes no row or memory_mark result in view states yet
     (``mark_anchors.append_mark_changes``). These rows follow any view so they are never
     folded into a rewrite, and precede the acceptance observation and the seal."""
     from ouroboros.mark_anchors import append_mark_changes
@@ -537,7 +537,11 @@ def _run_round_compaction(
         ctx.tools._ctx._pending_review_context = {}
     if not authored:  # an authored view retires host rows in its own checkpointed fold
         messages = _retire_superseded_host_state(messages, ctx)
-    maybe_append_roster_note(ctx.tools._ctx, messages, ctx.drive_root)
+    receipt = (getattr(ctx.tools._ctx, "_context_view_receipt", None) or {}) if authored else {}
+    held = receipt.get("status") == "applied" and bool(receipt.get("selection_fingerprint"))  # an applied fold:
+    ctx.tools._ctx._roster_held = held = held and not getattr(ctx.tools._ctx, "_roster_held", False)  # one round
+    if not held:
+        maybe_append_roster_note(ctx.tools._ctx, messages, ctx.drive_root)
     from ouroboros.skill_context_snapshot import maybe_append_skill_snapshots
     maybe_append_skill_snapshots(ctx.tools._ctx, messages, ctx.drive_root)
     append_mark_changes(ctx.tools._ctx, messages)
@@ -565,7 +569,12 @@ def _retire_superseded_host_state(messages, ctx):
 
 
 def _run_authored_context_view(messages, ctx, pending, selected_names):
-    """Apply one source/schema view together at the existing completed boundary."""
+    """Apply one source/schema view together at the existing completed boundary.
+
+    Two ``at_source`` counts point at the candidate receipt's address (``receipt_source``): the ``context_view`` event
+    counts each structure equal to the retained receipt's (keys or elements) instead of repeating it; the receipt row
+    of an applied fold counts ``bodies_removed`` and ``notes_kept``, whose lists (and ``restore_checkpoint``) the
+    stored receipt carries; when that receipt could not be stored, the row carries them itself."""
     from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
     from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
     from ouroboros.tool_policy import request_tool_schema_selection, select_tool_schemas
@@ -651,7 +660,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             exposed_units=observed.get("exposed_units"), written_at=proposal.get("written_at"),
         )
         receipt = asdict(result)
-        from ouroboros.context_source_view import retire_host_rows_after_fold
+        from ouroboros.context_source_view import fold_note_position, retire_host_rows_after_fold
         candidate = retire_host_rows_after_fold(candidate, receipt, observed_messages=observed["messages"],
                                                 keep_unit_ids=request.keep_unit_ids)
         if receipt["status"] == "no_op" and (proposal.get("review_transfers") or proposal.get("review_notes")):
@@ -667,8 +676,12 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             try:
                 review_pointer, review_capsule, review_transfers, expected_selection = prepare_review_view(
                     tool_ctx, candidate, receipt, proposal.get("review_transfers") or [], proposal.get("review_notes") or [])
-                candidate = (refresh_compacted_review_context(tool_ctx, candidate, selection=review_pointer)
-                             if review_pointer else refresh_compacted_review_context(tool_ctx, candidate))
+                # The mind's own review selection (review_notes/transfers) replaces the index in place; an ordinary
+                # fold changes no index before its note.
+                floor = None if proposal.get("review_notes") or proposal.get("review_transfers") else fold_note_position(
+                    candidate, receipt)
+                candidate = refresh_compacted_review_context(tool_ctx, candidate, floor=floor, **(
+                    {"selection": review_pointer} if review_pointer else {}))
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 receipt.update(status="selection_failed", review_selection_error=f"{type(exc).__name__}: {exc}")
                 candidate = messages
@@ -695,6 +708,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
     if receipt["status"] != "no_op":
         from ouroboros.artifacts import store_actor_source_bytes
         import hashlib
+        from ouroboros.tools.compact_context import receipt_head
+        head = receipt_head(receipt, proposal["observed"]["messages"] if pending is not None else None, candidate)
 
         raw = json.dumps({"stage": "candidate_materialization", "published": False,
                           "receipt": receipt}, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -703,7 +718,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, ctx.task_id,
                 category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(),
                 data=raw, extension="json")
-            notice = {"status": receipt["status"], "receipt_source": source}
+            notice = {**head, "receipt_source": {  # read_file(root, path) reads it as is
+                key: source[key] for key in ("kind", "root", "path", "size", "sha256")}}
             from ouroboros.context_timing import prologue_step
             from ouroboros.observability import promote_task_source_ref
             from ouroboros.task_custody import canonical_owner_root
@@ -721,33 +737,34 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 # ValueError, each for both), so the view names the error itself.
                 notice["receipt_retention_error"] = f"{type(exc).__name__}: {exc}"
         except (OSError, ValueError):
-            notice = {"status": receipt["status"], "receipt_source": "unavailable"}
+            notice = {**head, "receipt_source": "unavailable"}
         if memory_price:
             notice["memory_view"] = memory_price
         if receipt["status"] == "applied":  # what the fold freed and kept; the next request's count measures its re-read
             from ouroboros.tools.compact_context import FOLD_FACT_KEYS, residue_by_kind
+            # Counts only beside the receipt's address (its lists and restore checkpoint are there); without one, inline.
+            at_source = {key: len(receipt[key]) for key in ("bodies_removed", "notes_kept") if receipt.get(key)}
+            facts = (((key, receipt.get(key)) for key in FOLD_FACT_KEYS) if notice["receipt_source"] == "unavailable"
+                     else (("replaced_notes", receipt.get("replaced_notes")), ("at_source", at_source)))
             notice.update(reclaimed_tokens=receipt.get("reclaimed_tokens"), residue=residue_by_kind(candidate),
                           resulting_input_tokens=(receipt.get("fit") or {}).get("estimated_input_tokens"),
-                          basis="host estimates", **{key: receipt[key] for key in FOLD_FACT_KEYS if receipt.get(key)})
+                          basis="host estimates", **{key: value for key, value in facts if value})
         exceptions = receipt.get("request_exceptions") or []
         if receipt.get("inherited_selections_unapplied"):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
         if exceptions:
             notice["request_exceptions"] = exceptions
-        with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n" + json.dumps(notice, ensure_ascii=False)}]
+        from ouroboros.tools.compact_context import receipt_row
+        with_receipt = [*candidate, receipt_row(notice)]
         try:
             final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
             for detail in ("request_exceptions", "bodies_removed", "notes_kept"):
                 if final_fit.get("accepted") is True or detail not in notice:
-                    continue
-                # Optional detail must not undo an otherwise fitting view. The
-                # counted omission still points to the whole retained receipt.
-                # The notes themselves stay in the view; only their list leaves.
-                notice[f"{detail}_omitted"] = len(notice.pop(detail))
+                    continue  # optional detail must not undo a fitting view; the counted omission names the receipt
+                notice[f"{detail}_omitted"] = len(notice.pop(detail))  # an inline list (no address); notes stay in view
                 if detail == "bodies_removed":
                     notice.pop("restore_checkpoint", None)
-                with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n"
-                    + json.dumps(notice, ensure_ascii=False)}]
+                with_receipt = [*candidate, receipt_row(notice)]
                 final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
         except Exception as exc:
             final_fit = {"accepted": False, "reason": type(exc).__name__}

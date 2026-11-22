@@ -687,9 +687,13 @@ def test_pre_dispatch_admission_requires_current_window_evidence(tmp_path, fake_
     said so in PROSE — the reset instant and the code did not survive to the actor
     record. B1: the EXISTING exhausted class is raised there, carrying reset_at, and
     no session is ever started."""
+    from ouroboros import claudexor_daemon, config
+    from ouroboros import subscription_census as census
     from ouroboros.gateways.claudexor import ClaudexorSubscriptionWindowExhausted
     from ouroboros.review_execution import AgentSessionReviewExecutor, ReviewAssignment
 
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")  # the subscription census's request lands here
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
     spent = {"subject": {"harness": "fake-review", "subject_id": "acct"},
              "freshness": "fresh",
              "constraints": [{"used_ratio": 1.0, "resets_at": "2030-02-02T00:00:00Z"}]}
@@ -711,6 +715,8 @@ def test_pre_dispatch_admission_requires_current_window_evidence(tmp_path, fake_
     assert excinfo.value.reset_at == "2030-02-02T00:00:00Z"
     assert sum(len(inst.start_requests) for inst in fake_route.instances) == 0
     assert scopes == [("fake-small", "text")]
+    assert census.request_mtime() is not None  # the refused seat asks the census for a read
+    (tmp_path / "data" / census.REQUEST_FILE).unlink()
 
     # An incomplete ratio is not an admission verdict. A fresh executor asks
     # the selected subscription engine, without another model or API fallback.
@@ -728,6 +734,7 @@ def test_pre_dispatch_admission_requires_current_window_evidence(tmp_path, fake_
     assert len(starts) == 1
     assert starts[0]["authPreference"] == "subscription"
     assert starts[0]["model"] == "fake-small"
+    assert census.request_mtime() is None  # a seat that starts asks nothing
 
 
 def test_pre_dispatch_admission_preserves_the_pool_code(tmp_path, fake_route, monkeypatch):

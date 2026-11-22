@@ -20,6 +20,7 @@ from ouroboros.storage_free import FreeSpace
 from ouroboros.task_results import load_task_result
 from tests._shared import retire_synthetic_retention
 from tests._store_shared import seed_result
+from tests._workspace_git import git_repository
 from tests.test_body_candidate_retention import candidate  # noqa: F401 -- the body fixture
 from tests.test_storage_free import _fake_sizer, _join, _owner, _preview, _run
 from tests.test_storage_free_safety import _capture, _copy, _git, _prune, copies  # noqa: F401 -- the plain copies fixture
@@ -390,9 +391,7 @@ def test_a_detached_head_with_its_own_commits_is_not_offered(copies):  # noqa: F
 
 def test_a_nested_repository_is_not_offered(copies):  # noqa: F811
     handle = _copy(copies)
-    nested = Path(handle.path) / "vendor"
-    nested.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=nested, check=True)
+    nested = git_repository(Path(handle.path) / "vendor", unborn=True)
     (nested / "f").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "f"], cwd=nested, check=True)
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "own history"], cwd=nested, check=True)

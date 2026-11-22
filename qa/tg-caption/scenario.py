@@ -242,6 +242,7 @@ def capture_answer(page, out, stage):
 
 def conversation(out, data, candidate, note):
     from playwright.sync_api import sync_playwright
+    from ouroboros.install_identity import acting_as
     from ouroboros.subagent_messages import is_task_card_message
     from tests import test_attachment_consumer_composition as media
     from tests.system_e2e.harness import ArtifactOracle, ModelGate, ScriptedStubModel, wait_durable_result, wait_until
@@ -315,8 +316,10 @@ def conversation(out, data, candidate, note):
         assert not bot.seen(*CREATE_OR_EDIT) and not owner.turn_calls
         released = time.monotonic_ns()
         gate.release.set()
-        result = wait_durable_result(oracle, turn, timeout=150)
+        with acting_as(data):
+            result = wait_durable_result(oracle, turn, timeout=150)
         assert result["status"] == "completed" and not gate.timed_out
+        note("DURABLE  status=completed")
         check_posts(posts, owner, released, ref, facts, relpath, note)
         provider_id = await_send_ack(bot, chat, turn, oracle, note)
         capture_answer(page, out, "live")

@@ -9,7 +9,7 @@ every imported pack.
 What gets translated, and when:
 
 * **Catalog codes** — the host's closed code→sentence tables (task headline words, cause
-  sentences, question status, routing refusal causes; Telegram's own lines register
+  sentences, question status, routing refusal causes, a notice's next steps; Telegram's own lines register
   through ``register_catalog``). They are enumerable, so a language choice, a regenerate
   or a boot re-check queues every code the memory lacks and every generated code whose
   English changed (``source_hash``), and an owner pin is never touched.
@@ -110,8 +110,10 @@ def register_catalog(prefix: str, table: CatalogTable, note: str) -> None:
 
 def _core_catalogs() -> Dict[str, Tuple[Dict[str, str], str]]:
     from ouroboros import project_dialogue as pd
+    from ouroboros.host_notice import step_catalog
 
     return {
+        "notice.step": (step_catalog(), "the next step said after a System notice: a control or a Settings place"),
         "task.headline": ({**pd.OUTCOME_PHASE_HEADLINE, "quiet": pd.QUIET_RUN_HEADLINE},
                           "the one-word status headline of a task card (Working, Done, Failed…)"),
         "task.cause": (pd.TASK_CAUSE_PHRASES,

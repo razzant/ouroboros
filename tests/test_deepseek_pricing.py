@@ -536,8 +536,8 @@ def test_raw_token_counts_are_not_repaired_into_a_tariff(field, bad, body_error,
     assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (None, False, False)
     assert row["cost_evidence"]["tariff_pricing"]["unpriced"] == "usage_malformed"
     if field in {"prompt_tokens", "completion_tokens", "cache_write_tokens"}:
-        expected = None if isinstance(bad, bool) else max(0, int(bad))
-        assert row[field] == expected, "the historical ledger counter projection is unchanged"
+        expected = int(bad) if isinstance(bad, str) else None
+        assert row[field] == expected, "a malformed count is unknown on the row; an integer's digits are a count"
 
 
 @pytest.mark.parametrize("field", ["prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens"])

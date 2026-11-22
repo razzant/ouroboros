@@ -655,7 +655,9 @@ def test_readers_say_where_the_bytes_are_staged_deleting_or_deleted(finished, mo
 
     def bytes_now():
         rows = load_effective_task_result(root, TASK)["artifacts"]
-        return next(row["released"]["bytes_now"] for row in rows if str(row.get("path", "")).endswith(SNAP))
+        address = Path(SNAP).parts
+        return next(row["released"]["bytes_now"] for row in rows
+                    if Path(str(row.get("path") or "")).parts[-len(address):] == address)
 
     with monkeypatch.context() as patch:
         patch.setattr(pr, "_publish", lambda *_a: (_ for _ in ()).throw(OSError("full")))

@@ -453,7 +453,7 @@ def _measured_frame(
              for i in range(count) if requests[i] is not None}
     receipt.update(measurements=2, minimum_tokens=p_min, whole_tokens=p_whole, free_tokens=free,
                    requested_room_tokens=room, unsolicited_allowance_tokens=unsolicited_allowance)
-    whole_fits = (room is None or p_whole + reserve < capacity) and all(wants[i] >= len(texts[i]) for i in wants)
+    whole_fits = (room is None or p_whole + reserve <= capacity) and all(wants[i] >= len(texts[i]) for i in wants)
     complete = "complete" if room is not None else "capacity_unknown"
     if whole_fits and p_whole + reserve <= boundary and p_whole - p_min <= unsolicited_allowance:
         return rows, {**receipt, "status": complete}  # every body together inside the unasked share

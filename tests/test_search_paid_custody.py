@@ -22,7 +22,6 @@ def search_calls(root, monkeypatch):
     ctx = SimpleNamespace(task_id="child", task_metadata={"root_task_id": "dominant"}, pending_events=[])
     monkeypatch.setattr(net_transport, "web_search_openai_client", lambda **k: client)
     monkeypatch.setattr(search, "_web_search_openrouter", fallback)
-    monkeypatch.setattr(search, "estimate_cost_optional", lambda *args, **kwargs: None)
     monkeypatch.setattr(search, "_responses_search_candidate", lambda *a: (
         {"provider": "openai"}, {}, request(root, provider="openai"), lambda r: None))
     return ctx, create, fallback

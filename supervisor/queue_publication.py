@@ -87,7 +87,7 @@ _REPORTED_TASK_FACTS = ("model_waits", "focus")
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
                           "capture_seq": 0, "published_seq": 0, "write_failed": False,
                           "failed_writes": 0, "failures_answered": 0, "failed_streak": 0,
-                          "alive_heartbeats": None, "alive_pool": None, "alive_written_at": 0.0}
+                          "alive_heartbeats": None, "alive_pool": None, "alive_written_at": 0.0, "waits": {}}
 #: Consecutive failed writes after which the tick answers False on every tick until a write lands: the supervisor
 #: loop's own ending rule (``server._run_supervisor`` dies after three consecutive crashes), so a disk that fails
 #: every write slowly ends the loop as one that fails fast does, instead of resetting the loop's count on each tick
@@ -178,7 +178,7 @@ def reset() -> None:
     global _PUBLISHER, _WRITER
     _STATE.update(revision=0, published=0, reason="", kept=None, census=None, capture_seq=0, published_seq=0,
                   write_failed=False, failed_writes=0, failures_answered=0, failed_streak=0, alive_heartbeats=None,
-                  alive_pool=None, alive_written_at=0.0)
+                  alive_pool=None, alive_written_at=0.0, waits={})
     _PUBLISHER = None
     ended, _WRITER = _WRITER, _TickWriter()  # rebound first: a capture of the ended generation is refused by identity
     ended.stop()
@@ -282,11 +282,12 @@ def publish_queue_changes() -> Optional[bool]:
     with _queue()._queue_lock:
         if _kept_by_memo():
             return None  # the saved queue is still kept: decided once, not copied or counted again
+        waits = note_lane_waits()
         # One pool reading for capture and refresh. Worker-reported facts can move without a revision.
         pool, measured_after = _pool_counts(), _STATE["capture_seq"]
         census = _census(pool)
         moved = (_STATE["revision"] != _STATE["published"] or census != _STATE["census"] or _STATE["write_failed"])
-        capture = _capture(_STATE["reason"] or "main_loop", census=census, pool=pool) if moved else None
+        capture = _capture(_STATE["reason"] or "main_loop", census=census, pool=pool, waits=waits) if moved else None
     if not _WRITER.alive():
         # Written where the tick stands: the outcome answers for this tick's own write, so every failure so
         # far is answered with it.
@@ -303,6 +304,23 @@ def publish_queue_changes() -> Optional[bool]:
     failed, answered = _STATE["failed_writes"], _STATE["failures_answered"]
     _STATE["failures_answered"] = failed
     return failed == answered and _STATE["failed_streak"] < LOOP_CRASH_LIMIT
+
+
+def note_lane_waits() -> Dict[str, Dict[str, Any]]:
+    """Under Q: who keeps each queued row's lane now (``dispatch_choice.lane_waits``), for the tick and the status
+    census alike. Its holders change without a queue transition (a claim, a moved row's folder read, the chooser's
+    own refresh), so when the waits differ from the ones last captured or read the revision moves and both
+    publications follow; a pending transition keeps its reason (a forced or export capture stays one),
+    ``lane_wait`` names it only when nothing else is pending."""
+    from supervisor.dispatch_choice import lane_waits
+
+    waits = lane_waits()
+    if waits != _STATE["waits"]:
+        if _STATE["revision"] == _STATE["published"]:
+            _STATE["reason"] = "lane_wait"
+        _STATE["revision"] += 1
+        _STATE["waits"] = waits
+    return waits
 
 
 def _frozen(value: Any) -> Any:
@@ -360,10 +378,11 @@ def _kept_by_memo() -> bool:
     return _STATE["kept"] is not None and _STATE["kept"] == _custody_key()
 
 
-def _capture(reason: str, *, census: Optional[str] = None,
-             pool: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept. ``pool`` and
-    ``census`` are the tick's (one measurement); a barrier's capture measures the pool here, once."""
+def _capture(reason: str, *, census: Optional[str] = None, pool: Optional[Dict[str, Any]] = None,
+             waits: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+    """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept. ``pool``,
+    ``census`` and ``waits`` are the tick's (one measurement); a barrier's capture measures them here, once, and
+    records the waits it captured so the next tick does not mark them again."""
     if _kept_by_memo():
         return None
     pool = _pool_counts() if pool is None else pool
@@ -378,6 +397,10 @@ def _capture(reason: str, *, census: Optional[str] = None,
         log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
         _STATE["kept"] = _custody_key()
         return None
+    from supervisor.dispatch_choice import lane_waits
+
+    waits = lane_waits() if waits is None else waits  # beside the row (who keeps its lane now), never in its task
+    _STATE["waits"] = waits
     pending_rows = []
     for t in pending_items:
         pending_rows.append({
@@ -390,6 +413,7 @@ def _capture(reason: str, *, census: Optional[str] = None,
                                                         'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec',
                                                         '_execution_owner',  # its carrier: a returned turn keeps its lane
                                                         ) if key in t}}),
+            **({"lane_wait": waits[str(t.get("id") or "")]} if str(t.get("id") or "") in waits else {}),
         })
     running_rows = []
     for task_id, meta in running_items:

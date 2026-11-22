@@ -194,7 +194,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_BG_WAKEUP_MIN": 900,
     "OUROBOROS_BG_WAKEUP_MAX": 14400,
     "OUROBOROS_CONSCIOUSNESS_AUTONOMY": "act",
-    "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 20.0,
+    "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 15.0,
     "OUROBOROS_CONSCIOUSNESS_MAX_TASKS": 2,
     # Post-task self-evolution envelope (V4). Owner-enabled capability whose
     # CONTENT stays LLM-first; default OFF. When enabled, after a qualifying task
@@ -306,7 +306,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # EVERY cache_control breakpoint on the Anthropic-normalizing family (direct, OpenRouter anthropic/, the
     # generic compatible lane) — main loop, review lanes, safety supervisor alike — at the ONE send-time
     # finalizer (llm._normalize_payload_cache_ttl). 'default' = bare markers (provider default 5m tier); '5m'/'1h'
-    # = the explicit Anthropic ephemeral tiers ('1h' bills writes at the documented 2x-vs-1.25x ratio). Other
+    # = the explicit Anthropic ephemeral tiers (pricing uses only applicable catalog rates). Other
     # wire formats are a NO-OP (Gemini documents no ttl field — the v5.30.0 outage class).
     "OUROBOROS_PROMPT_CACHE_TTL": "1h",
     # Main's primary TASK is independent of the helper corridor MIN <= MAX.

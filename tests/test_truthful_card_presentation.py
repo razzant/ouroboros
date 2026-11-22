@@ -166,9 +166,9 @@ class TestChildWarnings:
 
         failed_review = {"status": "completed", "outcome_axes": {"review": {"status": "fail"}}}
         assert outcome_phase(failed_review, {}) == "error"
-        assert _completed_lifecycle_display({"status": "completed"}, failed_review) == ("❌", "finished with a failed outcome")
+        assert _completed_lifecycle_display({"status": "completed"}, failed_review) == "finished with a failed outcome"
         warned = {"status": "completed", "outcome_axes": {"review": {"status": "degraded"}}}
-        assert _completed_lifecycle_display({"status": "completed"}, warned) == ("⚠️", "finished with warnings")
+        assert _completed_lifecycle_display({"status": "completed"}, warned) == "finished with warnings"
         clean = {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}}}
         assert _completed_lifecycle_display(clean, clean) is None
 

@@ -18,7 +18,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     chat_decision.js, question_presentation.js, secret_hitl.js, main_waiting.js, chat_render_batch.js, task_phase_chip.js, task_activity_types.js — decision cards, Project questions/Main mirrors, keyed timeline patches, status/motion and census schema (§3 Chat and Projects)
     chat_history.js, chat_history_reveal.js, chat_history_replay.js, chat_preview.js, chat_reading_position.js, layout_batch.js, chat_row_sleep.js, chat_row_placement.js — bounded pages, landing, replay, saved preview, reading intent, batched reads, row sleep, child words vs notices (§3 Timeline ownership)
     delegated_activity.js — executor activity with preview gaps (§3); verification_presentation.js — recorded failed-check rows, live and replayed (§6 Tool capability and execution)
-    welcome_preference.js, host_notice_text.js — Main's empty state from the hidden `welcome` preference; known host sentences without the leading pictograph (DESIGN "Chat authorship and System rows")
+    welcome_preference.js, host_notice_text.js — Main's empty state from the hidden `welcome` preference; a notice's line (host_notice.py); older host rows without their pictograph (DESIGN principle 7)
     project_answer.js — Main's Project lifecycle rows and folded mirrored answers (§3 Main rows)
     work_portal.js, task_episodes.js, project_handoff.js — one Main card per work: the portal and its binding sources, Continue episodes, the binding receipt's words (§3 Project handoff receipts)
     chat_reply.js, chat_reply_quote.js, chat_search*.js, chat_relay_deck.js, chat_row_menu.js, row_menu_gesture.js, message_actions.js, routing_receipt.js, text_fit.js — replies/host quotes, shown-word search, note decks, row menus/actions, owner routing receipts, word fitting (§3; DESIGN "Replies")
@@ -34,7 +34,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     settings_ui.js, settings_home.js, settings_rows.js, settings_provider_cards.js, settings_catalog.js, settings_controls.js, settings_policy.js, settings_secrets.js, settings_connections.js, connection_labels.js, settings_local_model.js, settings_autostart.js, mcp_settings.js, mcp_header_fields.js, mcp_import_dialog.js — Settings: catalog, binders, policy, secrets, keys, local models, MCP (§3)
     model_roles.js, model_chooser.js — the Models editor and editable chooser shared by Settings, onboarding and route editors; catalog arrival never assigns a value (§3 Navigation)
     subagents_settings.js, subagent_status_primitives.js, route_editor_primitives.js, harness_accounts.js, harness_account_rows.js, account_resources.js, harness_login_cards.js, claudexor_status_store.js — Agents and accounts (§3 Agent accounts)
-    onboarding_agents_step.js, onboarding_starter_skills.js, onboarding_overlay.js, project_create.js, utils.js — first-run accounts step and starter skills; the wizard frame's sandbox policy, one security boundary; New Project dialog; shared utilities (§2; §3 Project rooms)
+    onboarding_agents_step.js, onboarding_starter_skills.js, onboarding_connection_card.js, qr_svg.js, onboarding_overlay.js, project_create.js, utils.js — first-run Accounts and Skills steps, a skill's connection card (local QR); the wizard frame's sandbox policy, one security boundary; New Project dialog; shared utilities (§2; §3 Project rooms)
     review_command.js — `/review` chooser and send, from Evolution (§3)
     review_presentation.js, review_opinions.js, plan_record_presentation.js, review_record_card.js, review_dom_patch.js, harness_presentation.js — Read-side Reviews groups/opinions, record facts, keyed DOM updates; sole harness identity markup (§3)
     acceptance_incident_presentation.js — a stored task-acceptance incident, read-only; no reviewer authority (§6 Result review)
@@ -269,11 +269,11 @@ ouroboros/ — agent core and shared runtime (§6)
   delegate_interactions.py, delegate_shared.py — nanny input into a live session: typed `waiting_on_user`, validated `_delegate_answer`, capability-gated `_delegate_message`; `_owned_run` keeps live control with the starter, confirmed successors can read and dispose of settled products (§6 Delegated subagents)
   route_spec.py — neutral route primitive: kind/target/pin normalization and effort validation
   configured_subagents.py, subagent_runtime.py — the canonical `OUROBOROS_SUBAGENTS` parser/serializer; immutable task-start snapshots and exact `subagent_id` selection (§6 Delegated subagents)
-  subagent_route_health.py, claudexor_observations.py, subagent_inspection.py — manifest route health, shared passive evidence and exact configured-actor inspection (§6 Route health)
+  subagent_route_health.py, claudexor_observations.py, subagent_inspection.py, subscription_census.py — manifest route health, shared passive evidence, exact configured-actor inspection (§6 Route health), census (PASSIVE_QUOTA_READ)
   subagent_work_order.py, subagent_bootstrap.py, delegate_start_instructions.py — owner-word-preserving work orders, host pre-start, stable instructions with a separately hashed coordination appendix (§6 Delegated subagents)
   delegate_supervision.py — sleep on runs and owed wake delivery (§6 Supervision, activity and recovery)
   delegate_recovery.py, delegate_continuation.py, delegate_pending.py, delegate_accepted.py, delegate_resume.py — exact-leaf recovery, `continue_from` after stops, keyed lookup/replay or lookup-only Resume (§6 Delegated subagents)
-  delegate_registration_policy.py, delegate_result_taken.py, historical_retirement.py, delegate_readonly_inputs.py, delegate_git_range.py, delegate_documents.py — registration, taken/history, STARTED fields, lineage/files/diffs/docs (§6)
+  delegate_registration_policy.py, delegate_result_taken.py, historical_retirement.py, delegate_readonly_inputs.py, delegate_git_range.py, delegate_documents.py, helper_receipt.py — registration, taken/history, STARTED fields, lineage/files/diffs/docs, receipts (§6)
   delegate_terminal.py, owner_stop_receipt.py — terminal reconciliation, audit-only custody persistence, typed custody card rows, Wrap up's saved-work receipt (§6 Delegated subagents)
   subagent_dispatch_notes.py — executor-note exports shared with `agent.py`; `agent_dispatch.py` implements the note/blocked-outcome pair
   subagent_messages.py, subagents.py, subagent_history.py, subagent_metrics.py, subagent_metric_events.py — child messages, dispatch, dated row measurements, no admission policy (§6)
@@ -375,7 +375,7 @@ ouroboros/ — agent core and shared runtime (§6)
   presence_call.py, presence_events.py — Presence call admission and shared event identity (§12)
   realtime_turn.py, realtime_setup.py, realtime_credentials.py — call route evidence, host-selected provider input and the one credential capture a session prepares and opens with (§13)
   skill_token.py — Opaque Host Service token minting/validation (§12)
-  skill_sources.py, skill_source_git.py, skill_source_catalog.py, skill_source_install.py, skill_starter.py — Sources, git caches, catalogs, install lifecycle, starter (§13)
+  skill_sources.py, skill_source_git.py, skill_source_catalog.py, skill_source_install.py, skill_starter.py, onboarding_connections.py — Sources, git caches, catalogs, install lifecycle, starter, setup cards (§13)
   marketplace/ — ClawHub and install substrate (§13)
     clawhub.py, fetcher.py, adapter.py, install.py, install_specs.py, isolated_deps.py, provenance.py — Registry, fetch, adaptation, install specs, isolated deps, receipts
   skill_lifecycle_queue.py — Single FIFO skill-mutation lane and event snapshot (§13)
@@ -389,7 +389,7 @@ ouroboros/ — agent core and shared runtime (§6)
   task_continuation.py — Durable review continuation state
   task_results.py — Task-result merge-writes (one store transaction) and typed readers; `resolve_ctx_lineage` answers a context's root/child lineage (§6 Task lifecycle)
   task_store.py, task_reads.py — Indexed facts/signatures, review/plan candidates, documents, display views; one captured value per statement, decoded after close; read/modify inside (PERSISTENCE.md)
-  pause_notices.py — Confirmed-pause System disclosures: pending episodes, saved-chat receipts, off-loop local replay
+  pause_notices.py — Confirmed-pause System notices: pending episodes, saved-chat receipts, off-loop local replay
   task_result_schema.py — Task-result schema admission: the `_schema_version` stamp, the classifier, and the quarantine an unstamped, future or malformed row lands in
   queue_observation.py — Queue documents read by file identity: expands `$shared` task values, takes heartbeats and pool counts from the generation-matched stamp (§5)
   task_status.py — effective status, lineage and waits; `execution_owner` and dated `execution_observation` separate lifecycle from liveness (§5); the worker-side cancel predicate fails open toward liveness (§10 invariant 14)
@@ -399,10 +399,11 @@ ouroboros/ — agent core and shared runtime (§6)
   argv_budget.py — Argv admission counts encoded bytes of argv plus environment (ARG_MAX charges both); asked by skill_exec before exec
   workspace_executor.py, workspace_executor_paths.py, docker_process_observer.py — backends/output paths (§6); liveness needs `sh`, `cat`, `/proc` (§9)
   deliverables_paths.py — Lexical and case-folded deliverables path views
-  tool_capabilities.py — SSOT for the core, parallel-safe, untruncated and stateful-browser tool sets and the cognitive-memory tool class every Presence ceiling carries
+  tool_capabilities.py — SSOT for the core, inert-read, untruncated and stateful-browser tool sets and the cognitive-memory tool class every Presence ceiling carries
   tool_access.py — ToolProfile × ResourceRoot × Operation matrix, affordance map, closed-enum `required_capabilities` check
   tool_access_types.py, tool_access_roots.py, tool_access_paths.py, tool_access_user_files.py, tool_access_reads.py — Matrix types and physical roots; inherited reads, separate action authority (§6 Resource roots and physical file identity)
   tool_policy.py — Round-one tool visibility, Nano's standing set (others: tool_capabilities.py)
+  capability_breakage.py — dated breaks: notice once, tail row on change
   tool_effects.py, place_guard.py — connector-declared effects (read · message · gesture · write), the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation; another place's notes and circle words beside a send
   icon_geometry.py — connector icons reduced to bounded geometry and drawn by the host in currentColor
   browser_policy.py — Browser targets, scripts and control requests: grants and service identity (§6 MCP)
@@ -718,6 +719,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── scheduled_tasks.json   ← cron/one-shot schedules and `kind:"notify"` notes (§5)
 │   │   ├── claudexor_rotation_provisioning.json ← last rotation receipt
 │   │   ├── claudexor_route_health.json ← the engine's newest per-route failure shares, replaced on change
+│   │   ├── subscription_census.json ← counted verdicts; `.request` asks a read
 │   │   ├── subagent_last_delegation.json ← dated helper observations, not dispatch authority
 │   │   ├── update_letter.json     ← description, its range, check facts
 │   │   ├── update_material.json   ← checked range for its author

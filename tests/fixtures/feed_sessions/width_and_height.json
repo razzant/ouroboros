@@ -1,0 +1,20 @@
+{
+  "about": "The window and the Project panel change size under a reader: a single jump of the window's width, a live drag of the panel's edge and a shorter window keep the passage being read; following the live edge, the same changes keep the newest message in view.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "a": {"name": "Width and height", "rows": [{"count": 90, "words": [30, 140]}]}
+  },
+  "events": [
+    {"open": "a"},
+    {"wheel": -1500},
+    {"viewport": [1040, 860]},
+    {"drag": -160},
+    {"viewport": [1040, 620]},
+    {"drag": 120, "steps": 30},
+    {"arrive": "a", "words": 40},
+    {"latest": true},
+    {"drag": -120},
+    {"viewport": [1280, 860]},
+    {"arrive": "a", "words": 40}
+  ]
+}

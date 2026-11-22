@@ -28,7 +28,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ouroboros import dialogue_store
+from ouroboros import dialogue_store, host_notice
 from ouroboros.chat_uploads import attachment_views, same_message, stored_refs
 from ouroboros.store import StoreBusy, StoreError, StoreMigrating
 from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, SUBAGENT_MESSAGE_FIELDS
@@ -285,6 +285,8 @@ def _chat_record(
         if meta.get("role") == "system":
             record["role"] = "system"
             record["system_type"] = str(meta.get("system_type") or "")
+        if notice := host_notice.stored(meta):  # a host notice's step and details (DESIGN principle 7)
+            record["notice"] = notice
         if isinstance(meta.get("host_fact"), dict) and meta["host_fact"].get("kind") == "call_open":
             record["host_fact"] = dict(meta["host_fact"])
         if isinstance(meta.get("ui_control"), dict) and meta["ui_control"].get("name"):

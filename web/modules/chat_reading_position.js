@@ -12,7 +12,13 @@ const MOVE_FRAMES = 3, WIDTH_HELD_FRAMES = 12;
 export function createChatReadingPosition({ visible, alive, ready, feed, anchors, changed, afterWrite, activity, updateButton }) {
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
-    const feedOrigin = () => feed.offsetTop || 0;
+    // Where the feed is laid out in the page (its offsetTop up the offsetParent chain; a transform does not count): a
+    // Project room's bar lies outside the feed's own offsetParent, so its offsetTop alone misses the bar entering the flow.
+    const feedOrigin = () => {
+        let y = 0;
+        for (let node = feed; node; node = node.offsetParent) y += node.offsetTop || 0;
+        return y;
+    };
     let viewportAnchor = null, viewportTop = null, width = feed.clientWidth, anchorOrigin = feedOrigin();
     // Every room first opens following its newest message (owner decision 2026-10-05).
     let intent = null;
@@ -22,6 +28,11 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
     let owedShift = 0, owedArmed = false, owedScrolls = -1;
     // The feed's box at a drag's release: the drag's own last scrolls arrive in it, a resize's clamp in another.
     let releasedBox = '';
+    // The reader's place was last chosen by a released feed scrollbar drag (until a newer gesture or navigation).
+    // Rule: a place a scrollbar drag decided is not held by the feed's limit, so a taller window that clamps it and
+    // a later reply move nothing (History edges: new replies stay below without moving the passage); the limit's hold
+    // (heldByLimit) keeps every other place, such as the one read before the phone keyboard went away.
+    let dragDecided = false;
     const feedBox = () => `${feed.clientWidth}x${feed.clientHeight}`;
     // The box the last reflow applied, or handed to a pending place. Until a changed box has had its reflow, a reader following the
     // newest message follows it still, whatever a write finds in between (mutate).
@@ -184,11 +195,13 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             } else if (!kept) keptNested = anchors.restore(viewportAnchor) && viewportAnchor?.nested === true;
             if (keptNested) keepPassage(viewportAnchor);
             settledBox = feedBox(); state.top = feed.scrollTop;
-            const keptHeld = !state.stick && !kept && heldByLimit(viewportAnchor);
+            const keptHeld = !dragDecided && !state.stick && !kept && heldByLimit(viewportAnchor);
             // A later reflow still belongs to the box edge, not a line the reader can move inside it.
-            // A box that is gone or hidden fails restore and is reselected by the ordinary anchor owner.
-            if (keptNested || keptHeld || (heightOnly && (state.stick || kept || rowStillPlaced(viewportAnchor)))) {
-                if (keptNested || keptHeld) width = feed.clientWidth;
+            // A box that is gone or hidden fails restore and is reselected by the ordinary anchor owner. A row put back
+            // still stays the row read through a passing layout (a rotation): a fresh search there would pick another
+            // row of the band, and the way back would land a line off.
+            if (keptNested || keptHeld || (heightOnly && state.stick) || (!state.stick && rowStillPlaced(viewportAnchor))) {
+                width = feed.clientWidth;
                 if (state.stick) viewportAnchor = null; // an edge follower has no reading row to reselect
                 viewportTop = state.top;
             } else { state.remember(true); viewportTop = state.top; }
@@ -266,7 +279,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
         },
         cancel(keepOwed = false) {
             const busy = state.returning;
-            generation++; scheduled = false; intent = null; dragging = '';
+            generation++; scheduled = false; intent = null; dragging = ''; dragDecided = false;
             if (!keepOwed) { owedShift = 0; owedArmed = false; }
             const notify = approximate;
             approximate = false; state.remember(true);
@@ -317,7 +330,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     held = null;
                     if (dragging === 'held') {
                         state.stick = feed.scrollHeight > feed.clientHeight && state.nearBottom();
-                        dragging = 'released'; releasedBox = feedBox(); placed = null;
+                        dragging = 'released'; releasedBox = feedBox(); placed = null; dragDecided = true;
                     }
                     return;
                 }

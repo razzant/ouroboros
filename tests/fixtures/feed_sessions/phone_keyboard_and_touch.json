@@ -1,0 +1,20 @@
+{
+  "about": "On a phone the owner reads back with a finger, opens the keyboard and keeps reading: the keyboard's change of visible height keeps the passage, the feed still scrolls under a finger, a reply stays below; reading forward to the end follows, and the keyboard there keeps the newest message in view.",
+  "viewport": [390, 844],
+  "phone": true,
+  "rooms": {
+    "a": {"name": "Phone reading", "rows": [{"count": 80, "words": [16, 70]}]}
+  },
+  "events": [
+    {"open": "a"},
+    {"swipe": -700},
+    {"keyboard": 420},
+    {"swipe": -300},
+    {"arrive": "a", "words": 30},
+    {"keyboard": null},
+    {"swipe": 6000, "expect": "following"},
+    {"keyboard": 420},
+    {"arrive": "a", "words": 30},
+    {"keyboard": null}
+  ]
+}

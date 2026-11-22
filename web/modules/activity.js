@@ -603,7 +603,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const facts = [
             enabled && bg.level ? esc(autonomyOf(bg.level)?.label || bg.level) : '',
             bg.last_wake_at ? `last wake ${esc(whenLabel(bg.last_wake_at))}${bg.last_wake_outcome ? ` (${esc(bg.last_wake_outcome)})` : ''}` : '',
-            // The money line in the Consciousness tab's own words ("≥ $1.50 of $20.00 in the last 24 hours").
+            // The money line in the Consciousness tab's own words ("≥ $1.50 of $15.00 in the last 24 hours").
             esc(allowanceText(normalizeConsciousness(bg, { enabled }))),
             Number.isFinite(Number(bg.max_tasks)) ? esc(fmt('own tasks {running}/{max}', { running: Number(bg.tasks_running || 0), max: Number(bg.max_tasks) })) : '',
         ].filter(Boolean).join(' · ');
