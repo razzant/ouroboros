@@ -11,11 +11,12 @@ import os
 import pathlib
 import re
 from collections import deque
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
-    is_skill_owner_state_target as _policy_is_skill_owner_state_target,
+    is_skill_owner_state_target as _is_skill_owner_state_target,
 )
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
@@ -33,6 +34,7 @@ from ouroboros.tool_access import (
     user_files_path_block_reason,
 )
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
+from ouroboros.tools.arg_feedback import ABSENT, read_end_spelling, with_argument_notes
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.utils import safe_relpath
 
@@ -191,8 +193,7 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
                        "complete_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                        "source_start_char": source_start, "source_end_char": source_start + len(body),
                        "range_basis": "unicode_text_universal_newlines", "source_masked": False})
-    rendered = header + displayed
-    return rendered
+    return header + displayed
 
 
 # The numbered display is deterministic: row k is ``_display_prefix(first_number + k)``
@@ -299,41 +300,30 @@ def _read_source_text(target: pathlib.Path, extent: Optional[Dict[str, Any]]) ->
     return content
 
 
-def _coerce_start_char(start_char: Any = 0) -> int:
+def _int_or(value: Any, default: Any) -> Any:
     try:
-        return max(0, int(start_char))
+        return int(value)
     except (TypeError, ValueError):
-        return 0
+        return default
+
+
+def _coerce_start_char(start_char: Any = 0) -> int:
+    return max(0, _int_or(start_char, 0))
 
 
 def _coerce_max_chars(max_chars: Any = None) -> Optional[int]:
     """A positive character budget for one view; anything else means unbounded."""
-    try:
-        value = int(max_chars) if max_chars is not None else None
-    except (TypeError, ValueError):
-        return None
+    value = _int_or(max_chars, None)
     return value if value is not None and value > 0 else None
 
 
 def _coerce_line_window(start_line: Any = 1, max_lines: Any = 2000) -> tuple[int, int]:
-    try:
-        start_raw = int(start_line)
-    except (TypeError, ValueError):
-        start_raw = 1
-    try:
-        max_raw = int(max_lines)
-    except (TypeError, ValueError):
-        max_raw = 2000
-    return start_raw, max(1, max_raw)
+    return _int_or(start_line, 1), max(1, _int_or(max_lines, 2000))
 
 
 def _is_cognitive_data_path(norm: str) -> bool:
     text = str(norm or "").replace("\\", "/").lstrip("./")
     return text.startswith("memory/") or text in _MEMORY_AT_DRIVE_MEMORY
-
-
-def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) -> bool:
-    return _policy_is_skill_owner_state_target(target, data_root)
 
 
 class _ListingFailure(Exception):
@@ -368,10 +358,8 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
         target.relative_to(work_domain.settle(root))
     except ValueError:
         raise _ListingFailure(f"Path escapes root: {rel}") from None
-    if not work_domain.exists(target):
-        raise _ListingMiss(f"Directory not found: {rel}")
-    if not work_domain.is_dir(target):
-        raise _ListingMiss(f"Not a directory: {rel}")
+    if not work_domain.is_dir(target):  # one check, worded by whether anything is there (as _tree_list)
+        raise _ListingMiss(f"{'Not a directory' if work_domain.exists(target) else 'Directory not found'}: {rel}")
     items = []
     # A hard iterdir/permission/race failure PROPAGATES: _list_files renders it
     # as a first-class "⚠️ LIST_FILES_ERROR" tool error, never an ok-shaped JSON
@@ -391,10 +379,8 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
 
 
 def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.Path, max_entries: int = 500) -> List[str]:
-    if not work_domain.exists(target):
-        raise _ListingMiss(f"Directory not found: {target}")
-    if not work_domain.is_dir(target):
-        raise _ListingMiss(f"Not a directory: {target}")
+    if not work_domain.is_dir(target):  # one check, worded by whether anything is there (as _tree_list)
+        raise _ListingMiss(f"{'Not a directory' if work_domain.exists(target) else 'Directory not found'}: {target}")
     items: List[str] = []
     hidden = 0
     # A hard iterdir/permission/race failure PROPAGATES to the first-class
@@ -606,6 +592,7 @@ def _data_read(
     _resolved_binding: ResolvedResourceBinding | None = None,
     extent: Optional[Dict[str, Any]] = None,
     max_chars: Optional[int] = None,
+    end_window: bool = False,
 ) -> str:
     """Read a drive text file; duplicate drive_root prefixes are stripped."""
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
@@ -643,9 +630,9 @@ def _data_read(
     try:
         content = _read_source_text(target, extent)
         start_raw, max_raw = _coerce_line_window(start_line, max_lines)
-        # The cognitive full-read shortcut only applies to a DEFAULT read: an explicit
-        # start_char or max_chars is a bounded-view request and must be honored, not swallowed.
-        if (_is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000
+        # The cognitive full-read shortcut only applies to a DEFAULT read: an explicit start_char, max_chars
+        # or read_file end_line is a bounded-view request and must be honored, not swallowed.
+        if (_is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000 and not end_window
                 and not _coerce_start_char(start_char) and _coerce_max_chars(max_chars) is None):
             if display_path is None:
                 return content
@@ -863,15 +850,25 @@ def _read_file(
     ctx: ToolContext,
     path: str,
     root: str | None = None,
-    max_lines: int = 2000,
+    max_lines: Optional[int] = None,
     start_line: int = 1,
     start_char: int = 0,
     bucket: str = "",
     skill_name: str = "",
     _resolved_binding: ResolvedResourceBinding | None = None,
     max_chars: Optional[int] = None,
+    end_line: Any = ABSENT,
+    end_char: Any = ABSENT,
+    _end_window: bool = False,
 ) -> str:
     ctx.last_read_view = None  # a blocked or missing read must not inherit the previous extent
+    if end_line is not ABSENT or end_char is not ABSENT:  # outside the schema (arg_feedback.read_end_spelling)
+        call = {"path": path, "root": root, "bucket": bucket, "skill_name": skill_name,
+                "start_line": start_line, "start_char": start_char, "max_chars": max_chars}
+        window, notes, refusal = read_end_spelling(ctx, call, max_lines, end_line, end_char)
+        return refusal or with_argument_notes(ctx, _read_file(
+            ctx, path, root, window, start_line, start_char, bucket, skill_name, _resolved_binding, max_chars,
+            _end_window=end_line not in (None, ABSENT)), notes)
     extent: Dict[str, Any] = {}
     if not root:
         from ouroboros.tools.tool_resolution import _root_containing_absolute_path
@@ -895,7 +892,8 @@ def _read_file(
             f"⚠️ NOT_FOUND: {_root_display_path(normalized, opened)} is a directory, not a file. List it:\n"
             f"  {call})")))
     if normalized in {"active_workspace", "system_repo", "runtime_data"}:
-        reader, display_path = ((_data_read, _root_display_path(normalized, path)) if normalized == "runtime_data" else
+        reader, display_path = ((partial(_data_read, end_window=_end_window), _root_display_path(normalized, path))
+                                if normalized == "runtime_data" else
                                 (_repo_read, f"{target} (project room)" if binding.source == "project_room"
                                  else _root_display_path(normalized, opened)))
         try:
@@ -922,6 +920,9 @@ def _read_file(
     except Exception as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"))
+
+
+setattr(_read_file, "_hidden_legacy_params", ("end_line", "end_char"))
 
 
 @completed_local_read
