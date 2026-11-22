@@ -1265,15 +1265,15 @@ function summarizeChatLiveEventView(evt) {
         const label = lifecycle.phase || status || 'working';
         const target = lifecycle.target ? `\`${lifecycle.target}\`` : 'skill';
         const headline = progressText.preview || `Skill ${lifecycle.kind || 'operation'}: ${target} — ${label}`;
-        const body = stale
+        const details = noticeBody(evt).fullBody || '', body = stale  // a notice's raw facts open from the row, not its line
             ? (lifecycle.recovery_hint || 'Lifecycle work is still running; restart may be required.')
-            : (lifecycle.error || lifecycle.message || '');
+            : details ? '' : (lifecycle.error || lifecycle.message || '');
         return chatView({
             phase,
             headline,
             body: shortText(body, 220),
             fullHeadline: progressText.full || headline,
-            fullBody: body,
+            fullBody: [body, details].filter(Boolean).join('\n\n'),
             activityPreview: progressText.preview || shortText(headline, 240),
             visible: true,
             promote: true,
@@ -1346,7 +1346,7 @@ function summarizeChatLiveEventView(evt) {
             phase,
             headline: subagentHeadline(sid, role, label, evt.model),
             body: terminalCause || activity.preview || '',
-            fullBody: [fullOutput, detail].filter(Boolean).join('\n\n'),
+            fullBody: [fullOutput, detail, noticeBody(evt).fullBody].filter(Boolean).join('\n\n'),  // a notice's details too
             activityPreview: terminalCause || activity.preview || '',
             activityLead: !terminalCause && activity === resultText ? report : '',
             visible: true,
@@ -1373,7 +1373,7 @@ function summarizeChatLiveEventView(evt) {
         // narration is promoted (title, collapsed line). ABSENT = predates the fact.
         const narration = evt.narration === true || evt.narration === undefined;
         const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
-        return Object.assign(chatView({  // a host notice's raw details open from its line as plain text, never its toast
+        return Object.assign(chatView({  // a notice's raw details open from its line as plain text, never its toast; new details, new row
             phase: ended === 'failed' ? 'lifecycle_error' : ended ? 'done' : 'working',
             // An empty note is no narration: a placeholder would become the card title as if said (#1369).
             headline: note.preview || '',
@@ -1386,7 +1386,7 @@ function summarizeChatLiveEventView(evt) {
             // too whenever the frame disclosed a delegated executor.
             chip: executorChip(evt),
             model: evt.model,
-            dedupeKey: progressText.full ? `progress:${progressText.full}` : `progress:${evt.task_id || ''}`,
+            dedupeKey: progressText.full ? [`progress:${progressText.full}`, noticeBody(evt).fullBody].filter(Boolean).join('\n') : `progress:${evt.task_id || ''}`,
         }), noticeBody(evt));
     }
 
