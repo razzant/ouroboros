@@ -4,8 +4,12 @@
 // screenshot first: WebKit can report a different layout before its first paint).
 //   Playwright: page.evaluate(`(${src})(${JSON.stringify({subject: '.card'})})`) -- call it; Node never calls a
 //   function given as a string. Ouroboros: browser_action(action="evaluate", value=src) runs it with defaults.
-// Options: subject (CSS selector of the element under comparison), minFont (11 px), target (24 px),
+// Options: subject (CSS selector of the element under comparison), minFont (11 px), coarse (a finger's
+// pointer; default: the page's own (pointer: coarse)), target (24 px, under a coarse pointer 44 px),
 // touch (3 px gap), nearMiss (3 px), limit (examples kept per kind; facts.counts has every total).
+// A target is small when either side of its reach is under `target`: its box with the positioned ::before
+// or ::after a page extends it with (a shared hit-area recipe), cut by what clips it. Under a fine pointer a
+// link inside running text is exempt (WCAG 2.5.8); under a finger it is not (it takes the hit area too).
 // Returns {viewport, facts, findings: [{kind, message, where, value}]}. Kinds: page-overflow,
 // container-overflow, text-clipped, text-truncated, text-clipped-by-ancestor, text-covered,
 // pinned-over-content, controls-touching, controls-overlap, target-small, text-tiny, edges-near-miss,
@@ -13,7 +17,8 @@
 // Not modelled: clip-path (a clipped element still counts as covering what lies under its box).
 ((opts) => {
   opts = opts || {};
-  const minFont = opts.minFont || 11, target = opts.target || 24, touch = opts.touch ?? 3;
+  const coarse = opts.coarse ?? !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+  const minFont = opts.minFont || 11, target = opts.target || (coarse ? 44 : 24), touch = opts.touch ?? 3;
   const nearMiss = opts.nearMiss || 3, limit = opts.limit || 6;
   const counts = {}, findings = [];
   const add = (kind, message, where, value) => {
@@ -78,7 +83,7 @@
       if (raw.width < 1 || raw.height < 1) continue;
       const full = toTop(raw), clip = clipOf(el), vis = cut(full, clip.rect), byAnc = cut(full, clip.anc);
       if (vis.width < 1 || vis.height < 1) continue;
-      const item = { el, cs, win, doc, full, vis, byAnc, clipBy: clip.by, prefix, offset, scale, sel: path(el, prefix),
+      const item = { el, cs, win, doc, full, vis, byAnc, clipBy: clip.by, clipRect: clip.rect, prefix, offset, scale, sel: path(el, prefix),
         onScreen: vis.bottom > 0 && vis.top < vh && vis.right > 0 && vis.left < vw };
       if (el.tagName === 'IFRAME') {
         let inner = null; try { inner = el.contentDocument; } catch (e) { inner = null; }
@@ -188,10 +193,32 @@
   }
 
   // Controls: touching neighbours, overlaps, small hit targets.
+  const reachOf = c => {   // the box and a positioned pseudo-element that extends it, cut by its clipping ancestors
+    const { el, cs, win, full, scale: k } = c, r = { left: full.left, top: full.top, right: full.right, bottom: full.bottom };
+    if (cs.position !== 'static' && !clipsX(cs) && !clipsY(cs)) for (const which of ['::before', '::after']) {
+      const ps = win.getComputedStyle(el, which);
+      if (!ps || /^(none|normal)$/.test(ps.content) || ps.display === 'none' || ps.position !== 'absolute' || ps.pointerEvents === 'none') continue;
+      const [t, rt, b, l] = ['top', 'right', 'bottom', 'left'].map(side => parseFloat(ps[side]));
+      if (![t, rt, b, l].every(Number.isFinite)) continue;
+      const border = side => parseFloat(cs[`border${side}Width`]) || 0;
+      r.left = Math.min(r.left, full.left + (border('Left') + l) * k); r.top = Math.min(r.top, full.top + (border('Top') + t) * k);
+      r.right = Math.max(r.right, full.right - (border('Right') + rt) * k); r.bottom = Math.max(r.bottom, full.bottom - (border('Bottom') + b) * k);
+    }
+    r.width = r.right - r.left; r.height = r.bottom - r.top;
+    const shown = cut(r, c.clipRect);   // a side the control's own box is cut on is a scroll position, not a size
+    return { w: c.vis.width < full.width - 1 ? r.width : shown.width, h: c.vis.height < full.height - 1 ? r.height : shown.height };
+  };
+  const inText = c => {   // an inline link whose block holds words besides its own: a link inside a sentence
+    if (!/^inline/.test(c.cs.display)) return false;
+    let block = c.el.parentElement;
+    while (block && /^inline/.test(c.win.getComputedStyle(block).display)) block = block.parentElement;
+    const words = n => ((n && n.textContent) || '').replace(/\s+/g, ' ').trim().length;
+    return !!block && words(block) > words(c.el) + 1;
+  };
   const live = controls.filter(c => c.onScreen);
   for (let i = 0; i < live.length; i++) {
-    const a = live[i], b0 = a.vis;
-    if (b0.width < target && b0.height < target && !(a.el.tagName === 'A' && a.el.closest('p,li'))) add('target-small', `${r1(b0.width)}×${r1(b0.height)}px hit target`, a.sel, [r1(b0.width), r1(b0.height)]);
+    const a = live[i], reach = reachOf(a);
+    if ((reach.w < target || reach.h < target) && !(!coarse && a.el.tagName === 'A' && inText(a))) add('target-small', `${r1(reach.w)}×${r1(reach.h)}px hit target`, a.sel, [r1(reach.w), r1(reach.h)]);
     for (let j = i + 1; j < live.length; j++) {
       const b = live[j];
       if (!a.boxed || !b.boxed || a.el.contains(b.el) || b.el.contains(a.el) || a.el.className === b.el.className) continue;
