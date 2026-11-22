@@ -760,3 +760,31 @@ def test_an_untyped_start_row_stands_and_the_first_full_fold_leaves_an_anchor(tm
     omitted = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-3",
                     keep_unit_ids=[_unit_at(start, 3).unit_id])
     assert notice not in omitted and start[3] in omitted and _notes(omitted) == [2]
+
+
+def test_a_host_source_view_ends_the_standing_rows_and_the_next_full_fold_takes_what_follows_it(tmp_path, monkeypatch):
+    """A restored source or an emergency record (a capsule with retention source_view) follows the keep selection, so
+    a full fold removes it and writes its note there: it ends the standing rows like any removable unit. Both
+    directions: the anchor before it stands, and the next full fold keeps that whole earlier request; the anchor after
+    it (here a tail fold's own call, which points at its note) does not stand, and the next full fold takes its rows."""
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.tools.compact_context import standing_rows
+    from tests._working_notes import _note
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    older = {**_note(tmp_path, "An earlier note.", "older"), "role": "assistant"}
+    restored = copy.deepcopy(_note(tmp_path, "Restored exact source.", "restored"))
+    meta = restored["content"][0]["_context_capsule"]
+    meta.update(retention="source_view", authorship="host")
+    meta.pop("written_at", None)
+    assert _capsule_metadata(restored)[1]["retention"] == "source_view"
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_read("one")], "fold-1", keep_unit_ids=[])
+    request = [*first, _facts("round 3")]
+    view = [*request, older, restored, *_read("two")]
+    tail = _fold(tmp_path, monkeypatch, ctx, view, "tail", fold_last_n=1)
+    assert tail[:len(view) - 2] == view[:-2] and _notes(tail) == [3, len(request), len(request) + 1, len(request) + 2]
+    after = [*tail, _facts("round 5")]
+    assert sorted(standing_rows(after)) == [2, *range(4, len(request))]  # the tail's own rows after it do not stand
+    full = _fold(tmp_path, monkeypatch, ctx, [*after, *_read("three")], "fold-2", keep_unit_ids=[])
+    assert full[:len(request) + 1] == [*request, older] and restored not in full
+    assert not any(row.get("tool_call_id") in ("tail", "three") for row in full)

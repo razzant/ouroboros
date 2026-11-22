@@ -65,41 +65,50 @@ def point_call_at_note(messages: list, receipt: dict, working_note) -> list:
     return [*messages[:at + 1], row, *messages[at + 2:]]
 
 
-def standing_rows(messages: list, released=()) -> dict:
-    """Positions that stand through an ordinary fold, each with the note whose rows they are ("" for the start).
+def _note_meta(row) -> dict | None:
+    """A capsule row's own metadata, read without validating or hashing it ({} when unreadable); None otherwise."""
+    content = row.get("content") if row.get("role") in {"assistant", "user"} else None
+    blocks = [block for block in content if isinstance(block, dict) and "_context_capsule" in block] if isinstance(
+        content, list) else []
+    return (blocks[0]["_context_capsule"] if isinstance(blocks[0]["_context_capsule"], dict) else {}) if blocks else None
 
-    The start: every row between the assignment and the first assistant answer (a note is none), typed or not. An
-    anchor: a note directly followed by its own pointing call (``NOTE_POINTER``) stands with every row
-    from that call to the next assistant row, the whole input of the request sent after that fold, while no removable
-    raw unit (not a capsule, not owner words, not standing) lies before it; a note named in ``released`` has none."""
-    from ouroboros.context_compaction import _capsule_metadata, context_units, owner_protected_unit_ids, unit_kind
+
+def standing_rows(messages: list, released=()) -> dict:
+    """Positions that stand through an ordinary fold, each with the position of the note whose rows they are (None
+    for the start). One walk over the rows; nothing is hashed (it runs whenever a round's facts row is written).
+
+    The start: every row between the assignment and the first assistant answer (a note is none), typed or not. Then,
+    in order, a note (a capsule that is not a host source view) or a row no fold selects (owner words, a row that is no
+    unit) continues the walk; a note directly followed by its own pointing call (``NOTE_POINTER``) stands with every
+    row from that call to the next assistant row, the whole input of the request sent after that fold, unless its
+    position is in ``released``; anything a full fold would take (a tool unit, prose, a host source view) ends it."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_ROW_KINDS
+    from ouroboros.context_compaction import _is_dialogue_prose_row
 
     first = next((i for i, row in enumerate(messages) if row.get("role") == "user"), None)
     if first is None:
         return {}
     end = next((i for i in range(first + 1, len(messages)) if messages[i].get("role") == "assistant"
-                and not _capsule_metadata(messages[i])[0]), len(messages))  # a note there is no answer
-    standing = {i: "" for i in range(first + 1, end) if not _capsule_metadata(messages[i])[0]}
-    units = context_units(messages, scope="dialogue")
-    protected = owner_protected_unit_ids(messages, units)
-    for unit in units:
-        if all(i in standing for i in range(unit.start, unit.end + 1)):
-            continue
-        if unit_kind(messages, unit) != "capsule":
-            if unit.unit_id not in protected:
-                break  # a removable raw unit: no later anchor stands
-            continue
-        call = unit.end + 1
-        if unit.unit_id in released or not _points_at(messages, call, (_capsule_metadata(messages[unit.start])[1]
-                                                                       or {}).get("unit_id")):
-            continue
-        stop = next((i for i in range(call + 1, len(messages)) if messages[i].get("role") == "assistant"),
-                    len(messages))
-        standing.update(dict.fromkeys(range(call, stop), unit.unit_id))
+                and _note_meta(messages[i]) is None), len(messages))
+    standing = {i: None for i in range(first + 1, end) if _note_meta(messages[i]) is None}
+    i = first + 1
+    while i < len(messages):
+        row, meta = messages[i], _note_meta(messages[i])
+        if meta is not None and meta.get("retention") != "source_view":
+            if i not in released and _points_at(messages, i + 1, meta.get("unit_id")):
+                stop = next((j for j in range(i + 2, len(messages)) if messages[j].get("role") == "assistant"),
+                            len(messages))
+                standing.update(dict.fromkeys(range(i + 1, stop), i))
+                i = stop
+                continue
+        elif not (i in standing or row.get(HOST_CONTEXT_KIND_KEY) in OWNER_ROW_KINDS or meta is None and not (
+                row.get("role") == "assistant" and row.get("tool_calls") or _is_dialogue_prose_row(row))):
+            break  # what a full fold takes: no later anchor stands
+        i += 1
     return standing
 
 
-def _standing_unit_ids(messages: list, units, standing: dict, named=()) -> list:
+def _standing_unit_ids(units, standing: dict, named=()) -> list:
     return [unit.unit_id for unit in units if unit.unit_id not in named
             and all(i in standing for i in range(unit.start, unit.end + 1))]
 
@@ -425,7 +434,7 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
     exposed = ({(ref.get("unit_id"), ref.get("raw_sha256")) for ref in observed["exposed_units"]}
                if "exposed_units" in observed else None)
     rows, counts, tokens = [], Counter(), Counter()
-    standing = standing_rows(messages)
+    standing, unit_at = standing_rows(messages), {unit.start: unit.unit_id for unit in units}
     for unit in units:
         kind = unit_kind(messages, unit)
         counts[kind] += 1
@@ -433,8 +442,8 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
         stands = unit.start in standing and all(i in standing for i in range(unit.start, unit.end + 1))
         row = {"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256, "kind": kind,
                "tokens": unit.context_size_tokens, "eligible": unit.unit_id not in protected and not stands,
-               **({"stands": f"own rows of note {standing[unit.start]}" if standing[unit.start]
-                   else "start of the request"} if stands else {})}
+               **({"stands": "start of the request" if standing[unit.start] is None
+                   else f"own rows of note {unit_at.get(standing[unit.start])}"} if stands else {})}
         if kind == "capsule":
             meta = _capsule_metadata(messages[unit.start])[1]
             row.update(authorship=meta.get("authorship") or "unrecorded", first_line=_first_line(messages[unit.start]),
@@ -600,8 +609,8 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
             + " Current context is unchanged."))
     rows, literal = observed["messages"], bool(keep_unit_ids)  # an explicit non-empty list is the mind's whole choice
     units = context_units(rows, scope="dialogue")
-    standing = standing_rows(rows, released=named)
-    stand = _standing_unit_ids(rows, units, standing, named)
+    standing = standing_rows(rows, released={unit.start for unit in units if unit.unit_id in named})
+    stand = _standing_unit_ids(units, standing, named)
     if fold_last_n is not None:
         # The newest N completed tool units that do not stand fold, with everything from the first of them
         # onward (prose and host rows between and after them; owner words and notes stay as always).
