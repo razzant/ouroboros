@@ -549,3 +549,18 @@ def test_an_excerpt_comes_from_the_shared_locator_on_the_original_text(tmp_path)
     line = next(line for line in listed(members(ctx, room_id="1", words=["history"])) if long in line)
     assert "; excerpt: «…" in line and "chat_history reader answered." in line
     assert f"[{len('Opening sentence. ' + 'filler ' * 80 + 'the chat_history reader answered.')} chars in full]" in line
+
+
+def test_a_row_whose_time_cannot_be_read_is_counted_with_the_room_wide_search(tmp_path):
+    """A malformed time beside valid ones is left out of the offered period; the line counts it and names the search
+    of the room at every time, so it is not silently outside every reader offered."""
+    ctx, _rows, _page, _note = install(tmp_path)
+    dialogue_store.append(tmp_path, "chat", {"chat_id": 1, "direction": "in", "ts": "yesterday-ish", "text": "Odd."})
+    line = next(line for line in listed(members(ctx, room_id="1", words=["flaky"])) if line.startswith("- untold"))
+    assert "date_from='2026-10-01T00:00:00+00:00', date_to='2026-10-01T00:00:04+00:00'" in line
+    assert ("; 1 of them carries no readable time: chat_history(words=['flaky'], room_id='1') searches the room at "
+            "every time") in line
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    ok = listed(members(install(clean)[0], room_id="1", words=["flaky"]))
+    assert not any("no readable time" in item for item in ok)

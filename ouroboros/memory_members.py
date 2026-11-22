@@ -155,12 +155,15 @@ def _search_line(words: List[str], what: str, room: str, runs: List[List[memory_
     rows = [meta for run in runs for _address, meta, _pos in run]
     span = _time_span(meta.get("ts") for meta in rows)
     dates = f", date_from='{span['start']}', date_to='{span['end']}'" if span["start"] else ""
-    undated = sum(1 for meta in rows if not meta.get("ts"))
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    undated = sum(1 for meta in rows if parse_deadline_ts(meta.get("ts")) is None)  # empty or unreadable alike
     return (f"- {what} rows of room:{room}: {_n(len(rows), 'row')} in {_n(len(runs), 'run')}, not filtered by words "
             f"here (this listing reads no row's words); a word search of room:{room} over their period, which also "
             f"returns told rows of that period: chat_history(words={words!r}, room_id='{room}'{dates})"
-            + (f"; {undated} of them carry no time" if undated else "") + "; the unfiltered listing prints each run's "
-            "exact readers")
+            + (f"; {undated} of them {'carries' if undated == 1 else 'carry'} no readable time: chat_history(words="
+               f"{words!r}, room_id='{room}') searches the room at every time" if undated else "")
+            + "; the unfiltered listing prints each run's exact readers")
 
 
 class _Entry:
