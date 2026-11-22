@@ -252,3 +252,51 @@ def test_a_late_pass_gives_the_ending_row_the_current_outcome_beside_its_recorde
         assert "The answer." not in json.dumps(current), "the card's facts, never the answer"
     else:
         assert "current_outcome" not in evidence
+
+
+@pytest.mark.parametrize("shape", ["display_partial", "broken_digest"])
+def test_partial_or_invalid_frozen_ceiling_refuses_adapter_yet_suppresses_report_disclosure(tmp_path, shape):
+    """Strict permission requires a valid frozen ceiling + receipt to expose ``presence_finish``; conservative
+    disclosure treats any frozen-ceiling legacy schedule shape as a private report in full & projected history
+    and schedule previews so ``DISPLAY_KEPT`` or damaged ceilings never leak saved words."""
+    from ouroboros.task_finalization import schedule_report_run
+    from ouroboros.tools.registry import ToolRegistry
+    from supervisor.queue_schedules import _scan_outcomes
+    from supervisor.terminal_delivery import build_completed_result_event, build_unreviewed_salvage_event
+    from tests.test_schedule_report_door import SCHEDULE, admit, bind, ceiling, run_metadata
+
+    task_id = f"partial-ceiling-{shape}"
+    admit(tmp_path, task_id)
+    bad_ceiling = {"schema_version": 1} if shape == "display_partial" else {**ceiling(), "digest": "e" * 64}
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = bind(registry, task_id=task_id, metadata=run_metadata(task_id),
+               contract={"capability_ceiling": bad_ceiling})
+    assert "presence_finish" not in registry._entries and getattr(ctx, "_schedule_door", None) is None
+
+    project = create_project(tmp_path, f"proj-{shape}", name="Scheduled checks")
+    chat_id = project["chat_id"]
+    bind_task_to_project(tmp_path, task_id, project["id"], chat_id, origin={"absent": "system"})
+    secret, summary_line = "PRIVATE FROZEN REPORT", "Private summary sentence."
+    stored = write_task_result(tmp_path, task_id, "completed", chat_id=chat_id, project_id=project["id"],
+                               root_task_id=task_id, delegation_role="root", result=secret, wake_summary=summary_line,
+                               wake_silent=True, terminal_origin="model_final", metadata=run_metadata(task_id),
+                               task_contract={"capability_ceiling": bad_ceiling})
+    full = load_task_result(tmp_path, task_id)
+    assert schedule_report_run(full) is True
+    completed_event = build_completed_result_event(tmp_path, {"id": task_id, "chat_id": chat_id}, task_id, full,
+                                                   unreconciled_runs=["run-unsettled"])
+    assert completed_event is not None and secret not in completed_event["text"] and summary_line not in completed_event["text"]
+    salvage_event = build_unreviewed_salvage_event(tmp_path, {"task_id": task_id, "chat_id": chat_id}, task_id,
+                                                   outcome="cancelled", salvaged_text=secret, settled_status="cancelled")
+    assert secret not in salvage_event["text"]
+
+    terminal = _project_row(task_id, stored, {}, {"chat_id": chat_id})
+    dialogue_store.append(tmp_path, "chat", terminal)
+    response = json.loads(_assemble_history_response(tmp_path, chat_id, 50, 200))
+    serialized = json.dumps(response)
+    assert secret not in serialized and summary_line not in serialized
+    [row] = [r for r in response["messages"] if r.get("task_id") == task_id and r.get("system_type") == "task_summary"]
+    assert row["schedule_report_only"] is True and row["quiet_effective"] is True and row["text"] == "Done · no message"
+
+    preview = _scan_outcomes(tmp_path, {"tasks": [{"id": SCHEDULE, "last_task_id": task_id}]})[SCHEDULE]
+    assert preview["report_only"] is True and preview["line"] == "" and preview["quiet"] is True

@@ -899,8 +899,8 @@ def build_completed_result_event(
     task_row = task if isinstance(task, dict) and task else dict(stored or {})
     legacy = schedule_report_run(task_row) or schedule_report_run(stored or {})
     chat_id = lineage_chat_id(pathlib.Path(drive_root), task_row, tid)
-    quiet = (stored or {}).get("wake_silent") is True  # its words stay internal; only custody may speak
-    if not tid or not chat_id or (not legacy and not (core_text or quiet)):
+    quiet = (stored or {}).get("wake_silent") is True or legacy  # its words stay internal; only custody may speak
+    if not tid or not (core_text or quiet) or not chat_id:
         return None
     from ouroboros.owner_stop_receipt import terminal_event_fields
     from ouroboros.task_finalization import terminal_custody_notice_text
@@ -910,12 +910,7 @@ def build_completed_result_event(
     note = unreconciled_runs_note(runs).lstrip("\n")
     if note and any(run not in custody for run in runs):
         custody = "\n\n".join(part for part in (note, custody) if part)
-    if legacy:
-        # Only a host custody notice may still be owed. The report itself never leaves the record.
-        if not custody:
-            return None
-        quiet = True
-    if quiet and not (core_text := custody):  # a silent wake's row is the host's custody line alone
+    if quiet and not (core_text := custody):  # a silent wake's or older schedule's row is custody alone
         return None
     event = {
         "type": "send_message", "chat_id": chat_id, "task_id": tid, "text": core_text,

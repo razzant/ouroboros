@@ -719,6 +719,7 @@ export function createChatInstance({
 
     function blockHasWork(record) {
         const id = record.groupId;
+        // Visibility depends on work, never the lane.
         return record.reviewController?.groups.size > 0
             || [...subagentChildParents.values()].some((info) => info.parentId === id)
             || record.items.some((item) => !item.receipt && (item.fullField === 'schedule_report'
@@ -726,8 +727,7 @@ export function createChatInstance({
             || record.toolErrors > 0;
     }
 
-    // Child, else project, identity names the card; authored activity stays in its timeline. An unnamed
-    // root with work takes its newest narration, `Task activity` once ended (#1369).
+    // Child or project names the card; an unnamed root uses narration, `Task activity` once ended.
     function cardTitle(record, work = blockHasWork(record)) {
         return record.isSubagent ? childTitle(record) : record.suggestedName
             || (work ? authoredTitle(record) || (record.finished ? 'Task activity' : '') : '');
