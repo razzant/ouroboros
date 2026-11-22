@@ -371,7 +371,7 @@ def _framing_window(env, memory, ctx):
 def _regime(first, second, framed):
     """The pressed fixture's own regime, so that a red here says the fixture walked off its edge, not the product."""
     facts = [(start["estimate"], start["room"], sorted(start["addressed"])) for start in (first, second)]
-    assert "world" in second["addressed"] and ("world" in first["addressed"]) is framed, (
+    assert "world" in second["addressed"] and ("world" in first["addressed"] if framed else not first["addressed"]), (
         f"the pressed fixture left its regime (estimate, start room, addressed per build: {facts}): the fixture moved, "
         "not the product")
     return True
