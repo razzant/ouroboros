@@ -297,9 +297,11 @@ def test_a_queued_root_says_the_work_it_stands_behind_by_that_works_name_and_not
     # Review round 2 (Astra B3, Carbon A1): a helper queued before its root never lends the work its name, and a
     # retry named only by its request (its census row's derived name) is named under either id the wait carries.
     kid = row("kid", "queued", parent_task_id="holder", root_task_id="holder")
+    attempt = row("holder-r2", original_task_id="holder", root_task_id="holder")
     helped = {"kid": {"parent_task_id": "holder", "root_task_id": "holder", "title": "Scan one file"},
-              "holder": {"running": True, "title": "Build index"}, "q": {"lane_wait": project}}
-    assert queued_of([kid, row("holder"), row("q", "queued", chat_id=1)], helped)[0]["behind"]["name"] == "Build index"
+              "holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder",
+                            "title": "Build index"}, "q": {"lane_wait": project}}
+    assert queued_of([kid, attempt, row("q", "queued", chat_id=1)], helped)[0]["behind"]["name"] == "Build index"
     by_request = row("holder-r2", original_task_id="holder", root_task_id="holder", suggested_name="Build from source")
     for held_by in ("holder", "holder-r2"):
         said = queued_of([by_request, row("q", "queued", chat_id=1)],

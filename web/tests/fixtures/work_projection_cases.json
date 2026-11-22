@@ -3215,7 +3215,7 @@
      "room": 42,
      "name": "Build index",
      "episode": {
-      "task_id": "qh",
+      "task_id": "qh-r2",
       "live": true
      },
      "activity": "working",
@@ -3231,7 +3231,7 @@
      "members": {
       "ids": [
        "qk",
-       "qh"
+       "qh-r2"
       ],
       "states": {
        "qk": {
@@ -3251,7 +3251,7 @@
         "tails": [],
         "mark": "still"
        },
-       "qh": {
+       "qh-r2": {
         "activity": "working",
         "transition": "none",
         "call": "working",
@@ -3273,15 +3273,20 @@
      "controls": [
       {
        "action": "wrap_up",
-       "target": "qh"
+       "target": "qh-r2"
       },
       {
        "action": "hurry",
-       "target": "qh"
+       "target": "qh-r2"
       },
       {
        "action": "pause",
-       "target": "qh"
+       "target": "qh-r2"
+      },
+      {
+       "action": "stop",
+       "target": "qh-r2",
+       "scope": "cascade"
       },
       {
        "action": "stop",
