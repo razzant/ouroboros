@@ -132,6 +132,7 @@ def test_one_recorded_folder_is_one_lane_whichever_room_starts_work_in_it():
     before = dict(newcomer)
     assert lane_wait(newcomer, holders, folder_projects(running + [newcomer])) == {
         "lane": "folder", "task_id": "p1", "project_id": "p", "folder": shared}
+    assert folder_projects([writer, {**writer, "project_id": "later"}])[("p1", shared)] == "p", "the first row wins"
     assert lane_wait(newcomer, lane_holders([], [newcomer]), folder_projects([newcomer])) == {} and newcomer == before
 
 
@@ -159,6 +160,7 @@ def test_a_queued_root_names_the_tree_keeping_its_projects_lane_first_and_nothin
     assert lane_wait(sibling, lane_holders(turn, [sibling]), folder_projects(turn + [sibling])) == {}, \
         "a conversation turn holds none"
     assert "_lane_wait" not in sibling and "lane_wait" not in sibling
+
 
 def test_earlier_holders_of_one_folder_never_lock_each_other_and_a_newcomer_waits_for_all():
     """Two trees that already held one folder (cold: asleep beside a live helper) take turns; a new one waits."""

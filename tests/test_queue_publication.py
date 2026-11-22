@@ -292,32 +292,68 @@ def test_a_pending_rows_lane_wait_is_published_beside_its_task_and_never_restore
     assert all("lane_wait" not in row for row in independent_roots(root)["roots"])
 
 
-def test_a_released_launch_claim_marks_the_queue_so_both_publications_drop_its_wait(published, monkeypatch):
-    """Review round 2 (Opus S2, Carbon S1, Astra B2): a claim released without a start changes who holds a lane, and
-    only a marked revision rewrites the snapshot the mind reads; the release marks it under Q. A quiet tick after
-    it writes nothing again."""
-    from types import SimpleNamespace as Namespace
-
+@pytest.mark.parametrize("change", ["claim_taken", "claim_released", "folder_settled", "room_folder_refreshed"])
+def test_a_wait_that_changes_without_a_transition_reaches_both_publications_at_the_next_tick(published, monkeypatch,
+                                                                                            change):
+    """Review round 3 (Astra B2, Opus A2/A3) and round 4: who holds a lane changes in memory without a queue
+    transition (a launch claim taken or released, a moved row's folder read off Q, the chooser's own refresh after
+    its room's folder changed). The tick compares the waits with the ones last captured and moves the revision,
+    so the snapshot the mind reads and the cached status body (keyed by ``state_publication._queue_revision``)
+    follow; a quiet tick after it marks and writes nothing."""
+    from ouroboros import project_placement
+    from ouroboros.gateway.state_publication import _queue_revision
     from ouroboros.peer_roster import independent_roots
+    from ouroboros.projects_registry import create_project, update_project
     from supervisor import worker_assignment, workers
+    from tests.test_one_work_placement import place
 
     root, _now = published
-    monkeypatch.setattr(workers, "PENDING", queue.PENDING)
-    monkeypatch.setattr(workers, "RUNNING", queue.RUNNING)
+    for name in ("PENDING", "RUNNING", "DRIVE_ROOT"):
+        monkeypatch.setattr(workers, name, getattr(queue, name))
     monkeypatch.setattr(queue, "INITIALIZED", True, raising=False)
-    claimed = {"id": "x", "type": "task", "project_id": "p", "root_task_id": "x", "title": "Add Ollama support",
-               "_launch_claim": {"token": "t", "wid": 0}}
-    queue.PENDING.extend([claimed, {"id": "q", "type": "task", "project_id": "p", "root_task_id": "q", "title": "CI"}])
-    assert queue.persist_queue_snapshot(reason="worker_launch_claimed")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    shared = root.parent / f"shared-{change}"
+    shared.mkdir()
+    external = {"workspace_root": str(shared), "workspace_mode": "external"}
+    holder = {"id": "x", "type": "task", "project_id": "p", "root_task_id": "x", "title": "Add Ollama support"}
+    queued = {"id": "q", "type": "task", "project_id": "p", "root_task_id": "q", "title": "CI", "metadata": {}}
+    if change.startswith("claim"):
+        queue.PENDING.extend([{**holder, **({"_launch_claim": {"token": "t", "wid": 0}} if change == "claim_released"
+                                            else {})}, queued])
+        expected = {"lane": "project", "task_id": "x", "project_id": "p"}
+    else:
+        queue.RUNNING["x"] = {"task": {**holder, "project_id": "other", **external}, "worker_id": 0}
+        intent = {"kind": "room_default", "project_id": "dest"} if change == "room_folder_refreshed" else None
+        queue.PENDING.append({**queued, "project_id": "prior", "metadata": {"resource_intent": intent} if intent else {}})
+        create_project(root, "dest", **({"working_dir": str(shared)} if change == "folder_settled" else {}))
+        place(root, "q", "dest", workers)
+        expected = {"lane": "folder", "task_id": "x", "project_id": "other", "folder": str(shared)}
+        if change == "room_folder_refreshed":
+            update_project(root, "dest", working_dir=str(shared))
+    queue_publication.publish_queue_changes()
+
     def said():
         return [row.get("lane_wait") for row in independent_roots(root)["roots"] if row["task_id"] == "q"]
 
-    assert said() == [{"lane": "project", "task_id": "x", "project_id": "p"}]
-    revision = queue_publication._STATE["revision"]
-    worker_assignment._release_launch(queue, claimed, Namespace(busy_task_id="x", reaping=False), "t")
-    assert queue_publication._STATE["revision"] == revision + 1, "the release marks the queue"
+    before, key = said(), _queue_revision()
+    with queue._queue_lock:  # the memory change itself, as its producer makes it: no mark
+        row = next(task for task in queue.PENDING if task["id"] == "q")
+        if change == "claim_taken":
+            queue.PENDING[0]["_launch_claim"] = {"token": "t", "wid": 0}
+        elif change == "folder_settled":
+            assert project_placement.refresh_pending_placement(root, row, lane=True) and row["_placement_folder"] == ""
+            basis = project_placement.pending_resource(row)
+            assert basis is not None and project_placement.settle_resource(row, basis, False, False)
+        elif change == "room_folder_refreshed":
+            assert project_placement.refresh_pending_placement(root, row, lane=True)
+    if change == "claim_released":
+        worker_assignment._release_launch(queue, queue.PENDING[0], SimpleNamespace(busy_task_id="x", reaping=False), "t")
+    assert _queue_revision() == key, "the change itself marks nothing"
     queue_publication.publish_queue_changes()
-    assert said() == [None], "the mind's list no longer names the released claim"
-    before = (root / "state" / "queue_snapshot.json").read_bytes()
+    after = [None] if change == "claim_released" else [expected]
+    assert before == ([expected] if change == "claim_released" else [None]) and said() == after
+    assert _queue_revision() != key, "the cached status body is produced again"
+    revision, snapshot = queue_publication.queue_revision(), (root / "state" / "queue_snapshot.json").read_bytes()
     queue_publication.publish_queue_changes()
-    assert (root / "state" / "queue_snapshot.json").read_bytes() == before, "a quiet tick writes nothing"
+    assert queue_publication.queue_revision() == revision, "a quiet tick marks nothing"
+    assert (root / "state" / "queue_snapshot.json").read_bytes() == snapshot, "and writes nothing"

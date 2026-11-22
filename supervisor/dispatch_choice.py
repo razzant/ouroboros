@@ -370,15 +370,26 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
     return picked, undecided, plans
 
 
+def _folder_answers(row: Dict[str, Any]) -> bool:
+    """Whether the folder ``row``'s lane reads (``project_lease.lane_folder``) still answers for the room memory admitted
+    it to: no admitted room row, an intent that keeps its own folder, or that room's recorded folder. A move gives a
+    queued row its new room at once (``mark_task_project``) and its folder facts only at the chooser's next look."""
+    from ouroboros.project_lease import lane_folder
+
+    project = (row.get("_project_admission") or {}).get("project")
+    intent = (row.get("metadata") or {}).get("resource_intent") if isinstance(row.get("metadata"), dict) else None
+    return (not isinstance(project, dict) or isinstance(intent, dict) and intent.get("kind") == "explicit_resource"
+            or lane_folder(row) == str(project.get("working_dir") or "").strip())
+
+
 def lane_waits() -> Dict[str, Dict[str, Any]]:
     """Under Q: each queued row another tree keeps out of its Project's or folder's lane now, by task id, as
     ``project_lease.lane_wait`` names the holder. Who holds a lane is what the walk counts before it picks
-    (RUNNING with its carriers, plus launches claimed); a returned turn takes no lane, and a moved row whose own
-    resource is unread keeps its Project's answer while its folder lane is unknown. Pure over memory: the queue
-    snapshot and the status census publish it, nothing stores it on a task; a display fact, so a failure says none
-    (warned once per distinct error), never raises."""
+    (RUNNING with its carriers, plus launches claimed); a returned turn takes no lane, and a folder is said only
+    while it answers for the row's admitted room (``_folder_answers``). Pure over memory: the queue snapshot and the
+    status census publish it, nothing stores it on a task; a display fact, so a failure says none (warned once per
+    distinct error), never raises."""
     from ouroboros.project_lease import folder_projects, lane_holders, lane_wait
-    from ouroboros.project_placement import pending_resource
     from supervisor.conversation_lane import resumes_on_lane
 
     try:
@@ -388,7 +399,7 @@ def lane_waits() -> Dict[str, Dict[str, Any]]:
         waits = {}
         for row in pending if holders else ():
             wait = {} if resumes_on_lane(row) else lane_wait(row, holders, projects)
-            if wait and (wait["lane"] == "project" or pending_resource(row) is None):
+            if wait and (wait["lane"] == "project" or _folder_answers(row)):
                 waits[_tid(row)] = wait
         return waits
     except Exception as error:
@@ -408,14 +419,12 @@ def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
     from ouroboros import store_hot_facts
     from ouroboros.project_placement import pending_resource, settle_resource
     from supervisor.events_budget import budget_resume_dispatch_allowed
-    from supervisor.queue_publication import mark_dirty_locked
 
     wa = _assignment()
     live, admitted, stale, chosen = {id(item) for item in _pool().PENDING}, [], [], set()
     for row in rows:
-        if id(row) in live and id(row) in screened.get("placements", {}) and settle_resource(
-                row, *screened["placements"][id(row)]):
-            mark_dirty_locked("placement_resource_settled")  # its folder lane is known now: its wait follows
+        if id(row) in live and id(row) in screened.get("placements", {}):
+            settle_resource(row, *screened["placements"][id(row)])
     index = _index(queue) if undecided or any(_carrier(row) for row in rows) else ({}, {})
     memo: Dict[tuple, str] = {}
     running = wa._started_projection() + [{"task": row} for row in carried]

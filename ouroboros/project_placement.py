@@ -54,10 +54,6 @@ def move_task_to_project(drive_root: Any, task_id: str, project_id: str, *, name
         )
         # Only PENDING rows can acquire a new lease on their next assignment.
         marked = mark_task_project(running, pending, task_id, pid, authority="binding", project=project)
-        for row in [item for item in pending or () if marked and str(item.get("id") or "") == str(task_id)]:
-            # Its next look's lane facts now (memory decides the folder or marks it unread), so no reader names the
-            # holder of the folder it left; a refusal leaves them to the chooser's own refresh.
-            refresh_pending_placement(drive_root, row, binding=binding, lane=True)
         if marked:
             try:
                 persist_queue_snapshot(reason="project_placement")
