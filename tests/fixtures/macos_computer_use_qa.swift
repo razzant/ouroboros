@@ -4,6 +4,8 @@
 //   QAFixture front  <title> <log.jsonl>   a text view that takes foreground typing and observes the desktop
 //   QAFixture paste  <title> <log.jsonl>   a standard Edit menu (Paste = cmd+v -> paste:), a text view that logs
 //                                          every paste action it performs, and a decoy field
+//   QAFixture pointer <title> <log.jsonl>  a scroll view over a 4000x4000 document, scrolled to its middle, that logs
+//                                          every mouse and wheel event it receives and where the document stands
 //
 // stdin, one command per line: "mark <label>" (log a state snapshot), "replace" (target: swap Commit for a
 // fresh instance), "decoy" (target: a second window of the SAME process, "<title>-decoy", with its own qa.sentinel),
@@ -25,14 +27,17 @@
 // the characters AppKit derived for each key event (and what its key types under Command alone), the input source in
 // use, every action its menu sent and
 // every paste action its text view performed, so a chord that arrived but pasted nothing is told apart from
-// one that never arrived.
+// one that never arrived. Every pointer and key row carries the event's kCGEventSourceUserData ("tag": the skill marks
+// its own events), mouse rows the button number and click count, wheel rows the deltas AppKit derived; every snapshot
+// names the keys and mouse buttons the session holds down, so a key or button left pressed shows. Key rows carry the
+// event's raw CoreGraphics flags; the front role also logs the system key events (media keys) it sees.
 
 import AppKit
 import Carbon.HIToolbox
 
 let arguments = CommandLine.arguments
-guard arguments.count == 4, ["target", "front", "paste"].contains(arguments[1]) else {
-    FileHandle.standardError.write(Data("usage: QAFixture <target|front|paste> <title> <log.jsonl>\n".utf8))
+guard arguments.count == 4, ["target", "front", "paste", "pointer"].contains(arguments[1]) else {
+    FileHandle.standardError.write(Data("usage: QAFixture <target|front|paste|pointer> <title> <log.jsonl>\n".utf8))
     exit(2)
 }
 let role = arguments[1]
@@ -108,6 +113,11 @@ final class PasteView: NSTextView {
     }
 }
 
+/// The pointer role's document: flipped, so a larger visible y is content further down.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { return true }
+}
+
 var rawInputCount = 0
 // Before AppKit dispatch, independently of whether a view accepts first mouse or acts on the event.
 // Keep these counts separate from Commit and text changes. No acceptsFirstMouse override/primer.
@@ -126,7 +136,7 @@ final class QAApplication: NSApplication {
 }
 
 final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextViewDelegate {
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: role == "target" ? 460 : 240),
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: role == "target" ? 460 : (role == "pointer" ? 340 : 240)),
                           styleMask: [.titled], backing: .buffered, defer: false)
     let field = NSTextField(string: "")
     let status = NSTextField(labelWithString: "idle")
@@ -134,6 +144,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
     let typed = NSTextView(frame: NSRect(x: 20, y: 20, width: 420, height: 200))
     let pasted = PasteView(frame: NSRect(x: 20, y: 60, width: 420, height: 160))
     let decoy = NSTextField(string: "")
+    let scroller = NSScrollView(frame: NSRect(x: 20, y: 20, width: 420, height: 300))
     var token: String?
     let commandGroup = NSBox(frame: NSRect(x: 20, y: 250, width: 420, height: 180))
     let commandField = NSTextField(string: "")
@@ -225,17 +236,46 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
                                          "first_responder": self.responder()])
             }
         } else {
-            typed.delegate = self
-            place(typed, "qa.typing", typed.frame)
+            if role == "pointer" {
+                window.acceptsMouseMovedEvents = true  // a plain move reaches the app only if a window asks for it
+                scroller.hasVerticalScroller = true
+                scroller.hasHorizontalScroller = true
+                scroller.documentView = FlippedView(frame: NSRect(x: 0, y: 0, width: 4000, height: 4000))
+                place(scroller, "qa.scroll", scroller.frame)
+                scroller.contentView.scroll(to: NSPoint(x: 1800, y: 1800))
+                scroller.reflectScrolledClipView(scroller.contentView)
+                scroller.contentView.postsBoundsChangedNotifications = true
+                NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroller.contentView,
+                                                       queue: .main) { _ in log("scrolled", ["origin": self.scrollOrigin()]) }
+            } else {
+                typed.delegate = self
+                place(typed, "qa.typing", typed.frame)
+                if let ups = NSEvent.addLocalMonitorForEvents(matching: .keyUp, handler: { self.key($0); return $0 }) {
+                    monitors.append(ups)
+                }
+                // System key events (media, brightness, keyboard light: NSSystemDefined subtype 8), delivered to this
+                // app or seen going elsewhere; nothing in the fixture acts on them.
+                for (scope, monitor) in [("local", NSEvent.addLocalMonitorForEvents(matching: .systemDefined, handler: {
+                                              self.system($0, "local"); return $0 })),
+                                          ("global", NSEvent.addGlobalMonitorForEvents(matching: .systemDefined, handler: {
+                                              self.system($0, "global") }))] {
+                    if let monitor = monitor { monitors.append(monitor) }
+                    log("system_monitor", ["scope": scope, "installed": monitor != nil])
+                }
+            }
             let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDragged,
-                                               .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp, .scrollWheel]
+                                               .rightMouseDown, .rightMouseUp, .rightMouseDragged, .otherMouseDown,
+                                               .otherMouseUp, .otherMouseDragged, .scrollWheel]
+            var pointerMonitors = 0  // counted here: other monitors (key-up, system keys) are not pointer observation
             if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { self.pointer($0, "global") }) {
                 monitors.append(global)
+                pointerMonitors += 1
             }
             if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { self.pointer($0, "local"); return $0 }) {
                 monitors.append(local)
+                pointerMonitors += 1
             }
-            log("pointer_monitor", ["installed": monitors.count == 2])
+            log("pointer_monitor", ["installed": pointerMonitors == 2])
         }
         if let keys = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { self.key($0); return $0 }) {
             monitors.append(keys)
@@ -253,9 +293,9 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             log("workspace_activated", ["activated_pid": Int(app?.processIdentifier ?? -1),
                                         "activated_bundle": app?.bundleIdentifier ?? ""])
         }
-        if role == "front" || role == "paste" {
+        if role == "front" || role == "paste" || role == "pointer" {
             window.makeKeyAndOrderFront(nil)
-            window.makeFirstResponder(role == "front" ? typed : pasted)
+            window.makeFirstResponder(role == "front" ? typed : (role == "paste" ? pasted : scroller.documentView))
             NSApp.activate(ignoringOtherApps: true)
         }
         FileHandle.standardInput.readabilityHandler = { handle in
@@ -275,6 +315,10 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             "mouse": [mouse.x.rounded(), mouse.y.rounded()],
             "window_id": window.windowNumber,
             "raw_input_count": rawInputCount,
+            // Held now in the session: virtual key codes and mouse buttons (pressedMouseButtons is a bit per button).
+            "keys_down": (0..<128).filter { CGEventSource.keyState(.combinedSessionState, key: CGKeyCode($0)) },
+            "buttons_down": NSEvent.pressedMouseButtons,
+            "window_frame": globalFrame(window.contentView!, window),
         ]
         if role == "target" {
             out["field"] = field.stringValue
@@ -306,11 +350,19 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             if let token = token {  // a comparison with the expected token: the contents are never logged
                 out["pasteboard_is_token"] = NSPasteboard.general.string(forType: .string) == token
             }
+        } else if role == "pointer" {
+            out["scroll_frame"] = globalFrame(scroller, window)
+            out["origin"] = scrollOrigin()
         } else {
             out["text"] = typed.string
             out["pasteboard_change_count"] = NSPasteboard.general.changeCount  // a counter, not the contents
         }
         return out
+    }
+
+    func scrollOrigin() -> [CGFloat] {
+        let origin = scroller.contentView.bounds.origin
+        return [origin.x.rounded(), origin.y.rounded()]
     }
 
     /// A standard Edit menu, as an AppKit application template has it: Paste is cmd+v and sends paste: to the first
@@ -385,7 +437,20 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
 
     func pointer(_ event: NSEvent, _ scope: String) {
         let at = NSEvent.mouseLocation
-        log("pointer_event", ["type": Int(event.type.rawValue), "scope": scope, "mouse": [at.x.rounded(), at.y.rounded()]])
+        var row: [String: Any] = ["type": Int(event.type.rawValue), "scope": scope, "mouse": [at.x.rounded(), at.y.rounded()],
+                                  "tag": event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0]
+        if let cg = event.cgEvent {  // where the event itself says it happened, in global top-left points
+            row["at"] = [cg.location.x.rounded(), cg.location.y.rounded()]
+        }
+        if event.type == .scrollWheel {  // clickCount and buttonNumber are not defined for a wheel event
+            row["delta"] = [event.scrollingDeltaX, event.scrollingDeltaY]
+            row["precise"] = event.hasPreciseScrollingDeltas
+            row["inverted"] = event.isDirectionInvertedFromDevice
+        } else if event.type != .mouseMoved {
+            row["button"] = event.buttonNumber
+            row["clicks"] = event.clickCount
+        }
+        log("pointer_event", row)
     }
 
     func key(_ event: NSEvent) {
@@ -399,12 +464,22 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         }
         // characters: what the event types with its modifiers (a menu matches those); chars_ignoring: the typing plane.
         var row: [String: Any] = ["characters": event.characters ?? "", "chars_ignoring": event.charactersIgnoringModifiers ?? "",
-                                  "key_code": Int(event.keyCode), "modifiers": held]
+                                  "key_code": Int(event.keyCode), "modifiers": held, "repeat": event.isARepeat,
+                                  "tag": event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0,
+                                  // the event's own CoreGraphics flags, class bits (Fn, NumericPad) included
+                                  "raw_flags": Int(event.cgEvent?.flags.rawValue ?? 0)]
         if role == "paste" {
             row.merge(["flags": Int(flags.rawValue), "repeat": event.isARepeat, "command_characters": commandCharacters(event.keyCode),
                        "input_source": inputSources(), "first_responder": responder()]) { $1 }
         }
         log(event.type == .keyUp ? "key_up" : "key_down", row)
+    }
+
+    func system(_ event: NSEvent, _ scope: String) {
+        // data1 = key type << 16 | key state << 8 for subtype 8; only read for a system-defined event
+        log("system_event", ["scope": scope, "subtype": Int(event.subtype.rawValue), "data1": event.data1,
+                             "key_type": (event.data1 & 0xffff0000) >> 16, "down": ((event.data1 & 0xff00) >> 8) == 0xa,
+                             "tag": event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0])
     }
 
     /// The target process's windows as AppKit has them: title, windowNumber (the CGWindowID), visible, main, key.

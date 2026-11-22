@@ -17,6 +17,7 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.skill_preflight import _handle_skill_preflight
 
 from tests._shared import reconcile_receipt
+from tests._workspace_git import git_repository
 
 
 def _manifest(name: str) -> str:
@@ -358,10 +359,9 @@ def _protected_workspace_registry(tmp_path, monkeypatch):
     system_repo = tmp_path / "system"
     workspace = tmp_path / "project"
     data = tmp_path / "data"
-    for item in (system_repo, workspace, data):
-        item.mkdir()
+    data.mkdir()
     for repo in (system_repo, workspace):
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        git_repository(repo, unborn=True)
     contract = {
         "resource_policy": {
             "protected_artifacts": [{
