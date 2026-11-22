@@ -922,3 +922,20 @@ def test_an_answer_received_before_its_session_failed_to_close_is_an_answer(loop
     slow.set()
     late = manager._call_tool_result("mcp_demo__echo", {"text": "answer exists"})
     assert late.code == "MCP_TIMEOUT" and call_now()["ok"] is True  # the caller timed out; the server had answered
+
+
+def test_an_older_observation_never_replaces_a_newer_mark_in_either_order():
+    manager = publisher()
+    assert manager.refresh_server("demo")["published"]
+    cfg = manager.server_config("demo")
+    earlier, later = "2026-11-22T11:26:11.577145+00:00", "2026-11-22T11:26:11.579029+00:00"
+    # A timeout observed first but written last: the answer observed after it stays.
+    assert mcp_catalog.record_call(cfg, ok=True, code="", method="ping", at=later)
+    assert not mcp_catalog.record_call(cfg, ok=False, code="MCP_TIMEOUT", method="ping", at=earlier)
+    assert call_now() == {"ok": True, "code": "", "method": "ping", "at": later}
+    # The same two in their own order: the series opens, then closes.
+    mcp_catalog.calls_path("demo").unlink()
+    assert mcp_catalog.record_call(cfg, ok=False, code="MCP_TIMEOUT", method="ping", at=earlier)
+    assert call_now()["since"] == earlier
+    assert mcp_catalog.record_call(cfg, ok=True, code="", method="ping", at=later)
+    assert call_now() == {"ok": True, "code": "", "method": "ping", "at": later}
