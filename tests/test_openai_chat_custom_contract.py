@@ -883,8 +883,8 @@ _MEMORY_TEXT_WORDS = {
                       "warning", "enters every request of its project whole", "memory_read(source='workpad:"],
     "workpad_read": ["revision", "memory_read(source='workpad')"],
     "memory_read": ["source=identity, world, workpad or workpad:<project id>", "version=<revision>",
-                    "newest first", "need no chronicle", "members=true with room_id or node_id",
-                    "words keeps matching lines"],
+                    "newest first", "need no chronicle", "members=true with room_id",
+                    "runs of rows are not filtered"],
 }
 
 

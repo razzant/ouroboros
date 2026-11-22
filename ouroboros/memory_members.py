@@ -5,18 +5,22 @@ Descent through my own tellings. Each relation is named as what it is, and no ot
 records, a ``legacy`` section *retells* a positional range of its room. No common parent and no containment
 tree is claimed; a room is no record, only the place its records and rows belong to.
 
-- **A room** (``room_id``): its acting tellings in publication order (pages, parts, accounts, notes, legacy
-  sections and journal gaps as ``ChronicleStore.room_records`` reads them), each record's withdrawal or pending
-  candidacy named apart, then its untold rows. The untold rows are the store's one open-row computation
-  (``memory_inventory.open_room_rows``: a chat row of the room after the legacy frontier that no acting page
-  seals), never computed a second way, shown as the maximal consecutive runs of that set in the room's reading
-  order (``dialogue_provenance.in_reading_order`` over every row of the room after the frontier), each with its
-  bounds, count, period and speakers. No calendar bucket. The room's line names its situation name
-  ``room:<id>``, the string a note's ``claims`` name; no pointer is built here.
+- **A room** (``room_id``): its acting tellings in publication order: its own records as
+  ``ChronicleStore.room_records`` reads them, and every page recorded in another room that holds an acting seal
+  here (the index's ``page_rows``), each saying where it is recorded; then, as paged entries, its withdrawn and
+  candidate pages and parts, named as what they are; then its untold rows. The untold rows are the store's one
+  open-row computation (``memory_inventory.open_room_rows``: a chat row of the room after the legacy frontier that
+  no acting page seals), collected from its own single read as the maximal runs of that set in the room's reading
+  order, each with its bounds, count, period and speakers. No calendar bucket. The room's line names its
+  situation name ``room:<id>``, the string a note's ``claims`` name; no pointer is built here.
 - **A record** (``node_id``): what its own relation names, in its recorded order: a page's sealed rows as runs in
-  each sealed room's reading order, then its notes; a part's members; an account's sources, each with the version
-  it cites and what changed since (``ChronicleStore._source_state``); a selection's account and the records it
-  replaces; a legacy section's range. A record with no such relation says so.
+  each sealed room's reading order, recorded, found and missing counted per room, then its notes (a withdrawn page
+  says it formerly sealed them); a part's members; an account's sources, each at the version it cites with what
+  changed since (``ChronicleStore._source_state``); a selection's account and the records it replaces; a legacy
+  section's range. A record with no such relation says so.
+
+A run is shown in reading order, but rows=true reads stored order, so each run's readers are its maximal
+stored-contiguous slices: following them returns exactly the run's rows.
 
 Each record line carries its kind and id, its status (a helper's draft, an accepted draft, a candidate, a
 withdrawn record), its author as the store records it (``memory_inventory.record_byline``), its period, its
@@ -26,12 +30,17 @@ records the instruction, otherwise labelled ``(record opening, no lead)``; then 
 
 When the listed entries fit the tool's own page bound with room left, the next stored level is added whole, in
 stored order, labelled as context, and so on while a whole level fits; a level that does not fit is left to its
-readers, never cut to "the important" entries. The optional words filter (``dialogue_words``) drops the listed
-lines that do not match, over the whole list before paging, so the page size never decides what matches.
+readers, never cut to "the important" entries. The optional words filter (``dialogue_words``) keeps the records
+whose own text or one correction under them matches, each judged on its own, a cited source at the revision cited;
+it runs over the whole list before paging, so the page size never decides what matches. Runs of rows are not
+filtered, since this listing reads no row's words: each room's runs become one line naming a word search of that
+room over their period.
 
-The path is passive: it never activates or imports the chronicle (``tools/chronicle._activated`` is not called).
-Before activation it reads nothing of the chronicle and names the gap: a room says "chronicle not activated",
-never "no untold rows". The chronicle's state is read once for the whole answer (``chronicle_store.capture``).
+Passive means: it never activates the chronicle and never runs the legacy import (``tools/chronicle._activated``
+is not called); before activation it reads nothing of the chronicle and names the gap, never "no untold rows".
+The store's own catch-up of its disposable index can still run on a read, as on every chronicle read. The
+chronicle's state is read once for the whole answer (``chronicle_store.capture``), the acting seals of a room in
+one more index statement.
 """
 from __future__ import annotations
 
@@ -93,17 +102,17 @@ def read_members(root: Path, *, room_id: Any = None, node_id: Any = None, start:
         head = (f"members of room:{room}" if room is not None else f"members of record {node}") + (
             f"; {NOT_ACTIVATED}: the one-time legacy import has not run, so "
             + ("this room's tellings and untold rows are unknown here, not none" if room is not None
-               else "no record can be read") + "; any other memory_read or chronicle_write call activates it")
+               else "no record can be read") + "; a memory_read of a room or a record, or any chronicle_write, "
+            "activates it")
         return result_window(head, "", 0, limit, lambda _end: "", _ORDER)
     with capture(root, tail="none"):  # one state of the chronicle for every line of the answer
         lister = _Lister(root, store)
         head, entries = lister.room(room) if room is not None else lister.node(node)
         shown = entries if words is None else _filtered(entries, words)
         if words is not None:
-            told = [entry for entry in entries if entry.words is not None]
-            head += (f"; words {words!r}: {sum(1 for entry in shown if entry.words is not None)} of {len(told)} listed "
-                     "records match in their own words and corrections (applied before paging); row runs are not "
-                     "filtered here")
+            told = [entry for entry in entries if entry.fields is not None]
+            head += (f"; words: {sum(1 for entry in shown if entry.fields is not None)} of {len(told)} listed records "
+                     "match in their own text or one correction (applied before paging); runs of rows are not filtered")
         text = "\n".join(entry.line for entry in shown)
         reader = f"room_id='{room}'" if room is not None else f"node_id='{node}'"
         also = f", words={words!r}" if words is not None else ""
@@ -118,9 +127,10 @@ def read_members(root: Path, *, room_id: Any = None, node_id: Any = None, start:
 
 
 def _filtered(entries: List["_Entry"], words: List[str]) -> List["_Entry"]:
-    """The listed set under ``words``: a record stays when its own words or a correction under it match (never its id,
-    facts or readers), with an excerpt when the match is not in its printed opening; runs of rows, whose words this
-    listing never reads, become one line per room naming the word search over them; any other line stays."""
+    """The listed set under ``words``: a record stays when its own text or one correction under it matches, each
+    field on its own (never its id, facts or readers), with an excerpt naming the field when the match is not in its
+    printed opening; each room's runs of rows, whose words this listing never reads, become one search line; any
+    other line stays."""
     from ouroboros.dialogue_words import match_text, parse
 
     query, kept, runs = parse(words), [], {}
@@ -130,47 +140,56 @@ def _filtered(entries: List["_Entry"], words: List[str]) -> List["_Entry"]:
                 runs[entry.run[1]] = [entry.run[0], entry.run[1], []]
                 kept.append(runs[entry.run[1]])
             runs[entry.run[1]][2].append(entry.run[2])
-        elif entry.words is None:
+        elif entry.fields is None:
             kept.append(entry)
-        elif match_text(query, entry.words):
-            opening = first_sentence(" ".join(str(entry.record.get("text") or "").split())) if entry.record else ""
-            near = "" if match_text(query, opening) else _excerpt(query, entry.words)
-            kept.append(_Entry(entry.line + (f"; excerpt: «{near}»" if near else ""), entry.record, entry.words))
+        elif hit := next(((name, text) for name, text in entry.fields if match_text(query, text)), None):
+            opening = first_sentence(" ".join(str(entry.record.get("text") or "").split()))
+            near = "" if hit[0] == "text" and match_text(query, opening) else excerpt(query, hit[1])
+            label = "excerpt" if hit[0] == "text" else f"excerpt ({hit[0]})"
+            kept.append(_Entry(entry.line + (f"; {label}: «{near}»" if near else ""), entry.record, entry.fields))
     return [item if isinstance(item, _Entry) else _Entry(_search_line(words, *item)) for item in kept]
 
 
 def _search_line(words: List[str], what: str, room: str, runs: List[List[memory_inventory.Entry]]) -> str:
-    stamps = [str(meta.get("ts") or "") for run in runs for _address, meta, _pos in run if meta.get("ts")]
-    dates = f", date_from='{min(stamps)}', date_to='{max(stamps)}'" if stamps else ""
-    return (f"- {what} rows of room:{room}: {_n(sum(len(run) for run in runs), 'row')} in {_n(len(runs), 'run')}, not "
-            f"filtered by words here (this listing reads no row's words); their word search: "
-            f"chat_history(words={words!r}, room_id='{room}'{dates})")
+    """One room's runs under ``words``: their count, and a word search of that room over their period (parsed times)."""
+    rows = [meta for run in runs for _address, meta, _pos in run]
+    span = _time_span(meta.get("ts") for meta in rows)
+    dates = f", date_from='{span['start']}', date_to='{span['end']}'" if span["start"] else ""
+    undated = sum(1 for meta in rows if not meta.get("ts"))
+    return (f"- {what} rows of room:{room}: {_n(len(rows), 'row')} in {_n(len(runs), 'run')}, not filtered by words "
+            f"here (this listing reads no row's words); a word search of room:{room} over their period, which also "
+            f"returns told rows of that period: chat_history(words={words!r}, room_id='{room}'{dates})"
+            + (f"; {undated} of them carry no time" if undated else "") + "; the unfiltered listing prints each run's "
+            "exact readers")
 
 
-def _excerpt(query: Any, text: str) -> str:
-    """About 200 characters around the first word of ``text`` an alternative of ``query`` asks for."""
+def excerpt(query: Any, text: str) -> str:
+    """About 200 characters around the first word of ``text`` that a satisfied alternative of ``query`` asks for,
+    found with the shared tokenizer (``dialogue_words.tokens``) chunk by chunk of the original text."""
     import re
 
-    from ouroboros.dialogue_words import match_text, normalize
+    from ouroboros.dialogue_words import match_text, tokens
 
-    wanted = [(prefix, False) for alt in query.alternatives if match_text(query._replace(alternatives=(alt,)), text)
-              for prefix in alt.prefixes] + [(phrase[0], True) for alt in query.alternatives for phrase in alt.phrases]
-    for found in re.finditer(r"\w+", text):
-        token = normalize(found.group())
-        if any(token == word if exact else token.startswith(word) for word, exact in wanted):
-            start, end = max(found.start() - 100, 0), min(found.start() + 100, len(text))
+    satisfied = [alt for alt in query.alternatives if match_text(query._replace(alternatives=(alt,)), text)]
+    wanted = [(prefix, False) for alt in satisfied for prefix in alt.prefixes] + [
+        (phrase[0], True) for alt in satisfied for phrase in alt.phrases]
+    for chunk in re.finditer(r"\S+", text):
+        if any(token == word if exact else token.startswith(word) for token in tokens(chunk.group())
+               for word, exact in wanted):
+            start, end = max(chunk.start() - 100, 0), min(chunk.start() + 100, len(text))
             return ("…" if start else "") + " ".join(text[start:end].split()) + ("…" if end < len(text) else "")
     return ""
 
 
 class _Entry:
-    """One listed line; for a record its own words (what ``words`` judges) and, with a relation, the record whose
-    members stand under it; for a run of rows ``(what, room, run)``."""
-    __slots__ = ("line", "record", "words", "run")
+    """One listed line; for a record the record itself and its own fields (what ``words`` judges: ``(name, text)``,
+    its text and each correction); for a run of rows ``(what, room, run)``."""
+    __slots__ = ("line", "record", "fields", "run")
 
-    def __init__(self, line: str, record: Optional[Dict[str, Any]] = None, words: Optional[str] = None,
+    def __init__(self, line: str, record: Optional[Dict[str, Any]] = None,
+                 fields: Optional[List[Tuple[str, str]]] = None,
                  run: Optional[Tuple[str, str, List[memory_inventory.Entry]]] = None):
-        self.line, self.record, self.words, self.run = line, record, words, run
+        self.line, self.record, self.fields, self.run = line, record, fields, run
 
 
 class _Lister:
@@ -186,37 +205,42 @@ class _Lister:
     def room(self, room: str) -> Tuple[str, List[_Entry]]:
         head = (f"members of room:{room}: its acting tellings in publication order, then its untold rows as runs in "
                 "the room's reading order")
-        sealed = self.store.sealed_row_refs(room)  # a page recorded in another room that seals rows here is a telling here
-        elsewhere = [page for page in self.store.records(kinds=["page"]) if str(page.get("room_id")) != room
-                     and sealed & {str(ref) for ref in _rooms_of(page).get(room, ())}]
-        records = sorted(self.store.room_records(room) + (self.store.interpret(elsewhere) if elsewhere else []),
-                         key=lambda record: record["sequence"])
+        own = self.store.room_records(room)
+        held = {record["id"] for record in own}
+        elsewhere = [page for ident in self._sealing_pages(room) - held if (page := self.store.get(ident)) is not None]
+        acting = [record for record in (self.store.interpret(elsewhere) if elsewhere else [])
+                  if record.get("status") not in ("rejected", "candidate")]
+        records = sorted(own + acting, key=lambda record: record["sequence"])
         withdrawn = [record for record in self.store.interpreted(room, kinds=("page", "part"))
                      if record.get("status") in ("rejected", "candidate")]
-        entries = self._record_entries(records, here=room)
+        entries = self._record_entries(records, here=room) + self._record_entries(withdrawn)
         if withdrawn:
-            head += "; not acting, not listed: " + ", ".join(
-                f"{'withdrawn' if record['status'] == 'rejected' else 'candidate'} {record['kind']} {record['id']}"
-                for record in withdrawn) + " (memory_read(node_id=…) reads each)"
+            head += f"; {_n(len(withdrawn), 'withdrawn or candidate record')} of this room listed after the acting ones"
         if room == LEGACY_ROOM_ID:
             return head + "; the legacy room names no chat, so no row stands in it", entries
         frontier = legacy_frontier(self.store)
         if type(frontier.get("pos")) is not int:
             return head + "; untold rows unknown: the legacy frontier is not recorded", entries
         gaps: set = set()
+        every: List[memory_inventory.Entry] = []
         try:
-            runs, timed = self._untold_runs(room, gaps)
+            runs: List[List[memory_inventory.Entry]] = []
+            memory_inventory.open_room_rows(self.root, room, gaps=gaps, runs=runs, every=every)  # one read of the room
         except StoreError as exc:  # an interval still importing or unreadable is unknown, never "no untold rows"
             return head + f"; untold rows unknown: the dialogue store answered {type(exc).__name__}", entries
         if gaps:
             from ouroboros.room_appearances import GAP_DETAILS  # D15->D17 is lazy-only
 
             head += "".join(f"; incomplete: {GAP_DETAILS.get(kind, kind)}" for kind in sorted(gaps))
-        if timed:
-            head += ("; this room reads by send time: rows=true between a run's bounds reads stored order and may "
-                     "show other rows")
-        head += f"; untold rows: {sum(len(run) for run in runs)} in {_n(len(runs), 'run')}" if runs else "; untold rows: none"
-        return head, entries + [_Entry(self._run_line("untold", room, run), run=("untold", room, run)) for run in runs]
+        head += (f"; untold rows: {sum(len(run) for run in runs)} in {_n(len(runs), 'run')}" if runs else
+                 "; untold rows: none observed" if gaps else "; untold rows: none")
+        return head, entries + [_Entry(self._run_line("untold", room, run, every), run=("untold", room, run))
+                                for run in runs]
+
+    def _sealing_pages(self, room: str) -> set:
+        """The pages that hold an acting seal of this room's rows: one statement over the index's ``page_rows``."""
+        with self.store._index() as db:  # the snapshot keeps seals without their page; the index keeps both
+            return {ident for (ident,) in db.execute("SELECT DISTINCT page_id FROM page_rows WHERE room=?", (room,))}
 
     def node(self, node_id: str) -> Tuple[str, List[_Entry]]:
         record = self.store.get(node_id)
@@ -229,6 +253,10 @@ class _Lister:
             what = ("nothing stands under a note in the chronicle's relations; a page that seals it names it"
                     if kind == "note" else f"a {kind} has no members relation")
             return f"{head}: {what}; memory_read(node_id='{record['id']}') reads it", []
+        if record.get("status") == "rejected":  # a withdrawn page or part holds nothing now: what it once named
+            relation, head = {"seals": "formerly sealed", "folds": "formerly folded"}[relation], head + ", withdrawn"
+        elif record.get("status") == "candidate":
+            head += ", a candidate, not acting"
         lines = getattr(self, f"_under_{kind}")(record)
         return f"{head}: it {relation} " + lines[0], lines[1]
 
@@ -236,11 +264,10 @@ class _Lister:
 
     def _under_page(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:
         covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
-        rooms = _rooms_of(record)
         entries: List[_Entry] = []
         notes: List[str] = []
-        count = 0
-        for room, refs in rooms.items():
+        counted: List[str] = []
+        for room, refs in _rooms_of(record).items():
             notes += [ref[5:] for ref in refs if str(ref).startswith("note:") and ref[5:] not in notes]
             wanted = {str(ref) for ref in refs if not str(ref).startswith("note:")}
             if not wanted:
@@ -252,55 +279,70 @@ class _Lister:
                 except (chat_chain.RowAddressError, ValueError):  # a span bound that no longer resolves: the room whole
                     rows = list(chat_chain.iter_room_rows(self.root, room))
             except StoreError as exc:  # an interval still importing or unreadable: named, never "no rows"
-                entries.append(_Entry(f"- sealed rows of room:{room}: {len(wanted)} rows not read here: the dialogue "
-                                      f"store answered {type(exc).__name__}"))
+                counted.append(f"room:{room} {len(wanted)} recorded, not read ({type(exc).__name__})")
+                entries.append(_Entry(f"- sealed rows of room:{room}: {_n(len(wanted), 'recorded row')} not read here: "
+                                      f"the dialogue store answered {type(exc).__name__}"))
                 continue
             runs = self._runs(rows, wanted)
-            count += sum(len(run) for run in runs)
-            entries += [_Entry(self._run_line("sealed", room, run), run=("sealed", room, run)) for run in runs]
-        found = [note for ident in notes if (note := self.store.get(ident)) is not None]
-        entries += self._record_entries(self.store.interpret(found) if found else [])
-        missing = len(notes) - len(found)
-        rooms_named = ", ".join(f"room:{room}" for room in rooms)
-        return (f"{_n(count, 'row')} and {_n(len(notes), 'note')}: the rows as runs in each sealed room's reading order ({rooms_named}), "
-                f"then the notes" + (f"; {missing} sealed notes are not in this chronicle" if missing else ""), entries)
+            found = {entry[0]["row_sha256"] for run in runs for entry in run}
+            missing = sorted(wanted - found)
+            counted.append(f"room:{room} {len(wanted)} recorded, {len(found)} found, {len(missing)} missing")
+            entries += [_Entry(self._run_line("sealed", room, run, rows), run=("sealed", room, run)) for run in runs]
+            if missing:  # an edited row changes its content hash: the page still names the old one
+                entries.append(_Entry(f"- sealed rows of room:{room} not found: {_n(len(missing), 'recorded row')} no "
+                                      "longer resolve (an edited row changes its hash): " + ", ".join(
+                                          ref[:12] for ref in missing)))
+        found_notes = [note for ident in notes if (note := self.store.get(ident)) is not None]
+        entries += self._record_entries(self.store.interpret(found_notes) if found_notes else [])
+        missing = len(notes) - len(found_notes)
+        return (f"rows ({'; '.join(counted) or 'none recorded'}) and {_n(len(notes), 'note')}: the rows as runs in "
+                "each sealed room's reading order, then the notes"
+                + (f"; {missing} sealed notes are not in this chronicle" if missing else ""), entries)
 
     def _under_part(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:
         ids = [str(ident) for ident in (record.get("covers") or {}).get("member_ids") or ()]
-        found = [member for ident in ids if (member := self.store.get(ident)) is not None]
-        missing = len(ids) - len(found)
-        return (f"{_n(len(ids), 'record')}, in its recorded order" + (f"; {missing} are not in this chronicle" if missing else ""),
-                self._record_entries(self.store.interpret(found) if found else []))
+        return f"{_n(len(ids), 'record')}, in its recorded order", self._named(ids)
+
+    def _named(self, ids: List[str]) -> List[_Entry]:
+        """The records ``ids`` names, in that order; one that is not in this chronicle keeps its recorded id."""
+        hits = [hit for hit in (self.store.get(ident) for ident in ids) if hit is not None]
+        found = {item["id"]: item for item in self.store.interpret(hits)} if hits else {}
+        listed = {entry.record["id"]: entry for entry in self._record_entries(list(found.values()))}
+        return [listed[ident] if ident in listed else _Entry(f"- record {ident}: NOT in this chronicle; its words "
+                                                            "cannot be read here") for ident in ids]
 
     def _under_account(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:
         sources = [src for src in record.get("sources") or () if isinstance(src, Mapping)]
-        found = {ident: hit for src in sources if (hit := self.store.get(ident := str(src.get("id") or ""))) is not None}
-        acting = {item["id"]: item for item in (self.store.interpret(list(found.values())) if found else [])}
         entries = []
         for src in sources:
             cited = f"cites revision {src.get('revision')}" + (f" ({src['status']} then)" if src.get("status") and
                                                                src["status"] != "final" else "")
-            if src.get("missing") or str(src.get("id")) not in acting:
+            found = None if src.get("missing") else self.store.get(str(src.get("id") or ""))
+            if found is None:
                 entries.append(_Entry(f"- source {src.get('kind')} {src.get('id')} (room:{src.get('room_id')}); {cited}; "
                                       "NOT in this chronicle: its words cannot be read here"))
                 continue
+            source = self.store.interpret([found])[0]
+            try:  # what words judge: the text as of the revision cited, which the printed reader opens
+                then = self.store.interpret([found], revision=str(src.get("revision")))[0] if src.get(
+                    "revision_known", True) and src.get("revision") else source
+            except ValueError:
+                then = source
             since = [f"later corrections not in this account: {', '.join(src['later_corrections'])}"
                      if src.get("later_corrections") else "",
                      "" if src.get("revision_known", True) else "that revision is not in this chronicle",
                      f"now {src['status_now']}" if src.get("status_now") and src.get("status_now") != src.get("status") else ""]
-            source = acting[str(src["id"])]
             entries.append(_Entry(self._record_line(source, extra=[cited, *filter(None, since)],
                                                     reader=f"memory_read(node_id='{src['id']}', revision='{src.get('revision')}')"),
-                                  source if source["kind"] in RELATIONS else None, self._words(source)))
+                                  source, self._fields(then)))
         return f"{_n(len(sources), 'source version')}, in its recorded order; nothing sealed or folded", entries
 
     def _under_selection(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:
         ids = [str(ident) for ident in record.get("replaces") or ()]
-        found = [hit for ident in ids if (hit := self.store.get(ident)) is not None]
         account = record.get("target_id")
         shown = "shows" if record.get("shown") else "withdraws"
         return (f"{_n(len(ids), 'record')}: it {shown} account {account} (memory_read(node_id='{account}')) in place of them",
-                self._record_entries(self.store.interpret(found) if found else []))
+                self._named(ids))
 
     def _under_legacy(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:
         raw = (record.get("covers") or {}).get("raw_range") or {}
@@ -323,13 +365,15 @@ class _Lister:
         from ouroboros.memory_view_account import told_by
 
         told = told_by(self.store, [record["id"] for record in records]) if records else {}
-        return [_Entry(self._record_line(record, told=told.get(record["id"]) or "", here=here),
-                       record if record["kind"] in RELATIONS else None, self._words(record)) for record in records]
+        return [_Entry(self._record_line(record, told=told.get(record["id"]) or "", here=here), record,
+                       self._fields(record)) for record in records]
 
-    def _words(self, record: Mapping[str, Any]) -> str:
-        """What a record says: its own text and the text of every correction standing under it."""
+    def _fields(self, record: Mapping[str, Any]) -> List[Tuple[str, str]]:
+        """What a record says, field by field: its own text, then each correction standing under it (as interpreted:
+        at a cited revision, only those up to it)."""
         fixes = [fix for item in record.get("corrections") or () if (fix := self.store.get(str(item.get("id")))) is not None]
-        return "\n\n".join([str(record.get("text") or ""), *(str(fix.get("text") or "") for fix in fixes)])
+        return [("text", str(record.get("text") or "")), *((f"correction {fix['id']}", str(fix.get("text") or ""))
+                                                          for fix in fixes)]
 
     def _record_line(self, record: Dict[str, Any], *, told: str = "", extra: Iterable[str] = (), reader: str = "",
                      here: str = "") -> str:
@@ -359,7 +403,8 @@ class _Lister:
         if kind == "note":
             return f"written {memory_inventory.minute(record['ts'])}" if record.get("ts") else "date not recorded"
         if kind == "selection":
-            return ""
+            return "period not recorded (a choice" + (f", made {memory_inventory.minute(record['ts'])})"
+                                                      if record.get("ts") else ")")
         if kind == "page":
             return memory_inventory.period_text((record.get("covers") or {}).get("ts_span"))
         try:
@@ -373,23 +418,19 @@ class _Lister:
             self._units = {unit.record_id: unit for unit in memory_inventory.legacy_units(self.store, self.root)}
         return self._units
 
-    def _run_line(self, what: str, room: str, run: List[memory_inventory.Entry]) -> str:
+    def _run_line(self, what: str, room: str, run: List[memory_inventory.Entry],
+                  stored: List[memory_inventory.Entry]) -> str:
         first, last = chat_chain.format_address(run[0][0]), chat_chain.format_address(run[-1][0])
         span = memory_inventory.period_text(_time_span(meta.get("ts") for _address, meta, _pos in run))
         speakers = Counter(str(row_author(meta, pos=pos, **self.lineage).get("label") or "author not recorded")
                            for _address, meta, pos in run)
         named = ", ".join(f"{label} {count}" for label, count in speakers.most_common())
-        return (f"- {what} rows of room:{room}: {_n(len(run), 'row')}, {span}; speakers: {named}; from {first} to {last}; "
-                f"memory_read(room_id='{room}', rows=true, from='{first}', to='{last}')")
+        readers = "; ".join(f"memory_read(room_id='{room}', rows=true, from='{chat_chain.format_address(a)}', "
+                            f"to='{chat_chain.format_address(b)}')" for a, b in _slices(run, stored))
+        return (f"- {what} rows of room:{room}: {_n(len(run), 'row')}, {span}; speakers: {named}; from {first} to {last} "
+                f"in reading order; " + readers)
 
     # --- runs -----------------------------------------------------------------------------------------
-
-    def _untold_runs(self, room: str, gaps: set) -> Tuple[List[List[memory_inventory.Entry]], bool]:
-        """The runs of the room's open rows, collected by the one open-row computation from its own single read."""
-        runs: List[List[memory_inventory.Entry]] = []
-        memory_inventory.open_room_rows(self.root, room, gaps=gaps, runs=runs)  # one read of the room's rows
-        rows = [meta for run in runs for _address, meta, _pos in run]
-        return runs, bool(rows) and bool(rooms_read_by_time(self.root, rows))
 
     def _runs(self, entries: List[memory_inventory.Entry], members: set) -> List[List[memory_inventory.Entry]]:
         """The maximal consecutive runs of ``members`` (row_sha256) among ``entries`` in their room's reading order."""
@@ -410,7 +451,10 @@ class _Lister:
 
     def context(self, listed: List[_Entry], room: int) -> str:
         """The next stored levels under the listed records, each added whole while it fits ``room``, else none of it."""
-        added, level, parents = "", 2, [entry for entry in listed if entry.record is not None]
+        def below_of(entries: List[_Entry]) -> List[_Entry]:
+            return [entry for entry in entries if entry.record is not None and entry.record["kind"] in RELATIONS]
+
+        added, level, parents = "", 2, below_of(listed)
         expanded = set()  # a record reached twice (a folded page listed beside its part) is expanded once
         while parents and room > 0:
             block, below, used = [], [], 0
@@ -426,7 +470,7 @@ class _Lister:
                 if used > room:
                     return added
                 block += lines
-                below += [entry for entry in entries if entry.record is not None]
+                below += below_of(entries)
             if not block:
                 return added
             text = (f"\ncontext, level {level}: what stands under the entries above, added whole because the page "
@@ -435,6 +479,21 @@ class _Lister:
                 return added
             added, room, parents, level = added + text, room - len(text), below, level + 1
         return added
+
+
+def _slices(run: List[memory_inventory.Entry], stored: List[memory_inventory.Entry]) -> List[Tuple[Any, Any]]:
+    """The run's maximal stored-contiguous slices, ``(first, last)`` addresses in stored order: rows=true between
+    each pair returns exactly those rows of the run, whatever the room's reading order."""
+    index = {entry[2]: at for at, entry in enumerate(stored)}
+    places = sorted(index[entry[2]] for entry in run if entry[2] in index)
+    slices, begin = [], None
+    for at, place in enumerate(places):
+        if begin is None:
+            begin = place
+        if at + 1 == len(places) or places[at + 1] != place + 1:
+            slices.append((stored[begin][0], stored[place][0]))
+            begin = None
+    return slices
 
 
 def _counts(record: Mapping[str, Any]) -> str:

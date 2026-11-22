@@ -467,19 +467,21 @@ def _room_entries(root: Any, store: ChronicleStore, room: str,
 
 
 def open_room_rows(root: Any, room_id: Any, gaps: Optional[set] = None, *,
-                   runs: Optional[List[List[Entry]]] = None) -> List[Entry]:
+                   runs: Optional[List[List[Entry]]] = None, every: Optional[List[Entry]] = None) -> List[Entry]:
     """``(address, row_meta, pos)`` of one room's open rows in reading order: append order, or in a room
     holding imported earlier messages its time order, though pages sealed them all
     (``dialogue_provenance.in_reading_order``), so lanes and the floor's oldest-first walk follow time;
     ``room_facts`` bounds their stored times. Addresses and positions stay physical. ``runs`` collects, from the
     same one read, the maximal runs of these rows among all the room's rows in its reading order, a sealed row
-    ending each (``memory_members``' untold rows)."""
+    ending each (``memory_members``' untold rows); ``every`` receives that read's rows, sealed ones too, in append order."""
     store, room = ChronicleStore(root), str(room_id)
     entries = _room_entries(root, store, room, gaps=gaps)  # ``gaps``: what this Project's read may lack (``chat_chain.room_rows``)
     if not entries:
         return []
     sealed = store.sealed_row_refs(room)
     kept = [entry for entry in entries if entry[0]["row_sha256"] not in sealed]
+    if every is not None:
+        every.extend(entries)
     if runs is not None:
         run: List[Entry] = []
         for entry in [*in_reading_order(entries, rooms_read_by_time(root, (e[1] for e in entries)), lambda e: e[1]), None]:
