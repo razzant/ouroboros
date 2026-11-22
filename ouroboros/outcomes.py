@@ -1123,7 +1123,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         execution_status = EXECUTION_FAILED
         reason_code = REASON_EMPTY_FINAL_TEXT
         failure = {"kind": "agent", "reason_code": reason_code}
-    elif (_infra := next(
+    elif not usage_status and (_infra := next(  # a producer that typed its status is never read from its words
         (row for row in _INFRA_TEXT_PREFIXES if text.lstrip().startswith(row[0])), None,
     )) is not None:
         execution_status = EXECUTION_INFRA_FAILED
