@@ -1,0 +1,62 @@
+# Scoped validation lane for Settings › Agents: push to ci/agents-settings-a188da16 only. Runs the keyless
+# agents browser tests and the four Node home modules in one hosted job mirroring ui-browser-push.yml; validation-only.
+name: 'Agents settings – scoped validation'
+
+on:
+  push:
+    branches: [ci/agents-settings-a188da16]
+
+permissions:
+  contents: read
+
+jobs:
+  agents-settings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Report the exact checkout under test
+        run: git rev-parse HEAD
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Install UI smoke Chromium and WebKit (stages the pinned Node)
+        id: install_browsers
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Run Settings › Agents browser tests (keyless; ui_browser marker, as the reviewed lane)
+        id: pytest_agents
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/agents" -- \
+            python -m pytest tests/test_agents_settings_browser.py -m ui_browser -q --tb=short \
+            --junitxml="${{ runner.temp }}/agents-settings.xml"
+      - name: Run the four browser home modules on the pinned Node (TAP prints counts)
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        run: |
+          "${{ github.workspace }}/node-standalone/bin/node" --test --test-concurrency=1 \
+            web/tests/agents_settings.test.js web/tests/subagents_settings.test.js \
+            web/tests/model_catalog_store.test.js web/tests/model_source_mark.test.js
+      - name: Report counts; fail on any skip (7 = 2 + 1 + 2x2 cases in the module)
+        if: ${{ !cancelled() && steps.pytest_agents.outcome != 'skipped' }}
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("${{ runner.temp }}/agents-settings.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+          total = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          print(f"pytest counts: tests={total} skipped={skipped}")
+          sys.exit(0 if total == 7 and skipped == 0 else 1)
+          PY
