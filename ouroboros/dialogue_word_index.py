@@ -45,7 +45,6 @@ log = logging.getLogger(__name__)
 FORMAT = 1  # the token rule and encoding; a different one is bypassed and rebuilt
 TOKEN_CHARS = 64
 CHUNK_ROWS = 256  # rows one posting commit carries: a lock-hold bound measured in the report, not a policy
-_PAGE_SQL_LIMIT = 500  # seqs one statement names
 _DDL = (
     "CREATE TABLE IF NOT EXISTS dw_meta (id INTEGER PRIMARY KEY CHECK (id=1), format INTEGER NOT NULL, "
     "generation TEXT NOT NULL, seen_rev INTEGER NOT NULL, usable INTEGER NOT NULL CHECK (usable IN (0,1)), "

@@ -44,9 +44,9 @@ from ouroboros.dialogue_words import Field, WordQuery, excerpt, fields_of, match
 
 log = logging.getLogger(__name__)
 
-# Postings candidates one call re-checks at most: a bound on one read's time, never a choice of which rows
-# matter. Measured on a generated 100,000-row store: about 35 µs a candidate, so 50,000 keep one call under
-# about two seconds whatever the query; met, it is disclosed and the continuation advances.
+# The bound limits the number of candidate rows whose originals one call rechecks. Measured on a generated
+# 100,000-row store: about 35 µs a candidate, so 50,000 keep one call under about two seconds whatever the query;
+# met, it is disclosed.
 RECHECK_BOUND = 50_000
 EXCERPT_CHARS = 240  # the shown part of one field around its first match; the row's reader holds it whole
 ORDERS = ("newest", "oldest")

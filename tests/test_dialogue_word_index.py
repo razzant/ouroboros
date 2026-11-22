@@ -290,7 +290,7 @@ def test_retirement_frees_pages_and_leaves_the_rows(tmp_path):
     dwi.run(tmp_path, lambda: False)
     size = ds.path(tmp_path).stat().st_size
     retired = dwi.retire(tmp_path)
-    assert retired["state"] == "retired" and retired["pages_freed"] >= 0 and retired["file_shrinks"] is False
+    assert retired["state"] == "retired" and retired["pages_freed"] > 0 and retired["file_shrinks"] is False
     assert ds.path(tmp_path).stat().st_size >= size
     with ds.transaction(tmp_path, write=False) as conn:
         assert dwi.generation(conn) is None
