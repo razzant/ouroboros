@@ -644,6 +644,9 @@ def test_a_named_match_found_in_an_incomplete_walk_says_what_was_not_read(regist
         return real_iterdir(self)
 
     monkeypatch.setattr(Path, "iterdir", iterdir)
+    import os
+
+    os.utime(hidden)  # its permissions changed: the walk reads the folder again, however settled the last walk was
     partial = _listed(registry, name="shared")
     assert partial["found"] is True and len(partial["skills"]) == 1
     assert partial["unreadable_sources"] == [f"{hidden} (PermissionError)"]

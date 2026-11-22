@@ -614,7 +614,13 @@ def test_a_long_failure_cause_is_cut_with_a_mark(tmp_path, monkeypatch):
 def test_a_discovery_that_answers_none_still_builds_the_request_and_says_the_failure(tmp_path, monkeypatch):
     """The other branch of the build's guard (RV3 R3-7): an injected discovery answering None neither breaks the
     always-in-context block nor lets the catalog read again."""
-    monkeypatch.setattr("ouroboros.skill_catalogue.discover_context_skills", lambda *_args: None)
+    calls = []
+
+    def reader(*_args):  # None first, an empty install on any repeat: a second read would claim no skills
+        calls.append(True)
+        return None if len(calls) == 1 else []
+
+    monkeypatch.setattr("ouroboros.skill_catalogue.discover_context_skills", reader)
     _env, text = _build(tmp_path)
     assert "The skill list could not be read (OSError: skill discovery failed); list_skills() reads it." in text
-    assert "No skills are installed." not in text
+    assert "No skills are installed." not in text and len(calls) == 1
