@@ -186,6 +186,13 @@ export function grantReady(entity) {
     return !entity?.grants || entity.grants.all_granted !== false;
 }
 
+/** The host's own answer whether missing access stops the skill (a key saved later or a permission waiting for the
+ * check of edited files does not); an older host without the field answers by `all_granted`. */
+export function grantBlocks(entity) {
+    const grants = entity?.grants;
+    return !!grants && (typeof grants.blocked === 'boolean' ? grants.blocked : grants.all_granted === false);
+}
+
 export function isRateLimitError(message) {
     const text = String(message || '').toLowerCase();
     return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');

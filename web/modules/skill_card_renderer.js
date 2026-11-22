@@ -9,6 +9,7 @@ import { tr } from './i18n.js';
 import {
     boundedText,
     escapeHtmlAttr as escapeHtml,
+    grantBlocks,
     grantReady,
     preflightFailed,
     preflightFailedStale,
@@ -388,8 +389,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
             actions: `${resume}${smallButton('Review', name, skill.review_stale ? 'rereview' : 'review')}${ownerMayAttest(skill) ? skipButton(name) : ''}` }));
         lockReason = 'Can’t turn on until it is reviewed.';
     } else if (!grantReady(skill)) {
-        if (!skill.lifecycle_pending) chip = chipHtml('Needs access', 'warn');
-        needs = true;
+        // What does not stop the skill (a key saved later, a permission waiting for a check) stays a suggestion.
+        if (!skill.lifecycle_pending && grantBlocks(skill)) chip = chipHtml('Needs access', 'warn');
+        needs = grantBlocks(skill);
         const grants = skill.grants || {};
         const keys = grants.missing_keys || grants.requested_keys || [];
         const permissions = grants.missing_permissions || grants.requested_permissions || [];
@@ -414,7 +416,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     // Declared MCP servers: Connect is the owner's continuation once the skill itself is ready (DESIGN §4). A running
     // review or a pending update names the state above ahead of the current bytes' gate, access and start facts.
     const servers = Array.isArray(skill.mcp_servers) ? skill.mcp_servers : [];
-    const runnable = reviewReady(skill) && !preflightFailed(skill) && grantReady(skill) && !skill.load_error && !conflict;
+    const runnable = reviewReady(skill) && !preflightFailed(skill) && !grantBlocks(skill) && !skill.load_error && !conflict;
     if (skill.enabled && !needs && !skill.lifecycle_pending && !untrusted(skill) && runnable && servers.length) {
         const blocked = servers.find((server) => server.conflict);
         const failed = servers.find((server) => server.configured && server.error);

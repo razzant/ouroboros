@@ -9,6 +9,7 @@ import {
     continuableReview, fillFindingsOnOpen, installedSkillModel, installedWhoHtml, isMadeHere, renderInstalledSkillCard,
     reviewSentence,
 } from '../modules/skill_card_renderer.js';
+import { grantBlocks } from '../modules/utils.js';
 
 const LISTING = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/extensions_v4.json', import.meta.url), 'utf8'));
 const row = (name) => structuredClone(LISTING.skills.find((skill) => skill.name === name));
@@ -492,6 +493,28 @@ test('a grant left behind by a byte change is named as the earlier version’s g
     // Never granted: the tray asks, and says nothing about an earlier version.
     const fresh = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'] } })));
     assert.doesNotMatch(fresh, /earlier version|skills-tray-note/);
+});
+
+test('Enable asks for a grant first only for access the host says stops the skill (grantBlocks)', () => {
+    assert.equal(grantBlocks({ grants: { all_granted: false, blocked: false, pending_keys: ['FIXTURE_KEY'] } }), false);
+    assert.equal(grantBlocks({ grants: { all_granted: false, blocked: true, missing_keys: ['OPENAI_API_KEY'] } }), true);
+    assert.equal(grantBlocks({ grants: { all_granted: false } }), true, 'an older host without `blocked` answers by all_granted');
+    assert.equal(grantBlocks({ grants: { all_granted: true } }), false);
+});
+
+test('access the host says stops nothing is a grant suggestion: Connect tools stays, no Needs access chip', () => {
+    // RV1 S11 (owner 1A/B″, 21.11): a key saved after the grant, or a permission waiting for the check of edited
+    // files, keeps the skill running; only the host's `blocked` turns the card into Needs access.
+    const server = { id: 'example', title: 'Example', conflict: false, configured: false, tool_count: 0, listed: false, error: '' };
+    const pending = skill({ type: 'script', enabled: true, mcp_servers: [server], grants: {
+        all_granted: false, blocked: false, usable: true, missing_keys: ['FIXTURE_KEY'], pending_keys: ['FIXTURE_KEY'] } });
+    const html = renderInstalledSkillCard(pending);
+    assert.match(traysOf(html), /data-skill-action="connect_tools"[^>]*>Connect tools</);
+    assert.match(traysOf(html), /data-skill-action="grant" data-keys="FIXTURE_KEY"/, 'the key is still offered for a grant');
+    assert.notDeepEqual((chipOf(html) || []).slice(2), ['Needs access']);
+    const blocked = renderInstalledSkillCard(skill({ ...pending, grants: { ...pending.grants, blocked: true, pending_keys: [] } }));
+    assert.doesNotMatch(blocked, /connect_tools/);
+    assert.deepEqual(chipOf(blocked).slice(1), ['warn', 'Needs access']);
 });
 
 test('declared MCP servers: Connect tools once the skill is ready, then the configured and listed facts', () => {
