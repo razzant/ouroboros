@@ -3023,7 +3023,9 @@ no code applies (Telegram: the first person to write becomes its owner). Where t
 install grants skills nothing on its own, the card's outcome line reads «Telegram starts after you allow it in
 Extensions» instead of the skill's note, since nothing in the card allows it. Summary
 shows the card's row when a token will be saved. The
-card's words, steps, link and options are the skill's declaration: nothing in the step is a service's own.
+card's words, steps, link and options are the skill's declaration: nothing in the step is a service's own. Being a
+built-in's, they translate as the catalog's words do; words composed with a name (the service, the account) go
+through the composed seam, and an account's @name and the token stay as they are.
 
 The first-run wizard is compact; the step rail alone says which step this is. It names each step by one short word
 (`railTitle`), so seven pills keep one line where the window allows; a phone's rail shows the current pill alone, its

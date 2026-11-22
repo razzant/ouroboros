@@ -10,6 +10,7 @@ import vm from 'node:vm';
 import { createStarterSkillsStep, needsText, normalizeStarterGroups } from '../modules/onboarding_starter_skills.js';
 import { checkIdentity, normalizeConnection, pairingCode } from '../modules/onboarding_connection_card.js';
 import { qrSvg } from '../modules/qr_svg.js';
+import { applyPayload, setMissTransport } from '../modules/i18n.js';
 
 // The vendored encoder as a page loads it: a classic script that defines the global `qrcodegen`.
 vm.runInThisContext(readFileSync(new URL('../vendor/qrcodegen/qrcodegen.js', import.meta.url), 'utf8'));
@@ -394,7 +395,7 @@ test('Connect opens the skill’s steps and its token field; a checked token sho
     let card = cardOf(host.innerHTML);
     assert.match(text(card), /Phone via Telegram .* Hide Open @BotFather in Telegram Open @BotFather Send \/newbot Choose a name, then a username ending in “bot” BotFather replies with a token: paste it here and press Check Bot token Check$/);
     // The field stands under the skill's last step, which says what to paste; its own name is read out, not shown.
-    assert.match(card, /<li class="skills-connection-token"><span data-i18n-authored>BotFather replies with a token: paste it here and press Check<\/span><label for="connection-telegram-token" class="skills-starter-sr">Bot token<\/label>/);
+    assert.match(card, /<li class="skills-connection-token"><span>BotFather replies with a token: paste it here and press Check<\/span><label for="connection-telegram-token" class="skills-starter-sr">Bot token<\/label>/);
     assert.match(card, /href="https:\/\/t\.me\/BotFather" target="_blank" rel="noopener noreferrer"/);
     assert.match(card, /type="password" autocomplete="off" spellcheck="false" data-connection-token/);
     assert.doesNotMatch(card, /<svg|data-connection-account/, 'no QR before a token is checked');
@@ -487,6 +488,34 @@ test('a draft that is no token is said here, never checked and never sent; the s
     paste(host, ` ${'x'.repeat(512)} `);
     await settle();
     assert.deepEqual(checks, [['telegram', 'x'.repeat(512)]]);
+});
+
+test('the card’s declared words translate as the catalog’s do; an account’s @name stays; composed words go through fmt', async () => {
+    const { host } = await cardStep(withCard(), () => ({ status: 'ok', username: 'my_ouro_bot' }));
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    paste(host, TOKEN);
+    await settle();
+    const card = cardOf(host.innerHTML);
+    // Title, pitch, steps, the step's button, hint, note and option label carry no mark that keeps them English.
+    assert.deepEqual(card.match(/<[^>]*data-i18n-authored[^>]*>/g), ['<div class="skills-connection-qr" data-i18n-authored>',
+        '<strong data-connection-account data-i18n-authored>'], 'only the QR (its label names the account) and the @name');
+    assert.match(card, /data-i18n-fmt="Open @\{account\}">Open @my_ouro_bot<\/a>/, 'the link’s words are composed, not keyed with a name');
+    assert.match(card, /<span>Send results and errors of work here<\/span>/);
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    assert.match(cardOf(host.innerHTML), /<span class="skills-starter-pitch" data-i18n-fmt="@\{account\} · connects when you finish setup">@my_ouro_bot · connects when you finish setup<\/span>/);
+    // A language with a memory: a failure's sentence names the service through the composed seam, never keyed with it.
+    setMissTransport(() => {});
+    applyPayload({ language: 'ru', english: false, entries: {
+        '{service} did not accept this token; it is not saved.': { text: '{service} не принял этот токен, он не сохранён.' } } });
+    try {
+        const refused = await cardStep(withCard(), () => ({ status: 'refused' }));
+        refused.host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+        paste(refused.host, TOKEN);
+        await settle();
+        assert.match(cardOf(refused.host.innerHTML), /data-connection-status="refused" data-i18n-fmt="\{service\} did not accept this token; it is not saved\.">Telegram не принял этот токен, он не сохранён\.<\/p>/);
+    } finally {
+        applyPayload({ language: 'en', english: true });
+    }
 });
 
 test('where the install grants skills nothing on its own, the card says the skill starts once allowed, never «connects»', async () => {

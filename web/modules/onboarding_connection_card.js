@@ -8,8 +8,12 @@
 // code were drawn (the host posts them to the skill once it runs): a code nobody saw would leave the skill waiting for
 // a scan nobody can make. A failed or unfinished check never blocks Continue or Finish; the token alone is saved then.
 // A draft no service takes (a space or line break inside, or longer than any token) is never checked or sent. Each
-// failure names only its own cause, and only the service's own refusal says it did not accept the token.
+// failure names only its own cause, and only the service's own refusal says it did not accept the token. The card's
+// declared words are a built-in skill's, the maintainers' as the catalog's are, so they go through the interface's
+// translation (owner 2026-11-21, v3.1 §5); words composed with a name go through `fmt`, and an account's @name, a
+// link and the token stay as they are.
 import { apiFetch } from './api_client.js';
+import { fmt } from './i18n.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { qrEncoder, qrSvg } from './qr_svg.js';
 
@@ -19,6 +23,8 @@ const MAX_TOKEN = 512;  // the host's own bound on a token (onboarding_connectio
 const flaw = (value) => (value.length > MAX_TOKEN ? 'long' : /\s/.test(value) ? 'spaced' : '');
 const https = (value) => (/^https:\/\/[^\s"'<>]+$/.test(String(value || '')) ? String(value) : '');
 const text = (value) => String(value ?? '').trim();
+// Words composed with a name or a reason, through the composed seam and marked so the overlay leaves them alone.
+const composed = (template, params = {}) => [fmt(template, params), ` data-i18n-fmt="${escapeHtml(template)}"`];
 // A declared field name in words: `botToken` → "Bot token".
 const fieldWords = (name) => text(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().replace(/^./, (first) => first.toUpperCase());
 
@@ -69,7 +75,10 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
     const service = text(item.title || item.name || declaration.skill);
     const title = declaration.title || service;
     const pitch = declaration.pitch || text(item.pitch || item.description);
-    const own = (value) => (value ? ' data-i18n-authored' : '');  // the skill's words stay its own
+    // Only a bare name and a skill author's description (no declared or catalog words) stay as they are, as on rows.
+    const authored = (own) => (own ? ' data-i18n-authored' : '');
+    const bareTitle = !declaration.title && !text(item.title);
+    const authorPitch = !declaration.pitch && !text(item.pitch);
     let sent = 0;
     const token = () => card.token.trim();
     // Where the token stands: a local flaw first (never checked), else the host's answer for exactly this token.
@@ -93,33 +102,39 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
         repaint();
     }
 
+    // Each status in its own words: [the words, their composed-seam mark], fixed ones as plain text the overlay reads.
     function statusWords(state) {
-        return {
+        const words = {
             checking: 'Checking…',
             spaced: 'A token has no spaces or line breaks inside, so this one is not saved.',
             long: 'A token is at most 512 characters, so this one is not saved.',
-            refused: `${service} did not accept this token; it is not saved.`,
-            unreachable: `Could not reach ${service} from here, so there is no QR code. The token is still saved when you finish.`,
-            unavailable: `The token could not be checked (${state?.reason || 'no answer'}), so there is no QR code. The token is still saved when you finish.`,
-        }[state?.status] || '';
+        }[state?.status];
+        if (words) return [words, ''];
+        return {
+            refused: () => composed('{service} did not accept this token; it is not saved.', { service }),
+            unreachable: () => composed('Could not reach {service} from here, so there is no QR code. The token is still saved when you finish.', { service }),
+            unavailable: () => composed('The token could not be checked ({reason}), so there is no QR code. The token is still saved when you finish.', { reason: state?.reason || 'no answer' }),
+        }[state?.status]?.() || ['', ''];
     }
 
     function optionsHtml() {
         return declaration.options.map((option) => `<label class="skills-connection-option"><input type="checkbox" class="ui-checkbox" data-connection-option="${escapeHtml(option.key)}"${card.options[option.key] ? ' checked' : ''}>
-            <span${own(true)}>${escapeHtml(option.label)}</span></label>`).join('');
+            <span>${escapeHtml(option.label)}</span></label>`).join('');
     }
 
     function pairHtml(account) {
         const target = link(account);
         const qr = qrSvg(target, { label: `QR code for @${account}` });
+        const [allowed, allowMark] = composed(`{service} ${later}.`, { service });
+        const [open, openMark] = composed('Open @{account}', { account });
         return `<div class="skills-connection-pair">
-            ${qr ? `<div class="skills-connection-qr">${qr}</div>` : ''}
+            ${qr ? `<div class="skills-connection-qr" data-i18n-authored>${qr}</div>` : ''}
             <div class="skills-connection-facts">
-                <strong data-connection-account>@${escapeHtml(account)}</strong>
-                ${declaration.hint ? `<span${own(true)}>${escapeHtml(declaration.hint)}</span>` : ''}
-                ${declaration.allow ? `<span data-connection-allow>${escapeHtml(`${service} ${later}.`)}</span>`
-                    : declaration.note ? `<span${own(true)}>${escapeHtml(declaration.note)}</span>` : '<span>It connects when you finish setup.</span>'}
-                <span>On this device? <a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer" data-connection-link>Open @${escapeHtml(account)}</a></span>
+                <strong data-connection-account data-i18n-authored>@${escapeHtml(account)}</strong>
+                ${declaration.hint ? `<span>${escapeHtml(declaration.hint)}</span>` : ''}
+                ${declaration.allow ? `<span data-connection-allow${allowMark}>${escapeHtml(allowed)}</span>`
+                    : declaration.note ? `<span>${escapeHtml(declaration.note)}</span>` : '<span>It connects when you finish setup.</span>'}
+                <span><span>On this device?</span> <a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer" data-connection-link${openMark}>${escapeHtml(open)}</a></span>
                 ${optionsHtml()}
             </div>
         </div>`;
@@ -132,14 +147,14 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             <button type="button" class="btn btn-default btn-sm" data-connection-check>Check</button></span>`;
     }
 
-    // Closed, a set token says where it stands in the place of the pitch.
+    // Closed, a set token says where it stands in the place of the pitch: [the words, their composed-seam mark].
     function standing() {
         const state = settled();
-        if (!token()) return '';
-        if (state?.status === 'ok') return `@${state.username} · ${later}`;
-        if (state?.status === 'refused') return `${service} did not accept the token`;
-        if (state?.status === 'spaced' || state?.status === 'long') return 'Not a token · not saved';
-        return state?.status === 'checking' ? 'Checking the token…' : 'Token not checked · saved when you finish';
+        if (!token()) return null;
+        if (state?.status === 'ok') return composed(`@{account} · ${later}`, { account: state.username });
+        if (state?.status === 'refused') return composed('{service} did not accept the token', { service });
+        if (state?.status === 'spaced' || state?.status === 'long') return ['Not a token · not saved', ''];
+        return [state?.status === 'checking' ? 'Checking the token…' : 'Token not checked · saved when you finish', ''];
     }
 
     return {
@@ -148,22 +163,23 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             const state = settled();
             const id = escapeHtml(item.id);
             const field = `connection-${escapeHtml(declaration.skill)}-token`;
-            const shown = card.open ? '' : standing();
+            const shown = card.open ? null : standing();
+            const [said, saidMark] = state && state.status !== 'ok' ? statusWords(state) : ['', ''];
             return `<div class="skills-connection" data-connection="${escapeHtml(declaration.skill)}" style="--arrive: ${order}">
                 <div class="skills-connection-head">
                     <label class="skills-starter-skill" data-starter-skill="${id}">
                         <input type="checkbox" class="ui-checkbox" data-starter-item="${id}"${ticked() ? ' checked' : ''}>
-                        <span class="skills-starter-words"><strong${own(declaration.title)}>${escapeHtml(title)}</strong>
-                            <span class="skills-starter-pitch"${own(!shown && declaration.pitch)}>${escapeHtml(shown || pitch)}</span></span>
+                        <span class="skills-starter-words"><strong${authored(bareTitle)}>${escapeHtml(title)}</strong>
+                            <span class="skills-starter-pitch"${shown ? shown[1] : authored(authorPitch)}>${escapeHtml(shown ? shown[0] : pitch)}</span></span>
                     </label>
                     <button type="button" class="btn btn-default btn-sm" data-connection-toggle aria-expanded="${card.open}">${card.open ? 'Hide' : token() ? 'Change' : 'Connect'}</button>
                 </div>
                 ${card.open ? `<div class="skills-connection-body">
                     <ol class="skills-connection-steps">
-                        ${declaration.steps.map((step, index) => `<li${index === declaration.steps.length - 1 ? ' class="skills-connection-token"' : ''}><span${own(true)}>${escapeHtml(step.text)}</span>${step.link ? ` <a class="btn btn-default btn-sm" href="${escapeHtml(step.link)}" target="_blank" rel="noopener noreferrer"${own(Boolean(step.action))}>${escapeHtml(step.action || 'Open')}</a>` : ''}${index === declaration.steps.length - 1 ? fieldHtml(field, true) : ''}</li>`).join('')}
+                        ${declaration.steps.map((step, index) => `<li${index === declaration.steps.length - 1 ? ' class="skills-connection-token"' : ''}><span>${escapeHtml(step.text)}</span>${step.link ? ` <a class="btn btn-default btn-sm" href="${escapeHtml(step.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(step.action || 'Open')}</a>` : ''}${index === declaration.steps.length - 1 ? fieldHtml(field, true) : ''}</li>`).join('')}
                         ${declaration.steps.length ? '' : `<li class="skills-connection-token">${fieldHtml(field, false)}</li>`}
                     </ol>
-                    ${state && state.status !== 'ok' ? `<p class="skills-starter-sub" role="status" data-connection-status="${state.status}">${escapeHtml(statusWords(state))}</p>` : ''}
+                    ${said ? `<p class="skills-starter-sub" role="status" data-connection-status="${state.status}"${saidMark}>${escapeHtml(said)}</p>` : ''}
                     ${state?.status === 'ok' ? pairHtml(state.username) : ''}
                 </div>` : ''}
             </div>`;
@@ -213,8 +229,8 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             return { [declaration.skill]: { fields: { [declaration.token]: token() }, ...(shown ? { code: card.code,
                 options: Object.fromEntries(declaration.options.map((option) => [option.key, card.options[option.key] ? option.on : option.off])) } : {}) } };
         },
-        /** Summary's row while a token will be saved: [title, where it stands]. */
-        summary: () => (ticked() && saved() ? [title, settled()?.status === 'ok' ? `@${settled().username}` : 'Token not checked'] : null),
+        /** Summary's row while a token will be saved: [title, where it stands, whether that is an account's @name]. */
+        summary: () => (ticked() && saved() ? [title, ...(settled()?.status === 'ok' ? [`@${settled().username}`, true] : ['Token not checked', false])] : null),
         snapshot: () => ({ ...card, options: { ...card.options } }),
     };
 }

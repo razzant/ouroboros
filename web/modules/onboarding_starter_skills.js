@@ -13,6 +13,7 @@
 // to the step. A list that cannot be read leaves the host's defaults in place and says so.
 import { skillSourcesApi } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
+import { fmt } from './i18n.js';
 import { createConnectionCard, normalizeConnection } from './onboarding_connection_card.js';
 
 const BUILT_IN_TITLE = 'Built in';
@@ -124,19 +125,22 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             state.error && state.status === 'ready' ? `The list couldn’t be refreshed (${state.error}).` : ''].filter(Boolean).join(' ');
     }
     const unreadText = () => `The list couldn’t be read (${state.error}). Ouroboros installs the recommended skills after it starts. Manage them in Extensions › Skills.`;
-    const countText = () => `${tickedItems().length} of ${items().length} ticked`;
+    // Counts are composed words (`fmt`): the span keeps its mark, so the overlay never keys a number of its own.
+    const COUNT = '{n} of {total} ticked';
+    const countText = () => fmt(COUNT, { n: tickedItems().length, total: items().length });
 
     function rowHtml() {
         const count = tickedItems().length;
-        const value = { loading: 'Reading the list…', error: 'The recommended set', empty: 'None offered' }[state.status]
-            || (count ? `${count} will install` : 'None will install');
+        const fixed = { loading: 'Reading the list…', error: 'The recommended set', empty: 'None offered' }[state.status]
+            || (count ? '' : 'None will install');
+        const value = fixed ? escapeHtml(fixed) : `<span data-i18n-fmt="{n} will install">${escapeHtml(fmt('{n} will install', { n: count }))}</span>`;
         const sub = state.status === 'error' ? unreadText() : pendingText();
         const card = connection?.summary();
         return `<div class="summary-kv skills-starter-row"><strong>Skills</strong><span class="skills-starter-summary">
-            <span class="skills-starter-value">${escapeHtml(value)} · <button type="button" class="skills-starter-change" data-starter-change>Change</button></span>
+            <span class="skills-starter-value">${value} · <button type="button" class="skills-starter-change" data-starter-change>Change</button></span>
             ${sub ? `<span class="skills-starter-sub" role="status">${escapeHtml(sub)}</span>` : ''}</span></div>${card ? `
             <div class="summary-kv skills-starter-row"><strong>${escapeHtml(card[0])}</strong><span class="skills-starter-summary">
-            <span class="skills-starter-value">${escapeHtml(card[1])} · <button type="button" class="skills-starter-change" data-starter-change>Change</button></span></span></div>` : ''}`;
+            <span class="skills-starter-value"><span${card[2] ? ' data-i18n-authored' : ''}>${escapeHtml(card[1])}</span> · <button type="button" class="skills-starter-change" data-starter-change>Change</button></span></span></div>` : ''}`;
     }
 
     // Inside a group: recommended skills that work at once, then the rest that do, then those that need something first.
@@ -203,7 +207,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         const groups = listed();
         return `<div class="skills-starter-list"${arrive ? ' data-arrive' : ''}>
             ${connection ? connection.html(next()) : ''}
-            ${items().length ? `<div class="skills-starter-bar"><span class="skills-starter-count" role="status">${countText()}</span><span class="skills-starter-bulk"><button type="button" data-starter-all="1">Tick all</button><span aria-hidden="true">·</span><button type="button" data-starter-all="0">Untick all</button></span></div>` : ''}
+            ${items().length ? `<div class="skills-starter-bar"><span class="skills-starter-count" role="status" data-i18n-fmt="${COUNT}">${escapeHtml(countText())}</span><span class="skills-starter-bulk"><button type="button" data-starter-all="1">Tick all</button><span aria-hidden="true">·</span><button type="button" data-starter-all="0">Untick all</button></span></div>` : ''}
             <div class="skills-starter-groups">${groups.map(([group, rows]) => `<section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}</h3>
                 ${rows.map((item) => skillHtml(item, next())).join('')}</section>`).join('')}</div>
             ${pending ? `<p class="skills-starter-sub" role="status">${escapeHtml(pending)}</p>` : ''}
