@@ -246,7 +246,13 @@ def test_chat_history_words_projects_whole_on_the_custom_route():
     for name in ("words", "room_id", "voice", "order"):
         assert entry.schema["parameters"]["properties"][name]["description"]
     assert entry.schema["parameters"]["properties"]["order"]["description"] == (
-        "With words: newest (default) or oldest first; oldest shows an original before its later restatements.")
+        "With words: newest (default) or oldest first by recorded time; oldest puts an original before its later "
+        "restatements.")
+    properties = entry.schema["parameters"]["properties"]
+    assert properties["count"]["description"] == (
+        "How many rows to return. With words, the first of the requested order; otherwise the latest.")
+    assert properties["offset"]["description"] == (
+        "How many rows to skip in that order. Without words, skip that many from the latest.")
     projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
     description = projected[0]["custom"]["description"]
     lead = " ".join(entry.schema["description"].split())
@@ -402,3 +408,38 @@ def test_the_structured_result_is_what_the_text_renders(tmp_path):
     assert len(hit["sha256"]) == 64 and hit["matched"] == ["question"]
     speakers = {field["name"]: (field["speaker"], field["label"]) for field in hit["fields"]}
     assert speakers["question"] == ("asker", "task asker-1") and speakers["press"] == ("owner", "my human")
+
+
+def test_a_projects_founding_message_lists_both_its_rooms(tmp_path):
+    from tests import _memory_inventory_shared as shared
+
+    rooms = shared.world(tmp_path, activate=False)
+    alpha = rooms["alpha"]
+    for scope in ({}, {"room_id": str(alpha)}):
+        answer = _read(tmp_path, words=["inventory work"], **scope)
+        line = next(line for line in answer.splitlines() if line.startswith("row:"))
+        assert "Main" in line and f"[chat_id={alpha}]" in line, line
+        assert shared.ORIGIN in _follow(tmp_path, line)
+
+
+def test_a_read_that_overlaps_an_edit_claims_no_exact_count_and_no_continuation(tmp_path, monkeypatch):
+    for n in range(3):
+        _say(tmp_path, f"2026-11-01T10:0{n}:00Z", f"match {n}")
+    stable = _read(tmp_path, words=["match"], count=1)
+    token = re.search(r"snapshot=([0-9a-f]{64})", stable).group(1)
+    revisions = iter([0, 1])
+    monkeypatch.setattr(dialogue_recall, "_text_revision", lambda _root: next(revisions, 1))
+    moved = _read(tmp_path, words=["match"], count=1)
+    assert "observed=3; total_unknown" in moved and "capture_unstable" in moved
+    assert "Snapshot unavailable" in moved and "Continue with" not in moved
+    assert _read(tmp_path, words=["match"], count=1, offset=1, snapshot=token).startswith("CHAT_HISTORY_SNAPSHOT_CHANGED")
+
+
+@pytest.mark.parametrize("bad", ["nothex", "f" * 63, "f" * 64 + ":x", "f" * 64 + ":0", "{valid}:3"])
+def test_every_malformed_continuation_is_a_typed_refusal(tmp_path, bad):
+    _say(tmp_path, "2026-11-01T10:00:00Z", "match")
+    valid = re.search(r"snapshot=([0-9a-f]{64})", _read(tmp_path, words=["match"])).group(1)
+    answer = _read(tmp_path, words=["match"], snapshot=bad.format(valid=valid))
+    assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID") or answer.startswith("CHAT_HISTORY_SNAPSHOT_CHANGED")
+    if bad.startswith("{valid}") or ":" in bad:  # a suffix is never a snapshot
+        assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID")

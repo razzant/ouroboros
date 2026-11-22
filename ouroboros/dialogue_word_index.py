@@ -44,8 +44,10 @@ log = logging.getLogger(__name__)
 
 FORMAT = 1  # the token rule and encoding; a different one is bypassed and rebuilt
 TOKEN_CHARS = 64
-CHUNK_ROWS = 256  # rows one posting commit carries: a lock-hold bound measured in the report, not a policy
-_PAGE_SQL_LIMIT = 500  # seqs one statement names
+# Rows one posting commit carries: a bound on how long one commit holds the write lock, never a policy. On a loaded
+# Mac one 256-row chunk held it 1.5 s and 3.0 s; at 128 the worst observed hold beside a writer was 28 ms. The first
+# live catch-up's ``hold_ms`` chunk records are the measurement to read.
+CHUNK_ROWS = 128
 _DDL = (
     "CREATE TABLE IF NOT EXISTS dw_meta (id INTEGER PRIMARY KEY CHECK (id=1), format INTEGER NOT NULL, "
     "generation TEXT NOT NULL, seen_rev INTEGER NOT NULL, usable INTEGER NOT NULL CHECK (usable IN (0,1)), "
@@ -143,22 +145,28 @@ class Candidates(NamedTuple):
     plan: str  # what the snapshot binds: the generation, its marks and its dirty set
 
 
+# The rows no posting covers yet: each chat unit from the ledger, then its rows at or above its mark through the
+# (segment, ordinal) index. Never a walk of the chat history: with every row posted it reads one index probe a unit.
+_UNCOVERED = ("SELECT d.seq FROM import_ledger l CROSS JOIN dialogue d INDEXED BY dialogue_ordinal "
+              "WHERE l.stream='chat' AND d.segment=l.id "
+              "AND d.ordinal >= coalesce((SELECT next_ord FROM dw_mark WHERE segment=l.id), 0) "
+              "AND d.stream='chat' AND d.seq < ?")
+
+
 def candidates(conn: sqlite3.Connection, query: Any, *, upper: int) -> Optional[Candidates]:
     """The candidate coordinates on this read connection, or ``None`` when the reader must scan (no FTS5, no
-    sound generation, an expression the table refuses)."""
+    sound generation, a first pass not finished yet, an expression the table refuses). During the first build
+    every unposted row would be a candidate and the postings window would move under each posted chunk."""
     if not fts5_available():
         return None
     try:
         facts = generation(conn)
-        if not facts or not facts["sound"]:
-            return None
+        if not facts or not facts["sound"] or facts["built_epoch"] < 0:
+            return None  # a generation whose first full pass has not finished is the job's, not a reader's
         posted = {seq for (seq,) in conn.execute("SELECT rowid FROM dw_post WHERE dw_post MATCH ? AND rowid < ?",
                                                  (match_expression(query), int(upper)))}
         dirty = {seq for (seq,) in conn.execute("SELECT seq FROM dw_dirty WHERE seq < ?", (int(upper),))}
-        uncovered = {seq for (seq,) in conn.execute(
-            "SELECT d.seq FROM import_ledger l JOIN dialogue d ON d.segment=l.id AND d.stream='chat' "
-            "WHERE l.stream='chat' AND d.seq < ? AND d.ordinal >= "
-            "coalesce((SELECT next_ord FROM dw_mark WHERE segment=l.id), 0)", (int(upper),))}
+        uncovered = {seq for (seq,) in conn.execute(_UNCOVERED, (int(upper),))}
         marks = conn.execute("SELECT coalesce(group_concat(segment || ':' || next_ord, ','), '') FROM "
                              "(SELECT * FROM dw_mark ORDER BY segment)").fetchone()[0]
     except sqlite3.Error:
@@ -179,7 +187,7 @@ def _segments(conn: sqlite3.Connection) -> List[Tuple[int, int, int]]:
         if live is not None and segment == live[0]:
             upper = int(live[1])
         else:
-            upper = int(conn.execute("SELECT coalesce(max(ordinal)+1, 0) FROM dialogue WHERE segment=?",
+            upper = int(conn.execute("SELECT coalesce(max(ordinal)+1, 0) FROM dialogue INDEXED BY dialogue_ordinal WHERE segment=?",
                                      (segment,)).fetchone()[0])
         mark = conn.execute("SELECT next_ord FROM dw_mark WHERE segment=?", (segment,)).fetchone()
         units.append((int(segment), int(mark[0]) if mark else 0, upper))
@@ -188,7 +196,8 @@ def _segments(conn: sqlite3.Connection) -> List[Tuple[int, int, int]]:
 
 def due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
     """Read-only and cheap: no install, archive walk or tokenization. Owed while FTS5 exists and nothing is
-    installed, the generation is not sound, a completed segment is unbuilt or the live unit has unposted rows."""
+    installed, the generation is not sound, a completed segment is unbuilt (the import counter), or at least one
+    whole chunk of the live unit's rows is unposted: fewer cost the reader only their re-read."""
     from ouroboros import dialogue_store as ds
 
     if row.get("state") == "failed":
@@ -206,7 +215,8 @@ def due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: b
             if live is None:
                 return False
             mark = conn.execute("SELECT next_ord FROM dw_mark WHERE segment=?", (live[0],)).fetchone()
-            return (int(mark[0]) if mark else 0) < int(live[1])
+            # A handful of new rows does not start the child: the reader re-reads them anyway.
+            return int(live[1]) - (int(mark[0]) if mark else 0) >= CHUNK_ROWS
     except Exception:
         log.debug("word postings facts unreadable; the next look asks again", exc_info=True)
         return False
@@ -255,7 +265,8 @@ def _post_segment(root: pathlib.Path, name: str, segment: int, mark: int, upper:
     while mark < upper:
         with ds.transaction(root, write=False) as conn:  # copied, then closed before any decoding
             page = conn.execute("SELECT json_group_array(json_array(seq, ordinal, body)) FROM (SELECT seq, ordinal, "
-                                "body FROM dialogue WHERE segment=? AND stream='chat' AND ordinal>=? AND ordinal<? "
+                                "body FROM dialogue INDEXED BY dialogue_ordinal WHERE segment=? AND stream='chat' AND ordinal>=? "
+                                "AND ordinal<? "
                                 "ORDER BY ordinal LIMIT ?)", (segment, mark, upper, CHUNK_ROWS)).fetchone()[0]
         records = json.loads(page or "[]")
         reach = records[-1][1] + 1 if len(records) == CHUNK_ROWS else upper
@@ -323,7 +334,8 @@ def run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
 # ---- retirement -----------------------------------------------------------------------------------
 
 def retire(root: Any) -> Dict[str, Any]:
-    """Drop every optional object in one write; the canonical rows are untouched. Returns the pages freed
+    """Stop the maintenance duty ``dialogue_words`` first, or its next look installs and rebuilds what was retired.
+    Drop every optional object in one write; the canonical rows are untouched. Returns the pages freed
     for reuse inside ``state/dialog.sqlite`` (the file does not shrink: no vacuum). Without FTS5 the virtual
     table cannot be dropped: the generation is latched unusable (the reader scans) and the objects stay
     coherent until a capable runtime retires them (``state="fts5_required"``)."""

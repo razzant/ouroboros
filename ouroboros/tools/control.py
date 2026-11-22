@@ -432,8 +432,8 @@ def get_tools() -> List[ToolEntry]:
             "name": "chat_history",
             "description": "Retrieve live and recent archived chat messages. Supports exact provenance/date filters, substring search or words, and pagination.",
             "parameters": {"type": "object", "properties": {
-                "count": {"type": "integer", "default": 100, "description": "Number of messages (from latest)"},
-                "offset": {"type": "integer", "default": 0, "description": "Skip N from end (pagination)"},
+                "count": {"type": "integer", "default": 100, "description": "How many rows to return. With words, the first of the requested order; otherwise the latest."},
+                "offset": {"type": "integer", "default": 0, "description": "How many rows to skip in that order. Without words, skip that many from the latest."},
                 "search": {"type": "string", "default": "", "description": "Text filter"},
                 "provider": {"type": "string", "default": "", "description": "Exact transport provider"},
                 "account_id": {"type": "string", "default": "", "description": "Exact transport account ID"},
@@ -446,7 +446,7 @@ def get_tools() -> List[ToolEntry]:
                 "words": {"type": "array", "items": {"type": "string"}, "description": WORDS_DESCRIPTION},
                 "room_id": {"type": "string", "description": "With words: one room's chat id (1 is Main)."},
                 "voice": {"type": "string", "enum": ["owner"], "description": "With words: only rows of my human's own words, a card they answered included."},
-                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first; oldest shows an original before its later restatements."},
+                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first by recorded time; oldest puts an original before its later restatements."},
             }, "required": [], "additionalProperties": False},
         }, _chat_history),
         ToolEntry("update_scratchpad", {

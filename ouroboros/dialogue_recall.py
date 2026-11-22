@@ -7,12 +7,12 @@ invalid-interval gaps, a room's appearance gaps, the frozen consolidation cursor
 (``dialogue_words``) on its typed fields, an alternative inside one field.
 
 Two paths give the same answer. A read of every room takes its candidates from the word postings
-(``dialogue_word_index``) when they are sound: posting hits, edited rows and every row not yet posted, in
-one read transaction; ``RECHECK_BOUND`` candidates at most are re-checked a call, taken from the asked end
-of time, and a bounded answer names the examined range and a continuation (``snapshot=<token>:<n>``) that
-always advances. Otherwise (a room read, no FTS5, postings not built or bypassed) the scan re-checks every
-row it reads, as the legacy substring search reads every row; no bound stands there, so a default call
-returns the newest matches whatever the store's size. The header names the path that answered.
+(``dialogue_word_index``) when they are sound: posting hits, edited rows and every row not yet posted, their
+coordinates in one short read and their bodies in pages, each its own short read (as the scan reads 500 rows a
+transaction). When the candidates outnumber ``RECHECK_BOUND`` the read is handed to the scan, which answers
+completely and says why. Otherwise too (a room read, no FTS5, postings not built or bypassed) the scan
+re-checks every row it reads, as the legacy substring search reads every row, so a default call returns the
+newest matches whatever the store's size. The header names the path that answered.
 
 Order. Hits are ordered by recorded time (``ts`` parsed as ISO-8601), ties by stored sequence; a row
 whose time cannot be read stands at the oldest end, by stored sequence. ``order`` is the caller's direction:
@@ -37,15 +37,18 @@ import hashlib
 import json
 import logging
 import pathlib
+import re
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from ouroboros.dialogue_words import Field, WordQuery, excerpt, fields_of, match_fields, parse
 
 log = logging.getLogger(__name__)
 
-# Postings candidates one call re-checks at most: a bound on one read's time, never a choice of which rows
-# matter. Measured on a generated 100,000-row store: about 35 µs a candidate, so 50,000 keep one call under
-# about two seconds whatever the query; met, it is disclosed and the continuation advances.
+# The bound limits the number of candidate rows whose originals one call rechecks; past it the scan answers
+# whole. On a real 974 MB stream 17,620 candidates took 5.9 s end to end (about 335 µs a candidate), so 50,000
+# candidates cost about 17 s on the postings path, where the scan of that stream costs about the same; rows of the
+# generated test store are twenty times smaller. A named limit, not built: on a store far larger than that one
+# the hand-over point should follow the row count.
 RECHECK_BOUND = 50_000
 EXCERPT_CHARS = 240  # the shown part of one field around its first match; the row's reader holds it whole
 ORDERS = ("newest", "oldest")
@@ -172,14 +175,14 @@ def _scan(memory: Any, room: Optional[int], keep: Callable[[Dict[str, Any]], boo
     pairs = [(entry.seq, entry.row) for entry in source
              if not is_a2a_chat_id(entry.row.get("chat_id")) and keep(entry.row)]
     coverage = capture_coverage(memory, upper=upper, imported=imported, matched=len(pairs), shown=shown)
-    return {"pairs": pairs, "coverage": coverage, "bounded": False, "plan": "",
+    return {"pairs": pairs, "coverage": coverage,
             "path": "scan of every row" if room is None else f"scan of room {room}"}
 
 
-def _posted(memory: Any, query: WordQuery, *, newest: bool, start: int) -> Optional[Dict[str, Any]]:
-    """The postings path for a read of every room: in ONE read transaction the candidates below a frozen
-    upper bound, ordered by ``time_key`` from the asked end, cut to ``[start, start + RECHECK_BOUND)``, and the
-    original rows of that window. ``None``: no sound postings here; the caller scans."""
+def _posted(memory: Any, query: WordQuery) -> Optional[Dict[str, Any]]:
+    """The postings path for a read of every room: the candidates below a frozen upper bound in one short read,
+    then their original rows in pages, each its own short read. ``None``: no sound postings here; ``{"handover":
+    n}``: n candidates exceed ``RECHECK_BOUND``. In both cases the caller scans."""
     from ouroboros import dialogue_store as ds, dialogue_word_index as dwi
 
     root = pathlib.Path(memory.drive_root)
@@ -187,24 +190,18 @@ def _posted(memory: Any, query: WordQuery, *, newest: bool, start: int) -> Optio
     imported = ds.range_coverage(root, "chat", upper=upper)
     with ds.transaction(root, write=False) as conn:
         found = dwi.candidates(conn, query, upper=upper)
-        if found is None:
-            return None
-        keyed: List[Tuple[Tuple[int, float, int], str]] = []
-        for at in range(0, len(found.seqs), _CHUNK):
-            chunk = found.seqs[at:at + _CHUNK]
-            keyed += [(time_key({"ts": ts}, seq), str(ts or "")) for seq, ts in conn.execute(
-                f"SELECT seq, ts FROM dialogue WHERE stream='chat' AND seq IN ({','.join('?' * len(chunk))})", chunk)]
-        keyed.sort(reverse=newest)
-        window = keyed[start:start + RECHECK_BOUND]
-        wanted = sorted(key[2] for key, _ts in window)
-        pages = [ds._page(conn, f"WHERE stream='chat' AND seq IN ({','.join('?' * len(chunk))})", tuple(chunk))
-                 for chunk in (wanted[at:at + _CHUNK] for at in range(0, len(wanted), _CHUNK))]
-    pairs = [(entry.seq, entry.row) for entry in (ds._row(record) for record in ds._decoded(*pages))]
+    if found is None:
+        return None
+    if len(found.seqs) > RECHECK_BOUND:
+        return {"handover": len(found.seqs)}
+    pairs: List[Tuple[int, Dict[str, Any]]] = []
+    for at in range(0, len(found.seqs), _CHUNK):
+        chunk = found.seqs[at:at + _CHUNK]
+        with ds.transaction(root, write=False) as conn:  # a page a read: never one transaction for the fetch
+            page = ds._page(conn, f"WHERE stream='chat' AND seq IN ({','.join('?' * len(chunk))})", tuple(chunk))
+        pairs += [(entry.seq, entry.row) for entry in (ds._row(record) for record in ds._decoded(page))]
     coverage = capture_coverage(memory, upper=upper, imported=imported, matched=len(pairs))
-    span = (f"{len(window)} of {len(keyed)} candidate rows re-checked, {'newest' if newest else 'oldest'} first "
-            f"by time, from {window[0][1] if window else '-'} to {window[-1][1] if window else '-'}")
-    return {"pairs": pairs, "coverage": coverage, "bounded": len(keyed) > start + len(window), "plan": found.plan,
-            "span": span, "examined": len(window),
+    return {"pairs": pairs, "coverage": coverage,
             "path": f"postings ({found.posted} posted, {found.dirty} edited, {found.uncovered} not yet posted)"}
 
 
@@ -264,18 +261,34 @@ def _seals(root: pathlib.Path, wanted: List[Tuple[int, str]]) -> Tuple[Dict[Tupl
     return found, ""
 
 
-def _showing(root: pathlib.Path, pairs: List[Tuple[int, Dict[str, Any]]]) -> Tuple[Dict[int, List[int]], str]:
-    """``({seq: rooms showing the row now}, gap)`` by the room rule, for one page's rows."""
-    from ouroboros.chat_chain import row_address
-    from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
-    from ouroboros.room_membership import row_rooms
+class Showing:
+    """The rooms that show a row now, by the store's own projection (``memory_inventory.rooms_of_row`` over one
+    ``membership_facts`` capture: the room rule plus a Project's founding owner message), read once per read and
+    used for admission, labels, seals and reopen alike. An unreadable project registry is ``gap`` (the caller
+    counts it) and each row then names the chat it was written in."""
 
-    try:
-        projects, rooms = frozenset(reserved_project_chat_ids(root, strict=True)), RoomResolver(root, strict=True)
-        return {seq: sorted(row_rooms(row_address(row)["chat_id"], row, projects, rooms)) for seq, row in pairs}, ""
-    except Exception as exc:  # the registry is unreadable: each row names its written chat, said
-        return ({seq: [row_address(row)["chat_id"]] for seq, row in pairs},
-                f"rooms_unreadable ({type(exc).__name__}): each row names the chat it was written in")
+    def __init__(self, root: pathlib.Path):
+        from ouroboros.projects_registry import reserved_project_chat_ids
+
+        self.facts, self.gap = None, ""
+        try:
+            reserved_project_chat_ids(root, strict=True)  # the registry must read; membership's own read is lenient
+            from ouroboros.memory_inventory import membership_facts
+
+            self.facts = membership_facts(root)
+        except Exception as exc:
+            self.gap = f"rooms_unreadable ({type(exc).__name__}): each row names the chat it was written in"
+        self._known: Dict[str, List[int]] = {}
+
+    def rooms(self, row: Mapping[str, Any]) -> List[int]:
+        from ouroboros.chat_chain import row_address, source_row_id
+        from ouroboros.memory_inventory import rooms_of_row, row_meta
+
+        key = source_row_id(dict(row))
+        if key not in self._known:
+            self._known[key] = (sorted(int(room) for room in rooms_of_row(row_meta(row), self.facts))
+                                if self.facts is not None else [int(row_address(row)["chat_id"])])
+        return self._known[key]
 
 
 def _authors(root: pathlib.Path, pairs: List[Tuple[int, Dict[str, Any]]], lineage: Mapping[str, Any]
@@ -349,6 +362,25 @@ def _reader(room: Optional[int], row: Mapping[str, Any], address: str) -> str:
     return f'memory_read(rows=true, room_id="{room}", from="{address}", to="{address}")'
 
 
+_TOKEN = re.compile(r"[0-9a-f]{64}")
+UNSTABLE_GAP = ("capture_unstable: the conversation changed during this read (an edited row); the count is what it "
+                "saw; start again without snapshot or offset")
+_REFUSALS = {
+    "malformed": "CHAT_HISTORY_SNAPSHOT_INVALID: this snapshot was not issued by a words read; start again with "
+                 "offset=0 and no snapshot.",
+    "unstable": "CHAT_HISTORY_SNAPSHOT_CHANGED: the conversation changed during this read; no mixed page was "
+                "returned; restart with offset=0 and no snapshot.",
+    "changed": "CHAT_HISTORY_SNAPSHOT_CHANGED: the query, the archive/live generations or an edited row changed; "
+               "no mixed page was returned; restart with offset=0 and no snapshot.",
+}
+
+
+def _refusal(kind: str) -> Dict[str, Any]:
+    """A continuation this read cannot serve: ``malformed`` (no read issued it), ``unstable`` (the capture moved
+    under it) or ``changed`` (another capture or query)."""
+    return {"refused": _REFUSALS[kind], "refused_kind": kind}
+
+
 def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "", order: str = "",
            count: int = 100, offset: int = 0, snapshot: str = "", filters: Mapping[str, str],
            visible_only: bool = False) -> Dict[str, Any]:
@@ -359,8 +391,7 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
     ``author``, ``api_door``, ``reply_to``, ``reply_unresolved``, ``matched``, ``fields`` (each ``name``,
     ``text``, ``speaker`` (``author|asker|owner|closer|host``), ``label``), ``seals`` (``[(room, page)]``));
     ``total`` (exact, else ``None``) and ``observed``; ``offset``, ``more``; ``gaps``, ``notes``, ``seal_gap``;
-    ``snapshot`` (this page's token, ``None`` when the capture did not stabilize), ``beyond`` (the token of
-    the next re-check window, else ``None``); ``span`` (the examined range of a windowed read); ``path``.
+    ``snapshot`` (this page's token, ``None`` when the capture did not stabilize); ``path``.
     ``visible_only`` (the neighbour door) keeps only rows a visible room shows now (a positive room id: Main, a
     Project, a place), resolved by the room rule before counting and paging; the mind's reads keep every row."""
     from ouroboros.chat_chain import format_address, row_address, source_row_id
@@ -379,8 +410,9 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         if voice == "owner":
             gaps_extra.append("owner_accounts_unreadable: place rows of my human not confirmed")
     accounts = lineage.get("owner_accounts")
-    requested, _, start_text = str(snapshot or "").strip().lower().partition(":")
-    start = int(start_text) if start_text.isdigit() and requested else 0
+    requested = str(snapshot or "").strip().lower()
+    if requested and not _TOKEN.fullmatch(requested):
+        return _refusal("malformed")
     revision = _text_revision(root)
     judged: Dict[int, List[str]] = {}
 
@@ -395,11 +427,14 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         return bool(matched)
 
     newest = order != "oldest"
-    read = _posted(memory, query, newest=newest, start=start) if room is None else None
-    if read is not None:
+    read = _posted(memory, query) if room is None else None
+    handover = (read or {}).get("handover")
+    if read is not None and not handover:
         read["pairs"] = [(seq, row) for seq, row in read["pairs"] if judge(row)]
     else:
         read = _scan(memory, room, judge)
+        if handover:
+            read["path"] += f": {handover} posting candidates exceed the re-check bound of {RECHECK_BOUND}"
     coverage = read["coverage"]
     seen, hits_all = set(), []
     for seq, row in sorted(read["pairs"], key=lambda pair: time_key(pair[1], pair[0]), reverse=newest):
@@ -407,48 +442,39 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         if identity not in seen:  # one source row, whatever its fields or physical copies
             seen.add(identity)
             hits_all.append((seq, row))
+    showing = Showing(root)  # one projection of the rooms for this read: admission, labels, seals, readers
     if visible_only:  # the hidden partition (0) and synthetic traffic are no room a person reads
-        shown, rooms_gap = _showing(root, hits_all)
-        hits_all = [(seq, row) for seq, row in hits_all if any(chat > 0 for chat in shown[seq])]
-        notes.extend([rooms_gap] if rooms_gap else [])
-    stable = bool(coverage.get("snapshot_stable")) and _text_revision(root) == revision
-    windowed = read["bounded"] or bool(start)
+        hits_all = [(seq, row) for seq, row in hits_all if any(chat > 0 for chat in showing.rooms(row))]
+    moved = _text_revision(root) != revision
+    stable = bool(coverage.get("snapshot_stable")) and not moved
     normalized = {**normalized_chat_history_query(filters, ""), "words": list(query.items),
                   "room_id": "" if room is None else str(room), "voice": voice, "order": order or "newest",
-                  "chat_text_revision": revision, "plan": read["plan"] if windowed else "",
+                  "chat_text_revision": revision,
                   **({"visible_only": True} if visible_only else {})}
     current = _snapshot(coverage, normalized)
-    result: Dict[str, Any] = {"refused": None, "path": read["path"], "span": "", "beyond": None}
     if requested and (not stable or requested != current):
-        result["refused"] = ("CHAT_HISTORY_SNAPSHOT_CHANGED: the query, the archive/live generations or an edited "
-                             "row changed; no mixed page was returned; restart with offset=0 and no snapshot.")
-        return result
+        return _refusal("unstable" if not stable else "changed")
+    result: Dict[str, Any] = {"refused": None, "refused_kind": None, "path": read["path"]}
     gaps = [f"{gap.get('kind') or 'unknown'}" + (f" ({gap['detail']})" if gap.get("detail") else "")
             for gap in coverage.get("gaps") or []] + gaps_extra
-    if windowed:
-        result["span"] = read["span"]
-        if read["bounded"]:
-            result["beyond"] = f"{current}:{start + read['examined']}"
-        gaps.append(f"recheck_bound: {read['span']}; " + (
-            f"the rest was not examined: continue beyond with offset=0, snapshot={result['beyond']}"
-            if read["bounded"] else "this is the last window") + (
-            f"; earlier windows held {start} candidates" if start else ""))
+    if showing.gap:
+        gaps.append(showing.gap)
+    if moved:  # an edit landed while this read ran: its count is what it saw, never exact
+        gaps.append(UNSTABLE_GAP)
     offset, count = max(0, int(offset)), max(1, int(count))
     page = hits_all[offset:offset + count]
-    showing, rooms_gap = _showing(root, page)
-    if rooms_gap:
-        notes.append(rooms_gap)
+    rooms_of = {seq: showing.rooms(row) for seq, row in page}
     authors, lineage_gap = _authors(root, page, lineage)
     if lineage_gap:
         notes.append(lineage_gap)
     wanted = [(chat, source_row_id(row)) for seq, row in page
-              for chat in {*showing[seq], *([room] if room is not None else [])}]
+              for chat in {*rooms_of[seq], *([room] if room is not None else [])}]
     seals, seal_gap = _seals(root, wanted) if page else ({}, "")
     hits = []
     for seq, row in page:
         address = format_address(row_address(row))
         written = row_address(row)["chat_id"]
-        rooms = showing[seq]
+        rooms = rooms_of[seq]
         reader_room = room if room is not None else (written if written in rooms else (rooms[0] if rooms else None))
         author = authors[seq]
         reply = row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}
@@ -467,7 +493,7 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
                       if (chat, sha) in seals]})
     result.update(hits=hits, total=None if gaps else len(hits_all), observed=len(hits_all), offset=offset,
                   more=max(0, len(hits_all) - offset - len(page)), gaps=gaps, notes=notes, seal_gap=seal_gap,
-                  snapshot=(f"{current}:{start}" if start else current) if stable else None)
+                  snapshot=current if stable else None)
     return result
 
 

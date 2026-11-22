@@ -42,6 +42,10 @@ _HEADERS = {"Cache-Control": "no-store"}
 _NOT_FOUND = "no dialogue row the door reads has this address"
 
 
+UNSTABLE_READ = "The conversation changed during this read. Start again without snapshot or offset."
+INVALID_SNAPSHOT = "Invalid snapshot. Use the snapshot from a search response or start again without it."
+
+
 class Refusal(Exception):
     """One typed refusal: its status, code and sentence, and nothing of the store."""
 
@@ -104,17 +108,13 @@ def row_view(hit: Mapping[str, Any], *, labels: Any, query: Any = None) -> Dict[
     return view
 
 
-def _showing(root: pathlib.Path, row: Mapping[str, Any], written: int) -> Tuple[List[int], str]:
-    """The rooms that show ``row`` now by the room rule (``room_membership.row_rooms``), as the words reader
-    resolves its hits; with the registry unreadable, the chat it was written in, said."""
-    from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
-    from ouroboros.room_membership import row_rooms
+def _showing(root: pathlib.Path, row: Mapping[str, Any]) -> Tuple[List[int], str]:
+    """The rooms that show ``row`` now, as the words reader resolves its hits (``dialogue_recall.Showing``: the
+    store's own projection); with the registry unreadable, the chat it was written in, said."""
+    from ouroboros.dialogue_recall import Showing
 
-    try:
-        projects, rooms = frozenset(reserved_project_chat_ids(root, strict=True)), RoomResolver(root, strict=True)
-        return sorted(row_rooms(written, row, projects, rooms)), ""
-    except Exception as exc:
-        return [written], f"rooms_unreadable ({type(exc).__name__}): the row names the chat it was written in"
+    showing = Showing(root)
+    return showing.rooms(row), showing.gap
 
 
 def _integer(values: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
@@ -146,6 +146,10 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
     found = dialogue_recall.search(Memory(drive_root=root), query, room=room, voice=voice, order=order, count=count,
                                    offset=offset, snapshot=str(values.get("snapshot", "") or ""), filters=filters,
                                    visible_only=True)
+    if found["refused_kind"] == "malformed":
+        raise Refusal(400, "recall_bad_snapshot", INVALID_SNAPSHOT)
+    if found["refused_kind"] == "unstable":
+        raise Refusal(409, "recall_snapshot_changed", UNSTABLE_READ)
     if found["refused"]:
         raise Refusal(409, "recall_snapshot_changed", "the conversation or the query changed since this snapshot; "
                       "no mixed page was returned: start again without snapshot and offset")
@@ -156,12 +160,9 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
     following = None
     if current and more:  # the next page of this capture
         following = [*same, ("count", str(count)), ("offset", str(offset + len(hits))), ("snapshot", current)]
-    elif current and found["beyond"]:  # the next re-check window of a bounded read
-        following = [*same, ("count", str(count)), ("snapshot", found["beyond"])]
     notes = [_outward(note) for note in found["notes"]]
-    if current is None and (more or found["beyond"]):
-        notes.append("no continuation: the capture did not stabilize (part of the conversation is still importing); "
-                     "ask again from offset 0 when the import has finished")
+    if current is None:  # no continuation of a capture that moved or is still importing
+        notes.append(UNSTABLE_READ)
     labels = RoomLabelResolver(root)
     return {"mode": "search", "words": list(words), "room_id": room_text, "voice": voice, "order": order or "newest",
             "total": found["total"], "observed": found["observed"], "offset": found["offset"], "more": more,
@@ -197,7 +198,7 @@ def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
     if row is None or is_a2a_chat_id(row.get("chat_id")):
         raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
     written = int(row_address(row)["chat_id"])
-    rooms, rooms_note = _showing(root, row, written)
+    rooms, rooms_note = _showing(root, row)
     if not any(chat > 0 for chat in rooms):  # the hidden partition is no room a person reads
         raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
     authors, notes = label_authors(root, [(found["seq"], row)])  # as the search names it, lineage epoch included
