@@ -305,18 +305,21 @@ class _Lister:
                                       "NOT in this chronicle: its words cannot be read here"))
                 continue
             source = self.store.interpret([found])[0]
-            try:  # what words judge: the text as of the revision cited, which the printed reader opens
-                then = self.store.interpret([found], revision=str(src.get("revision")))[0] if src.get(
-                    "revision_known", True) and src.get("revision") else source
-            except ValueError:
-                then = source
+            fields: List[Tuple[str, str]] = []  # what words judge: the cited revision's text, never today's in its place
+            known = bool(src.get("revision_known", True) and src.get("revision"))
+            if known:
+                try:
+                    fields = self._fields(self.store.interpret([found], revision=str(src.get("revision")))[0])
+                except ValueError:
+                    known = False
             since = [f"later corrections not in this account: {', '.join(src['later_corrections'])}"
                      if src.get("later_corrections") else "",
-                     "" if src.get("revision_known", True) else "that revision is not in this chronicle",
+                     "" if known else "that revision is not in this chronicle; its words cannot be judged here",
                      f"now {src['status_now']}" if src.get("status_now") and src.get("status_now") != src.get("status") else ""]
-            entries.append(_Entry(self._record_line(source, extra=[cited, *filter(None, since)],
-                                                    reader=f"memory_read(node_id='{src['id']}', revision='{src.get('revision')}')"),
-                                  source, self._fields(then)))
+            reader = (f"memory_read(node_id='{src['id']}', revision='{src.get('revision')}')" if known
+                      else f"memory_read(node_id='{src['id']}')")
+            entries.append(_Entry(self._record_line(source, extra=[cited, *filter(None, since)], reader=reader),
+                                  source, fields))
         return f"{_n(len(sources), 'source version')}, in its recorded order; nothing sealed or folded", entries
 
     def _under_selection(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:

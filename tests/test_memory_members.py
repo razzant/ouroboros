@@ -510,6 +510,24 @@ def test_words_judge_each_field_alone_and_a_cited_source_at_its_cited_revision(t
     assert len(opening) == 1 and "excerpt" not in opening[0]
 
 
+def test_a_cited_revision_missing_from_this_chronicle_has_no_searchable_words(tmp_path, monkeypatch):
+    """A partial journal keeps the source but not the revision an account cites: its words are not judged by today's
+    text (an excerpt its reader could not open); the line names the missing revision and matches nothing."""
+    ctx, _rows, page, note = install(tmp_path)
+    zebra = write(ctx, kind="correction", target_id=page, text="Zebra stripes were the cause.")["node_id"]
+    account = write(ctx, kind="account", text="Across the build work.", sources=[page, note])["node_id"]
+    assert ": 1 of 2 listed records match" in members(ctx, node_id=account, words=["zebra"]).split("\n")[0]
+    original = ChronicleStore._revisions
+    monkeypatch.setattr(ChronicleStore, "_revisions",
+                        lambda store, db, ident: [rev for rev in original(store, db, ident) if rev != zebra])
+    for words in (["zebra"], ["found build"]):
+        text = members(ctx, node_id=account, words=words)
+        assert ": 0 of 2 listed records match" in text.split("\n")[0], words
+    line = next(line for line in listed(members(ctx, node_id=account)) if line.startswith(f"- page {page} ["))
+    assert f"cites revision {zebra}" in line and "that revision is not in this chronicle; its words cannot be judged" in line
+    assert f"revision='{zebra}'" not in line and f"memory_read(node_id='{page}')" in line
+
+
 def test_a_room_with_incomplete_appearances_observes_no_untold_rows_without_claiming_none(tmp_path, monkeypatch):
     ctx, _rows, _page, _note = install(tmp_path)
     assert members(ctx, room_id="1").split("\n")[0].endswith("untold rows: 3 in 2 runs")
