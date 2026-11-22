@@ -601,14 +601,37 @@ def test_views_that_do_not_show_leave_the_search_unfinished_and_a_named_place_un
 def test_a_pair_cut_off_before_its_draft_stays_named(tmp_path, monkeypatch):
     real, on_disk = stand._version, {}
 
-    def version(stand_, page, theme, screen, spec, version, limit=4):
+    def version(stand_, page, theme, screen, spec, version, limit=4, written=lambda path: None):
         if version == "draft":   # the draft's capture times out after the served frame is written
             on_disk.update(json.loads(_FakeStand.report.read_text(encoding="utf-8")))
             raise TimeoutError("draft screenshot timed out")
-        return real(stand_, page, theme, screen, spec, version, limit)
+        return real(stand_, page, theme, screen, spec, version, limit, written)
 
     monkeypatch.setattr(stand, "_version", version)
     report = _look(tmp_path, monkeypatch, places=["alpha"], frames="first")
     held = [line for line in on_disk["not_looked"] if line.startswith("webkit dark phone: alpha: the served version")]
     assert held and "look-t-served-webkit-dark-390x844-3x-touch-alpha.png" in held[0], on_disk["not_looked"]
     assert held[0] in report["not_looked"] and report["screens"] == []
+
+
+def test_a_served_frame_left_by_its_broken_scroll_frames_stays_named(tmp_path, monkeypatch):
+    on_disk, frame = {}, "look-t-served-webkit-dark-390x844-3x-touch-alpha.png"
+
+    def shot_scroll(self, name, caption="", page=None):
+        if page is not None and page is self.twin:   # the served first frame is written, its first scroll frame times out
+            on_disk.update(json.loads(_FakeStand.report.read_text(encoding="utf-8")))
+            raise TimeoutError("scroll frame timed out")
+        return []
+
+    def on_twin(self, act):   # as the Stand's: a twin that fails is closed and named, the draft goes on alone
+        try:
+            return act(self.twin) if self.twin is not None else None
+        except Exception as exc:
+            self.twin, self.twin_error = None, f"{type(exc).__name__}: {exc}"
+
+    monkeypatch.setattr(_FakeStand, "shot_scroll", shot_scroll)
+    monkeypatch.setattr(_FakeStand, "on_twin", on_twin)
+    report = _look(tmp_path, monkeypatch, places=["alpha"], frames="all")
+    assert any(frame in line for line in on_disk["not_looked"]), "named on disk when written: " + str(on_disk)
+    assert (tmp_path / "frames" / frame).is_file() and [s["screen"] for s in report["screens"]] == ["alpha"]
+    assert any(frame in line and "stopped after its frame" in line for line in report["not_looked"]), report["not_looked"]

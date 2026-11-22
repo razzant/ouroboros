@@ -731,9 +731,9 @@ def _why(stand, plan, place, view, screen, known, discover, served=None) -> str:
     return known.get(screen, {}).get("why", "")
 
 
-def _version(stand, page, theme, screen, spec, version, limit=EXAMPLES):
+def _version(stand, page, theme, screen, spec, version, limit=EXAMPLES, written=lambda path: None):
     """One page's raw measurements of this screen and, when asked, its frames named and captioned with ``version``:
-    (found, {"frames", "uncaptioned"?})."""
+    (found, {"frames", "uncaptioned"?}); written(path) is told of the first frame before any scroll frame is drawn."""
     label, size = engine_label(stand), f"{stand.width}x{stand.height}"
     png = page.screenshot(timeout=120000)   # the paint measure.js waits for, and the first frame
     found = stand.measure(limit=limit, page=page)
@@ -745,6 +745,7 @@ def _version(stand, page, theme, screen, spec, version, limit=EXAMPLES):
         path = stand.out / f"{name}.png"
         data, error = caption_frame(png, caption, stand.scale)
         path.write_bytes(data)
+        written(path)
         frames.append(str(path))
         if error:
             uncaptioned[str(path)] = error
@@ -754,17 +755,22 @@ def _version(stand, page, theme, screen, spec, version, limit=EXAMPLES):
     return found, {"frames": frames, **({"uncaptioned": uncaptioned} if uncaptioned else {})}
 
 
-def _look_screen(stand, viewport, theme, place, view, screen, why, spec, served, hold=lambda line: None) -> dict:
-    """One screen: the twin's served version first when it shows the same screen (held as an unfinished pair until the
-    draft beside it is measured), then the page's own; a screen the served interface lacks is named as such."""
-    pair = served == "" and stand.twin is not None
-    limit = MATCHED if pair else EXAMPLES
-    before = stand.on_twin(lambda twin: _version(stand, twin, theme, screen, spec, "served", limit)) if pair else None
-    if before is not None:
-        frame = f" (its frame {Path(before[1]['frames'][0]).name})" if before[1]["frames"] else ""
-        hold(f"{screen}: the served version was measured{frame}, the draft beside it was not, so the pair is unfinished")
+def _look_screen(stand, viewport, theme, place, view, screen, why, spec, served, hold=lambda line, keep=False: None) -> dict:
+    """One screen: the twin's served version first when it shows the same screen (held as an unfinished pair from its
+    first frame on, until the draft beside it is measured), then the page's own; a screen the served interface lacks
+    is named as such, and so is a served frame left on disk by a twin that stopped among its scroll frames."""
+    pair, held = served == "" and stand.twin is not None, []
+
+    def first(path):
+        held.append(path.name)
+        hold(f"{screen}: the served version was measured (its frame {path.name}), the draft beside it was not, so the "
+             "pair is unfinished")
+    before = stand.on_twin(lambda twin: _version(stand, twin, theme, screen, spec, "served", MATCHED, first)) if pair else None
+    if before is None and held:
+        hold(f"{screen}: the served page stopped after its frame {held[0]} was written, so the draft has no served "
+             "version beside it", keep=True)
     version = "draft" if stand.web_root else "served"
-    found, part = _version(stand, stand.page, theme, screen, spec, version, limit)
+    found, part = _version(stand, stand.page, theme, screen, spec, version, MATCHED if pair else EXAMPLES)
     marks = _mark_new(found, before[0]) if before is not None else {}
     out = {"screen": screen, "place": place, "tab": view["name"] if view else None,
            "shows": (view or {}).get("shows") or (view or {}).get("id"), "engine": stand.engine,
@@ -810,9 +816,11 @@ def _look_once(report, plan, engine, viewport, theme, known, deadline, spec, sav
                                         "the screens after that have no served version to compare with")
         save()
 
-    def hold(line):   # on disk before the draft is captured: a timeout, Stop or kill there leaves the pair named
-        pending.append(f"{combo}: {line}")
-        report["not_looked"].append(pending[-1])
+    def hold(line, keep=False):   # on disk at once (replacing the line held before): an interruption leaves it named
+        while pending:
+            report["not_looked"].remove(pending.pop())
+        report["not_looked"].append(f"{combo}: {line}")
+        pending.extend([] if keep else report["not_looked"][-1:])
         save()
 
     discover = bool(plan["classes"]) and not (plan.get("named") or plan["all"]) and viewport["name"] not in report["discovered"]
