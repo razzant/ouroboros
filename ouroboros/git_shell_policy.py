@@ -76,8 +76,7 @@ _NOTES_READONLY_MODES = frozenset({"", "list", "show", "get-ref"})
 _BISECT_READONLY_MODES = frozenset({"log", "visualize", "view", "terms"})
 # git config: legacy flag-dispatched modes. `-f`/`--file`/`--blob` make config a
 # general file reader OUTSIDE the repo, so they disqualify the read-only
-# classification outright (the `--no-index` precedent: reads must not ride the
-# repo-inspection exemption at arbitrary targets).
+# classification outright: such a read is not repository inspection.
 _CONFIG_READONLY_ACTION_FLAGS = frozenset({
     "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
     "--get-color", "--get-colorbool",
@@ -305,8 +304,7 @@ def _git_invocation_block_reason(parts: list[str], *, allow_network: bool = True
     if _git_subcommand_is_readonly(subcmd, args):
         # A read-only SUBCOMMAND carrying a file-WRITING flag is not a read-only
         # invocation: `git log|show|diff --output=<file>` truncates <file>. Judged
-        # here, in the one classifier every consumer asks, so the exemption key and
-        # both target resolvers get the same honest answer.
+        # here, in the one classifier every consumer asks.
         if _git_output_file_args(args):
             return f"git {subcmd} --output"
         if subcmd in GIT_NETWORK_SUBCOMMANDS and not allow_network:
