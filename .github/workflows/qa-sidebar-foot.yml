@@ -1,0 +1,85 @@
+name: Sidebar foot qualification
+'on':
+  push:
+    branches: [qa/sidebar-foot-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  sidebar-foot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: '9124b27a4759f89338f2b5ba6f2f77708f727920'
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+
+      - name: Prove the exact product tree
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          tree=$(git rev-parse 'HEAD^{tree}')
+          printf 'Product commit: %s\nProduct tree: %s\n' "$commit" "$tree"
+          test "$commit" = '9124b27a4759f89338f2b5ba6f2f77708f727920'
+          test "$tree" = 'fefe152c57af16be988ed224c0e4da0531281160'
+          git diff --quiet
+          git diff --cached --quiet
+          test ! -e .github/workflows/qa-sidebar-foot.yml
+
+      - name: Install the pinned Node, Chromium and WebKit
+        timeout-minutes: 70
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+
+      - name: Run focused JavaScript tests
+        working-directory: web
+        run: >-
+          ../node-standalone/bin/node --test tests/pages.test.js tests/update_flow.test.js
+          tests/update_progress.test.js tests/update_letter.test.js tests/update_verdict.test.js
+          tests/update_versions.test.js tests/update_evidence.test.js
+          tests/version_labels.test.js tests/layout.test.js
+
+      - name: Verify the real sidebar in both engines
+        timeout-minutes: 25
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          set -euo pipefail
+          junit="$RUNNER_TEMP/sidebar-foot.xml"
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/sidebar-evidence" \
+            -- python -m pytest -o addopts= -q --tb=short -m ui_browser \
+              tests/test_sidebar_short_window_browser.py \
+              tests/test_ui_shell_legacy_browser.py::test_retained_sidebar_wheel_scrolls_projects_between_main_and_the_tools \
+              tests/test_ui_shell_legacy_browser.py::test_the_document_before_the_cards_gets_the_same_foot_as_a_fresh_one \
+              tests/test_shell_interactions_browser.py::test_collapsed_projects_keep_only_the_pinned_ones_and_the_tools_follow \
+              tests/test_ui_smoke_update_progress.py::test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_panel \
+              tests/test_update_local_changes_browser.py \
+              tests/test_projects_nav_browser.py::test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_focus \
+              tests/test_projects_nav_browser.py::test_find_field_is_a_row_high_capsule_on_the_rows_columns \
+              tests/test_project_pin_browser.py::test_many_pins_order_within_groups_long_names_and_short_windows \
+              tests/test_project_pin_browser.py::test_local_pin_reveal_respects_input_and_visible_scroll_region \
+              --junitxml="$junit"
+          python - "$junit" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          cases = list(ET.parse(sys.argv[1]).getroot().iter('testcase'))
+          assert not any(c.find(tag) is not None for c in cases for tag in ('skipped', 'failure', 'error'))
+          for engine in ('chromium', 'webkit'):
+              assert any(engine in c.get('name', '').lower() for c in cases), f'{engine} did not run'
+          print(f'{len(cases)} browser cases ran without skips; Chromium and WebKit both observed')
+          PY
