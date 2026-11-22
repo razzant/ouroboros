@@ -304,5 +304,6 @@ def test_recall_waits_for_a_slow_whole_conversation_search_past_the_clients_defa
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["recall", "--help"])
     rendered = " ".join(capsys.readouterr().out.split())
-    assert "can take a minute or more; --room-id narrows that" in rendered
+    assert ("Without a usable index it scans the conversation and can take a minute or more. Give --room-id to "
+            "search one room.") in rendered
     assert "only the owner's rows (a card they answered included)" in rendered and "my human" not in rendered
