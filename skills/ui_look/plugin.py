@@ -1,12 +1,13 @@
 """ui_look: Ouroboros looks at its own interface, read-only, with the ui_design skill's live stand.
 
 One tool, ``look``. It gathers what the stand needs: the owner's window from the task's ``owner_client`` fact and a
-phone, both themes, the pinned Chromium of the browser tools and a WebKit that is already installed, the served
-``web/`` and a draft one. It then runs ``skills/ui_design/references/live_stand.py look`` in a child process group of
-its own and answers that child's report briefly. The stand plans the places, measures and draws the frames; nothing
-of it is copied here. Stop, the time budget and the work's own deadline end the child, and the report keeps what was
-measured until then. Frames and the report are flat files in ``uploads/screenshots`` named after the work, which the
-existing age-out of that folder removes.
+second window (a phone beside a desk, a desk beside a phone), both themes, the pinned Chromium of the browser tools
+with their launch arguments and a WebKit that is already installed, the served ``web/`` and a draft one. It then runs
+``skills/ui_design/references/live_stand.py look`` in a child process group of its own and answers that child's
+report briefly. The stand plans the places, measures and draws the frames; nothing of it is copied here. Stop, the
+time budget and the work's own deadlines end the child, and the report keeps what was measured until then. Frames
+and the report are flat files in ``uploads/screenshots`` named after the work, which the existing age-out of that
+folder removes.
 """
 
 from __future__ import annotations
@@ -32,18 +33,23 @@ THEMES = ("dark", "light")
 EXAMPLE_KINDS = ("text-covered", "controls-overlap", "pinned-over-content", "target-small", "page-overflow",
                  "container-overflow", "text-clipped", "text-clipped-by-ancestor", "text-truncated")
 SUMMARY_ROWS, EXAMPLES_PER_ROW, FRAMES_LISTED = 60, 3, 80
-NOTE = ("Measurements for your judgement, never a verdict: open frames with view_image before you conclude. A frame "
-        "is captioned with the engine that drew it; neither engine is the owner's own window (the macOS app draws "
-        "with the system WKWebView).")
+NOTE = ("Measurements for your judgement, never a verdict; view_image opens a frame when seeing it helps. A frame is "
+        "captioned with the engine that drew it and its version (served or draft); neither engine is the owner's own "
+        "window (the macOS app draws with the system WKWebView). With a draft and frames every screen is a pair, and "
+        "a row's new counts what the draft shows beyond the served page on the same screen.")
 
 DESCRIPTION = (
     "Look at Ouroboros's own interface, read-only, on the live data. By default the places a change touches: the "
-    "diff between the draft web/ (this task's body candidate, or web_root) and the served one, or the files in "
-    "changed; every place when web/ui.css, a token or the shell changes. Looks at the owner's window (owner_client) "
-    "and a 390 px phone, in both themes, with the pinned Chromium and, where already installed, WebKit emulation. "
+    "diff between the draft web/ (this task's body candidate, the system copy this work edits, or web_root) and the "
+    "served one, or the files in changed; every place when web/ui.css, a token, the shell or the order of a "
+    "stylesheet's rules changes. Looks at the owner's window (owner_client) and a second one (a 390 px phone, or a "
+    "desk beside a phone), in both themes, with the pinned Chromium and, where already installed, WebKit emulation. "
     "Answers the measurements per screen (covered text, small targets, overflow, cut text, uneven rows, long text): "
     "facts to judge, never a verdict. Frames only when asked, as PNG files in uploads/screenshots captioned with "
-    "their engine. Every write is answered locally; nothing on the install changes. Takes minutes."
+    "their engine; with a draft, frames come in pairs (served, then draft) and findings the draft adds are marked "
+    "new, which takes about 20-40% longer and a second page in memory. Every write is answered locally; nothing on "
+    "the install changes. Takes minutes; frames 'all' on every place keeps up to about 1 GB of PNG until the "
+    "screenshots age-out, and every place on two engines needs a budget_sec near its maximum."
 )
 SCHEMA = {
     "type": "object",
@@ -103,7 +109,8 @@ def owner_client(ctx: Any) -> dict:
 
 
 def viewports(fact: dict) -> list:
-    """The owner's window as the owner_client fact measured it, then a phone; a desk window when none is known."""
+    """The owner's window as the owner_client fact measured it (a desk window when none is known), then the other
+    kind: a desk beside an owner on touch or under 700 px, else a phone; it is left out only when it is the same."""
     view = fact.get("viewport") if isinstance(fact.get("viewport"), dict) else {}
     width, height = int(view.get("w") or 0), int(view.get("h") or 0)
     if width >= 280 and height >= 280:
@@ -112,7 +119,9 @@ def viewports(fact: dict) -> list:
                  "touch": bool(fact.get("coarse_pointer")), "source": "owner_client"}
     else:
         owner = dict(DESK, source="no owner window in this work's owner_client fact")
-    return [owner] if (owner["width"], owner["touch"]) == (PHONE["width"], True) else [owner, dict(PHONE, source="phone")]
+    other = dict(DESK, source="desk") if owner["touch"] or owner["width"] < 700 else dict(PHONE, source="phone")
+    same = all(owner[key] == other[key] for key in ("width", "height", "scale", "touch"))
+    return [owner] if same else [owner, other]
 
 
 def _owner_engine_is_webkit(fact: dict) -> bool:
@@ -133,10 +142,10 @@ def pinned_chromium() -> tuple[dict | None, str]:
     """The browser tools' pinned Chromium if it is installed: (engine row, "") or (None, why not). Never installs."""
     try:
         from ouroboros import chromium_runtime
-        from ouroboros.tools.browser import _pinned_chromium
+        from ouroboros.tools.browser import CHROMIUM_LAUNCH_ARGS, _pinned_chromium
 
         return {"engine": "chromium", "executable_path": str(_pinned_chromium(allow_install=False)),
-                "sandbox": chromium_runtime.sandbox_enabled()}, ""
+                "sandbox": chromium_runtime.sandbox_enabled(), "args": list(CHROMIUM_LAUNCH_ARGS)}, ""
     except Exception as exc:
         version = getattr(sys.modules.get("ouroboros.chromium_runtime"), "CHROMIUM_VERSION", "") or "build"
         if "is not installed" in str(exc):  # the browser tools' own lookup found no pinned build
@@ -146,21 +155,16 @@ def pinned_chromium() -> tuple[dict | None, str]:
 
 
 def installed_webkit(data_dir: pathlib.Path) -> str | None:
-    """The browsers root (a PLAYWRIGHT_BROWSERS_PATH value) holding a WebKit build, where the browser tools look."""
+    """The browsers root holding a WebKit build, where the browser tools look: the child's PLAYWRIGHT_BROWSERS_PATH."""
     try:
         from ouroboros import chromium_runtime
         from ouroboros.tools.browser import _has_platform_webkit
     except Exception:
         return None
     configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
-    roots = [(configured, chromium_runtime.browsers_root(configured))] if configured else []
-    roots += [("0", chromium_runtime.browsers_root("0")),
-              (str(data_dir / "playwright-browsers"), data_dir / "playwright-browsers"),
-              (str(_default_browsers_cache()), _default_browsers_cache())]
-    for value, root in roots:
-        if root is not None and _has_platform_webkit(pathlib.Path(root)):
-            return value
-    return None
+    roots = [chromium_runtime.browsers_root(configured)] if configured else []
+    roots += [chromium_runtime.browsers_root("0"), data_dir / "playwright-browsers", _default_browsers_cache()]
+    return next((str(root) for root in roots if root is not None and _has_platform_webkit(pathlib.Path(root))), None)
 
 
 def engine_rows(asked: list, fact: dict, data_dir: pathlib.Path) -> tuple[list, list, dict]:
@@ -180,7 +184,8 @@ def engine_rows(asked: list, fact: dict, data_dir: pathlib.Path) -> tuple[list, 
 
 
 def web_roots(ctx: Any, web_root: str) -> tuple[pathlib.Path | None, pathlib.Path, str]:
-    """(the draft web/ to show or None for the served one, the served web/, a refusal or "")."""
+    """(the draft web/ to show or None for the served one, the served web/, a refusal or ""). The draft is web_root,
+    else this task's body candidate, else the system copy this work edits (a child on a copy of the body)."""
     try:
         from ouroboros import body_candidate
 
@@ -188,13 +193,21 @@ def web_roots(ctx: Any, web_root: str) -> tuple[pathlib.Path | None, pathlib.Pat
         bound = body_candidate.descriptor(ctx) if body_candidate.is_bound(ctx) else {}
     except Exception:
         served, bound = pathlib.Path(getattr(ctx, "repo_dir", ".")) / "web", {}
+    try:
+        from ouroboros.tools.tool_resolution import active_repo_dir_for
+        from ouroboros.workspace_copies import is_system_copy
+
+        active, system_copy = pathlib.Path(active_repo_dir_for(ctx)), is_system_copy(ctx)
+    except Exception:
+        active, system_copy = pathlib.Path(getattr(ctx, "repo_dir", ".")), False
     if web_root:
         draft = pathlib.Path(str(web_root)).expanduser()
         if not draft.is_absolute():
-            base = getattr(ctx, "active_repo_dir", None)
-            draft = (pathlib.Path(base()) if callable(base) else pathlib.Path(getattr(ctx, "repo_dir", "."))) / draft
+            draft = active / draft
     elif bound:
         draft = pathlib.Path(str(bound["path"])) / "web"
+    elif system_copy:
+        draft = active / "web"
     else:
         return None, served, ""
     if not (draft / "index.html").is_file():
@@ -202,20 +215,32 @@ def web_roots(ctx: Any, web_root: str) -> tuple[pathlib.Path | None, pathlib.Pat
     return (None if draft.resolve() == served.resolve() else draft), served, ""
 
 
-def budget(asked: Any) -> tuple[float, str]:
-    """The look's time: what was asked within bounds, and never past the work's own deadline."""
+def budget(ctx: Any, asked: Any) -> tuple[float, str]:
+    """The look's time: what was asked within bounds, never past the earliest of the work's deadline, its execution
+    window and this dispatch's window (each less the reserve its owner keeps to answer), with the stand's grace."""
     seconds = float(min(BUDGET_MAX_SEC, max(BUDGET_MIN_SEC, int(asked or BUDGET_SEC))))
+    bounds = []
     try:
-        from ouroboros.model_wait import dispatch_deadline_remaining_sec
-        from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC as margin
+        from ouroboros.deadline_utils import deadline_remaining_sec, has_deadline
+        from ouroboros.model_wait import dispatch_deadline_remaining_sec, explicit_execution_window_remaining
+        from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC
+        from ouroboros.task_pacing import effective_finalization_reserve_sec
 
-        remaining = dispatch_deadline_remaining_sec()
+        reserve = float(effective_finalization_reserve_sec(ctx))
+        if has_deadline(ctx):
+            bounds.append(deadline_remaining_sec(ctx) - reserve)
+        window = explicit_execution_window_remaining(ctx)
+        if window is not None:
+            bounds.append(window - reserve)
+        dispatch = dispatch_deadline_remaining_sec()
+        if dispatch is not None:
+            bounds.append(dispatch - NESTED_SETTLEMENT_MARGIN_SEC)
     except Exception:
-        remaining, margin = None, 0
-    if remaining is not None:
-        seconds = min(seconds, remaining - margin - GRACE_SEC)
+        pass
+    if bounds:
+        seconds = min(seconds, min(bounds) - GRACE_SEC)
         if seconds < BUDGET_MIN_SEC:
-            return seconds, f"this work's deadline leaves {int(max(0.0, remaining))} s, too little for a look"
+            return seconds, f"this work has about {int(max(0.0, min(bounds)))} s left to spend, too little for a look"
     return seconds, ""
 
 
@@ -254,12 +279,28 @@ def _end_tree(proc: subprocess.Popen) -> None:
 
 
 def _examples(screen: dict) -> list:
-    out = [f"{f['kind']}: {f.get('message', '')} ({str(f.get('where', ''))[:90]})"[:220]
-           for f in screen.get("findings") or [] if f.get("kind") in EXAMPLE_KINDS]
+    """A row's examples, those the draft adds over the served page first ("new: ...")."""
+    found = sorted((f for f in screen.get("findings") or [] if f.get("kind") in EXAMPLE_KINDS), key=lambda f: not f.get("new"))
+    out = [f"{'new: ' if f.get('new') else ''}{f['kind']}: {f.get('message', '')} ({str(f.get('where', ''))[:90]})"[:220]
+           for f in found]
     out += [f"uneven-rows: gaps {row.get('gaps')} px between {len(row.get('items') or [])} controls at y {row.get('y')}"
             for row in screen.get("uneven_rows") or []]
     out += [f"long-text: {text.get('chars')} characters in {text.get('el')}" for text in screen.get("long_texts") or []]
     return out[:EXAMPLES_PER_ROW]
+
+
+def _frames(screen: dict) -> list:
+    """A screen's frames as the answer lists them: the served version first when the screen is a pair."""
+    versions = [(screen["served"], "served")] if (screen.get("served") or {}).get("frames") else []
+    out = []
+    for part, version in versions + [(screen, screen.get("version") or "served")]:
+        for path in part.get("frames") or []:
+            row = {"file": path, "engine": screen["label"], "version": version, "screen": screen["screen"],
+                   "theme": screen["theme"], "viewport": screen["viewport"]}
+            if path in (part.get("uncaptioned") or {}):
+                row["caption_error"] = part["uncaptioned"][path]
+            out.append(row)
+    return out
 
 
 def summary(report: dict, report_path: pathlib.Path, outcome: dict, missing: list) -> str:
@@ -272,22 +313,24 @@ def summary(report: dict, report_path: pathlib.Path, outcome: dict, missing: lis
     if not ran and tried:
         return _answer(ok=False, reason="no_browser", message="No browser could start; nothing was looked at.",
                        engines=tried + missing, report=str(report_path))
+    if report.get("failed") and not report.get("screens"):
+        return _answer(ok=False, reason="look_failed", message=report["failed"], notes=report.get("notes"),
+                       report=str(report_path))
     short = {"chromium": "Chromium", "webkit": "WebKit emulation"}
-    rows, clean = [], []
+    rows, quiet = [], []
     for screen in report.get("screens") or []:
         counts = {kind: n for kind, n in (screen.get("counts") or {}).items() if n}
         name = f"{screen['screen']} {screen['theme']} {screen['viewport']} {short.get(screen['engine'], screen['engine'])}"
         if not counts:
-            clean.append(name)
+            quiet.append(name)
             continue
         rows.append({"screen": screen["screen"], "engine": short.get(screen["engine"], screen["engine"]),
-                     "theme": screen["theme"], "viewport": f"{screen['viewport']} {screen['size']}",
-                     "counts": counts, "examples": _examples(screen)})
-    frames = [{"file": path, "engine": screen["label"], "screen": screen["screen"], "theme": screen["theme"],
-               "viewport": screen["viewport"]} for screen in report.get("screens") or [] for path in screen.get("frames") or []]
+                     "theme": screen["theme"], "viewport": f"{screen['viewport']} {screen['size']}", "counts": counts,
+                     **({"new": screen["new"]} if "new" in screen else {}), "examples": _examples(screen)})
+    frames = [row for screen in report.get("screens") or [] for row in _frames(screen)]
     plan = report.get("plan") or {}
     answer = {"ok": True, "summary": rows[:SUMMARY_ROWS], "screens_looked": len(report.get("screens") or []),
-              "clean_screens": clean[:40], "places": plan.get("why") or [],
+              "screens_without_findings": quiet[:40], "places": plan.get("why") or [],
               "engines": [{"engine": row["engine"], "label": row.get("label", "")} for row in ran]
                          + [{"engine": row["engine"], "why": row.get("error", "")} for row in tried] + missing,
               "viewports": report.get("viewports"), "themes": report.get("themes"), "panels": report.get("panels"),
@@ -301,9 +344,11 @@ def summary(report: dict, report_path: pathlib.Path, outcome: dict, missing: lis
         if report.get("screens") and not answer["draft_files_served"]:
             answer["notes"].append("the draft web/ answered no request of the page, so these are measurements of the "
                                    "served interface, not of the draft")
-    if len(rows) > SUMMARY_ROWS or len(clean) > 40 or len(frames) > FRAMES_LISTED:
-        answer["omitted"] = (f"{max(0, len(rows) - SUMMARY_ROWS)} rows, {max(0, len(clean) - 40)} clean screens and "
-                             f"{max(0, len(frames) - FRAMES_LISTED)} frames are in the report")
+        if report.get("draft_files_missing"):  # answered 404: the draft lacks a file its own page still asks for
+            answer["draft_files_missing"] = report["draft_files_missing"]
+    if len(rows) > SUMMARY_ROWS or len(quiet) > 40 or len(frames) > FRAMES_LISTED:
+        answer["omitted"] = (f"{max(0, len(rows) - SUMMARY_ROWS)} rows, {max(0, len(quiet) - 40)} screens without "
+                             f"findings and {max(0, len(frames) - FRAMES_LISTED)} frames are in the report")
     if not report.get("finished"):
         answer["not_looked"].append(f"the stand ended before its report was complete (exit {outcome.get('exit')})")
         if not outcome.get("ended"):
@@ -320,8 +365,8 @@ class Look:
     def _stop_reason(self) -> str:
         try:
             state = self.api.get_stop_state()
-        except Exception:
-            return ""  # a host without the reader: its own checks between calls still hold
+        except Exception as exc:  # a Stop that cannot be read may be a Stop: the call ends here
+            return f"stop_unreadable ({_first_line(exc)})"
         status = str((state or {}).get("status") or "")
         return "" if status == "continue" else (str((state or {}).get("reason") or status) or "stop")
 
@@ -344,14 +389,16 @@ class Look:
         if not rows:
             return _answer(ok=False, reason="no_browser", message="No browser to look with; nothing was started.",
                            engines=missing)
-        seconds, refusal = budget(budget_sec)
+        seconds, refusal = budget(ctx, budget_sec)
         stopped = refusal or self._stop_reason()
         if stopped:
-            return _answer(ok=False, reason="stopped" if not refusal else "no_time", message=stopped)
+            reason = "no_time" if refusal else "stop_unreadable" if stopped.startswith("stop_unreadable") else "stopped"
+            return _answer(ok=False, reason=reason, message=stopped)
         work = re.sub(r"[^A-Za-z0-9_-]+", "_", str(getattr(ctx, "task_id", "") or "work"))[:48]
         shots = data_dir / "uploads" / "screenshots"
         shots.mkdir(parents=True, exist_ok=True)
-        prefix = f"look-{work}-{time.strftime('%Y%m%dT%H%M%S')}-"
+        now = time.time()  # with milliseconds and the process: two calls in one second keep their own files
+        prefix = f"look-{work}-{time.strftime('%Y%m%dT%H%M%S', time.localtime(now))}{int(now * 1000) % 1000:03d}-{os.getpid()}-"
         report_path = shots / f"{prefix}report.json"
         spec = {"url": f"http://127.0.0.1:{int(info.get('server_port') or 8765)}", "web_root": str(draft) if draft else None,
                 "base": str(served), "changed": list(changed) if changed else None, "places": list(places) if places else None,
@@ -373,10 +420,11 @@ class Look:
         return summary(report, report_path, outcome, missing)
 
     def _run_child(self, stand: pathlib.Path, spec: dict, report_path: pathlib.Path, env: dict, seconds: float) -> dict:
-        with tempfile.TemporaryDirectory(prefix="ui-look-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="ui-look-", ignore_cleanup_errors=True) as tmp:
             spec_path, log_path = pathlib.Path(tmp) / "spec.json", pathlib.Path(tmp) / "stand.log"
             spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
-            command = [_helper_python(), "-I", "-B", str(stand), "look", "--spec", str(spec_path), "--report", str(report_path)]
+            # -B only: the interpreter's own site (a user-installed Playwright) stays reachable
+            command = [_helper_python(), "-B", str(stand), "look", "--spec", str(spec_path), "--report", str(report_path)]
             ended, deadline = "", time.monotonic() + seconds + GRACE_SEC
             with open(log_path, "wb") as log:
                 proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,

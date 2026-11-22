@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -119,6 +120,9 @@ def test_named_changes_touch_their_places(tmp_path, changed, pages, classes, eve
     (lambda css: css + ".alpha-card { --card-gap: 4px; }\n", ["alpha"], [], False),
     (lambda css: css + ":root { --tone: red; }\n", [], [], "a token changed in ':root'"),
     (lambda css: css + "button { color: red; }\n", [], [], "'button' names no class"),
+    (lambda css: css.replace("max-width: 500px", "max-width: 600px"), ["beta"], [], False),   # a moved breakpoint
+    (lambda css: css.replace(".alpha-card { color: red; }\n.panel-own { gap: 1px; }\n",
+                             ".panel-own { gap: 1px; }\n.alpha-card { color: red; }\n"), [], [], "the order of its rules changed"),
 ])
 def test_a_draft_stylesheet_touches_where_its_changed_rules_stand(tmp_path, edit, pages, classes, every):
     served, draft = _web(tmp_path / "served"), _web(tmp_path / "draft")
@@ -141,13 +145,15 @@ def test_the_plan_reads_the_real_interface_and_no_diff_means_every_place(tmp_pat
     assert stand.place_plan(web)["all"] and stand.place_plan(web, web)["all"]
 
 
-def test_the_owner_window_comes_from_owner_client_beside_a_phone():
+def test_the_owner_window_comes_from_owner_client_beside_the_other_kind():
     owner, phone = plugin.viewports({"viewport": {"w": 1512, "h": 945}, "device_pixel_ratio": 2, "coarse_pointer": False})
     assert (owner["name"], owner["width"], owner["height"], owner["scale"], owner["touch"]) == ("owner", 1512, 945, 2.0, False)
     assert (phone["width"], phone["height"], phone["touch"]) == (390, 844, True)
     assert [view["name"] for view in plugin.viewports({})] == ["desk", "phone"]
     on_phone = plugin.viewports({"viewport": {"w": 390, "h": 760}, "device_pixel_ratio": 3, "coarse_pointer": True})
-    assert [(view["name"], view["height"]) for view in on_phone] == [("owner", 760)]
+    assert [(view["name"], view["width"], view["touch"]) for view in on_phone] == [("owner", 390, True), ("desk", 1440, False)]
+    narrow = plugin.viewports({"viewport": {"w": 600, "h": 900}, "device_pixel_ratio": 2, "coarse_pointer": False})
+    assert [(view["name"], view["width"]) for view in narrow] == [("owner", 600), ("desk", 1440)]
 
 
 def _pin(root: Path) -> Path:
@@ -176,9 +182,12 @@ def test_without_a_browser_it_says_so_and_starts_nothing(tmp_path, monkeypatch):
     assert {row["engine"] for row in answer["engines"]} == {"chromium", "webkit"}
     assert not (tmp_path / "data" / "uploads").exists()
 
+    from ouroboros.tools.browser import CHROMIUM_LAUNCH_ARGS
+
     executable = _pin(browsers)
     rows, missing, _env = plugin.engine_rows(["chromium", "webkit"], {}, tmp_path / "data")
-    assert rows == [{"engine": "chromium", "executable_path": str(executable), "sandbox": True}]
+    assert rows == [{"engine": "chromium", "executable_path": str(executable), "sandbox": True,
+                     "args": list(CHROMIUM_LAUNCH_ARGS)}], "the pinned build starts with browse_page's own arguments"
     assert [row["engine"] for row in missing] == ["webkit"]
 
 
@@ -195,7 +204,8 @@ state = {"plan": {"why": ["asked"], "unplaced": []}, "engines": [{"engine": "chr
          "label": "Chromium 158 headless"}], "screens": [screen("files", {"target-small": 2, "contrast-unknown": 1},
          [spec["frames_dir"] + "/" + spec["frame_prefix"] + "chromium-dark-1512x945-files.png"])],
          "viewports": spec["viewports"], "themes": spec["themes"], "panels": {}, "not_looked": [], "notes": [],
-         "spec_seen": spec, "spec_path": sys.argv[sys.argv.index("--spec") + 1], "playwright": True, "finished": False,
+         "spec_seen": spec, "spec_path": sys.argv[sys.argv.index("--spec") + 1], "isolated": sys.flags.isolated,
+         "playwright": True, "finished": False,
          "web_root": spec["web_root"], "draft_files_served": 0 if spec["budget_sec"] > 100 else 3}
 json.dump(state, open(report, "w"))
 if spec["budget_sec"] > 100:
@@ -206,7 +216,7 @@ json.dump(state, open(report, "w"))
 '''
 
 
-@pytest.mark.parametrize("stop_after", [None, 2])
+@pytest.mark.parametrize("stop_after", [None, 2, "unreadable"])
 def test_the_tool_runs_the_stand_child_and_stop_ends_it_keeping_what_it_measured(tmp_path, monkeypatch, stop_after):
     fake = tmp_path / "references" / "live_stand.py"
     fake.parent.mkdir()
@@ -219,10 +229,14 @@ def test_the_tool_runs_the_stand_child_and_stop_ends_it_keeping_what_it_measured
     draft.mkdir(parents=True)
     (draft / "index.html").write_text("<!doctype html>", encoding="utf-8")
 
-    def stop_state():  # Stop once the child has written what it saw so far
+    def stop_state():  # Stop (or a Stop that cannot be read) once the child has written what it saw so far
         polls.append(1)
         written = list((data / "uploads" / "screenshots").glob("*-report.json"))
-        return {"status": "stop", "reason": "cancelled"} if stop_after and written and len(polls) > stop_after else {"status": "continue"}
+        if stop_after and written and len(polls) > 2:
+            if stop_after == "unreadable":
+                raise RuntimeError("the stop store is locked")
+            return {"status": "stop", "reason": "cancelled"}
+        return {"status": "continue"}
 
     api = SimpleNamespace(get_runtime_info=lambda: {"data_dir": str(data), "server_port": 8765}, get_stop_state=stop_state)
     surface = {"viewport": {"w": 1512, "h": 945}, "device_pixel_ratio": 2, "ua": "Mozilla/5.0 (Macintosh) AppleWebKit/605"}
@@ -235,7 +249,8 @@ def test_the_tool_runs_the_stand_child_and_stop_ends_it_keeping_what_it_measured
     report = json.loads(Path(answer["report"]).read_text(encoding="utf-8"))
     seen = report["spec_seen"]
     assert Path(seen["frames_dir"]) == data / "uploads" / "screenshots" and Path(answer["report"]).parent == data / "uploads" / "screenshots"
-    assert seen["frame_prefix"].startswith("look-task42-") and seen["places"] == ["files"] and seen["base"] == str(REPO / "web")
+    assert re.fullmatch(r"look-task42-\d{8}T\d{9}-\d+-", seen["frame_prefix"]), "milliseconds and the process name a call"
+    assert seen["places"] == ["files"] and seen["base"] == str(REPO / "web") and report["isolated"] == 0
     assert seen["web_root"] == str(draft)
     assert [(view["name"], view["width"]) for view in seen["viewports"]] == [("owner", 1512), ("phone", 390)]
     assert seen["themes"] == ["dark", "light"] and seen["engines"][0]["executable_path"] == "/pinned/chrome-headless-shell"
@@ -245,10 +260,228 @@ def test_the_tool_runs_the_stand_child_and_stop_ends_it_keeping_what_it_measured
     assert answer["frames"][0]["engine"] == "Chromium 158 headless" and answer["frames"][0]["file"].endswith("-files.png")
     unserved = [note for note in answer["notes"] if "draft web/ answered no request" in note]
     if stop_after:
-        assert answer["screens_looked"] == 1 and any("stopped (cancelled)" in line for line in answer["not_looked"])
+        stopped = "stopped (stop_unreadable (the stop store is locked))" if stop_after == "unreadable" else "stopped (cancelled)"
+        assert answer["screens_looked"] == 1 and any(stopped in line for line in answer["not_looked"]), answer["not_looked"]
         assert any("before its report was complete" in line for line in answer["not_looked"])
         assert answer["draft_files_served"] == 0 and unserved, "a draft the page never ran is said, not measured as it"
     else:
-        assert answer["screens_looked"] == 2 and answer["clean_screens"] == ["files-two dark owner Chromium"]
+        assert answer["screens_looked"] == 2 and answer["screens_without_findings"] == ["files-two dark owner Chromium"]
         assert answer["not_looked"] == [] and answer["draft_files_served"] == 3 and not unserved
     assert not Path(report["spec_path"]).exists(), "the spec folder is temporary"
+
+
+def _api(tmp_path, stop_state=lambda: {"status": "continue"}):
+    return SimpleNamespace(get_runtime_info=lambda: {"data_dir": str(tmp_path / "data"), "server_port": 9,
+                                                     "skill_dir": str(SEEDS / "ui_look")}, get_stop_state=stop_state)
+
+
+def test_the_look_fits_the_work_deadline_and_an_unreadable_stop_starts_nothing(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    def at(seconds):
+        return {"deadline_at": (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()}
+
+    assert plugin.budget(SimpleNamespace(task_metadata=at(3600)), 480) == (480.0, "")
+    seconds, refusal = plugin.budget(SimpleNamespace(task_metadata=at(55)), 480)
+    assert seconds < plugin.BUDGET_MIN_SEC and "too little for a look" in refusal
+    monkeypatch.setattr(plugin.subprocess, "Popen", lambda *a, **k: pytest.fail("nothing may start"))
+    monkeypatch.setattr(plugin, "engine_rows", lambda asked, fact, data: ([{"engine": "webkit"}], [], {}))
+    late = SimpleNamespace(task_id="t", task_metadata=at(55), repo_dir=REPO, drive_root=tmp_path / "data")
+    assert json.loads(plugin.Look(_api(tmp_path)).run(late))["reason"] == "no_time"
+
+    def unreadable():
+        raise RuntimeError("the stop store is locked")
+
+    ctx = SimpleNamespace(task_id="t", task_metadata={}, repo_dir=REPO, drive_root=tmp_path / "data")
+    answer = json.loads(plugin.Look(_api(tmp_path, unreadable)).run(ctx))
+    assert (answer["ok"], answer["reason"]) == (False, "stop_unreadable") and "stop store is locked" in answer["message"]
+
+
+def test_a_child_on_a_system_copy_shows_that_copy_by_default(tmp_path):
+    copy = tmp_path / "copy"
+    (copy / "web").mkdir(parents=True)
+    (copy / "web" / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    child = SimpleNamespace(task_metadata={}, repo_dir=REPO, workspace_mode="self_worktree", workspace_root=str(copy),
+                            task_constraint=None)
+    assert plugin.web_roots(child, "") == (copy / "web", REPO / "web", "")
+    assert plugin.web_roots(SimpleNamespace(task_metadata={}, repo_dir=REPO), "") == (None, REPO / "web", "")
+
+
+class _Route:
+    def __init__(self, url, method="GET"):
+        self.request, self.done = SimpleNamespace(url=url, method=method), None
+
+    def fulfill(self, **kw):
+        self.done = ("fulfill", kw.get("status"), kw.get("path"))
+
+    def continue_(self):
+        self.done = ("continue",)
+
+    def abort(self):
+        self.done = ("abort",)
+
+
+def test_the_draft_answers_for_its_whole_interface_and_the_pinned_build_gets_its_arguments(tmp_path):
+    draft = _web(tmp_path / "draft")
+    page = stand.Stand(web_root=draft, out=tmp_path / "out", url="http://127.0.0.1:9")
+    for url, done in (("http://127.0.0.1:9/static/style.css?v=2", ("fulfill", 200, str(draft / "style.css"))),
+                      ("http://127.0.0.1:9/static/modules/gone.js", ("fulfill", 404, None)),   # deleted in the draft
+                      ("http://127.0.0.1:9/static/../../etc/hosts", ("fulfill", 404, None)),
+                      ("http://127.0.0.1:9/api/state", ("continue",))):
+        route = _Route(url)
+        page._http(route, True)
+        assert route.done == done, url
+    served = _Route("http://127.0.0.1:9/static/modules/gone.js")
+    page._http(served, False)   # the served page beside the draft asks the server
+    assert served.done == ("continue",) and page.missing_from_root == ["/static/modules/gone.js", "/static/../../etc/hosts"]
+    assert page.served_from_root == 1
+
+    launched = []
+    pinned = stand.Stand(executable_path="/pinned/chrome-headless-shell", launch_args=["--use-gl=angle"], out=tmp_path)
+    pinned._pw = SimpleNamespace(chromium=SimpleNamespace(launch=lambda **kw: launched.append(kw)))
+    pinned._launch()
+    assert launched == [{"headless": True, "executable_path": "/pinned/chrome-headless-shell", "chromium_sandbox": True,
+                         "args": ["--use-gl=angle"]}]
+
+
+def test_a_frame_that_cannot_be_captioned_and_a_failed_snippet_are_named(tmp_path):
+    png, error = stand.caption_frame(b"not a png", "Chromium | draft", 2)
+    assert png == b"not a png" and error.startswith("no caption: ")
+
+    class Page:
+        def evaluate(self, script, arg=None):
+            if "target-small" in script:   # the measure.js snippet
+                raise RuntimeError("measure.js threw")
+            return [] if "window.__look." in script else None
+
+    found = stand.Stand(out=tmp_path).measure(page=Page())
+    assert found["layout_error"] == "RuntimeError: measure.js threw"
+    assert stand._facts(found)["unmeasured"] == "measure.js failed: RuntimeError: measure.js threw"
+
+
+class _FakePage:
+    def screenshot(self, timeout=None):
+        return b"not a png"   # so the frame keeps no caption, and says so
+
+    def evaluate(self, script, arg=None):
+        return f"panel-{arg}"   # the one call look() makes itself: what a pressed view opens
+
+
+class _FakeStand:
+    """What look() drives of the Stand, on a page of places alpha and beta (beta with two views) and one room."""
+    made: list = []
+    report: Path = Path()
+    shell_fails = False
+
+    def __init__(self, **kw):
+        _FakeStand.made.append(kw)
+        self.web_root, self.out, self.engine = kw["web_root"], Path(kw["out"]), kw["engine"]
+        self.width, self.height, self.scale, self.touch = kw["width"], kw["height"], kw["scale"], bool(kw["touch"])
+        self.version, self.twin_error, self.place, self.seen = "1", "", "", []
+        self.intercepted, self.dropped_ws, self.served_from_root, self.missing_from_root, self.caption_errors = [], [], 0, [], {}
+        self.page, self.twin = _FakePage(), (_FakePage() if kw["twin"] and kw["web_root"] else None)
+
+    def __enter__(self):
+        self.seen.append(json.loads(_FakeStand.report.read_text(encoding="utf-8"))["finished"])   # written at the start
+        return self
+
+    def __exit__(self, *exc):
+        _FakeStand.last = self
+
+    def open(self):
+        if _FakeStand.shell_fails:
+            raise stand.ShellError("the interface did not load (Timeout 60000ms exceeded)")
+
+    def panels(self):
+        return {}
+
+    def places(self):
+        return ["alpha", "beta"]
+
+    def nav(self, place):
+        self.place = place
+
+    def tabs(self, page=None):   # the served page lacks the draft's second view
+        views = [{"i": 0, "name": "One"}, {"i": 1, "name": "Two"}] if self.place == "beta" else []
+        return views[:1] if page is not None and page is self.twin else views
+
+    def tab(self, index, twin_index=None):
+        return "", (None if self.twin is None else "" if twin_index is not None else "the served interface has no such view")
+
+    def rooms(self):
+        return [{"id": "p1", "name": "Room One"}]
+
+    def open_room(self, room_id):
+        return "", (None if self.twin is None else "")
+
+    def probe(self, classes):
+        return list(classes) if self.place == "beta" else []
+
+    def on_twin(self, act):
+        return act(self.twin) if self.twin is not None else None
+
+    def shot_scroll(self, name, caption="", page=None):
+        return []
+
+    def measure(self, limit=6, page=None):
+        self.seen.append(json.loads(_FakeStand.report.read_text(encoding="utf-8"))["writes_answered_locally"])
+        self.intercepted.append({"method": "POST"})
+        counts = {"target-small": 1} if page is self.twin else {"target-small": 2, "text-tiny": 1}
+        finding = {"kind": "target-small", "message": "18x18px hit target", "where": "button.x", "value": None}
+        return {"uneven_rows": [], "long_texts": [], "layout": {"facts": {"counts": counts}, "findings": [finding]}}
+
+
+def _look(tmp_path, monkeypatch, **spec):
+    served, draft = _web(tmp_path / "served"), _web(tmp_path / "draft")
+    monkeypatch.setattr(stand, "Stand", _FakeStand)
+    monkeypatch.setitem(sys.modules, "playwright", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", SimpleNamespace())
+    _FakeStand.made, _FakeStand.report = [], tmp_path / "report.json"
+    spec = {"web_root": str(draft), "base": str(served), "frames_dir": str(tmp_path / "frames"), "frame_prefix": "look-t-",
+            "viewports": [{"name": "phone", "width": 390, "height": 844, "scale": 3, "touch": True}], "themes": ["dark"],
+            "engines": [{"engine": "webkit"}], "url": "http://127.0.0.1:9", **spec}
+    (tmp_path / "frames").mkdir(exist_ok=True)
+    return stand.look(spec, _FakeStand.report)
+
+
+def test_with_a_draft_and_frames_every_screen_is_a_pair_and_rooms_are_asked_for(tmp_path, monkeypatch):
+    report = _look(tmp_path, monkeypatch, changed=["web/modules/a.js", "web/modules/b.js"], frames="first", rooms=1)
+    screens = {s["screen"]: s for s in report["screens"]}
+    assert _FakeStand.made[0]["twin"] is True and list(screens) == ["alpha", "beta-one", "beta-two", "room-0-room_one"]
+    assert screens["room-0-room_one"]["why"] == "asked for" and screens["beta-one"]["shows"] == "panel-0"
+    assert screens["beta-two"]["served"] == {"absent": "the served interface has no such view"}
+    for name in ("alpha", "beta-one", "room-0-room_one"):
+        screen = screens[name]
+        assert screen["version"] == "draft" and screen["new"] == {"target-small": 1, "text-tiny": 1}
+        (served,), (draft,) = screen["served"]["frames"], screen["frames"]
+        assert "look-t-served-webkit-dark-390x844-3x-touch-" in served and "look-t-draft-webkit-dark-390x844-3x-touch-" in draft
+        assert screen["uncaptioned"][draft].startswith("no caption: ")
+    assert not any("not told apart" in note for note in report["notes"])
+    assert _FakeStand.last.seen[0] is False, "the report is on disk before the browser opens"
+    assert _FakeStand.last.seen[-1] >= 2, "each screen writes its counters as it ends, not only the combo"
+    answer = json.loads(plugin.summary(report, tmp_path / "report.json", {"exit": 0, "ended": ""}, []))
+    assert [frame["version"] for frame in answer["frames"]] == ["served", "draft", "served", "draft", "draft", "served", "draft"]
+    assert answer["summary"][0]["new"] == {"target-small": 1, "text-tiny": 1} and answer["frames"][1]["caption_error"]
+
+
+def test_without_frames_one_page_a_note_and_rooms_or_their_absence_said(tmp_path, monkeypatch):
+    report = _look(tmp_path, monkeypatch, changed=["web/modules/a.js"], frames="none", rooms=0)
+    assert _FakeStand.made[0]["twin"] is False and all("served" not in s and "new" not in s for s in report["screens"])
+    assert any("not told apart" in note and "frames 'first'" in note for note in report["notes"]), report["notes"]
+    only_rooms = _look(tmp_path, monkeypatch, changed=["ouroboros/loop.py"], frames="none", rooms=1)
+    assert [s["screen"] for s in only_rooms["screens"]] == ["room-0-room_one"], "rooms asked for need no place"
+    classes = _look(tmp_path, monkeypatch, changed=["web/modules/panel.js"], frames="none", rooms=0)
+    assert [s["screen"] for s in classes["screens"]] == ["beta-one", "beta-two"] and classes["discovered"] == ["phone"]
+    assert any("no Project room was opened" in note for note in classes["notes"])
+
+
+def test_a_shell_that_never_loads_is_a_failed_look_and_an_unfinished_search_is_named(tmp_path, monkeypatch):
+    monkeypatch.setattr(_FakeStand, "shell_fails", True)
+    report = _look(tmp_path, monkeypatch, changed=["web/modules/a.js"], themes=["dark", "light"])
+    assert report["screens"] == [] and report["failed"] and len([n for n in report["notes"] if "did not load" in n]) == 2
+    answer = json.loads(plugin.summary(report, tmp_path / "report.json", {"exit": 0, "ended": ""}, []))
+    assert (answer["ok"], answer["reason"]) == (False, "look_failed")
+    monkeypatch.setattr(_FakeStand, "shell_fails", False)
+    monkeypatch.setattr(_FakeStand, "probe", lambda self, classes: (_ for _ in ()).throw(RuntimeError("page crashed")))
+    broken = _look(tmp_path, monkeypatch, changed=["web/modules/panel.js"])
+    assert broken["discovered"] == [] and any("search for the changed classes did not finish" in n for n in broken["notes"])

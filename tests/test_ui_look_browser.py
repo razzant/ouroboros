@@ -1,20 +1,22 @@
-"""The ui_look tool on a real test server: a draft web/ changes one Files rule, and the tool looks only there.
+"""The ui_look tool and its stand on a real test server, in the engine each case names: the browser tools' pinned
+Chromium by its executable (never Playwright's own build) or Playwright WebKit.
 
-The server is the UI fixture's (isolated data, a mock model). The tool runs the ui_design stand in a child of its own
-against it, in the engine each case names: the browser tools' pinned Chromium by its executable (never Playwright's
-own build) or Playwright WebKit. The draft shrinks the text of the Files folder list (its rows, or its empty-folder
-note) to 7 px, a size the interface never uses, so the measured text sizes prove that every measured and framed screen
-ran the draft stylesheet. The list stands on every Files screen at both widths; the Files tab band does not, since a
-desk moves its location and actions into the page's bar and hides it (page_header.js bindPageHeader). The answer
-covers the files place alone, in both themes, at the owner's window from owner_client and at a phone; each frame is a
-flat file in uploads/screenshots with a band under it naming its engine. The stand runs in this test's interpreter,
-or in the one LOOK_STAND_PYTHON names (a Python with Playwright, for a test interpreter without it).
+The server is the UI fixture's (isolated data, a mock model). A draft web/ shrinks the text of the Files folder list
+(its rows, or its empty-folder note) to 7 px, a size the interface never uses, so the measured text sizes prove which
+version of the interface each screen ran. The list stands on every Files screen at both widths; the Files tab band does
+not, since a desk moves its location and actions into the page's bar and hides it (page_header.js bindPageHeader). With
+frames asked for, every screen is a pair: the served interface beside the draft on the same data, the served one
+without the 7 px text, the draft with it marked new, each frame a flat file in uploads/screenshots named and captioned
+with its version and engine. The stand, run alone at a phone, walks every Dashboard view and Extensions page although
+the phone hides their list after the first press, and opens a Project room by its id. The stand runs in this test's
+interpreter, or in the one LOOK_STAND_PYTHON names (a Python with Playwright, for a test interpreter without it).
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,28 +24,30 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from devtools.benchmarks.common.server_runner import _api
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
 pytestmark = [pytest.mark.ui_browser]
 REPO = Path(__file__).resolve().parents[1]
+STAND = REPO / "skills" / "ui_design" / "references" / "live_stand.py"
 LABELS = {"chromium": "Chromium", "webkit": "WebKit emulation"}
 
 
-def _plugin():
+def _plugin(monkeypatch):
     spec = importlib.util.spec_from_file_location("ui_look_browser_plugin", REPO / "skills" / "ui_look" / "plugin.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if os.environ.get("LOOK_STAND_PYTHON"):
+        monkeypatch.setattr(module, "_helper_python", lambda: os.environ["LOOK_STAND_PYTHON"])
     return module
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_look_measures_where_a_draft_change_stands_and_captions_each_frame(direct_server_with_data, tmp_path,
-                                                                           monkeypatch, engine):
+def test_look_measures_where_a_draft_change_stands_beside_the_served_screen(direct_server_with_data, tmp_path,
+                                                                            monkeypatch, engine):
     from PIL import Image
 
-    plugin = _plugin()
-    if os.environ.get("LOOK_STAND_PYTHON"):
-        monkeypatch.setattr(plugin, "_helper_python", lambda: os.environ["LOOK_STAND_PYTHON"])
+    plugin = _plugin(monkeypatch)
     server = direct_server_with_data
     draft = tmp_path / "draft" / "web"
     shutil.copytree(Path(server["repo_dir"]) / "web", draft, ignore=shutil.ignore_patterns("tests", "node_modules"))
@@ -68,15 +72,59 @@ def test_look_measures_where_a_draft_change_stands_and_captions_each_frame(direc
     assert screens and {screen["place"] for screen in screens} == {"files"}, [screen["screen"] for screen in screens]
     assert {(screen["theme"], screen["viewport"]) for screen in screens} == {
         (theme, view) for theme in ("dark", "light") for view in ("owner", "phone")}
-    sizes = [(screen["screen"], screen["theme"], screen["viewport"], screen["text_sizes"]) for screen in screens]
-    assert all(7 in (size or []) for *_, size in sizes), f"every screen ran the draft stylesheet: {sizes}"
+    sizes = [(screen["screen"], screen["theme"], screen["viewport"], screen["text_sizes"],
+              (screen.get("served") or {}).get("text_sizes")) for screen in screens]
+    assert all(7 in (draft_sizes or []) and 7 not in (served_sizes or [7]) for *_, draft_sizes, served_sizes in sizes), (
+        f"each screen is a pair: the draft ran its stylesheet, the served page did not: {sizes}")
+    assert all(screen["new"].get("text-tiny", 0) >= 1 for screen in screens), [screen.get("new") for screen in screens]
     shots = data / "uploads" / "screenshots"
-    assert Path(answer["report"]).parent == shots and len(answer["frames"]) == len(screens)
+    assert Path(answer["report"]).parent == shots and len(answer["frames"]) == 2 * len(screens)
+    assert [frame["version"] for frame in answer["frames"]] == ["served", "draft"] * len(screens)
     for frame in answer["frames"]:
         path = Path(frame["file"])
-        assert path.parent == shots and path.name.startswith("look-look-browser-") and f"-{engine}-" in path.name
+        view = (1280, 800, 2, "mouse") if frame["viewport"] == "owner" else (390, 844, 3, "touch")
+        assert path.parent == shots and path.name.startswith("look-look-browser-"), path.name
+        assert f"-{frame['version']}-{engine}-" in path.name and f"-{view[0]}x{view[1]}-{view[2]}x-{view[3]}-" in path.name
         with Image.open(path) as image:
-            view = (1280, 800, 2) if frame["viewport"] == "owner" else (390, 844, 3)
             band = max(18, round(20 * view[2]))
             assert image.size == (view[0] * view[2], view[1] * view[2] + band), (path.name, image.size)
             assert image.text["Description"].startswith(frame["engine"]) and frame["engine"].startswith(LABELS[engine])
+            assert f"| {frame['version']} |" in image.text["Description"], image.text["Description"]
+
+
+def _source_list(module: str, block: str, key: str) -> list:
+    """The values of ``key`` in the list ``block`` of a web module, in its order (what its rows are made from)."""
+    text = (REPO / "web" / "modules" / module).read_text(encoding="utf-8")
+    start = text.index(block)
+    return re.findall(rf"\b{key}: '([^']+)'", text[start:text.index("]", start)])
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_the_stand_walks_each_view_a_phone_hides_and_opens_a_room_by_its_id(direct_server_with_data, tmp_path,
+                                                                             monkeypatch, engine):
+    plugin = _plugin(monkeypatch)
+    server = direct_server_with_data
+    room = _api(server["url"], "POST", "/api/projects", {"name": "Look room"}, timeout=60)["project"]
+    rows, missing, env = plugin.engine_rows([engine], {}, tmp_path / "tool-data")
+    assert rows, missing
+    spec = {"url": server["url"], "places": ["dashboard", "skills"], "rooms": 1, "frames": "none",
+            "viewports": [{"name": "phone", "width": 390, "height": 844, "scale": 3, "touch": True}], "themes": ["light"],
+            "engines": rows, "frames_dir": str(tmp_path), "frame_prefix": "look-views-", "budget_sec": 900}
+    report_path = tmp_path / "views-report.json"
+    outcome = plugin.Look(SimpleNamespace(get_stop_state=lambda: {"status": "continue"}))._run_child(
+        STAND, spec, report_path, env, 900)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["finished"] and outcome["exit"] == 0, (outcome, report["notes"])
+    assert not [note for note in report["notes"] if "was not measured" in note], report["notes"]
+    by_place = {place: [screen for screen in report["screens"] if screen["place"] == place]
+                for place in ("dashboard", "skills", "room")}
+    dashboard = [(screen["tab"], screen["shows"]) for screen in by_place["dashboard"]]
+    assert dashboard == list(zip(_source_list("dashboard.js", "const DASHBOARD_TABS", "label"),
+                                 [f"dashboard-panel-{value}" for value in
+                                  _source_list("dashboard.js", "const DASHBOARD_TABS", "value")])), dashboard
+    extensions = [(screen["tab"], screen["shows"]) for screen in by_place["skills"]]
+    assert extensions == list(zip(_source_list("extensions.js", "export const EXTENSIONS_PAGES", "title"),
+                                  _source_list("extensions.js", "export const EXTENSIONS_PAGES", "id"))), extensions
+    assert [(screen["tab"], screen["shows"], screen["why"]) for screen in by_place["room"]] == [
+        ("Look room", room["id"], "asked for")]
