@@ -195,7 +195,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/fs/dirs` | |
 | GET | `/api/chat/history` | |
 | GET | `/api/chat/search` | |
-| GET | `/api/recall` | neighbour door, raw loopback peer only (CLIENT_CONTRACT) |
+| GET | `/api/recall` | neighbour door (CLIENT_CONTRACT) |
 | GET | `/api/logs/{name}` | |
 | GET | `/api/logs/{name}/raw` | |
 | POST | `/api/chat/upload` | |
