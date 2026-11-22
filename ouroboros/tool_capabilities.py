@@ -298,9 +298,14 @@ INERT_READ_TOOLS: frozenset[str] = frozenset({
 })
 
 
-def legacy_pool_response(names: list[str]) -> bool:
-    """Whether this response runs whole in the pool under its old exception rule (``LEGACY_POOL_TOOLS``)."""
-    return len(names) > 1 and all(name in LEGACY_POOL_TOOLS for name in names)
+def legacy_pool_response(names: Iterable[str]) -> bool:
+    """Whether this response runs whole in the pool under its old exception rule (``LEGACY_POOL_TOOLS``). Names are
+    taken lazily, as the old question took them: one is read only while every earlier one was legacy."""
+    count = 0
+    for count, name in enumerate(names, 1):
+        if name not in LEGACY_POOL_TOOLS:
+            return False
+    return count > 1
 
 
 def call_segments(names: Iterable[str]) -> list[list[int]]:

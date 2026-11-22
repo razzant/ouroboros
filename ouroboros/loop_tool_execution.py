@@ -1135,8 +1135,9 @@ def _retire_stateful_tool(stateful_executor, tool_ctx, future):
     return settlement_target, on_settled
 
 
-def _call_name(tc: Dict[str, Any]) -> str:
-    return str((tc.get("function") or {}).get("name") or "").strip()
+def _call_name(tc: Any) -> str:  # tolerant: a malformed call is named "", so it is never inert and runs alone
+    fn = tc.get("function") if isinstance(tc, dict) else None
+    return str(fn.get("name") or "").strip() if isinstance(fn, dict) else ""
 
 
 def handle_tool_calls(
@@ -1230,8 +1231,9 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
     tools._ctx._request_wire_custom_receipts = ()
     validation_by_id = custom_validation_by_call_id(validation)
 
-    names = [_call_name(tc) for tc in tool_calls]
-    legacy = legacy_pool_response(names)  # exactly the old pool; every other response runs in segments
+    legacy = len(tool_calls) > 1 and legacy_pool_response(  # the old pool's own question, lazy and strict as it was:
+        str(tc.get("function", {}).get("name") or "").strip() for tc in tool_calls)  # a malformed call raises here
+    names = [_call_name(tc) for tc in tool_calls]  # every other response runs in segments
     from ouroboros.presence_context import keep_first_receipts
 
     def _execute(tc: Dict[str, Any]) -> Dict[str, Any]:

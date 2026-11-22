@@ -518,9 +518,10 @@ def test_a_delivery_confirmed_while_a_group_runs_rides_one_row(host_world, monke
         with lock:
             me = threading.get_ident()
             reads_on[me] = reads_on.get(me, 0) + 1
+            seen = confirmed.is_set()  # before the wake-up below: a confirmation it lets happen is outside this read
             if outer.get('read') == me and reads_on[me] == 2:
                 read_closed.set()  # the read's own window has closed
-        return frozenset({('earlier-send', '0')}) if confirmed.is_set() else frozenset()
+        return frozenset({('earlier-send', '0')}) if seen else frozenset()
     monkeypatch.setattr(presence_context, 'confirmed_delivery_receipts', receipts)
     original = execution._execute_with_timeout
 
@@ -644,11 +645,18 @@ def test_a_legacy_sibling_ending_outside_exception_after_a_control_keeps_its_own
     assert 'owner_stop' in results[1]['result'] and 'NOT STARTED' not in results[1]['result']
 
 
-def test_a_raw_call_without_a_function_does_not_stop_the_calls_before_it(host_world, monkeypatch):
-    """Naming the calls tolerates a raw call whose function is None, so the earlier call runs, as on the target,
-    which raised only when it reached that call."""
+@pytest.mark.parametrize('raw', [{'id': 'raw', 'function': None}, {'id': 'raw', 'function': 'read_file'}, 'read_file'],
+                         ids=['none', 'string-function', 'string-call'])
+def test_a_malformed_call_ends_the_response_where_the_target_did(host_world, monkeypatch, raw):
+    """The mode is chosen by the old pool's own lazy, strict question. After a writing call it stops at that call's
+    name, so the write lands and the malformed call fails when reached; after only legacy names it reaches the
+    malformed call and raises before anything, so no paid call of the prefix starts."""
     host = host_world.host
-    entered = effects(monkeypatch, {'write_file': completed('Written.')})
-    with pytest.raises(AttributeError):
-        batch_of(host, [invocation('write', 'write_file', path='s', content='c'), {'id': 'raw', 'function': None}])
-    assert entered == ['write_file']
+    entered = effects(monkeypatch, {'write_file': completed('Written.'), 'web_search': completed('Paid.'),
+                                    'schedule_subagent': completed('Spawned.')})
+    with pytest.raises(AttributeError, match="has no attribute 'get'"):
+        batch_of(host, [invocation('write', 'write_file', path='s', content='c'), raw])
+    assert entered == ['write_file'], 'the write before the malformed call runs'
+    with pytest.raises(AttributeError, match="has no attribute 'get'"):
+        batch_of(host, [invocation('search', 'web_search', query='q'), invocation('spawn', 'schedule_subagent'), raw])
+    assert entered == ['write_file'], 'nothing of a legacy-only prefix is entered'
