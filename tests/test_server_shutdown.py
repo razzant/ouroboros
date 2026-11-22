@@ -1142,6 +1142,52 @@ def test_an_install_that_exits_after_its_stop_leaves_the_model_manager(tmp_path,
         owner.join(10)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a child that ignores SIGTERM is a POSIX case")
+def test_an_install_a_stop_overtook_during_its_launch_stays_where_panic_reaches_it(tmp_path, monkeypatch):
+    """A stop that lands while the installer is still being launched finds no handle and only cancels; the install
+    thread then sends TERM to the child it got and returns. One that ignores TERM stays where Panic's request reaches
+    it until its exit is seen, and the next Stop lets it go once it has exited."""
+    import signal
+    import sys
+
+    from ouroboros import local_model
+
+    ready, children = tmp_path / "ready", []
+    code = ("import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "pathlib.Path(sys.argv[1]).touch(); time.sleep(60)")
+    monkeypatch.setattr(local_model, "_get_install_command", lambda: [sys.executable, "-c", code, str(ready)])
+    monkeypatch.setattr(local_model, "_get_install_env", lambda: dict(os.environ))
+    manager = local_model.LocalModelManager()
+    launch_kwargs, terminate = local_model._with_hidden_subprocess, local_model.terminate_process_tree
+
+    def stop_during_the_launch(kwargs):
+        manager.stop_server()  # past the install's first check, before it holds a handle
+        return launch_kwargs(kwargs)
+
+    def terminate_once_ignored(child):
+        children.append(child)
+        deadline = time.monotonic() + 10
+        while not ready.is_file() and time.monotonic() < deadline:  # TERM is ignored from here on
+            time.sleep(0.01)
+        return terminate(child)
+
+    monkeypatch.setattr(local_model, "_with_hidden_subprocess", stop_during_the_launch)
+    monkeypatch.setattr(local_model, "terminate_process_tree", terminate_once_ignored)
+    owner = threading.Thread(target=manager._run_install, daemon=True)
+    owner.start()
+    owner.join(10)
+    assert not owner.is_alive() and len(children) == 1 and manager._install_proc is None
+    child = children[0]
+    try:
+        assert child.poll() is None and child in manager._stopping, "a live install escaped Panic's request"
+        assert [receipt["pid"] for receipt in manager.panic_stop(request_only=True)] == [child.pid]
+        assert child.wait(timeout=10) == -signal.SIGKILL
+        manager.stop_server()
+        assert child not in manager._stopping and manager.panic_stop(request_only=True) == []
+    finally:
+        _end(child)
+
+
 def test_a_model_child_that_exits_after_its_stop_goes_at_the_next_stop_or_panic():
     """A server an earlier stop saw alive after its last wait may exit later: the next Stop's poll lets it go, and
     Panic polls before it signals, so a reaped handle (the current server's or a stopped one's) is released and never

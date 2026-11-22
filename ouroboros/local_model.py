@@ -270,6 +270,7 @@ class LocalModelManager:
 
             # stop_server may have run during Popen; kill immediately if so.
             if self._install_cancelled.is_set():
+                self._stopping.add(proc)  # that stop never saw this child: Panic reaches it until its exit is seen
                 try:
                     terminate_process_tree(proc)
                 except Exception:
