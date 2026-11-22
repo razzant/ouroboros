@@ -749,7 +749,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
         if authority.isolation == "live" else ""), None)]
     if snapshot_id and authority.investigation:  # nothing from its copy can land: no write root, this fact instead
         facts["access"].append(("investigation", "evidence-only investigation in a private copy (execution_root) of "
-                                "authority_target_root: its changes are kept as evidence and never applied "
+                                "authority_target_root: its captured changes are kept as evidence and never applied "
                                 "(integrate_delegated_patch refuses), and the host's instructions forbid commits", False))
     elif snapshot_id and access != "readonly":  # a plan turn keeps its snapshot for its continuation, writes nothing
         facts["write_root"] = ("private snapshot (execution_root) of authority_target_root: only a diff captured at "

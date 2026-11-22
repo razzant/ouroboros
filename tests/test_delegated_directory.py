@@ -168,7 +168,7 @@ def test_only_an_investigation_start_says_its_copy_is_evidence_only(tmp_path, mo
         assert started["status"] == "started", started
         note = started["note"]
     said = ("investigation: evidence-only investigation in a private copy (execution_root) of authority_target_root: "
-            "its changes are kept as evidence and never applied") in note
+            "its captured changes are kept as evidence and never applied") in note
     assert said is (kind == "investigation"), note
     assert ("write root: private snapshot" in note) is (kind == "writer"), note
 
