@@ -769,6 +769,7 @@
           "offset": 0
         },
         "reply_author_label": "System",
+        "task_attempt": 0,
         "model_execution": {
           "requested_model": "claudexor::codex=gpt-6-astra",
           "requested_use_local": false,
@@ -793,6 +794,8 @@
           }
         },
         "target_label": "Ouroboros Autonomous Exploration",
+        "terminal_origin": "model_final",
+        "status": "completed",
         "outcome_axes": {
           "schema_version": 1,
           "lifecycle": {
@@ -837,9 +840,9 @@
               "receipt": false,
               "fact": "settled",
               "live": false,
-              "status": "ok",
               "hostError": false,
-              "ts": "2026-10-24T07:49:00+00:00"
+              "ts": "2026-10-24T07:49:00+00:00",
+              "status": "ok"
             }
           ],
           "legacy": {
@@ -864,9 +867,9 @@
             "quota_met": false
           }
         },
+        "task_terminal_status": "completed",
         "_is_direct_chat": true,
         "initiator": "consciousness",
-        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -912,6 +915,7 @@
           "offset": 3880
         },
         "reply_author_label": "System",
+        "task_attempt": 0,
         "model_execution": {
           "requested_model": "claudexor::codex=gpt-6-astra",
           "requested_use_local": false,
@@ -936,6 +940,8 @@
           }
         },
         "target_label": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не тре…",
+        "terminal_origin": "model_final",
+        "status": "completed",
         "outcome_axes": {
           "schema_version": 1,
           "lifecycle": {
@@ -980,9 +986,9 @@
               "receipt": false,
               "fact": "settled",
               "live": false,
-              "status": "ok",
               "hostError": false,
-              "ts": "2026-10-24T07:49:00+00:00"
+              "ts": "2026-10-24T07:49:00+00:00",
+              "status": "ok"
             }
           ],
           "legacy": {
@@ -1008,10 +1014,10 @@
           }
         },
         "tool_calls": 16,
+        "task_terminal_status": "completed",
         "_is_direct_chat": true,
         "initiator": "consciousness",
         "wake_summary": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
-        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1057,6 +1063,7 @@
           "offset": 8308
         },
         "reply_author_label": "System",
+        "task_attempt": 0,
         "model_execution": {
           "requested_model": "claudexor::codex=gpt-6-astra",
           "requested_use_local": false,
@@ -1081,6 +1088,8 @@
           }
         },
         "target_label": "Ouroboros Autonomous Exploration",
+        "terminal_origin": "model_final",
+        "status": "completed",
         "outcome_axes": {
           "schema_version": 1,
           "lifecycle": {
@@ -1125,9 +1134,9 @@
               "receipt": false,
               "fact": "settled",
               "live": false,
-              "status": "ok",
               "hostError": false,
-              "ts": "2026-10-24T07:49:00+00:00"
+              "ts": "2026-10-24T07:49:00+00:00",
+              "status": "ok"
             }
           ],
           "legacy": {
@@ -1152,9 +1161,9 @@
             "quota_met": false
           }
         },
+        "task_terminal_status": "completed",
         "_is_direct_chat": true,
         "initiator": "consciousness",
-        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1189,6 +1198,22 @@
         "summary_kind": "terminal_root_projection",
         "task_id": "214a31b6",
         "ts": "2026-10-24T07:50:00+00:00",
+        "suggested_name": "Ouroboros Autonomous Exploration",
+        "wake_silent": true,
+        "quiet_effective": true,
+        "terminal_time": {
+          "v": 1,
+          "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+          "source": "executor_terminal",
+          "attempt": {
+            "task_attempt": 0,
+            "_attempt": null,
+            "started_at": "2026-10-23T07:44:23.208947+00:00",
+            "metadata_attempt": null,
+            "metadata_task_attempt": null
+          }
+        },
+        "task_attempt": 0,
         "historical_terminal": {
           "status": "completed",
           "phase": "done",
@@ -1205,8 +1230,22 @@
             "last_llm_error_kind": null,
             "source": "usable_solve_response"
           },
+          "suggested_name": "Ouroboros Autonomous Exploration",
           "wake_silent": true,
-          "quiet_effective": true
+          "quiet_effective": true,
+          "terminal_time": {
+            "v": 1,
+            "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+            "source": "executor_terminal",
+            "attempt": {
+              "task_attempt": 0,
+              "_attempt": null,
+              "started_at": "2026-10-23T07:44:23.208947+00:00",
+              "metadata_attempt": null,
+              "metadata_task_attempt": null
+            }
+          },
+          "task_attempt": 0
         },
         "row_address": "row:1@2026-10-24T07:50:00+00:00#3b0b6a314f8a",
         "history_id": "chat:1832",
@@ -1214,10 +1253,7 @@
           "source": "chat",
           "offset": 1832
         },
-        "reply_author_label": "System",
-        "wake_silent": true,
-        "quiet_effective": true,
-        "suggested_name": "Ouroboros Autonomous Exploration"
+        "reply_author_label": "System"
       },
       {
         "text": "",
@@ -1227,6 +1263,23 @@
         "summary_kind": "terminal_root_projection",
         "task_id": "w-summary",
         "ts": "2026-10-24T07:50:00+00:00",
+        "wake_summary": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
+        "suggested_name": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
+        "wake_silent": true,
+        "quiet_effective": true,
+        "terminal_time": {
+          "v": 1,
+          "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+          "source": "executor_terminal",
+          "attempt": {
+            "task_attempt": 0,
+            "_attempt": null,
+            "started_at": "2026-10-23T07:44:23.208947+00:00",
+            "metadata_attempt": null,
+            "metadata_task_attempt": null
+          }
+        },
+        "task_attempt": 0,
         "historical_terminal": {
           "status": "completed",
           "phase": "done",
@@ -1243,8 +1296,23 @@
             "last_llm_error_kind": null,
             "source": "usable_solve_response"
           },
+          "wake_summary": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
+          "suggested_name": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
           "wake_silent": true,
-          "quiet_effective": true
+          "quiet_effective": true,
+          "terminal_time": {
+            "v": 1,
+            "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+            "source": "executor_terminal",
+            "attempt": {
+              "task_attempt": 0,
+              "_attempt": null,
+              "started_at": "2026-10-23T07:44:23.208947+00:00",
+              "metadata_attempt": null,
+              "metadata_task_attempt": null
+            }
+          },
+          "task_attempt": 0
         },
         "row_address": "row:1@2026-10-24T07:50:00+00:00#1692acb40d1a",
         "history_id": "chat:5833",
@@ -1252,11 +1320,7 @@
           "source": "chat",
           "offset": 5833
         },
-        "reply_author_label": "System",
-        "wake_silent": true,
-        "quiet_effective": true,
-        "suggested_name": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
-        "wake_summary": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется."
+        "reply_author_label": "System"
       },
       {
         "text": "",
@@ -1266,6 +1330,22 @@
         "summary_kind": "terminal_root_projection",
         "task_id": "w-spoke",
         "ts": "2026-10-24T07:50:00+00:00",
+        "suggested_name": "Ouroboros Autonomous Exploration",
+        "wake_silent": true,
+        "quiet_effective": false,
+        "terminal_time": {
+          "v": 1,
+          "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+          "source": "executor_terminal",
+          "attempt": {
+            "task_attempt": 0,
+            "_attempt": null,
+            "started_at": "2026-10-23T07:44:23.208947+00:00",
+            "metadata_attempt": null,
+            "metadata_task_attempt": null
+          }
+        },
+        "task_attempt": 0,
         "historical_terminal": {
           "status": "completed",
           "phase": "done",
@@ -1282,8 +1362,22 @@
             "last_llm_error_kind": null,
             "source": "usable_solve_response"
           },
+          "suggested_name": "Ouroboros Autonomous Exploration",
           "wake_silent": true,
-          "quiet_effective": false
+          "quiet_effective": false,
+          "terminal_time": {
+            "v": 1,
+            "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+            "source": "executor_terminal",
+            "attempt": {
+              "task_attempt": 0,
+              "_attempt": null,
+              "started_at": "2026-10-23T07:44:23.208947+00:00",
+              "metadata_attempt": null,
+              "metadata_task_attempt": null
+            }
+          },
+          "task_attempt": 0
         },
         "row_address": "row:1@2026-10-24T07:50:00+00:00#cd25fb0aea74",
         "history_id": "chat:10142",
@@ -1291,10 +1385,7 @@
           "source": "chat",
           "offset": 10142
         },
-        "reply_author_label": "System",
-        "wake_silent": true,
-        "quiet_effective": false,
-        "suggested_name": "Ouroboros Autonomous Exploration"
+        "reply_author_label": "System"
       }
     ],
     "window": {
@@ -1376,8 +1467,8 @@
         "accounted_upper_bound_usd_with_children": null,
         "reserved_usd": 0.0,
         "unresolved_upper_bound_usd": 0.0,
-        "unknown_unmetered": 1,
-        "non_final_rows": 1,
+        "unknown_unmetered": 13,
+        "non_final_rows": 13,
         "ledger_integrity_degraded": false,
         "cost_custody": {
           "status": "available",
@@ -1388,14 +1479,52 @@
         },
         "cost_presentation": {
           "scope": "root_tree",
-          "tracked_amount": null,
-          "has_unpriced": true,
+          "tracked_amount": 0.02,
+          "has_unpriced": false,
           "tracked_final": false,
-          "accounting_open": false,
+          "accounting_open": true,
           "has_rows": true
         },
         "cost_final": false,
         "cost_with_children_partial": true,
+        "outcome_axes": {
+          "schema_version": 1,
+          "lifecycle": {
+            "status": "running"
+          },
+          "execution": {
+            "status": "ok",
+            "reason_code": "final_message"
+          },
+          "artifacts": {
+            "status": "ready"
+          },
+          "objective": {
+            "status": "not_evaluated",
+            "source": "none"
+          },
+          "review": {
+            "status": "skipped",
+            "trigger": "not_evaluated"
+          }
+        },
+        "_is_direct_chat": true,
+        "outcome_phase": "working",
+        "outcome_final": false,
+        "model_execution": {
+          "requested_model": "claudexor::codex=gpt-6-astra",
+          "requested_use_local": false,
+          "used_model": "claudexor::codex=gpt-6-astra",
+          "reported_model": "claudexor::codex=gpt-6-astra",
+          "used_local": false,
+          "provider": "claudexor",
+          "llm_call_id": "llm_442c75b763ca44f687fc7d94d7642fc8",
+          "last_llm_error_kind": null,
+          "source": "usable_solve_response"
+        },
+        "reason_code": "final_message",
+        "continuation_offer": null,
+        "accounted_upper_bound_usd": null,
         "suggested_name": "Own time"
       }
     ],
@@ -1452,6 +1581,7 @@
             "offset": 0
           },
           "reply_author_label": "System",
+          "task_attempt": 0,
           "model_execution": {
             "requested_model": "claudexor::codex=gpt-6-astra",
             "requested_use_local": false,
@@ -1476,6 +1606,8 @@
             }
           },
           "target_label": "Ouroboros Autonomous Exploration",
+          "terminal_origin": "model_final",
+          "status": "completed",
           "outcome_axes": {
             "schema_version": 1,
             "lifecycle": {
@@ -1520,9 +1652,9 @@
                 "receipt": false,
                 "fact": "settled",
                 "live": false,
-                "status": "ok",
                 "hostError": false,
-                "ts": "2026-10-24T07:49:00+00:00"
+                "ts": "2026-10-24T07:49:00+00:00",
+                "status": "ok"
               }
             ],
             "legacy": {
@@ -1547,9 +1679,9 @@
               "quota_met": false
             }
           },
+          "task_terminal_status": "completed",
           "_is_direct_chat": true,
           "initiator": "consciousness",
-          "terminal_origin": "model_final",
           "rounds": 9,
           "continuation_offer": {
             "eligible": false,
@@ -1584,6 +1716,22 @@
           "summary_kind": "terminal_root_projection",
           "task_id": "214a31b6",
           "ts": "2026-10-24T07:50:00+00:00",
+          "suggested_name": "Ouroboros Autonomous Exploration",
+          "wake_silent": true,
+          "quiet_effective": true,
+          "terminal_time": {
+            "v": 1,
+            "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+            "source": "executor_terminal",
+            "attempt": {
+              "task_attempt": 0,
+              "_attempt": null,
+              "started_at": "2026-10-23T07:44:23.208947+00:00",
+              "metadata_attempt": null,
+              "metadata_task_attempt": null
+            }
+          },
+          "task_attempt": 0,
           "historical_terminal": {
             "status": "completed",
             "phase": "done",
@@ -1600,8 +1748,22 @@
               "last_llm_error_kind": null,
               "source": "usable_solve_response"
             },
+            "suggested_name": "Ouroboros Autonomous Exploration",
             "wake_silent": true,
-            "quiet_effective": true
+            "quiet_effective": true,
+            "terminal_time": {
+              "v": 1,
+              "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+              "source": "executor_terminal",
+              "attempt": {
+                "task_attempt": 0,
+                "_attempt": null,
+                "started_at": "2026-10-23T07:44:23.208947+00:00",
+                "metadata_attempt": null,
+                "metadata_task_attempt": null
+              }
+            },
+            "task_attempt": 0
           },
           "row_address": "row:1@2026-10-24T07:50:00+00:00#3b0b6a314f8a",
           "history_id": "chat:1832",
@@ -1609,10 +1771,7 @@
             "source": "chat",
             "offset": 1832
           },
-          "reply_author_label": "System",
-          "wake_silent": true,
-          "quiet_effective": true,
-          "suggested_name": "Ouroboros Autonomous Exploration"
+          "reply_author_label": "System"
         }
       ],
       "window": {
@@ -1667,6 +1826,7 @@
             "offset": 0
           },
           "reply_author_label": "System",
+          "task_attempt": 0,
           "model_execution": {
             "requested_model": "claudexor::codex=gpt-6-astra",
             "requested_use_local": false,
@@ -1691,6 +1851,8 @@
             }
           },
           "target_label": "Ouroboros Autonomous Exploration",
+          "terminal_origin": "model_final",
+          "status": "completed",
           "outcome_axes": {
             "schema_version": 1,
             "lifecycle": {
@@ -1735,9 +1897,9 @@
                 "receipt": false,
                 "fact": "settled",
                 "live": false,
-                "status": "ok",
                 "hostError": false,
-                "ts": "2026-10-24T07:49:00+00:00"
+                "ts": "2026-10-24T07:49:00+00:00",
+                "status": "ok"
               }
             ],
             "legacy": {
@@ -1762,9 +1924,9 @@
               "quota_met": false
             }
           },
+          "task_terminal_status": "completed",
           "_is_direct_chat": true,
           "initiator": "consciousness",
-          "terminal_origin": "model_final",
           "rounds": 9,
           "continuation_offer": {
             "eligible": false,
@@ -1799,6 +1961,22 @@
           "summary_kind": "terminal_root_projection",
           "task_id": "214a31b6",
           "ts": "2026-10-24T07:50:00+00:00",
+          "suggested_name": "Ouroboros Autonomous Exploration",
+          "wake_silent": true,
+          "quiet_effective": false,
+          "terminal_time": {
+            "v": 1,
+            "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+            "source": "executor_terminal",
+            "attempt": {
+              "task_attempt": 0,
+              "_attempt": null,
+              "started_at": "2026-10-23T07:44:23.208947+00:00",
+              "metadata_attempt": null,
+              "metadata_task_attempt": null
+            }
+          },
+          "task_attempt": 0,
           "historical_terminal": {
             "status": "completed",
             "phase": "done",
@@ -1815,8 +1993,22 @@
               "last_llm_error_kind": null,
               "source": "usable_solve_response"
             },
+            "suggested_name": "Ouroboros Autonomous Exploration",
             "wake_silent": true,
-            "quiet_effective": false
+            "quiet_effective": false,
+            "terminal_time": {
+              "v": 1,
+              "occurred_at": "2026-10-23T07:49:41.071005+00:00",
+              "source": "executor_terminal",
+              "attempt": {
+                "task_attempt": 0,
+                "_attempt": null,
+                "started_at": "2026-10-23T07:44:23.208947+00:00",
+                "metadata_attempt": null,
+                "metadata_task_attempt": null
+              }
+            },
+            "task_attempt": 0
           },
           "row_address": "row:1@2026-10-24T07:50:00+00:00#71867522b837",
           "history_id": "chat:1839",
@@ -1824,10 +2016,7 @@
             "source": "chat",
             "offset": 1839
           },
-          "reply_author_label": "System",
-          "wake_silent": true,
-          "quiet_effective": false,
-          "suggested_name": "Ouroboros Autonomous Exploration"
+          "reply_author_label": "System"
         }
       ],
       "window": {
