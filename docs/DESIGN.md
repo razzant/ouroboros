@@ -1502,7 +1502,8 @@ Wheels, swipes and keys scroll bounded boxes until their edge. Scrollbar drags
 follow new replies only on release at the live edge; wheel, swipe or key
 scrolling follows when it ends there. Expansion or full output preserves place;
 only a newer line moves a card timeline to its end. New replies stay below
-without moving the passage.
+without moving the passage. A picture still loading above the passage grows up
+out of view; one the reader is on grows down.
 
 Reading far back releases newest pages, bounding retention as replies arrive.
 Disconnected fragments or uncertain coverage show
@@ -1564,8 +1565,8 @@ that saved no choice reads `until it is woken`), unless a subagent its sleep cho
 that subagent (`… until Ouroboros resumes it` only when this episode may ask for it,
 or `until you resume it` after Panic; a Continue's earlier subagent is just
 `paused`), with no new control or turn; subagents an earlier attempt left running
-read as `Working`, with their count; `Queued` carries no cause when the scheduler
-recorded none, never a free-worker claim; an
+read `Working`, with their count; `Queued` names a listed work holding
+its lane (`behind “…”`), never a free worker; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its authored focus (`update_focus`: stage · done · left), led by its time,
 quiet, at most two lines. A finished row shows the author’s closing sentence,
@@ -3544,7 +3545,8 @@ its top 32 px. The first row and every landing clear the header's reach; a row u
 effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
 do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
 both themes. While typing in Telegram the feed still passes under both. The newest line and time rest just above the
-measured composer. In a tight room the top extension yields to the feed. Reading history holds the passage in place.
+measured composer. In a tight room the top extension yields to the feed. Reading history holds the passage in place,
+as it does in a shorter window, and the feed still scrolls.
 Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter

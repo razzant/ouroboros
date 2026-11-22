@@ -88,6 +88,14 @@
  * @property {*=} since
  * @property {PauseAuthor=} by  // the declared author of a decided Pause
  * @property {Array<SleepWake>=} wake  // what a `sleeping` reason waits for: its clauses, joined by "or", time last
+ * @property {QueuedBehind=} behind  // the work a `queued` reason stands behind now
+ */
+/**
+ * @typedef {Object} QueuedBehind
+ * @property {string} task_id  // that work's tree id
+ * @property {string} lane  // project | folder
+ * @property {string} name  // that work's name as the list shows it
+ * @property {string=} folder  // the folder's path (folder lane)
  */
 /**
  * @typedef {Object} PauseAuthor

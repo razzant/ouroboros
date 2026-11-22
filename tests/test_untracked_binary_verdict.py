@@ -17,27 +17,32 @@ import subprocess
 import pytest
 
 from ouroboros import workspace_patch_capture as capture
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 
 def _git(cwd, *args, **kw):
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, check=True, **kw)
 
 
-def _fixture_repo(root: pathlib.Path) -> tuple[pathlib.Path, list[str]]:
-    """Every class the verdict can be asked about, plus the config git consults."""
-    repo = root / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "T")
-    _git(repo, "config", "diff.drvbin.binary", "true")
-    _git(repo, "config", "diff.drvtext.binary", "false")
-    _git(repo, "config", "filter.stripnul.clean", "tr -d '\\000'")
+def _lay_attributes_repo(folder: pathlib.Path) -> None:
+    """The config git consults and the committed .gitattributes: three loose objects, one commit "attrs"."""
+    repo = git_repository(folder / "repo", unborn=True)
+    world_git(repo, "config", "user.email", "t@example.com")
+    world_git(repo, "config", "user.name", "T")
+    world_git(repo, "config", "diff.drvbin.binary", "true")
+    world_git(repo, "config", "diff.drvtext.binary", "false")
+    world_git(repo, "config", "filter.stripnul.clean", "tr -d '\\000'")
     (repo / ".gitattributes").write_text(
         "*.dat -diff\n*.bin binary\n*.txt diff\n*.drv diff=drvbin\n*.drt diff=drvtext\n"
         "*.lfs filter=stripnul\n*.u16 working-tree-encoding=UTF-16\n", encoding="utf-8")
-    _git(repo, "add", ".gitattributes")
-    _git(repo, "commit", "-qm", "attrs")
+    world_git(repo, "add", ".gitattributes")
+    world_git(repo, "commit", "-qm", "attrs")
+
+
+def _fixture_repo(root: pathlib.Path) -> tuple[pathlib.Path, list[str]]:
+    """Every class the verdict can be asked about, plus the config git consults."""
+    repo = clone_repository(world("untracked-binary-verdict-attributes", _lay_attributes_repo) / "repo", root / "repo")
     files = {
         "plain.dat": b"hello\n",             # -diff attribute: binary whatever the bytes
         "plain.bin": b"hello\n",             # binary macro

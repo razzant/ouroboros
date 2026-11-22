@@ -28,12 +28,18 @@ from ouroboros import (
 from ouroboros import review_thread_retention as rt
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.task_store import patch_document, read_document
+from tests._owner_keep_answer import outside_store
 from tests._store_shared import seed_result
 from tests.test_store import document
 
 TASK, THREAD, SEAT = "task-rt-1", "thr-1", "seat-a"
 PLACE = f"review_thread:{THREAD}"
 KEEP = {"basis": "test"}
+
+
+def _keep(root, task, **kwargs):
+    """``owner_keep.set_owner_keep`` with its answer apart from the task's canonical store files (#3981 names each)."""
+    return outside_store(owner_keep.set_owner_keep(root, task, **kwargs), root, task)
 
 
 def _sha(data: bytes) -> str:
@@ -244,7 +250,7 @@ def test_a_complete_export_is_kept_verified_then_released_and_reads_offline(worl
     seat = review_ledger.load_record(world.root, world.record_id)["rows"][0]
     assert [ref["role"] for ref in seat["historical_source_refs"]] == ["thread_export"]
     assert review_ledger.record_sources_resolvable(world.root, review_ledger.load_record(world.root, world.record_id))
-    answer = owner_keep.set_owner_keep(world.root, TASK, keep=True, source=KEEP)
+    answer = _keep(world.root, TASK, keep=True, source=KEEP)
     assert f"review_thread:{THREAD}" in answer["retired"]  # accepted: never promised back
     assert answer["releases"] == {PLACE: "accepted_pending_removal"}  # acceptance observed, removal not
 
@@ -442,7 +448,7 @@ def test_a_lost_post_is_the_same_operation_on_the_next_pass(world):
     world.engine.faults.add("lost_before")
     assert world.run()["unknown"] == 1 and world.release()["state"] == "bound"
     operation = world.release()["operation_id"]
-    answer = owner_keep.set_owner_keep(world.root, TASK, keep=False, source=KEEP)
+    answer = _keep(world.root, TASK, keep=False, source=KEEP)
     assert answer["status"] == "released" and answer["releases"] == {PLACE: "release_unconfirmed"}
     assert PLACE not in answer["unknown"] + answer["retained"] + answer["retired"]  # neither kept nor gone
     assert world.run()["accepted"] == 1
@@ -462,7 +468,7 @@ def test_keep_after_binding_abandons_an_unknown_operation_and_the_late_request_c
     world.engine.faults.add("delayed")
     world.run()
     operation = world.release()["operation_id"]
-    answer = owner_keep.set_owner_keep(world.root, TASK, keep=True, source=KEEP)
+    answer = _keep(world.root, TASK, keep=True, source=KEEP)
     assert (answer["status"], answer["keep"], answer["releases"]) == ("release_unconfirmed", True,
                                                                       {PLACE: "release_unconfirmed"})
     world.engine.inflight_later = world.engine.inflight[:]  # the request is still on its way
@@ -471,7 +477,7 @@ def test_keep_after_binding_abandons_an_unknown_operation_and_the_late_request_c
     world.engine.inflight.extend(world.engine.inflight_later)
     world.engine.land()  # it arrives after the fence: the operation's bound outcome stands
     assert world.engine.ops[operation]["outcome"] == "abandoned" and not world.engine.purged
-    answer = owner_keep.set_owner_keep(world.root, TASK, keep=True, source=KEEP)
+    answer = _keep(world.root, TASK, keep=True, source=KEEP)
     assert f"review_thread:{THREAD}" in answer["retained"] and answer["releases"] == {PLACE: "abandoned"}
 
 
@@ -481,7 +487,7 @@ def test_keep_after_an_acceptance_whose_answer_was_lost_reports_it_gone(world):
     owner_keep.set_owner_keep(world.root, TASK, keep=True, source=KEEP)
     assert world.run()["accepted"] == 1  # the read finds it accepted: abandon is never needed
     assert not any(kind == "abandon" for kind, _ in world.engine.calls)
-    answer = owner_keep.set_owner_keep(world.root, TASK, keep=True, source=KEEP)
+    answer = _keep(world.root, TASK, keep=True, source=KEEP)
     assert PLACE in answer["retired"] and answer["releases"] == {PLACE: "accepted_pending_removal"}
 
 
@@ -643,7 +649,7 @@ def test_a_purge_after_a_kept_export_keeps_its_archive_pointer_and_invents_no_op
     assert (saved["state"], saved["receipt"]) == ("purged", held["receipt"])
     assert saved["engine"] == {"thread_state": "purged"} and "operation_id" not in saved
     assert rt.read_thread_export(world.root, TASK, saved["receipt"])["thread_id"] == THREAD  # still readable offline
-    assert owner_keep.set_owner_keep(world.root, TASK, keep=False, source=KEEP)["releases"] == {PLACE: "purged"}
+    assert _keep(world.root, TASK, keep=False, source=KEEP)["releases"] == {PLACE: "purged"}
 
 
 def test_a_purge_after_a_spent_refusal_is_no_acceptance(world):
@@ -655,7 +661,7 @@ def test_a_purge_after_a_spent_refusal_is_no_acceptance(world):
     assert world.run()["holds"] == {"thread_purged": 1}
     saved = world.release()
     assert (saved["state"], saved["operation_id"]) == ("purged", refused["operation_id"]) and not world.engine.accepted
-    answer = owner_keep.set_owner_keep(world.root, TASK, keep=False, source=KEEP)
+    answer = _keep(world.root, TASK, keep=False, source=KEEP)
     assert answer["releases"] == {PLACE: "purged"} and answer["retired"] == [PLACE]
 
 
@@ -1255,7 +1261,7 @@ def test_a_malformed_export_is_a_durable_named_hold_with_its_exact_manifest(worl
         assert receipt["detail"] == {"item_id": "lane-1", "field": "path"}
     elif fault in ("plane", "kind", "closure"):
         assert receipt["detail"] == {"item_id": None if fault == "closure" else "lane-1", "field": fault}
-    keep = owner_keep.set_owner_keep(world.root, TASK, keep=False, source=KEEP)
+    keep = _keep(world.root, TASK, keep=False, source=KEEP)
     assert PLACE in keep["retained"] and keep["releases"] == {PLACE: "held"}  # discoverable, still the engine's
     world.engine.calls.clear()
     world.touch()
@@ -1307,21 +1313,28 @@ def test_s12_a_keep_saved_after_binding_is_release_unconfirmed_and_a_delivered_r
 
     world.engine.retire_thread = keep_then_decide
     report = world.run()
-    saved = json.loads(answers[0])  # the writer's own answer, never a no-effect "nothing was saved"
+    saved = outside_store(json.loads(answers[0]), world.root, TASK)  # the writer's own answer, never a no-effect "nothing was saved"
     assert (saved["status"], saved["keep"], saved["releases"]) == ("release_unconfirmed", True,
                                                                    {PLACE: "release_unconfirmed"})
     assert saved["unknown"] == saved["retained"] == saved["retired"] == []  # the only material: never bare kept
     assert "owner_keep" in read_document(world.root, TASK)
     assert report["accepted"] == 1 and world.engine.purged  # best effort: the retire was already delivered
     after = owner_keep.set_owner_keep(world.root, TASK, keep=True, source=KEEP)
-    assert (after["status"], after["keep"], after["releases"]) == ("already_retired", True,
-                                                                    {PLACE: "accepted_pending_removal"})
+    # #3981: the thread's verified export stays in the task's canonical store, which Keep names file by file and
+    # holds, so the answer is partly retired (the thread is gone, its archive kept), no longer already_retired.
+    rest = outside_store(after, world.root, TASK)
+    assert after["retained"] and rest["retained"] == [] and rest["retired"] == [PLACE], after
+    from ouroboros.payload_release_state import store_of
+    [manifest] = (store_of(world.root, TASK) / "source_handles" / "delegated_activity").glob(f"thread-{THREAD}-manifest-*.json")
+    assert str(manifest) in after["retained"] and after["releases"][str(manifest)] == "held", after  # one real file
+    assert (after["status"], after["keep"], rest["releases"]) == ("partly_retired", True,
+                                                                  {PLACE: "accepted_pending_removal"})
 
 
 def test_s12_a_keep_the_engine_has_not_decided_yet_stops_the_release_on_the_next_pass(world, monkeypatch):
     world.engine.faults.add("delayed")  # the retire is still on its way
     world.run()
-    answer = _route_keep(world.root, monkeypatch)
+    answer = outside_store(_route_keep(world.root, monkeypatch), world.root, TASK)
     assert (answer["status"], answer["keep"], answer["releases"]) == ("release_unconfirmed", True,
                                                                       {PLACE: "release_unconfirmed"})
     late, world.engine.inflight = world.engine.inflight[:], []
@@ -1329,7 +1342,7 @@ def test_s12_a_keep_the_engine_has_not_decided_yet_stops_the_release_on_the_next
     world.engine.inflight.extend(late)
     world.engine.land()  # it arrives after the fence: refused, never accepted
     assert not world.engine.purged
-    final = _route_keep(world.root, monkeypatch)
+    final = outside_store(_route_keep(world.root, monkeypatch), world.root, TASK)
     assert (final["status"], final["retained"], final["releases"]) == ("kept", [PLACE], {PLACE: "abandoned"})
 
 
@@ -1341,11 +1354,11 @@ def test_a_keep_beside_a_bound_release_saves_and_names_every_other_material(worl
     patch_document(world.root, TASK, lambda current: {**current, "child_drive_root": str(drive)})
     world.engine.faults.add("lost_before")
     world.run()
-    answer = json.loads(_tool_keep(world.root))
+    answer = outside_store(json.loads(_tool_keep(world.root)), world.root, TASK)
     assert (answer["status"], answer["keep"]) == ("release_unconfirmed", True), answer  # never already_retired
     assert answer[other] == [str(drive)] and answer["releases"] == {PLACE: "release_unconfirmed"}
     assert "owner_keep" in read_document(world.root, TASK)  # it protects what is still owned
-    released = json.loads(_tool_keep(world.root, keep=False))
+    released = outside_store(json.loads(_tool_keep(world.root, keep=False)), world.root, TASK)
     assert (released["status"], released["keep"], released["releases"]) == ("released", False,
                                                                              {PLACE: "release_unconfirmed"})
     assert "owner_keep" not in read_document(world.root, TASK)
@@ -1439,7 +1452,7 @@ def test_r2_a_keep_beside_an_accepted_thread_holds_the_thread_not_reached(world,
     _second_seat(world, monkeypatch)
     first = world.run()
     assert (first["accepted"], first["holds"], first["waiting"]) == (1, {"export_unavailable": 1}, 1), first
-    answer = owner_keep.set_owner_keep(world.root, TASK, keep=True, source=KEEP)
+    answer = _keep(world.root, TASK, keep=True, source=KEEP)
     assert (answer["status"], answer["keep"]) == ("partly_retired", True), answer
     assert answer["retired"] == [PLACE] and answer["retained"] == [PLACE_B]
     assert answer["releases"] == {PLACE: "accepted_pending_removal", PLACE_B: "unrecorded"}
@@ -1492,5 +1505,5 @@ def test_a_stop_between_a_tasks_threads_keeps_the_rest_waiting_and_owes_the_next
 def test_only_an_observed_cleanup_result_is_reported_removed(world):
     world.engine.cleaned = True  # this engine's acceptance answer already reports its cleanup done
     assert world.run()["accepted"] == 1
-    answer = owner_keep.set_owner_keep(world.root, TASK, keep=True, source=KEEP)
+    answer = _keep(world.root, TASK, keep=True, source=KEEP)
     assert PLACE in answer["retired"] and answer["releases"] == {PLACE: "removed"}

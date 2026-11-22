@@ -14,7 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 PAYLOADS = {
     "ui_design": ("SKILL.md", "references/craft.md", "references/browser.md", "references/measure.js",
                   "references/freeze.js", "references/brief.md", "references/live_stand.py",
-                  "assets/compare.html"),
+                  "references/place_plan.py", "assets/compare.html"),
 }
 
 @pytest.mark.parametrize("name", PAYLOADS)

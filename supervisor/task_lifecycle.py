@@ -125,13 +125,16 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
     """
     if not CANCELLED_ROOT_FENCES:
         return False
+    parent = str(task.get("parent_task_id") or "").strip()
     for candidate in (
         str(root_task_id or "").strip(),
         str(task.get("root_task_id") or "").strip(),
-        str(task.get("parent_task_id") or "").strip(),
+        parent,
     ):
         if candidate and candidate in CANCELLED_ROOT_FENCES:
             return True
+    if not parent:  # a root has no ancestry to walk: never build the live map for it
+        return False
     q = _queue_module()
     live: Dict[str, Dict[str, Any]] = {
         str(item.get("id") or ""): item for item in q.PENDING if isinstance(item, dict)
@@ -140,7 +143,6 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
         str(rid): meta["task"] for rid, meta in q.RUNNING.items()
         if isinstance(meta, dict) and isinstance(meta.get("task"), dict)
     })
-    parent = str(task.get("parent_task_id") or "").strip()
     seen: set[str] = set()
     while parent and parent not in seen and len(seen) < 100:
         if parent in CANCELLED_ROOT_FENCES:

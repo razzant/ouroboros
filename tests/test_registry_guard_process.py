@@ -10,6 +10,7 @@ import ouroboros.tools.registry_guard_process as process_guard
 import ouroboros.tools.registry_guards as registry_guards
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.tool_result import LegacyTextResultAdapter, ToolResult
+from tests._workspace_git import git_repository
 
 
 # Semantic mention detectors were removed; execution and observation owners remain.
@@ -290,9 +291,7 @@ def test_light_repo_formatter_preserves_sorted_bounded_path_disclosure():
 
 
 def test_git_ref_snapshot_detects_a_ref_only_change(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True)
     (repo / "tracked.txt").write_text("content\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
     subprocess.run(

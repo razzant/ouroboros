@@ -12,7 +12,13 @@ const MOVE_FRAMES = 3, WIDTH_HELD_FRAMES = 12;
 export function createChatReadingPosition({ visible, alive, ready, feed, anchors, changed, afterWrite, activity, updateButton }) {
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
-    const feedOrigin = () => feed.offsetTop || 0;
+    // Where the feed is laid out in the page (its offsetTop up the offsetParent chain; a transform does not count): a
+    // Project room's bar lies outside the feed's own offsetParent, so its offsetTop alone misses the bar entering the flow.
+    const feedOrigin = () => {
+        let y = 0;
+        for (let node = feed; node; node = node.offsetParent) y += node.offsetTop || 0;
+        return y;
+    };
     let viewportAnchor = null, viewportTop = null, width = feed.clientWidth, anchorOrigin = feedOrigin();
     // Every room first opens following its newest message (owner decision 2026-10-05).
     let intent = null;
@@ -186,9 +192,11 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             settledBox = feedBox(); state.top = feed.scrollTop;
             const keptHeld = !state.stick && !kept && heldByLimit(viewportAnchor);
             // A later reflow still belongs to the box edge, not a line the reader can move inside it.
-            // A box that is gone or hidden fails restore and is reselected by the ordinary anchor owner.
-            if (keptNested || keptHeld || (heightOnly && (state.stick || kept || rowStillPlaced(viewportAnchor)))) {
-                if (keptNested || keptHeld) width = feed.clientWidth;
+            // A box that is gone or hidden fails restore and is reselected by the ordinary anchor owner. A row put back
+            // still stays the row read through a passing layout (a rotation): a fresh search there would pick another
+            // row of the band, and the way back would land a line off.
+            if (keptNested || keptHeld || (heightOnly && state.stick) || (!state.stick && rowStillPlaced(viewportAnchor))) {
+                width = feed.clientWidth;
                 if (state.stick) viewportAnchor = null; // an edge follower has no reading row to reselect
                 viewportTop = state.top;
             } else { state.remember(true); viewportTop = state.top; }
