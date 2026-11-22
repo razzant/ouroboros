@@ -287,6 +287,36 @@ test('a source confirmed late wears its harness mark: the card repaints the mark
     assert.match(mark(), /^<svg class="model-source-mark"/, 'the harness mark stands where the descriptor names it');
 });
 
+test('a catalog repaint brings no tiers back: a Main tier press stands after the store announces it', async () => {
+    const c = card();
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: '', default: 'standard' } });
+    await flush();
+    c.store.adoptTiers({ main: 'fast', default: 'standard' });  // the owner's Main tier press (composer_model.js)
+    await flush();
+    assert.deepEqual(c.store.tiers(), { main: 'fast', default: 'standard' }, 'the pressed tier stays after the store announces it');
+});
+
+test('two mounted cards that remember different tiers and one catalog change: the adoptions stop', async () => {
+    const d = card();
+    let adopts = 0;
+    const adopt = d.store.adoptTiers;
+    d.store.adoptTiers = (tiers) => { adopts += 1; if (adopts <= 50) adopt(tiers); };
+    d.paint({ lead: lead(ASTRA, 'main'), tiers: { main: '', default: 'standard' } });
+    await flush();
+    paintCardModel(card().record, { lead: lead(ASTRA, 'main'), target: 't2', main: route(ASTRA), tiers: { main: 'fast', default: 'standard' } },
+        { store: d.store, coarse: () => false, place: () => ({ reposition() {}, destroy() {} }), toast() {}, rerender() {}, act: async () => ({}) });
+    await flush();
+    assert.equal(adopts, 2, 'each body that arrives adopts its tiers once; repaints adopt none, so the chain ends');
+});
+
+test('a new view from the server adopts its tiers, also on a card that already holds one', () => {
+    const c = card();
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: '', default: 'standard' } });
+    assert.deepEqual(c.store.tiers(), { main: '', default: 'standard' });
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: 'fast', default: 'standard' } });
+    assert.deepEqual(c.store.tiers(), { main: 'fast', default: 'standard' }, 'a body naming new tiers is adopted');
+});
+
 test('the meta separator stays with the last visible model fact across repaints', () => {
     const c = card();
     const separator = () => c.part().querySelector('.chat-live-meta-sep');
