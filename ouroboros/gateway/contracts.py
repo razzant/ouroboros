@@ -30,7 +30,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
 )
 from ouroboros.gateway.work_contracts import ProcessingTiers, WorkLeadFields, WorkStateFields
 from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
-from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
+from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
     AttachmentManifestEntry, ChatAttachmentInbound, ChatAttachmentView,
@@ -219,9 +219,10 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     model_lane: NotRequired[str]
     requested_model_lane: NotRequired[str]
     effective_model_lane: NotRequired[str]
-    # Opaque delegated route stamped once by resolve_subagent_dispatch; absent/empty = native/no chip. Dispatch
-    # intent is not a landing receipt: a reduction belongs in capability_delta, never rewrites this route.
+    # The opaque route resolve_subagent_dispatch stamped (a dispatch decision, no landing receipt: a reduction is
+    # capability_delta's), and the {kind, target_id} the delegation selected, frozen at scheduling, shown from Queued.
     executor_route: NotRequired[str]
+    requested_executor_route: NotRequired[RequestedExecutorRoute]  # absent = not recorded
     # Recorded coordinator facts on live/history frames; absence carries no billing or provenance claim.
     parent_cognitive_route: NotRequired[Dict[str, Any]]
     coordinator_route: NotRequired[str]
@@ -819,9 +820,8 @@ class StateResponse(WorkStateFields):
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
     # Task->project bindings ({task_id: {project_id, chat_id}}; a Project's name is in the census rows and
-    # ``projects``): a bound card hides the stray "turn into project" button (v6.33.0 P2) and opens its project
-    # (v6.33.0 F4). Null only when ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the
-    # map's digest; "" after a failed read).
+    # ``projects``): a bound card hides the stray "turn into project" button and opens its project. Null only when
+    # ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the map's digest; "" after a failed read).
     task_bindings: Optional[dict]
     task_bindings_revision: str
     task_bindings_unchanged: bool

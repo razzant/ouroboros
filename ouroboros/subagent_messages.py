@@ -23,6 +23,8 @@ SUBAGENT_MESSAGE_FIELDS: tuple[str, ...] = (
     "effective_model_lane",
     "model",
     "executor_route",
+    # The executor the delegation selected, frozen at scheduling (``requested_executor_route``).
+    "requested_executor_route",
     "parent_cognitive_route",
     "coordinator_route",
     "coordinator_billing",
@@ -65,6 +67,24 @@ def is_task_card_message(meta: Mapping[str, Any] | None) -> bool:
     source = meta if isinstance(meta, Mapping) else {}
     return (source.get("card_row") in CARD_ROW_PLACEMENTS
             or str(source.get("delegation_role") or "").strip().lower() == "subagent")
+
+
+def requested_executor_route(record: Mapping[str, Any] | None) -> Dict[str, str]:
+    """The executor a delegation selected: ``{kind, target_id}`` of the row snapshot frozen when the
+    child was scheduled (``configured_subagent.route``), else a frame's own copy of it.
+
+    A request, not a receipt: what ran stays the run's evidence. Only the kind and the target travel —
+    never the row's account pin or other settings; ``{}`` when neither names a known kind and a target.
+    """
+    source = record if isinstance(record, Mapping) else {}
+    snapshot = source.get("configured_subagent")
+    route = snapshot.get("route") if isinstance(snapshot, Mapping) else source.get("requested_executor_route")
+    if not isinstance(route, Mapping):
+        return {}
+    kind, target = route.get("kind"), route.get("target_id")
+    if kind not in ("api_model", "agent_session") or not isinstance(target, str) or not target.strip():
+        return {}
+    return {"kind": kind, "target_id": target.strip()}
 
 
 def executor_observation_meta(
@@ -224,6 +244,8 @@ def subagent_message_meta(
         "effort_requested": first("effort_requested"),
         "effort_source": first("effort_source"),
     }
+    if selected := requested_executor_route(source) or requested_executor_route(metadata):
+        meta["requested_executor_route"] = selected
     cognitive = source.get("parent_cognitive_route") or metadata.get("parent_cognitive_route")
     if isinstance(cognitive, Mapping):
         meta["parent_cognitive_route"] = dict(cognitive)

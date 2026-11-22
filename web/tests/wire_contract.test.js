@@ -117,7 +117,8 @@ test('the update letter typedef promises exactly the fields the projection emits
 test('the live progress path forwards every progress field the endpoint emits and the chat UI consumes', () => {
     const emitted = pythonTupleNames(repoFile('ouroboros/gateway/history.py'), '_PROGRESS_META_FIELDS');
     for (const field of ['executor_route', 'model_lane', 'status', 'subagent_event',
-        'execution_evidence', 'actual_substrate', 'executor_observation']) {
+        'execution_evidence', 'actual_substrate', 'executor_observation', 'requested_executor_route',
+        'parent_cognitive_route', 'coordinator_route', 'coordinator_billing', 'coordinator_provenance', 'use_local_model']) {
         assert.ok(emitted.has(field), `${field} is no longer emitted by the history endpoint`);
     }
     // executor_route drives the executor chip in log_events.js; it must reach the
@@ -131,7 +132,10 @@ test('the live progress path forwards every progress field the endpoint emits an
     // a chip came back on reload and was missing while the task ran.
     const chat = moduleFile('chat.js');
     const activity = moduleFile('chat_activity.js');
-    const DELEGATION_KEYS = ['executor_route', 'execution_evidence', 'actual_substrate', 'executor_observation'];
+    // The selection and the recorded coordinator facts travel with them: a card first met on one of these frames
+    // (a replay, a missed terminal) names what was requested and who coordinated it, never less than live.
+    const DELEGATION_KEYS = ['executor_route', 'execution_evidence', 'actual_substrate', 'executor_observation', 'requested_executor_route',
+        'parent_cognitive_route', 'coordinator_route', 'coordinator_billing', 'coordinator_provenance', 'use_local_model'];
     const carry = activity.match(/const CARD_META_KEYS = \[([^\]]+)\]/)?.[1];
     assert.ok(carry, 'shared card carry list must exist');
     const carried = new Set([...carry.matchAll(/'([a-z_]+)'/g)].map(m => m[1]));
@@ -181,13 +185,19 @@ test('the live progress path forwards every progress field the endpoint emits an
     const delegationSample = {
         executor_route: 'route-wire', execution_evidence: 'ev-wire',
         actual_substrate: 'sub-wire', executor_observation: 'obs-wire',
+        requested_executor_route: { kind: 'agent_session', target_id: 'codex=wire' },
+        parent_cognitive_route: { model: 'cog-wire', chosen_by: 'inherited' }, coordinator_route: 'coord-wire',
+        coordinator_billing: 'measured', coordinator_provenance: 'inherited', use_local_model: false,
     };
     const frame = terminalChildFrame('child-wire', { parentId: 'root-wire', role: 'scout' }, {
         status: 'failed', reason_code: 'delegated_custody_unreconciled', ...delegationSample,
     });
     assert.equal(frame.reason_code, 'delegated_custody_unreconciled');
     assert.equal(frame.subagent_event, 'failed');
-    for (const key of DELEGATION_KEYS) assert.equal(frame[key], delegationSample[key], key);
+    for (const key of DELEGATION_KEYS) assert.deepEqual(frame[key], delegationSample[key], key);
+    // A frame that never recorded one carries none: absence stays absence (unavailable, never `unknown`).
+    const sparse = terminalChildFrame('child-wire', { parentId: 'root-wire', role: 'scout' }, { status: 'completed' });
+    for (const key of DELEGATION_KEYS) assert.equal(sparse[key], undefined, key);
 });
 
 test('both consumers of the credential-profiles wire read the SAME shape', () => {

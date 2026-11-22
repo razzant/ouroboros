@@ -19,6 +19,13 @@ except ImportError:  # pragma: no cover - Python 3.10 compatibility.
     from typing_extensions import Literal, Required, TypedDict
 
 
+class RequestedExecutorRoute(TypedDict):
+    """The frozen executor selection on a subagent's request."""
+
+    kind: Literal["api_model", "agent_session"]
+    target_id: str
+
+
 class ChatHistoryPosition(TypedDict):
     """Where a stored row lies: its stream and the row's chain coordinate in the dialogue store (the
     byte offset the row has in the frozen archive plus the rows appended since). It names a stored

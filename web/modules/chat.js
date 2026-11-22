@@ -424,7 +424,8 @@ export function createChatInstance({
         else recordConcludedActivity(id, phase);
         settleTerminalRootChildren(id);
     }
-    const settleChildFrom = (id, d) => withStableViewport(() => routeSubagentTerminalToCard(id, { ...d, task_id: id }, true));
+    // A stored row's ts is its creation, not its receipt.
+    const settleChildFrom = (id, d) => withStableViewport(() => routeSubagentTerminalToCard(id, { ...d, task_id: id, ts: d.updated_at || d.ts }, true));
     // A terminal root reads each open descendant once; only proven child terminality changes its state (#300).
     function settleTerminalRootChildren(rootId) {
         for (const [childId, info] of subagentChildParents) {
@@ -1731,6 +1732,10 @@ export function createChatInstance({
                 && !keepStickyExecutorChip(record.executorChip, summary.executorChip)) {
             record.executorChip = summary.executorChip;
         }
+        if (summary.requestedExecutor) record.requestedExecutor = summary.requestedExecutor;  // the child's selection
+        // Coordinator facts outlive the chip: recorded ones over a pre-evidence chip's.
+        const drafted = summary.executorChip?.coordinator;
+        if (summary.coordinator || drafted) record.coordinator = { ...drafted, ...record.coordinator, ...summary.coordinator };
         if (summary.modelExecution) record.modelExecution = summary.modelExecution;
         if (summary.effort) record.effort = summary.effort;
         record._lastFrameMeta = Array.isArray(summary.meta) ? summary.meta : [];

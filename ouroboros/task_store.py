@@ -549,12 +549,12 @@ def origin_documents(root: Any, origin: str) -> Tuple[Dict[str, Dict[str, Any]],
 DISPLAY_DROPPED: Tuple[str, ...] = (
     "trace_refs", "review_evidence", "artifacts", "result", "trace_summary",
     "governing_owner_words", "verification_ledger", "plan_review_state", "acceptance_debt",
-    "mutation_evidence", "configured_subagent", "context", "continuation_narrative", "origin_message_text",
+    "mutation_evidence", "context", "continuation_narrative", "origin_message_text",
     "owner_mailbox", "subagent_availability", "plan_record", "review_status", "schedule_admission",
     "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken", "payload_release",
     *(f"metadata.{key}" for key in (
         "task_contract", "main_routing_manifest", "governing_owner_words", "routing_contract",
-        "configured_subagent", "project_routing_manifest", "subagent_envelope", "owner_corpus",
+        "project_routing_manifest", "subagent_envelope", "owner_corpus",
         "origin_message_text", "wake_observation", "project_last_task_result", "current_chat",
         "workspace_preflight", "workspace_copy", "late_answer")),
 )
@@ -565,6 +565,10 @@ DISPLAY_KEPT: Dict[str, Tuple[str, ...]] = {
     # Who asked for a Continue (``initiator_meta``), without the continuation's evidence.
     "metadata.continuation": ("admission",), "metadata.continuation.admission": ("by",),
     "metadata.continuation.admission.by": ("actor",),
+    # The executor a child selected (``subagent_messages.requested_executor_route``): its route's kind and target, never
+    # the row's account pin or other snapshot facts. A parent key precedes its nested key (each reads the stored body).
+    "configured_subagent": ("route",), "configured_subagent.route": ("kind", "target_id"),
+    "metadata.configured_subagent": ("route",), "metadata.configured_subagent.route": ("kind", "target_id"),
 }
 _KEEP = "__keep__"  # a path no kept object holds: the no-op target of a conditional edit
 

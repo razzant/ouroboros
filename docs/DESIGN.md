@@ -1362,9 +1362,13 @@ preference when it opens and on every reconnect; there is no file watcher.
   longest word, and the role takes a second line before either is cut; only a
   card too narrow for those beside `Details` and its chevron (a 320px phone)
   moves the two controls under the role, never past its edge (audit №2, owner
-  2026-10-28T22:09Z). Its compact line names the executor with only its own model evidence (observed;
-  `requested …`; unconfirmed absent), else the agent model. Coordinator and
-  provenance stay in details; effort stays visible as the leaf's dispatch choice,
+  2026-10-28T22:09Z). From Queued on, the compact line can show the executor and model selected before dispatch.
+  The executor's own model evidence takes priority and identifies a model as observed or requested.
+  Without that evidence, the line shows the model selected for that same executor as `requested …`.
+  An API-model child uses the solve's observed model or the recorded execution wording when no model was observed.
+  Without an execution record it shows its agent model, falling back to its selection as `requested …`.
+  The selection stays in details whenever the line shows other information. Coordinator, its provenance and billing stay
+  in details; effort stays visible as the leaf's dispatch choice,
   not a provider echo. Its chip uses the child's own frames: the applied level (`Effort High`),
   the asked level when it differed (`Effort High (asked Ultra)`), then its
   source: a pin glyph before a pinned level, `· model name` for a level the
@@ -1388,9 +1392,10 @@ preference when it opens and on every reconnect; there is no file watcher.
   not proof of current computation. A progress actor adds `last update`; a
   refused pin, no run, runs not settled, failed or unverified runs, unreadable
   evidence and an undisclosed outcome split qualify it. One priority phrase
-  stays visible; the detail names the other exceptions. Terminal records without
-  run evidence remain explicitly unknown; no promise of a later receipt replaces
-  it. Counts, the model and its source (requested, observed or `model unconfirmed`), spend
+  stays visible; the detail names the other exceptions. Terminal records of a
+  dispatched route without run evidence remain explicitly unknown; no promise of a
+  later receipt replaces it. A selection that ended before any dispatch keeps its
+  bare name and request: no run was due, so none is missing. Counts, the model and its source (requested, observed or `model unconfirmed`), spend
   and access form one detail sentence that the expanded card prints as text,
   never only a title. Settled observed models are separate historical facts,
   not a claim that their union is the current actor. Missing identity stays

@@ -524,6 +524,7 @@ class PreparationClaim:
         return cls(task_id=tid, ctx=ctx, route=route, token=str(marker.get("token") or ""), generation=None,
                    generation_token=str(marker.get("generation") or ""),
                    owner=marker.get("owner") if isinstance(marker.get("owner"), dict) else {},
+                   event={key: row[key] for key in ("configured_subagent", "parent_cognitive_route") if key in row},
                    surface=str(marker.get("surface") or ""), resource=resource,
                    claimed_at=str(marker.get("claimed_at") or ""), unidentified_residue=phase == COPYING)
 
@@ -540,7 +541,7 @@ class PreparationClaim:
                 "_admission_refusal_token": self.refusal_receipt}
 
     def refuse(self, detail: str, reason_code: str, *, extra_fields: Optional[Dict[str, Any]] = None,
-               persist_result: bool = True) -> bool:
+               persist_result: bool = True, disclose_only: bool = False) -> bool:
         """The typed never-admitted refusal through the schedule refusal and notice owner."""
         from supervisor.events_schedule_task import _reject_schedule_task
 
@@ -551,21 +552,15 @@ class PreparationClaim:
             delegation_role=str(route.get("delegation_role") or "subagent"), parent_id=route.get("parent_id"),
             root_task_id=root_task_id, role=str(route.get("role") or ""),
             result_fields={"parent_task_id": route.get("parent_id"), "root_task_id": root_task_id,
-                           "delegation_role": "subagent", "role": str(route.get("role") or "")},
+                           "delegation_role": "subagent", "role": str(route.get("role") or ""),
+                           **{key: self.event[key] for key in ("configured_subagent", "parent_cognitive_route")
+                              if key in self.event}},
             detail=detail, reason_code=reason_code, extra_fields=extra_fields,
-            persist_result=persist_result, preparation=self)
+            persist_result=persist_result and not disclose_only, preparation=None if disclose_only else self)
 
     def disclose_unknown(self) -> None:
         """Unreadable authority before any claim: the existing notice only, nothing reserved or written."""
-        from supervisor.events_schedule_task import _reject_schedule_task
-
-        route = self.route
-        _reject_schedule_task(
-            self.ctx, tid=self.task_id, chat_id=route.get("chat_id"),
-            delegation_role=str(route.get("delegation_role") or "subagent"), parent_id=route.get("parent_id"),
-            root_task_id=str(route.get("root_task_id") or self.task_id), role=str(route.get("role") or ""),
-            result_fields={}, detail=_AUTHORITY_UNKNOWN, reason_code="scheduled_result_authority_unknown",
-            persist_result=False)
+        self.refuse(_AUTHORITY_UNKNOWN, "scheduled_result_authority_unknown", disclose_only=True)
 
     def after_refusal(self, remove_drive: Callable[[], None]) -> None:
         """After the receipt: this token's own copy, then the child drive, off the event loop.

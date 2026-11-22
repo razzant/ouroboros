@@ -104,6 +104,7 @@ _PROGRESS_META_FIELDS = (
     # Phase 6: the resolved delegated route (a harness id), so a replayed
     # bubble keeps its executor chip instead of losing it on reload.
     "executor_route",
+    "requested_executor_route",  # the executor the delegation selected, so a queued card keeps it on reload
     # Recorded coordinator facts only; missing facts stay absent without result enrichment.
     "parent_cognitive_route", "coordinator_route", "use_local_model",
     "coordinator_billing", "coordinator_provenance",
@@ -301,6 +302,18 @@ def _load_terminal_result(data_dir: pathlib.Path, task_id: str, cache: Dict[Any,
     return cache[task_id]
 
 
+def _hydrate_admission_notices(data_dir, notices, cache):
+    for child_id, rows in notices.items():
+        if not child_id:
+            continue
+        result = _load_terminal_result(data_dir, child_id, cache)
+        meta = subagent_message_meta(result, task_id=child_id)
+        for row in rows:
+            if matches_history_attempt(row, recorded_attempt(result)):
+                for key, value in meta.items():
+                    row.setdefault(key, value)
+
+
 def _annotate_terminal_task_truth(
     combined: list[Dict[str, Any]],
     data_dir: pathlib.Path,
@@ -315,9 +328,8 @@ def _annotate_terminal_task_truth(
 ) -> None:
     """Project task truth AFTER quotas, paying only for represented/current tasks.
 
-    Use in-window cost/axes/review and inert evidence carriers; share the pre-floor cache.
-    Strip unanchored pre-floor child identity AFTER injection (#496), without extra reads.
-    Anchor live children or those with represented/live immediate parents, transitively.
+    Share the pre-floor cache for cost, reviews, and evidence. Anchor live children and
+    those with anchored parents transitively. Strip other pre-floor lineage after injection (#496).
     """
 
     try:
@@ -329,6 +341,7 @@ def _annotate_terminal_task_truth(
         ending_rows = {} if ending_rows is None else ending_rows
         summary_anchors, child_row_task_ids = set(), set()
         result_task_ids = set(ending_rows)
+        admission_notices = {}
         from ouroboros.tool_call_log import replay_evidence_for_tasks
 
         # Carriers are host projections after physical selection, not synthetic
@@ -343,6 +356,9 @@ def _annotate_terminal_task_truth(
             # notice and lifecycle rows); tool evidence follows the task's own route.
             if evidence_scope is None or evidence_scope(task_id):
                 represented.setdefault(task_id, str(message.get("ts") or ""))
+            if message.get("system_type") == "subagent_admission_notice":
+                admission_notices.setdefault(str(message.get("subagent_task_id") or ""), []).append(message)
+                continue
             if type(message.get("tool_calls")) is int:
                 tool_counts[task_id] = max(tool_counts.get(task_id, 0), message["tool_calls"])
             progress, summary = bool(message.get("is_progress")), message.get("system_type") == "task_summary"
@@ -367,8 +383,9 @@ def _annotate_terminal_task_truth(
         # A parent anchored by its child's row carries that row's ts; a census anchor has none.
         for task_id, ts in (evidence_anchors or {}).items():
             represented.setdefault(task_id, ts)
-        if _READS in cache:  # anchored parents and current work were not in the page's first batch
-            cache[_READS].prefetch([*represented, *result_task_ids])
+        if _READS in cache:  # include child IDs whose notices name their parents as chat anchors
+            cache[_READS].prefetch([*represented, *result_task_ids, *admission_notices])
+        _hydrate_admission_notices(data_dir, admission_notices, cache)
         tool_evidence_by_task = replay_evidence_for_tasks(data_dir, represented)
         for task_id, evidence in tool_evidence_by_task.items():
             result = _load_terminal_result(data_dir, task_id, cache)
@@ -423,8 +440,7 @@ def _annotate_terminal_task_truth(
                 unread_tasks.add(task_id)
             if carriers.get(task_id, {}).get("system_type") == "task_evidence":
                 carriers[task_id]["_is_direct_chat"] = bool(result.get("_is_direct_chat"))
-            child_meta = subagent_message_meta(result, task_id=task_id)
-            if child_meta:
+            if child_meta := subagent_message_meta(result, task_id=task_id):
                 legacy_child_meta_by_task[task_id] = child_meta
             status = str(result.get("status") or "")
             checkpoint = result.get("root_phase_checkpoint")
@@ -496,7 +512,8 @@ def _annotate_terminal_task_truth(
         summary_anchors.difference_update(anchored, legacy_child_meta_by_task, child_row_task_ids)
         for message in combined:
             task_id = str(message.get("task_id") or "")
-            if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
+            if not task_id or message.get("system_type") in (
+                    "subagent_admission_notice", "project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
                 continue
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
                 message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;

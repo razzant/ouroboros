@@ -12,12 +12,14 @@ Verifies Lane B claims at the byte level:
   4. Negative (A2A) chat: no chat frame, log channel still enriched.
   5. Non-subagent task: push_log event carries NO delegation keys.
 """
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
 
-def _mk_ctx(tmp_path, sent, pushed):
+def _mk_ctx(tmp_path, sent, pushed, deliver=None):
     class Bridge:
         @staticmethod
         def push_log(data):
@@ -38,6 +40,8 @@ def _mk_ctx(tmp_path, sent, pushed):
         @staticmethod
         def send_with_budget(chat_id, text, **kw):
             sent.append((chat_id, text, json.loads(json.dumps(kw.get("progress_meta") or {}))))
+            if deliver is not None:
+                deliver(chat_id, text, **kw)
 
         @staticmethod
         def load_state():
@@ -59,7 +63,7 @@ def _mk_ctx(tmp_path, sent, pushed):
     return Ctx()
 
 
-def _seed(tmp_path, task_id, chat_id, delegation_role="subagent"):
+def _seed(tmp_path, task_id, chat_id, delegation_role="subagent", **extra):
     (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
     from ouroboros.task_results import write_task_result
     fields = dict(
@@ -79,19 +83,20 @@ def _seed(tmp_path, task_id, chat_id, delegation_role="subagent"):
             "actual_substrate": "harness_used",
         },
     )
-    write_task_result(tmp_path, task_id, "completed", **fields)
+    write_task_result(tmp_path, task_id, "completed", **{**fields, **extra})
 
 
-def _run(tmp_path, task_id, chat_id, delegation_role="subagent"):
+def _run(tmp_path, task_id, chat_id, delegation_role="subagent", *, deliver=None, running=None, stored=None):
     sent, pushed = [], []
-    ctx = _mk_ctx(tmp_path, sent, pushed)
+    ctx = _mk_ctx(tmp_path, sent, pushed, deliver)
     task = {
         "id": task_id, "type": "task", "chat_id": chat_id,
         "delegation_role": delegation_role, "role": "researcher",
         "parent_task_id": "root-9", "root_task_id": "root-9",
+        **(running or {}),
     }
     ctx.RUNNING[task_id] = {"task": task}
-    _seed(tmp_path, task_id, chat_id, delegation_role)
+    _seed(tmp_path, task_id, chat_id, delegation_role, **(stored or {}))
     from ouroboros.headless import prepare_terminal_task_files
     from supervisor.events import _handle_task_done
     assert not prepare_terminal_task_files(tmp_path, task)["error"]
@@ -108,7 +113,7 @@ def _run(tmp_path, task_id, chat_id, delegation_role="subagent"):
     return sent, pushed, done_rows
 
 
-KEYS = ("executor_route", "execution_evidence", "actual_substrate")
+KEYS = ("executor_route", "requested_executor_route", "execution_evidence", "actual_substrate")
 
 
 def test_chat0_subagent_durable_vs_transport(tmp_path):
@@ -141,6 +146,35 @@ def test_negative_a2a_subagent_no_chat_frame_but_log_enriched(tmp_path):
         assert k not in done_rows[0]
 
 
+def test_terminal_first_chat_and_log_use_the_same_changed_coordinator_as_history(tmp_path, monkeypatch):
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from supervisor import message_bus
+
+    live = []
+    bridge = message_bus.LocalChatBridge()
+    bridge._broadcast_fn = live.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_: None)
+    facts = {
+        "parent_cognitive_route": {"model": "openai/at-start", "use_local_model": False, "chosen_by": "inherited"},
+        "model": "openai/at-end", "coordinator_route": "openai/at-end", "use_local_model": False,
+        "coordinator_billing": "measured", "coordinator_provenance": "parent_fallback",
+    }
+    _, pushed, [durable] = _run(tmp_path, "terminal-first", 1, deliver=message_bus.send_with_budget,
+                                running={"model": "openai/at-start", "coordinator_route": "openai/at-start"},
+                                stored=facts)
+    [chat] = [frame for frame in live if frame.get("system_type") == "subagent_terminal_notice"]
+    [log] = [frame for frame in pushed if frame["type"] == "task_done"]
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "20"})))
+    [replay] = [row for row in json.loads(response.body)["messages"]
+                if row.get("system_type") == "subagent_terminal_notice"]
+    for frame in (chat, log, replay):
+        assert {key: frame[key] for key in facts} == facts
+    assert not facts.keys() & durable.keys(), "chat persists the metadata; log enrichment is transport-only"
+
+
 def test_a_child_refused_at_dispatch_names_the_session_route_its_row_named(tmp_path):
     """Live, its card said ``{harness} · blocked`` from the dispatch caps; the record keeps no route (nothing ran
     on it), so the terminal carriers take it from the configured row. An API-model row names none, as live."""
@@ -151,7 +185,7 @@ def test_a_child_refused_at_dispatch_names_the_session_route_its_row_named(tmp_p
         return dict(result="⚠️ SUBAGENT_UNAVAILABLE: this subagent could not start.", chat_id=0,
                     parent_task_id="root-9", root_task_id="root-9", delegation_role="subagent",
                     effective_executor="blocked", executor_route="", reason_code="subagent_executor_unavailable",
-                    configured_subagent={"route": {"kind": kind, "target_id": target}})
+                    configured_subagent={"route": {"kind": kind, "target_id": target, "credential_profile_id": "acct"}})
 
     session, api = refused("agent_session", "claude=claude-opus-5-5:high"), refused("api_model", "openai/gpt-6")
     assert (terminal_executor_route(session), terminal_executor_route(api)) == ("claude", "")
@@ -174,6 +208,54 @@ def test_a_child_refused_at_dispatch_names_the_session_route_its_row_named(tmp_p
         pushed_done = [p for p in pushed if p.get("type") == "task_done"]
         assert pushed_done[0].get("executor_route") == route, task_id
         assert [meta["executor_route"] for _c, _t, meta in sent] == [route or ""], task_id
+        # Both carriers also name what the row selected, its model included and its account pin never.
+        selected = {"kind": fields["configured_subagent"]["route"]["kind"],
+                    "target_id": fields["configured_subagent"]["route"]["target_id"]}
+        assert pushed_done[0]["requested_executor_route"] == selected, task_id
+        assert [meta["requested_executor_route"] for _c, _t, meta in sent] == [selected], task_id
+
+
+def test_a_child_cancelled_while_queued_frames_its_selection_without_a_running_row(tmp_path, monkeypatch):
+    """The real pending cancellation (cancel_task_by_id -> _finish_captured_pending -> _emit_cancel_task_done) removes
+    the child from PENDING and never puts it in RUNNING, so ``task`` is {} at the terminal dispatch: its already loaded
+    stored result names the child, and the pushed frame carries the selection (never the pin, never a route it did
+    not get), while the durable row and the chat-notice gating stay as they were."""
+    from ouroboros import cancel_intents
+    from ouroboros.task_results import write_task_result
+    from supervisor import queue, task_lifecycle, workers
+    from supervisor.events import _handle_task_done
+
+    emitted = []
+    for name, value in (("DRIVE_ROOT", tmp_path), ("PENDING", []), ("RUNNING", {}), ("ADMISSION_RESERVATIONS", {})):
+        monkeypatch.setattr(queue, name, value)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
+    monkeypatch.setattr(workers, "WORKERS", {}, raising=False)
+    monkeypatch.setattr(workers, "get_event_q", lambda *_a, **_k: SimpleNamespace(put=emitted.append))
+    monkeypatch.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {}, raising=False)
+    monkeypatch.setattr(task_lifecycle, "_ACTIVE_CASCADE_FENCES", {}, raising=False)
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    snapshot = {"schema": 1, "selected_subagent_id": "row", "config_fingerprint": "fp",
+                "route": {"kind": "agent_session", "target_id": "codex=gpt-5.5-mini", "credential_profile_id": "acct"}}
+    lineage = dict(parent_task_id="root-9", root_task_id="root-9", delegation_role="subagent", role="checker")
+    task = {"id": "queued-kid", "type": "task", "chat_id": 0, **lineage, "configured_subagent": snapshot}
+    write_task_result(tmp_path, "queued-kid", "scheduled", chat_id=0, configured_subagent=snapshot, **lineage)
+    queue.PENDING.append(task)
+    cancel_intents.request_cancel(tmp_path, "queued-kid", source="http_single")
+    assert task_lifecycle.cancel_task_by_id("queued-kid")
+    [done_event] = [evt for evt in emitted if evt.get("type") == "task_done"]
+    assert "_files_prepared_attempt" not in done_event and queue.RUNNING == {}
+    sent, pushed = [], []
+    ctx = _mk_ctx(tmp_path, sent, pushed)
+    assert ctx.RUNNING == {}
+    _handle_task_done(done_event, ctx)
+    [frame] = [p for p in pushed if p.get("type") == "task_done"]
+    assert frame["status"] == "cancelled"
+    assert frame["requested_executor_route"] == {"kind": "agent_session", "target_id": "codex=gpt-5.5-mini"}
+    assert "executor_route" not in frame and "acct" not in json.dumps(frame), "never dispatched; no pin travels"
+    rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    [durable] = [row for row in rows if row.get("type") == "task_done" and row.get("task_id") == "queued-kid"]
+    assert not set(KEYS) & durable.keys(), "the enrichment is transport-only"
+    assert sent == [], "no RUNNING row: the chat notice gating is unchanged"
 
 
 def test_non_subagent_log_channel_not_enriched(tmp_path):

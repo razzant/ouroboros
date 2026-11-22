@@ -7,7 +7,7 @@ import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReason
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { checkpointHasProgressRow, serviceCheckpointFacts, serviceStopCardRow, taskCheckpointIdentity, taskCheckpointLabel, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel, serviceOutputLinksHtml } from './task_checkpoints.js';
-import { coordinatorRouteClause, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
+import { compactModel, coordinatorFacts, formatCoordinatorProvenance, harnessPresentation, recordedCoordinator, requestedExecutor, routeHarness, selectedModel } from './harness_presentation.js';
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
@@ -97,22 +97,6 @@ function isSubagentEvent(evt) {
     return String(evt.delegation_role || '').toLowerCase() === 'subagent' || Boolean(evt.subagent_task_id);
 }
 
-// E2 (v6.39 UI): compact model name for the subagent label — drop the provider prefix
-// ("anthropic/claude-sonnet-4.6" -> "claude-sonnet-4.6") and mark a local route. Shared SSOT
-// reused by the chat live-card headline (web/modules/chat.js).
-export function compactModel(model = '') {
-    const m = String(model || '').trim();
-    if (!m) return '';
-    // Provider-prefixed IDs use either "provider/model" (OpenRouter) or "provider::model"
-    // (direct providers, e.g. openai::gpt-5.5, cloudru::…); show just the model part. Take
-    // whatever follows the LAST '/' or '::' separator.
-    const slash = m.lastIndexOf('/');
-    const dcolon = m.lastIndexOf('::');
-    const cut = Math.max(slash >= 0 ? slash + 1 : 0, dcolon >= 0 ? dcolon + 2 : 0);
-    const short = m.slice(cut);
-    return /local/i.test(m) ? `${short} (local)` : short;
-}
-
 // Phase 6, owner directive #1: «бейдж точно нужен, но не рекламный … что ТУТ
 // бабл \ субагент на codex». A small chip naming the harness this bubble or
 // subagent was DISPATCHED to — icon plus the short harness name, in the style of
@@ -143,6 +127,7 @@ const SUBSTRATE_NOTE = {
 // `observation`, `sourceTs` and the revision feed keepStickyExecutorChip.
 export function executorChip(evt) {
     const coordinatorProvenance = formatCoordinatorProvenance(evt);
+    const selected = requestedExecutor(evt);  // the delegation's request, read before any evidence below
     const raw = evt?.executor_observation;
     const observation = raw && raw.task_id === String(evt?.subagent_task_id || evt?.task_id || '')
         && raw.run_id && raw.attempt_id && raw.harness_id && Number.isInteger(raw.revision)
@@ -154,23 +139,24 @@ export function executorChip(evt) {
         const name = harnessPresentation(observation.harness_id).label;
         const model = observation.model_source === 'observed' || observation.model_source === 'requested'
             ? compactModel(observation.model) : '';
+        const asked = compactModel(selectedModel(selected, observation.harness_id));  // a model-less report keeps its own harness's request
         return {
             harness: observation.harness_id,
             hasEvidence: false,
             observation,
             sourceTs: Date.parse(evt?.ts || evt?.timestamp || '') || 0,
             label: `${name} · last update`,
-            title: `Latest observed activity: ${name}, ${model ? `model ${model} (${observation.model_source})` : 'model unconfirmed'}, run ${observation.run_id}, attempt ${observation.attempt_id}, revision ${observation.revision}. This is progress, not a terminal execution receipt.`,
+            title: `Latest observed activity: ${name}, ${model ? `model ${model} (${observation.model_source})` : asked ? `model ${asked} (requested)` : 'model unconfirmed'}, run ${observation.run_id}, attempt ${observation.attempt_id}, revision ${observation.revision}. This is progress, not a terminal execution receipt.`,
             ...(coordinatorProvenance ? { coordinatorProvenance } : {}),
         };
     }
-    const route = String(evt?.executor_route || '').trim();
-    if (!route) return null;
-    // The route id is OPAQUE (`harness` or `harness=model`): print the harness
-    // part only, never interpreted beyond splitting the spelling Claudexor uses.
-    const harness = route.split('=')[0].trim().toLowerCase();
+    if (selected?.kind === 'api_model') return null;  // an API model runs on no harness: its target is never a chip
+    // The route id is OPAQUE (`harness[=model]`): only its harness part is printed, a head that is no harness id (an
+    // API model target) names none, and before dispatch the selection names its harness.
+    const routed = routeHarness(evt?.executor_route), harness = routed || selected?.harness || '';
     if (!harness) return null;
-    const name = harnessPresentation(harness).label;
+    const name = harnessPresentation(harness).label, asked = compactModel(selectedModel(selected, harness));
+    const modelClause = asked ? `, model ${asked} (requested)` : '';
     const base = {
         harness, label: name, sourceTs: Date.parse(evt?.ts || evt?.timestamp || '') || 0,
         ...(coordinatorProvenance ? { coordinatorProvenance } : {}),
@@ -197,14 +183,20 @@ export function executorChip(evt) {
     if (!evidence) {
         const record = normalizeTaskTerminalRecord(evt);
         const status = String(record.outcome_axes?.lifecycle?.status || record.status || evt?.subagent_event || '').toLowerCase();
-        if (OBSERVED_OUTCOME_STATUSES.has(status)) {
-            return chip(false, 'run outcome unknown', `The ${name} route was assigned, but this terminal record has no delegated-run evidence; the run outcome is unknown`);
+        const ended = OBSERVED_OUTCOME_STATUSES.has(status) || status === 'rejected';
+        if (ended && routed) {
+            return chip(false, 'run outcome unknown', `The ${name} route was assigned${modelClause}, but this terminal record has no delegated-run evidence; the run outcome is unknown`);
         }
+        // A selection that ended before any dispatch (cancelled while queued, refused at admission) had no run to
+        // lose: it keeps its executor and request, with no missing-receipt warning and no promise of one.
+        if (ended) return chip(false, '', `Selected ${name}${modelClause}; no dispatch was recorded before it ended`);
         // Evidence rides TERMINAL frames only, so a live frame proves nothing
         // either way, and under the pre-start charter the leaf usually IS running
         // by now: an evidence-grade negative ("no run yet") would be false for most
         // of the live phase. The bare name states the assignment the frame carries.
-        return chip(false, '', `Dispatched to ${name} — run evidence arrives with the terminal receipt; ${coordinatorRouteClause(evt)}`);
+        // The supervising agent's route and billing ride beside the sentence, for the card's Coordinator row.
+        return { ...chip(false, '', `${routed ? 'Dispatched to' : 'Selected'} ${name}${modelClause} — run evidence arrives with the terminal receipt`),
+            coordinator: coordinatorFacts(evt) };
     }
     const started = Number(evidence.delegated_runs_started || 0);
     const settled = Number(evidence.delegated_runs_settled || 0);
@@ -1233,8 +1225,9 @@ export function modelExecutionLabel(fact) {
 const originLabels = (evt) => ({ ...(evt?.initiator && { initiator: String(evt.initiator) }), ...(evt?.place_origin && { placeOrigin: evt.place_origin }),
     ...(evt?.continue_requester && { continueRequester: String(evt.continue_requester) }) });
 export function summarizeChatLiveEvent(evt) {
-    const view = summarizeChatLiveEventView(evt);
-    return view && Object.assign(view, originLabels(evt));
+    // A child's selection and its recorded coordinator facts ride each frame stating them; the card keeps both (chat.js).
+    const view = summarizeChatLiveEventView(evt), requested = requestedExecutor(evt), coordinator = recordedCoordinator(evt);
+    return view && Object.assign(view, originLabels(evt), requested ? { requestedExecutor: requested } : {}, coordinator ? { coordinator } : {});
 }
 
 function summarizeChatLiveEventView(evt) {

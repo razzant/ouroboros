@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { coordinatorRouteClause, formatCoordinatorProvenance, executorIdentityMarkup } from '../modules/harness_presentation.js';
+import { compactModel, coordinatorFacts, formatCoordinatorProvenance, executorIdentityMarkup } from '../modules/harness_presentation.js';
 import { executorChip } from '../modules/log_events.js';
 
 // Python checks these card facts against both subagent_message_meta and the history
@@ -22,15 +22,18 @@ for (const row of cases) {
             const absent = mode === 'history without coordinator facts';
             if (absent) for (const field of coordinatorFields) delete frame[field];
             const provenance = absent ? '' : row.provenance;
-            const clause = absent ? `this subagent itself runs on ${frame.model} (bills as unknown)` : row.clause;
+            const coordinator = absent ? { route: compactModel(frame.model), billing: 'unknown' } : row.coordinator;
             const chip = executorChip(frame);
             assert.equal(formatCoordinatorProvenance(frame), provenance);
-            assert.equal(coordinatorRouteClause(frame), clause);
-            assert.ok(chip.title.includes(clause));
+            assert.deepEqual(coordinatorFacts(frame), coordinator);
+            assert.deepEqual(chip.coordinator, coordinator);
             assert.equal(chip.coordinatorProvenance || '', provenance);
-            // The chip line carries the executor only; the coordinator and its recorded provenance are a
-            // details row (chat_activity.renderLiveCardMeta), so an absent record shows no provenance at all.
+            // The coordinator is the card's Coordinator details row (chat_activity.renderLiveCardMeta), never the
+            // executor's sentence or line, so it can never read as the model the child's work ran on.
+            assert.doesNotMatch(chip.title, /runs on|bills as/);
             assert.doesNotMatch(executorIdentityMarkup(chip, { model: 'exec-model' }), /Coordinator|inherited|fallback|delegator/);
+            // A selected model is the executor sentence's request; the row's account pin never travels.
+            if (row.facts.requested_executor_route) assert.match(chip.title, /^Dispatched to Codex, model gpt-5\.5 \(requested\)/);
             if (absent) assert.equal(chip.coordinatorProvenance || '', '');
         });
     }
@@ -38,8 +41,8 @@ for (const row of cases) {
 
 test('the chip renders supplied billing and never prices or reclassifies the route', () => {
     for (const model of ['claudexor::codex=gpt-5', 'local-model (local)', 'openai/gpt-5']) {
-        assert.match(coordinatorRouteClause({ model, cost_usd: .5 }), /bills as unknown/);
-        assert.match(coordinatorRouteClause({ model, coordinator_billing: 'measured' }), /bills as measured/);
+        assert.equal(coordinatorFacts({ model, cost_usd: .5 }).billing, 'unknown');
+        assert.equal(coordinatorFacts({ model, coordinator_billing: 'measured' }).billing, 'measured');
     }
     assert.equal(formatCoordinatorProvenance({ model: 'm', effective_model_lane: 'fallback' }), '');
     for (const snap of [{ model: 'm' }, { model: 'm', source_role: 'fallback' },

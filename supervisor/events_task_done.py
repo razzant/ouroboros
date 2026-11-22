@@ -21,6 +21,7 @@ from ouroboros.outcomes import (
 )
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.host_notice import phrase
+from ouroboros.subagent_messages import requested_executor_route, subagent_message_meta
 from ouroboros.task_finalization import quiet_finish, schedule_report_fields, send_provider_death_notice, work_label
 from ouroboros.task_results import (
     STATUS_CANCELLED,
@@ -441,12 +442,11 @@ def _finish_task_done_dispatch(
         event={**(evt if isinstance(evt, dict) else {}), **task_done_event},
     )
 
-    if task_id and str(task.get("delegation_role") or "") == "subagent":
-        effective_result = (
-            final_task_result
-            or load_task_result(ctx.DRIVE_ROOT, str(task_id or ""))
-            or {}
-        )
+    # A child that left RUNNING first (cancelled while queued, or popped by its cancel) has ``task`` {}: its stored
+    # result names it, so its pushed frame still carries selection and evidence; only a RUNNING child's notice is sent.
+    running_child = str(task.get("delegation_role") or "") == "subagent"
+    if task_id and (running_child or str(final_task_result.get("delegation_role") or "") == "subagent"):
+        effective_result = final_task_result or load_task_result(ctx.DRIVE_ROOT, str(task_id or "")) or {}
         from supervisor.subagent_task_truth import enrich_task_done_event, terminal_executor_route
 
         _envelope = enrich_task_done_event(task_done_event, effective_result)
@@ -456,7 +456,7 @@ def _finish_task_done_dispatch(
                 ctx, task_id, task.get("parent_task_id"), task.get("root_task_id")
             ) or None,
             task.get("chat_id"),
-        )
+        ) if running_child else None
         if chat_id is not None:
             status = str(
                 effective_result.get("status")
@@ -486,7 +486,8 @@ def _finish_task_done_dispatch(
                 {"accounted_upper_bound_usd": None, **task_done_event})
             role = str(task.get("role") or "").strip()
             role_suffix = f" ({role})" if role else ""
-            progress_meta = {
+            progress_meta = subagent_message_meta(effective_result, task_id=str(task_id or ""))
+            progress_meta.update({
                 "subagent_event": subagent_event,
                 "subagent_task_id": str(task_id or ""),
                 "root_task_id": str(task.get("root_task_id") or ""),
@@ -531,7 +532,10 @@ def _finish_task_done_dispatch(
                 "effort_level": str(effective_result.get("effort_level") or ""),
                 "effort_requested": str(effective_result.get("effort_requested") or ""),
                 "effort_source": str(effective_result.get("effort_source") or ""),
-            }
+            })
+            # The executor the delegation selected, so a card first met at its end names it too (absent, never {}).
+            if selected := requested_executor_route(task):
+                progress_meta.setdefault("requested_executor_route", selected)
             if isinstance(_envelope.get("execution_evidence"), dict):
                 progress_meta["execution_evidence"] = _envelope["execution_evidence"]
             if _envelope.get("actual_substrate"):

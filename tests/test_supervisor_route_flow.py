@@ -135,6 +135,10 @@ def test_explicit_route_crosses_event_queue_restart_worker_and_agent_mirrors(hos
     events._handle_schedule_task(event, host.ctx)
     assert len(host.pending) == 1
     assert host.pending[0]["metadata"]["parent_cognitive_route"] == original
+    # The queued card already names what the row selected: its route's kind and target, never its account pin.
+    selected = {key: event["configured_subagent"]["route"][key] for key in ("kind", "target_id")}
+    scheduled = [n["progress_meta"] for n in host.notices if (n.get("progress_meta") or {}).get("subagent_event") == "scheduled"]
+    assert [meta.get("requested_executor_route") for meta in scheduled] == [selected]
     # Queue persistence retains the full JSON snapshot, including its selected row.
     assert queue.persist_queue_snapshot()
     host.pending.clear()
@@ -155,6 +159,7 @@ def test_explicit_route_crosses_event_queue_restart_worker_and_agent_mirrors(hos
     # This shared projection feeds running, heartbeat and replayed card metadata.
     meta = subagent_message_meta(task, task_id=tid, event="running")
     assert meta["parent_cognitive_route"] == original
+    assert meta["requested_executor_route"] == selected
     assert not host.attempts
 
 

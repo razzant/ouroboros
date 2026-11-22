@@ -226,6 +226,12 @@
  * @property {string=} instruction  // one line the owner acts on, as written (a Git command); a reader without Details says it under the line
  * @property {string=} line  // phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
  */
+/** The executor selection frozen when a subagent is scheduled.
+ * @typedef {Object} RequestedExecutorRoute
+ * @property {'api_model'|'agent_session'} kind
+ * @property {string} target_id
+ */
+
 /** @typedef {Object} ChatOutbound
  * @property {import('./client_contract_types.js').PresenceContact=} presence_contact
  * @property {{kind:'publication'|'answer'|'closure',state:'owed'|'delivered',reason_code?:string,dismissed?:boolean}=} question_delivery Canonical settlement delivery fact.
@@ -308,6 +314,7 @@
  * @property {string=} effort_requested  The parent's request when it made one.
  * @property {string=} effort_source  auto | pin | model_name | cyber.
  * @property {string=} executor_route  Opaque delegated harness route resolved at dispatch, not an engine receipt; absent = ordinary native presentation, no chip.
+ * @property {RequestedExecutorRoute=} requested_executor_route  The requested executor shown from Queued on.
  * @property {Object=} parent_cognitive_route  Recorded parent snapshot; never inferred from the child's model lane.
  * @property {string=} coordinator_route
  * @property {boolean=} use_local_model

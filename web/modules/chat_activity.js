@@ -1,12 +1,12 @@
 // Pure chat-activity helpers shared by chat.js and dependency-free node tests:
 // live-card presentation projections (moved verbatim from chat.js) plus the
 // census snapshot hydration. The room's status word is the server's (work_status.js).
-import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
+import { META_PART_SEPARATOR, compactModel, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation, joinMetaParts, requestedFact } from './harness_presentation.js';
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
 import { modelHandoverFact } from './model_handover.js';
 import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
-import { childLineCause, compactModel, formatLogDuration, modelExecutionView, serviceOutputLinksHtml } from './log_events.js';
+import { childLineCause, formatLogDuration, modelExecutionView, serviceOutputLinksHtml } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
@@ -852,9 +852,9 @@ export function clearStickyCardState(record) {
     record.collapsedActivityLead = '';
     record.causeHeld = false;  // an outcome's cause owns the line from then on; equal narration words never take it
     record.costMeta = null;
-    // The executor chip is cycle state like the cost projection: a recycled
-    // slot must not claim the previous cycle's delegated route as its own.
-    record.executorChip = null;
+    // The executor chip, its selection and recorded coordinator are cycle state like the cost projection:
+    // a recycled slot must not claim the previous cycle's delegated route, request or coordinator as its own.
+    record.executorChip = record.requestedExecutor = record.coordinator = null;
     // A recycled slot must not inherit the previous cycle's finalizing hold —
     // nor the outcome observed under it (#1110), which would otherwise paint the
     // new cycle's chip with the old cycle's Failed.
@@ -1380,7 +1380,8 @@ export function costMetaKeys(src) {
 }
 
 const CARD_META_KEYS = [
-    ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
+    ...COST_META_KEYS, 'executor_route', 'requested_executor_route', 'execution_evidence', 'actual_substrate', 'parent_cognitive_route',
+    'coordinator_route', 'coordinator_billing', 'coordinator_provenance', 'use_local_model',
     'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'continue_requester', 'cancel_origin',
     'delegated_activity', 'outcome_axes', 'delegated_runs_unreconciled', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning', 'place_origin', 'notice',
 ];
@@ -1465,19 +1466,20 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     const text = (item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`;
     // The compact line says who ran the work, on what, how long and for how much (DESIGN §5 "A task card's
     // summary outranks its details"). A delegated child names its executor and only the executor's own model
-    // evidence; any other card the model a usable solve response observed, else its agent model, and an
+    // evidence, else the model its delegation selected (`requested …`; the request stays in Details when the
+    // line says otherwise); any other card the model a usable solve response observed, else its agent model, and an
     // unobserved execution in its own words. Effort is the selected leaf's dispatch level, not the nanny's
     // reasoning level or a provider echo (subagent_runtime.resolve_configured_actor_dispatch).
     // Session counters belong to the supervising agent, never the foreign executor.
     const chip = record.executorChip;
     const supervision = chip && harnessPresentation(chip.harness).kind === 'harness';
     const execution = modelExecutionView(record.modelExecution);
-    const coordinator = compactModel(agentModel);
-    const provenance = chip ? formatCoordinatorProvenance(
-        record?.coordinatorProvenance || chip?.coordinatorProvenance || chip?.snapshot || '',
-    ) : '';
-    const model = chip ? executorModelText(chip, compactModel)
-        : execution && !execution.observed ? execution.value : execution?.model || coordinator;
+    // A child's recorded coordinator facts (recordedCoordinator) outlive the dispatch chip's own; later chips carry none.
+    const recorded = chip ? { ...chip.coordinator, ...record.coordinator } : {}, coordinator = compactModel(agentModel);
+    const coordinatorName = recorded.route || coordinator;
+    const provenance = chip ? formatCoordinatorProvenance(recorded.provenance || chip?.coordinatorProvenance || chip?.snapshot || '') : '';
+    const model = chip ? executorModelText(chip, record.requestedExecutor)
+        : execution && !execution.observed ? execution.value : execution?.model || coordinator || executorModelText(null, record.requestedExecutor);
     // The compact line names the model a Claudexor route ran on, not the route's spelling `codex=…` (Details keep it).
     const lineModel = String(model || '').replace(/(^|\s)[a-z][\w.-]*=(?=\S)/i, '$1');
     // A key added under Accounts follows its model ("claude-opus-5.5 · Claude credits"); the built-in key adds nothing.
@@ -1516,8 +1518,11 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     const clockChanged = paintHeadClock(record, headClock ? clock : '');
     const factsChanged = paintLiveFacts(record, portal ? [] : [
         ['Executor', chip?.title ? escapeHtml(chip.title) : ''],
-        // Provenance is a recorded fact of the schedule (chosen_by / coordinator_provenance), never inferred here.
-        [chip ? 'Coordinator' : 'Agent model', coordinator ? escapeHtml(provenance ? `${coordinator} (${provenance})` : coordinator) : ''],
+        // Provenance and billing are recorded facts (chosen_by / coordinator_provenance / coordinator_billing), never
+        // inferred here; a session child's coordinator is named here only.
+        [chip ? 'Coordinator' : 'Agent model', coordinatorName ? escapeHtml(joinMetaParts([provenance ? `${coordinatorName} (${provenance})` : coordinatorName,
+            recorded.billing && `bills as ${recorded.billing}`])) : ''],
+        ['Requested', escapeHtml(requestedFact(record.requestedExecutor, chip, model))],
         // An unobserved execution of a card without an executor is its compact model fact already.
         [execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
         ...(record.handoverRows?.length ? [modelHandoverFact(record.handoverRows)] : []),

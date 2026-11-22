@@ -137,7 +137,7 @@ def _reject_schedule_task(
                             **preparation.refusal_fields())
         persist_result = True
     never_admitted = write_fields.get("admission_outcome") == "never_admitted"
-    refusal_confirmed = False
+    refusal_confirmed, stored = False, None
     if persist_result and not never_admitted:
         _cleanup_rejected_worktree(tid, result_fields)
     if reason_code:
@@ -152,12 +152,12 @@ def _reject_schedule_task(
             if preparation is not None:
                 # Rejoin only the chosen receipt. A closing generation must
                 # still settle it; copy disposal and notice are not retried.
-                preparation.store_gate(functools.partial(
+                stored = preparation.store_gate(functools.partial(
                     persist_never_admitted_refusal, ctx.DRIVE_ROOT, tid,
                     admission_token=preparation.token, **receipt), controls=False)
             else:
                 write_refusal = persist_never_admitted_refusal if never_admitted else write_task_result
-                write_refusal(ctx.DRIVE_ROOT, tid, **({} if never_admitted else {"status": status}), **receipt)
+                stored = write_refusal(ctx.DRIVE_ROOT, tid, **({} if never_admitted else {"status": status}), **receipt)
             refusal_confirmed = True
         except Exception as exc:
             from supervisor.workspace_preparation import store_contention
@@ -183,6 +183,7 @@ def _reject_schedule_task(
             if delegation_role == "subagent":
                 # The stored result keeps ``detail`` for the parent model; the card
                 # shows the producer's owner sentence when it wrote one (#1403).
+                recorded = stored if isinstance(stored, dict) else {}
                 _send_subagent_rejection(
                     ctx,
                     chat_id,
@@ -192,6 +193,11 @@ def _reject_schedule_task(
                     role=role,
                     status=status,
                     detail=fallback_message.removeprefix("⚠️ ") or detail,
+                    # Selection and cognition carried by the request or its confirmed refusal receipt.
+                    configured_subagent=result_fields.get("configured_subagent")
+                    or recorded.get("configured_subagent"),
+                    parent_cognitive_route=result_fields.get("parent_cognitive_route")
+                    or recorded.get("parent_cognitive_route"),
                 )
             elif fallback_message:
                 ctx.send_with_budget(chat_id, fallback_message, role="system", system_type="task_admission_notice")
@@ -367,7 +373,9 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
             reject(
                 ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
                 parent_id=parent_id, root_task_id=root_task_id, role=role,
-                result_fields={"project_id": project_id, "child_drive_root": child_drive_root},
+                result_fields={"project_id": project_id, "child_drive_root": child_drive_root,
+                               "configured_subagent": configured_subagent,
+                               "parent_cognitive_route": parent_cognitive_route},
                 detail=f"Task not scheduled: Project state could not be checked: {exc}",
                 reason_code=getattr(exc, "reason", "project_routing_fence_lookup_failed"),
                 extra_fields={"admission_outcome": "never_admitted"})
@@ -836,7 +844,7 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
             task_group_id=r.task_group_id, requested_model_lane=r.requested_model_lane,
             active_subagent_count=_active_subagent_count(
                 root_task_id, getattr(view, "PENDING", pending_ref), getattr(view, "RUNNING", running_view)),
-            max_active_subagents=max_active,
+            max_active_subagents=max_active, configured_subagent=r.configured_subagent,
         ))
         progress_meta["parent_cognitive_route"] = cognitive_route
         if queued_behind_active_cap:

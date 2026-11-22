@@ -44,6 +44,7 @@ from ouroboros.gateway.contracts import (
     PhotoOutbound,
     ProviderTestRequest,
     ProviderTestResponse,
+    RequestedExecutorRoute,
     SettingsMeta,
     SettingsPostCommitFailureResponse,
     SkillDeleteResponse,
@@ -134,6 +135,26 @@ def _js_typedef_properties(text: str, name: str) -> set[tuple[str, str]]:
         match.group("body"),
         re.M,
     ))
+
+
+def test_requested_executor_route_schema_and_jsdoc_match():
+    from ouroboros.gateway.schema import json_schema_for
+
+    schema = json_schema_for(ChatOutbound)
+    field = "requested_executor_route"
+    typedef = "RequestedExecutorRoute"
+    route = schema["properties"][field]
+    assert field not in schema["required"]
+    assert route == json_schema_for(RequestedExecutorRoute)
+    assert route["type"] == "object"
+    assert set(route["required"]) == {"kind", "target_id"}
+    kinds = ["api_model", "agent_session"]
+    assert route["properties"] == {"kind": {"enum": kinds}, "target_id": {"type": "string"}}
+
+    text = (pathlib.Path(__file__).parents[1] / "web/modules/api_types.js").read_text(encoding="utf-8")
+    assert _js_typedef_properties(text, typedef) == {("|".join(map(repr, kinds)), "kind"), ("string", "target_id")}
+    chat = re.search(r"@typedef \{Object\} ChatOutbound\b(?P<body>.*?)\n \*/", text, re.S)
+    assert chat and f"@property {{{typedef}=}} {field} " in chat.group("body")
 
 
 def test_provider_test_gateway_contract_shape_is_exact():

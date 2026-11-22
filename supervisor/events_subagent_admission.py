@@ -20,6 +20,8 @@ from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
 from supervisor.events_chat_delivery import _bound_project_chat_id
 from supervisor.message_bus import notification_chat_route
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID
+from ouroboros.subagent_messages import requested_executor_route
+from ouroboros.supervisor_route import validate_cognitive_route
 
 log = logging.getLogger(__name__)
 
@@ -115,8 +117,10 @@ def _subagent_rejection_meta(
     role: str,
     status: str,
     error: str,
+    configured_subagent: Any = None,
+    parent_cognitive_route: Any = None,
 ) -> Dict[str, Any]:
-    return {
+    progress_meta = {
         "subagent_event": "rejected",
         "accepted": False,
         "subagent_task_id": tid,
@@ -127,6 +131,14 @@ def _subagent_rejection_meta(
         "status": status,
         "error": error,
     }
+    if selected := requested_executor_route({"configured_subagent": configured_subagent}):
+        progress_meta["requested_executor_route"] = selected  # what the refused child had selected
+    try:
+        if cognitive_route := validate_cognitive_route(parent_cognitive_route):
+            progress_meta["parent_cognitive_route"] = cognitive_route
+    except ValueError:
+        pass  # A malformed binding may itself be the refusal's cause.
+    return progress_meta
 
 
 def _subagent_scheduled_meta(
@@ -138,6 +150,7 @@ def _subagent_scheduled_meta(
     requested_model_lane: str,
     active_subagent_count: int,
     max_active_subagents: Optional[int],
+    configured_subagent: Any = None,
 ) -> Dict[str, Any]:
     progress_meta = {
         "subagent_event": "scheduled",
@@ -153,6 +166,9 @@ def _subagent_scheduled_meta(
         # running card (written by the worker after dispatch) carries both.
         "model_lane": requested_model_lane,
     }
+    # The executor the row snapshot selected IS known at acceptance: a queued card names it as requested.
+    if selected := requested_executor_route({"configured_subagent": configured_subagent}):
+        progress_meta["requested_executor_route"] = selected
     if max_active_subagents is None:
         del progress_meta["max_active_subagents"]  # no number of the owner's: the feed names none
     return progress_meta
@@ -168,6 +184,8 @@ def _send_subagent_rejection(
     role: str,
     status: str,
     detail: str,
+    configured_subagent: Any = None,
+    parent_cognitive_route: Any = None,
 ) -> None:
     # Route through lineage so a subagent rejection notice lands in the root's
     # project thread, not the main chat (C4.4); fall back to the raw chat id.
@@ -190,6 +208,8 @@ def _send_subagent_rejection(
             role=role,
             status=status,
             error=detail,
+            configured_subagent=configured_subagent,
+            parent_cognitive_route=parent_cognitive_route,
         ),
         role="system", system_type="subagent_admission_notice")
 

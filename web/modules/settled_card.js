@@ -10,6 +10,7 @@ import { syncReviewGateItem } from './review_gate_card.js';
 import { cardMetaKeys, isReplayEvidenceRow, noteToolHostMetrics, positiveTaskTerminalFact, renderLiveCardMeta, toolEvidenceIncomplete, toolEvidenceView } from './chat_activity.js';
 import { referencesTaskOnly } from './chat_row_placement.js';
 import { childCauseFacts, isTerminalTaskDetail, taskCancelPending, taskDoneIsTerminal, taskTerminalPhase } from './log_events.js';
+import { selectedRoute } from './harness_presentation.js';
 import { isoMicros } from './utils.js';
 import { READ_EPOCH, syncContinueAction } from './task_continue.js';
 import { measure } from './layout_batch.js';
@@ -198,7 +199,12 @@ export function terminalChildFrame(childId, info, evt, phase = taskTerminalPhase
         // Only the text this frame carries.
         ...Object.fromEntries(['result', 'trace_summary', 'error'].filter((key) => evt[key]).map((key) => [key, evt[key]])),
         reason_code: evt.reason_code || '',
-        ...cardMetaKeys(evt) };
+        ...cardMetaKeys(evt),
+        // A stored task detail (a terminal frame this page missed) keeps the delegation's selection in its row
+        // snapshot (only its kind and target are carried) and the completion-seam evidence in its envelope.
+        requested_executor_route: selectedRoute(evt.requested_executor_route) || selectedRoute(evt.configured_subagent?.route) || undefined,
+        execution_evidence: evt.execution_evidence || evt.subagent_envelope?.execution_evidence,
+        actual_substrate: evt.actual_substrate || evt.subagent_envelope?.actual_substrate };
 }
 
 /** Paint handover evidence through the caller's viewport seam. A census row can only advance the attempt;

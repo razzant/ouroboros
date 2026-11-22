@@ -8,6 +8,8 @@ import {
     summarizeChatLiveEvent,
     taskOutcomeSeverity,
 } from '../modules/log_events.js';
+import { compactModel, executorModelText, recordedCoordinator, requestedExecutor, requestedFact } from '../modules/harness_presentation.js';
+import { terminalChildFrame } from '../modules/settled_card.js';
 
 test('shared task severity never paints degraded or best-effort outcomes green', () => {
     const clean = {
@@ -291,8 +293,9 @@ test('the chip is layered truth: decision before evidence, receipt only from evi
     assert.equal(dispatched.label, 'Claude Code');
     assert.match(dispatched.title, /Dispatched to Claude Code/);
     assert.match(dispatched.title, /run evidence arrives with the terminal receipt/);
-    assert.match(dispatched.title, /this subagent runs on its coordinator route \(bills as unknown\)/);
-    assert.doesNotMatch(dispatched.title, /itself runs on the API/);
+    // The coordinator is no part of the executor's sentence: the card's Coordinator row reads it from the chip.
+    assert.deepEqual(dispatched.coordinator, { route: '', billing: 'unknown' });
+    assert.doesNotMatch(dispatched.title, /runs on|bills as/);
     assert.doesNotMatch(dispatched.title, /Ran on your/);
 
     const dispatchedSub = executorChip({
@@ -301,10 +304,7 @@ test('the chip is layered truth: decision before evidence, receipt only from evi
         coordinator_billing: 'subscription',
         parent_cognitive_route: { model: 'claudexor::claude=sonnet-4-6', chosen_by: 'inherited' },
     });
-    assert.match(
-        dispatchedSub.title,
-        /this subagent itself runs on claudexor::claude=sonnet-4-6 \(bills as subscription\)/,
-    );
+    assert.deepEqual(dispatchedSub.coordinator, { route: 'claude=sonnet-4-6', billing: 'subscription' });
     assert.equal(dispatchedSub.coordinatorProvenance, 'inherited');
 
     const dispatchedMeasured = executorChip({
@@ -313,10 +313,7 @@ test('the chip is layered truth: decision before evidence, receipt only from evi
         cost_usd: 0.02,
         coordinator_billing: 'measured',
     });
-    assert.match(
-        dispatchedMeasured.title,
-        /this subagent itself runs on openai\/gpt-5\.6-sol \(bills as measured\)/,
-    );
+    assert.deepEqual(dispatchedMeasured.coordinator, { route: 'gpt-5.6-sol', billing: 'measured' });
 
     // EVIDENCE with settled runs: the completion-seam reconciliation proved the
     // delegation happened, so the chip may finally say so — with the count and
@@ -525,6 +522,108 @@ test('the chip rides both projections: an ordinary progress bubble and a subagen
         is_progress: true, content: 'plain child', delegation_role: 'subagent',
         subagent_task_id: 'child-2', subagent_event: 'running',
     }), false);
+});
+
+test('the selected executor and model read as a request from Queued on; evidence outranks it', () => {
+    const selection = { requested_executor_route: { kind: 'agent_session', target_id: 'codex=gpt-5.5' } };
+    const line = (frame) => executorModelText(executorChip(frame), requestedExecutor(frame));
+    // Queued: no dispatch route yet, so the chip names the SELECTED harness and the line its model, as a request.
+    const queued = { ...selection, subagent_event: 'scheduled', accepted: true };
+    assert.equal(executorChip(queued).label, 'Codex');
+    assert.match(executorChip(queued).title, /^Selected Codex, model gpt-5\.5 \(requested\) — run evidence arrives/);
+    assert.equal(line(queued), 'requested gpt-5.5');
+    // Dispatched: the route's bare harness (a blocked or terminal route) keeps the selection's model.
+    const running = { ...selection, executor_route: 'codex', subagent_event: 'running' };
+    assert.match(executorChip(running).title, /^Dispatched to Codex, model gpt-5\.5 \(requested\)/);
+    assert.equal(line(running), 'requested gpt-5.5');
+    // An older frame: a full dispatch route still names its model (an `:effort` tail is no part of it); a bare one none.
+    assert.deepEqual(requestedExecutor({ executor_route: 'codex=gpt-5.5:high' }), { kind: 'agent_session', harness: 'codex', model: 'gpt-5.5' });
+    assert.equal(requestedExecutor({ executor_route: 'codex' }), null);
+    assert.equal(line({ executor_route: 'codex' }), '');
+    // A progress report without a model keeps its own harness's request, never another harness's.
+    const report = (harness_id, extra = {}) => ({ ...selection, executor_route: 'codex', subagent_task_id: 'c', executor_observation: {
+        task_id: 'c', task_attempt: '1', run_id: 'r', attempt_id: 'a', harness_id, phase: 'p', revision: 1, ...extra } });
+    assert.match(executorChip(report('codex')).title, /Codex, model gpt-5\.5 \(requested\), run r/);
+    assert.equal(line(report('codex')), 'requested gpt-5.5');
+    assert.match(executorChip(report('cursor')).title, /Cursor, model unconfirmed/);
+    assert.equal(line(report('cursor')), '');
+    assert.equal(requestedFact(requestedExecutor(report('cursor')), executorChip(report('cursor')), ''), 'Codex · gpt-5.5');
+    // Observed evidence takes the line; the request moves to Details only when it differs.
+    const observed = report('codex', { model: 'gpt-5.5-2026-11', model_source: 'observed' });
+    assert.equal(line(observed), 'gpt-5.5-2026-11');
+    assert.equal(requestedFact(requestedExecutor(observed), executorChip(observed), line(observed)), 'Codex · gpt-5.5');
+    assert.equal(requestedFact(requestedExecutor(queued), executorChip(queued), line(queued)), '');
+    const settled = { ...selection, executor_route: 'codex', status: 'completed', execution_evidence: {
+        delegated_runs_started: 1, delegated_runs_settled: 1, delegated_runs_failed: 0, harness_models: ['GPT-5.5 Codex'] } };
+    assert.equal(line(settled), 'GPT-5.5 Codex');
+    // A child that ended before any dispatch (cancelled while queued, refused at admission, with or without a
+    // status) lost no run: its selection and request stay, with no missing-receipt warning and no promised receipt.
+    for (const ended of [{ status: 'cancelled', subagent_event: 'cancelled' },
+        { status: 'failed', subagent_event: 'rejected', accepted: false }, { subagent_event: 'rejected', accepted: false }]) {
+        const frame = { ...selection, ...ended };
+        assert.equal(executorChip(frame).label, 'Codex', JSON.stringify(ended));
+        assert.equal(executorChip(frame).title, 'Selected Codex, model gpt-5.5 (requested); no dispatch was recorded before it ended');
+        assert.equal(line(frame), 'requested gpt-5.5', JSON.stringify(ended));
+    }
+    // Only a dispatched route can have lost its receipt: there the warning stays.
+    const dispatchedEnd = executorChip({ ...selection, executor_route: 'codex', status: 'cancelled' });
+    assert.equal(dispatchedEnd.label, 'Codex · run outcome unknown');
+    assert.match(dispatchedEnd.title, /^The Codex route was assigned, model gpt-5\.5 \(requested\), but this terminal record has no delegated-run evidence/);
+    // An API-model selection runs on no harness: its target is never a chip, and the line requests its model.
+    const api = { requested_executor_route: { kind: 'api_model', target_id: 'openai::gpt-5.5' }, executor_route: 'openai::gpt-5.5' };
+    assert.equal(executorChip(api), null);
+    assert.equal(executorModelText(null, requestedExecutor(api)), 'requested gpt-5.5');
+    assert.equal(executorModelText(executorChip(running), requestedExecutor(api)), '', 'an API model never joins a harness');
+    // Nor does an older frame's API target: no harness id heads it.
+    for (const executor_route of ['openai::gpt-5.5', 'claudexor::codex=gpt-5', 'anthropic/claude-x']) {
+        assert.equal(executorChip({ executor_route }), null, executor_route);
+        assert.equal(requestedExecutor({ executor_route }), null, executor_route);
+    }
+    // Every frame that states a selection hands it to the card.
+    assert.deepEqual(summarizeChatLiveEvent({ ...queued, is_progress: true, content: 'Scheduled', delegation_role: 'subagent',
+        subagent_task_id: 'c', parent_task_id: 'p' }).requestedExecutor, { kind: 'agent_session', harness: 'codex', model: 'gpt-5.5' });
+});
+
+test('a local API selection is marked local once, queued and completed', () => {
+    // The row spells a local target `… (local)` (configured_subagents / subagent_runtime): compacting it never adds a
+    // second mark, while a bare local-named model keeps its single mark and a remote one gets none.
+    assert.deepEqual(['qwen.gguf (local)', 'openai::gpt-5 (local)', 'local-model', 'local-model (local)', 'openai::gpt-5'].map(compactModel),
+        ['qwen.gguf (local)', 'gpt-5 (local)', 'local-model (local)', 'local-model (local)', 'gpt-5']);
+    for (const [target, asked, ran] of [['qwen.gguf (local)', 'qwen.gguf (local)', 'qwen.gguf'], ['openai::gpt-5 (local)', 'gpt-5 (local)', 'openai::gpt-5']]) {
+        const selected = requestedExecutor({ requested_executor_route: { kind: 'api_model', target_id: target } });
+        // Queued: the API child's line requests it, marked once; Details repeat nothing the line says.
+        assert.equal(executorModelText(null, selected), `requested ${asked}`, target);
+        assert.equal(requestedFact(selected, null, `requested ${asked}`), '', target);
+        // Completed on that local model: its solve response names the bare model (the lane is `used_local`), which is
+        // the same request, so Details add no false `Requested` row; a different model still shows the request.
+        assert.equal(requestedFact(selected, null, compactModel(ran)), '', target);
+        assert.equal(requestedFact(selected, null, 'gpt-4.1'), asked, target);
+    }
+});
+
+test('a stored detail carries only the selection\'s kind and target, never the row\'s pin', () => {
+    const route = { kind: 'agent_session', target_id: 'codex=gpt-5.5' };
+    const detail = (extra) => terminalChildFrame('kid', { parentId: 'root', role: 'reader' }, { status: 'completed', ...extra });
+    // A legacy detail (no carrier of its own) projects its row snapshot's route: the account pin never travels.
+    assert.deepEqual(detail({ configured_subagent: { route: { ...route, credential_profile_id: 'work-account', effort: 'high' } } })
+        .requested_executor_route, route);
+    assert.deepEqual(detail({ requested_executor_route: { ...route, credential_profile_id: 'work-account' } }).requested_executor_route, route);
+    // A carrier that names no known kind and target is no selection at all.
+    for (const bad of [{ kind: 'agent_session' }, { kind: 'shell', target_id: 'x' }, { kind: 'api_model', target_id: '  ' }, 'codex=gpt-5.5']) {
+        assert.equal(detail({ configured_subagent: { route: bad } }).requested_executor_route, undefined, JSON.stringify(bad));
+    }
+});
+
+test('a frame records only the coordinator facts it states', () => {
+    // A sparse observation or receipt states none, so a card keeps what earlier frames recorded and invents no basis.
+    assert.equal(recordedCoordinator({ model: 'm', executor_route: 'codex' }), null);
+    assert.equal(recordedCoordinator({ executor_route: 'codex', execution_evidence: { delegated_runs_started: 1 } }), null);
+    // A scheduling notice records the parent's snapshot: its route and provenance, and no billing it did not give.
+    assert.deepEqual(recordedCoordinator({ parent_cognitive_route: { model: 'openai/gpt-6', chosen_by: 'inherited' } }),
+        { route: 'gpt-6', provenance: 'inherited' });
+    // A running or observation frame records the route and billing basis subagent_message_meta stamped.
+    assert.deepEqual(recordedCoordinator({ model: 'openai/gpt-6', coordinator_route: 'recorded (local)', coordinator_billing: 'measured',
+        use_local_model: true }), { route: 'recorded (local)', billing: 'measured' });
 });
 
 test('historical frames without the failed counter reconstruct it from succeeded', () => {

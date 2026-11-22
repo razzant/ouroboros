@@ -162,6 +162,75 @@ for (const external of [false, true]) test(`terminal child retains late lineage 
     } finally {fx.instance.destroy(); restoreDom(fx.prior);}
 });
 
+// A session child's Coordinator row (DESIGN §5: coordinator, provenance and billing stay in details) is recorded by its
+// scheduling and running frames; a later chip that states none (a sparse observation, a receipt, a missed terminal's
+// stored detail, a cancel before dispatch) replaces the executor's sentence, never those recorded facts.
+const COORD = {selection: {kind: 'agent_session', target_id: 'codex=gpt-5.5'},
+    snapshot: {model: 'openai/gpt-6-astra', use_local_model: false, chosen_by: 'delegator', selected_supervisor_snapshot: {selected_subagent_id: 'nanny-row'}},
+    lineage: {chat_id: 1, role: 'system', is_progress: true, task_id: 'kid', subagent_task_id: 'kid', parent_task_id: 'root',
+        root_task_id: 'root', delegation_role: 'subagent', subagent_role: 'reviewer'},
+    evidence: {delegated_runs_started: 1, delegated_runs_settled: 1, delegated_runs_failed: 0, harness_models: ['gpt-5.5-codex']}};
+const coordinatorRow = (card) => card.querySelector('[data-live-facts]').innerHTML.match(/<dt>Coordinator<\/dt><dd>([^<]*)<\/dd>/)?.[1];
+const scheduledFrame = () => ({...COORD.lineage, content: 'Scheduled', subagent_event: 'scheduled', requested_executor_route: COORD.selection,
+    parent_cognitive_route: COORD.snapshot, ts: '2026-11-22T10:00:00Z'});
+const runningFrame = () => ({...COORD.lineage, content: 'Running', subagent_event: 'running', requested_executor_route: COORD.selection,
+    ts: '2026-11-22T10:00:01Z',
+    model: 'openai/gpt-6-astra', executor_route: 'codex=gpt-5.5', parent_cognitive_route: COORD.snapshot,
+    coordinator_route: 'openai/gpt-6-astra', coordinator_billing: 'measured', use_local_model: false});
+for (const via of ['log', 'detail', 'history']) test(`a child's recorded coordinator outlives its observation and terminal chips: ${via}`, async () => {
+    const recorded = 'gpt-6-astra (chosen by the delegator (nanny-row)) · bills as measured';
+    const observation = {...COORD.lineage, role: 'assistant', content: 'Reading the renderer', ts: '2026-11-22T10:00:02Z',
+        executor_observation: {task_id: 'kid', task_attempt: '0', run_id: 'run', attempt_id: 'a01', harness_id: 'codex',
+            phase: 'harness.event', revision: 1}};
+    // A stored row's `ts` is when it was first written (its REQUESTED receipt, before any live frame); its last write
+    // is the receipt this page missed, so that one, not the creation, competes with the live chips.
+    const detail = {task_id: 'kid', status: 'completed', delegation_role: 'subagent', parent_task_id: 'root', model: 'openai/gpt-6-astra',
+        ts: '2026-11-22T09:59:00Z', updated_at: '2026-11-22T10:05:00Z',
+        parent_cognitive_route: COORD.snapshot, configured_subagent: {route: {...COORD.selection, credential_profile_id: 'acct'}},
+        subagent_envelope: {execution_evidence: COORD.evidence}};
+    const terminal = {...COORD.lineage, content: 'Subagent completed (reviewer).', subagent_event: 'completed', status: 'completed', ts: '2026-11-22T10:04:00Z',
+        task_terminal_status: 'completed', executor_route: 'codex=gpt-5.5', requested_executor_route: COORD.selection, execution_evidence: COORD.evidence};
+    const fx = makeInstance(via === 'history' ? [scheduledFrame(), runningFrame(), observation, terminal] : [], {kid: detail});
+    try {
+        await fx.instance.refreshHistory({revision: 1});
+        if (via !== 'history') {
+            fx.handlers.get('chat')(scheduledFrame());
+            // Queued: the snapshot names the coordinator and its provenance; its unstated billing reads unknown.
+            assert.equal(coordinatorRow(fx.card('kid')), 'gpt-6-astra (chosen by the delegator (nanny-row)) · bills as unknown');
+            fx.handlers.get('chat')(runningFrame());
+            assert.equal(coordinatorRow(fx.card('kid')), recorded);
+            fx.handlers.get('chat')(observation);
+            assert.match(fx.card('kid').querySelector('[data-live-meta]').innerHTML, /last update/);
+            assert.equal(coordinatorRow(fx.card('kid')), recorded, 'a sparse observation keeps the recorded coordinator');
+            fx.handlers.get('log')({chat_id: 1, data: {type: 'task_done', task_id: via === 'log' ? 'kid' : 'root', status: 'completed',
+                ...(via === 'log' ? {executor_route: 'codex=gpt-5.5', requested_executor_route: COORD.selection, execution_evidence: COORD.evidence} : {})}});
+            await new Promise(resolve => setImmediate(resolve));
+        }
+        const card = fx.card('kid');
+        assert.equal(card.dataset.finished, '1');
+        assert.match(card.querySelector('[data-live-meta]').innerHTML, /gpt-5\.5-codex/);
+        assert.equal(coordinatorRow(card), recorded, 'the terminal receipt keeps the recorded coordinator');
+    } finally {fx.instance.destroy(); restoreDom(fx.prior);}
+});
+
+test('a child cancelled before dispatch keeps its selection and the coordinator its scheduling recorded', async () => {
+    const fx = makeInstance([]);
+    try {
+        await fx.instance.refreshHistory({revision: 1});
+        fx.handlers.get('chat')(scheduledFrame());
+        // The real pending-cancel frame: no dispatch route, no evidence, only the stored selection (events_task_done).
+        fx.handlers.get('log')({chat_id: 1, data: {type: 'task_done', task_id: 'kid', status: 'cancelled', requested_executor_route: COORD.selection}});
+        await new Promise(resolve => setImmediate(resolve));
+        const card = fx.card('kid');
+        const facts = card.querySelector('[data-live-facts]').innerHTML;
+        assert.equal(card.dataset.finished, '1');
+        assert.match(facts, /<dt>Executor<\/dt><dd>Selected Codex, model gpt-5\.5 \(requested\); no dispatch was recorded before it ended<\/dd>/);
+        assert.doesNotMatch(facts, /run evidence arrives|run outcome unknown/);
+        // Its queued chip's facts stay recorded: the same coordinator and the `unknown` basis it read, as on replay.
+        assert.equal(coordinatorRow(card), 'gpt-6-astra (chosen by the delegator (nanny-row)) · bills as unknown');
+    } finally {fx.instance.destroy(); restoreDom(fx.prior);}
+});
+
 // Root-only census and complete work membership exercise the real card consumer.
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function childFixture(details) {
