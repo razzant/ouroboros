@@ -1,7 +1,7 @@
 """Fair physical-call admission shared by the processes of one installation.
 
 The owner's limit (``settings_scales.MODEL_CAP_KEY``: not chosen is no limit for an API route and
-three for a local model; <=0 disables) belongs to one model on a resolved
+one for the built-in server; <=0 disables) belongs to one model on a resolved
 provider, credential and endpoint, across roles and every process of the installation.
 Routes the managed Claudexor engine serves are not queued here: that one daemon is
 already the shared admission point for its accounts (quota-aware routing and
@@ -9,6 +9,10 @@ rotation), and a host cap would only shrink an install's parallel work to the ca
 across all its models. Callers bind their deadline with
 ``model_call_scope``; adapters take ``model_call_slot(route=target)`` INSIDE the
 physical sender, so retries, tools, backoff and abandoned logical waits own no slot.
+The built-in server's own count of a request (``/extras/measure_chat``) waits on the same inference
+lock as a generation, so with no number chosen no count opens its connection outside this queue
+(``measurement_slot``), holding the slot for the count alone: the sender takes its own, and a count
+whose answer is only advice declines a busy slot instead of standing behind the generation that holds it.
 A waiter has no clock of its own: it keeps its place until a slot frees, its caller's
 deadline passes, or Stop, Pause or the dispatch fence it already polls ends it. The work
 is never sent elsewhere for waiting (``loop_transport.fallback_chain_allowed``); while it
@@ -97,10 +101,11 @@ class _LocalRoute:
         self.active = 0
 
 
-def _cap(use_local: bool = False) -> int:
+def _chosen_cap() -> int | None:
+    """The owner's number of requests at once per model, ``None`` while none is chosen."""
     from ouroboros.config import SETTINGS_PATH
     from ouroboros.settings_integrity import read_settings_json_verified
-    from ouroboros.settings_scales import MODEL_CAP_KEY, MODEL_CAP_LOCAL, model_cap_value, unchosen_saved_document
+    from ouroboros.settings_scales import MODEL_CAP_KEY, model_cap_value, unchosen_saved_document
 
     # Capacity belongs to the install, not an older task's frozen settings.
     # Every process observes an owner cap change through the same document (read as the settings seam reads it:
@@ -110,7 +115,13 @@ def _cap(use_local: bool = False) -> int:
         saved = unchosen_saved_document(read_settings_json_verified(SETTINGS_PATH))
     except (OSError, ValueError):
         saved = None
-    cap = model_cap_value((saved or {}).get(MODEL_CAP_KEY, runtime_setting(MODEL_CAP_KEY, "")))
+    return model_cap_value((saved or {}).get(MODEL_CAP_KEY, runtime_setting(MODEL_CAP_KEY, "")))
+
+
+def _cap(use_local: bool = False) -> int:
+    from ouroboros.settings_scales import MODEL_CAP_LOCAL
+
+    cap = _chosen_cap()
     # Not chosen: a provider's API keeps its own limit; a model on this computer computes only what its slots allow.
     return (MODEL_CAP_LOCAL if use_local else 0) if cap is None else cap
 
@@ -147,6 +158,14 @@ def _managed(route: dict | None) -> bool:
     return isinstance(route, dict) and str(route.get("provider") or "") == "claudexor"
 
 
+def _local_port(port: int | None = None) -> int:
+    """The port the built-in server this caller's own client reaches listens on (``local_dispatch_port``);
+    another port is another server, named explicitly by the caller that starts one there."""
+    from ouroboros.local_model import local_dispatch_port
+
+    return int(local_dispatch_port() if port is None else port)
+
+
 def _route_digest(model: str, use_local: bool, route: dict | None) -> str:
     if route is None:
         if use_local:
@@ -157,9 +176,13 @@ def _route_digest(model: str, use_local: bool, route: dict | None) -> str:
             from ouroboros.llm import LLMClient
             route = LLMClient().resolve_remote_target(model)
     provider = str(route.get("provider") or "unknown")
-    endpoint = str(route.get("base_url") or "").strip().rstrip("/")
+    endpoint = str((route.get("local_dispatch_base_url") if provider == "local" else None)
+                   or route.get("base_url") or "").strip().rstrip("/")
     if provider == "local" and not endpoint:
-        endpoint = f"http://127.0.0.1:{runtime_setting('LOCAL_MODEL_PORT', 8766)}/v1"
+        # The lane's target spells no endpoint: its own client reaches the port the environment names
+        # (``local_model.local_dispatch_port``, the launcher's), so that server is the one this queue belongs
+        # to — never a settings projection or a deployment policy the send itself does not follow.
+        endpoint = f"http://127.0.0.1:{_local_port()}/v1"
     account = {key: str(route.get(key) or "") for key in ("api_key", "user", "password", "credential_profile_id")}
     identity = [provider, str(route.get("source") or ""), endpoint, account, str(model or "")]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -368,7 +391,7 @@ def limit_physical_send(route: dict, send: Callable) -> Callable:
     from ouroboros.llm_attempt import require_physical_dispatch_window
 
     model = str(route.get("usage_model") or route.get("resolved_model") or "")
-    local = str(route.get("provider") or "") == "local"  # the built-in server: it keeps three while no number is chosen
+    local = str(route.get("provider") or "") == "local"
 
     def dispatch():
         with model_call_slot(model, local, route=route, check=require_physical_dispatch_window):
@@ -381,3 +404,73 @@ def limit_physical_send(route: dict, send: Callable) -> Callable:
             return await send()
 
     return dispatch_async if inspect.iscoroutinefunction(send) else dispatch
+
+
+def built_in_route(port: int | None = None) -> dict:
+    """The queue identity of the built-in server's one model, shared by its generations and its own count.
+
+    The shape a local send's target has (``llm_local._build_local_candidate``) for the model that server
+    serves, so a generation — the lane's, or the Settings Test's probe — and a count of that server name one
+    queue: any other spelling would stand beside the request holding the inference lock. ``port`` is the
+    address the caller's own client reaches: the lane's configured one here, the running manager's actual one
+    for a probe (``local_model.start_server`` accepts a port, and a server started elsewhere can differ from
+    it). Another port is another server, therefore another queue."""
+    return {"provider": "local", "usage_model": "local-model", "base_url": f"http://127.0.0.1:{_local_port(port)}/v1"}
+
+
+def _attempt_measurement_slot(model: str, route: dict) -> _Waiter | None:
+    """One attempt at the built-in server's slot: the held waiter, or ``None`` while this process holds nothing.
+
+    Anything short of holding it — a generation on the one slot, a ticket ahead, a control fence, an unreadable
+    queue or a passed deadline — is ``None`` with no record left behind: the count this serves is advice, so its
+    answer is the caller's own estimate or unavailable fact, never a refusal."""
+    from ouroboros.llm_attempt import require_physical_dispatch_window
+
+    try:
+        waiter = _Waiter(model, True, None, route, None, require_physical_dispatch_window)
+    except Exception:
+        return None
+    try:
+        if waiter.step():
+            return waiter
+    except Exception:  # a passed deadline, a Stop/Pause fence or an unreadable queue drops the count; the work's own
+        pass          # send still checks every one of those controls before it dispatches
+    waiter.close()  # a registered ticket leaves with the declined attempt
+    return None
+
+
+@contextlib.contextmanager
+def measurement_slot(route: dict | None = None, *, wait: bool = True):
+    """Hold the built-in server's slot while a request that only measures on it is open; yields whether this
+    count may open its connection.
+
+    With no number chosen the server computes one request at a time (``MODEL_CAP_LOCAL``), and its count
+    waits on the inference lock a generation holds: a measurement that opened its connection before the
+    send had a slot spent its short HTTP timeout behind another call and lost the exact count. Here it waits
+    before the connection opens, under the caller's deadline and the Stop, Pause and dispatch checks of a
+    send. The slot ends with the count and is never held across accounting: the physical sender owns its
+    own for the generation (it outlives a caller that stops waiting), so nothing nests. An owner's number,
+    zero or less included, and every route but the built-in server's keep their request outside the queue.
+
+    ``wait=True`` keeps its place in line and admits every count. ``wait=False`` is a count whose answer is
+    advice — the budget lookahead's price, a route observation — and it tries once: while a generation holds
+    the slot it yields False at once, so its caller opens no connection and keeps its own estimate or
+    unavailable fact instead of standing behind that generation."""
+    from ouroboros.llm_attempt import require_physical_dispatch_window
+
+    route = built_in_route() if route is None else route
+    if str(route.get("provider") or "") != "local" or _chosen_cap() is not None:
+        yield True
+        return
+    model = str(route.get("usage_model") or route.get("resolved_model") or "")
+    if wait:
+        with model_call_slot(model, True, route=route, check=require_physical_dispatch_window):
+            require_physical_dispatch_window()
+            yield True
+        return
+    waiter = _attempt_measurement_slot(model, route)
+    try:
+        yield waiter is not None
+    finally:
+        if waiter is not None:
+            waiter.close()

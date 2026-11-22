@@ -192,3 +192,62 @@ def disclose(drive_root: Any, moved: List[Dict[str, Any]], evicted: List[Dict[st
                                       "chat_id": row.get("chat_id"), **({"basis": basis} if basis else {})})
     for row in evicted:
         td._disclose_exhausted_delivery(drive_root, row, reason="outbox_capacity")
+
+
+def filter_schedule_report_debt(drive_root: Any, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Neither deferred nor ordinary replay sends a report owed by an older writer (#3687).
+
+    The owed final has only an address, not the run's saved classification. Read its exact task once
+    per sweep, off the outbox lock; a busy reader defers rather than charging an attempt. Pure host notices
+    and receipt repairs are still deliveries. A proven private report is superseded by the saved result,
+    keeping its exact payload and any separate custody/Stop receipts in the same outbox.
+    """
+    from ouroboros.store import acquisition_budget
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, schedule_report_run
+    from ouroboros.task_results import load_task_result
+    from supervisor.events_chat_delivery import _remembered_delivery
+
+    td, facts, keep, retire = _td(), {}, [], {}
+    for row in rows:
+        did, tid = str(row.get("delivery_id") or ""), str(row.get("task_id") or "")
+        final = td._TERMINAL_ANSWER_ID.fullmatch(did)
+        if (final is None or final.group("task") != tid or row.get("terminal_projection_token")
+                or row.get("terminal_origin") == TERMINAL_ORIGIN_HOST_NOTICE
+                or row.get("emitted") or _remembered_delivery(row) is not None):
+            keep.append(row)
+            continue
+        if tid not in facts:
+            try:
+                with acquisition_budget(0):
+                    facts[tid] = schedule_report_run(load_task_result(drive_root, tid, strict=True) or {})
+            except Exception:
+                facts[tid] = None  # unreadable, not an ordinary result
+                log.debug("schedule report classification deferred for %s", tid, exc_info=True)
+        if facts[tid] is True:
+            retire[did] = row
+        elif facts[tid] is False:
+            keep.append(row)
+    if not retire:
+        return keep
+    moved: List[Dict[str, Any]] = []
+
+    def mutate(current: Dict[str, Any]) -> Any:
+        moved.clear()
+        delivered = td._delivered_rows(current, strict=True)
+        pending = td._mapping_rows(current, "pending", strict=True)
+        exhausted, superseded = (td._mapping_rows(current, key, strict=True) for key in ("exhausted", "superseded"))
+        for did, read in retire.items():
+            row = pending.get(did)
+            if (did not in delivered and isinstance(row, dict) and not row.get("emitted")
+                    and {**row, "delivery_id": did} == read):
+                moved.append(_supersede(did, f"task_result:{read['task_id']}", delivered, pending, exhausted, superseded))
+        return td._registry_document(current, delivered, pending, exhausted=exhausted, superseded=superseded) if moved else None
+
+    try:
+        td.update_json_locked(td._registry_path(drive_root), mutate, strict_existing_dict=True,
+                              timeout_sec=td.bounded_wait(4.0))
+    except Exception:
+        log.debug("schedule report debt retirement deferred", exc_info=True)
+    else:
+        disclose(drive_root, moved, [], basis="schedule_report_only")
+    return keep

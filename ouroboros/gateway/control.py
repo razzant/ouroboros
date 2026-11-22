@@ -221,7 +221,8 @@ async def api_command(request: Request) -> JSONResponse:
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
             visible_task_id = str(body.get("visible_task_id") or "").strip()
-            if visible_task_id:
+            deduped = {"ok": True, "deduped": True, "task_id": visible_task_id}
+            if visible_task_id:  # a repeat of a queued command is answered before any source is read
                 now = time.monotonic()
                 expired = [
                     key for key, ts in _RECENT_VISIBLE_COMMANDS.items()
@@ -230,7 +231,16 @@ async def api_command(request: Request) -> JSONResponse:
                 for key in expired:
                     _RECENT_VISIBLE_COMMANDS.pop(key, None)
                 if visible_task_id in _RECENT_VISIBLE_COMMANDS:
-                    return JSONResponse({"ok": True, "deduped": True, "task_id": visible_task_id})
+                    return JSONResponse(deduped)
+            reply: dict[str, Any] = {}
+            if "reply_excerpt" in body:
+                from ouroboros.chat_references import ingress_reply
+                try:  # a refused command reserves no id, and no lock is held while its source is read
+                    reply = await asyncio.to_thread(ingress_reply, request_drive_root(request), body)
+                except ValueError as exc:
+                    return json_error(str(exc), 400, accepted=False)
+                if visible_task_id in _RECENT_VISIBLE_COMMANDS:  # a twin was queued while this one waited; no await follows
+                    return JSONResponse(deduped)
             send_kwargs: dict[str, Any] = {"broadcast": False, "suppress_chat_log": bool(visible_text)}
             if task_constraint:
                 send_kwargs["task_constraint"] = task_constraint
@@ -240,6 +250,9 @@ async def api_command(request: Request) -> JSONResponse:
             # the true caller here (disclosed non-goal).
             send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", ""),
                                             **({"ui_control": control} if control else {})}
+            if reply:
+                send_kwargs["accepted_reply"] = reply
+                send_kwargs["task_metadata"].update(reply_excerpt=reply["excerpt"], reply_reference=reply)
             # Publication precedes readiness. Bind the independent owner, keeping
             # this transport's metadata if the supervisor becomes ready meanwhile.
             if bridge is None or str(cmd).strip().lower() == "/restart":
@@ -253,35 +266,20 @@ async def api_command(request: Request) -> JSONResponse:
             if visible_task_id:
                 _RECENT_VISIBLE_COMMANDS[visible_task_id] = time.monotonic()
             if visible_text:
-                # X3: no invented ids. `visible_task_id` is a caller-supplied
-                # UI correlation key; when the caller has none there is no task
-                # id yet (`ui_send` returns nothing — the router mints the id at
-                # promotion), and the old bare "skill_repair" literal was a
-                # fabricated id persisted into the durable chat log. The typed
-                # truth is an empty id plus the pending marker.
-                task_id = visible_task_id
-                ts = utc_now_iso()
+                # The live and saved receipts share the caller's correlation id.
+                # Without one, the id stays empty until the router promotes the task.
+                receipt = {"ts": utc_now_iso(), "source": "skill_repair", "task_id": visible_task_id}
                 payload = {
                     "type": "chat",
                     "role": "system",
                     "content": visible_text,
-                    "ts": ts,
-                    "source": "skill_repair",
                     "system_type": "skill_repair",
-                    "task_id": task_id,
+                    **receipt,
                 }
-                if not task_id:
+                if not visible_task_id:
                     payload["task_id_pending"] = True
                 broadcast_ws_sync(payload)
-                log_chat(
-                    "system",
-                    0,
-                    0,
-                    visible_text,
-                    ts=ts,
-                    source="skill_repair",
-                    task_id=task_id,
-                )
+                log_chat("system", 0, 0, visible_text, **receipt)
         return JSONResponse({"status": "ok"})
     except Exception as exc:
         return json_exception(exc, 400)
@@ -964,21 +962,16 @@ def _assisted_update_pays() -> bool:
     (a root task, opening on Main) or a seat of the commit-review wave it asks for. The API rows of the
     review pool are answered at the global axis by ``review_wave_admission`` (the reservation's own rule);
     session rows ride subscriptions. An unknown answer pays; every send still meets its reservation."""
-    from ouroboros.review_execution import ReviewRouteKind
-    from ouroboros.reviewer_slot_config import review_pool_slots
-    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
-    from ouroboros.tools.review_multi_model import _review_output_budget
+    from ouroboros.tools.review_admission import managed_update_wave_inputs
     from ouroboros.usage_admission import review_wave_admission
     from supervisor import state
     from supervisor.worker_assignment import needs_paid_admission
 
     if needs_paid_admission({"metadata": {}}):
         return True
-    models = [row.model for row in review_pool_slots() if row.model
-              and str(getattr(row.route, "value", row.route) or "") != ReviewRouteKind.AGENT_SESSION.value]
-    return bool(models) and review_wave_admission(
-        drive_root=state.DRIVE_ROOT, root_task_id="managed-update-admission", models=models,
-        prompt_chars=int(REVIEW_PROMPT_TOKEN_BUDGET) * 4, max_completion_tokens=int(_review_output_budget()),
+    wave = managed_update_wave_inputs()
+    return bool(wave["models"]) and review_wave_admission(
+        **wave, drive_root=state.DRIVE_ROOT,
         global_limit_usd=float(state.TOTAL_BUDGET_LIMIT or 0.0)).get("fits") is not True
 
 

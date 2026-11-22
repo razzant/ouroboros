@@ -260,14 +260,19 @@ class TurnEventQueue:
     plus its turn-only extras: the origin label and the Stop marker on work frames.
     ``on_frame(kind, data)`` sees each of the task's own frames as it passes, in either
     lane (its start phases are read there: ``worker_chat_lane.TurnPhaseFrames``).
+    ``attempt``, the physical attempt it was made for, numbers its own live frames that
+    name none: drained after the task's next assignment, such a frame never takes that
+    attempt's RUNNING owner (``address_task_event``).
     """
 
     def __init__(self, inner: Any, task_id: Any, chat_id: Any, initiator: Any = "",
                  on_first_work: Optional[Callable[[], None]] = None, *,
                  lineage: Optional[Dict[str, Any]] = None, direct_chat: bool = True,
                  telemetry_only: bool = False,
-                 on_frame: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> None:
+                 on_frame: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+                 attempt: Optional[int] = None) -> None:
         self._inner = inner
+        self._attempt = attempt if type(attempt) is int and attempt >= 0 else None
         self._task_id = str(task_id or "")
         # None is absence (a task admitted without an address stamps none);
         # 0 is a real session, the hidden partition, and is stamped as such.
@@ -335,6 +340,8 @@ class TurnEventQueue:
         if self._telemetry_only and kind not in _TELEMETRY_KINDS:
             return item
         self.stamp_payload(data)
+        if kind == "log_event" and self._attempt is not None and data.get("task_attempt") is None:
+            data["task_attempt"] = self._attempt
         if self._telemetry_only:
             return item
         # The turn's origin label (a consciousness wake-up) rides the
@@ -390,7 +397,8 @@ def task_event_queue(inner: Any, task: Dict[str, Any], *, initiator: Any = "",
     """The task's per-task endpoint, created at task start and handed down.
 
     Captures the task's chat (``None`` when it carries none; 0 is the hidden
-    partition and is kept) and its lineage by value, and registers itself for the
+    partition and is kept), its lineage and its physical attempt (``task_started``'s,
+    ``terminal_time.source_task_attempt``) by value, and registers itself for the
     process's log sink. A pooled task stamps only the telemetry lane; a conversation
     turn the lane carries (``execution_owner.lane == "conversation"``) stamps every
     task-scoped event plus the turn-only extras — its origin label, the Stop marker
@@ -404,10 +412,12 @@ def task_event_queue(inner: Any, task: Dict[str, Any], *, initiator: Any = "",
         chat_id = None
     owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
     conversation = owner.get("lane") == "conversation"
+    from ouroboros.terminal_time import source_task_attempt
+
     endpoint = TurnEventQueue(inner, str(task.get("id") or ""), chat_id, initiator if conversation else "",
                               on_first_work if conversation else None, lineage=task,
                               direct_chat=bool(task.get("_is_direct_chat")), telemetry_only=not conversation,
-                              on_frame=on_frame)
+                              on_frame=on_frame, attempt=source_task_attempt(task))
     if endpoint.task_id:
         _TASK_ENDPOINTS[endpoint.task_id] = endpoint
     return endpoint
@@ -417,7 +427,8 @@ def stamp_recorded_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """Stamp a worker-appended row with ITS task's facts before the sink forwards it live.
 
     A row of a task this process never ran (or ran before this registry existed)
-    passes through unchanged; the supervisor's RUNNING fallback still applies."""
+    passes through unchanged; the supervisor's RUNNING fallback still applies. No
+    attempt is stamped here: the registry holds the task's newest endpoint."""
     endpoint = _TASK_ENDPOINTS.get(str(row.get("task_id") or "")) if isinstance(row, dict) else None
     return endpoint.stamp_payload(row) if endpoint is not None else row
 

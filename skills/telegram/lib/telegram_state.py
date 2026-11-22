@@ -22,6 +22,17 @@ _MAX_MESSAGE_REFS = 1000
 _MESSAGE_REFS_LOCK = threading.RLock()
 
 
+class TelegramDestinationUnavailable(RuntimeError):
+    """A row's proven address names another bot or chat than this client's (``_carried_here``): nothing is sent
+    through this one, and its outbox record ends not delivered."""
+
+    cause = "telegram_destination_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("The Telegram bot or chat this message is addressed to is not the current one; "
+                         "it stays in Ouroboros.")
+
+
 def _reference_state(api) -> dict:
     data = _read_json_file(_state_file(api, "message_refs.json"))
     return data if isinstance(data, dict) else {}
@@ -94,28 +105,97 @@ def _owner_message_seen(api, bot: str, chat_id: int, message_id: int) -> None:
     })
 
 
-def _owner_ingress_fields(api, bot: str, chat_id: int, message: dict, update_id: int) -> dict:
+def _owner_client_id(bot: str, chat_id: int, message_id: int) -> str:
+    return f"tg:{f'{bot}:' if bot else ''}{chat_id}:{message_id}"
+
+
+def _owner_ingress_fields(api, bot: str, chat_id: int, message: dict, update_id: int, target=None) -> dict:
     """The owner message's identity at the host, under the bot that polled it: in a private
-    chat the chat id is the owner's for every bot, and each bot numbers its own messages."""
+    chat the chat id is the owner's for every bot, and each bot numbers its own messages.
+    ``reply_to`` is the address of what it replies to: its ``_reply_target``, or, for Panic's own
+    door, which never waits on the store, what this bot's map alone names (``_reply_reference``)."""
     message_id = int(message.get("message_id") or 0)
-    client_id = f"tg:{f'{bot}:' if bot else ''}{chat_id}:{message_id or update_id}"
+    client_id = _owner_client_id(bot, chat_id, message_id or update_id)
     if message_id:
         _remember_message(api, bot, chat_id, message_id, {
             **_message_ref(api, bot, chat_id, message_id), "direction": "in", "chat_id": chat_id,
             "kind": "message", "client_message_id": client_id,
         })
-    reply = message.get("reply_to_message")
-    address = _reply_reference(api, bot, chat_id, int(reply.get("message_id") or 0)) if isinstance(reply, dict) else ""
+    reply = message.get("reply_to_message") if target is None else None
+    address = target["address"] if target is not None else (
+        _reply_reference(api, bot, chat_id, int(reply.get("message_id") or 0)) if isinstance(reply, dict) else "")
     return {"client_message_id": client_id, **({"reply_to": address} if address else {})}
 
 
-def _old_reference_unlinked(api, bot: str, chat_id: int, message: dict) -> bool:
-    """Whether this reply went without the link a record naming no bot holds at its number. That
-    record proves nothing about this message, so the owner is told rather than a link guessed."""
+def _reply_target(api, bot: str, chat_id: int, message: dict) -> dict:
+    """What an owner's Reply points at in this bot's chat, read from Telegram's own facts and this bot's maps.
+
+    ``address``: the host row or ``task:`` reference ("" for none). The owner's own words are quoted by
+    their accepted row (``tg:<bot>:<chat>:<message>``) when it exists. A bot bubble no map holds names
+    nothing: the Reply is an ordinary turn here without a quote, never refused (``unlinked``: a record naming
+    no bot holds that number, so the owner is told rather than a link guessed). ``card_message_id``: a card
+    the owner pressed (any ``work_card``, its record however old), else the card of the helper (``child``) a notice
+    is about, as the maps hold it now; 0 when none is known.
+    """
     reply = message.get("reply_to_message")
     target = int(reply.get("message_id") or 0) if isinstance(reply, dict) else 0
-    return bool(bot and target and not _message_ref(api, bot, chat_id, target)
-                and _reply_reference(api, "", chat_id, target))
+    if not target:
+        return {"address": ""}
+    record = _message_ref(api, bot, chat_id, target)
+    author, sender = reply.get("from"), message.get("from")
+    if not isinstance(author, dict):  # absent only outside a private chat's normal shape: the map decides
+        own = record.get("direction") == "in"
+    else:
+        own = author.get("is_bot") is not True and isinstance(sender, dict) and author.get("id") == sender.get("id")
+    if own:
+        record = _bind_owner_row(api, bot, chat_id, target, {
+            **record, "direction": "in", "chat_id": chat_id,
+            "client_message_id": str(record.get("client_message_id") or _owner_client_id(bot, chat_id, target))})
+        return {"address": str(record.get("row_address") or "")}
+    address = _reply_reference(api, bot, chat_id, target)
+    child, card = str(record.get("child_task_id") or ""), record.get("kind") == "work_card"
+    if address and not (child or card) and record.get("task_id") and _helper_card(api, bot, chat_id, record["task_id"]):
+        child = str(record["task_id"])  # a helper's row saved before its record named the helper: its card does
+    if not address and (child := _subagent_for_message(api, bot, chat_id, target)):
+        address, card = f"task:{child}", True
+    if not address:
+        return {"address": "", "unlinked": bool(bot and _reply_reference(api, "", chat_id, target))}
+    # A Reply to a card quotes that very card; one to a notice about the helper quotes its card now.
+    return {"address": address, "child": child,
+            "card_message_id": target if card else _child_card_message(api, bot, chat_id, child)}
+
+
+def _reply_ingress_transport(target: dict, bot: str, message_id: int) -> dict:
+    """What the owner's message adds to its accepted row's transport: the bot that took it, which with the chat
+    and its id is the address the host proves (``chat_references.proven_address``); for a Reply to a bot bubble
+    also his message and the card the answer quotes (``_reply_target``). The host reads those only for its own
+    exact Reply's turn (``chat_references.exact_reply_transport``); an ordinary turn keeps its usual quote."""
+    facts = {"bot_id": bot} if bot else {}
+    if target.get("address") and "child" in target and message_id:
+        facts["owner_message_id"] = int(message_id)
+        if target.get("card_message_id"):
+            facts["reply_card_message_id"] = int(target["card_message_id"])
+        if target.get("child"):
+            facts["reply_child_task_id"] = target["child"]
+    return facts
+
+
+def _bind_owner_row(api, bot: str, chat_id: int, message_id: int, record: dict) -> dict:
+    """An owner record with the accepted row's address, read by its exact id (never by text or order)."""
+    if record.get("direction") != "in" or record.get("row_address") or not record.get("client_message_id"):
+        return record
+    from supervisor.message_bus import accepted_chat_message
+    from ouroboros.chat_chain import format_address, row_address
+
+    try:
+        row = accepted_chat_message(_data_dir(api), int(record.get("chat_id") or chat_id), record["client_message_id"])
+    except Exception:
+        api.log("warning", "Telegram reply source could not be read; its exact quote is unavailable.")
+        return record
+    if row is not None:
+        record = {**record, "row_address": format_address(row_address(row))}
+        _remember_message(api, bot, chat_id, message_id, record)
+    return record
 
 
 def _is_routing_notice(event: dict) -> bool:
@@ -146,18 +226,7 @@ def _native_reply_id(api, bot: str, chat_id: int, event: dict) -> int:
         scope, prefix = _bot_references(_reference_state(api), bot)
         latest = scope.get("latest_owner", {}).get(f"{prefix}{chat_id}", 0)
     for mid, record in owners:
-        if not record.get("row_address") and record.get("client_message_id"):
-            from supervisor.message_bus import accepted_chat_message
-            from ouroboros.chat_chain import format_address, row_address
-
-            try:
-                row = accepted_chat_message(_data_dir(api), record["chat_id"], record["client_message_id"])
-            except Exception:
-                api.log("warning", "Telegram reply source could not be read; sending without a native reply.")
-                continue
-            if row is not None:
-                record = {**record, "row_address": format_address(row_address(row))}
-                _remember_message(api, bot, chat_id, mid, record)
+        record = _bind_owner_row(api, bot, chat_id, mid, record)
         if record.get("row_address") == address and record.get("chat_id") == reply.get("chat_id"):
             return mid if (latest and mid != latest) or _is_routing_notice(event) else 0
     return 0
@@ -174,9 +243,66 @@ def _quiet_progress(event: dict) -> bool:
         event.get("system_type") == "host_progress" and not event.get("task_incident"))
 
 
+def _child_of(event: dict) -> str:
+    """The helper a mirrored row shows: an admitted helper's lifecycle card (``subagent_event``) or a
+    separate row of that helper (its host notice, typed message or note); "" for every other row."""
+    if event.get("subagent_event"):
+        accepted = event.get("accepted") is not False
+        return str(event.get("subagent_task_id") or event.get("task_id") or "") if accepted else ""
+    return str(event.get("task_id") or "") if str(event.get("delegation_role") or "").lower() == "subagent" else ""
+
+
+def _carried_here(bot: str, transport, chat_id: int, *, mirror_all: bool = False) -> bool:
+    """Whether a row may leave through ``bot`` to ``chat_id``. A transport the host marks with a proven address
+    (``chat_references.proven_address``) names the bot and chat that took its owner message, and only they carry
+    it: an exact Reply's own turn and its notices (``reply``) in every mode; a helper's pre-answer card and notice
+    (``root``) where the room's own rows would not reach the phone, since the common mirror (``mirror_all``)
+    delivers them as before. Every other row: True. A message asks it where its client is built from one token
+    (``_mirror_options``); typing, when it chooses its chats (plugin.py ``_typing_cue``)."""
+    mark = transport.get("host_address") if isinstance(transport, dict) else None
+    if mark not in ("reply", "root") or (mark == "root" and mirror_all):
+        return True
+    return bool(bot) and transport.get("bot_id") == bot and str(transport.get("conversation_id") or "") == str(chat_id)
+
+
+def _bridged(event: dict) -> dict:
+    """The row as this bridge delivers it. A helper's card or notice whose room another connector binds carries
+    its root's proven address beside that binding (``telegram_root``, ``chat_references.live_transport``):
+    here only that address counts, so the room's binding never suppresses or redirects it."""
+    transport = event.get("transport")
+    root = transport.get("telegram_root") if isinstance(transport, dict) else None
+    return {**event, "transport": root} if isinstance(root, dict) else event
+
+
+def _exact_anchor(api, bot: str, chat_id: int, event: dict):
+    """``(anchor, fallback)`` for a part of an accepted exact Reply's own turn, ``None`` for any other row.
+
+    The anchor is the card the owner's Reply pressed, else the card of the helper it was about, else his own
+    message; the fallback (his own message) is used once, only after Telegram definitely refuses a missing card
+    (lib/telegram_outbox.py). Its bot and chat are this client's (``_mirror_options``)."""
+    transport = event.get("transport")
+    exact = transport.get("exact_reply") if isinstance(transport, dict) else None
+    if not isinstance(exact, dict):
+        return None
+    owner = exact.get("owner_message_id")
+    if type(owner) is not int or owner <= 0:
+        raise TelegramDestinationUnavailable()  # an address without the message it answers carries nothing
+    card, child = exact.get("card_message_id"), str(exact.get("child_task_id") or "")
+    anchor = card if type(card) is int and card > 0 else _child_card_message(api, bot, chat_id, child)
+    return (anchor, owner) if anchor and anchor != owner else (owner, 0)
+
+
 def _mirror_options(api, bot: str, event: dict, chat_id: int) -> dict:
     """A client mirrors one host row; all of its physical parts share this fact, and the bot of
-    the token this client is built from: a token saved during a long send never moves a part."""
+    the token this client is built from: a token saved during a long send never moves a part.
+    A row with a proven address leaves only through the bot and chat it names, judged on that same
+    token (``_carried_here``). An exact Reply's own turn asks for its strict anchor (``_exact_anchor``);
+    every other row keeps the ordinary one (``_native_reply_id``)."""
+    transport = event.get("transport")
+    mark = transport.get("host_address") if isinstance(transport, dict) else None
+    if mark and not _carried_here(bot, transport, chat_id, mirror_all=mark == "root" and _mirrors_all(api)):
+        raise TelegramDestinationUnavailable()
+    child = _child_of(event)
     task_id = str(event.get("subagent_task_id") or event.get("task_id") or "")
     kind = str(event.get("kind") or event.get("type") or event.get("system_type") or "message")
     if (event.get("subagent_event") or kind == "task_summary"
@@ -186,15 +312,20 @@ def _mirror_options(api, bot: str, event: dict, chat_id: int) -> dict:
     elif event.get("quiz_id"):
         kind = "question"
     reply = event.get("reply_to")
-    native_reply_id = _native_reply_id(api, bot, chat_id, event)
+    strict = _exact_anchor(api, bot, chat_id, event)
+    native_reply_id, fallback = strict or (_native_reply_id(api, bot, chat_id, event), 0)
     record = {"row_address": str(event.get("row_address") or ""), "chat_id": event.get("chat_id"),
               "task_id": task_id, "kind": kind,
               "reply_to": str(reply.get("address") or "") if isinstance(reply, dict) else "",
-              "native_reply_id": native_reply_id}
+              "native_reply_id": native_reply_id, **({"child_task_id": child} if child else {})}
     if _quiet_progress(event) and kind not in ("work_card", "question"):
         record["progress"] = True  # the type fact Silent mode's replacement requires
-    return {"on_message": lambda chat, mid: _remember_message(api, bot, chat, mid, record),
-            "reply_to_message_id": native_reply_id}
+    options = {"on_message": lambda chat, mid: _remember_message(api, bot, chat, mid, record),
+               "reply_to_message_id": native_reply_id}
+    if strict:
+        options.update(strict_reply=True, reply_fallback_id=fallback,
+                       on_reply_changed=lambda anchor: record.update(native_reply_id=anchor))
+    return options
 
 
 def _replaceable_progress(api, bot: str, chat_id: int, message_id: int, event: dict) -> bool:
@@ -331,6 +462,13 @@ def _load_settings(api) -> Dict[str, Any]:
     return load_settings(pathlib.Path(api.get_state_dir()))
 
 
+def _mirrors_all(api) -> bool:
+    """Whether the common mirror carries every row to a pinned chat (plugin.py ``_target_chat``: mode ``all``)."""
+    settings = _load_settings(api)
+    return bool(str(settings.get("TELEGRAM_CHAT_ID") or "").strip()) and \
+        str(settings.get("TELEGRAM_MIRROR_MODE") or "all").strip().lower() == "all"
+
+
 def _is_silent_mode_enabled(settings: Dict[str, Any]) -> bool:
     """Silent mode sends replies, the final answer and progress without sound, and a
     progress note replaces the progress note just before it (``_replaceable_progress``);
@@ -427,6 +565,50 @@ def _subagent_key(bot: str, chat_id: int, child_id: str) -> str:
 
 def _get_subagent_msg(api, bot: str, chat_id: int, child_id: str) -> int:
     return int(_load_subagent_state(api).get(_subagent_key(bot, chat_id, child_id)) or 0)
+
+
+def _child_card_message(api, bot: str, chat_id: int, child_id: str) -> int:
+    """The helper's lifecycle card in this bot's chat: the one edited now, else the newest confirmed card the
+    larger reply map still holds after the card index let it go (a record saved before it named the helper
+    included); 0 when neither does."""
+    if not child_id:
+        return 0
+    if mid := _get_subagent_msg(api, bot, chat_id, child_id):
+        return mid
+    with _MESSAGE_REFS_LOCK:
+        records = list(_message_refs(api, bot).items())
+    prefix = f"{chat_id}:"
+    for key, record in reversed(records):
+        if key.startswith(prefix) and record.get("kind") == "work_card" and record.get("task_id") == child_id:
+            return int(key[len(prefix):])
+    return 0
+
+
+def _helper_card(api, bot: str, chat_id: int, task_id: str) -> int:
+    """The card of ``task_id`` when that work is a helper: the card index's, else, once the index let it go, the
+    card the larger reply map still holds for it, confirmed a helper's by the host's own record of that work (a
+    root's completion notice is a card of its own, never a helper's); 0 otherwise or when that record is unreadable."""
+    if mid := _get_subagent_msg(api, bot, chat_id, task_id):
+        return mid
+    if not (mid := _child_card_message(api, bot, chat_id, task_id)):
+        return 0
+    try:
+        from ouroboros.task_status import load_effective_task_result
+
+        task = load_effective_task_result(_data_dir(api), task_id, materialize_artifacts=False) or {}
+    except Exception:
+        return 0
+    return mid if task.get("delegation_role") == "subagent" and task.get("parent_task_id") else 0
+
+
+def _subagent_for_message(api, bot: str, chat_id: int, message_id: int) -> str:
+    """The helper whose card index names ``message_id`` in this bot's chat; "" when none does."""
+    prefix = _subagent_key(bot, chat_id, "")
+    for key, mid in _load_subagent_state(api).items():
+        child = key[len(prefix):] if key.startswith(prefix) else ""
+        if mid == message_id and child and ":" not in child:
+            return child
+    return ""
 
 
 def _set_subagent_msg(api, bot: str, chat_id: int, child_id: str, message_id: int) -> None:
@@ -564,13 +746,22 @@ async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any]
     child = str(event.get("subagent_task_id") or event.get("task_id") or "").strip()
     if not child:
         return
+
+    def remember_card(mid: int) -> None:  # an edit keeps the card a known Reply target, as a new bubble is
+        if event.get("accepted") is not False:
+            _remember_message(api, client.bot_id, chat_id, mid, {
+                **_message_ref(api, client.bot_id, chat_id, mid), "chat_id": event.get("chat_id"),
+                "kind": "work_card", "task_id": child, "child_task_id": child})
+
     text = _subagent_card_text(event, sub_event, lang)
     msg_id = _get_subagent_msg(api, client.bot_id, chat_id, child)
     if msg_id:
         # Edit the subagent's existing bubble (plain text — no HTML parse risk).
         if await client.edit_message_text(chat_id, msg_id, text, parse_mode=""):
+            remember_card(msg_id)
             return
         # Edit failed (message too old / deleted) → post a fresh bubble below.
     new_id = await client.send_message(chat_id, text, parse_mode="", **({"disable_notification": True} if quiet else {}))
     if new_id:
         _set_subagent_msg(api, client.bot_id, chat_id, child, new_id)
+        remember_card(new_id)

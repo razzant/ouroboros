@@ -85,7 +85,7 @@ function world({ open = false, stack = true, coarse = true, enabled = DRAWER_DRA
         return event;
     };
     const touch = (type, opts) => touchEvent(type, { ...opts, target: opts.target || down.get(opts.id || 1)?.target || room });
-    const click = () => { const e = { stopped: false, prevented: false, stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } }; docL.fire('click', e); return e; };
+    const click = (extra = {}) => { const e = { stopped: false, prevented: false, ...extra, stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } }; docL.fire('click', e); return e; };
     const progress = () => Number(sidebar.styleProps.get('--drawer-p'));
     const dragging = () => sidebar.classList.contains('dragging') && scrim.classList.contains('dragging');
     const runTimers = (ms = 10_000) => {
@@ -346,12 +346,38 @@ test('the click that ends a drag is swallowed once; a tap is not; dispose releas
     const ending = w.click();
     assert.equal(ending.stopped && ending.prevented, true);
     assert.equal(w.click().stopped, false, 'only the one ending click');
-    w.clock.t += DRAG.clickGuard + 1;
     w.touch('touchstart', { x: 100, y: 300 });  // a gesture in flight when the app goes
     w.dispose();
     assert.equal(w.doc.listeners.count() + w.root.listeners.count(), 0, 'dispose releases every page listener');
     assert.equal(w.win.listeners.count(), 0);
     assert.equal(w.room.own.count(), 0, 'and the gesture\'s own');
+});
+
+test('a tap 250 ms after a drag acts at once, once, on any target; after the system took the touch too (key, assistive and mouse cases: gesture_tail.test.js)', () => {
+    const w = world();
+    const plus = fakeEl('plus'); plus.parentElement = w.doc.body;  // the composer's +, under the next finger
+    const listening = () => w.doc.listeners.map.get('click')?.length || 0;
+    const tap = (target, dt = 250) => {
+        w.touch('touchstart', { x: 40, y: 760, id: 2, target, dt });
+        w.touch('touchend', { x: 40, y: 760, id: 2 });
+        return w.click({ detail: 1 });
+    };
+    assert.equal(listening(), 0, 'nothing listens on the document before a drag');
+    open(w, { from: 100, to: 400 });  // the finger moved: its host sends no click
+    assert.deepEqual(w.state.set, [true]);
+    assert.equal(listening(), 1, 'until the drag\'s tail or the next finger');
+    assert.equal(tap(plus).stopped, false, 'the next finger presses what it meets');
+    assert.equal(listening(), 0);
+    assert.equal(w.click({ detail: 1 }).stopped, false, 'and so does whatever follows');
+    // The system took the touch mid-drag: a new finger elsewhere acts.
+    w.state.open = false; w.scrim.hidden = true; w.state.set.length = 0; w.runTimers();
+    w.touch('touchstart', { x: 100, y: 300 });
+    w.touch('touchmove', { x: 112, y: 300 });
+    w.touch('touchmove', { x: 112 + 200, y: 300, dt: 200 });
+    w.touch('touchcancel', { x: 112 + 200, y: 300 });
+    assert.equal(tap(plus).stopped, false, 'touchcancel, then a new finger');
+    assert.equal(listening(), 0);
+    w.dispose();
 });
 
 test('when the system takes the touch the drawer settles from where the finger left it, never stranded halfway', () => {

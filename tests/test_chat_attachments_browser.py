@@ -21,6 +21,7 @@ from tests import _dialogue as dialogue_test
 import base64
 import json
 import os
+import re
 import struct
 import zlib
 from pathlib import Path
@@ -582,6 +583,208 @@ def test_composer_consumer_path_and_real_media_past_the_text_tail(direct_server_
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("initial_reply", [False, True], ids=["plain", "selected"])
+def test_reply_selected_during_upload_belongs_to_the_next_draft(direct_server_with_data, engine, initial_reply):
+    from playwright.sync_api import expect, sync_playwright
+
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_chain import format_address, row_address
+
+    data = direct_server_with_data["data_dir"]
+    addresses = []
+    for minute, color in enumerate(("amber", "blue")):
+        row = {"chat_id": 1, "direction": "out", "ts": f"2026-10-01T12:0{minute}:00Z",
+               "text": f"Check the **{color} lamp**."}
+        ds.append(data, "chat", row, feed=True)
+        addresses.append(format_address(row_address(row)))
+    excerpt = {"text": "amber lamp", "start_utf16": len("Check the ")}
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 1100, "height": 750})
+            page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+            page.add_init_script("""(() => {
+                const fetch = window.fetch.bind(window), send = WebSocket.prototype.send;
+                window.fetch = async (...args) => {
+                    const response = await fetch(...args);
+                    if (response.url.endsWith('/api/chat/upload'))
+                        await new Promise(resolve => { window.finishUpload = resolve; });
+                    return response;
+                };
+                WebSocket.prototype.send = function(raw) {
+                    const frame = JSON.parse(raw);
+                    if (frame.type !== 'chat' || !frame.attachments) return send.call(this, raw);
+                    window.sentFileFrame = frame;
+                    window.deliverFileFrame = () => send.call(this, raw);
+                };
+            })()""")
+            page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+            page.wait_for_function("() => window.__testSockets.some(s => s.readyState === WebSocket.OPEN)")
+
+            def stage_quote(address):
+                phrase = page.locator(f'#chat-messages [data-row-address={json.dumps(address)}] .message strong')
+                phrase.scroll_into_view_if_needed()
+                phrase.evaluate("""el => {
+                    const r = document.createRange(); r.selectNodeContents(el);
+                    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+                }""")
+                page.get_by_role("button", name="Reply to quote", exact=True).click()
+
+            composer, files = page.locator("#chat-input"), page.locator("#chat-file-input")
+            if initial_reply:
+                stage_quote(addresses[0])
+            composer.fill("Please check the color.")
+            files.set_input_files({"name": "lamp.txt", "mimeType": "text/plain", "buffer": b"Amber"})
+            page.locator("#chat-send").click()
+            page.wait_for_function("typeof window.finishUpload === 'function'")
+            stage_quote(addresses[1])
+            page.evaluate("finishUpload()")
+            page.wait_for_function("window.sentFileFrame")
+            frame = page.evaluate("window.sentFileFrame")
+            echo = page.locator(f'#chat-messages [data-client-message-id={json.dumps(frame["client_message_id"])}]')
+            expected = (addresses[0], excerpt) if initial_reply else (None, None)
+            assert (frame.get("reply_to"), frame.get("reply_excerpt")) == expected
+            assert frame['content'] == 'Please check the color.\n\n[Attached file: lamp.txt]'
+            if initial_reply:
+                expect(echo.locator(".chat-quote[data-excerpt] .chat-quote-text")).to_have_text(excerpt["text"])
+            else:
+                expect(echo.locator(".chat-quote")).to_have_count(0)
+            expect(page.locator('.chat-quote--composer:not([inert]) .chat-quote-text')).to_have_text('blue lamp')
+            expect(composer).to_have_value('Please check the color.')
+            expect(page.locator('.attach-name')).to_have_text(['lamp.txt'])
+
+            # The old acknowledgement cannot consume the newer reply, draft words or files.
+            composer.fill('Compare the other color.')
+            page.get_by_role('button', name='Remove attachment lamp.txt').click()
+            files.set_input_files({"name": "other.txt", "mimeType": "text/plain", "buffer": b"Blue"})
+            page.evaluate("deliverFileFrame()")
+            expect(echo).to_have_attribute("data-row-address", re.compile(r"^row:"))
+            saved = ds.accepted_row(data, 1, frame["client_message_id"]).row
+            assert saved['text'] == frame['content'] and [item['name'] for item in saved['attachments']] == ['lamp.txt']
+            saved_reply = saved.get('reply_to') or {}
+            assert (saved_reply.get('address'), saved_reply.get('excerpt')) == expected
+            kept = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
+            assert kept['address'] == addresses[1] and kept['excerpt']['text'] == 'blue lamp'
+            expect(composer).to_have_value('Compare the other color.')
+            expect(page.locator('.attach-name')).to_have_text(['other.txt'])
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_editing_restored_selected_reply_reuses_files_or_reports_expiry(direct_server_with_data, engine):
+    from playwright.sync_api import expect, sync_playwright
+
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_chain import format_address, row_address
+
+    data = direct_server_with_data["data_dir"]
+    row = {"chat_id": 1, "direction": "out", "ts": "2026-10-01T12:00:00Z", "text": "Check the **amber lamp**."}
+    ds.append(data, "chat", row, feed=True)
+    address = format_address(row_address(row))
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+            sent, uploads = [], []
+            held_uploads, upload_plan = [], {"hold": False}
+            page.on("request", lambda r: uploads.append(r.url) if r.method == "POST" and r.url.endswith('/api/chat/upload') else None)
+            page.route("**/api/chat/upload", lambda route: held_uploads.append(route) if upload_plan["hold"] else route.continue_())
+
+            def route(client):
+                server = client.connect_to_server()
+
+                def send(message):
+                    frame = json.loads(message)
+                    if frame.get("type") == "chat" and frame.get("attachments"):
+                        sent.append(frame)
+                        if frame.get("reply_excerpt"):  # a synthetic source the server can no longer resolve
+                            frame = {**frame, "reply_to": address.rsplit("#", 1)[0] + "#" + "f" * 12}
+                        return server.send(json.dumps(frame))
+                    server.send(message)
+                client.on_message(send)
+
+            page.route_web_socket("**/ws", route)
+            online = "() => window.__testSockets?.at(-1)?.readyState === 1"
+            page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+            page.wait_for_function(online)
+            source = page.locator(f'#chat-messages [data-row-address={json.dumps(address)}] .message strong')
+            source.evaluate("""el => { const r = document.createRange(); r.selectNodeContents(el);
+                const s = getSelection(); s.removeAllRanges(); s.addRange(r); }""")
+            page.get_by_role("button", name="Reply to quote", exact=True).click()
+            words, send_btn = page.locator("#chat-input"), page.locator("#chat-send")
+            words.fill("Please check the files.")
+            page.locator("#chat-file-input").set_input_files([
+                {"name": name, "mimeType": "text/plain", "buffer": name.encode()} for name in ("keep.txt", "expired.txt")])
+            send_btn.click()
+            expect(page.locator('[data-ingress-unconfirmed]')).to_be_visible()
+            first, = sent
+            assert ds.accepted_row(data, 1, first["client_message_id"]) is None
+
+            page.reload()
+            page.wait_for_function(online)
+            expect(words).to_have_value("")
+            expect(page.locator('.attach-name')).to_have_count(0)
+            expect(page.locator('.chat-quote--composer')).to_have_count(0)
+            page.get_by_role('button', name='Send as a new message', exact=True).click()
+            expect(words).to_have_value("Please check the files.")
+            expect(page.locator('.chat-quote--composer[data-excerpt]')).to_be_visible()
+
+            # Text is read-only during upload; selecting a different quote is an available owner action that
+            # makes a newer draft. Its files keep their own uploaded refs after the submitted version goes out.
+            page.locator("#chat-file-input").set_input_files([
+                {"name": name, "mimeType": "text/plain", "buffer": name.encode()} for name in ("keep.txt", "expired.txt")])
+            upload_plan["hold"] = True
+            send_btn.click()
+            expect(send_btn).to_be_disabled()
+            assert held_uploads
+            source.evaluate("""el => { const range = document.createRange();
+                range.setStart(el.previousSibling, 0); range.setEnd(el.previousSibling, 5);
+                const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); }""")
+            page.get_by_role('button', name='Reply to quote', exact=True).click()
+            expect(page.locator('.chat-quote--composer:not([inert]) .chat-quote-text')).to_have_text('Check')
+            upload_plan["hold"] = False
+            for held in held_uploads:
+                held.continue_()
+            expect(send_btn).to_be_enabled()
+            expect(page.locator('[data-ingress-unconfirmed]')).to_have_count(2)
+            first, second = sent
+            assert first["reply_excerpt"] == second["reply_excerpt"], "the submitted selection was fixed before the upload"
+            assert ds.accepted_row(data, 1, second["client_message_id"]) is None
+            page.reload()
+            page.wait_for_function(online)
+            expect(words).to_have_value("Please check the files.")
+            expect(page.locator('.attach-name')).to_have_text(["keep.txt", "expired.txt"])
+            expect(page.locator('.chat-quote--composer[data-excerpt]')).to_be_visible()
+            expect(page.locator('.chat-quote--composer .chat-quote-text')).to_have_text('Check')
+            if evidence := os.environ.get("OUROBOROS_UI_EVIDENCE_DIR"):
+                page.screenshot(path=Path(evidence) / f"restored-selected-reply-{engine}.png")
+            page.get_by_role('button', name='Cancel reply').click()
+            (data / "uploads" / second["attachments"][1]["filename"]).unlink()
+            send_btn.click()
+            expect(page.locator('#toast-stack')).to_contain_text('Saved attachment “expired.txt” is unavailable')
+            assert sent == [first, second] and len(uploads) == 4
+            page.get_by_role('button', name='Remove attachment expired.txt').click()
+
+            page.reload()  # the edited draft's refs survive too, without reviving the old version
+            page.wait_for_function(online)
+            expect(page.locator('.attach-name')).to_have_text(["keep.txt"])
+            expect(page.locator('.chat-quote--composer')).to_have_count(0)
+            send_btn.click()
+            expect(page.locator('.chat-bubble.user[data-row-address]')).to_have_count(1)
+            later = sent[-1]
+            assert later['client_message_id'] not in {first['client_message_id'], second['client_message_id']} and 'reply_excerpt' not in later
+            assert later['attachments'] == second['attachments'][:1] and len(uploads) == 4
+            accepted = ds.accepted_row(data, 1, later['client_message_id']).row
+            assert accepted['attachments'][0]['upload'] == second['attachments'][0]['filename']
+            expect(words).to_have_value('')
+            expect(page.locator('.attach-name')).to_have_count(0)
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_server_with_data, engine):
     """The socket took the frame, then dropped it (the host never saw it): the bubble says it is
     not confirmed — and still does after a reload, from this tab's kept copy — and "Send again"
@@ -691,6 +894,11 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
             # Saved by the host, then the host restarted before the page heard back: the new process
             # cannot know what became of it, so the kept message is saved with its delivery unconfirmed.
             plan.update(cut=1, hold=True)
+            page.locator(_BUBBLE).last.locator('.message').evaluate("""node => {
+                const range = document.createRange(); range.selectNodeContents(node);
+                getSelection().removeAllRanges(); getSelection().addRange(range);
+            }""")
+            page.get_by_role('button', name='Reply to quote', exact=True).click()
             send("restart.png", "third")
             # A served-SHA recovery can reload and reset the page's socket counter.
             # Observe the fault boundary itself, not an assumed number of prior sockets.
@@ -714,11 +922,19 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
             assert delivery.inner_text().startswith("Saved; delivery not confirmed.")
             actions = page.locator(f"{_BUBBLE} [data-unconfirmed-action]")
             assert actions.all_inner_texts() == ["Send as new"], "no Send again: it could only rejoin"
-            assert page.evaluate("() => Object.keys(sessionStorage).filter(k => k.startsWith('ouro_chat_unconfirmed'))") == []
+            for _ in range(2):
+                kept = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_unconfirmed'))")
+                assert len(kept) == 1 and kept[0]["deliveryUnknown"] is True
+                assert kept[0]["frame"]["reply_excerpt"]["text"] == "second"
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_function(open_socket, timeout=30_000)
+                delivery.wait_for(timeout=30_000)
+                assert actions.all_inner_texts() == ["Send as new"]
             assert len(seen) == 4 and len(inbound(seen[-1])) == 1, "nothing was resent"
             # Send as new only puts his words back in the composer, as a new message he may edit or send.
             actions.first.click()
             assert "third" in page.locator("#chat-input").input_value()
+            assert page.locator('.chat-quote--composer[data-excerpt]').count() == 1
             page.wait_for_timeout(500)
             assert len(seen) == 4 and len(inbound(seen[-1])) == 1, "Send as new sent nothing by itself"
             _capture(page, page.locator(_BUBBLE).last, evidence / f"attachments-delivery-unconfirmed-{engine}.png")

@@ -361,6 +361,7 @@ _CONVERSATION_READERS = {
 _BODY_DECODERS = {
     "ouroboros/dialogue_store.py::whole_body": "expands",
     "ouroboros/dialogue_store.py::revise_text": "expands: refreshes the identity, returns the row as written",
+    "ouroboros/dialogue_store.py::annotation_sources": "stored row, its address only",
     "ouroboros/place_arrivals.py::project_source": "every Row reader: identity and words; whole_rows hands rows on",
     "ouroboros/place_arrivals.py::heard_replay": "stored row, identity and import marker only",
     "ouroboros/place_arrivals.py::record_heard": "stored row, identity only",

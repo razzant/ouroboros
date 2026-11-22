@@ -21,6 +21,8 @@ const inFlight = new Set();
 const sessionNonces = new Map();
 // Cards whose full task detail was read once for the server's offer.
 const offerReads = new WeakSet();
+/** The number of the detail read that stated an offer (settled_card.js numbers them as it sends them). */
+export const READ_EPOCH = Symbol('task detail read epoch');
 
 /** One Continue action per task. Unavailable storage limits retention to this page. */
 export function continueNonce(taskId, storage, retainedNonce = '') {
@@ -49,17 +51,22 @@ export function continueOfferView(detail) {
     }
     // A finite budget whose remainder the saved execution clock cannot establish: the host refuses
     // rather than guess. Its `cause` is the interruption's, so the note names the budget instead.
-    if (offer.eligible === false && offer.refusal === 'execution_budget_unknown') {
-        return { kind: 'refusal', refusal: 'execution_budget_unknown' };
+    // A deep self-review saves no point to continue from: Continue would start an ordinary task under its name.
+    if (offer.eligible === false && ['execution_budget_unknown', 'deep_review_restart_required'].includes(offer.refusal)) {
+        return { kind: 'refusal', refusal: offer.refusal };
     }
     return offer.eligible ? { kind: 'offer', cause: String(offer.cause || '') } : { kind: 'none' };
 }
 
+const REFUSAL_PHRASES = {
+    execution_budget_unknown: () => tr('task.continue.budget_unknown',
+        "The time left in this task's execution budget could not be read from its saved clock, so no new task starts."),
+    deep_review_restart_required: () => tr('task.continue.deep_review_restart',
+        'A deep self-review keeps no saved point to continue from; send /review to start a new one.'),
+};
+
 function refusalPhrase(view) {
-    return view.refusal === 'execution_budget_unknown'
-        ? tr('task.continue.budget_unknown',
-            "The time left in this task's execution budget could not be read from its saved clock, so no new task starts.")
-        : taskReasonPhrase(view.cause);
+    return REFUSAL_PHRASES[view.refusal] ? REFUSAL_PHRASES[view.refusal]() : taskReasonPhrase(view.cause);
 }
 
 /**
@@ -99,7 +106,8 @@ export async function continueTaskAction(taskId, { request = continueTask, stora
         if (body.state === 'bound' && body.action_nonce) continueNonce(id, storage, body.action_nonce);
         // The same nonce stays: pressing again retries this very admission. A typed hard limit says itself; any other
         // failure is said in the shared failure words (U131), its raw text kept for the log.
-        const limit = body.reason_code === 'hard_limit_reached' && body.cause ? taskReasonPhrase(body.cause) : '';
+        const limit = body.reason_code === 'hard_limit_reached' && body.cause ? taskReasonPhrase(body.cause)
+            : body.reason_code === 'deep_review_restart_required' ? REFUSAL_PHRASES.deep_review_restart_required() : '';
         if (!limit) console.warn('Continue not confirmed', exc);
         toast(limit ? `Continue not confirmed: ${limit}` : `Continue not confirmed. ${errorWords(exc).text}`, 'error');
         return '';
@@ -108,10 +116,11 @@ export async function continueTaskAction(taskId, { request = continueTask, stora
     }
 }
 
-function renderSuccessor(button, successorId) {
+function renderSuccessor(record, button, successorId) {
     button.textContent = tr('task.continue.continued', 'Continued');
     button.disabled = true;
     button.dataset.continueSuccessor = successorId;
+    record.admittedAfter = record.readEpoch ?? 0;  // reads sent up to now predate this admission
 }
 
 /** The successor a card's Continue control names: '' while it still offers Continue, null with no control. */
@@ -129,7 +138,8 @@ export function continueControlSuccessor(record) {
  * about it and never removes a shown action; when it is the terminal of a ROOT
  * card that did not complete cleanly (a best-effort completion may be a
  * technical limit, and an author's stop is unfinished), the card reads the full
- * detail once to learn the offer.
+ * detail once to learn the offer. An admission is recorded against the reads sent so far: an offer stated by an
+ * earlier read than that never replaces it, a later read may (`admittedAfter`, `READ_EPOCH`). `read` null: no lookup.
  */
 export function syncContinueAction(record, detail, { read = fetchTaskDetail, write = (fn) => fn() } = {}) {
     if (!detail || typeof detail !== 'object') return false;
@@ -138,7 +148,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail, wri
         const axes = detail.outcome_axes;
         const authorStop = axes?.execution?.task_completion?.action === 'stop' || axes?.objective?.reason === 'author_stop';
         const clean = ['completed', 'done'].includes(status) && axes?.execution?.status !== 'best_effort' && !authorStop;
-        if (record?.root && !record.isSubagent && !offerReads.has(record) && taskDoneIsTerminal(detail) && !clean) {
+        if (read && record?.root && !record.isSubagent && !offerReads.has(record) && taskDoneIsTerminal(detail) && !clean) {
             offerReads.add(record);
             Promise.resolve().then(() => read(record.groupId))
                 .then((full) => {
@@ -154,6 +164,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail, wri
     // Continue belongs to a root: the host refuses a child (not_a_root_task), so a child's card shows none, even
     // when a parent's replayed row (a subagent's rejection notice) brings the parent's offer onto it.
     const view = record?.isSubagent ? { kind: 'none' } : continueOfferView(detail);
+    if (view.kind !== 'successor' && detail[READ_EPOCH] <= record?.admittedAfter) return false;
     const actions = view.kind === 'none' ? ownLiveActionsEl(record) : ensureLiveActionsEl(record);
     const existing = actions?.querySelector('[data-continue-task]');
     const refusal = actions?.querySelector('[data-continue-refusal]');
@@ -183,7 +194,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail, wri
         actions.appendChild(button);
     }
     if (view.kind === 'successor') {
-        renderSuccessor(button, view.successorId);
+        renderSuccessor(record, button, view.successorId);
         return !existing;
     }
     button.textContent = view.kind === 'retry' ? tr('task.continue.retry', 'Retry Continue') : tr('task.continue.label', 'Continue');
@@ -196,7 +207,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail, wri
         button.disabled = true;
         const successor = await continueTaskAction(record.groupId, { actionNonce: view.actionNonce || '' });
         if (!successor) { button.disabled = false; return; }
-        renderSuccessor(button, successor);
+        renderSuccessor(record, button, successor);
         // The card's own chat reads the predecessor's record now, so the successor joins this card (work_portal.js).
         record.root?.dispatchEvent?.(new CustomEvent('ouro:task-continued', { bubbles: true,
             detail: { taskId: String(record.groupId || ''), successorId: successor } }));

@@ -135,7 +135,6 @@ def test_a_paused_root_says_what_of_its_tree_still_runs_as_the_owners_card_does(
     """Parked under the owner's press: Ouroboros reads the review its Pause lets finish and a run nobody can
     confirm beside the wait, never as "resume now"; the owner's card types them by the same rule."""
     from ouroboros import delegate_custody as custody
-    from ouroboros.gateway import work_status
     from ouroboros.peer_roster import roster_fingerprint
 
     _paused_root(tmp_path)
@@ -161,11 +160,15 @@ def test_a_paused_root_says_what_of_its_tree_still_runs_as_the_owners_card_does(
     assert custody.emit(tmp_path, custody.SETTLED, {"run_id": "rv", "task_id": "t", "state": "succeeded"})
     quiet = independent_roots(tmp_path)
     assert "tails" not in quiet["roots"][0] and "tails:" not in render_roster_note(quiet)
-    # One typing for both readers: the roster follows the card's rule, never a copy of its own.
+    # The root's own queue row has no root_task_id. Custody puts the run in its tree;
+    # only a measurement for that exact run says whether it is working.
     assert custody.emit(tmp_path, custody.STARTED, {"run_id": "r9", "task_id": "t", "root_task_id": "t"})
-    assert [tail["state"] for tail in independent_roots(tmp_path)["roots"][0]["tails"]] == ["live"]
-    monkeypatch.setattr(work_status, "run_tail", lambda source, owner, **facts: ("run", "unknown"))
-    assert [tail["state"] for tail in independent_roots(tmp_path)["roots"][0]["tails"]] == ["unknown"]
+    for measured, expected in ((None, "unknown"), (False, "open"), (True, "live")):
+        def observation(root, keys):
+            assert {key[:2] for key in keys} == {("t", "r9")}
+            return {key: measured for key in keys}
+        monkeypatch.setattr("ouroboros.delegate_feed.current_activities", observation)
+        assert [tail["state"] for tail in independent_roots(tmp_path)["roots"][0]["tails"]] == [expected]
 
 
 def test_a_settled_pause_lists_its_finishing_reviews_without_a_custody_row(tmp_path):

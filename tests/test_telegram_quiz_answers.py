@@ -258,6 +258,9 @@ def test_reply_to_quiz_keeps_existing_local_command_precedence(tmp_path, monkeyp
 def test_reply_to_an_ordinary_message_is_a_normal_chat_turn(tmp_path, monkeypatch):
     plugin = _load_plugin()
     api = _send_card(plugin, tmp_path, monkeypatch)
+    address = "row:42@2026-11-20T10:00:00Z#123456789abc"  # a mirrored ordinary answer the bridge remembers
+    sys.modules[plugin.__package__ + ".lib.telegram_state"]._remember_message(
+        api, "", 42, 12, {"row_address": address, "chat_id": 42, "kind": "message"})
     Client.updates = [{"update_id": 9, "message": {
         "message_id": 601, "chat": {"id": 42, "type": "private"}, "from": {"id": 42},
         "text": "and this?", "reply_to_message": {"message_id": 12},
@@ -265,7 +268,7 @@ def test_reply_to_an_ordinary_message_is_a_normal_chat_turn(tmp_path, monkeypatc
     posts = []
     injected = _run_poller(plugin, api, monkeypatch, posts)
     assert posts == []
-    assert [p["text"] for p in injected] == ["and this?"]
+    assert [(p["text"], p["reply_to"]) for p in injected] == [("and this?", address)]
 
 
 def test_late_or_unknown_answers_are_toasted_honestly(tmp_path, monkeypatch):
@@ -431,7 +434,9 @@ def _recording_client(plugin):
     class Recording(plugin.TelegramClient):
         async def call(self, method, *, data=None, files=None, timeout=30):
             calls.append((method, dict(data or {})))
-            return {"ok": True, "result": {"message_id": 700 + len(calls)}}
+            result = {"message_id": 700 + len(calls)}
+            self._observe_message(data, result)  # as a real confirmed send: every part enters the reply map
+            return {"ok": True, "result": result}
 
     return Recording, calls
 

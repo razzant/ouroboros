@@ -59,13 +59,14 @@ def test_a_supervisor_cancel_is_an_observed_end_named_by_its_observer(tmp_path, 
     write_task_result(tmp_path, 'done', 'cancelled', _cancel_observed=True)  # natural completion wins a late cancel
     assert load_task_result(tmp_path, 'done')['terminal_time'] == done['terminal_time']
     assert done['terminal_time']['source'] == 'executor_terminal'
-    # Only the three writers where the supervisor itself performs the cancel claim the observation
-    # (their own tests read the stamp); restart recovery and the pool's emergency path saw no end.
+    # Only live transitions claim the observation, including policy cancellation before assignment.
+    # Restart reconciliation and the pool's emergency writer leave the time unknown.
     import pathlib
 
     claims = {path.name: path.read_text(encoding='utf-8').count('_cancel_observed=True')
               for path in (pathlib.Path(__file__).resolve().parents[1] / 'supervisor').glob('*.py')}
-    assert {name: count for name, count in claims.items() if count} == {'task_lifecycle.py': 2, 'workers.py': 1}
+    assert {name: count for name, count in claims.items() if count} == {
+        'task_lifecycle.py': 2, 'workers.py': 1, 'worker_assignment.py': 2}
 
 
 def test_only_the_executors_own_end_is_an_answer_time(tmp_path, monkeypatch):
@@ -215,9 +216,13 @@ def test_actual_child_copyback_cannot_authenticate_its_own_attempt(tmp_path, mon
         write_task_result(host, 'root', 'failed')
     monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T3)
     copied = copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)})
+    final = load_task_result(host, 'root')
+    if canonical_state == 'stale_attempt':  # attempt 1's old end is no end of the live attempt 2: no status, no occurrence
+        assert (final['status'], final['task_attempt']) == ('running', 2)
+        assert terminal_time_fact(final)['occurred_at'] is None
+        return
     expected = source['terminal_time']['occurred_at'] if canonical_state == 'matching' else None
     assert copied['terminal_time']['occurred_at'] == expected
-    final = load_task_result(host, 'root')
     assert final['terminal_time'] == terminal_time_fact(final)
     assert terminal_time_fact(final)['occurred_at'] == expected
 
@@ -245,12 +250,16 @@ def test_orphan_settlement_before_delayed_copyback_keeps_child_occurrence(tmp_pa
         write_task_result(child, 'root', 'completed', _terminal_observed=True, result='Child answer')
     monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T3)
     assert load_task_result(host, 'root')['status'] == 'running'  # copyback has not delivered it yet
-    assert reconcile_orphaned_running_tasks(host) == 1
+    stale = child_state == 'stale_attempt'  # the child's end is attempt 2's: it settles nothing of the live attempt 1
+    assert reconcile_orphaned_running_tasks(host) == (0 if stale else 1)
     rows = [load_task_result(host, 'root')]
     if child_state != 'recovered':
         rows.append(copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)}))
+    if stale:  # a declined copy has no row of its own to judge: the stored row stays open and borrows no answer
+        rows = [load_task_result(host, 'root')]
+        assert rows[0].get('result') != 'Child answer'
     for row in rows:
-        assert row['status'] == ('failed' if child_state == 'recovered' else 'completed')
+        assert row['status'] == ('running' if stale else 'failed' if child_state == 'recovered' else 'completed')
         assert terminal_time_fact(row)['occurred_at'] == (T2 if child_state == 'matching' else None)
     assert terminal_time_fact(load_task_result(host, 'root')) == terminal_time_fact(rows[0])
 

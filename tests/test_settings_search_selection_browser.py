@@ -170,7 +170,7 @@ def _save_and_reload(page):
 
 
 def _unrelated_save(page):
-    open_settings(page, 'tools', 'OUROBOROS_TOOL_TIMEOUT_SEC')
+    open_settings(page, 'computer/advanced', 'OUROBOROS_TOOL_TIMEOUT_SEC')  # the global tool timeout lives in This computer › Advanced
     assert commit_row(page, 'OUROBOROS_TOOL_TIMEOUT_SEC', 601).startswith('Saved')
 
 

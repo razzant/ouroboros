@@ -47,15 +47,19 @@ def bound_runs(txn, invocation_id: str) -> dict:
 
 def advance(record: dict, event: dict, ordinal: int) -> dict:
     """Invocation transition; the independent ``rows=`` oracle below defines its meaning."""
-    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED
+    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED
 
     record = dict(record or {"state": "pending", "run_id": ""})
     kind = event.get("type")
     if kind == START_REQUESTED and not record.get("request"):
         record.update(request=dict(event), request_ordinal=ordinal)
+    elif kind == START_RISK_ACCEPTED and record.get("request") and record["state"] == "pending":
+        decisions = dict(record.get("resume_decisions") or {})
+        decisions[event["resuming_task_id"]] = event["decision"]
+        record["resume_decisions"] = decisions
     elif kind == STARTED:
         record.update(state="started", run_id=str(event.get("run_id") or ""), started_ordinal=ordinal)
-    elif kind == START_FAILED and event.get("definite") is True and record["state"] != "started":
+    elif kind in (START_UNSENT, START_FAILED) and event.get("definite") is True and record["state"] != "started":
         record["state"] = "failed_definite"
     return record
 
@@ -87,19 +91,24 @@ def legacy_record(txn, invocation_id: str, bound: Optional[dict] = None) -> Opti
     if bound and not started:
         return {**gap, "request": request, "reason": "start_facts_missing"}
     rid = max(started, key=lambda key: started[key].get("_invocation_started_ordinal", 0)) if started else ""
-    return {"request": request, "state": "started" if rid else "failed_definite" if refused else "pending",
+    return {"request": request, **decision_facts(requested or {}),
+            "state": "started" if rid else "failed_definite" if refused else "pending",
             "run_id": rid}
 
 
+def decision_facts(record):
+    return {"resume_decisions": copy.deepcopy(record["resume_decisions"])} if record.get("resume_decisions") else {}
+
+
 def reduce_event(txn, event: dict, ordinal: int) -> Optional[dict]:
-    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED
+    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED
 
     iid, kind = str(event.get("invocation_id") or ""), event.get("type")
     if kind == START_REQUESTED:
         key = operation_key(str(event.get("operation_id") or ""), str(event.get("slot_id") or ""))
         if txn.get_row(OPERATIONS, key) is None:
             txn.put_row(OPERATIONS, key, {"invocation_id": iid, "request_ordinal": ordinal})
-    if not iid or kind not in (START_REQUESTED, STARTED, START_FAILED):
+    if not iid or kind not in (START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED):
         return None
     record = txn.get_row(INVOCATIONS, iid)
     if record is None:
@@ -116,13 +125,13 @@ def _read(txn, invocation_id: str) -> Optional[dict]:
     bound = bound_runs(txn, invocation_id)
     # A rollback writer knows neither the invocation row nor the new run fact.
     # Its addressed rows remain usable only when the legacy path can prove the answer.
-    if record is None or any(facts.get("started_ts") and not facts.get("_invocation_started_ordinal")
-                             for facts in bound.values()):
-        return legacy_record(txn, invocation_id, bound)
+    if (record is None or any(facts.get("started_ts") and not facts.get("_invocation_started_ordinal")
+                              for facts in bound.values()) or record.get("state") == "pending"
+            and txn.get_row("custody_open", f"invocation:{invocation_id}") is None):
+        legacy = legacy_record(txn, invocation_id, bound)
+        return {**legacy, **decision_facts(record or {})} if legacy else None
     if record.get("legacy_gap"):
         return {**record, "state": LEGACY_GAP, "reason": record["legacy_gap"], "run_id": ""}
-    if record.get("state") == "pending" and txn.get_row("custody_open", f"invocation:{invocation_id}") is None:
-        return legacy_record(txn, invocation_id, bound)
     return record
 
 
@@ -133,7 +142,8 @@ def _answer(root, record: Optional[dict], request_facts) -> Optional[dict]:
         return {"state": LEGACY_GAP, "run_id": "", "reason": record["reason"]}
     if not record.get("request"):
         return None  # A complete modern fold without REQUESTED has no invocation.
-    return {**request_facts(root, record["request"]), "state": record["state"], "run_id": record["run_id"]}
+    return {**request_facts(root, record["request"]), **decision_facts(record),
+            "state": record["state"], "run_id": record["run_id"]}
 
 
 def read(root, invocation_id: str, request_facts) -> Optional[dict]:
@@ -162,11 +172,10 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
                       rows: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     """One invocation's durable fate: who requested it, the EXACT body it sent,
     the resources that attempt bound, and how it resolved.
-    ``state`` is ``pending`` (requested, never bound, never definitely refused —
-    the only state an explicit retry may replay), ``started`` (a run bound to it;
-    carried with its ``run_id`` so the caller can wait instead of re-posting), or
-    ``failed_definite`` (the daemon definitively refused; the id is dead — replaying
-    it against a since-reconfigured route is how a key wedges into a permanent 409).
+    ``state`` is ``pending`` (requested, unbound, no definite refusal). A recorded
+    ``resume_decisions`` entry restricts every retry to lookup. ``started`` means a run bound to it
+    and the caller can wait on its ``run_id``. ``failed_definite`` closes a proven
+    unsent or definitely refused start.
     ``request`` is the canonical POST body recorded before the wire attempt: a retry
     replays THESE bytes, never a re-derivation, because the engine's replay match
     digests the request and answers a same-key-different-digest POST with 409
@@ -182,7 +191,7 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
     retains the first request and last STARTED. Legacy rows use ``legacy_record``;
     insufficient stored evidence returns ``legacy_gap``, never an absent run.
     """
-    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, _unique_rows
+    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED, _unique_rows
 
     target = str(invocation_id or "").strip()
     if not target:
@@ -199,9 +208,11 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
         kind = str(row.get("type") or "")
         if kind == START_REQUESTED and found is None:
             found = _request_facts(drive_root, row)
+        elif kind == START_RISK_ACCEPTED and found is not None and state == "pending":
+            found.setdefault("resume_decisions", {})[row["resuming_task_id"]] = row["decision"]
         elif kind == STARTED:
             state, run_id = "started", str(row.get("run_id") or "")
-        elif kind == START_FAILED and row.get("definite") is True and state != "started":
+        elif kind in (START_UNSENT, START_FAILED) and row.get("definite") is True and state != "started":
             state = "failed_definite"
     if found is None:
         return None

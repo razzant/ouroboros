@@ -3,7 +3,7 @@
  * Model capsule (composer_model.js) or on a work's model fact (card_model.js) opens, never hover. From the top: what
  * the caller puts first (a work's own acts), the search field, the list of models (model_list.js: Main, Pinned,
  * Recent, All sources), and at its foot the processing tier strip (processing_choice.js) with what its choice applies
- * to. On the popups' floating material above its anchor, so nothing in the transcript or the composer moves; in the
+ * to; redundant Standard controls are hidden. It floats above its anchor without moving the composer or transcript; in the
  * stack layout a bottom sheet over a scrim, whose field waits for its own press (no keyboard raised by opening).
  *
  * One sheet in the window: opening another closes this one. A press outside, Escape (after the field's own), focus
@@ -14,8 +14,9 @@
  * holds the focus (bindDialogFocus): opened by a finger the sheet itself takes it, so no keyboard rises, and Tab and
  * Shift+Tab wrap inside it, never reaching what lies under the scrim.
  */
+import { routeKey } from './chat_model_routes.js';
 import { createModelList, modelSearchField } from './model_list.js';
-import { createTierStrip } from './processing_choice.js';
+import { createTierStrip, pinDecides } from './processing_choice.js';
 import { bindDialogFocus } from './ui_interactions.js';
 
 let serial = 0;
@@ -30,7 +31,8 @@ export function closeModelSheet({ within = null } = {}) {
 /**
  * `anchor` is what it stands by (the composer row, a card's fact), `label` its accessible name, `head` an optional
  * node above the field, `list` the options of createModelList (minus its field and element), `tier` the strip's
- * `{ onChoose(tier), view() }` (`view()` returns the strip's paint: choice, resolved, scope, supportOf, explain, busy).
+ * `{ onChoose(tier), view(), mainRoute() }` (`view()` returns the strip's paint; `mainRoute()` names the route using
+ * Main's pin, if any, so this sheet can ask for that exact binding).
  * `stack()` says whether the layout is the phone's, `coarse()` whether a finger opened it, `place(sheet, anchor)` binds
  * its position (bindPopoverPosition). `onClose()` follows its close. Returns `{ el, input, paint, reposition, close }`.
  */
@@ -60,7 +62,8 @@ export function openModelSheet({ anchor, label = 'Model', head = null, list, tie
     const grid = doc.createElement('div');
     grid.className = 'model-sheet-list';
     grid.id = `${id}-list`;
-    const strip = createTierStrip({ doc, id: `${id}-tier`, onChoose: (choice) => tier.onChoose(choice) });
+    const strip = createTierStrip({ doc, id: `${id}-tier`, onChoose: (choice) => tier.onChoose(choice),
+        onFocusLost: () => (bottom && coarse() ? sheet : input).focus({ preventScroll: true }) });
     sheet.append(field, grid, strip.el);
     if (scrim) doc.body.append(scrim);
     doc.body.append(sheet);
@@ -68,10 +71,25 @@ export function openModelSheet({ anchor, label = 'Model', head = null, list, tie
     let closed = false;
     let position = null;
     let disposeFocus = null;
+    // Even for the same route, a pin kept from a previous opening may have changed in Settings elsewhere. Ask once
+    // each time a route comes under this sheet, before painting its support: when it opens and when Main moves, a
+    // return to a route it left included (the pin may have gone with the model). A repaint, a failed or a mismatched
+    // read is not a poll.
+    let askedPin = '';  // the route now under the sheet, once its pin was asked for
+    function readMainPin() {
+        const route = tier.mainRoute?.();
+        const { store } = list;
+        const key = routeKey(route);
+        if (key !== askedPin) askedPin = '';
+        if (!route || askedPin || !pinDecides(store.index(), route)) return;
+        askedPin = key;
+        void store.readConnections?.({ fresh: true });
+    }
     const rows = createModelList({ ...list, el: grid, input, id,
         onLeave: ({ focus }) => close({ focus }), onPaint: () => position?.reposition() });
     const paint = () => {
         if (closed) return;
+        readMainPin();
         rows.paint();
         strip.paint(tier.view());
         position?.reposition();

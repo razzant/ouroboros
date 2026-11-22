@@ -119,3 +119,86 @@ def _fence(root):
 
 def _kept(root, member="child-dead"):
     return _fence(root)["ended_member_runs"][member]
+
+
+def _snapshot(root):
+    """The census rows and the works projection ``/api/state`` builds from them, through their real producers."""
+    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from ouroboros.gateway.work_projection import works_snapshot
+
+    raw, owners = {}, []
+    census = _chat_activities_snapshot_safe(root, work_facts=raw, decision_owners=owners)
+    return census, works_snapshot(root, owners, raw)
+
+
+def _works(root):
+    return _snapshot(root)[1]["works"]
+
+
+def _live_tree(tmp_path, workers):
+    """A RUNNING root, its RUNNING child and a never-started PENDING child."""
+    from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, write_task_result
+
+    write_task_result(tmp_path, "root-1", STATUS_RUNNING, chat_id=0)
+    write_task_result(tmp_path, "child-run", STATUS_RUNNING, chat_id=0)
+    write_task_result(tmp_path, "child-new", STATUS_SCHEDULED, chat_id=0)
+    workers.RUNNING["root-1"] = {"task": {"id": "root-1", "type": "task", "chat_id": 0,
+                                          "root_task_id": "root-1"}, "worker_id": 0, "attempt": 1}
+    workers.RUNNING["child-run"] = {"task": {
+        "id": "child-run", "type": "task", "chat_id": 0, "root_task_id": "root-1",
+        "parent_task_id": "root-1", "delegation_role": "subagent"}, "worker_id": 1, "attempt": 1}
+    workers.PENDING.append({"id": "child-new", "type": "task", "chat_id": 0, "_attempt": 1,
+                            "root_task_id": "root-1", "parent_task_id": "root-1",
+                            "delegation_role": "subagent"})
+
+
+REASON = "I will work from the saved files while the original job may still be spending."
+REQUEST = {"prompt": "Summarize the layout.", "access": "readonly", "mode": "ask",
+           "primaryHarness": "some-route", "maxSeconds": 120}
+
+
+def _pending(root, member, iid, tree="root-1", **fields):
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_resume import address
+
+    assert custody.record_start_requested(
+        root, task_id=member, root_task_id=tree, invocation_id=iid, idempotency_key=iid,
+        request=REQUEST, project_id="", project_owned=False, route="some-route",
+        daemon_store_id="store-a", store_identity_unproven=False, **fields)
+    return address({"task_id": member, "root_task_id": tree, "invocation_id": iid})
+
+
+def _paused(root, monkeypatch, tail):
+    from supervisor.owner_pause_control import request_owner_pause
+
+    queue, workers, engine = _tail_tree(root, monkeypatch, tail=tail)
+    assert request_owner_pause("root-1", request_id="press")["ok"]
+    _tick(queue)
+    with monkeypatch.context() as park:
+        _park_root(root, park, queue, workers)
+    return queue, workers, engine
+
+
+def _resume(door, ids=(), *, selected="root-1", reason=REASON):
+    if door == "owner":
+        from ouroboros.gateway.router import collect_routes
+        from supervisor import queue
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        body = {"accept_unknown": list(ids), "reason": reason} if ids else {}
+        app = Starlette(routes=collect_routes(data_dir=queue.DRIVE_ROOT))
+        with TestClient(app) as client:
+            response = client.post(f"/api/tasks/{selected}/resume", json=body)
+            reply = response.json()
+            if reply.get("acceptable_unknown"):
+                assert response.status_code == 409
+            return reply
+    from supervisor.events_mind_controls import _apply
+    return _apply({"task_id": selected, "action": "resume_task", "actor_task_id": "main",
+                   "action_nonce": "resume", "reason": reason, "accept_unknown": list(ids)})
+
+
+def _decide(root, start):
+    from ouroboros.delegate_resume import _record
+    return _record(root, start, start["task_id"], {"actor": "owner", "door": "api_task_resume"}, REASON)

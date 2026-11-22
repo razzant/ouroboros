@@ -104,6 +104,133 @@ def test_a_subscription_route_that_billed_is_refused_from_the_next_call(data_roo
     assert _row(data_root, other)["state"] == "reserved"
 
 
+@pytest.mark.parametrize("model, limit, fits", [
+    (SUBSCRIPTION, 1.0, False),
+    ("claudexor::codex=gpt-6-sol", 1.0, True),
+    (SUBSCRIPTION, 2.0, True),
+])
+def test_wave_and_reservation_use_the_same_models_cash_at_the_global_limit(data_root, monkeypatch, model, limit, fits):
+    from ouroboros import usage_store
+
+    billed = ua.reserve_attempt(_subscription(data_root))
+    ua.mark_dispatched(billed)
+    ua.settle_attempt(billed, {}, cost_usd=1.0, cost_final=True)
+    before = ledger_rows(data_root)
+    model_reads = []
+    bucket = usage_store.Txn.bucket
+
+    def read_bucket(view, scope, key=""):
+        if scope == "model":
+            model_reads.append(key)
+        return bucket(view, scope, key)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(usage_store.Txn, "bucket", read_bucket)
+        wave = ua.review_wave_admission(data_root, models=[model], root_task_id="review", prompt_chars=40,
+                                       use_local=False, processing_preferences="standard", global_limit_usd=limit)
+    assert model_reads == ([model] if limit == 1.0 else [])
+    assert wave["slot_bounds"] == [None] and wave["unpriced_slots"] == 1
+    assert wave["estimated_wave_usd"] is None and wave["fits"] is fits
+    assert ledger_rows(data_root) == before
+    request = _subscription(data_root, model=model, root_task_id="review", global_limit_usd=limit)
+    if fits:
+        assert _row(data_root, ua.reserve_attempt(request))["reservation_upper_bound_usd"] is None
+    else:
+        with pytest.raises(ua.BudgetExceeded) as refused:
+            ua.reserve_attempt(request)
+        assert refused.value.limit_scope == wave["binding_axis"] == "global"
+
+
+def test_unreadable_model_cash_matters_only_if_it_can_decide_the_wave(data_root, monkeypatch):
+    from ouroboros import usage_store
+
+    _reach_global_limit(data_root)
+    bucket = usage_store.Txn.bucket
+    reads = []
+
+    def unavailable(view, scope, key=""):
+        if scope == "model":
+            reads.append(key)
+            raise ua.UsageAccountingError("model summary unavailable")
+        return bucket(view, scope, key)
+
+    monkeypatch.setattr(usage_store.Txn, "bucket", unavailable)
+    options = dict(root_task_id="review", use_local=False, prompt_chars=40, global_limit_usd=1.0)
+    paid = ua.review_wave_admission(data_root, models=[SUBSCRIPTION, "openai::uncatalogued"], **options)
+    assert paid["fits"] is False and reads == []
+    unknown = ua.review_wave_admission(data_root, models=[SUBSCRIPTION], **options)
+    assert reads == [SUBSCRIPTION] and unknown["fits"] is None
+    assert unknown["admission_unknown"] == "UsageAccountingError"
+
+
+@pytest.mark.parametrize("name, tier, custom_endpoint, bound", [
+    ("free", "standard", False, 0.0),
+    ("metered", "standard", False, 0.005),
+    ("uncatalogued", "standard", False, None),
+    ("free", "fast", False, None),
+    ("free", "standard", True, None),
+])
+def test_fieldless_standard_review_prices_only_the_selected_cloudru_route(
+        data_root, monkeypatch, name, tier, custom_endpoint, bound):
+    from dataclasses import replace
+    from ouroboros import pricing
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_attempt import _attempt_request
+    from ouroboros.llm_routing import resolve_target
+
+    _reach_global_limit(data_root)
+    # The first tuple is the cached tariff for an is_billable=false catalog row.
+    monkeypatch.setattr(pricing, "_cached_pricing", {"cloudru": {
+        "cloudru/free": (0.0, 0.0, 0.0, 0.0), "cloudru/metered": (0.0, None, None, 5.0)}})
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", {})
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *args: pytest.fail("unexpected catalog fetch"))
+    settings = {"CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://private.invalid/v1"} if custom_endpoint else {}
+    model = f"cloudru::{name}"
+    target = resolve_target(model, settings)
+    before = ledger_rows(data_root)
+    wave = ua.review_wave_admission(data_root, root_task_id="review", models=[model], use_local=False,
+                                   prompt_chars=100, max_completion_tokens=1000, processing_preferences=tier,
+                                   resolve_target_for_model=lambda value: resolve_target(value, settings),
+                                   global_limit_usd=1.0, allow_live_fetch=True)
+    assert wave["slot_bounds"] == [bound] and wave["estimated_wave_usd"] == bound
+    assert wave["unpriced_slots"] == int(bound is None)
+    assert wave["binding_axis"] == "global" and wave["fits"] is (bound == 0.0)
+    assert ledger_rows(data_root) == before
+
+    if tier == "standard":
+        target["processing_preference"] = tier
+        payload = LLMClient()._build_remote_kwargs(target, [{"role": "user", "content": "test"}], "medium",
+                                                   1000, "auto", None, None, skip_capability_fetch=True)
+        physical = replace(_attempt_request(target, payload), drive_root=data_root, root_task_id="review",
+                           global_limit_usd=1.0, allow_live_fetch=False)
+        assert physical.submitted_processing_mode == ""
+        assert ua._reservation_cost(physical) == bound
+        if bound == 0.0:
+            assert _row(data_root, ua.reserve_attempt(physical))["reservation_upper_bound_usd"] == 0.0
+        else:
+            with pytest.raises(ua.BudgetExceeded) as refused:
+                ua.reserve_attempt(physical)
+            assert refused.value.limit_scope == "global"
+
+
+@pytest.mark.parametrize("root_cap, group_cap, axis, fits", [
+    (2.0, 2.0, "global", True),
+    (0.0, 2.0, "root", False),
+    (2.0, 1.0, "group", False),
+])
+def test_session_only_wave_at_global_limit_still_checks_its_root_and_original_group(
+        data_root, root_cap, group_cap, axis, fits):
+    _reach_global_limit(data_root)  # the original root and its billing group have spent $1
+    before = ledger_rows(data_root)
+    successor = ua.UsageScope(drive_root=data_root, task_id="review", root_task_id="review",
+                              billing_group_id="root", billing_group_limit_usd=group_cap)
+    with ua.usage_scope(successor):
+        wave = ua.review_wave_admission(data_root, root_task_id="review", task_id="review", models=[],
+                                       session_slots=1, prompt_chars=0, global_limit_usd=1.0, root_limit_usd=root_cap)
+    assert (wave["fits"], wave["binding_axis"], wave["slot_bounds"]) == (fits, axis, [])
+    assert ledger_rows(data_root) == before
+
+
 def test_the_dispatch_recheck_follows_the_same_predicate(data_root):
     subscription = ua.reserve_attempt(_subscription(data_root))
     paid = ua.reserve_attempt(_paid(data_root, reservation_usd=0.2))
@@ -247,11 +374,11 @@ def test_a_dispatched_row_with_saved_work_is_held_and_resumes_not_failed(tmp_pat
     assert load_task_result(tmp_path, "saved")["status"] == "scheduled"  # nonterminal, never FAILED
 
     # The existing Resume door revalidates the saved source: unreadable keeps the hold, valid releases it.
-    monkeypatch.setattr(task_admission, "_working_resume_granted", lambda *_a, **_k: False)
     refused = queue.resume_budget_paused_task("saved")
     assert refused["ok"] is False and refused["error"] == "dispatch_outcome_unknown"
+    assert refused["refusal_basis"] == "saved_work_unverified"
     assert "_budget_pause" in workers.PENDING[0]
-    monkeypatch.setattr(task_admission, "_working_resume_granted", lambda *_a, **_k: True)
+    monkeypatch.setattr(task_admission, "working_resume_refusal", lambda *_a, **_k: "")
     assert queue.resume_budget_paused_task("saved")["ok"] is True
     assert "_budget_pause" not in workers.PENDING[0] and workers.PENDING[0]["_working_recovery"]
 

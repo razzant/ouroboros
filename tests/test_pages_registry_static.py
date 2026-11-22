@@ -7,9 +7,10 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# Where a page's section is mounted and where its header is rendered.
+# Where a page's section is mounted and where its header is rendered (Extensions, the place `skills`, draws its section
+# in extensions.js; skills.js, whose initSkills app.js calls, mounts the skill views inside it).
 MODULES = {"chat": ("chat.js", "chat.js"), "circles": ("circles.js", "circles.js"), "files": ("files.js", "files.js"),
-           "skills": ("skills.js", "skills.js"), "widgets": ("widgets.js", "widgets.js"),
+           "skills": ("extensions.js", "extensions.js"), "widgets": ("widgets.js", "widgets.js"),
            "dashboard": ("dashboard.js", "dashboard.js"), "settings": ("settings.js", "settings.js")}
 
 
@@ -19,7 +20,7 @@ def _read(rel: str) -> str:
 
 def _registry():
     source = _read("web/modules/pages.js")
-    rows = re.findall(r"\{ id: '([a-z]+)', label: '([^']+)', icon: '([a-z]+)', zone: '([a-z]+)'(?:, hint: '[^']+')?, init: '([A-Za-z]+)' \}", source)
+    rows = re.findall(r"\{ id: '([a-z]+)', label: '([^']+)', icon: '([a-z]+)', zone: '([a-z]+)'(?:, hint: '[^']+')?(?:, group: '(?:sections|system)')?, init: '([A-Za-z]+)' \}", source)
     assert rows, "the registry rows must stay readable to this parity guard"
     return rows
 

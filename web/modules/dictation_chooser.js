@@ -1,7 +1,7 @@
 // "+" → Add dictation… (docs/DESIGN.md "Voice controls"): the ways to dictate on this install, each saying where the
 // audio goes. An engine that is live here is chosen at once; an installed built-in engine that is off (Browser speech)
 // is turned on through the Skills toggle, then chosen; a built-in engine not installed yet and an OuroborosHub engine
-// (Whisper) are reached through the Skills page — the installed entry, or the Browse search where it installs.
+// (Whisper) are reached through Extensions — the installed entry on Skills, or the Browse search where it installs.
 // Choosing saves `voice.stt`; the mic appears once the engine can run here. Nothing here installs code or sends audio.
 import { fetchJson } from './api_client.js';
 import { fmt, tr } from './i18n.js';
@@ -15,7 +15,7 @@ export const HUB_STT_ENGINES = Object.freeze([
     Object.freeze({ slug: 'whisper-voice', label: 'Whisper', destination: 'host', install_size: '~500 MB' }),
 ]);
 
-/** Ask the Skills page for one installed skill's entry (`{skill}`) or a Browse search (`{query}`); skills.js
+/** Ask Extensions for one installed skill's entry (`{skill}`) or a Browse search (`{query}`); skills.js
  * listens. */
 export function openSkills(detail) {
     globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-skills', { detail }));
@@ -37,7 +37,7 @@ export function chooserOptions({ speech, installed = null, location = globalThis
         if (liveKeys.has(`${offer.skill}:${offer.id}`)) continue;
         rows.push({ kind: 'offer', key: `${offer.skill}:${offer.id}`, label: offer.label, offer,
             line: offer.title || destinationLabel(offer.destination, location),
-            hint: offer.installed === false ? fmt('Find {label} in Skills', { label: offer.label })
+            hint: offer.installed === false ? fmt('Find {label} in Extensions', { label: offer.label })
                 : tr('voice.chooser.turn_on', 'Turn on and use') });
     }
     const liveSkills = new Set(live.map((row) => row.skill));
@@ -46,7 +46,7 @@ export function chooserOptions({ speech, installed = null, location = globalThis
         const skill = installed?.find((item) => item?.name === engine.slug) || null;
         rows.push({ kind: 'hub', key: `hub:${engine.slug}`, label: engine.label, engine, installed: Boolean(skill),
             line: [destinationLabel(engine.destination, location), engine.install_size, 'OuroborosHub'].filter(Boolean).join(' · '),
-            hint: skill ? fmt('Open {label} in Skills', { label: engine.label }) : fmt('Find {label} in Skills', { label: engine.label }) });
+            hint: skill ? fmt('Open {label} in Skills', { label: engine.label }) : fmt('Find {label} in Extensions', { label: engine.label }) });
     }
     return { rows, chosen };
 }

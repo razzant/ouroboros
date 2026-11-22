@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Op
 from ouroboros import room_messages, shared_values, store, store_empty, store_timing
 from ouroboros.store import StoreBusy, StoreError, StoreLost, StoreMigrating, TIER_ENFORCED, TIER_NAME
 from ouroboros.store_capture import capture
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -51,9 +51,18 @@ DISPATCH_STATES = ("none", "pending", "dispatched", "completed", "abandoned")
 _PROBE_INDEX = {"chat_id": "dialogue_room", "task_id": "dialogue_task", "parent_task_id": "dialogue_parent",
                 "root_task_id": "dialogue_root", "subagent_task_id": "dialogue_subagent", "origin": "dialogue_origin",
                 "client_message_id": "dialogue_named", "kind": "dialogue_kind",
-                "appearance": "room_appearances"}  # the derived index (``APPEARANCES_DDL``), not a dialogue column
+                "appearance": "room_appearances", "telegram_inbound_chat": "dialogue_inbound"}  # named non-column probes
 _TASK_KEYS = ("task_id", "parent_task_id", "root_task_id", "subagent_task_id")  # every identifier a task's row may carry
 SKIPPED_KINDS = ("invalid", "non_object")  # a line that is not JSON; valid JSON that is not an object
+_TELEGRAM_INBOUND = "direction='in' AND client_message_id GLOB 'tg:*'"
+TELEGRAM_INBOUND_DDL = ("CREATE INDEX IF NOT EXISTS dialogue_telegram_inbound ON dialogue(stream, chat_id, seq) "
+                        f"WHERE {_TELEGRAM_INBOUND}")
+
+
+def has_telegram_inbound_index(conn) -> bool:
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='dialogue_telegram_inbound'").fetchone())
+
+
 _SCHEMA = """
 CREATE TABLE dialogue (
   stream TEXT NOT NULL, seq INTEGER NOT NULL, length INTEGER NOT NULL, segment INTEGER NOT NULL,
@@ -92,7 +101,7 @@ CREATE INDEX ledger_gen ON import_ledger(gen) WHERE gen IS NOT NULL;
 CREATE INDEX ledger_ordinal ON import_ledger(stream, ordinal_base) WHERE ordinal_base IS NOT NULL;
 CREATE INDEX ledger_pos ON import_ledger(stream, pos_base) WHERE pos_base IS NOT NULL;
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-"""
+""" + TELEGRAM_INBOUND_DDL + ";\n"
 
 
 class Row(NamedTuple):
@@ -139,9 +148,9 @@ def present(root: Any) -> bool:
 
 
 def encode(row: Dict[str, Any]) -> str:
-    """The exact text a chain line held, without the newline: the encoding the chat logs were written in while they
-    were files. Chain coordinates were measured on it, so it never follows ``append_jsonl``'s."""
-    return json.dumps(row, ensure_ascii=False)
+    """The dialogue line's JSON without the newline, with its original spacing for byte coordinates.
+    Escape POSIX name bytes so typed document rows also have a UTF-8 representation."""
+    return json_dumps_utf8(row, ensure_ascii=False)
 
 
 def decode(body: str) -> Dict[str, Any]:
@@ -819,7 +828,8 @@ def dispatch_facts(root: Any, chat_id: Optional[int], client_message_id: str) ->
         return None
     recorded = json.loads(record["dispatch_input"] or "{}")
     return {"state": record["dispatch"], "process": str(recorded.get("process") or ""),
-            "dispatcher": str(recorded.get("dispatcher") or "")}
+            "dispatcher": str(recorded.get("dispatcher") or ""),
+            **({"refused": str(recorded["refused"])} if recorded.get("refused") else {})}
 
 
 def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) -> Optional[str]:
@@ -828,29 +838,41 @@ def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) ->
 
 
 def _move_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, states: Tuple[str, ...],
-                   process: str) -> bool:
+                   process: str, read_reply: bool = False) -> tuple[bool, Optional[Dict[str, Any]]]:
     if not client_message_id or not present(root):
-        return False
+        return False, None
+    # A pending retry takes the original reply snapshot in the same transaction as the claim. Select only the
+    # reference, not the rest of the dispatch input (which can include inline media).
+    returning = (" RETURNING json_quote(json_extract(dispatch_input, '$.message.task_metadata.reply_reference'))"
+                 if read_reply else "")
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
             "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='dispatched', "
             "dispatch_input=json_set(coalesce(dispatch_input, '{}'), '$.process', ?) WHERE stream='chat' AND client_message_id=? "
-            f"AND chat_id IS ? AND direction='in' AND dispatch IN ({','.join('?' * len(states))})",
+            f"AND chat_id IS ? AND direction='in' AND dispatch IN ({','.join('?' * len(states))}){returning}",
             (process, client_message_id, chat_id, *states))
-        return cursor.rowcount == 1
+        rows = cursor.fetchall() if read_reply else []
+        reply = json.loads(rows[0][0]) if len(rows) == 1 else None
+        return cursor.rowcount == 1, reply if isinstance(reply, dict) else None
 
 
 def claim_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
     """Take the owed dispatch of an accepted row (pending -> dispatched): the durable "entered"
     mark, with the ``process`` (custody session) that takes it. Exactly one caller wins -- the
     acceptor, a same-id retry or the recovery."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process)
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process)[0]
+
+
+def claim_dispatch_with_reply(root: Any, chat_id: Optional[int], client_message_id: str, *,
+                              process: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
+    """The same one-winner claim plus its accepted Reply reference, when one was recorded."""
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, read_reply=True)
 
 
 def note_dispatched(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
     """The entry mark of a named acceptance that owed no bus dispatch (``none`` -> dispatched):
     its caller hands it to its own dispatcher now."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("none", "pending"), process=process)
+    return _move_dispatch(root, chat_id, client_message_id, states=("none", "pending"), process=process)[0]
 
 
 def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str) -> bool:
@@ -861,11 +883,28 @@ def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str)
         return False
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
-            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=json_object("
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=CASE WHEN "
+            "json_extract(dispatch_input, '$.refused') IS NULL THEN json_object("
             "'dispatcher', json_extract(dispatch_input, '$.dispatcher'), 'process', json_extract(dispatch_input, '$.process')) "
+            "ELSE json_object('dispatcher', json_extract(dispatch_input, '$.dispatcher'), 'process', "
+            "json_extract(dispatch_input, '$.process'), 'refused', json_extract(dispatch_input, '$.refused')) END "
             "WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' AND dispatch='dispatched'",
             (client_message_id, chat_id))
         return cursor.rowcount == 1
+
+
+def refuse_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, cause: str) -> bool:
+    """The owner router refused the accepted row's message before any work began: its typed end (``cause``, the
+    owner-facing sentence its notice said), kept on the row's own dispatch record as ``dispatch_facts``' ``refused``
+    (``complete_dispatch`` keeps it), so the named operation answers it after any restart."""
+    if not client_message_id or not cause or not present(root):
+        return False
+    with transaction(root, write=True) as conn:
+        cursor = conn.execute(
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch_input=json_set(coalesce(dispatch_input, '{}'), "
+            "'$.refused', ?) WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' "
+            "AND dispatch IN ('dispatched', 'completed')", (cause, client_message_id, chat_id))
+        return cursor.rowcount >= 1
 
 
 def abandon_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, reason: str) -> bool:
@@ -1096,6 +1135,14 @@ def _probe_seqs(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str,
         bounds += (limit,)
     tail += ")"
     for column, listed in values.items() if limit is None or limit > 0 else ():
+        if column == "telegram_inbound_chat":
+            # Older stores use the ordinary inbound index only until the next appearance maintenance pass.
+            index = "dialogue_telegram_inbound" if has_telegram_inbound_index(conn) else "dialogue_inbound"
+            found.update(json.loads(conn.execute(
+                f"SELECT json_group_array(seq) FROM (SELECT seq FROM dialogue INDEXED BY {index} "
+                f"WHERE stream=? AND chat_id IN (SELECT +value FROM json_each(?)) AND {_TELEGRAM_INBOUND}"
+                + tail, (stream, json.dumps(listed), *bounds)).fetchone()[0]))
+            continue
         select = (f"SELECT json_group_array(seq) FROM (SELECT seq FROM dialogue INDEXED BY {_PROBE_INDEX[column]} "
                   f"WHERE stream=? AND {column} ")
         if column == "appearance":  # one seek per key of the derived index; absent before its first row
@@ -1135,6 +1182,9 @@ def main_candidates(root: Any, stream: str, *, exclude_chats: Iterable[int], pin
         chats = [record["chat_id"] for record in conn.execute("SELECT chat_id FROM rooms ORDER BY chat_id")
                  if record["chat_id"] not in excluded]
         keys: List[Tuple[str, Any]] = [("chat_id", chat) for chat in chats] + [("chat_id", None)]
+        if stream == "chat":
+            keys.extend(("telegram_inbound_chat", chat) for chat in excluded)
+            keys.append(("appearance", "room:1"))
         keys.extend(("kind", kind) for kind in pinned_kinds)
         probed = _probe(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=True)
     return _probed(*probed)
@@ -1196,6 +1246,36 @@ def carried_ids(root: Any, client_message_ids: Iterable[str], *, stream: str = "
                              "INDEXED BY dialogue_named WHERE stream=? AND client_message_id=+value)",
                              (json.dumps(wanted, ensure_ascii=False), stream)).fetchone()[0]
     return {wanted[index] for index in json.loads(found or "[]")}
+
+
+def annotation_rooms(root: Any, message_ids: Iterable[str]) -> dict:
+    """Resolve pre-room receipt ids in one indexed read. Only a unique readable owner row can wear the receipt;
+    an unread line hides only itself."""
+    return {message: source[0] for (room, message), source in annotation_sources(root, message_ids).items()
+            if room is None and source}
+
+
+def annotation_sources(root: Any, message_ids: Iterable[str]) -> dict:
+    """Room/id and pre-room ids with one identifiable owner row, addressed together."""
+    from ouroboros.chat_chain import format_address, row_address
+    wanted = set(message_ids)
+    if not wanted or not range_coverage(root, "chat")["imported"]:
+        return {}  # an unread line hides only itself
+    sources = {}
+    with transaction(root, write=False) as conn:
+        for record in conn.execute(
+            "SELECT body FROM dialogue INDEXED BY dialogue_named WHERE stream='chat' "
+            "AND client_message_id IN (SELECT value FROM json_each(?)) AND (direction='in' OR kind='quiz_answer')",
+            (json.dumps(sorted(wanted)),),
+        ):
+            row = decode(record["body"])
+            address = row_address(row)
+            identity = (address["chat_id"], format_address(address))
+            for room in (None, address["chat_id"]):
+                key = (room, row["client_message_id"])
+                if sources.setdefault(key, identity) != identity:
+                    sources[key] = None
+    return sources
 
 
 def rows_by_identity(root: Any, chat_id: Optional[int], ts: str, *, stream: str = "chat") -> List[Row]:

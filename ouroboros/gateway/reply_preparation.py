@@ -162,6 +162,7 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
     known positives either way. Without any awaited reply alive the census is not read.
     """
     from ouroboros.budget_pause import budget_pause_row
+    from ouroboros.chat_references import delivery_transport
     from ouroboros.delegate_feed import current_activity
     from ouroboros.sleep_custody import accepted_receipt
     from ouroboros.gateway.state import _answer_stored, _chat_activities_snapshot_safe, _direct_turns_snapshot_safe
@@ -290,7 +291,7 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
         return None if result is True and _task_activity_facts(drive_root, task_id).get("unavailable") else result
 
     bridge = try_get_bridge()
-    chats: Dict[int, Dict[str, Any]] = {}
+    chats: Dict[tuple, Dict[str, Any]] = {}  # per chat and the Telegram conversation and bot it types in
     roots: List[str] = []
     for task_id, row in rows.items():
         if row.get("parent_task_id") or not (facts.get(task_id) or {}).get("expected"):
@@ -309,7 +310,13 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
         if chat is None:
             continue
         roots.append(task_id)
-        chats.setdefault(chat, {"chat_id": chat, "transport": bridge.chat_transport(chat) if bridge else {}})
+        # An exact Telegram Reply's own turn types where it was asked; its room's binding stays its own. Only a
+        # host-proven Telegram address (``host_address``: its bot and chat are strings) splits a chat; any other
+        # connector's transport, whatever its values, is the chat's.
+        transport = delivery_transport(drive_root, bridge.chat_transport(chat) if bridge else {}, task_id)
+        proven = transport.get("host_address") and transport.get("kind") == "telegram"
+        key = (chat, str(transport.get("conversation_id")), str(transport.get("bot_id"))) if proven else (chat,)
+        chats.setdefault(key, {"chat_id": chat, "transport": transport})
     return {"complete": availability["complete"], "chats": list(chats.values()), "roots": sorted(roots)}
 
 

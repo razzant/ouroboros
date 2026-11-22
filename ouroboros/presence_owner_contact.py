@@ -95,7 +95,8 @@ def private_main_row(row: dict) -> bool:
     Classification only. ``room_membership.row_rooms`` owns where it is shown: Main and the
     internal Project its work lives in, never the place room that occasioned it."""
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else {}
-    return row.get("chat_id") == 1 and private_main_contact(
+    from ouroboros.chat_chain import _row_chat_id
+    return _row_chat_id(row) == 1 and private_main_contact(
         row if row.get("presence_contact") else quiz, row.get("task_id"))
 
 

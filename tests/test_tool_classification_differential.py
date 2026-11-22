@@ -689,6 +689,13 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # review_collection) publish native LEGACY_UNAVAILABLE; the bare `_BUSY` warning is the retired chain's ok.
     "REVIEW_STATE_BUSY": (False, "ok"),
     "native:LEGACY_UNAVAILABLE:REVIEW_STATE_BUSY": (True, "unavailable"),
+    # join_ledger leaves the disposition unrecorded while child custody is held.
+    # This plain warning uses the generic legacy bucket, not a typed success receipt.
+    "CHILD_RESULT_DISPOSITION_BUSY": (False, "ok"),
+    # #3687 loop_completion_schema.fixed_refusal: an older schedule's frozen ceiling fixes message/answer_sha256 on
+    # presence_finish, refused before Safety/staging with native ACCESS_BLOCKED; bare `_ARGUMENT` is generic ok.
+    "SCHEDULE_REPORT_FIXED_ARGUMENT": (False, "ok"),
+    "native:ACCESS_BLOCKED:SCHEDULE_REPORT_FIXED_ARGUMENT": (True, "blocked"),
 }
 
 
