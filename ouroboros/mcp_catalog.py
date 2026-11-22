@@ -312,12 +312,15 @@ def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
 
 def clear_sign_in_refusal(cfg: Any) -> bool:
     """After the owner signed in: forget a call record whose open series is the sign-in requirement (a transport
-    failure stays, its server may still be down). True when it was removed; a busy lock is a writer's newer mark."""
+    failure stays, its server may still be down). True when it was removed. Never raises, so the record's own
+    trouble never undoes the sign-in: a busy lock is a writer's newer mark, and a record that cannot be removed
+    now (a file another process holds open) is kept with a diagnostic; the next changed call replaces it, and a
+    later sign-in removes it while it still holds this refusal."""
     from ouroboros import store
 
-    if (latest_call(cfg) or {}).get("code") != "MCP_AUTH_REQUIRED":
-        return False
     try:
+        if (latest_call(cfg) or {}).get("code") != "MCP_AUTH_REQUIRED":
+            return False
         with store.name_lock(config.DATA_DIR, f"mcp/calls/server-{cfg.id}.lock", timeout_sec=0):
             data = read_json_dict(calls_path(cfg.id)) or {}
             if (data.get("server_id"), data.get("identity")) != (cfg.id, identity(cfg)) or (
@@ -326,6 +329,10 @@ def clear_sign_in_refusal(cfg: Any) -> bool:
             calls_path(cfg.id).unlink(missing_ok=True)
             return True
     except store.StoreBusy:
+        return False
+    except Exception:  # noqa: BLE001 - kept until a changed call or a later sign-in
+        log.warning("MCP call record of %s kept after sign-in: it could not be removed now", getattr(cfg, "id", "?"),
+                    exc_info=True)
         return False
 
 
