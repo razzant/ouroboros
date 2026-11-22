@@ -140,7 +140,8 @@ test('a start the window took from Max is Low for now beside the owner\'s Max, o
     const census = (applied, cause) => [{ chat_id: 1, activity_id: 'w', task_attempt: 1, context_attempt: {
         attempt_id: 'a', ledger_state: 'dispatched', task_attempt: 1, applied, books: 'maps', cause,
         preferred_at_send: 'max', observed_at: at } }];
-    for (const cause of ['memory', 'request', 'route']) {
+    // A row of 17-22 Nov whose tool schemas tipped the start recorded `window`: the same Low for now (Astra 9).
+    for (const cause of ['memory', 'request', 'route', 'window']) {
         const said = causeOf({ preferred_at_send: 'max', applied: 'low', cause }, 'max');
         assert.match(said, /^Low for now, not Max: /, cause);
         for (const effective of ['low', 'max']) {
@@ -154,6 +155,9 @@ test('a start the window took from Max is Low for now beside the owner\'s Max, o
             assert.ok(shown.fact.text.startsWith(said), cause);
         }
     }
+    assert.equal(causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'window' }, 'max'),
+        'Low for now, not Max: the whole books did not fit beside the rest of the start.');
+    assert.equal(causeOf({ preferred_at_send: 'low', applied: 'nano', cause: 'window' }, 'low'), 'Low did not fit at the start.');
     assert.equal(taskCheckpointLabel(row({ cause: 'after_start', effective_mode: 'max' })), 'The work moved to Low after it started.');
     // A row written before the books' form was kept tells the same start in the same words.
     const old = row({ books: undefined, cause: 'memory' });
