@@ -320,3 +320,22 @@ def test_a_missing_entry_file_is_its_own_reason_after_the_lifecycle_ones(tmp_pat
     _script(tmp_path, "off-but-whole", enabled=False)
     [whole] = [row for row in summarize_skills(tmp_path)["skills"] if row["name"] == "off-but-whole"]
     assert skill_status(whole)["reasons"] == ["skill_disabled"]
+
+
+def test_a_long_off_purpose_is_cut_as_the_cards_cut_it_and_names_where_it_is_whole(tmp_path):
+    """The full form cut an Off skill's purpose at 120 characters with no address (RV1 A6b): an evaluation rule in a
+    shipped skill's description was lost to a reader whose role cannot call list_skills."""
+    _skill(tmp_path, "short-off", enabled=False)
+    folder = tmp_path / "skills" / "external" / "long-off"
+    folder.mkdir(parents=True)
+    description = "Design guidance for pages. " * 14 + "Judge the result by eye at its real size, every time it changes."
+    (folder / "SKILL.md").write_text(f"---\nname: long-off\ndescription: {json.dumps(description)}\nversion: '1'\n"
+                                     "type: instruction\n---\nB\n", encoding="utf-8")
+    full = _section(tmp_path).full_text
+    [line] = [line for line in full.splitlines() if line.startswith("- long-off: ")]
+    assert line.startswith("- long-off: " + description[:260])
+    assert "OMISSION NOTE: truncated at 260 chars" in line
+    assert line.endswith("Whole text: read_file(root='skill_payload', bucket='external', skill_name='long-off', "
+                         "path='SKILL.md'). (Off: never turned on)")
+    [short] = [line for line in full.splitlines() if line.startswith("- short-off: ")]
+    assert short == "- short-off: Purpose of short-off."

@@ -369,6 +369,16 @@ def _status_lines(status: dict, field: Any, row: dict) -> List[str]:
     return first + [f"Note: {field(note, 200)}" for note in status["notes"]]
 
 
+def _purpose(row: dict, field: Any) -> str:
+    """A skill's purpose as the cards bound it (260 characters, a labelled cut), naming its manifest's ``read_file``
+    address, which every actor profile opens, when the cut leaves part of it out."""
+    purpose = field(row.get("description"), 260) or "No description."
+    if purpose != field(row.get("description"), 1 << 20) and row.get("location") and row.get("manifest_file"):
+        purpose += (f" Whole text: read_file(root='skill_payload', bucket={str(row['location'])!r}, "
+                    f"skill_name={str(row['name'])!r}, path={str(row['manifest_file'])!r}).")
+    return purpose
+
+
 def _append_unadmitted(lines: List[str], operative: List[str], rows: List[Any], root: Any, field: Any,
                        off_state: Any, skill_status: Any, unlisted: List[str]) -> None:
     """After the admitted cards: enabled skills no review admits (each with its purpose and first reason in both
@@ -381,7 +391,7 @@ def _append_unadmitted(lines: List[str], operative: List[str], rows: List[Any], 
         if not name or name in seen or (row.get("enabled") and row.get("executable_review")):
             continue
         seen.add(name)
-        status, purpose = skill_status(row), field(row.get("description"), 120) or "No description."
+        status, purpose = skill_status(row), _purpose(row, field)
         if row.get("enabled"):
             reason = _first_reason(status, row, field)
             unadmitted.append((f"- {name} ({field(row.get('type') or 'skill', 40)}): {purpose} "
