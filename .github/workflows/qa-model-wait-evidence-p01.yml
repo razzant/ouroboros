@@ -1,0 +1,138 @@
+name: Model wait evidence qualification
+on:
+  push:
+    branches: ['qa/model-wait-evidence-p01-20261122']
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    env:
+      BASE: '259a8eb55b44b0723523b09cc9085643c6570a72'
+      PRODUCT: '79cd45756f9479138a4325ab1caed36e0ce98881'
+      PRODUCT_TREE: '12c5e3f30d40fe54e29b542d42e16d9394c34eea'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind this workflow to the exact isolated tree
+        id: subject
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-list --parents -1 HEAD)" == "$GITHUB_SHA $PRODUCT" ]]
+          [[ "$(git rev-list --parents -1 "$PRODUCT")" == "$PRODUCT $BASE" ]]
+          [[ "$(git rev-parse "$PRODUCT^{tree}")" == "$PRODUCT_TREE" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT" HEAD)" == $'A\t.github/workflows/qa-model-wait-evidence-p01.yml' ]]
+          mkdir -p "$RUNNER_TEMP/wait-proof"
+          git checkout --detach "$PRODUCT"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Install locked test dependencies
+        id: deps
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Exercise wait admission, receipts, clocks and control
+        id: product
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -I -S scripts/safe_test.py --timeout 230 --evidence-dir "$RUNNER_TEMP/wait-raw-product" -- \
+            python -m pytest -q --tb=short --show-capture=no -o 'addopts=' -o 'junit_family=xunit1' \
+            tests/test_model_wait.py tests/test_model_wait_controls.py tests/test_primary_quota_observation.py \
+            tests/test_subscription_main_wait.py::test_quota_auto_wait_rejoins_same_round_then_repairs_changed_account \
+            tests/test_subscription_main_wait.py::test_unknown_main_outcome_never_retries_or_waits_for_quota \
+            tests/test_subscription_main_wait.py::test_a_wait_card_switch_sends_the_list_fitted_to_the_chosen_routes_ceiling \
+            --junitxml="$RUNNER_TEMP/wait-product.xml"
+      - name: Check size, book balance and owning contracts
+        id: structural
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.BASE }}
+          OURO_BOOK_GROWTH_MODE: block
+        run: |
+          set -euo pipefail
+          env -u GITHUB_EVENT_NAME -u GITHUB_REF python -I -S scripts/safe_test.py --timeout 110 \
+            --evidence-dir "$RUNNER_TEMP/wait-raw-size" -- python -m pytest -q --tb=line -o 'addopts=' \
+            -m size_ratchet tests/test_post_merge_check.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py \
+            --junitxml="$RUNNER_TEMP/wait-size.xml"
+          python -I -S scripts/safe_test.py --timeout 105 --evidence-dir "$RUNNER_TEMP/wait-raw-contract" -- \
+            python -m pytest -q --tb=short -o 'addopts=' tests/test_domain_manifest.py tests/test_generated_inventories.py \
+            --junitxml="$RUNNER_TEMP/wait-contract.xml"
+      - name: Install the pinned Node and Chromium
+        id: browser_install
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/wait-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node --pinned-chromium chromium
+      - name: Check the live wait card with synthetic facts
+        id: ui
+        if: ${{ !cancelled() && steps.browser_install.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/wait-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/wait-proof
+        run: |
+          set -euo pipefail
+          ./node-standalone/bin/node --test web/tests/model_wait.test.js
+          xvfb-run -a python -I -S scripts/safe_test.py --timeout 220 --evidence-dir "$RUNNER_TEMP/wait-raw-ui" -- \
+            python -m pytest -q --tb=short --show-capture=no -o 'addopts=' -m ui_browser \
+            tests/test_model_wait_browser.py::test_engine_wait_follows_the_access_its_refusal_proved_and_offers_sign_in_only_for_authentication \
+            tests/test_model_wait_browser.py::test_an_unconfirmed_quota_wait_keeps_its_control_and_promises_no_quota \
+            tests/test_model_wait_browser.py::test_proven_authentication_opens_the_exact_profiles_sign_in \
+            tests/test_model_wait_browser.py::test_auth_opens_existing_accounts_login_for_the_exact_profile \
+            tests/test_model_wait_browser.py::test_direct_api_wait_never_offers_subscription_login_or_auto_rotation \
+            --junitxml="$RUNNER_TEMP/wait-browser.xml"
+      - name: Retain case results on this subject
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        env:
+          PRODUCT_OUTCOME: ${{ steps.product.outcome }}
+          STRUCTURAL_OUTCOME: ${{ steps.structural.outcome }}
+          UI_OUTCOME: ${{ steps.ui.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          proof = root / 'wait-proof'
+          fields = ('BASE', 'PRODUCT', 'PRODUCT_TREE', 'GITHUB_SHA', 'PRODUCT_OUTCOME', 'STRUCTURAL_OUTCOME', 'UI_OUTCOME')
+          report = {key.lower(): os.environ[key] for key in fields}
+          report['cases'] = {}
+          for lane in ('product', 'size', 'contract', 'browser'):
+              try:
+                  cases = list(ET.parse(root / f'wait-{lane}.xml').iter('testcase'))
+              except (OSError, ET.ParseError):
+                  cases = []
+              report['cases'][lane] = [[row.get('classname'), row.get('name'), next(
+                  (word for word in ('failure', 'error', 'skipped') if row.find(word) is not None), 'passed')]
+                  for row in cases]
+          report['images'] = sorted(p.name for p in proof.glob('waiting-access-*.png'))
+          (proof / 'summary.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          print({lane: len(rows) for lane, rows in report['cases'].items()})
+          if any(os.environ[key] != 'success' for key in fields[-3:]) or any(
+              not rows or any(case[-1] != 'passed' for case in rows) for rows in report['cases'].values()):
+              raise SystemExit('Qualification did not pass all required lanes')
+          if not all(any(tag in name for name in report['images']) for tag in ('quota-narrow', 'quota-unconfirmed-narrow')):
+              raise SystemExit('The visually distinguishable mobile witnesses were not retained')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        with:
+          name: model-wait-evidence-proof
+          path: |
+            ${{ runner.temp }}/wait-proof/summary.json
+            ${{ runner.temp }}/wait-proof/waiting-access-*.png
+          if-no-files-found: error
+          retention-days: 7
