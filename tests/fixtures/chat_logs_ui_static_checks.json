@@ -1107,13 +1107,13 @@
     "id": "test_inflight_routing_receipt_retires_pending",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (receiptCid && pendingSubmissions.delete(receiptCid)) {"
+    "value": "if (own && receiptCid && Number(msg.chat_id ?? 1) === chatId &&\n                (msg.source_row_address ? msg.source_row_address === pendingSubmissions.get(receiptCid)?.rowAddress : msg.source_row_address !== '') &&\n                pendingSubmissions.delete(receiptCid)) {"
   },
   {
     "id": "test_inflight_history_annotation_retires_pending",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (msg.chat_annotation && msg.client_message_id) {"
+    "value": "if (msg.chat_annotation && localOwnerRow(msg) && msg.client_message_id &&\n                            (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {"
   },
   {
     "id": "test_inflight_history_annotation_retires_pending",
@@ -1137,7 +1137,7 @@
     "id": "test_inflight_reconnect_user_row_retires_pending",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (fromReconnect && msg.role === 'user' && msg.client_message_id) {"
+    "value": "if (fromReconnect && msg.role === 'user' && localOwnerRow(msg) && msg.client_message_id) {"
   },
   {
     "id": "test_inflight_queue_eviction_retires_pending",
