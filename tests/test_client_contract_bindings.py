@@ -322,8 +322,8 @@ def test_every_published_and_owned_shape_has_one_field_identical_browser_twin():
 
 
 @pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "WorkPendingRoute", "CitedModelWords", "WorkProcessing", "ProcessingReceipt",
-                                  "ProcessingTiers"])
-def test_nested_lead_provenance_has_a_field_identical_browser_twin(name):
+                                  "ProcessingTiers", "WorkMembers", "WorkMemberState"])
+def test_nested_work_contracts_have_a_field_identical_browser_twin(name):
     # Inline schemas do not appear in the published document's top-level name list.
     text = (REPO / "web" / "modules" / "work_types.js").read_text(encoding="utf-8")
     assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"work contract twins lack {name}"

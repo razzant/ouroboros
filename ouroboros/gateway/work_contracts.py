@@ -215,7 +215,7 @@ class WorkTail(TypedDict):
     """What still runs beside or after the current episode, said as a second fact, never as the work's word."""
 
     kind: str  # helper | run | review | model
-    state: str  # live | unknown | held (a helper a sleeping episode chose, paused until its Resume)
+    state: str  # live | unknown | open (an observed inactive run) | held (a paused helper)
     code: str
     text: str
     count: NotRequired[int]
@@ -249,9 +249,26 @@ class WorkEpisode(TypedDict):
     live: bool
 
 
+class WorkMemberState(TypedDict):
+    """One task's own activity. Concurrent execution is reported separately in its addressed tails."""
+
+    activity: Literal["working", "queued", "waiting", "paused", "unknown"]
+    transition: Literal["none", "finalizing", "pausing"]
+    call: Literal["", "preparing", "sending", "thinking", "working"]
+    live: bool  # this task executes, independent of its external runs
+    release: Literal["self", "owner", "mind", "none"]
+    confirmed: bool
+    turn: List[WorkTurn]
+    because: List[WorkReason]
+    tails: List[WorkTail]  # run/review IDs are external run IDs; model IDs are attempt IDs
+    mark: str  # the member's own mark, independent of its tails
+    queue_attempt: NotRequired[int]  # observed queue ordinal of this member's state, not an executor ordinal
+    last_resume: NotRequired[LastResume]
+
+
 class WorkMembers(TypedDict):
     ids: List[str]
-    states: NotRequired[Dict[str, Dict[str, Any]]]
+    states: NotRequired[Dict[str, WorkMemberState]]
 
 
 class WorkFocus(TypedDict):

@@ -1141,6 +1141,12 @@ def restore_verdict(task: Dict[str, Any]) -> str:
     return _restore_reading(task)[0]
 
 
+def schedule_refusal_basis(verdict: str) -> str:
+    """What the occurrence read established when it could not authorize replay."""
+    return {"possible": "dispatch_unconfirmed", "settled": "schedule_settled",
+            "busy": "schedule_receipt_busy"}.get(verdict, "schedule_receipt_unverified")
+
+
 def _restore_reading(task: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
     """``replay``: the receipt is readable, ours, still ``scheduled`` and never marked
     dispatchable. ``possible``: the receipt or row positively says a handoff may have

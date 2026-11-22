@@ -156,7 +156,7 @@ test('the live progress path forwards every progress field the endpoint emits an
     // (settled_card.js) and hands it WHOLE to updateSubagentCardFromEvent. Forgetting the
     // delegation keys in that frame keeps a log-channel-only card at "no run yet"
     // forever — the exact defect family this file was written for.
-    assert.match(chat, /updateSubagentCardFromEvent\(terminalChildFrame\(childId, info, evt\)/,
+    assert.match(chat, /updateSubagentCardFromEvent\(terminalChildFrame\(childId, info, evt, phase\)/,
         'routeSubagentTerminalToCard must pass the whole synthesized frame to updateSubagentCardFromEvent');
     const settled = moduleFile('settled_card.js');
     const frameBuilders = settled.split('export function terminalChildFrame').slice(1)
@@ -318,7 +318,19 @@ test('live structured delivery frames keep additive grouping and size fields', (
 });
 
 test('history typedef declares task outcome terminality fields', () => {
-    const types = moduleFile('api_types.js');
-    assert.match(types, /@property \{"working"\|"done"\|"warn"\|"error"\|"cancelled"=\} outcome_phase/);
-    assert.match(types, /@property \{boolean=\} outcome_final/);
+    // The additive outcome fields now live in the replaceable-client mirror.
+    // Pin TaskOutcomeHistoryFields' own block: the same mirror carries a second,
+    // looser {string=} outcome_phase with its own {boolean=} outcome_final further
+    // down, so a file-wide match could pass even if this history typedef dropped
+    // either field. The enum values are the Python producer's own set
+    // (project_dialogue.outcome_phase: working/done/warn/error/cancelled), now
+    // spelled with single quotes.
+    const types = moduleFile('client_contract_types.js');
+    const start = types.indexOf('@typedef {Object} TaskOutcomeHistoryFields');
+    assert.notEqual(start, -1, 'TaskOutcomeHistoryFields typedef not found — the contract moved, update this test');
+    const end = types.indexOf('*/', start);
+    assert.notEqual(end, -1, 'TaskOutcomeHistoryFields typedef closer not found — update this test');
+    const block = types.slice(start, end);
+    assert.match(block, /@property \{'working'\|'done'\|'warn'\|'error'\|'cancelled'=\} outcome_phase/);
+    assert.match(block, /@property \{boolean=\} outcome_final/);
 });

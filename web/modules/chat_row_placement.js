@@ -7,6 +7,11 @@ import { isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_a
 // refused, never its speaker; it stays the issuing chat's own row.
 export const ORIGIN_ADDRESSED_NOTICE_TYPES = new Set(['task_not_started', 'task_start_unconfirmed', 'steer_not_delivered', 'relay_reply']);
 
+export function referencesTaskOnly(row) {
+    return ORIGIN_ADDRESSED_NOTICE_TYPES.has(row.system_type)
+        || ['project_question_pointer', 'quiz_answer', 'quiz_closed'].includes(row.system_type);
+}
+
 /**
  * Where a known child's non-progress, unplaced row goes: a routing notice stays a row
  * of the conversation (''), the child's own words (send_user_message) are a line of
@@ -24,6 +29,7 @@ export function childRowPlacement(row) {
  */
 export function replayConcludesTask(row) {
     return (row.role === 'assistant' || row.role === 'system')
+        && !referencesTaskOnly(row)
         && (positiveTaskTerminalFact(row) || (!row.system_type && !row.msg_type && row.task_phase !== 'unfinished'))
         && !isNonTerminalMediaHistoryRow(row);
 }

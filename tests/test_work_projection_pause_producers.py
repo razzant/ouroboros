@@ -59,6 +59,104 @@ def test_a_warm_sleep_waits_only_on_its_current_attempt_and_a_pause_still_wins(t
     assert not {"wrap_up", "hurry"} & {control["action"] for control in work["controls"]}
 
 
+def test_a_sleeping_then_queued_child_keeps_its_own_external_run(tmp_path, monkeypatch):
+    from ouroboros import delegate_custody
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _live_tree(tmp_path, workers)
+    run = {"run_id": "native-1", "task_id": "child-run", "root_task_id": "root-1"}
+    assert delegate_custody.emit(tmp_path, delegate_custody.STARTED, run)
+    worker = workers.RUNNING["child-run"]
+    worker["owner_wait"] = {"state": "waiting", "reason": "sleep", "task_attempt": 1,
+                            "sleep": {"mode": "warm", "runs": ["native-1"]}}
+
+    def check(activity, reason, open_run=True):
+        [work] = _works(tmp_path)
+        states = work["members"]["states"]
+        child = states["child-run"]
+        assert (child["activity"], child["live"], child["call"], child["mark"]) == (activity, False, "", "still")
+        assert [entry["code"] for entry in child["because"]] == [reason]
+        if reason == "sleeping":
+            assert child["because"][0]["wake"] == [{"kind": "runs", "count": 1}]
+        assert [(t["code"], t["ids"]) for t in child["tails"]] == (
+            [("external_runs_unconfirmed", ["native-1"])] if open_run else [])
+        assert [rid for tail in work["tails"] for rid in tail["ids"]] == (["native-1"] if open_run else [])
+        assert states["root-1"]["tails"] == []
+        assert (states["child-new"]["activity"], states["child-new"]["live"], states["child-new"]["tails"]) == (
+            "queued", False, [])
+        assert work["activity"] == "working" and {c["target"] for c in work["controls"]} == {"root-1"}
+
+    check("waiting", "sleeping")
+    task = workers.RUNNING.pop("child-run")["task"]
+    task["_budget_pause"] = {"rail": "model_sleep", "reason": "sleep", "exact_continuation": True,
+                             "sleep": {"mode": "cold", "runs": ["native-1"]}}
+    workers.PENDING.append(task)
+    check("waiting", "sleeping")
+    task["_budget_pause_resume"] = {"selected_by": "sleep_wake", "pause": task.pop("_budget_pause"),
+                                    "external_runs": {"custody_read": "ok", "runs": [{**run, "state": "running"}]}}
+    check("queued", "queued")
+    # The old observation on the wake grant cannot outlive the engine's terminal observation.
+    assert delegate_custody.emit(tmp_path, delegate_custody.TERMINAL_OBSERVED, {
+        **run, "state": "succeeded", "observation_seq": 1, "source_ref": {"sha256": "0" * 64}})
+    check("queued", "queued", open_run=False)
+
+
+def test_nested_runs_need_a_current_observation_of_their_own_executor(tmp_path, monkeypatch):
+    from ouroboros import budget_pause, delegate_collection, delegate_custody, delegate_feed, external_runs
+    from ouroboros.gateway.work_projection import unconfirmed_stops
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _live_tree(tmp_path, workers)
+    a = {"task_id": "child-run", "run_id": "job-a", "invocation_id": "inv-a", "root_task_id": "root-1"}
+    b = {"task_id": "child-new", "run_id": "run-b", "invocation_id": "inv-b", "root_task_id": "root-1"}
+    workers.RUNNING["root-1"]["owner_wait"] = {
+        "state": "waiting", "reason": "sleep", "task_attempt": 1, "sleep": {"mode": "warm"}}
+    for run in (a, b):  # a jobId-only receipt uses that id as its custody run_id
+        assert delegate_custody.emit(tmp_path, delegate_custody.STARTED, run)
+    workers.RUNNING["child-run"]["owner_wait"] = {
+        "state": "waiting", "reason": "sleep", "task_attempt": 1, "sleep": {"mode": "warm", "runs": ["job-a"]}}
+    failed = external_runs.observe_task_runs(tmp_path, "child-run", request_stop=False, read_error="unavailable")
+    assert failed["custody_read"] == "failed" and failed["runs"] == []
+    budget_pause.set_budget_pause(tmp_path, "child-run", {"state": budget_pause.STATE_PAUSED,
+                                                         "pause_id": "a", "external_runs": failed})
+    assert unconfirmed_stops(tmp_path, a["task_id"]) is None
+    assert unconfirmed_stops(tmp_path, b["task_id"]) == frozenset()
+    now = 100.0
+    monkeypatch.setattr(delegate_feed, "time", SimpleNamespace(monotonic=lambda: now))
+    seen = {"run-b": {**b, "run_state": "running", "answered": True, "at": now}}
+    monkeypatch.setattr(delegate_collection, "body_runtime", lambda root: SimpleNamespace(
+        observation=lambda rid: seen.get(rid, {})))
+
+    def check(a_state, b_state):
+        [work] = _works(tmp_path)
+        states = work["members"]["states"]
+        for run, state, reason in ((a, a_state, "sleeping"), (b, b_state, "queued")):
+            member = states[run["task_id"]]
+            assert not member["live"] and member["because"][0]["code"] == reason
+            assert [(tail["state"], tail["ids"]) for tail in member["tails"]] == [(state, [run["run_id"]])]
+        assert not states["root-1"]["tails"]
+        assert {rid: tail["state"] for tail in work["tails"] for rid in tail["ids"]} == {
+            a["run_id"]: a_state, b["run_id"]: b_state}
+        assert work["live"] is ("live" in (a_state, b_state))
+        assert [c for c in work["controls"] if c["action"] == "stop"] == [
+            {"action": "stop", "target": "root-1", "scope": "cascade"}]
+
+    check("unknown", "live")
+    fresh = {**a, "answered": True, "run_state": "running", "at": now}
+    for mismatch in ({"task_id": "child-new"}, {"run_id": "run-b"}, {"invocation_id": "old"},
+                     {"answered": False}, {"at": now - delegate_feed._OBSERVATION_CURRENT_SEC - 1}):
+        seen["job-a"] = {**fresh, **mismatch}
+        check("unknown", "live")
+    seen["job-a"] = {**fresh, "run_state": "queued"}
+    seen["run-b"]["waiting_on_user"] = True
+    check("open", "open")
+    seen.pop("job-a")
+    check("unknown", "open")
+    seen["job-a"] = fresh
+    seen["run-b"]["async_questions_only"] = True
+    check("live", "live")
+
+
 def test_a_settling_pause_says_what_still_executes_and_a_stop_nobody_confirmed(tmp_path, monkeypatch):
     from ouroboros import budget_pause, delegate_custody
     from supervisor.events_budget import install_exact_budget_pause
@@ -73,7 +171,7 @@ def test_a_settling_pause_says_what_still_executes_and_a_stop_nobody_confirmed(t
     # The root and the running child finish their step; the child that never started is queued, not working.
     assert (work["activity"], work["transition"], work["live"]) == ("working", "pausing", True)
     assert [(tail["code"], tail["state"], tail["ids"]) for tail in work["tails"]] == [
-        ("helpers_running", "live", ["child-run"]), ("delegated_running", "live", ["run-1"])]
+        ("helpers_running", "live", ["child-run"]), ("external_runs_unconfirmed", "unknown", ["run-1"])]
 
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
                           WORKERS=workers.WORKERS, sort_pending=lambda: None,
@@ -89,6 +187,10 @@ def test_a_settling_pause_says_what_still_executes_and_a_stop_nobody_confirmed(t
     assert (work["activity"], work["transition"], work["live"]) == ("paused", "none", False)
     assert [(tail["code"], tail["state"], tail["ids"]) for tail in work["tails"]] == [
         ("external_runs_unconfirmed", "unknown", ["run-1"])]
+    states = work["members"]["states"]
+    assert (states["child-run"]["activity"], states["child-run"]["live"], states["child-run"]["tails"]) == (
+        "paused", False, work["tails"])
+    assert states["root-1"]["tails"] == states["child-new"]["tails"] == []
     assert {"stop", "resume"} <= {control["action"] for control in work["controls"]}, "its Stop still reaches that run"
 
 
@@ -126,6 +228,9 @@ def test_a_warm_park_executes_nothing_and_its_unconfirmed_stop_stays_unconfirmed
     assert (work["activity"], work["transition"], work["live"]) == ("working", "pausing", True)
     assert [(tail["code"], tail["state"], tail["ids"]) for tail in work["tails"]] == [
         ("review_work_finishing", "live", ["review-run"]), ("external_runs_unconfirmed", "unknown", ["own-run"])]
+    states = work["members"]["states"]
+    assert states["child-run"]["tails"] == work["tails"]
+    assert states["root-1"]["tails"] == states["child-new"]["tails"] == []
     # Ouroboros's own roster reads the same tree the same way.
     queue.persist_queue_snapshot(reason="warm-park")
     tree = peer_roster._live_trees(tmp_path, peer_roster._load_queue_snapshot(tmp_path))["root-1"]

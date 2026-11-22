@@ -976,24 +976,24 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
         offset(row) < offset(latest) and str(row.get("ts") or "") > ts and not words(row) for row in feed)}}
 
 
-def replay_evidence_rows(messages, evidence, results=None, drive_root=None):
-    """Carry cross-page evidence only when this page has no equivalent fact. A task's ending-row fact stays as it was
-    recorded; when a late review revised the stored outcome since, the row also carries that current outcome
-    (``late_review_marks.late_current_outcome``), read from the results this page already loaded, never a new read."""
+def replay_evidence_rows(messages, evidence):
+    """Emit the page's annotated receipts once, respecting the phase of an early answer on a visible row."""
+    from ouroboros.project_completion_facts import recorded_ending_details
+
     visible = {row.get("history_id") for row in messages if row.get("history_id")}
     settled = {(row.get("task_id"), row["quiz"].get("quiz_id"), row["quiz"].get("state")) for row in messages
                if row.get("msg_type") == "quiz" and row["quiz"].get("state") in {"answered", "closed"}}
-    terminals = {row["task_id"]: row["historical_terminal"] for row in messages
-                 if row.get("task_id") and row.get("historical_terminal")}
+    terminals = {row["task_id"]: row for row in messages if row.get("task_id") and row.get("historical_terminal")}
     rows = [row for row in evidence if row.get("history_id") not in visible
             and not (row.get("system_type") in {"quiz_answer", "quiz_closed"}
                      and (row.get("task_id"), row["quiz"].get("quiz_id"), row["quiz"].get("state")) in settled)
-            and not (row.get("historical_terminal")
-                     and terminals.get(row.get("task_id")) == row["historical_terminal"])]
-    from ouroboros.late_review_marks import late_current_outcome  # D11->D15
-
+            and not (row.get("historical_terminal") and (other := terminals.get(row.get("task_id")))
+                     and all(other.get(key) == value for key, value in recorded_ending_details(row).items())
+                     and all(other.get(key) == row.get(key) for key in ("historical_terminal", "task_outcome", "current_outcome")))]
+    # A frozen receipt keeps its own ending even when the stored work reopened. It follows a visible early
+    # answer's phase, whichever other row of the task (another attempt's summary) sorts beside it.
+    answered = {row["task_id"] for row in messages if row.get("task_id") and row.get("task_phase") == "finalizing"}
     for row in rows:
-        loaded = (results or {}).get(row.get("task_id")) if row.get("historical_terminal") else None
-        if isinstance(loaded, dict) and (current := late_current_outcome(drive_root, loaded)):
-            row["current_outcome"] = current
+        if row.get("historical_terminal") and row["task_id"] in answered:
+            row.update(task_phase="finalizing", outcome_final=False)
     return rows

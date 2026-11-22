@@ -1127,6 +1127,7 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
         candidate = authority["task"]
         predecessor = str(((candidate.get("metadata") or {}).get("continuation") or {}).get("predecessor_task_id") or "")
         blockers = action_writers(q, predecessor, purpose=CONTINUE_PURPOSE) if predecessor else []
+        basis = ""
         if native_continuation_repair(candidate):
             from ouroboros.owner_wait import restore_owner_wait_allowed
 
@@ -1135,8 +1136,10 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
                 root = pathlib.Path(candidate.get("budget_drive_root") or q.DRIVE_ROOT)
                 safe = restore_owner_wait_allowed(root, candidate, strict=True)
                 error = "" if safe else "dispatch_outcome_unknown"
+                if not safe:
+                    basis = "saved_wait_unverified"
         else:
-            safe, error = pending_member_replay_safe(q, candidate)
+            safe, error, basis = pending_member_replay_safe(q, candidate)
         try:  # read here, off Q: the selection that records it holds the queue lock
             from supervisor.task_admission import prestart_returned_unsent
 
@@ -1144,7 +1147,7 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
         except Exception:
             prestart = {"prestart_proof_unreadable": True}  # the selection then keeps its hold's result as it is
         return {"candidate": task, "authority": authority, "blockers": blockers,
-                "safe": safe, "unsafe_error": error, **prestart}
+                "safe": safe, "unsafe_error": error, **({"refusal_basis": basis} if basis else {}), **prestart}
     except Exception:
         log.warning("Held selection observation unavailable for %s", task_id, exc_info=True)
         return {"error": "selection_observation_unavailable"}
@@ -1173,6 +1176,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
             or selection_record(task) != hold):
         return {"ok": False, "error": "selection_authority_changed"}
     from ouroboros.control_actor import control_actor, observed_control_stop
+    from ouroboros.work_stop import unsafe_replay_response
     if refusal := release_refusal(observed_control_stop(
             result_root, task, budget=q.BUDGET_ROOT_FENCES, owner=current["owner_fence"]), control_actor()):
         return refusal
@@ -1204,7 +1208,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         if (hold.get("root_grant_id") and str(hold["root_grant_id"]) != root_grant["grant_id"]):
             return {"ok": False, "error": "root_resume_generation_stale",
                     "root_task_id": root_task_id, "action": "resume_root_first"}
-    safe, unsafe_error = observation["safe"], observation["unsafe_error"]
+    safe = observation["safe"]
     if not safe and record_policy(hold).get("needs_source") and "_working_recovery" not in task:
         # Its attempt saved nothing: the fact is a missing continuation, not an unknown dispatch (#1729).
         from ouroboros.budget_pause import RESTORE_REFUSAL_SOURCE_MISSING
@@ -1212,7 +1216,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         return {"ok": False, "error": RESTORE_REFUSAL_SOURCE_MISSING, "action": "cancel_or_new_run",
                 "detail": "stopped while pausing, before anything was saved: there is nothing to continue"}
     if not safe:
-        return {"ok": False, "error": unsafe_error, "action": "cancel_or_new_run"}
+        return unsafe_replay_response(observation)
     if writers:
         return resume_into_writer_wait(q, task, writers, predecessor=str(continuation["predecessor_task_id"]),
                                        result_root=result_root, root_task_id=root_task_id)

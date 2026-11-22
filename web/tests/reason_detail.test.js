@@ -883,16 +883,18 @@ test('a canonical review PASS without a decision does not resurrect the legacy p
 // shipped ones, so a helper that drops a fact fails here rather than in a re-implementation of it.
 function liveSubagentTerminalRoute({ records = new Map(), onFrame = () => true, onHydrate = () => {} } = {}) {
     const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    const start = chatSource.indexOf('    function routeSubagentTerminalToCard(childId, evt');
+    // Slice by the function's own name: its phase default comes from the real selector, so the
+    // harness injects `taskTerminalPhase` instead of pinning a signature that travels with it.
+    const start = chatSource.indexOf('    function routeSubagentTerminalToCard(');
     const end = chatSource.indexOf('\n    function updateLiveCardFromLogEvent(evt) {', start);
     assert.ok(start > 0 && end > start, 'the live route moved — update this test');
     const parents = new Map([['kid-r', { parentId: 'root', role: 'scout' }], ['kid-s', { parentId: 'root', role: 'scout' }]]);
     return Function('subagentChildParents', 'liveCardRecords', 'terminalChildFrame', 'updateSubagentCardFromEvent',
-        'noteHandoverAttempt', 'withStableViewport', 'hydrateOpenSettledChild', 'hydrateCardReviews', 'taskDoneIsTerminal',
+        'noteHandoverAttempt', 'withStableViewport', 'hydrateOpenSettledChild', 'hydrateCardReviews', 'taskDoneIsTerminal', 'taskTerminalPhase',
         `${chatSource.slice(start, end)}\nreturn routeSubagentTerminalToCard;`)(
         parents, records, terminalChildFrame, onFrame, noteHandoverAttempt,
         () => {},  // the viewport writer: the stored read's own paint, not this witness's business
-        onHydrate, () => {}, taskDoneIsTerminal);
+        onHydrate, () => {}, taskDoneIsTerminal, taskTerminalPhase);
 }
 
 test('the real routeSubagentTerminalToCard forwards cause facts and only the carried text', () => {

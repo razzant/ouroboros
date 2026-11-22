@@ -157,13 +157,13 @@ def test_terminal_row_keeps_the_custody_fact_its_phase_uses(tmp_path):
         assert projected.get("delegated_runs_unreconciled") == debt
 
 
-@pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
-def test_a_late_pass_gives_the_ending_row_the_current_outcome_beside_its_recorded_phase(tmp_path, monkeypatch, verdict):
+@pytest.mark.parametrize(("verdict", "with_progress"), [("PASS", True), ("PASS", False), ("FAIL", False)])
+def test_a_late_pass_gives_the_ending_row_the_current_outcome_beside_its_recorded_phase(tmp_path, monkeypatch, verdict, with_progress):
     """The ending row stays the observation it recorded (Done with warnings: Ouroboros finished before its reviewers
     answered). When the late review then PASSes exactly the delivered answer, the same history read also carries the
     task's current outcome (``late_review_marks.late_current_outcome``, the one the live event carries), so a reload
     reads what the open card shows; a late FAIL adds nothing."""
-    from ouroboros import review_ledger
+    from ouroboros import late_review_marks, review_ledger
     from ouroboros.late_review_marks import resolve_pending_result_review
     from ouroboros.outcomes import _objective_axis
 
@@ -176,14 +176,26 @@ def test_a_late_pass_gives_the_ending_row_the_current_outcome_beside_its_recorde
                                reason_code="final_message", outcome_axes={
                                    "execution": {"status": "ok"}, "review": review, "objective": _objective_axis(review)})
     ending = _project_row("late-task", stored, {}, {"chat_id": 1})
-    dialogue_store.append(tmp_path, "progress", {"task_id": "late-task", "chat_id": 1, "content": "Checking",
-                                                 "ts": ending["ts"], "narration": True})
+    if with_progress:
+        dialogue_store.append(tmp_path, "progress", {"task_id": "late-task", "chat_id": 1, "content": "Checking",
+                                                     "ts": ending["ts"], "narration": True})
     dialogue_store.append(tmp_path, "chat", ending)
     monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
         "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": verdict}})
     assert resolve_pending_result_review(tmp_path, "late-task", "rec-1") is (verdict == "PASS")
+    reads = []
+    lookup = late_review_marks.late_current_outcome
+
+    def counted(root, stored):
+        reads.append(stored["task_id"])
+        return lookup(root, stored)
+
+    monkeypatch.setattr(late_review_marks, "late_current_outcome", counted)
     response = json.loads(_assemble_history_response(tmp_path, 1, 50, 200))
+    assert reads.count("late-task") == 1
     [evidence] = [row for row in response["messages"] if row.get("task_id") == "late-task" and row.get("historical_terminal")]
+    if not with_progress:
+        assert [row for row in response["messages"] if row.get("task_id") == "late-task"] == [evidence]
     assert evidence["historical_terminal"]["phase"] == "warn", "the ending row stays as it was recorded"
     if verdict == "PASS":
         current, row = evidence["current_outcome"], load_task_result(tmp_path, "late-task")
