@@ -1,0 +1,436 @@
+# Focused synthetic verification of the Resume fix (#3428) — TEMPORARY BRANCH TOOLING.
+#
+# Trigger: push to `ci/verify-resume-3428` only. The tested tree is the pinned product head
+# (the fix commit), never this branch's tip: the QA commit adds only these two files, and
+# the first step detaches to the product SHA, so nothing here reaches ouroboros/ or web/.
+# No secrets, no provider calls, no uploads of raw reports or log bodies.
+#
+# Two jobs, independent (a red sibling never masks a neighbour). Inside the focused job the
+# preparation chain — checkout, the product-head pin, the interpreter, the journal probe, the
+# Windows POSIX utilities, the report checker — is one gate: "Preparation is complete" succeeds
+# only when every preparation step did, and every test step (each pytest group, its JUnit
+# check, the Linux-only lanes) runs exactly `if: !cancelled() && steps.ready.outcome == 'success'`.
+# A group's red therefore never skips its siblings, and a failed or skipped preparation is
+# never bypassed: nothing runs on an unpinned tree. No step uses continue-on-error, so every
+# failure stays red.
+#   focused (linux WAL + windows PERSIST) — one narrow matrix over the Resume surfaces the fix
+#     touched, the unknown-start Stop-authority doors, and the real nodes for a late reviewer
+#     correction, planned restarts and the roster/Stop. Linux additionally pays the size lane
+#     against the product's own parent and the domain/docs inventories, and both OS legs run the
+#     two exact nodes an earlier CI found red (another author is checking them).
+#   browser — ONE real Chromium run of the synthetic five-unknown-starts scenario
+#     (synthetic_resume_ui.py, copied in only for this job) on ubuntu-22.04, the image where the
+#     pinned Chromium's sandbox needs no host reconfiguration; proof: the delivered PNG plus the
+#     five addresses read back from the CONSUMED grant, not from the HTTP offer.
+name: Focused resume verification (3428)
+
+on:
+  push:
+    branches:
+      - ci/verify-resume-3428
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focused-resume-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Rebindable pins: both SHAs are literals to rebind to the fresh tree before this file is
+  # sent. The size lane's base is then the upstream parent, not the old feature branch's first
+  # parent; nothing else in this file reads a history the fetch does not already carry.
+  PRODUCT: 23b1504236adf90607788d984781d9a48849d88b  # the fix commit under test
+  PRODUCT_PARENT: 69b5486b887d7136323c147674ccf734d80b956f  # the size lane's base
+  RESUME_NODES: >-
+    tests/test_pause_review_completion.py::test_the_tree_reads_paused_with_its_reviewer_finishing_and_resume_consumes_its_grant_once,
+    tests/test_pause_review_completion.py::test_a_launched_reviewer_finishes_its_episode_while_the_synchronous_author_detaches,
+    tests/test_budget_pause_exact.py::test_detached_drain_spares_only_a_reviewer_its_live_registry_names,
+    tests/test_delegate_recovery.py::test_planned_restart_doors_name_saved_delegates_as_work_returns,
+    tests/test_delegate_recovery.py::test_planned_restart_doors_name_late_work_into_their_own_transaction_after_the_stop,
+    tests/test_work_projection_pause_producers.py::test_an_ordinary_pending_start_lists_no_roster_row,
+    tests/test_work_projection_pause_producers.py::test_a_start_that_binds_between_the_roster_reads_never_loses_its_run,
+    tests/test_work_projection_pause_producers.py::test_an_accepted_lookup_only_start_keeps_its_ended_tree_in_the_model_roster,
+    tests/test_work_projection_pause_producers.py::test_an_ended_episodes_lookup_only_start_stays_in_its_work_and_accepts_stop,
+    tests/test_delegate_accepted_lookup.py::test_starter_can_stop_its_identified_uncustodied_run_after_store_returns
+
+jobs:
+  focused:
+    name: focused (${{ matrix.leg }}, ${{ matrix.journal }})
+    runs-on: ${{ matrix.os }}
+    # Every group now pays in full whatever its siblings returned; the ceiling leaves room for
+    # the sum of the step ceilings' realistic paths instead of the old skip-on-first-red race.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: linux
+            os: ubuntu-latest
+            interpreter: shipped  # the SQLite and journal mode fresh installs run
+            journal: WAL
+          - leg: windows
+            os: windows-latest
+            interpreter: setup-python  # the interpreter an in-place-updated install keeps
+            journal: PERSIST
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 3  # the QA tip, the product head, and the base the size lane reads
+      - name: Test the pinned product head, not this branch's tip
+        id: pin
+        run: |
+          test "$(git rev-parse 'HEAD^1')" = "$PRODUCT" || { echo "the QA commit is not directly over the pinned product head"; exit 1; }
+          git cat-file -e "$PRODUCT_PARENT^{commit}" || { echo "the size-lane base object is missing from the fetch"; exit 1; }
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+      - uses: ./.github/actions/setup-python-env
+        id: setup
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'  # dependencies only: tests import the checkout
+      - name: The stores run ${{ matrix.journal }} here
+        id: journal
+        run: >-
+          python -c "import pathlib, sys, tempfile; from ouroboros import store;
+          probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch();
+          mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode);
+          sys.exit(mode != sys.argv[1])" ${{ matrix.journal }}
+      - name: Set up Windows POSIX test utilities (the repo's own Windows recipe)
+        if: ${{ matrix.leg == 'windows' }}
+        id: posix
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: MSYS
+          release: false
+          update: true
+          install: rsync
+      - name: Select Windows POSIX test utilities
+        if: ${{ matrix.leg == 'windows' }}
+        id: msysbin
+        shell: pwsh
+        run: '"${{ steps.posix.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+      - name: Write the report checker (counts and names only, never report bodies)
+        id: checker
+        run: |
+          mkdir -p "$RUNNER_TEMP/ci-private"
+          cat > "$RUNNER_TEMP/focused_check.py" <<'PY'
+          """Read one pytest xunit2 report: what ran, by testcase name and classname.
+
+          The report's own `file` attribute is not assumed; a module is recognised by its
+          classname, a node by classname plus the function name before its parameter part.
+          Nothing about log bodies or the scratch tree is printed.
+          """
+          import argparse, os, sys
+          import xml.etree.ElementTree as ET
+
+          def status_of(case):
+              for child in case:
+                  if child.tag in ("failure", "error"):
+                      return "failed"
+                  if child.tag == "skipped":
+                      return "skipped"
+              return "passed"
+
+          def module_of(path):
+              return path[:-3].replace("/", ".").replace("\\", ".") if path.endswith(".py") else path
+
+          def main():
+              ap = argparse.ArgumentParser()
+              ap.add_argument("junit")
+              ap.add_argument("--exact", type=int, default=0)
+              ap.add_argument("--modules", default="")
+              ap.add_argument("--nodes", default="")
+              ap.add_argument("--allow-skip", default="")
+              a = ap.parse_args()
+              split = lambda text: [part.strip() for part in text.split(",") if part.strip()]
+              label = os.path.basename(a.junit)
+              if not os.path.exists(a.junit):
+                  print(f"CHECK {label}: MISSING — the pytest step produced no report")
+                  return 1
+              try:
+                  cases = list(ET.parse(a.junit).getroot().iter("testcase"))
+              except ET.ParseError as exc:
+                  print(f"CHECK {label}: UNREADABLE report ({type(exc).__name__})")
+                  return 1
+              rows = [(c.get("classname") or "", c.get("name") or "", status_of(c)) for c in cases]
+              counts = {k: sum(1 for _, _, s in rows if s == k) for k in ("passed", "skipped", "failed")}
+              allowed = set(split(a.allow_skip))
+              problems = [] if rows else ["collected nothing"]
+              for klass, name, status in rows:
+                  if status == "failed":
+                      problems.append(f"failed {klass}::{name}")
+                  elif status == "skipped" and name.split("[", 1)[0] not in allowed:
+                      problems.append(f"skipped {klass}::{name}")
+              for path in split(a.modules):
+                  if not any(klass == module_of(path) for klass, _, _ in rows):
+                      problems.append(f"no case ran from {path}")
+              for node in split(a.nodes):
+                  path, _, func = node.partition("::")
+                  module, stem = module_of(path), func.split("[", 1)[0]
+                  if not any(k == module and (n == stem or n.startswith(stem + "[")) for k, n, _ in rows):
+                      problems.append(f"required node absent: {node}")
+              if a.exact and len(rows) != a.exact:
+                  problems.append(f"expected exactly {a.exact} cases, saw {len(rows)}")
+              print(f"CHECK {label}: {len(rows)} cases, {counts['passed']} passed, "
+                    f"{counts['skipped']} skipped, {counts['failed']} failed")
+              for problem in problems:
+                  print("  " + problem)
+              return 1 if problems else 0
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
+      - name: Preparation is complete
+        id: ready
+        # always() only to EVALUATE the chain: the step succeeds exactly when checkout, the pin,
+        # the interpreter, the journal probe, the Windows utilities and the checker all got there.
+        # Every test step below keys on this one outcome, so a failed preparation is never a
+        # bypass and a red sibling group never cancels the independent ones.
+        if: ${{ always() && steps.pin.outcome == 'success' && steps.setup.outcome == 'success' && steps.journal.outcome == 'success' && steps.checker.outcome == 'success' && (matrix.leg != 'windows' || steps.msysbin.outcome == 'success') }}
+        run: echo "ready to test $PRODUCT on the ${{ matrix.leg }} leg (${{ matrix.journal }})"
+      # ── 1. the four identity-recovery parameters, alone ──
+      - name: Resume identity faults (the four parameters)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 20
+        env:
+          NODE: tests/test_retry_resume_lineage_faults.py::test_one_identity_read_refuses_unknown_then_resumes_the_tree
+        run: >-
+          python -m pytest "$NODE" --junitxml="$RUNNER_TEMP/ci-private/lineage.xml" -q --tb=short
+      - name: Check the four identity parameters executed
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        env:
+          NODE: tests/test_retry_resume_lineage_faults.py::test_one_identity_read_refuses_unknown_then_resumes_the_tree
+        run: python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/lineage.xml" --exact 4 --nodes "$NODE"
+      # ── 2. the unknown-start Stop-authority doors (exact, warm, unsaved) ──
+      - name: Unknown-start Stop authority (three doors)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          NODE: tests/test_retry_resume_stop_authority.py::test_unknown_root_identity_refuses_without_member_grant
+        run: >-
+          python -m pytest "$NODE" --junitxml="$RUNNER_TEMP/ci-private/stop-authority.xml" -q --tb=short
+      - name: Check the three Stop-authority doors executed
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        env:
+          NODE: tests/test_retry_resume_stop_authority.py::test_unknown_root_identity_refuses_without_member_grant
+        run: python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/stop-authority.xml" --exact 3 --nodes "$NODE"
+      # ── 3. the whole Resume module, both members and both doors ──
+      - name: The whole delegated start / Resume module
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 40
+        run: >-
+          python -m pytest tests/test_delegated_start_resume.py
+          --junitxml="$RUNNER_TEMP/ci-private/resume.xml" -q --tb=short
+      - name: Check the Resume module ran its named cases
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        env:
+          NODES: >-
+            tests/test_delegated_start_resume.py::test_owner_http_names_all_five_unbound_starts_across_two_tasks,
+            tests/test_delegated_start_resume.py::test_exact_resume_observes_the_choice_at_grant_and_consumption,
+            tests/test_delegated_start_resume.py::test_failed_observation_keeps_bound_job_and_foreign_terminal_cannot_settle_it,
+            tests/test_delegated_start_resume.py::test_publication_boundary_parks_cold_and_one_resume_revises_or_sends,
+            tests/test_delegated_start_resume.py::test_five_named_starts_record_once_each_on_the_same_grant_after_a_partial_store_failure
+        run: python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/resume.xml" --modules tests/test_delegated_start_resume.py --nodes "$NODES"
+      # ── 4. admission and the WHOLE skill-payload module, in one invocation ──
+      - name: Admission and the whole skill-payload module (one invocation)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 40
+        run: >-
+          python -m pytest tests/test_delegated_start_admission.py tests/test_delegated_skill_payload.py
+          --junitxml="$RUNNER_TEMP/ci-private/admission-payload.xml" -q --tb=short
+      - name: Check both modules ran (the exec-bit case has no POSIX bit on Windows)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        run: >-
+          python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/admission-payload.xml"
+          --modules tests/test_delegated_start_admission.py,tests/test_delegated_skill_payload.py
+          --allow-skip test_exec_bit_only_flip_is_typed_unreviewable_metadata_change
+      # ── 5. the real nodes the narrow matrix would otherwise miss ──
+      - name: Late reviewer correction, planned restarts, roster/Stop
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          nodes=$(printf '%s' "$RESUME_NODES" | tr ',' '\n' | sed '/^[[:space:]]*$/d')
+          # An empty selection would silently become "collect the whole tests/ tree".
+          test "$(printf '%s\n' "$nodes" | grep -c .)" -eq 10 || { echo "the named node list is not complete"; exit 1; }
+          # shellcheck disable=SC2086
+          python -m pytest $nodes --junitxml="$RUNNER_TEMP/ci-private/nodes.xml" -q --tb=short
+      - name: Check every named node actually ran
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        run: python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/nodes.xml" --nodes "$RESUME_NODES"
+      # ── 5b. the two exact nodes an earlier CI found red (another author is checking them) ──
+      - name: The reviewed-recipe schema and the malformed neighbour claim
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 15
+        run: >-
+          python -m pytest
+          tests/test_available_subagents_runtime_review_fixes.py::test_delegate_start_recipes_match_the_fresh_start_schema
+          tests/test_local_custody_recovery.py::test_a_malformed_neighbor_claim_does_not_erase_or_prevent_exact_retirement
+          --junitxml="$RUNNER_TEMP/ci-private/review-fix-nodes.xml" -q --tb=short
+      - name: Check both red-flagged nodes executed
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        env:
+          NODES: >-
+            tests/test_available_subagents_runtime_review_fixes.py::test_delegate_start_recipes_match_the_fresh_start_schema,
+            tests/test_local_custody_recovery.py::test_a_malformed_neighbor_claim_does_not_erase_or_prevent_exact_retirement
+        run: python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/review-fix-nodes.xml" --exact 2 --nodes "$NODES"
+      # ── 6. Linux only: the size lane against the product's own parent, and the inventories ──
+      - name: Size-ratchet lane against the product parent
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' && matrix.leg == 'linux' }}
+        timeout-minutes: 20
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.PRODUCT_PARENT }}
+        run: python -m pytest tests/ -m size_ratchet -q --tb=short
+      - name: Domain manifest gate
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' && matrix.leg == 'linux' }}
+        timeout-minutes: 10
+        run: python scripts/check_domains.py
+      - name: Generated inventories and docs sync
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' && matrix.leg == 'linux' }}
+        timeout-minutes: 20
+        run: >-
+          python -m pytest tests/test_domain_manifest.py tests/test_domain_report.py
+          tests/test_architecture_facts.py tests/test_generated_inventories.py tests/test_docs_sync.py
+          --junitxml="$RUNNER_TEMP/ci-private/inventories.xml" -q --tb=short
+      - name: Check every inventory module ran
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' && matrix.leg == 'linux' }}
+        run: >-
+          python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/inventories.xml"
+          --modules
+          tests/test_domain_manifest.py,tests/test_domain_report.py,tests/test_architecture_facts.py,tests/test_generated_inventories.py,tests/test_docs_sync.py
+
+  browser:
+    name: five unknown starts, one browser Resume (chromium, ubuntu-22.04)
+    # The repo's own UI lane records (#2735, .github/workflows/ui-browser.yml) that the pinned
+    # Chrome for Testing cannot start its sandbox on Ubuntu 23.10+ GitHub runners unless the
+    # host's AppArmor restriction of unprivileged user namespaces is turned off with a global
+    # sudo sysctl. This one-off job does NOT reconfigure runner protections: it selects the
+    # GitHub-hosted image that ships without that restriction (ci.yml's SQLite floor and
+    # linux-appimage-native.yml already run on it), where the pinned Playwright 1.62 Chromium
+    # starts with its sandbox as-is. If this image or the pinned browser ever stops serving,
+    # the job goes honestly red — there is no --no-sandbox or sysctl fallback here by design.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Take the fixture, then test the pinned product head
+        id: pin
+        run: |
+          mkdir -p "$RUNNER_TEMP/ci-private" "$RUNNER_TEMP/ci-raw/browser" "$RUNNER_TEMP/ci-raw/browser/ui" "$RUNNER_TEMP/upload"
+          test "$(git rev-parse 'HEAD^1')" = "$PRODUCT" || { echo "the QA commit is not directly over the pinned product head"; exit 1; }
+          git show "$GITHUB_SHA:synthetic_resume_ui.py" > "$RUNNER_TEMP/synthetic_resume_ui.py"
+          test -s "$RUNNER_TEMP/synthetic_resume_ui.py"
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'  # exact candidate: the tests import this checkout, not an editable install
+      - name: Install the pinned Chromium and the reviewed Node
+        id: install_browsers
+        timeout-minutes: 45
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium
+      # The scenario is copied into the product tree only for this run: the QA commit is
+      # never part of the tested checkout, and no other UI file is collected here.
+      - name: Place the synthetic scenario
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        run: cp "$RUNNER_TEMP/synthetic_resume_ui.py" tests/test_ci_synthetic_resume_ui.py
+      - name: Run the one Chromium scenario under safe_test
+        id: browser
+        timeout-minutes: 25
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          # The one persistent place this scenario's picture and facts land, declared the way
+          # this repository's own ci.yml declares a UI evidence directory: safe_test carries
+          # OUROBOROS_UI_EVIDENCE_DIR through its boundary untouched, so the scenario writes
+          # into this directory instead of a temporary one, and the proof step below reads
+          # exactly this directory.
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/ci-raw/browser/ui
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: >-
+          python -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP"
+          --evidence-dir "$RUNNER_TEMP/ci-raw/browser" --
+          python -m pytest tests/test_ci_synthetic_resume_ui.py -m ui_browser -q --tb=short
+          --junitxml="$RUNNER_TEMP/ci-private/browser.xml"
+      - name: Prove the five consumed-grant addresses, the single return and the delivered screen
+        if: ${{ !cancelled() && steps.browser.outcome != 'skipped' }}
+        env:
+          JUNIT: ${{ runner.temp }}/ci-private/browser.xml
+          EVIDENCE_DIR: ${{ runner.temp }}/ci-raw/browser/ui
+          PNG: unknown-starts-confirm.png
+          UPLOAD: ${{ runner.temp }}/upload
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib, sys
+          import xml.etree.ElementTree as ET
+
+          junit = pathlib.Path(os.environ["JUNIT"])
+          if not junit.is_file():
+              print("CHECK browser.xml: MISSING — the pytest step produced no report"); raise SystemExit(1)
+          cases = list(ET.parse(junit).getroot().iter("testcase"))
+          bad = [f"{c.get('classname')}::{c.get('name')} {child.tag}"
+                 for c in cases for child in c if child.tag in ("failure", "error", "skipped")]
+          print(f"CHECK browser.xml: {len(cases)} case(s) ran")
+          for note in bad:
+              print("  " + note)
+          if len(cases) != 1 or bad:
+              raise SystemExit(1)
+
+          parent = pathlib.Path(os.environ["EVIDENCE_DIR"])
+          pngs = [p for p in parent.glob(os.environ["PNG"]) if p.is_file() and p.stat().st_size > 0]
+          if len(pngs) != 1:
+              print(f"the scenario left {len(pngs)} copies of its screenshot, expected exactly one"); raise SystemExit(1)
+          facts = parent / "unknown-starts-consumed.json"
+          if not facts.is_file():
+              print("the consumed grant proof is missing from the evidence directory"); raise SystemExit(1)
+          row = json.loads(facts.read_text(encoding="utf-8"))
+          ids = row["accepted_ids"]
+          print(f"same task: {row['same_id']} · state {row['phase']} · "
+                f"{len(set(ids))} distinct addresses recorded by the consumed grant · "
+                f"engine starts {len(row['creates'])} · cancel requests {len(row['cancel_requests'])}")
+          # accepted_ids is what the fixture read back from the CONSUMED grant after the real
+          # worker pass (its own five choice_ids) — not the refusal's HTTP offer. The equality
+          # offer == sent == 200 reply == grant is the fixture's own in-run assertion; the
+          # engine counters are the stand-in's actual lists, which the grant must never have
+          # grown. All list values in this file are synthetic fixture addresses.
+          if (row["same_id"] != "root-1" or len(ids) != 5 or len(set(ids)) != 5
+                  or row["creates"] or row["cancel_requests"]):
+              raise SystemExit(1)
+          # The three real HTTP answers of the run, in order: the Activity refusal, the refusal
+          # after Cancel (nothing was granted), and the single Resume anyway.
+          http = json.loads((parent / "unknown-starts-http.json").read_text(encoding="utf-8"))
+          statuses = [post["status"] for post in http["posts"]]
+          print(f"HTTP sequence: {statuses}")
+          if statuses != [409, 409, 200] or http["page_errors"]:
+              print(f"unexpected HTTP sequence or page errors: {statuses} {http['page_errors']}"); raise SystemExit(1)
+          out = pathlib.Path(os.environ["UPLOAD"])
+          out.mkdir(parents=True, exist_ok=True)
+          (out / pngs[0].name).write_bytes(pngs[0].read_bytes())
+          PY
+      - name: Upload only this scenario's screenshot
+        if: ${{ !cancelled() && steps.browser.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: resume-unknown-starts-screenshot
+          path: ${{ runner.temp }}/upload/unknown-starts-confirm.png
+          if-no-files-found: error
+          retention-days: 14
