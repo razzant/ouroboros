@@ -1,0 +1,154 @@
+name: Built-in model queue qualification
+on:
+  push:
+    branches: ['qa/builtin-model-queue-p01-20261122']
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 17
+    env:
+      BASE: 'ea78023155d91aec1ab1d2fcc099d444fe96b325'
+      PRODUCT: 'a0f83c0fd1088affe9a0f0f07bf859b8fb2742bc'
+      PRODUCT_TREE: 'd31b34c568a4a37cf2cdccc821cf07c532504f1a'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the branch-only workflow to the product tree
+        id: subject
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-list --parents -1 HEAD)" == "$GITHUB_SHA $PRODUCT" ]]
+          [[ "$(git rev-list --parents -1 "$PRODUCT")" == "$PRODUCT $BASE" ]]
+          [[ "$(git rev-parse "$PRODUCT^{tree}")" == "$PRODUCT_TREE" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT" HEAD)" == $'A\t.github/workflows/qa-builtin-model-queue-p01.yml' ]]
+          mkdir -p "$RUNNER_TEMP/queue-proof"
+          printf 'base=%s\nproduct=%s\ntree=%s\nworkflow=%s\n' "$BASE" "$PRODUCT" "$PRODUCT_TREE" "$GITHUB_SHA" > "$RUNNER_TEMP/queue-proof/subject.txt"
+          git checkout --detach "$PRODUCT"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Install the locked dependencies
+        id: dependencies
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Exercise the queue and its callers with synthetic replies
+        id: product
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -I -S scripts/safe_test.py --timeout 210 --evidence-dir "$RUNNER_TEMP/queue-raw-product" -- \
+            python -m pytest -q --tb=short --show-capture=no -o 'addopts=' -o 'junit_family=xunit1' \
+            tests/test_model_concurrency.py tests/test_nano_local_exact.py tests/test_capability_probe_accounting_v664.py \
+            tests/test_local_context_evidence.py::test_serving_measurement_keeps_input_and_instance_binding \
+            tests/test_local_context_evidence.py::test_the_count_opens_no_connection_to_an_endpoint_this_lane_does_not_dispatch_to \
+            tests/test_local_context_evidence.py::test_ordinary_builtin_send_names_the_endpoint_its_sdk_client_reaches \
+            tests/test_local_context_evidence.py::test_a_bound_candidate_takes_its_serving_facts_from_the_named_endpoint \
+            tests/test_local_context_evidence.py::test_a_bound_count_accepts_the_owners_own_process_without_a_service_binding \
+            tests/test_local_context_evidence.py::test_the_advisory_lookahead_counts_under_the_endpoint_it_names \
+            tests/test_local_context_evidence.py::test_the_advisory_lookahead_names_the_lane_endpoint_and_trusts_no_other \
+            tests/test_effort_compatibility.py::test_local_driver_retains_known_intent_with_omitted_effort \
+            tests/test_local_tool_parsing.py::test_the_local_lane_answers_without_its_reasoning_and_calls_tools_the_new_way \
+            tests/test_commit_review_processing.py::test_local_candidate_keeps_captured_processing_or_inherits_when_unspecified \
+            tests/test_local_gigachat_send_deadlines.py::test_local_send_narrows_its_timeout_to_the_window_left_after_preparation \
+            tests/test_local_gigachat_send_deadlines.py::test_local_safety_check_inside_a_tool_gets_the_tool_window_left \
+            tests/test_physical_candidate_capture.py::test_local_transport_timeout_is_separate_from_physical_candidate \
+            tests/test_physical_candidate_capture.py::test_local_candidate_is_measured_as_prepared_without_a_compactor \
+            tests/test_physical_candidate_capture.py::test_local_read_timeout_after_dispatch_is_not_retried \
+            tests/test_response_limit_consumers.py::test_local_cap_is_bound_to_the_served_artifact_and_local_endpoint \
+            tests/test_response_limit_consumers.py::test_a_maximum_applied_while_stopped_holds_after_the_model_starts \
+            tests/test_context_local_admission.py \
+            tests/test_send_clock.py::test_the_local_lane_measures_and_sends_the_same_single_line \
+            tests/test_wrapup_real_send_parity.py \
+            --junitxml="$RUNNER_TEMP/queue-product.xml"
+      - name: Check size, book balance and owning contracts
+        id: structure
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.BASE }}
+          OURO_BOOK_GROWTH_MODE: block
+        run: |
+          set -euo pipefail
+          env -u GITHUB_EVENT_NAME -u GITHUB_REF python -I -S scripts/safe_test.py --timeout 110 \
+            --evidence-dir "$RUNNER_TEMP/queue-raw-size" -- python -m pytest -q --tb=line -o 'addopts=' \
+            -m size_ratchet tests/test_post_merge_check.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py \
+            --junitxml="$RUNNER_TEMP/queue-size.xml"
+          python -I -S scripts/safe_test.py --timeout 120 --evidence-dir "$RUNNER_TEMP/queue-raw-contracts" -- \
+            python -m pytest -q --tb=short -o 'addopts=' tests/test_config_extraction.py tests/test_reviewer_delivery_defaults.py::test_an_install_whose_saved_3_reads_as_not_set_hears_it_once \
+            tests/test_domain_manifest.py tests/test_generated_inventories.py --junitxml="$RUNNER_TEMP/queue-contracts.xml"
+      - name: Install the pinned driver and Chromium
+        id: browsers
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/queue-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node --pinned-chromium chromium
+      - name: Exercise the real Settings row and retain its rendered view
+        id: ui
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/queue-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/queue-proof
+        run: |
+          set -euo pipefail
+          ./node-standalone/bin/node --test web/tests/settings_rows.test.js
+          xvfb-run -a python -I -S scripts/safe_test.py --timeout 190 --evidence-dir "$RUNNER_TEMP/queue-raw-ui" -- \
+            python -m pytest -q --tb=short --show-capture=no -o 'addopts=' -m ui_browser \
+            tests/test_model_concurrency_setting_browser.py::test_concurrency_field --junitxml="$RUNNER_TEMP/queue-ui.xml"
+      - name: Keep only bounded synthetic outcomes
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        env:
+          PRODUCT_OUTCOME: ${{ steps.product.outcome }}
+          STRUCTURE_OUTCOME: ${{ steps.structure.outcome }}
+          UI_OUTCOME: ${{ steps.ui.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          proof = root / 'queue-proof'
+          result = {key.lower(): os.environ[key] for key in ('BASE', 'PRODUCT', 'PRODUCT_TREE', 'GITHUB_SHA',
+                                                            'PRODUCT_OUTCOME', 'STRUCTURE_OUTCOME', 'UI_OUTCOME')}
+          result['checks'] = {}
+          for stage in ('product', 'size', 'contracts', 'ui'):
+              try:
+                  cases = list(ET.parse(root / f'queue-{stage}.xml').iter('testcase'))
+              except (OSError, ET.ParseError):
+                  cases = []
+              def disposition(case):
+                  return next((word for word in ('failure', 'error', 'skipped') if case.find(word) is not None), 'passed')
+              result['checks'][stage] = {'counts': {word: sum(disposition(c) == word for c in cases)
+                                                   for word in ('passed', 'failure', 'error', 'skipped')},
+                                         'cases': [[c.get('classname'), c.get('name'), disposition(c)] for c in cases]}
+          result['images'] = sorted(p.name for p in proof.glob('concurrency-*-field-chromium.png'))
+          (proof / 'summary.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps({k: v['counts'] for k, v in result['checks'].items()}))
+          if any(result[key] != 'success' for key in ('product_outcome', 'structure_outcome', 'ui_outcome')) or any(
+              not v['counts']['passed'] or v['counts']['failure'] or v['counts']['error'] or v['counts']['skipped']
+              for v in result['checks'].values()) or not result['images']:
+              raise SystemExit('Qualification failed or omitted required evidence')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        with:
+          name: builtin-model-queue-proof
+          path: |
+            ${{ runner.temp }}/queue-proof/subject.txt
+            ${{ runner.temp }}/queue-proof/summary.json
+            ${{ runner.temp }}/queue-proof/concurrency-*-field-chromium.png
+          if-no-files-found: error
+          retention-days: 7
