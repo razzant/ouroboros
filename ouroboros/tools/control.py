@@ -446,7 +446,7 @@ def get_tools() -> List[ToolEntry]:
                 "words": {"type": "array", "items": {"type": "string"}, "description": WORDS_DESCRIPTION},
                 "room_id": {"type": "string", "description": "With words: one room's chat id (1 is Main)."},
                 "voice": {"type": "string", "enum": ["owner"], "description": "With words: only rows of my human's own words, a card they answered included."},
-                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first."},
+                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first; oldest shows an original before its later restatements."},
             }, "required": [], "additionalProperties": False},
         }, _chat_history),
         ToolEntry("update_scratchpad", {

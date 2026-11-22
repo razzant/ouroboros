@@ -245,6 +245,8 @@ def test_chat_history_words_projects_whole_on_the_custom_route():
     entry = next(entry for entry in get_tools() if entry.name == "chat_history")
     for name in ("words", "room_id", "voice", "order"):
         assert entry.schema["parameters"]["properties"][name]["description"]
+    assert entry.schema["parameters"]["properties"]["order"]["description"] == (
+        "With words: newest (default) or oldest first; oldest shows an original before its later restatements.")
     projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
     description = projected[0]["custom"]["description"]
     lead = " ".join(entry.schema["description"].split())
