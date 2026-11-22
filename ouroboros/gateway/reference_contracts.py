@@ -48,6 +48,7 @@ class HostNotice(TypedDict, total=False):
     code: str  # the notice's stable code
     step: str  # the owner's next step, a key of host_notice.STEPS; absent = no step
     details: str  # the raw facts behind Details
+    instruction: str  # one line the owner acts on, as written (a Git command); a reader without Details says it under the line
     line: str  # phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
 
 

@@ -223,6 +223,7 @@
  * @property {string=} code  // the notice's stable code
  * @property {string=} step  // the owner's next step, a key of host_notice.STEPS; absent = no step
  * @property {string=} details  // the raw facts behind Details
+ * @property {string=} instruction  // one line the owner acts on, as written (a Git command); a reader without Details says it under the line
  * @property {string=} line  // phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
  */
 /** @typedef {Object} ChatOutbound

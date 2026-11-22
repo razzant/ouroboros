@@ -8,6 +8,7 @@ one typed ``notice`` beside it in the row's ``progress_meta`` (``fields``):
 * ``step`` — the owner's next step, a key of ``STEPS``: a control or a Settings place (a host that has scheduled the
   retry itself says so instead); absent when there is none;
 * ``details`` — the raw facts, behind Details for the owner and beside the phrase for the mind;
+* ``instruction`` — one line the owner acts on, as written: the exact command a step sends him to (a Git command);
 * ``template`` and ``values`` — only for a phrase that carries variable or authored words (a count, a name, the
   mind's own note): the constant English with ``{name}`` slots, and the words that fill them (``phrase``). The
   template is what gets translated; the values are inserted as they were written, never translated.
@@ -15,8 +16,8 @@ one typed ``notice`` beside it in the row's ``progress_meta`` (``fields``):
 The row keeps it through persistence, history and live delivery (``message_ingress``, ``gateway.history``); the window
 draws it as it is, and a row without one (older history) keeps the display table ``web/modules/host_notice_text.js``.
 Telegram and Copy take one line from ``notice_line``, which sends it and reads it alike (``view``); Telegram, which has
-no Details, says the details under that line only for a step whose details are its instruction
-(``with_instruction_details``). The mind reads the step and the details beside the phrase (``mind_text``). Words stay
+no Details, says a notice's ``instruction`` under that line, and never its details (``with_instruction``). The mind
+reads the step and the details beside the phrase (``mind_text``). Words stay
 the producer's: this module holds the steps, the one closed vocabulary every notice shares, and none of the phrases.
 A phrase the translation memory lacks is offered to the generator only when its row is sent, in that install's data
 root; a read never writes and never wakes it.
@@ -47,10 +48,9 @@ STEPS: Dict[str, str] = {
     "reopen_project": "A message from you in this room or a new task reopens it.",
     "inspect_task": "Open the task's details before you start another run.",
     "restore_kept_changes": "Put your local changes back with the Git command that comes with this message.",
+    "inspect_then_restore_kept_changes": ("The automatic restore was interrupted: check the current files first, then put "
+                                          "your local changes back with the Git command that comes with this message."),
 }
-# Steps whose details are the instruction itself (the exact command that puts kept local changes back: the owner's
-# Q1=C), so a reader without Details says them under the line; every other notice stays one line there.
-INSTRUCTION_STEPS = frozenset({"restore_kept_changes"})
 _STEP_CODE = "code:notice.step."
 _MISSES: Dict[str, set] = {}
 _MISSES_CAP = 2_000  # one process's memory of offered phrases per language; the generator's own queue is bounded too
@@ -62,11 +62,11 @@ class _Slots(dict):
         return "{" + key + "}"
 
 
-def notice(code: str, *, step: str = "", details: Any = "", template: str = "",
+def notice(code: str, *, step: str = "", details: Any = "", instruction: Any = "", template: str = "",
            values: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    """A row's ``notice``: the code, the step when there is one, the raw details when there are any, and a variable
-    phrase's template with its values. An unknown step is a producer defect, refused here rather than drawn as words
-    nobody wrote."""
+    """A row's ``notice``: the code, the step when there is one, the raw details when there are any, the owner's
+    instruction on one line, and a variable phrase's template with its values. An unknown step is a producer defect,
+    refused here rather than drawn as words nobody wrote."""
     if step and step not in STEPS:
         raise ValueError(f"unknown host notice step {step!r}")
     made: Dict[str, Any] = {"code": str(code)}
@@ -74,6 +74,8 @@ def notice(code: str, *, step: str = "", details: Any = "", template: str = "",
         made["step"] = step
     if raw := str(details or "").strip():
         made["details"] = raw
+    if line := " ".join(str(instruction or "").split()):
+        made["instruction"] = line
     if template:
         made.update(template=str(template), values={str(k): str(v) for k, v in (values or {}).items()})
     return made
@@ -116,10 +118,11 @@ def notice_of(row: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def stored(row: Mapping[str, Any]) -> Dict[str, Any]:
-    """The notice a row persists: its code, step, details and a variable phrase's template and values, never the
-    line a reader was sent."""
+    """The notice a row persists: its code, step, details, instruction and a variable phrase's template and values,
+    never the line a reader was sent."""
     notice = notice_of(row)
-    kept: Dict[str, Any] = {key: str(notice[key]) for key in ("code", "step", "details", "template") if notice.get(key)}
+    kept: Dict[str, Any] = {key: str(notice[key]) for key in ("code", "step", "details", "instruction", "template")
+                            if notice.get(key)}
     if kept.get("template") and isinstance(notice.get("values"), Mapping):
         kept["values"] = {str(k): str(v) for k, v in notice["values"].items()}
     return kept
@@ -169,13 +172,12 @@ def notice_line(row: Mapping[str, Any], lang: Optional[str] = None, *, drive_roo
     return f"{text} {words}" if text else str(words)
 
 
-def with_instruction_details(row: Mapping[str, Any], line: str) -> str:
-    """The text a reader without Details (Telegram) sends for a host row: its one line, then the notice's details after
-    one blank line, as written, when its typed step is one whose details are its instruction (``INSTRUCTION_STEPS``);
-    the line alone for every other row."""
-    notice = notice_of(row)
-    details = str(notice.get("details") or "").strip()
-    return f"{line}\n\n{details}" if line and details and notice.get("step") in INSTRUCTION_STEPS else line
+def with_instruction(row: Mapping[str, Any], line: str) -> str:
+    """The text a reader without Details (Telegram) sends for a host row: its one line, then the notice's typed
+    ``instruction`` after one blank line, as written; the line alone for every other row (its details stay behind
+    Details in the window)."""
+    instruction = str(notice_of(row).get("instruction") or "").strip()
+    return f"{line}\n\n{instruction}" if line and instruction else line
 
 
 def view(row: Mapping[str, Any], *, drive_root: Optional[pathlib.Path] = None, record_misses: bool = False) -> Dict[str, Any]:
