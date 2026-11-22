@@ -26,6 +26,7 @@ from ouroboros.outcomes import (
 # loop.py's re-export and every existing caller keep addressing one object.
 from ouroboros.skill_readiness import skill_names_touched_by_trace as _skill_names_touched_by_trace  # noqa: F401 -- historical name
 from ouroboros.tool_error_words import check_cause, red_check_phrase
+from ouroboros.tool_policy import BUILTIN_NAMESPACE
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.tools.registry import ToolRegistry
 
@@ -394,18 +395,6 @@ def _zero_run_closed(ctx: Any, receipt_rows: List[Dict[str, Any]]) -> bool:
         return False
 
 
-def _callable_tools(tools: Any) -> Optional[frozenset]:
-    """The built-in tools this actor may call now (``callable_rows``: a name a consciousness level withholds stays
-    shown, В31=B, yet its call is refused); None when unreadable, and then the notice withholds no path."""
-    from ouroboros.tool_policy import BUILTIN_NAMESPACE
-
-    try:
-        rows = tools.callable_rows(BUILTIN_NAMESPACE)
-    except Exception:
-        return None
-    return None if rows is None else frozenset(row["name"] for row in rows)
-
-
 RED_CHECK_NOTICE = "red_check_notice"  # the hold cause of the red check stated alone; beside the other facts the hold is theirs
 
 
@@ -425,7 +414,10 @@ def _pre_delivery_facts(tools: ToolRegistry, drive_root: Any, task_id: str, llm_
     lines: List[str] = []
     red = red_check_fact(receipt_rows)
     red_due = bool(red) and not red["passed_after"] and not red_told
-    callable_tools = _callable_tools(tools)  # a path this actor cannot take is never offered
+    try:  # a path this actor cannot call is never offered (a level's withheld name stays shown, В31=B); unreadable: none
+        callable_tools = frozenset(row["name"] for row in tools.callable_rows(BUILTIN_NAMESPACE))
+    except Exception:
+        callable_tools = None
     can_check = callable_tools is None or "verify_and_record" in callable_tools
     # A declaration that nothing is machine-checkable does not skip it: an early formal record must not buy the
     # door back (owner 12.11: such a record no longer counts as a check). The notice states the declaration.
