@@ -221,7 +221,7 @@ LIST_SKILLS_SCHEMA = {
 # Preview bounds; list_skills(name=...) returns every full value.
 _PREVIEW_CHARS = {"type": 80, "version": 80, "description": 200, "when_to_use": 160,
                   "what_model_sees": 160, "token_effect": 160, "load_error": 200,
-                  "live_reason": 120, "not_ready": 240}
+                  "live_reason": 120, "not_ready": 240, "notes": 240}
 _PREVIEW_TOOLS = 6
 _PREVIEW_TOOL_CHARS = 80
 _STATE = ("name", "source", "enabled", "review_status", "review_stale")
@@ -304,8 +304,9 @@ def _compact(row: dict, drive_root: Any = None) -> dict:
     reason = " ".join(_all_reasons(status).split())  # a preview of the named row's whole ``not_ready``
     if reason:
         out["not_ready"] = reason[:_PREVIEW_CHARS["not_ready"]]
-    if status["notes"]:
-        out["notes"] = status["notes"]
+    notes = " ".join("; ".join(status["notes"]).split())  # a preview too; the named row keeps each note whole
+    if notes:
+        out["notes"] = notes[:_PREVIEW_CHARS["notes"]]
     if drive_root is not None and not row.get("enabled") and (off := off_state(drive_root, row)):
         out["off_state"] = off
     experience = row.get("model_experience")
@@ -322,8 +323,8 @@ def _compact(row: dict, drive_root: Any = None) -> dict:
         out.update(desired_live=row.get("desired_live"), live_loaded=row.get("live_loaded"),
                    process=row.get("process"))
         texts["live_reason"] = row.get("live_reason")
-    cut = len(reason) - _PREVIEW_CHARS["not_ready"]
-    omitted = {"not_ready": cut} if cut > 0 else {}
+    omitted = {key: len(text) - _PREVIEW_CHARS[key] for key, text in (("not_ready", reason), ("notes", notes))
+               if len(text) > _PREVIEW_CHARS[key]}
     for key, value in texts.items():
         text = " ".join(str(value or "").split())
         out[key] = text[:_PREVIEW_CHARS[key]]

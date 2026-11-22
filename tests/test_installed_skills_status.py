@@ -125,7 +125,7 @@ def test_a_readiness_note_is_shown_in_both_forms_and_list_skills_and_none_withou
         assert "  Note: works; key X is not granted" in cards["noted"] and "Status:" not in cards["noted"]
         assert "Note:" not in cards["plain"] and "Status:" not in cards["plain"]
     page = {row["name"]: row for row in list_skills_payload({"skills": rows})["skills"]}
-    assert page["noted"]["notes"] == ["works; key X is not granted"] and page["noted"]["ready"] is True
+    assert page["noted"]["notes"] == "works; key X is not granted" and page["noted"]["ready"] is True
     assert "notes" not in page["plain"]
 
 

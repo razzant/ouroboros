@@ -572,3 +572,31 @@ def test_the_index_previews_a_long_reason_and_the_named_row_keeps_it_whole(regis
         {**row, "desired_live": True, "live_reason": "load_error"}]})  # a failed load held in memory: liveness
     [record] = _listed(registry)["skills"]
     assert record["ready"] is True and "not_ready" not in record and "not_ready" not in record.get("omitted", {})
+
+
+def test_a_long_note_is_a_bounded_preview_in_the_index_and_whole_in_the_named_row(registry, monkeypatch):
+    """A mixed package (its own MCP server, 185 declared script files absent) carries a note of thousands of
+    characters: the index previews it like not_ready and stays one page; the named row keeps it whole (RV2 DX5,
+    DX6); a ready skill has no note in either."""
+    drive = registry._ctx.drive_root
+    folder = _seed(registry, "mixed", type="script", runtime="python3",
+                   scripts=[{"name": f"tool_{index:03d}.py"} for index in range(185)],
+                   mcp_servers=[{"id": "tools", "runtime": "agent_python", "entry": "server.py"}])
+    (folder / "server.py").write_text("print('serve')\n", encoding="utf-8")
+    from ouroboros.skill_loader import find_skill
+
+    (drive / "state" / "skills" / "mixed").mkdir(parents=True, exist_ok=True)
+    (drive / "state" / "skills" / "mixed" / "review.json").write_text(
+        json.dumps({"status": "pass", "content_hash": find_skill(drive, "mixed").content_hash}), encoding="utf-8")
+    save_enabled(drive, "mixed", True, actor="owner_ui")
+    _admitted_script(registry, "plain")
+    whole = (f"skill_exec unavailable: no declared script file exists ("
+             f"{', '.join(f'scripts/tool_{index:03d}.py' for index in range(185))}); its MCP tools are separate")
+    typed = registry.execute_result("list_skills", {})
+    rows = {row["name"]: row for row in json.loads(typed.text)["skills"]}
+    assert len(typed.text) <= tool_result_limit("list_skills") and rows["mixed"]["ready"] is True
+    assert rows["mixed"]["notes"] == whole[:240] and rows["mixed"]["omitted"]["notes"] == len(whole) - 240
+    assert "notes" not in rows["plain"] and "notes" not in rows["plain"].get("omitted", {})
+    [named] = _listed(registry, name="mixed")["skills"]
+    assert named["notes"] == [whole]
+    assert "notes" not in _listed(registry, name="plain")["skills"][0]
