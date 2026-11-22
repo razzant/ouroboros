@@ -159,6 +159,7 @@ export function buildTimelineItemHtml(item, record) {
             ${item.historyId ? `data-history-id="${escapeHtmlAttr(item.historyId)}"`
         : item.sourceHistoryId ? `data-source-history-id="${escapeHtmlAttr(item.sourceHistoryId)}"` : ''}
             data-expanded="${expanded ? '1' : '0'}"
+            ${item.replyAddress ? `data-work-reply-row="${item.replyRole || 'system'}" tabindex="0" data-row-address="${escapeHtmlAttr(item.replyAddress)}"` : ''}
         >
             ${headHtml}
             ${delegated ? `<div class="chat-live-line-body chat-delegated-activity" id="${escapeHtmlAttr(bodyId)}">${delegatedActivityBodyHtml(delegated, { expanded })}</div>`

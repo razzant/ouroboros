@@ -25,7 +25,7 @@ const LONG_PRESS_MS = 450;
 const HOLD_MS = 150;  // a still finger this long starts the sink, so a tap or a scroll never shows it
 const RELEASE_MS = 260;  // the lift's way back (style.css), after which the row is at rest
 const MOVE_TOLERANCE_PX = 10;
-const ROW = '.chat-bubble, .chat-live-card:not(.subagent)';
+const ROW = '.chat-bubble, .chat-live-card[data-task-id], [data-work-reply-row]';
 const NATIVE = 'a[href], input, textarea, select, [contenteditable="true"], video, audio';
 
 const shown = (node) => Boolean(node?.isConnected && !node.hidden && !node.disabled);
@@ -54,14 +54,13 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         return row && feed.contains(row) ? row : null;
     };
 
-    // What the row's Reply quotes, a work card's included (the menu's first item, and the swipe's).
-    const replyRef = (row) => (row.matches('.chat-live-card') ? replies.cardRef(cardOf(row.dataset.taskId || '') || null)
-        : replies.bubbleRef(row));
+    const recordOf = (row) => row.matches('.chat-live-card') ? cardOf(row.dataset.taskId || '') : null;
+    // An unregistered card does not borrow another row's Reply.
+    const replyRef = (row, record = recordOf(row)) => row.matches('.chat-live-card')
+        ? record && replies.cardRef(record) : replies.bubbleRef(row);
 
     function bubbleItems(row, point, touch) {
         const items = [];
-        const ref = replies.bubbleRef(row);
-        if (ref) items.push(['reply', tr('chat.reply.reply', 'Reply'), () => replies.start(ref)]);
         const copy = row.querySelector(':scope > .chat-message-copy, :scope > .chat-message-actions > .chat-message-copy');
         if (copy) items.push(['copy', tr('code.copy', 'Copy'), () => copy.click(), true]);
         if (touch && replies.canSelect?.(row, point)) items.push(['select-text', tr('chat.reply.select_text', 'Select text'),
@@ -73,10 +72,8 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         return items;
     }
 
-    function cardItems(row, record) {
+    function cardItems(record) {
         const items = [];
-        // A work card draws no Reply of its own (its action row holds only commands): the menu is its Reply.
-        if (replies.cardRef(record)) items.push(['reply', tr('chat.reply.reply', 'Reply'), () => replies.start(replies.cardRef(record))]);
         const words = [record.titleEl?.textContent, fullText(record.activityEl)].map((text) => String(text || '').trim());
         if (words.some(Boolean)) items.push(['copy', tr('code.copy', 'Copy'),
             () => copyTextWithToast(words.filter(Boolean).join('\n')), true]);
@@ -93,8 +90,10 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
     }
 
     function itemsFor(row, point, touch) {
-        const record = row.matches('.chat-live-card') ? cardOf(row.dataset.taskId || '') : null;
-        const items = record ? cardItems(row, record) : bubbleItems(row, point, touch);
+        const record = recordOf(row);
+        const items = record ? cardItems(record) : bubbleItems(row, point, touch);
+        const ref = replyRef(row, record);
+        if (ref) items.unshift(['reply', tr('chat.reply.reply', 'Reply'), () => replies.start(ref)]);
         // The row's own Project reference (a portal's footer, the reference under an answer or a receipt).
         const reference = [...row.querySelectorAll('[data-intent="open-project"]')]
             .find((node) => shown(node) && rowOf(node) === row && !node.closest('.chat-live-card.subagent'));
@@ -240,7 +239,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         ['scroll', onScroll]];
     for (const [type, handler] of listeners) feed.addEventListener(type, handler);
     const win = doc.defaultView || globalThis.window;
-    const disposeSwipe = createRowSwipe({ feed, icon: REPLY_ICON, replyRef, reply: (ref) => replies.start(ref), win, doc,
+    const disposeSwipe = createRowSwipe({ feed, rowOf, icon: REPLY_ICON, replyRef, reply: (ref) => replies.start(ref), win, doc,
         isStack: () => isStackLayout(), isCoarse: () => Boolean(win?.matchMedia?.('(pointer: coarse)')?.matches),
         onLayout: (sync) => onLayoutChange(() => sync(), { w: win }) });
 

@@ -308,6 +308,8 @@ def _chat_record(
                 record[key] = stored_reply(meta[key]) if key == "reply_to" else dict(meta[key])  # no captured source
         if meta.get("reply_to_relay"):
             record["reply_to_relay"] = str(meta["reply_to_relay"])
+        if direction == "out" and isinstance(meta.get("about_work_task_id"), str) and meta["about_work_task_id"]:
+            record["about_work_task_id"] = meta["about_work_task_id"]
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
         if meta.get("card_press"):
@@ -806,7 +808,7 @@ def handle_web_message(
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
         row = accepted_chat_message(bus.DATA_DIR, thread_id, client_message_id) if client_message_id else None
-        reply = ingress_reply(bus.DATA_DIR, metadata, accepted=row)
+        reply = ingress_reply(bus.DATA_DIR, metadata, accepted=row, route_work=True)
         if reply:  # the obligation of a fresh acceptance replays the same reference
             metadata["reply_reference"] = reply
         fresh = False

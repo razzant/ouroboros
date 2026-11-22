@@ -1177,16 +1177,13 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
     if not (sources or own) or not root or str(meta.get("delegation_role") or "") == "subagent":
         return False
     try:
-        from ouroboros.routing_wait import message_routing_acts, recorded_act_receipt, routing_act_fields, routing_act_lines as lines
+        from ouroboros.routing_wait import append_own_routing_acts, message_routing_acts, routing_act_lines as lines
 
         root = pathlib.Path(str(root))
         acts = message_routing_acts(root, sources)
-        for ref in own:  # the exact token answers even when no owner row carries the act
-            message = str(ref.get("client_message_id") or "")
-            row = recorded_act_receipt(root, ref) if message else {}  # in the room a note's relay named for it
-            act = routing_act_fields(root, message, row or ref)
-            if act and act["status"] != "unconfirmed" and act not in acts:
-                acts.append(act)
+        replyable = append_own_routing_acts(root, own, acts)
+        if replyable:
+            tool_ctx._confirmed_reply_works = {*getattr(tool_ctx, "_confirmed_reply_works", ()), *replyable}
     except Exception:
         log.debug("routing receipts unreadable at the model boundary", exc_info=True)
         return False
@@ -1208,6 +1205,7 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
         "and late outcomes of its own unconfirmed acts, oldest first — receipts from the routing rail; "
         "each row identifies the work and its recorded outcome.",
         *current,
+        *(f"To confirm your handoff to {work}, use finish_task(about_work={work!r}, …)." for work in sorted(replyable)),
         "Not listed: another turn's act under its own agent-steer id, or an act keyed only to a task id; "
         "neither links to this message."])})
     return True

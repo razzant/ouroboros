@@ -378,6 +378,8 @@ def write_owner_message(
         entry["late_answer"] = late_ref
     if isinstance(reply_reference, dict) and reply_reference.get("address"):
         entry["reply_reference"] = dict(reply_reference)
+    if origin_message_ref:
+        entry["origin_message_ref"] = dict(origin_message_ref)
     if isinstance(client_surface, dict) and client_surface:
         # Owner Surface Fact (additive, like ``ts``): which client surface sent
         # this follow-up, so the loop can note a mid-task device change.

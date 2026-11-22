@@ -31,6 +31,7 @@ import { admittedSuccessor } from './task_episodes.js';
 import { noteOrigin } from './task_origin.js';
 import { continueControlSuccessor } from './task_continue.js';
 import { closingLine, readCardDetail } from './settled_card.js';
+import { restoreWorkReplies } from './chat_row_placement.js';
 
 const key = (value) => String(value || '').trim();
 const MAIN_CHAT_ID = 1;  // contracts/chat_id_policy WEB_UI_CHAT_ID (task_reference.js, notifications.js)
@@ -50,7 +51,12 @@ export function bindWorkPortal(record, project = {}) {
     const projectId = key(project?.id);
     if (!root || record.isSubagent || !projectId) return false;
     let changed = false;
-    if (root.dataset.portal !== '1') { root.dataset.portal = '1'; changed = true; }
+    if (root.dataset.portal !== '1') {
+        root.dataset.portal = '1';
+        // A portal cannot expand Details. Keep replies navigable in the source room.
+        restoreWorkReplies(root);
+        changed = true;
+    }
     if (root.dataset.projectId !== projectId) { root.dataset.projectId = projectId; changed = true; }
     // In this form the card discloses nothing (the room holds what it would open): its "Details"
     // button is hidden (style.css) and the summary stays reading content. The reference below is the one door.

@@ -264,6 +264,8 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
         }
         const update = { headline: summary.headline || item.headline,
             cardRowRevision: summary.cardRowRevision,
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             cardReview: summary.cardReview || null, evidenceRef: summary.evidenceRef || null,
             fullHeadline: summary.fullHeadline || summary.headline || item.fullHeadline,
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
@@ -286,6 +288,8 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
     } else {
         record.items.push({
             cardRowRevision: summary.cardRowRevision,
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             cardReview: summary.cardReview || null,
             phase: summary.phase || 'working', headline: summary.headline || 'Update',
             fullHeadline: summary.fullHeadline || summary.headline || 'Update',

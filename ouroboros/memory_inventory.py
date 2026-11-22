@@ -86,7 +86,7 @@ _META_FIELDS = ("chat_id", "ts", "type", "kind",  # ``kind``: the display stamp 
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
 # ``telegram_room_chat_id``: the room the host decided for the bundled bridge's Reply (``room_membership``); no
 # stored prefix lacks it wrongly, since no released body wrote it before it joined this list.
-_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved", "telegram_room_chat_id")
+_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved", "telegram_room_chat_id", "work_task_id")
 # What a row's ``transport`` keeps: its scalars, which ``dialogue_provenance.place_row_facts`` spreads as the row's
 # place facts (``place_activity`` reads the event, place and conversation keys) and which name its provider, account,
 # conversation and thread (``dialogue_provenance``, ``RoomLabelResolver.label``), so a row that came over a transport
