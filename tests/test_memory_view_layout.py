@@ -8,21 +8,20 @@ a new page changes B and never A' or D. Anthropic keeps the message seal and giv
 slot to C before schemas. Codex and direct OpenAI keep all stable items and C as one notice (their cache is
 read only inside the leading system group, by prefix: measured 2026-10-03); the view fact of
 the first send reaches the cap info, the task context, one event and the trace.
-Between two works on one memory, mode, authority, catalogue and route (another work being the control), a clock, a
-restart, the queue, money, review records, route health, registration order, the actor's drive, the assignment's size
-(whole, and on a pressed fixture that frames the second start), the calendar between two framed starts, or a failed MCP
-listing moves neither the schemas (on the Claudexor wire and sorted), A', D nor any section of B or their order, each
-fact checked to have reached the request (a failed MCP listing reaches no row by design and is checked at its manager);
-a leak still open is a strict xfail on its own tracker item that holds only while every moved label is one it names.
-A new page keeps B's declared head and moves only the story after it.
+Between two works on one memory, mode, authority, catalogue and route, a clock, a restart, the queue, money, review
+records, route health, registration order, the actor's drive, the assignment's size, the calendar between framed starts
+or a failed MCP listing moves no schema, A', D, B section or their order; an open leak is a strict xfail on its tracker
+item, holding while every moved label is one it excuses. A new page keeps B's declared head and moves only the story.
 Fixture: ``tests._memory_inventory_shared`` (three rooms besides Main, legacy memory).
 """
 from __future__ import annotations
 
 import copy
 import json
+import pathlib
 import re
 import queue
+import sys
 
 import pytest
 
@@ -125,11 +124,23 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
 
 
 _REAL_CLOCKS = {}  # the process's own clocks, taken on first use while none is moved
+_REAL_ROOT = {}  # config.DATA_DIR as conftest bound it, kept before the warm-up patches it
 _PRODUCT = ("ouroboros", "supervisor")
 
 
 class KnownLeak(AssertionError):
-    """Every label that moved is one the case's strict xfail names; any other moved part fails the case outright."""
+    """Every moved label is one the case's strict xfail names and passes its ``_SAME`` check; else the case fails."""
+
+
+def _release_root(drive):
+    """Product module paths or ``str``s at or under ``drive`` (``config`` apart) moved under the real root: their names."""
+    drive, real, changed = pathlib.Path(drive), pathlib.Path(_REAL_ROOT["root"]), []
+    for name, module in [(n, m) for n, m in list(sys.modules.items()) if n.split(".")[0] in _PRODUCT and n != "ouroboros.config"]:
+        for attr, value in _namespace(module).items():
+            if isinstance(value, (str, pathlib.PurePath)) and pathlib.Path(value).is_relative_to(drive):
+                setattr(module, attr, type(value)(real / pathlib.Path(value).relative_to(drive)))
+                changed.append(f"{name}.{attr}")
+    return changed
 
 
 class _CalendarMeta(type):
@@ -149,13 +160,13 @@ def _namespace(module):
 
 @pytest.fixture(scope="module")
 def _warm(tmp_path_factory):
-    """One whole family build under the real clocks, once per module and worker, before any case moves them: every
-    module a build or a case's fact imports is loaded here, so none is first imported while a clock is moved (a module
-    imported then can hold the moved clock where no sweep finds it, e.g. a dataclass default factory)."""
-    from ouroboros import claudexor_exit_facts, mcp_client, review_ledger, review_price, reviewer_slot_config  # noqa: F401
+    """One family build under the real clocks per module and worker, before any case moves one: it first imports every
+    module a build or a fact imports (one loaded under a moved clock can keep it), then rebinds their copies of its root."""
+    from ouroboros import claudexor_exit_facts, config, mcp_client, review_ledger, review_price, reviewer_slot_config  # noqa: F401
     from tests._scale_root import money
     from tests.test_tool_connections import _servers
 
+    _REAL_ROOT.setdefault("root", config.DATA_DIR)
     with pytest.MonkeyPatch.context() as patch:
         root = tmp_path_factory.mktemp("warm")
         _one_root(patch, root / "drive")
@@ -169,28 +180,34 @@ def _warm(tmp_path_factory):
             _start(env, memory, dict(MAIN), ctx=_ctx(env, "tmain"), restart=True, reversed_registration=True)
         finally:
             mcp_client.reset_manager_for_tests()
+    _release_root(root / "drive")  # where first imports are meant to happen
+    assert not (kept := _release_root(root)), f"a product module still points into the warm-up's root: {kept}"
+
+
+@pytest.fixture
+def case_root(_warm, tmp_path, monkeypatch):
+    _one_root(monkeypatch, tmp_path / "drive")  # at teardown no product module may keep this drive
+    _fixed_host(monkeypatch)
+    yield  # what a test's first imports kept of its drive is rebound in any case, so later tests are not harmed
+    assert not (late := _release_root(tmp_path / "drive")), f"first imported under a case's data root: {late}; add it to the warm-up"
 
 
 @pytest.fixture
 def clocks(_warm):
-    """``move(wall=, calendar=)``: ``time.time`` (and ``time_ns``, the no-argument ``gmtime``/``localtime``/``strftime``)
-    reads ``wall`` seconds on, ``datetime.datetime.now``/``utcnow``/``today`` read ``calendar`` seconds on: the
-    ``datetime`` module's class and each loaded ``ouroboros``/``supervisor`` module's own ``from datetime import
-    datetime`` name. ``date.today()`` reads ``time.time``, so it follows ``wall``. At teardown every name this fixture
-    set gets back what it replaced, and every other module attribute that holds one of the moved objects (by identity,
-    whatever its name) gets the real clock; a module that refuses the assignment is reported. Then no moved object is
-    left anywhere, and no product module was first imported while a clock was moved (``_warm`` loads them)."""
+    """``move(wall=, calendar=)``: ``time.time``, ``time_ns``, bare ``gmtime``/``localtime``/``strftime`` and ``date.today()``
+    run ``wall`` seconds on, ``datetime.datetime.now``/``utcnow`` ``calendar`` seconds on, ``today`` their sum (also in each
+    product module's own name); teardown restores all by identity and the stray-probe cache by value, reports refusals
+    and fails on any module first imported meanwhile."""
     import datetime as dt
-    import sys
     import time
 
     if not _REAL_CLOCKS:
         _REAL_CLOCKS.update(time=time.time, time_ns=time.time_ns, gmtime=time.gmtime, localtime=time.localtime,
                             strftime=time.strftime, datetime=dt.datetime)
-    real = _REAL_CLOCKS
+    real, stray = _REAL_CLOCKS, sys.modules["ouroboros.context_health"]._STRAY_PROBE_CACHE  # loaded by ``_warm``
     moved = {}  # id -> (the moved object, the name of the real clock it stands in for)
     replaced = []  # (module, name, what stood there)
-    loaded = []  # sys.modules at the first move
+    loaded = []  # sys.modules and the stray-probe cache (a moved wall stamps it) at the first move
 
     def put(module, name, value):
         moved[id(value)] = (value, name)
@@ -199,7 +216,7 @@ def clocks(_warm):
 
     def move(*, wall: float, calendar: float) -> None:
         if not loaded:
-            loaded.append(set(sys.modules))
+            loaded.extend((set(sys.modules), dict(stray)))
         put(time, "time", lambda: real["time"]() + wall)
         put(time, "time_ns", lambda: real["time_ns"]() + int(wall * 1e9))
         put(time, "gmtime", lambda secs=None: real["gmtime"](time.time() if secs is None else secs))
@@ -241,10 +258,10 @@ def clocks(_warm):
         except Exception as exc:  # report, and go on restoring the others
             refused.append(f"{name}.{attr}: {exc!r}")
     left = sorted(f"{name}.{attr}" for name, _module, attr, _clock in holding())
-    late = sorted(name for name in set(sys.modules) - (loaded[0] if loaded else set(sys.modules))
-                  if name.split(".")[0] in _PRODUCT)
+    stray.update(loaded[1] if loaded else {})
+    late = sorted(set(sys.modules) - (loaded[0] if loaded else set(sys.modules)))
     assert not refused and not left, f"a moved clock is left in {left}; refused: {refused}"
-    assert not late, f"first imported under a moved clock: {late}; add it to the warm-up"
+    assert not late, f"first imported under a moved clock: {late}; import it in the warm-up"
 
 
 def _calendar_offsets():
@@ -259,11 +276,8 @@ def _calendar_offsets():
 
 
 def _one_root(monkeypatch, drive):
-    """The case's drive as its data root for these readers: ``config.DATA_DIR`` and ``config.SETTINGS_PATH``;
-    ``OUROBOROS_DATA_DIR``, which ``config.resolve_data_dir`` and ``usage_ledger._drive_root`` read first (and through
-    the latter the window and density evidence store, ``capability_evidence.canonical_evidence_root``); and
-    ``OUROBOROS_SETTINGS_PATH`` when the session sets it (``tests/conftest.py``), which ``usage_journal`` reads first.
-    The supervisor's state root (``supervisor.state``, bound by conftest) stays the worker's."""
+    """The drive as data root: ``config.DATA_DIR``/``SETTINGS_PATH``, ``OUROBOROS_DATA_DIR`` (``resolve_data_dir``,
+    ``usage_ledger``, the evidence store) and a set ``OUROBOROS_SETTINGS_PATH``; ``supervisor.state`` stays the worker's."""
     import os
 
     from ouroboros import config
@@ -553,10 +567,18 @@ def _vary_mcp(env, monkeypatch, **_kw):
                                           for start in (first, second)))
 
 
+def _same_identity(env, first, second):
+    """Identity alike once the fork's reader address reads as the canonical one, spelled as the producer spells it."""
+    fork = repr(str((env.drive_root / "memory/identity.md").resolve(strict=False)))
+    sections = [_named(start["B"]).get(("## Identity", 1), "") for start in (first, second)]
+    return bool(sections[0]) and sections[0] == sections[1].replace(f"path={fork}", "path='memory/identity.md'")
+
+
 _VARY = {"another_work": _vary_work, "time_time": _vary_time, "datetime": _vary_datetime, "restart": _vary_restart,
          "queue": _vary_queue, "budget": _vary_budget, "review_records": _vary_reviews, "accounts": _vary_accounts,
          "tool_order": _vary_registration, "actor_fork": _vary_fork, "assignment_size": _vary_assignment_size,
          "frame_budget": _vary_frame, "framed_another_day": _vary_framed_day, "mcp_liveness": _vary_mcp}
+_SAME = {"actor_fork": (_same_identity, "the reader address")}  # a case's closer check of its named leak
 
 
 def _frame_known(memory):
@@ -603,22 +625,11 @@ def _case(fact, item=None, what="", *known, marks=()):
     _case("framed_another_day"),
     _case("mcp_liveness"),
 ])
-def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, request, clocks, fact, known):
-    """A' and B are bytes of their sources alone (DEVELOPMENT "Cache-friendliness invariant"). Two works on one memory,
-    mode, authority, catalogue and model route: another work (another task id and owner text, the control every other
-    case extends by one fact); then a clock (``time.time``, every ``datetime`` reader, or both with the startup's WORLD
-    refresh: a restart), across a month boundary and at another hour; the queue; money; review records; the engine's
-    route health; the tools' registration order; the actor's drive (a fork); the assignment's size, whole and on a
-    pressed fixture that frames the second start; the calendar between two framed starts; a failed MCP listing. The
-    schemas, A', D and every section of B (and their order) keep their bytes, and each case checks its own witness of
-    the fact: in the request (C, the user row or the frame's own facts) for every case but ``mcp_liveness``, whose
-    failure reaches no row by design and is witnessed at the MCP manager. A case whose start still moves holds a strict
-    xfail bound to its tracker item; it raises its known leak only when every moved label is one the case names, and
-    fails outright otherwise."""
+def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, request, case_root, clocks, fact, known):
+    """Two works one ``_VARY`` fact apart keep the schemas, A', D, B's sections and order, each fact reaching its witness
+    (``mcp_liveness``: the MCP manager); an open leak raises ``KnownLeak`` only when every moved label is named, ``_SAME`` passing."""
     from ouroboros import mcp_client
 
-    _one_root(monkeypatch, tmp_path / "drive")
-    _fixed_host(monkeypatch)
     base, later = _calendar_offsets()
     clocks(wall=base, calendar=base)
     env, memory, _rooms = world(tmp_path)
@@ -647,6 +658,7 @@ def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, r
     known = set(known[0](memory) if known and callable(known[0]) else known)
     unexplained = [label for label in moved if label not in known]
     assert not unexplained, f"{fact}: the shared start moved in {unexplained}"
+    assert fact not in _SAME or _SAME[fact][0](env, first, second), f"{fact}: {moved} moved beyond {_SAME[fact][1]}"
     if moved:
         raise KnownLeak(f"{fact}: only the named leak moved: {moved}")
 
@@ -753,11 +765,9 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
     assert not {row["section_id"] for row in receipts} & {"architecture", "development"}
 
 
-def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tmp_path, monkeypatch):
+def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tmp_path, case_root):
     from tests.test_memory_view_story import _page
 
-    _one_root(monkeypatch, tmp_path / "drive")
-    _fixed_host(monkeypatch)
     env, memory, _rooms = world(tmp_path)
     a0, b0, c0, _cap = blocks(env, memory, MAIN)
     overview = memory.drive_root / "memory" / "knowledge" / "overview.md"
