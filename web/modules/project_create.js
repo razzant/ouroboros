@@ -33,13 +33,13 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
     const maxNameLength = PROJECT_NAME_MAX;
     return new Promise((resolve) => {
         const backdrop = document.createElement('div');
-        backdrop.className = 'marketplace-modal-backdrop new-project-backdrop';
+        backdrop.className = 'ui-modal-backdrop new-project-backdrop';
         backdrop.innerHTML = `
-            <div class="marketplace-modal new-project-dialog" role="dialog" aria-modal="true" aria-labelledby="new-project-title">
-                <div class="marketplace-modal-head">
+            <div class="ui-modal new-project-dialog" role="dialog" aria-modal="true" aria-labelledby="new-project-title">
+                <div class="ui-modal-head">
                     <h3 id="new-project-title">New project</h3>
                 </div>
-                <div class="marketplace-modal-body">
+                <div class="ui-modal-body">
                     <label class="new-project-field ui-field">
                         <span>Name</span>
                         <input class="files-modal-input ui-control" data-np-name name="project-name" type="text" placeholder="My project" maxlength="${maxNameLength}">
@@ -69,7 +69,7 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
                     </p>
                     <div class="new-project-error ui-result" data-np-error role="alert"></div>
                 </div>
-                <div class="marketplace-modal-actions">
+                <div class="ui-modal-actions">
                     <button type="button" class="btn btn-default" data-np-cancel>Cancel</button>
                     <button type="button" class="btn" data-primary data-np-create>Create project</button>
                 </div>

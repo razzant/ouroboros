@@ -331,7 +331,7 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 line = region.locator(".updates-letter-over")
                 assert line.inner_text() == OVER_LINE and line.get_attribute("data-tone") == "warn"
                 assert line.bounding_box()["y"] < region.locator(".updates-letter-body").bounding_box()["y"]
-                plain = dialog.locator(".marketplace-modal-body > p").inner_text()
+                plain = dialog.locator(".ui-modal-body > p").inner_text()
                 for fact in ("Git applies this update directly", "Claudexor: 4.8.0 → 4.8.0", "forward-only"):
                     assert fact in plain, fact
                 details = dialog.locator("details.confirm-dialog-details")
@@ -339,12 +339,12 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 assert details.get_attribute("open") is None, "per-commit receipts stay collapsed"
                 # Beside the prose, the consequences and the Details summary read at its size and ink.
                 prose = region.locator(".updates-letter-body").evaluate(INK)
-                assert prose[0] == "14px" and dialog.locator(".marketplace-modal-body > p").evaluate(INK) == prose
+                assert prose[0] == "14px" and dialog.locator(".ui-modal-body > p").evaluate(INK) == prose
                 assert details.locator("summary").evaluate(INK) == prose
                 assert "post-merge" not in plain and "full_battery" not in plain and "receipt" not in plain
                 box = region.bounding_box()
                 assert box["height"] <= min(0.42 * height, 380) + 2, box
-                actions = dialog.locator(".marketplace-modal-actions").bounding_box()
+                actions = dialog.locator(".ui-modal-actions").bounding_box()
                 assert actions["y"] + actions["height"] <= height, "the actions stay in view beside long prose"
                 shot(page, "04-apply-large")
                 details.locator("summary").click()
@@ -412,7 +412,7 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 page.evaluate("import('/static/modules/confirm_dialog.js')"  # the dialog's own promise stays open
                               ".then((m) => { m.openConfirmDialog({title: 'Plain', body: 'An ordinary question.'}); })")
                 dialog.wait_for()
-                assert dialog.locator(".marketplace-modal-body > p").evaluate(
+                assert dialog.locator(".ui-modal-body > p").evaluate(
                     "el => getComputedStyle(el).fontSize === getComputedStyle(el.parentElement).fontSize")
                 page.keyboard.press("Escape")
                 dialog.wait_for(state="detached")
