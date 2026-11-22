@@ -488,9 +488,9 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str,
         waiting += _queue_hold_facts(task, stored, waiting)
     from ouroboros.work_stop import stop_presentation
     view = stop_presentation({**stored, **task}, {"owner": stored.get("owner_pause") or {}})
-    # Who keeps its lane, as the queue published it beside the row; its hold, pause and sleep come first, so a row
-    # stopped, refused, asleep or held waits for that, not for that holder.
-    if (not settled and status == "pending" and isinstance(queue_row.get("lane_wait"), dict)
+    # Who keeps its lane, as the queue published it beside the row; a nearer cause comes first (a stop, a refusal, a
+    # wait of this attempt, a Project hold, its root's spending fence), so the list names what the card says.
+    if (not settled and not waiting and isinstance(queue_row.get("lane_wait"), dict)
             and not (view["stop"] or view["refusal"] or view["waiting"] or row.get("project_admission_hold"))):
         row["lane_wait"] = dict(queue_row["lane_wait"])
     if view["stop"] or view["refusal"]:
@@ -521,6 +521,8 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     trees = _live_trees(root, snapshot, gaps)
     listed: List[tuple] = []  # (task_id, task, status, queue_row), in roster order
     seen: set[str] = set()
+    fenced = {str(fence.get("root_task_id") or "") for fence in snapshot.get("budget_root_fences") or ()
+              if isinstance(fence, dict)}  # a root's spending fence holds its queued rows before any lane
     if not (snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid")):
         for status_key in ("running", "pending"):
             for row in snapshot.get(status_key) or []:
@@ -539,7 +541,8 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
                 ):
                     continue
                 seen.add(task_id)
-                listed.append((task_id, task, status_key, row))
+                listed.append((task_id, task, status_key, {**row, "lane_wait": None}
+                               if str(task.get("root_task_id") or task_id) in fenced else row))
     from ouroboros.conversation_lease import resolved_presence_turns
 
     # Live Presence authors moved to a Project join the ONE read of every listed root's result (B10 L3).

@@ -159,7 +159,7 @@ def queued_reason(wait: Any, names: Mapping[str, str]) -> Dict[str, Any]:
     entry = reason("queued")
     wait = wait if isinstance(wait, Mapping) else {}
     holder, lane = str(wait.get("task_id") or ""), str(wait.get("lane") or "")
-    name = names.get(holder, "") if holder and lane in {"project", "folder"} else ""
+    name = names.get(holder, "") if holder else ""
     if name:
         folder = str(wait.get("folder") or "") if lane == "folder" else ""
         entry.update(text=QUEUED_BEHIND.format(name=name),

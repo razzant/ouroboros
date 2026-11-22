@@ -629,11 +629,14 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
     unconfirmed: List[str] = []  # tasks whose action address the measurement could not prove
     # The census rows' own names: what a sleep waits for is said by them, never by an id or a new read.
     names = {task_id: _first_name(facts) for task_id, facts in raw.items()}
-    # The work a queued root stands behind is named as that tree's work reads in this list, else by its census row.
-    shown = {tid: _first_name(raw.get(tid) or {}, row) for tid, row in rows.items()}
+    # The work a queued root stands behind is named as that work reads in this list, else by its episode's census row
+    # (never a helper's), under its logical root and its attempt row alike.
+    shown = {}
     for entry in groups.values():
-        work_name = entry["name"] or next(filter(None, (_first_name(facts) for _row, facts, _ in entry["rows"])), "")
-        shown.update((root, work_name) for root in entry["roots"] if work_name)
+        episodes = [(row, facts) for row, facts, root in entry["rows"] if _episode_row(row, facts, root)]
+        work_name = entry["name"] or next(filter(None, (_first_name(facts, row) for row, facts in episodes)), "")
+        ids = [*entry["roots"], *(str(row.get("activity_id") or "") for row, _facts in episodes)]
+        shown.update((key, work_name) for key in ids if work_name and key)
     for work_id, entry in groups.items():
         members, live_roots, owners_by_root, paused_roots = [], [], {}, {}
         for row, facts, root_id in entry["rows"]:

@@ -600,7 +600,7 @@ def test_a_queued_row_says_behind_which_work_it_stands_and_never_overflows(room_
     """Owner 21.11.2026 («5A»), review round 1 (S5): the line and the details wrap a long unbroken name and folder path
     inside the row; the list's own scroll width is measured, since an overflow inside it never reaches the page's."""
     holder = "Rebuild_the_release_candidate_" * 4
-    folder = "/Users/someone/work/" + "a-very-long-folder-name-without-any-space-" * 3
+    folder = "/Users/someone/work/" + "a" * 130 + "/a-very-long-folder-name-without-any-space"  # one unbroken part
     queued_name = "Измерить старт чата и проверить ускорение на старых цитатах"
     transport = Transport(room_ui["page"], activities=[
         activity("rw-holder", suggested_name=holder), activity("rw-behind", "queued", suggested_name=queued_name)])

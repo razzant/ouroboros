@@ -294,6 +294,18 @@ def test_a_queued_root_says_the_work_it_stands_behind_by_that_works_name_and_not
     retried = {"holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder",
                              "suggested_name": "Add Ollama support"}, "q": {"lane_wait": project}}
     assert queued_of([retry, row("q", "queued", chat_id=1)], retried)[0]["behind"]["name"] == "Add Ollama support"
+    # Review round 2 (Astra B3, Carbon A1): a helper queued before its root never lends the work its name, and a
+    # retry named only by its request (its census row's derived name) is named under either id the wait carries.
+    kid = row("kid", "queued", parent_task_id="holder", root_task_id="holder")
+    helped = {"kid": {"parent_task_id": "holder", "root_task_id": "holder", "title": "Scan one file"},
+              "holder": {"running": True, "title": "Build index"}, "q": {"lane_wait": project}}
+    assert queued_of([kid, row("holder"), row("q", "queued", chat_id=1)], helped)[0]["behind"]["name"] == "Build index"
+    by_request = row("holder-r2", original_task_id="holder", root_task_id="holder", suggested_name="Build from source")
+    for held_by in ("holder", "holder-r2"):
+        said = queued_of([by_request, row("q", "queued", chat_id=1)],
+                         {"holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder"},
+                          "q": {"lane_wait": {**project, "task_id": held_by}}})
+        assert said[0]["text"] == "behind \u201cBuild from source\u201d", held_by
     bare = queued_of([row("holder", suggested_name="Derived from the request"), row("q", "queued", chat_id=1)],
                      {"holder": {"running": True}, "q": {"lane_wait": project}})
     assert bare[0]["text"] == "behind \u201cDerived from the request\u201d"

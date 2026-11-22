@@ -252,9 +252,9 @@ def test_a_queued_root_names_the_work_that_keeps_its_projects_or_its_folders_lan
                                    "folder": "/work/shared"},
                                   {"lane": "project", "task_id": "holder-b", "project_id": "room-b"}])
 def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_lane(tmp_path, wait):
-    """Opus 15.11.2026: a row's own pause, sleep or hold comes first: a row the queue publishes a ``lane_wait``
-    beside that is paused, asleep or held waits for that, so the roster names its hold and no lane. The same row,
-    eligible again, names its lane wait as the queue publishes it."""
+    """Opus 15.11.2026 and review round 2 (Astra B4): a row's own pause, sleep, hold, saved question or its root's
+    spending fence comes first: a row the queue publishes a ``lane_wait`` beside waits for that, so the roster names
+    that and no lane, as its card does. The same row, eligible again, names its lane wait as the queue publishes it."""
     from ouroboros.peer_roster import independent_roots
 
     write_task_result(tmp_path, "paused", "scheduled", reason_code="budget_paused", budget_pause={
@@ -264,8 +264,9 @@ def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_lane(tmp_path, w
     write_task_result(tmp_path, "asleep", "scheduled", reason_code="budget_paused", budget_pause={
         "pause_id": "p-asleep", "state": "paused", "task_attempt": 1, "paused_at": _PAUSED_AT,
         "reason": "sleep", "rail": "model_sleep", "sleep": _sleep("cold")})
+    _park(tmp_path, "asker", quiz="q7")
     held = {"reason": "project_routing_fence_lookup_failed", "detail": "The task result is unreadable."}
-    markers = {"eligible": {}, "paused": {"_budget_pause": {"exact_continuation": True}},
+    markers = {"eligible": {}, "asker": {}, "fenced": {}, "paused": {"_budget_pause": {"exact_continuation": True}},
                "asleep": {"_budget_pause": {"exact_continuation": True}},
                "held": {"_project_admission_restore_hold": held}, "owner-held": {"_owner_hold": {"reason": "owner"}}}
 
@@ -274,6 +275,7 @@ def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_lane(tmp_path, w
             "ts": utc_now_iso(),
             "running": [{"id": "holder", "attempt": 1, "task": {"id": "holder", "title": "Weekly review", "_attempt": 1,
                                                                 "project_id": "room-a"}}],
+            "budget_root_fences": [{"root_task_id": "fenced", "fence_id": "f-root", "status": "active"}],
             "pending": [{"id": task_id, "attempt": 1, "task": {"id": task_id, "title": task_id, "_attempt": 1,
                                                                "project_id": "room-b", **extra}, "lane_wait": wait}
                         for task_id, extra in marked.items()],
@@ -282,8 +284,9 @@ def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_lane(tmp_path, w
 
     rows = publish(markers)
     assert rows["eligible"]["lane_wait"] == wait
-    for task_id in ("paused", "asleep", "held", "owner-held"):
+    for task_id in ("paused", "asleep", "held", "owner-held", "asker", "fenced"):
         assert "lane_wait" not in rows[task_id], task_id
+    assert rows["asker"]["waiting"][0]["kind"] == "owner"
     assert rows["paused"]["waiting"][0]["kind"] == "owner_pause" and rows["asleep"]["waiting"][0]["kind"] == "sleep"
     assert rows["held"]["project_admission_hold"]["reason"] == held["reason"]
     assert rows["owner-held"]["refusal"] == {"reason": "_owner_hold"}

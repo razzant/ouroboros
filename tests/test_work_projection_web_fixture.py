@@ -168,6 +168,21 @@ CASES = {
         [_row("qh", suggested_name="Add Ollama support"), _row("qd", "queued", started_at=90.0)],
         {"qh": _RUNNING, "qd": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
     ),
+    # Review round 2: a helper queued before its root never names the work; a retry named only by its request is
+    # named by its episode's census row.
+    "queued_behind_helper_first": (
+        [_row("qk", "queued", parent_task_id="qh", root_task_id="qh"), _row("qh"),
+         _row("qs", "queued", started_at=90.0)],
+        {"qk": {"parent_task_id": "qh", "root_task_id": "qh", "title": "Scan one file"},
+         "qh": {**_RUNNING, "title": "Build index"},
+         "qs": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    "queued_behind_request_retry": (
+        [_row("qh-r2", original_task_id="qh", root_task_id="qh", suggested_name="Build index from source"),
+         _row("qt", "queued", started_at=90.0)],
+        {"qh-r2": {**_RUNNING, "original_task_id": "qh", "root_task_id": "qh"},
+         "qt": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
     # The holder the wait names is not a work the list holds: nothing is claimed.
     "queued_behind_unlisted": (
         [_row("qu", "queued", started_at=90.0)],
