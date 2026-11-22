@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from ouroboros.work_stop import SELECTION_KEY, continuation_refusal, current_stop
+from ouroboros.work_stop import SELECTION_KEY, continuation_refusal, current_stop, release_refusal
 from supervisor.work_stop_migration import FORMAT_KEY, FORMAT_VERSION, normalize_snapshot
 from tests._budget_pause_exact_helpers import _install_queue, _parked
 
@@ -74,7 +74,7 @@ def test_selected_members_keep_only_q9_bindings_and_new_pause_discards_old_selec
     assert SELECTION_KEY not in paused and "_budget_pause_hold" not in paused
 
 
-@pytest.mark.parametrize("reason,release", [("panic_hold", "owner"), ("saved_work_hold", "resume"),
+@pytest.mark.parametrize("reason,release", [("panic_hold", "resume"), ("saved_work_hold", "resume"),
                                           ("unrecognized_code", "resume")])
 def test_unselected_old_holds_gain_release_or_become_point_refusals(reason, release):
     task = {"id": "held", "_budget_pause_hold": {"reason": reason, "stop_cause": "panic", "selected": False}}
@@ -86,6 +86,7 @@ def test_unselected_old_holds_gain_release_or_become_point_refusals(reason, rele
     else:
         hold = task["_budget_pause_hold"]
         assert hold["release"] == release and hold["door"] == "panic"
+        assert release_refusal(hold) is None, "an old Panic hold is a mind's to release too"
         assert "stop_cause" not in hold and "selected" not in hold
 
 

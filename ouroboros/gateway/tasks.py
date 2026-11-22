@@ -1433,7 +1433,7 @@ async def api_task_resume(request: Request) -> JSONResponse:
                           code=error, reason_code=result.get("cause", ""), task_id=task_id,
                           **({"action": result["action"]} if result.get("action") else {}))
     # Only a task the queue does not hold is Not Found; every other answer is a typed refusal of a task that
-    # exists (Panic's owner-only hold, an unresumable stop, a selection still to observe, money, custody...).
+    # exists (an unresumable stop, a selection still to observe, money, custody...).
     status = 404 if error in {"task_not_pending", "missing_task_id"} else 409
     return JSONResponse({"error": error, "task_id": task_id, **{key: result[key] for key in (
                              "action", "blockers", "message", "refusal_basis",

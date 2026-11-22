@@ -5,7 +5,7 @@ import pathlib
 import time
 import uuid
 
-from ouroboros.control_actor import control_actor, observed_control_stop, resume_author
+from ouroboros.control_actor import observed_control_stop, resume_author
 from ouroboros.utils import utc_now_iso
 from ouroboros.work_stop import release_refusal
 
@@ -48,7 +48,7 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
         else:
             return None
     if refusal := release_refusal(observed_control_stop(root, row, budget=q.BUDGET_ROOT_FENCES,
-                                                       owner=fence), control_actor()):
+                                                       owner=fence)):
         return refusal
     if refusal := _late_phase_refusal(q, root, task_id, row, fence, gaps=gaps):
         return refusal

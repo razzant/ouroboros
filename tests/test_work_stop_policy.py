@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.work_stop import (
-    continuation_refusal, current_stop, reason_policy, release_refusal, stop_record,
+    continuation_refusal, current_stop, reason_policy, release_refusal, stop_presentation, stop_record,
 )
 from supervisor import events_budget as eb
 from tests._budget_pause_exact_helpers import _install_queue, _parked
@@ -55,7 +55,7 @@ def test_scopes_keep_independent_member_authority_and_sleep_is_only_waiting():
     task[eb.BUDGET_HOLD_KEY] = stop_record(eb.HOLD_PANIC, held_at="T")
     stop = current_stop(task, {"owner": {"state": "paused", "fence_id": "f"}})
     assert stop["cause"] == "pause" and stop["member_stop"]["cause"] == "panic"
-    assert release_refusal(stop, {"actor": "ouroboros"}) is None and release_refusal(stop, {}) is None
+    assert release_refusal(stop) is None
     assert current_stop(task)["release"] == "resume"
 
 
@@ -224,9 +224,64 @@ def test_a_panic_held_sleep_yields_to_a_minds_resume(tmp_path, monkeypatch):
     from supervisor.restart_retention import hold_after_stop
     hold_after_stop(task, tmp_path, eb.HOLD_PANIC)
     assert current_stop(task)["reason"] == eb.HOLD_PANIC
+    eb._handle_budget_resume_child({"task_id": "child", "requested_by": "root", "reason": "wake"}, sup)
+    assert outcomes[-1]["error"] == "root_resume_grant_missing", "the root's door follows the tree rule, not Panic"
     assert _apply({"action": "resume_task", "task_id": "child", "actor_task_id": "root",
                    "action_nonce": "generic", "reason": "wake"})["ok"]
     assert eb.BUDGET_HOLD_KEY not in task
+
+
+@pytest.mark.parametrize("child_kind", ["sleeping", "working"])
+def test_after_a_panic_boot_a_resumed_root_selects_its_panic_held_child(tmp_path, monkeypatch, child_kind):
+    """Trees rise after Panic (Fable, review of PR6): a real Panic boot holds a working root and its child (a cold
+    sleeper gets ``panic_hold``, a working one ``saved_work_hold{door: panic}``) and leaves consciousness off. The
+    root's door to its child waits for the root's own Resume; a mind's Resume of the root opens it."""
+    from ouroboros import budget_pause as bp, model_sleep
+    from supervisor import worker_chat_lane
+    from supervisor.events_mind_controls import _apply
+    from tests._budget_pause_exact_helpers import _fast_hold, _loop_ctx, _quiet_external
+    from tests.test_restart_saved_work import _working_run
+    from tests.test_state_authority import _prior
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    state.save_state({**_prior(), "bg_consciousness_enabled": True})
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: 5.0)
+    _working_run(tmp_path, workers, "root")
+    _working_run(tmp_path, workers, "child", parent="root")
+    outcomes = []
+    sup = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
+                          WORKERS=workers.WORKERS, sort_pending=q.sort_pending,
+                          persist_queue_snapshot=q.persist_queue_snapshot,
+                          bridge=SimpleNamespace(push_log=outcomes.append))
+    if child_kind == "sleeping":
+        ctx, limit = _loop_ctx(tmp_path, "child")
+        ctx.root_task_id = "root"
+        ctx.task_metadata = {"parent_task_id": "root", "root_task_id": "root"}
+        _fast_hold(monkeypatch, bp)
+        _quiet_external(monkeypatch, bp)
+        monkeypatch.setattr(model_sleep, "cold_blockers", lambda *a, **k: [])
+        ctx._model_sleep = {"sleep_id": "cold", "mode": "cold", **model_sleep.selectors(ctx, wake_after_sec=3600)}
+        with pytest.raises(bp.BudgetPauseRequested) as parked:
+            bp.enter_cold_sleep(limit)
+        bp.end_dispatch_fence("child")
+        eb.install_exact_budget_pause(sup, "child", bp.exact_pause_marker(parked.value.pause)["checkpoint"])
+    assert q.persist_queue_snapshot(reason="before_panic")
+    (tmp_path / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
+    workers.PENDING.clear()
+    workers.RUNNING.clear()
+    assert q.restore_pending_from_snapshot() == 2
+    worker_chat_lane.auto_resume_after_restart()
+    rows = {task["id"]: task for task in workers.PENDING}
+    assert current_stop(rows["root"]).get("door") == "panic"
+    assert current_stop(rows["child"])["reason"] == ("panic_hold" if child_kind == "sleeping" else "saved_work_hold")
+    assert state.load_state()["bg_consciousness_enabled"] is False
+    eb._handle_budget_resume_child({"task_id": "child", "requested_by": "root", "reason": "wake"}, sup)
+    assert outcomes[-1]["ok"] is False, "before its root's own Resume the door stays shut"
+    assert _apply({"action": "resume_task", "task_id": "root", "actor_task_id": "main-mind",
+                   "action_nonce": "root", "reason": "go on"})["ok"]
+    eb._handle_budget_resume_child({"task_id": "child", "requested_by": "root", "reason": "wake"}, sup)
+    assert outcomes[-1]["ok"] is True, outcomes[-1]
+    assert eb.BUDGET_HOLD_KEY not in rows["child"]
 
 
 def test_an_application_stop_keeps_the_selection_it_replaces_beside_its_recovery_until_another_stop():
@@ -336,3 +391,25 @@ def test_boot_notice_says_what_the_restored_rows_need(monkeypatch, tmp_path):
 
     assert [text for _chat, text in rec.alerts if text.startswith("♻️")] == [
         "♻️ Restored pending queue: 5 tasks. Continuing by themselves: 2; waiting for Resume: 2; still paused: 1."]
+
+
+def test_a_panic_hold_stored_with_the_old_owner_release_reads_and_releases_as_resume(tmp_path, monkeypatch):
+    """A hold stored before 22 Nov 2026 keeps ``release: owner`` on disk; it is read as ``resume`` (Fable M2): the
+    mind's roster says so, the work shows its Resume, and a mind's Resume lifts it, as a new hold."""
+    from ouroboros.control_actor import mind_control
+    from ouroboros.peer_roster import _queue_hold_facts
+    from ouroboros.task_results import write_task_result
+
+    q, _state, workers = _install_queue(tmp_path, monkeypatch)
+    legacy = {"reason": "panic_hold", "release": "owner", "held_at": "2026-10-29T15:00:00Z",
+              "by": {"actor": "host", "task_id": "", "text": "", "at": "2026-10-29T15:00:00Z"}}
+    task = {"id": "old", "root_task_id": "old", "_attempt": 1, "type": "task", "admitted_dispatch": "none",
+            eb.BUDGET_HOLD_KEY: dict(legacy)}
+    workers.PENDING.append(task)
+    write_task_result(tmp_path, "old", "scheduled", root_task_id="old")
+    view = stop_presentation(task)
+    assert (view["release"], view["resumable"]) == ("resume", True)
+    assert _queue_hold_facts(task, {}, [])[0]["release"] == "resume"
+    with mind_control("mind", "continue"):
+        assert q.resume_budget_paused_task("old")["ok"]
+    assert eb.BUDGET_HOLD_KEY not in task

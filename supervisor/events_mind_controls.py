@@ -82,7 +82,7 @@ def _kept_pause(task_id: str) -> dict | None:
     owner Q9); a closed fence whose CREATING press was not Ouroboros's (``control_actor.creating_author``): the
     owner's (``owner_paused_by_name``) or one that declared nobody (``pause_author_unknown``, often the owner's own
     from before the window declared him). A later press filling in an author never makes it Ouroboros's."""
-    from ouroboros.control_actor import control_actor, creating_author, observed_control_stop
+    from ouroboros.control_actor import creating_author, observed_control_stop
     from ouroboros.owner_pause import fence_closed, read_fence
     from ouroboros.task_results import load_task_result, resolve_task_lineage
     from ouroboros.work_stop import release_refusal
@@ -94,8 +94,7 @@ def _kept_pause(task_id: str) -> dict | None:
         meta = q.RUNNING.get(task_id)
         row = ((meta.get("task") if isinstance(meta, dict) else None)
                or next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None))
-    if row and (refusal := release_refusal(observed_control_stop(drive, row, budget=q.BUDGET_ROOT_FENCES),
-                                           control_actor())):
+    if row and (refusal := release_refusal(observed_control_stop(drive, row, budget=q.BUDGET_ROOT_FENCES))):
         return refusal
     try:
         stored = load_task_result(drive, task_id, strict=True)

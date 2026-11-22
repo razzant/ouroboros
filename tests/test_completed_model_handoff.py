@@ -837,8 +837,8 @@ def test_owner_stop_or_panic_of_the_work_still_refuses_continue(tmp_path, monkey
 @pytest.mark.parametrize("panic", [False, True], ids=["writer-wait", "panic-hold"])
 def test_a_panic_hold_on_a_held_continue_outlives_its_retired_sender(tmp_path, monkeypatch, panic):
     """Without a Panic the held selection records the ended sender and starts the Continue once. A Panic
-    replaces that wait (the restore's own rule): its sender's recorded end starts nothing, the mind's
-    Resume is refused, and only the owner's Resume releases it."""
+    replaces that wait (the restore's own rule): its sender's recorded end starts nothing, and a Resume,
+    here a mind's, releases it."""
     from ouroboros.control_actor import mind_control
     from ouroboros.local_custody_repair import reconcile_open_local_custody
     from ouroboros.work_stop import hold_fact

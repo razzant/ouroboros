@@ -117,8 +117,8 @@ def reason_policy(reason: str) -> dict:
 def record_policy(record: dict | None) -> dict:
     record = record or {}
     policy = reason_policy(str(record.get("reason") or ""))
-    if policy["cause"] != "refusal":
-        policy["release"] = record.get("release", policy["release"])
+    if policy["cause"] != "refusal":  # a stored Panic ``owner`` (before 22 Nov 2026) releases as Resume now
+        policy["release"] = "resume" if record.get("release") == "owner" else record.get("release", policy["release"])
     return policy
 
 
@@ -230,7 +230,7 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
     # though its stop was already released; the census names that existing door.
     needs_resume = refusal or task.get("can_resume")
     release = stop.get("release") or ("resume" if needs_resume else "none")
-    if release_refusal(stop, {"actor": "ouroboros"}):
+    if release_refusal(stop):
         release = "none"
     text = STOP_TEXT[code]
     if code == "technical_pause":
@@ -245,7 +245,7 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
         entry["by"] = author
     return {"stop": stop, "refusal": refusal, "reason": entry,
             "pause_cause": _PAUSE_CAUSES.get(cause, "sleep" if sleeping else "unknown"),
-            "release": release, "resumable": release in {"resume", "owner"},
+            "release": release, "resumable": release == "resume",
             "waiting": bool(not stop and not needs_resume and (wait.get("wait_for") or sleeping))}
 
 
@@ -475,7 +475,7 @@ def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
     (a sleep, earlier writers settling: waits are not stops). Otherwise ``state`` is ``held`` (a stop keeps
     it from running), ``pausing`` (a stop settles it while it still runs) or ``unknown`` (a fact the reading
     needs is unreadable: neither held nor runnable). ``release`` says who may release it: ``mind`` (a
-    Resume request, which still checks money, Stop, time and the root's grant), ``owner`` or ``none``. The
+    Resume request, which still checks money, Stop, time and the root's grant) or ``none``. The
     request door belongs to the reader (``stop_for_reader``). A stop read from a stale queue snapshot says
     so (``queue_freshness``) and offers no door: the row may already have changed. When the root's resume
     basis cannot be read, the stop stands as read and says so (``resume_basis: unreadable``): its identity
@@ -539,12 +539,12 @@ def stop_for_reader(stop: dict, task: dict, reader_id: str) -> dict:
     return dict(stop)
 
 
-def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:
-    """Release permission, not readiness; empty actor means owner, mind doors must use ``mind_control``."""
-    stop, actor = stop or {}, actor or {}
+def release_refusal(stop: dict | None) -> dict | None:
+    """Release permission, not readiness: the same for the owner's press and a mind's Resume."""
+    stop = stop or {}
     if stop.get("release") == "none":
         return {"ok": False, "error": "stop_not_resumable"}
-    return release_refusal(stop["member_stop"], actor) if stop.get("member_stop") else None
+    return release_refusal(stop["member_stop"]) if stop.get("member_stop") else None
 
 
 def door_can_replace(task: dict, reason: str) -> bool:
@@ -565,10 +565,10 @@ def writer_wait(task: dict | None) -> bool:
 
 
 def held_for_release(task: dict | None) -> bool:
-    """Its own explicit stop that only a Resume or the owner releases; never a wait or a refusal."""
+    """Its own explicit stop that only a Resume releases; never a wait or a refusal."""
     hold = hold_fact(task)
     policy = record_policy(hold)
-    return bool(hold) and policy["cause"] != "wait" and policy["release"] in {"resume", "owner"}
+    return bool(hold) and policy["cause"] != "wait" and policy["release"] == "resume"
 
 
 _POINTS = ("_budget_pause", "_owner_wait_resume", "_working_recovery", "_budget_pause_resume", SELECTION_KEY)

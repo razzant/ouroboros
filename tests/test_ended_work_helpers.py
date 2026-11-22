@@ -294,6 +294,26 @@ def test_an_owner_pause_panic_hold_or_accepted_resume_keeps_the_helper(env):
     _closed(env)
 
 
+def test_a_panic_held_helper_under_its_ended_roots_money_fence_is_kept(env):
+    """Astra (review of PR6): a helper paused on a technical source, its tree under a root money fence, the root
+    answered, then a Panic boot gave the helper its own ``panic_hold``. The tree fence paints the shown stop, yet
+    the helper's own Panic hold keeps it: no automatic cleanup closes it, its saved pause stays, and a mind's
+    Resume may still release it. Without the Panic hold the same orphan closes as before."""
+    from ouroboros.work_stop import current_stop, release_refusal
+
+    _work_root(env.root)
+    task = _paused_helper(env.root, env.monkeypatch)
+    env.q.BUDGET_ROOT_FENCES[ROOT] = {"root_task_id": ROOT, "status": "paused", "cause": "money", "fence_id": "f-1"}
+    task["_budget_pause_hold"] = stop_record("panic_hold", held_at="2026-11-10T00:00:00+00:00")
+    assert _sweep(env) == ([], {})
+    _retained(env)
+    assert _pending(env)["_budget_pause"]["exact_continuation"] is True, "its saved continuation stays"
+    assert release_refusal(current_stop(_pending(env), {"budget": env.q.BUDGET_ROOT_FENCES})) is None
+    task.pop("_budget_pause_hold")
+    assert _sweep(env)[0] == [CHILD], "the same orphan without a Panic hold closes with the ended work"
+    _closed(env)
+
+
 def test_panic_closes_nothing(env, monkeypatch):
     import supervisor.restart_retention as retention
 

@@ -542,7 +542,7 @@ def test_nested_cards_show_their_own_current_work(subscription_ui, tmp_path, mon
     page.screenshot(path=str(out / f"nested-members-{width}.png"), animations="disabled")
 
 
-def test_only_the_nested_waiter_shows_that_its_selected_helper_needs_owner_resume(subscription_ui, monkeypatch):
+def test_only_the_nested_waiter_shows_that_its_selected_helper_needs_a_resume(subscription_ui, monkeypatch):
     from playwright.sync_api import expect
 
     root, waiter, held, other = "map-root", "map-reader", "map-index", "map-notes"
@@ -572,7 +572,7 @@ def test_only_the_nested_waiter_shows_that_its_selected_helper_needs_owner_resum
         return page.locator(f'.chat-live-card[data-task-id="{task_id}"] > [data-live-summary-button]')
 
     expect(head(waiter).locator("[data-live-phase]")).to_have_text("Waiting")
-    phrase = "1 subagent it waits for is paused until you resume it"
+    phrase = "1 subagent it waits for is paused until Ouroboros resumes it"  # its root may ask, after Panic too
     expect(head(waiter)).to_contain_text(phrase)
     expect(head(root)).not_to_contain_text(phrase)
     expect(head(other).locator("[data-live-phase]")).to_have_text("Waiting")

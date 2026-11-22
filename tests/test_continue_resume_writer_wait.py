@@ -237,7 +237,7 @@ def test_stop_while_it_waits_ends_it_and_nothing_starts(tmp_path, monkeypatch):
 @pytest.mark.parametrize("door", ["owner_restart", "panic", "app_stop"])
 def test_a_restart_while_it_waits_keeps_its_ordinary_return_and_selects_no_child(tmp_path, monkeypatch, door):
     """The restart applies its own rule to the wait, as to any Continue's writer wait: the owner's Restart holds it for
-    an explicit Resume and a Panic for the owner's own (``retained_pending``); a plain stop of the application keeps
+    an explicit Resume and a Panic too, the owner's or a mind's (``retained_pending``); a plain stop of the application keeps
     the wait, which starts it once its writers settle. That Resume of the SAVED Continue, its writer still running,
     returns it to its wait through the held-row selection; its release starts it and never its held child."""
     from ouroboros import delegate_recovery
@@ -266,9 +266,14 @@ def test_a_restart_while_it_waits_keeps_its_ordinary_return_and_selects_no_child
     print(door, "restored hold:", restored)
     assert recheck_held_continuations() == [], "nothing starts while its earlier writer runs"
     if door == "panic":
-        assert restored["reason"] == "panic_hold" and restored["release"] == "owner" and not writer_wait(row), restored
+        assert restored["reason"] == "panic_hold" and restored["release"] == "resume" and not writer_wait(row), restored
         _settle_leaf(tmp_path)
         assert recheck_held_continuations() == [], "the Panic replaced the wait: its writers settling starts nothing"
+        from ouroboros.control_actor import mind_control
+
+        with mind_control("main", "carry on after the Panic"):  # pin of the removed owner-only rule: a mind may
+            assert queue.resume_budget_paused_task(successor)["ok"]
+        assert hold_fact(row) is None
         return
     child = {"id": "succ-child", "type": "task", "chat_id": 7, "root_task_id": successor, "parent_task_id": successor,
              "_attempt": 1, "admitted_dispatch": "none",

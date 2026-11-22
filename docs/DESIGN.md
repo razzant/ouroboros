@@ -972,7 +972,7 @@ status sentence's or a composer chip's dot is its tone, §4).
 - **Amber is the owner's attention and nothing else:** (1) the owner's move — a
   question still unanswered (the ones Main's pill counts, whether its task stands on it, goes on under its
   assumption or has ended, and a Project's answer whose delivery a restart left unknown), or what only the owner can do: sign in, a spending limit, Resume after a
-  restart, crash or Panic, grant access, a skill review that must run first, local
+  restart or crash, grant access, a skill review that must run first, local
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
   or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
   with); (2) a warning worth reading — warn toasts and sentences,
@@ -1561,9 +1561,8 @@ the words the declaring press recorded following its head verbatim whoever decla
 `or` — the subagent by its name, else how many, its external run, a service, a reviewer, a sender by its name, else a
 message — and its time last, in the viewer's clock, a time alone also waking on a message; a record
 that saved no choice reads `until it is woken`), unless a subagent its sleep chose is paused: the line then says so and who resumes
-that subagent (`… until Ouroboros resumes it` only when this episode may ask for it,
-or `until you resume it` after Panic; a Continue's earlier subagent is just
-`paused`), with no new control or turn; subagents an earlier attempt left running
+that subagent (`… until Ouroboros resumes it` only when this episode may ask for it, after Panic too;
+a Continue's earlier subagent is just `paused`), with no new control or turn; subagents an earlier attempt left running
 read as `Working`, with their count; `Queued` carries no cause when the scheduler
 recorded none, never a free-worker claim; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a

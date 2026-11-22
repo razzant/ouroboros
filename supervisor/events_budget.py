@@ -1183,7 +1183,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *
     from ouroboros.control_actor import control_actor, observed_control_stop
     from ouroboros.work_stop import unsafe_replay_response
     if refusal := release_refusal(observed_control_stop(
-            result_root, task, budget=q.BUDGET_ROOT_FENCES, owner=current["owner_fence"]), control_actor()):
+            result_root, task, budget=q.BUDGET_ROOT_FENCES, owner=current["owner_fence"])):
         return refusal
     native_read_gap = native_continuation_repair(task)
     # This native repair cannot complete a shadow working carrier's root Resume.

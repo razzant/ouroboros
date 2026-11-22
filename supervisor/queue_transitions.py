@@ -463,7 +463,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
     from ouroboros.work_stop import SELECTION_KEY, clear_refusal, release_refusal, selection_record, unsafe_replay_response
     q = _queue_module()
     task_id = str(task_id or "").strip()
-    if refusal := release_refusal(observed_control_stop(q.DRIVE_ROOT), control_actor()):
+    if refusal := release_refusal(observed_control_stop(q.DRIVE_ROOT)):
         return refusal
     if not task_id:
         return {"ok": False, "error": "missing_task_id"}
@@ -476,7 +476,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
     with q._queue_lock:
         located = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
         if refusal := release_refusal(observed_control_stop(
-                q.DRIVE_ROOT, located, budget=q.BUDGET_ROOT_FENCES), control_actor()):
+                q.DRIVE_ROOT, located, budget=q.BUDGET_ROOT_FENCES)):
             return refusal
     if located is None:
         # A member parked WARM under the owner's Pause (its stack retained while a
@@ -549,7 +549,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         if task is None:
             return {"ok": False, "error": "task_not_pending"}
         if refusal := release_refusal(observed_control_stop(
-                q.DRIVE_ROOT, task, budget=q.BUDGET_ROOT_FENCES), control_actor()):
+                q.DRIVE_ROOT, task, budget=q.BUDGET_ROOT_FENCES)):
             return refusal
         pause = task.get("_budget_pause") if isinstance(task.get("_budget_pause"), dict) else None
         if pause and pause.get("exact_continuation"):

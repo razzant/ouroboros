@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from ouroboros.control_actor import control_actor, observed_control_stop, resume_author
+from ouroboros.control_actor import observed_control_stop, resume_author
 from ouroboros.delegate_recovery import owner_restart_in_progress
 from ouroboros.work_stop import SELECTION_KEY, clear_refusal, continuation_refusal, release_refusal, retain_consumed_selection
 from ouroboros.utils import utc_now_iso
@@ -287,7 +287,7 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
         return None
     result_root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
     if refusal := release_refusal(observed_control_stop(
-            result_root, task, budget=q.BUDGET_ROOT_FENCES), control_actor()):
+            result_root, task, budget=q.BUDGET_ROOT_FENCES)):
         return refusal
     root_task_id = str(task.get("root_task_id") or task_id)
     try:
@@ -610,7 +610,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         return {"ok": False, "error": "malformed_pause_identity"}
     result_root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
     if refusal := release_refusal(observed_control_stop(
-            result_root, task, budget=q.BUDGET_ROOT_FENCES), control_actor()):
+            result_root, task, budget=q.BUDGET_ROOT_FENCES)):
         return refusal
     if refusal := _restart_or_update_refusal(q, task, result_root, task_id):
         return refusal
@@ -1220,7 +1220,7 @@ def resume_late_phase(task_id: str, *, gaps: Optional[List[Dict[str, str]]] = No
     if row.get("status") not in _TRULY_TERMINAL_STATUSES or not fence_closed(fence):
         return None
     if refusal := release_refusal(observed_control_stop(
-            root, row, budget=q.BUDGET_ROOT_FENCES, owner=fence), control_actor()):
+            root, row, budget=q.BUDGET_ROOT_FENCES, owner=fence)):
         return refusal
     remainder = refresh_owner_pause_tree(task_id, gaps=gaps) != FENCE_RELEASED
     if remainder:

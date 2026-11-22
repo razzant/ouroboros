@@ -537,7 +537,7 @@ def _pending_resume_available(q: Any, task: dict, *, owner_paused: bool) -> bool
     from supervisor.queue_transitions import budget_pause_fact
 
     stop = current_stop(task, {"budget": q.BUDGET_ROOT_FENCES})
-    if owner_paused or not (stop.get("release") in {"resume", "owner"} or continuation_refusal(task)):
+    if owner_paused or not (stop.get("release") == "resume" or continuation_refusal(task)):
         return False
     task_id = str(task.get("id") or "")
     root_id = str(task.get("root_task_id") or task_id)

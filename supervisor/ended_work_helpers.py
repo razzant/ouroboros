@@ -124,7 +124,7 @@ def _is_child(row: Dict[str, Any]) -> bool:
 def _parked_for_resume(row: Dict[str, Any], fences: Dict[str, Any]) -> bool:
     """A queued row whose only way on is an explicit Resume nobody has accepted; every unknown fact answers False."""
     from ouroboros.budget_pause import STATE_RESUME_GRANTED, budget_pause_row
-    from ouroboros.work_stop import SELECTION_KEY, pause_marker, queue_control
+    from ouroboros.work_stop import SELECTION_KEY, current_stop, pause_marker, queue_control
 
     q, task_id = _queue(), str(row.get("id") or "")
     # An accepted Resume's carrier lifts the stop it answered; under a standing pause marker a newer Pause spent it.
@@ -139,7 +139,7 @@ def _parked_for_resume(row: Dict[str, Any], fences: Dict[str, Any]) -> bool:
         log.debug("The control over %s was not read; it stays", task_id, exc_info=True)
         return False
     return (control["phase"] == "budget_paused" and not control["owner_resumed"] and view.get("release") == "resume"
-            and (view.get("stop") or {}).get("cause") != "panic"  # a Panic hold is kept (the docstring)
+            and current_stop(row).get("cause") != "panic"  # its own Panic hold keeps it, under any tree fence
             and bool(view.get("resumable")) and not view.get("waiting")
             and str((view.get("refusal") or {}).get("reason") or "") not in _KEPT_REFUSALS
             and pause.get("state") != STATE_RESUME_GRANTED and not _resumed_when_stopped(row, pause))

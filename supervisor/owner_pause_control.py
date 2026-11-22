@@ -240,7 +240,7 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
     from ouroboros.task_carrier import execution_kind
     from ouroboros.task_results import resolve_task_lineage
     from ouroboros.store import acquisition_budget, StoreBusy
-    from ouroboros.control_actor import control_actor, observed_control_stop
+    from ouroboros.control_actor import observed_control_stop
     from ouroboros.work_stop import release_refusal
 
     from supervisor import queue as q
@@ -276,7 +276,7 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
             return {"ok": False, "error": "not_a_root_task", "root_task_id": str(task.get("root_task_id") or "")}
         root_drive = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
         if refusal := release_refusal(observed_control_stop(
-                root_drive, task, budget=q.BUDGET_ROOT_FENCES), control_actor()):
+                root_drive, task, budget=q.BUDGET_ROOT_FENCES)):
             return refusal
         root_id = lineage["root_task_id"] if lineage["is_retry_root_attempt"] else task_id
         from ouroboros.owner_pause import root_actor
@@ -324,7 +324,7 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
                 if (latest or {}).get("_budget_pause_hold") != task.get("_budget_pause_hold"):
                     return {"ok": False, "error": "selection_authority_changed"}
                 if refusal := release_refusal(observed_control_stop(
-                        root_drive, latest, budget=q.BUDGET_ROOT_FENCES, owner=current), control_actor()):
+                        root_drive, latest, budget=q.BUDGET_ROOT_FENCES, owner=current)):
                     return refusal
                 # The accepted Pause replaces only the decision this actor may release.
                 # Independent exact continuation custody stays on its own marker.

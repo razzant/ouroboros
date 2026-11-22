@@ -648,7 +648,7 @@ def test_the_unstarted_roots_grant_yields_to_a_newer_pause_stop_panic_or_unknown
         workers.WORKERS.clear()
         _stop_and_boot(q, workers)
         rows = {t["id"]: t for t in workers.PENDING}
-        assert eb.budget_hold_fact(rows[ROOT])["door"] == "panic", "only the owner resumes the root again"
+        assert eb.budget_hold_fact(rows[ROOT])["door"] == "panic", "the root needs a new Resume"
     held = copy.deepcopy(rows[CHOSEN])
     outcome = _model_selects(tmp_path, workers, q, CHOSEN, ROOT)
     assert outcome["ok"] is False and outcome["error"] == {
