@@ -67,10 +67,12 @@ def resolved_carrier(root, metadata) -> dict:
 
 def carrier_now(ctx, metadata=None) -> dict:
     """The carrier a run selects its finish by (``resolved_carrier`` at its canonical root): a new selection of a
-    retained legacy binding meets its place like any other, while a stored result replays as it was selected."""
+    retained legacy binding meets its place like any other, while a stored result replays as it was selected. A run
+    under a frozen Presence ceiling keeps its own outward choice, the forced declaration (owner Q4)."""
     if metadata is None:
         metadata = getattr(ctx, "task_metadata", None) or {}
-    if not _legacy_binding(metadata):
+    frozen = isinstance((getattr(ctx, "task_contract", None) or {}).get("capability_ceiling"), dict)
+    if frozen or not _legacy_binding(metadata):
         return reply_carrier(metadata) if isinstance(metadata, dict) else {}
     from ouroboros.tool_access import canonical_data_root
     return resolved_carrier(canonical_data_root(ctx), metadata)
@@ -219,11 +221,11 @@ def conversation_gesture_tools(connector: str) -> list:
 def records_only(metadata) -> bool:
     """A place-bound root (a focus turn, a root it handed off, a schedule's run) whose own connector speaks through
     such a tool: its finish is its record and people hear only what it sends (owner 06.11 «2A», 21.11 «1A»). A
-    connector without one (a peer URL) keeps the final as its reply. A legacy binding is bound like a place."""
+    connector without one (a peer URL) keeps the final as its reply. A run's selection reads the same fact with a
+    retained legacy binding resolved (``records_only_now``, ``prepare_focus_reply``)."""
     metadata = metadata if isinstance(metadata, dict) else {}
     presence = metadata.get("presence") or {}
-    return (bool(reply_carrier(metadata) or _legacy_binding(metadata))
-            and bool(conversation_send_tools(str(presence.get("transport_skill") or ""))))
+    return bool(reply_carrier(metadata)) and bool(conversation_send_tools(str(presence.get("transport_skill") or "")))
 
 
 def _focus_turn(metadata) -> bool:
@@ -252,17 +254,22 @@ def records_only_now(ctx) -> bool:
     """``records_only`` for an Active place under Acts or Evolves. A Silent or Paused place and Advises keep today's
     held draft (the owner's rehearsal before activating a place); an unreadable place keeps it too."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    if not records_only(metadata):
-        return False
     from ouroboros.consciousness_authority import is_observe_origin
     from ouroboros.tool_access import canonical_data_root
-    if is_observe_origin(metadata):
+    if not _door_declared(metadata) or is_observe_origin(metadata):
         return False
     try:
-        root = canonical_data_root(ctx)
-        return get_place(root, resolved_carrier(root, metadata)["place_id"]).state == "active"
+        carrier = carrier_now(ctx, metadata)
+        return bool(carrier) and get_place(canonical_data_root(ctx), carrier["place_id"]).state == "active"
     except Exception:  # a missing or unreadable place: the held path says so, as it does for every final
         return False
+
+
+def _door_declared(metadata) -> bool:
+    """Whether the run's own connector declares an in-conversation message door (``records_only`` without the
+    carrier, which a selection resolves)."""
+    presence = metadata.get("presence") if isinstance(metadata, dict) and isinstance(metadata.get("presence"), dict) else {}
+    return bool(conversation_send_tools(str(presence.get("transport_skill") or "")))
 
 
 def riding_sends(ctx, calls) -> list:
@@ -438,7 +445,7 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
         return True, ""
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, reply_anchor, selection_for
-    door, records, focus = records_only(metadata), records_only_now(ctx), _focus_turn(metadata)
+    door, records, focus = _door_declared(metadata), records_only_now(ctx), _focus_turn(metadata)
     if records and focus and text and not quiet:
         from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
         if owner_reply_owed(ctx):  # R3 at the common exit: a focus's record owes my human's reply as a silent one does

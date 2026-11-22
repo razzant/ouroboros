@@ -149,7 +149,9 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
             "type": "presence_result", "task_id": str(task.get("id") or ""), "outcome": outcome,
             "text": "", "message": "", "work_ref": work_ref, "output_ref": "", "ts": utc_now_iso(),
         }
-    carrier = carrier_now(ctx, task.get("metadata") or {})  # a new selection: a retained legacy binding meets its place
+    # A new selection meets the place a retained legacy binding resolves to; a frozen-ceiling run keeps its forced
+    # declaration (``place_reply.carrier_now``).
+    carrier = carrier_now(ctx, task.get("metadata") or {})
     if carrier:
         # Ordinary exits have already returned flags to the mind. Forced exits cannot buy a
         # new round: preserve the flag as a held reply instead of releasing unchecked speech.

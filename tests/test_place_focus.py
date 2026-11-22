@@ -1061,7 +1061,7 @@ def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, mon
     """Pre-migration task bytes name the place only by its old ``binding_id``: a new selection resolves it through the
     place store as ``reply_hold`` does, so a door connector's finish is its record (the live result builder included)
     and a doorless one meets the ``place_reply`` check; a final stored before it is replayed as stored."""
-    from ouroboros.place_reply import prepare_focus_reply, records_only, reply_carrier
+    from ouroboros.place_reply import carrier_now, prepare_focus_reply, records_only, reply_carrier
     from ouroboros.presence_runner import build_presence_result_event, presence_result_from_stored
     from tests.test_place_reply_revision import promoted
     root = focus[0]
@@ -1071,7 +1071,7 @@ def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, mon
     presence = task["metadata"]["presence"]
     presence["binding_id"] = presence.pop("place_id")
     task["metadata"].pop("focus", None)  # pre-migration bytes carry no focus frame either
-    assert reply_carrier(task["metadata"]) == {} and records_only(task["metadata"]) is door
+    assert reply_carrier(task["metadata"]) == {} and records_only(task["metadata"]) is False  # metadata names no place
     checks = []
     monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
@@ -1089,6 +1089,8 @@ def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, mon
               "metadata": {**task["metadata"], "presence_outcome": "message", "presence_result_text": "Hello"}}
     replay = presence_result_from_stored(stored, task["id"])
     assert (replay.outcome, replay.text) == ("message", "Hello"), "a final selected before the update is served as stored"
+    frozen = SimpleNamespace(task_metadata=task["metadata"], task_contract={"capability_ceiling": {}}, drive_root=root)
+    assert carrier_now(frozen) == {}, "a frozen-ceiling run keeps its forced declaration as its outward choice (owner Q4)"
 
 
 class _Death(BaseException):
