@@ -313,15 +313,8 @@ def iter_gated_functions(
     yield from _iter_gated_functions_from_modules(iter_gated_modules(repo_dir, repo_paths=repo_paths))
 
 
-def collect_size_ratchet_inventory(
-    repo_dir: pathlib.Path,
-    *,
-    repo_paths: Iterable[str] | None = None,
-) -> SizeRatchetInventory:
-    """Collect one exact inventory for gates, health, census, and regeneration."""
-    injected = tuple(repo_paths) if repo_paths is not None else None
-    modules = tuple(iter_gated_modules(repo_dir, repo_paths=injected))
-    functions = tuple(_iter_gated_functions_from_modules(modules))
+def _inventory_of(modules: tuple[GatedModule, ...], functions: tuple[GatedFunction, ...]) -> SizeRatchetInventory:
+    """These modules and functions with the exact debt sets every gate and metric reads from them."""
     return SizeRatchetInventory(
         modules=modules,
         functions=functions,
@@ -337,6 +330,17 @@ def collect_size_ratchet_inventory(
             item.path for item in modules if BAND_MODULE_MAX_LINES < item.line_count <= MAX_MODULE_LINES
         ),
     )
+
+
+def collect_size_ratchet_inventory(
+    repo_dir: pathlib.Path,
+    *,
+    repo_paths: Iterable[str] | None = None,
+) -> SizeRatchetInventory:
+    """Collect one exact inventory for gates, health, census, and regeneration."""
+    injected = tuple(repo_paths) if repo_paths is not None else None
+    modules = tuple(iter_gated_modules(repo_dir, repo_paths=injected))
+    return _inventory_of(modules, tuple(_iter_gated_functions_from_modules(modules)))
 
 
 def _gated_blobs(
@@ -1492,22 +1496,7 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
             except SyntaxError as exc:
                 raise ValueError(f"gated Python module has invalid syntax: {rel}") from exc
             functions.extend(_iter_lexical_functions(tree, rel))
-    inventory = SizeRatchetInventory(
-        modules=tuple(sorted(modules)),
-        functions=tuple(sorted(functions)),
-        giant_paths=frozenset(item.path for item in modules if item.line_count > MAX_MODULE_LINES),
-        function_debt=frozenset(
-            (item.path, item.qualname) for item in functions if item.line_count > MAX_FUNCTION_LINES
-        ),
-        band_paths=frozenset(
-            item.path for item in modules if TARGET_MODULE_LINES < item.line_count <= BAND_MODULE_MAX_LINES
-        ),
-        byte_debt={item.path: item.utf8_bytes for item in modules if item.utf8_bytes > MAX_MODULE_BYTES},
-        above_band_paths=frozenset(
-            item.path for item in modules if BAND_MODULE_MAX_LINES < item.line_count <= MAX_MODULE_LINES
-        ),
-    )
-    return _metrics_from_inventory(inventory)
+    return _metrics_from_inventory(_inventory_of(tuple(sorted(modules)), tuple(sorted(functions))))
 
 
 def collect_sections(
