@@ -645,7 +645,8 @@ def test_set_next_wakeup_names_a_time_with_its_offset_and_the_pending_wake_keeps
 def test_set_next_wakeup_says_a_choice_stands_when_only_the_states_backup_copy_failed(tmp_path, monkeypatch):
     """The primary copy holds the choice and only its backup failed (``StateUnavailable.primary_written``): the
     receipt names what was stored and the backup that was not written, never "nothing was stored"; a failed primary
-    write stores nothing and says so."""
+    write stores nothing and says so, and so does a backup that fails while the write first restores a missing
+    primary (``state._state_for_write``), before the choice is written."""
     from ouroboros.consciousness_clock import WAKE_TARGET_STATE_KEY
     from ouroboros.tools import control
     from supervisor import state
@@ -678,6 +679,15 @@ def test_set_next_wakeup_says_a_choice_stands_when_only_the_states_backup_copy_f
                          "(backup_write_failed).")
     live = state.load_state()
     assert live["consciousness_next_interval_sec"] == 1800 and live[WAKE_TARGET_STATE_KEY]["at"] == at
+    state.STATE_PATH.unlink()  # the next write restores the primary from the backup before the choice is written
+    with mock.patch.dict(os.environ, {"OUROBOROS_BG_WAKEUP_MIN": "300", "OUROBOROS_BG_WAKEUP_MAX": "3600"}):
+        monkeypatch.setattr(state, "atomic_write_text", failing(state.STATE_LAST_GOOD_PATH))
+        recovering = control._set_next_wakeup(ctx, seconds=600, at="2030-03-19T09:00:00+03:00")
+        monkeypatch.setattr(state, "atomic_write_text", real)
+    assert recovering == ("⚠️ CAPABILITY_UNAVAILABLE: nothing was stored: runtime state is unavailable "
+                          "(backup_write_failed).")
+    restored = state.load_state()
+    assert restored.get(WAKE_TARGET_STATE_KEY) is None and restored.get("consciousness_next_interval_sec") != 600
 
 
 def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_facts(tmp_path, monkeypatch):
