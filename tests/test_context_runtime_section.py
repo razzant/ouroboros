@@ -1204,13 +1204,14 @@ def test_a_no_and_the_history_s_import_are_read_in_one_snapshot(tmp_path, monkey
     assert opened == [False]
 
 
-@pytest.mark.parametrize("shape", ["pressed", "written", "no_press", "unknown_exchange"])
+@pytest.mark.parametrize("shape", ["pressed", "written", "no_press", "unknown_exchange", "no_witness"])
 def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i_know_i_have_not_written(
         tmp_path, shape):
     """``prompts/FIRST_MEETING.md`` waits for the owner's yes on its text: absent, nothing is carried; present, its
     words ride the setup facts only while a press of Start is on record (the state's ``first_meeting`` record) and I
     know I have not written to my human. No press (Colab, headless, a legacy-adopted root) or an exchange that cannot be
-    read carries none, and once I have written they leave."""
+    read carries none, and once I have written they leave. The same press in a state whose initialization record is
+    missing is unknown: none either (rv2 C5)."""
     from ouroboros import dialogue_store
     from ouroboros.context_first_hour import setup_fact
     from ouroboros.store import StoreLost
@@ -1221,6 +1222,9 @@ def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i
                                  {"first_meeting": {"state": "admitted", "pressed_at": "2026-11-21T10:00:00Z"}}))
     if shape == "written":
         _said(data, ("10:00", "out"))
+    if shape == "no_witness":
+        (data / "state" / "state.initialized.json").unlink()
+        assert setup_fact(data)["state"] == "unknown: no initialization record"
     assert "first_meeting" not in setup_fact(data, repo)  # no file: nothing
     (repo / "prompts").mkdir(parents=True)
     (repo / "prompts" / "FIRST_MEETING.md").write_text("Owner-approved words.\n", encoding="utf-8")

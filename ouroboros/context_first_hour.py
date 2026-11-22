@@ -18,8 +18,9 @@ judgement.
   block reads (one read serves both); present only while that row counted issues.
 - ``first_meeting``: the one line that is not a reading: the owner's words for a first meeting
   (``prompts/FIRST_MEETING.md``), carried only while a press of Start is on record (the state's ``first_meeting``
-  record, which only a state minted after a setup's Finish carries) and I KNOW I have not written to my human (an
-  unknown exchange carries none), and only once that file exists.
+  record, which only a state minted after a setup's Finish carries, in a state read that is the current one: a state
+  whose initialization record is missing or does not match is unknown, and carries none) and I KNOW I have not written
+  to my human (an unknown exchange carries none), and only once that file exists.
 """
 
 from __future__ import annotations
@@ -119,13 +120,15 @@ def _state_origin(root: pathlib.Path) -> str:
 
 def _controls(root: pathlib.Path) -> Dict[str, str]:
     """The owner chat and the consciousness switch from one state read, and whether that state records a press of
-    Start (``pressed``: its ``first_meeting`` record, which only a state born after a setup's Finish carries)."""
+    Start (``pressed``: its ``first_meeting`` record, which only a state born after a setup's Finish carries; never
+    from a read that is not the current state, such as a primary whose initialization record is missing)."""
     from ouroboros.consciousness import owner_chat_of
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from supervisor.first_meeting import FIRST_MEETING_KEY
-    from supervisor.state import control_value, read_state
+    from supervisor.state import CURRENT_QUALITIES, control_value, read_state
 
-    view = read_state(root).projection()
+    read = read_state(root)
+    view = read.projection()
     try:
         chat = owner_chat_of(view)
         owner = ("none bound yet: no owner message has bound one" if chat is None
@@ -134,7 +137,8 @@ def _controls(root: pathlib.Path) -> Dict[str, str]:
         owner = f"unknown: {exc}"
     known, enabled = control_value(view, "bg_consciousness_enabled")
     switch = "on" if known and enabled is True else "off" if known and enabled is False else "unknown"
-    return {"owner_chat": owner, "consciousness": switch, "pressed": isinstance(view.get(FIRST_MEETING_KEY), dict)}
+    pressed = read.quality in CURRENT_QUALITIES and isinstance(view.get(FIRST_MEETING_KEY), dict)
+    return {"owner_chat": owner, "consciousness": switch, "pressed": pressed}
 
 
 def _exchange(root: pathlib.Path) -> Tuple[str, Optional[bool]]:
