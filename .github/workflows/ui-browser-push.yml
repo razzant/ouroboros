@@ -1,147 +1,393 @@
-# Manual browser proof; retain the filename for existing dispatch clients.
-# The default `full` calls the same complete lane as ci.yml's manual/tag runs.
-# Only this entry offers a PARTIAL DIAGNOSTIC, in a separate job: it cannot
-# substitute for the complete lane required by a release. No push/PR/schedule.
-name: UI browser (manual)
-run-name: ${{ inputs.diagnostic && inputs.diagnostic != 'full' && format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic) || 'UI browser full lane' }}
-
-on:
-  workflow_dispatch:
-    inputs:
-      diagnostic:
-        description: Full lane or a partial UI-only diagnostic (never full-suite proof)
-        type: choice
-        default: full
-        options:
-          - full
-          - viewport
-          - inflight
-
+# Manual, disposable branch qualification for the post-merge fix-forward of #3857
+# (https://github.com/razzant/ouroboros/issues/3687 — legacy-schedule completion
+# compatibility). Only this workflow file differs from the product commit it
+# qualifies: the job refuses to run anywhere but the QA branch, and the first
+# step rejects a QA child commit that touches anything outside this one file or
+# that does not sit on the pinned product commit. Every case runs against that
+# product commit, never the modified workflow tree, and each of the 13 cases
+# (10 pytest modules + 3 Node files) exports its own evidence even when its
+# neighbours fail, so no error can fabricate a PASS.
+name: QA legacy schedules 3687 (disposable branch qualification)
+on: workflow_dispatch
 permissions:
   contents: read
-
-# No concurrency group: one requested qualification must not cancel or replace
-# another. Full manual runs exercise the complete lane regardless of path changes.
-
+concurrency:
+  group: qa-legacy-schedule-3687-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  # The root replaces both once, before pushing the QA child commit:
+  #   PRODUCT_SHA - the exact #3857 fix-forward commit the QA child commit sits on (its HEAD^);
+  #   BASE_SHA    - the contribution base: size-ratchet target and diff base.
+  # The select step refuses to run on the literal markers or a non-SHA value,
+  # so a forgotten substitution fails the run instead of qualifying the wrong tree.
+  PRODUCT_SHA: b40d49b10b51dae158e4ca3298d0d8884b3a5e71
+  BASE_SHA: 8b12d20a0418541c5b03ff95a5df7f359994a1fc
 jobs:
-  # The complete lane's one weight table, frozen once before its first leg, as ci.yml's `shard-plan` does.
-  shard-plan:
-    name: shard-plan
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: ./.github/actions/shard-plan
-
-  # Exactly one of the next two jobs runs: the complete lane for `full`, otherwise one scenario.
-  ui-smoke:
-    name: ui-smoke
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
-    needs: shard-plan
-    uses: ./.github/workflows/ui-browser.yml
-    # A called workflow cannot raise its caller's token: the lane reads this run's
-    # shard plan (actions) and the accepted-failure issues (issues), as from ci.yml.
-    permissions:
-      contents: read
-      actions: read
-      issues: read
-
-  # Never full-lane proof: one scenario, with no lane guard, no shard, no manifest,
-  # no reconciliation and no browser-tools smoke. Its name says so wherever it shows.
-  ui-diagnostic:
-    name: ${{ inputs.diagnostic && inputs.diagnostic != 'full' && format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic) || 'ui-diagnostic' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic != 'full' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 115
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup-python-env
-        with:
-          interpreter: shipped  # the SQLite and journal mode fresh installs run, as the full lane
-          install-project: 'false'
-        id: setup_python
-      # Bounded downloads with one retry, the reviewed Node first, as the full lane installs them (#2895).
-      - name: Install UI smoke Chromium and WebKit
-        id: install_browsers
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
-        timeout-minutes: 70
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
-      - name: Run PARTIAL DIAGNOSTIC host UI scenario
-        id: ui_diagnostic
-        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
-        env:
-          DIAGNOSTIC: ${{ inputs.diagnostic }}
-          OUROBOROS_RUN_UI_SMOKE: "1"
-          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+  qualify:
+    if: github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/legacy-schedule-contracts-3958'
+    name: qualify (${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The post-merge legs' own split: Linux runs the shipped interpreter and WAL,
+        # Windows setup-python's 3.10 and PERSIST, as an install updated in place does.
+        include:
+          - {os: ubuntu-latest, leg: linux, interpreter: shipped, journal: WAL}
+          - {os: windows-latest, leg: windows, interpreter: setup-python, journal: PERSIST}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
         shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0            # BASE_SHA must resolve in-history
+          persist-credentials: false
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
         run: |
-          case "$DIAGNOSTIC" in
-            viewport) target=tests/test_ui_smoke_playwright.py::test_ui_smoke_live_card_mutations_preserve_viewport ;;
-            inflight) target=tests/test_ui_smoke_inflight_indicator.py::test_ui_smoke_chat_inflight_indicator_lifecycle ;;
-            *) echo "Unknown UI diagnostic selection" >&2; exit 2 ;;
-          esac
-          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/host" \
-            -- python -m pytest "$target" -m ui_browser -q --tb=short \
-            --junitxml="${{ runner.temp }}/ci-private/ui/host.xml" \
-            --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
-      - name: Upload UI test evidence
-        id: ui_evidence
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Select the product commit under the QA child
+        id: select
+        run: |
+          set -euo pipefail
+          for marker_value in "$PRODUCT_SHA" "$BASE_SHA"; do
+            case "$marker_value" in
+              ''|*__*) echo "Unsubstituted marker or empty SHA: $marker_value" >&2; exit 1 ;;
+            esac
+            printf '%s' "$marker_value" | grep -Eq '^[0-9a-f]{40}$' || { echo "Not a commit SHA: $marker_value" >&2; exit 1; }
+          done
+          test "$PRODUCT_SHA" != "$BASE_SHA" || { echo "PRODUCT_SHA equals BASE_SHA" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          changed="$(git diff --name-only HEAD^ HEAD)"
+          test "$changed" = ".github/workflows/ui-browser-push.yml"
+          test "$(git rev-parse HEAD^)" = "$PRODUCT_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" "$PRODUCT_SHA"
+          git checkout --detach HEAD^
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git status --porcelain)"
+          echo "OURO_SIZE_RATCHET_BASE_REF=$BASE_SHA" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/qualification/${{ matrix.leg }}"
+          git show -s --format='%H %T %P' HEAD "$BASE_SHA" | tee "$RUNNER_TEMP/qualification/${{ matrix.leg }}/product.txt"
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
         with:
-          name: ui-ci-${{ inputs.diagnostic }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ci-evidence/ui/
-          retention-days: 30
-          if-no-files-found: warn
-      # The run's declared diagnostics, apart from its projection, as the full lane publishes them.
-      - name: Select UI diagnostics for publication
-        id: ui_diagnostics_export
-        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
-        continue-on-error: true
-        run: python -m ouroboros.test_evidence export-diagnostics "${{ runner.temp }}/ci-raw/ui" "${{ runner.temp }}/ci-diagnostics/ui"
-      - name: Upload UI diagnostics
-        id: ui_diagnostics
-        if: ${{ !cancelled() && steps.ui_diagnostics_export.outcome != 'skipped' }}
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'   # dependencies only; the tests import this checkout
+      # A bare `python` under safe_test's scrubbed environment resolved outside the virtualenv on
+      # Windows (the repo's #1641 lesson; claudexor-platform-gate.yml names the interpreter the same
+      # way). Pin this environment's own interpreter once, then name it in every command below,
+      # outer scripts/safe_test.py and inner -m pytest alike; it refuses to guess instead of
+      # qualifying a different interpreter's tree.
+      - name: Pin the environment's own interpreter as an absolute path
+        id: qa_python
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VIRTUAL_ENV:-}" ]; then
+            echo "setup-python-env exported no VIRTUAL_ENV: refusing to guess an interpreter" >&2
+            exit 1
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            py="$(cygpath -am "$VIRTUAL_ENV")/Scripts/python.exe"
+          else
+            py="$VIRTUAL_ENV/bin/python"
+          fi
+          "$py" -c 'import sys,pytest; print(sys.executable,pytest.__version__)'
+          echo "QA_PY=$py" >> "$GITHUB_ENV"
+      - name: The stores run ${{ matrix.journal }} here
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        run: |
+          "$QA_PY" -c "import pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode); sys.exit(mode != sys.argv[1])" ${{ matrix.journal }}
+      - name: Run the ten legacy-schedule case modules (one evidence dir per case)
+        id: cases
+        timeout-minutes: 60
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          EVID="$RUNNER_TEMP/qualification/${{ matrix.leg }}"
+          mkdir -p "$EVID/python" "$EVID/junit" "$RUNNER_TEMP/qa-scratch/${{ matrix.leg }}"
+          suite=(
+            test_addressed_schedule_readers.py
+            test_schedule_receipt_reads.py
+            test_chat_id_truthiness_guard.py
+            test_chat_logs_ui.py
+            test_consciousness_schedule_gateway.py
+            test_presence_final_route.py
+            test_tool_classification_differential.py
+            test_schedule_outcome_cache.py
+            test_schedule_report_door.py
+            test_schedule_view.py
+          )
+          for module in "${suite[@]}"; do
+            test -f "tests/$module" || { echo "Missing selected test module: tests/$module" >&2; exit 1; }
+          done
+          printf '%s\n' "${suite[@]}" > "$EVID/selected-python.txt"
+          red=0
+          set +e    # one case's red must not stop its neighbours; the gate re-reads every artifact
+          for module in "${suite[@]}"; do
+            stem="${module%.py}"
+            "$QA_PY" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/qa-scratch/${{ matrix.leg }}/$stem" -- \
+              "$QA_PY" -m pytest -n0 -q --tb=short --timeout=300 "tests/$module" \
+              --junitxml="$EVID/junit/$stem.xml" \
+              --ci-evidence-dir="$EVID/python/$stem"
+            code=$?
+            printf '%s\t%s\n' "$module" "$code" >> "$EVID/python-exit.tsv"
+            [ "$code" -ne 0 ] && red=$((red + 1))
+          done
+          set -e
+          cat "$EVID/python-exit.tsv"
+          test "$red" -eq 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        id: setup_node
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         with:
-          name: ui-diagnostics-${{ inputs.diagnostic }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ci-diagnostics/ui/
-          retention-days: 30
-          if-no-files-found: ignore
-      - name: Summarize host UI test results
-        id: ui_summary
-        if: ${{ !cancelled() }}
-        continue-on-error: true
+          node-version: '22'   # the version ci.yml's own node lane provisions on both OS
+      - name: Run the three web schedule cases (node --test, one TAP per case)
+        id: node_cases
+        timeout-minutes: 15
+        if: ${{ !cancelled() && steps.setup_node.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          EVID="$RUNNER_TEMP/qualification/${{ matrix.leg }}"
+          mkdir -p "$EVID/node"
+          node_suite=(
+            tests/activity_schedule_rows.test.js
+            tests/quiet_run_cards.test.js
+            tests/consciousness_task_door.test.js
+          )
+          for f in "${node_suite[@]}"; do
+            test -f "web/$f" || { echo "Missing selected Node test: web/$f" >&2; exit 1; }
+          done
+          printf '%s\n' "${node_suite[@]}" > "$EVID/selected-node.txt"
+          node --version
+          red=0
+          set +e
+          for f in "${node_suite[@]}"; do
+            stem="$(basename "$f" .test.js)"
+            ( cd web && node --test --test-reporter=tap --test-timeout=300000 "$f" ) \
+              > "$EVID/node/$stem.tap" 2>&1
+            code=$?
+            printf '%s\t%s\n' "$f" "$code" >> "$EVID/node-exit.tsv"
+            awk -v c="$f" '/^[[:space:]]*not ok /{print c": "$0} /^# (tests|pass|fail|cancelled|skipped|todo) /{print c": "$0}' \
+              "$EVID/node/$stem.tap" | tee -a "$EVID/node-summary.txt"
+            [ "$code" -ne 0 ] && red=$((red + 1))
+          done
+          set -e
+          cat "$EVID/node-exit.tsv"
+          test "$red" -eq 0
+      - name: Judge all 13 cases from the exported evidence (no fabricated PASS)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        shell: python
         env:
-          PRODUCER_OUTCOME: ${{ steps.ui_diagnostic.outcome }}
-          ARTIFACT_OUTCOME: ${{ steps.ui_evidence.outcome }}
-          ARTIFACT_URL: ${{ steps.ui_evidence.outputs.artifact-url }}
-          DIAGNOSTIC: ${{ inputs.diagnostic }}
-        run: >-
-          python -m tests.ci_evidence summarize
-          --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host"
-          --producer-outcome "$PRODUCER_OUTCOME" --scope "$DIAGNOSTIC"
-          --artifact-outcome "$ARTIFACT_OUTCOME" --artifact-url "$ARTIFACT_URL"
-          --summary "$GITHUB_STEP_SUMMARY"
-      - name: Disclose incomplete UI diagnostics
-        continue-on-error: true
-        if: >-
-          ${{ !cancelled() &&
-          (steps.ui_summary.outcome != 'success' ||
-           steps.ui_evidence.outcome != 'success' || steps.ui_evidence.outputs.artifact-url == '' ||
-           steps.ui_diagnostics_export.outcome == 'failure' || steps.ui_diagnostics.outcome == 'failure') }}
+          LEG: ${{ matrix.leg }}
         run: |
-          echo "::warning::UI diagnostics are incomplete; see the original test and reporting steps."
-          echo "UI diagnostics_incomplete. The original test outcomes are unchanged." >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          leg = os.environ["LEG"]
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "qualification" / leg
+          summary = {"leg": leg, "product_sha": os.environ["PRODUCT_SHA"],
+                     "base_sha": os.environ["BASE_SHA"], "cases": []}
+          problems = []
+          python_modules = [
+              "test_addressed_schedule_readers.py",
+              "test_schedule_receipt_reads.py",
+              "test_chat_id_truthiness_guard.py",
+              "test_chat_logs_ui.py",
+              "test_consciousness_schedule_gateway.py",
+              "test_presence_final_route.py",
+              "test_tool_classification_differential.py",
+              "test_schedule_outcome_cache.py",
+              "test_schedule_report_door.py",
+              "test_schedule_view.py",
+          ]
+          node_cases = {
+              "tests/activity_schedule_rows.test.js": "activity_schedule_rows",
+              "tests/quiet_run_cards.test.js": "quiet_run_cards",
+              "tests/consciousness_task_door.test.js": "consciousness_task_door",
+          }
+          clean = {"setup": "passed", "call": "passed", "teardown": "passed"}
+
+          def read_exits(name):
+              path = root / name
+              if not path.exists():
+                  return {}
+              table = {}
+              for line in path.read_text(encoding="utf-8").splitlines():
+                  left, _, code = line.rpartition("\t")
+                  if left:
+                      table[left] = int(code)
+              return table
+
+          def record(case, kind, result, reason=None, **extra):
+              entry = {"case": case, "kind": kind, "result": result}
+              if reason is not None:
+                  entry["reason"] = reason
+              entry.update(extra)
+              summary["cases"].append(entry)
+              if result == "failed":
+                  problems.append(f"{case} -> failed" + (f": {reason}" if reason else ""))
+
+          py_exits = read_exits("python-exit.tsv")
+          for module in python_modules:
+              case, stem = f"tests/{module}", module[:-3]
+              code = py_exits.get(module)
+              if code is None:
+                  record(case, "pytest-module", "failed", "never ran: no exit code recorded")
+                  continue
+              path = root / "python" / stem / "results.json"
+              if not path.exists():
+                  record(case, "pytest-module", "failed",
+                         f"no results.json at {path}: the pytest session exported no evidence",
+                         exit_code=code)
+                  continue
+              data = json.loads(path.read_text(encoding="utf-8"))
+              # Parent rows carry a phase per test; pytest 9's built-in subtests add
+              # is_subtest rows beside them (test_tool_classification_differential uses
+              # them), so subtest rows never build phases and are judged on their own
+              # outcome, and the parent-id count still equals the collected count.
+              phases, subtest_rows_not_passed, duplicates = {}, [], []
+              for row in data.get("reports", []):
+                  nodeid, phase, outcome = row["nodeid"], row["phase"], row["outcome"]
+                  if row.get("is_subtest", False):
+                      if outcome != "passed":
+                          subtest_rows_not_passed.append(
+                              {"nodeid": nodeid, "phase": phase, "outcome": outcome})
+                      continue
+                  seen = phases.setdefault(nodeid, {})
+                  if phase in seen:
+                      duplicates.append(nodeid)
+                  seen[phase] = outcome
+              collected = data.get("tests_collected", 0)
+              not_clean = {nodeid: ph for nodeid, ph in sorted(phases.items()) if ph != clean}
+              entry = {"exit_code": code, "collected": collected, "not_clean": not_clean,
+                       "subtest_rows_not_passed": subtest_rows_not_passed}
+              if duplicates:
+                  record(case, "pytest-module", "failed",
+                         "duplicate parent phase rows in results.json: "
+                         + ", ".join(sorted(set(duplicates))[:5]), **entry)
+                  continue
+              if collected < 1:
+                  record(case, "pytest-module", "failed", f"collected {collected} tests", **entry)
+                  continue
+              if len(phases) != collected:
+                  record(case, "pytest-module", "failed",
+                         f"collected {collected} tests but results.json holds "
+                         f"{len(phases)} parent test ids", **entry)
+                  continue
+              skip_only = ((not not_clean or all("skipped" in ph.values() for ph in not_clean.values()))
+                           and all(row["outcome"] == "skipped" for row in subtest_rows_not_passed))
+              if (not_clean or subtest_rows_not_passed) and skip_only:
+                  record(case, "pytest-module", "skipped",
+                         "skip labeled honestly, never a pass",
+                         skipped_nodeids=sorted(not_clean), **entry)
+                  continue
+              if subtest_rows_not_passed:
+                  record(case, "pytest-module", "failed",
+                         f"subtest rows not passed: {subtest_rows_not_passed[:5]}", **entry)
+                  continue
+              if not_clean:
+                  record(case, "pytest-module", "failed",
+                         "not every collected test passed setup, call and teardown", **entry)
+                  continue
+              if code != 0:
+                  record(case, "pytest-module", "failed",
+                         f"pytest exited {code} although every collected test passed", **entry)
+                  continue
+              record(case, "pytest-module", "passed", **entry)
+
+          node_exits = read_exits("node-exit.tsv")
+          count_line = re.compile(r"^# (tests|pass|fail|cancelled|skipped|todo) (\d+)$")
+          for case, stem in node_cases.items():
+              code = node_exits.get(case)
+              if code is None:
+                  record(case, "node-file", "failed", "never ran: no exit code recorded")
+                  continue
+              path = root / "node" / f"{stem}.tap"
+              if not path.exists():
+                  record(case, "node-file", "failed", f"no TAP at {path}", exit_code=code)
+                  continue
+              counts, not_ok = {}, 0
+              for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                  match = count_line.match(line.strip())
+                  if match:
+                      counts[match.group(1)] = int(match.group(2))
+                  elif line.lstrip().startswith("not ok"):
+                      not_ok += 1
+              entry = {"exit_code": code, "tap": counts}
+              if not_ok or counts.get("fail", 0) or counts.get("cancelled", 0):
+                  record(case, "node-file", "failed", f"{not_ok} 'not ok' lines, tap {counts}", **entry)
+                  continue
+              if counts.get("pass", 0) < 1:
+                  record(case, "node-file", "failed", f"tap shows no passing test: {counts}", **entry)
+                  continue
+              if code != 0:
+                  record(case, "node-file", "failed",
+                         f"node exited {code} although the TAP is clean: {counts}", **entry)
+                  continue
+              if counts.get("skipped", 0):
+                  record(case, "node-file", "skipped",
+                         f"skip labeled honestly, never a pass; tap {counts}", **entry)
+                  continue
+              record(case, "node-file", "passed", **entry)
+
+          if len(summary["cases"]) != 13:
+              problems.append(f"expected 13 cases, recorded {len(summary['cases'])}")
+          summary["passed"] = [c["case"] for c in summary["cases"] if c["result"] == "passed"]
+          summary["skipped_labeled"] = [c["case"] for c in summary["cases"] if c["result"] == "skipped"]
+          summary["failed"] = [c["case"] for c in summary["cases"] if c["result"] == "failed"]
+          if summary["skipped_labeled"]:
+              print(f"::warning::{leg} labeled skips (never a pass): "
+                    + ", ".join(summary["skipped_labeled"]))
+          (root / "cases.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                                           encoding="utf-8")
+          for entry in summary["cases"]:
+              print(f"{entry['result']:8s} {entry['case']}"
+                    + (f" — {entry['reason']}" if "reason" in entry else ""))
+          if problems:
+              print("\n".join(problems), file=sys.stderr)
+              sys.exit(1)
+          print(f"{leg}: {len(summary['passed'])}/13 cases passed on this leg")
+      - name: Ruff F on the changed Python paths
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.setup_python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          EVID="$RUNNER_TEMP/qualification/linux"
+          changed="$(git diff --name-only "$BASE_SHA" "$PRODUCT_SHA" -- '*.py')"
+          if [ -z "$changed" ]; then
+            echo "No changed Python paths in $BASE_SHA..$PRODUCT_SHA" | tee "$EVID/ruff-f.txt"
+            exit 0
+          fi
+          printf 'Changed Python paths:\n%s\n' "$changed" | tee "$EVID/ruff-f-paths.txt"
+          printf '%s\n' "$changed" | xargs "$QA_PY" -m ruff check --select F 2>&1 | tee "$EVID/ruff-f.txt"
+      - name: Size lane on the contribution base
+        id: size
+        timeout-minutes: 20
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.setup_python.outcome == 'success' }}
+        run: |
+          "$QA_PY" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/size-run" -- \
+            "$QA_PY" -m pytest -o addopts='' -n0 -m size_ratchet -q --tb=short \
+              tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py \
+              --ci-evidence-dir="$RUNNER_TEMP/qualification/linux/size"
+      # The published set stays minimal: the judge above already read the raw JUnit and TAP, and
+      # the upload carries the per-case results.json plus the selected module/exit lists instead.
+      - name: Drop the raw JUnit and TAP before the upload
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          EVID="$RUNNER_TEMP/qualification/${{ matrix.leg }}"
+          rm -rf "$EVID/junit" "$EVID/node"
+      - name: Retain the qualification evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-legacy-schedule-3687-${{ matrix.leg }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification/
+          if-no-files-found: error
+          retention-days: 14
