@@ -22,6 +22,7 @@ from ouroboros.task_results import STATUS_REQUESTED, STATUS_SCHEDULED, load_task
 from supervisor import queue, task_lifecycle
 from supervisor import workspace_preparation as prep
 from supervisor.events import dispatch_event
+from tests._workspace_git import seeded_repository as make_repo  # one commit "fixture" by Fixture
 
 
 _WAIT_SEC = 30.0  # bounds only how long a broken run takes to report; passing runs never wait on it
@@ -29,18 +30,6 @@ _WAIT_SEC = 30.0  # bounds only how long a broken run takes to report; passing r
 
 def git(root, *args):
     return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True).stdout
-
-
-def make_repo(path, files):
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "config", "user.name", "Fixture")
-    git(path, "config", "user.email", "fixture@example.invalid")
-    for name, content in files.items():
-        (path / name).write_bytes(content)
-    git(path, "add", "-A")
-    git(path, "commit", "-qm", "fixture")
-    return path
 
 
 class SupervisorCtx:
