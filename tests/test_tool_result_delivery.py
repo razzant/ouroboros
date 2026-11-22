@@ -554,6 +554,7 @@ def test_a_namespace_listing_is_a_chosen_view_and_an_unscoped_listing_is_not(tmp
     assert "WARNING: never on prod." not in delivered["unscoped"][0]
     assert delivered["unscoped"][1]["tool_calls"][0]["result_source_view"]["requested"] is False
     assert requested_call_view("list_available_tools", {"namespace": "mcp_docs", "view_head_chars": 10}) == (10, 0)
+    assert requested_call_view("list_available_tools", {"namespace": "builtin"}) == (None, None)  # any named namespace
     assert requested_call_view("list_available_tools", {"namespace": " "}) is None
 
 

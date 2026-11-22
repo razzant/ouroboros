@@ -134,8 +134,10 @@ def test_the_map_names_only_the_selectors_this_actor_can_call(registry, disabled
     for text in (full, nano, helper):
         assert ("list_available_tools" in text) is ("list_available_tools" not in disabled)
     assert "### mcp_gitlab (GitLab)" in full and "create_issue" in nano  # the map itself stays
-    # Without the reader nothing brings the complete text back, so the map keeps it.
-    assert ("It returns every field" in full) is ("list_available_tools" in disabled)
+    # Without the reader nothing brings the complete text back, so the map keeps it, unclipped.
+    remainder = " ".join(GITLAB[2]["description"].split("Work account only. ", 1)[1].split())
+    line = remainder if "list_available_tools" in disabled else "Read one merge request with its discussion."
+    assert f"- get_merge_request [read-only]: {line}\n" in full
 
 
 def test_the_map_is_a_pure_function_of_catalog_facts(registry):
@@ -631,23 +633,15 @@ _PURPOSE_ROWS = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "one_sentence", "description": "Get unread messages across all channels.",
      "input_schema": {"type": "object", "properties": {}}},
-    {"name": "no_sentence_end", "description": "Add or update a comment on a Jira issue",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "ie_lower", "description": "Resolve the head, i.e. the latest revision. Return its ID.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "ie_capital", "description": "Pick the default branch, i.e. Main. Then merge into it.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "vs_lower", "description": "Set the folder kind (private vs. shared) on creation. It cannot change later.",
-     "input_schema": {"type": "object", "properties": {}}},
     {"name": "long_lead", "description": _LONG_LEAD + " Use search_datadog_metrics first to find the metric name.",
      "input_schema": {"type": "object", "properties": {}}},
 ]
 
 
 def test_an_integrating_focus_reads_first_sentences_and_the_listing_returns_the_rest(registry):
-    """The map holds each tool's own first sentence, whole: after the server's shared leading text, never cut at
-    "e.g."; a one-sentence description and one without a sentence end stay whole. The intro names the exact reader,
-    and that reader returns what the line left out."""
+    """The map holds each tool's own first sentence, whole (``text_sentences.first_whole_sentence``, whose rows live in
+    its own table): after the server's shared leading text, never clipped at a length. The intro names the exact
+    reader, and that reader returns what the line left out."""
     from ouroboros import loop as loop_module
 
     _servers(listing={"gitlab": GITLAB, "slack": _PURPOSE_ROWS})
@@ -660,19 +654,11 @@ def test_an_integrating_focus_reads_first_sentences_and_the_listing_returns_the_
     assert "It returns every field" not in full and "For createIssueLink" not in full
     assert "- link_types: Get available Jira issue link types (e.g. Blocks, Duplicate, Clones, Relates).\n" in full
     assert "- link_types_plain: Get available link types.\n" in full
-    assert "\n- one_sentence: Get unread messages across all channels.\n" in full
-    # A stop before a lowercase word, or closing a run of initials, is not a sentence end.
-    assert "\n- ie_lower: Resolve the head, i.e. the latest revision.\n" in full and "Return its ID" not in full
-    assert "\n- ie_capital: Pick the default branch, i.e. Main.\n" in full and "Then merge" not in full
-    assert full.endswith("\n- vs_lower: Set the folder kind (private vs. shared) on creation.")
     assert len(_LONG_LEAD) > 120 and f"\n- long_lead: {_LONG_LEAD}\n" in full and "search_datadog_metrics" not in full
-    assert "- no_sentence_end: Add or update a comment on a Jira issue\n" in full
+    assert full.endswith("\n- one_sentence: Get unread messages across all channels.")
     resident = initial_tool_schemas(registry)
     loop_module._setup_dynamic_tools(registry, resident, [])
-    listing = registry.execute("list_available_tools", {"namespace": "mcp_gitlab"})
-    assert " ".join(GITLAB[2]["description"].split()) in listing  # nothing is lost: the rest is one call away
-    assert "Use numeric project ids, never names." in listing
-    assert _LINK_TYPES in registry.execute("list_available_tools", {"namespace": "mcp_slack"})
+    assert _LINK_TYPES in registry.execute("list_available_tools", {"namespace": "mcp_slack"})  # the rest, one call away
 
 
 def test_settings_weighs_the_map_an_integrating_focus_reads(registry):
