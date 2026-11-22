@@ -322,6 +322,40 @@ def test_an_unreadable_source_is_unknown_not_repaired_and_a_switched_off_or_remo
     assert _round(mcp_work) is None  # a surface whose reader failed is unknown as a whole
 
 
+@pytest.mark.parametrize("change", ["broke", "recovered", "unchanged"])
+def test_a_resumed_work_hears_what_broke_or_recovered_while_it_was_parked(monkeypatch, tmp_path, change):
+    from ouroboros.owner_wait import continuation_state, restore_continuation_state
+    from ouroboros.tools.registry import ToolRegistry
+
+    manager = _manager(monkeypatch, ("demo", True))
+    if change == "recovered":
+        _call(manager, "demo", TimeoutError("slow"))
+
+    def registry():
+        made = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+        made._ctx._execution_trace, made._ctx._accumulated_usage = {"tool_calls": [], "reasoning_notes": []}, {}
+        return made
+
+    parked, messages = registry(), [{"role": "user", "content": "the task"}]
+    breakage.write_start_notice(parked, messages)
+    state = json.loads(json.dumps(continuation_state(  # the work parks (owner wait, budget pause, checkpoint)
+        parked._ctx, messages, parked._ctx._execution_trace, parked._ctx._accumulated_usage, 2, [], set())))
+    if change == "broke":
+        _call(manager, "demo", TimeoutError("slow"))
+    elif change == "recovered":
+        _call(manager, "demo", ToolResult(status="ok", code="OK", text="pong"))
+    resumed, restored = registry(), [{"role": "user", "content": "the task"}]
+    breakage.write_start_notice(resumed, restored)  # the loop's start runs before its restore
+    restore_continuation_state(resumed, state, restored, resumed._ctx._execution_trace,
+                               resumed._ctx._accumulated_usage, set())
+    ctx = SimpleNamespace(messages=restored, tools=resumed)
+    assert breakage.append_change_row(ctx) is (change != "unchanged")
+    if change != "unchanged":
+        expected = "calls not answered since" if change == "broke" else "no longer reported broken (a call answered at"
+        assert expected in restored[-1]["content"]
+    assert breakage.append_change_row(ctx) is False
+
+
 def test_main_hears_at_its_next_turn_that_what_it_was_told_broke_recovered_and_another_work_does_not(
         monkeypatch, tmp_path):
     manager = _manager(monkeypatch, ("demo", True))
