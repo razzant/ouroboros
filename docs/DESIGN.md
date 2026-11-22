@@ -3025,7 +3025,8 @@ to the skill once it runs, never into Settings; without it no code is armed and 
 no code applies (Telegram: the first person to write becomes its owner). Where the
 install grants skills nothing on its own, the card's outcome line reads «Telegram starts after you allow it in
 Extensions» instead of the skill's note, since nothing in the card allows it. Summary
-shows the card's row when a token will be saved. The
+shows the card's row when a token will be saved; it names the account only once the page painted its QR (a check that
+answers after the card was hidden or the step left arms no code and says «Token checked · QR not shown yet»). The
 card's words, steps, link and options are the skill's declaration: nothing in the step is a service's own. Being a
 built-in's, they translate as the catalog's words do; words composed with a name (the service, the account) go
 through the composed seam, and an account's @name and the token stay as they are.

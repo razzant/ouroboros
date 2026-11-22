@@ -4,9 +4,10 @@
 // others, its box the skill's starter tick, with Connect. Open: the skill's own steps, its token field and, once the
 // host's identity check names the account, a QR of the skill's link with a one-time code made here, the account's
 // @name, the same link for this device and the skill's options. Nothing is saved here: the token rides the one
-// completion into Settings, and the code and the options ride with it only once the QR and the link that carry the
-// code were drawn (the host posts them to the skill once it runs): a code nobody saw would leave the skill waiting for
-// a scan nobody can make. A failed or unfinished check never blocks Continue or Finish; the token alone is saved then.
+// completion into Settings, and the code and the options ride with it only once the step painted the QR and the link
+// that carry the code for exactly this token (the host posts them to the skill once it runs): a code nobody saw would
+// leave the skill waiting for a scan nobody can make, so a check that answers once the card is hidden or the step is
+// left arms nothing, and nothing names the account as connected until that painting. A failed or unfinished check never blocks Continue or Finish; the token alone is saved then.
 // A draft no service takes (a space or line break inside, or longer than any token) is never checked or sent. Each
 // failure names only its own cause, and only the service's own refusal says it did not accept the token. The card's
 // declared words are a built-in skill's, the maintainers' as the catalog's are, so they go through the interface's
@@ -23,6 +24,8 @@ const MAX_TOKEN = 512;  // the host's own bound on a token (onboarding_connectio
 const flaw = (value) => (value.length > MAX_TOKEN ? 'long' : /\s/.test(value) ? 'spaced' : '');
 const https = (value) => (/^https:\/\/[^\s"'<>]+$/.test(String(value || '')) ? String(value) : '');
 const text = (value) => String(value ?? '').trim();
+// A checked token whose QR the page never painted (the card hidden or the step left before the answer): no account named.
+const UNSHOWN = 'Token checked · QR not shown yet';
 // Words composed with a name or a reason, through the composed seam and marked so the overlay leaves them alone.
 const composed = (template, params = {}) => [fmt(template, params), ` data-i18n-fmt="${escapeHtml(template)}"`];
 // A declared field name in words: `botToken` → "Bot token".
@@ -70,7 +73,7 @@ export async function checkIdentity(skill, token, fetchImpl = apiFetch) {
 /** The card of one starter `item` from its normalized `declaration`. `repaint` redraws the step; `ticked()` and
  * `tick()` read and set the skill's starter box. */
 export function createConnectionCard(item, declaration, { check = checkIdentity, random, repaint = () => {}, ticked = () => true, tick = () => {}, encoder = qrEncoder } = {}) {
-    const card = { open: false, token: '', code: '', check: null,
+    const card = { open: false, token: '', code: '', check: null, drawn: '',
         options: Object.fromEntries(declaration.options.map((option) => [option.key, option.fresh])) };
     const service = text(item.title || item.name || declaration.skill);
     const title = declaration.title || service;
@@ -80,12 +83,15 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
     const bareTitle = !declaration.title && !text(item.title);
     const authorPitch = !declaration.pitch && !text(item.pitch);
     let sent = 0;
+    let face = '';  // the token whose QR and link the card's last markup carried; `painted()` makes it `card.drawn`
     const token = () => card.token.trim();
     // Where the token stands: a local flaw first (never checked), else the host's answer for exactly this token.
     const settled = () => (flaw(token()) ? { token: token(), status: flaw(token()) }
         : card.check && card.check.token === token() ? card.check : null);
     const link = (account) => declaration.link.replace('{username}', encodeURIComponent(account)).replace('{code}', encodeURIComponent(card.code));
     const saved = () => Boolean(token()) && !['refused', 'spaced', 'long'].includes(settled()?.status);
+    // The step painted the QR and the link of this card's code for exactly this token: the only code it may arm.
+    const drawn = () => settled()?.status === 'ok' && card.drawn === token();
     // Where the install grants nothing on its own, the skill starts only once allowed: that, never «connects».
     const later = declaration.allow ? 'starts after you allow it in Extensions' : 'connects when you finish setup';
 
@@ -151,7 +157,7 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
     function standing() {
         const state = settled();
         if (!token()) return null;
-        if (state?.status === 'ok') return composed(`@{account} · ${later}`, { account: state.username });
+        if (state?.status === 'ok') return drawn() ? composed(`@{account} · ${later}`, { account: state.username }) : [UNSHOWN, ''];
         if (state?.status === 'refused') return composed('{service} did not accept the token', { service });
         if (state?.status === 'spaced' || state?.status === 'long') return ['Not a token · not saved', ''];
         return [state?.status === 'checking' ? 'Checking the token…' : 'Token not checked · saved when you finish', ''];
@@ -165,6 +171,7 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             const field = `connection-${escapeHtml(declaration.skill)}-token`;
             const shown = card.open ? null : standing();
             const [said, saidMark] = state && state.status !== 'ok' ? statusWords(state) : ['', ''];
+            face = card.open && state?.status === 'ok' ? state.token : '';
             return `<div class="skills-connection" data-connection="${escapeHtml(declaration.skill)}" style="--arrive: ${order}">
                 <div class="skills-connection-head">
                     <label class="skills-starter-skill" data-starter-skill="${id}">
@@ -184,6 +191,9 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
                 </div>` : ''}
             </div>`;
         },
+        /** The step wrote the card's last markup into the page: a QR and link it carried were seen, and leaving the card
+         * or the step keeps that. Never from building markup alone: only a written page counts. */
+        painted() { if (face) card.drawn = face; },
         /** Handles the card's own controls; false for anything else. */
         click(target) {
             if (target.closest('[data-connection-toggle]')) {
@@ -220,17 +230,19 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             void run();
             return true;
         },
-        /** `{skill: {fields: {token}, code, options}}` for the one completion once the QR and the link were drawn,
-         * `{skill: {fields: {token}}}` while they were not (a check that failed, is still running or never ran), or
-         * null: nothing typed, no token at all, or a token the service refused. */
+        /** `{skill: {fields: {token}, code, options}}` for the one completion once the step painted this token's QR and
+         * link, `{skill: {fields: {token}}}` while it did not (a check that failed, is still running, never ran, or
+         * answered while the card was hidden or the step left), or null: nothing typed, no token at all, or a token the
+         * service refused. */
         payload() {
             if (!ticked() || !saved()) return null;
-            const shown = settled()?.status === 'ok';  // the code this card drew is the only one it may arm
-            return { [declaration.skill]: { fields: { [declaration.token]: token() }, ...(shown ? { code: card.code,
+            return { [declaration.skill]: { fields: { [declaration.token]: token() }, ...(drawn() ? { code: card.code,
                 options: Object.fromEntries(declaration.options.map((option) => [option.key, card.options[option.key] ? option.on : option.off])) } : {}) } };
         },
-        /** Summary's row while a token will be saved: [title, where it stands, whether that is an account's @name]. */
-        summary: () => (ticked() && saved() ? [title, ...(settled()?.status === 'ok' ? [`@${settled().username}`, true] : ['Token not checked', false])] : null),
+        /** Summary's row while a token will be saved: [title, where it stands, whether that is an account's @name]; the
+         * account only once its QR was painted. */
+        summary: () => (ticked() && saved() ? [title, ...(drawn() ? [`@${settled().username}`, true]
+            : [settled()?.status === 'ok' ? UNSHOWN : 'Token not checked', false])] : null),
         snapshot: () => ({ ...card, options: { ...card.options } }),
     };
 }

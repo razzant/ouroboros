@@ -424,6 +424,30 @@ def test_the_connection_card_checks_a_token_draws_its_qr_and_rides_the_completio
     assert not any(key.startswith("TELEGRAM_") for key in payload), "nothing of the card in the settings part"
 
 
+def test_a_check_answering_after_the_step_was_left_arms_no_code_and_names_no_account(subscription_ui):
+    """A pairing code rides only with a QR the page painted: a check that answers once the person went on to Summary
+    leaves the token alone, and Summary names no account (rv2 C1); the case above pins the painted direction."""
+    ui = subscription_ui
+    held = []
+    ui["page"].route("**/api/onboarding/connection/identity", lambda route: held.append(route))
+    page = _skills_step(ui, answer=_with_card(), width=390)
+    card = page.locator(".skills-connection")
+    card.locator("[data-connection-toggle]").click()
+    field = card.locator("[data-connection-token]")
+    field.fill(TOKEN)
+    field.press("Enter")
+    card.locator('[data-connection-status="checking"]').wait_for()
+    page.click("#next-btn")
+    summary = page.locator('[data-starter-skills="row"]')
+    summary.wait_for()
+    held[0].fulfill(content_type="application/json", body=json.dumps({"ok": True, "username": "my_ouro_bot"}))
+    summary.get_by_text("Token checked · QR not shown yet").wait_for()
+    assert "@my_ouro_bot" not in summary.inner_text()
+    assert not page.locator("[data-connection-link], .skills-connection-qr").count()
+    page.click("#next-btn")
+    assert _completion(ui)[0]["connections"]["telegram"] == {"fields": {"botToken": TOKEN}}
+
+
 def test_without_a_declared_card_the_skill_stays_a_row_and_nothing_rides(subscription_ui):
     ui = subscription_ui
     page = _skills_step(ui)

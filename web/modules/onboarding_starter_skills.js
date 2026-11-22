@@ -258,6 +258,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         painting = true;
         try { host.innerHTML = arrive ? stepHtml(true) : html; } finally { painting = false; }
         painted = html;
+        connection?.painted();  // a QR the page now shows is one the person could scan: only then may its code ride
         arrived ||= arrive;
         if (arrive) paceColumns();
         restore?.();

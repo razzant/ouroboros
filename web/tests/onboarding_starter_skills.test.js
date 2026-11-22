@@ -478,6 +478,33 @@ test('a code is armed only with the QR that shows it: none while the check runs,
         'the QR drawn: its code and the options ride with the token');
 });
 
+test('a code rides only with a QR the page painted: a check answering once the card is hidden or the step left arms none', async () => {
+    for (const away of ['hide', 'leave']) {
+        let answer = null;
+        const { step, host } = await cardStep(withCard(), () => new Promise((done) => { answer = done; }));
+        const row = fakeHost('row');
+        host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+        paste(host, TOKEN);  // the check starts at once
+        if (away === 'hide') host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+        else step.mount(row);  // Continue, before the answer
+        answer({ status: 'ok', username: 'my_ouro_bot' });
+        await settle();
+        assert.doesNotMatch(host.innerHTML + row.innerHTML, /<svg|data-connection-link/, `${away}: nothing was painted`);
+        assert.deepEqual(step.payload().connections, { telegram: { fields: { botToken: TOKEN } } }, `${away}: the token alone`);
+        if (away === 'hide') assert.match(text(cardOf(host.innerHTML)), /^Phone via Telegram Token checked · QR not shown yet Change$/);
+        step.mount(row);
+        assert.match(text(row.innerHTML), /Phone via Telegram Token checked · QR not shown yet · Change$/, `${away}: no account named`);
+        // Back on the step, opening the card paints the QR: its code rides now, and leaving the step again keeps it.
+        step.mount(host);
+        if (away === 'hide' || !host.innerHTML.includes('data-connection-link')) host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+        assert.match(host.innerHTML, /data-connection-link/, `${away}: the QR painted`);
+        const { code } = step.snapshot().connection;
+        step.mount(row);
+        assert.deepEqual(step.payload().connections, { telegram: { fields: { botToken: TOKEN }, code, options: { TELEGRAM_NOTIFY_TASKS: 'on' } } });
+        assert.match(text(row.innerHTML), /Phone via Telegram @my_ouro_bot · Change$/);
+    }
+});
+
 test('a draft that is no token is said here, never checked and never sent; the service’s words stay its own', async () => {
     for (const [draft, words] of [[`${TOKEN} more`, /^A token has no spaces or line breaks inside, so this one is not saved\.$/],
         [`${TOKEN}\nsecond line`, /^A token has no spaces or line breaks inside, so this one is not saved\.$/],
