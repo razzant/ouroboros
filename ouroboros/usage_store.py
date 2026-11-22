@@ -500,8 +500,8 @@ class Txn:
     def period_models(self, first: int, end: int, since_iso: str) -> List[Dict[str, Any]]:
         """Per model and route: the model calls of rowids ``[first, end)`` reserved since ``since_iso``: how many
         were sent, are still open, settled with or without a price, their settled cost and reported tokens. Input is
-        classed (read, written, uncached) only for calls that reported both cache counts; the rest of the others'
-        input (beyond a count they did report) is counted apart, never as uncached. One bounded range read."""
+        classed only from reported cache counts. Project the legacy write-validity flag before grouping:
+        LIMIT -1 keeps SQLite from flattening the subquery and carrying the whole extra through the sorter."""
         return [dict(record) for record in self.conn.execute(
             "SELECT COALESCE(model, '') AS model, COALESCE(provider, '') AS provider, "
             "SUM(state IN ('dispatched','settled','unresolved')) AS calls, "
@@ -514,19 +514,30 @@ class Txn:
             "SUM(prompt_tokens IS NOT NULL AND (cached_tokens IS NULL OR cache_write_tokens IS NULL)) AS uncounted_calls, "
             "SUM(CASE WHEN cached_tokens IS NULL OR cache_write_tokens IS NULL THEN MAX(0, COALESCE(prompt_tokens, 0) "
             "- COALESCE(cached_tokens, 0) - COALESCE(cache_write_tokens, 0)) ELSE 0 END) AS uncounted_input_tokens "
-            f"FROM attempts WHERE {_PERIOD_WHERE} GROUP BY 1, 2", (int(first), int(end), str(since_iso)))]
+            "FROM (SELECT model, provider, state, cost_usd, prompt_tokens, completion_tokens, cached_tokens, "
+            "CASE WHEN cache_write_tokens IS NULL THEN NULL WHEN json_extract(extra, '$.cache_write_tokens_invalid') "
+            "THEN NULL ELSE cache_write_tokens END AS cache_write_tokens "
+            f"FROM attempts WHERE {_PERIOD_WHERE} LIMIT -1) GROUP BY 1, 2", (int(first), int(end), str(since_iso)))]
 
     def period_settled_calls(self, first: int, end: int, since_iso: str) -> List[Dict[str, Any]]:
         """The same range's settled calls one by one, for sharing each call's cost out by its own tokens: every
         call with a recorded cost or a cache write, its dispatch time, and for a write what it did to its route's
         cached start (``physical_context.prefix``, absent on rows written before that record) and the provider's
-        split of its writes by lifetime: the only rows of a period whose ``extra`` is opened."""
+        split of its writes by lifetime, the processing mode that qualifies the display tariff, and whether the
+        row retains usage its four text counts cannot carry (``retained_usage``: settlement's ``cost_evidence.usage``)."""
         return [dict(record) for record in self.conn.execute(
             "SELECT COALESCE(model, '') AS model, COALESCE(provider, '') AS provider, "
             "COALESCE(prompt_cache_ttl, '') AS prompt_cache_ttl, prompt_tokens, completion_tokens, cached_tokens, "
             "cache_write_tokens, CAST(cost_usd AS REAL) AS usd, ts_dispatched, "
+            "json_type(extra, '$.cost_evidence.usage') IS NOT NULL AS retained_usage, "
+            "json_extract(extra, '$.cache_write_tokens_invalid') AS cache_write_tokens_invalid, "
+            "json_extract(extra, '$.service_tier') AS service_tier, "
+            "CASE WHEN COALESCE(json_type(extra, '$.processing'), 'null')='null' THEN 1 ELSE "
+            "json_extract(extra, '$.processing.observed')='standard' AND json_array_length(extra, '$.processing.observedNative')=1 "
+            "AND json_extract(extra, '$.processing.observedNative[0]')='default' END AS base_router_processing, "
             "CASE WHEN cache_write_tokens>0 THEN json_extract(extra, '$.physical_context.prefix') END AS prefix, "
-            "CASE WHEN cache_write_tokens>0 THEN json_extract(extra, '$.cache_write_tokens_by_ttl') END AS write_split "
+            "CASE WHEN cache_write_tokens IS NOT NULL THEN "
+            "NULLIF(json_quote(json_extract(extra, '$.cache_write_tokens_by_ttl')), 'null') END AS write_split "
             f"FROM attempts WHERE {_PERIOD_WHERE} AND state='settled' AND (cache_write_tokens>0 OR cost_usd IS NOT NULL)",
             (int(first), int(end), str(since_iso)))]
 

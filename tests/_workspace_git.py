@@ -2,6 +2,8 @@
 
 The plain Git repository a test starts from, unborn or with one empty commit, is a world of its own
 (tests/_worlds.py): ``git_repository(tmp_path / name)`` copies it, where ``git init`` and a commit cost two processes.
+A repository whose files are fixed is a world too: its build lays it with ``git_repository`` and ``world_git``, and
+each test copies it with ``clone_repository``.
 """
 import functools
 import json
@@ -50,6 +52,31 @@ def git_repository(destination: Path, *, unborn: bool = False, identity: bool = 
     key = f"git-{'unborn' if unborn else 'base'}{'-identity' if identity else ''}"
     build = functools.partial(_lay_git_repository, unborn=unborn, identity=identity)
     return clone(world(key, build), destination)
+
+
+def _subcommand(args):
+    """The git subcommand of ``args``: the first word that is no option (``-c``/``-C`` take a value)."""
+    words = iter(args)
+    for word in words:
+        if word in ("-c", "-C"):
+            next(words, None)
+        elif not word.startswith("-"):
+            return word
+    return None
+
+
+def world_git(root, *args):
+    """``git`` in a world's build: the first consumer's own Git state (``GIT_*``, system and global
+    configuration) stays out of these build commands; HOME, XDG and TZ are inherited from the caller.
+    The world serves the whole run, so a ``commit`` after which HEAD names no commit, because something stood in
+    for git at the first build, fails in that test instead of publishing an unborn tree."""
+    env = _git_environment()
+    out = git(root, *args, env=env)
+    if _subcommand(args) == "commit":
+        head = git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}", env=env).strip()
+        if len(head) not in (40, 64) or head.strip(b"0123456789abcdef"):
+            raise RuntimeError("no commit was laid: something stood in for git during the build")
+    return out
 
 
 def repository(root, *, unborn=False):
