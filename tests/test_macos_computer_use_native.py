@@ -1263,9 +1263,12 @@ def test_a_press_a_move_and_a_release_in_three_calls_are_one_drag(host, launch):
     start, end = [at[0] - 60, at[1]], [at[0] + 60, at[1] + 30]
     before = pointer.mark("before")
     pressed = call("mouse_down", x=start[0], y=start[1], raw=True, app=f"pid:{pointer.pid}", raise_policy="never")
-    held = pointer.mark("held")
-    moved = call("move", x=end[0], y=end[1], raw=True)
-    released = call("mouse_up")
+    released = None
+    try:  # whatever fails in between, the runner's button goes up again for the cases after this one
+        held = pointer.mark("held")
+        moved = call("move", x=end[0], y=end[1], raw=True)
+    finally:
+        released = call("mouse_up")
     pointer.wait_for("pointer_event", after=before["t"], type=MOUSE["left_up"])
     after = pointer.mark("after")
     rows = _received(pointer, before, after, MOUSE["left_down"], MOUSE["left_dragged"], MOUSE["left_up"], MOUSE["moved"])
@@ -1296,14 +1299,16 @@ def test_a_system_key_arrives_as_a_system_defined_event(host, launch):
     assert all(s.get("ok") is True and s.get("method") == "cg_events" for s in sent), sent
     seen = [r for r in rows if r["scope"] == "local"] or [r for r in rows if r["scope"] == "global"]
     assert [r["down"] for r in seen] == [True, False, True, False], rows
+    # The raw word, not only its decoded halves: key type 23 << 16 with state 0xA (down) or 0xB (up) << 8.
+    assert [r["data1"] for r in seen] == [0x170A00, 0x170B00, 0x170A00, 0x170B00], seen
     assert all(r["tag"] == SKILL_TAG for r in seen), seen
 
 
 @desktop_only
 def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_path, record_property):
     """600 characters (Latin, Cyrillic, emoji, line breaks) through type_text: the text view holds all 600, and the
-    fixture's own log says how long they took. The skill's budget allows 10 ms per character beyond a fixed part, so
-    more than 10 ms per character fails here: green means the budget holds on this runner, red that it must be
+    fixture's own log says how long they took. The skill's budget allows mac_input.TYPE_MS_PER_CHAR per character
+    beyond a fixed part, so more than that fails here: green means the budget holds on this runner, red that it must be
     raised (from this measurement, which goes to the job summary and the artifact, not from a guess)."""
     call, _schema = host
     _input_ready(call)
@@ -1330,4 +1335,29 @@ def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_pa
     log.warning("long text: %s characters, %s ms wall, %s ms per character, budget %s ms", len(text), wall_ms, per_char, budget)
     assert sent.get("ok") is True and sent.get("chars_sent") == sent.get("chars_total") == 600, sent
     assert after["text"] == text, {"arrived": len(after["text"]), "sent": len(text)}
-    assert per_char is not None and per_char <= 10, {"ms_per_char": per_char, "budget_ms": budget}
+    from skills.unix_computer_use import mac_input  # the allowance the program's deadline is computed from
+    assert per_char is not None and per_char <= mac_input.TYPE_MS_PER_CHAR, {"ms_per_char": per_char, "budget_ms": budget}
+
+
+@desktop_only
+def test_a_key_sequence_with_characters_types_selects_and_replaces(host, launch):
+    """key("a cmd+a b") goes the sequence path: one lookup of its characters in the target's layout after the switch
+    (typing plane and Command plane), then a, Command-A (the chord program), b, into the paste fixture, whose Edit menu
+    has Select All (the front fixture has no menu, so Command-A does nothing there). Its text view ends with "b": the
+    "a" was typed, selected and replaced."""
+    call, _schema = host
+    _input_ready(call)
+    front = launch("paste")
+    _hand_front(call, front)
+    before = front.mark("before")
+    sent = call("key", keys="a cmd+a b", app=f"pid:{front.pid}", raise_policy="never")
+    try:
+        front.wait_for("paste_text", after=before["t"], timeout=10, text="b")
+    except AssertionError:
+        pass  # the comparison below shows what arrived instead
+    after = front.mark("after")
+    downs = _between(front.rows(), before["t"], after["t"], "key_down")
+    assert sent.get("ok") is True and sent.get("steps") == 3, sent
+    assert after["text"] == "b", {"text": after["text"], "downs": downs, "receipt": sent}
+    assert [r["characters"] for r in downs] == ["a", "a", "b"] and downs[1]["modifiers"] == ["cmd"], downs
+    assert not _own_marks(downs) and after["keys_down"] == [], (downs, after)
