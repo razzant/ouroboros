@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Tuple
 
 from ouroboros.tools.review_helpers import _VENDORED_NAMES, _VENDORED_SUFFIXES
-from ouroboros.tools.review_helpers import iter_repo_pack_entries  # noqa: F401 - public compatibility re-export
 
 TARGET_MODULE_LINES = 1000
 MAX_MODULE_LINES = 1600
@@ -588,9 +587,6 @@ def load_size_ratchet_manifest(path: pathlib.Path) -> SizeRatchetManifest:
 _CHECKED_IN_MANIFEST = load_size_ratchet_manifest(pathlib.Path(__file__).with_name("size_ratchet_manifest.py"))
 GIANT_PATHS = _CHECKED_IN_MANIFEST.giant_paths
 FUNCTION_DEBT = _CHECKED_IN_MANIFEST.function_debt
-# Compatibility names remain public during the v7 migration; their keys are now exact.
-GRANDFATHERED_OVERSIZED_MODULES = GIANT_PATHS
-GRANDFATHERED_OVERSIZED_FUNCTIONS = FUNCTION_DEBT
 
 
 def validate_manifest_transition(

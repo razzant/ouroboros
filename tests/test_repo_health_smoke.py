@@ -1276,8 +1276,7 @@ def test_review_import_rejects_executable_manifest_before_side_effect(tmp_path: 
     (tools / "__init__.py").write_text("", encoding="utf-8")
     (package / "review.py").write_bytes((source_root / "ouroboros" / "review.py").read_bytes())
     (tools / "review_helpers.py").write_text(
-        "_VENDORED_NAMES = frozenset()\n_VENDORED_SUFFIXES = ()\n"
-        "def iter_repo_pack_entries(*args, **kwargs):\n    raise NotImplementedError\n",
+        "_VENDORED_NAMES = frozenset()\n_VENDORED_SUFFIXES = ()\n",
         encoding="utf-8",
     )
     marker = tmp_path / "executed"
@@ -1298,13 +1297,6 @@ def test_review_import_rejects_executable_manifest_before_side_effect(tmp_path: 
     assert result.returncode != 0
     assert "size manifest is data-only" in result.stderr
     assert not marker.exists()
-
-
-def test_review_reexports_the_exact_repo_pack_iterator() -> None:
-    from ouroboros import review
-    from ouroboros.tools import review_helpers
-
-    assert review.iter_repo_pack_entries is review_helpers.iter_repo_pack_entries
 
 
 def test_generator_rationale_parser_requires_explicit_nonblank_path_text() -> None:
