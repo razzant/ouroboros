@@ -105,10 +105,11 @@ STREAM_HANDLERS: dict[tuple[str, str], dict[str, Any]] = {
 }
 
 
-def load_capture() -> Any:
-    """``macos_capture.py`` beside this file, by its path (``-I`` keeps this folder off ``sys.path``)."""
-    path = pathlib.Path(__file__).resolve().with_name("macos_capture.py")
-    spec = importlib.util.spec_from_file_location("_unix_computer_use_macos_capture", path)
+def load_capture(file: str = "macos_capture.py") -> Any:
+    """A module beside this file, by its path (``-I`` keeps this folder off ``sys.path``): ``macos_capture.py``, or
+    ``mac_input.py`` for the structured refusal of a missing grant."""
+    path = pathlib.Path(__file__).resolve().with_name(file)
+    spec = importlib.util.spec_from_file_location("_unix_computer_use_" + path.stem, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
@@ -117,6 +118,7 @@ def load_capture() -> Any:
 
 
 capture = load_capture()  # standard library only at import; its Bridge imports PyObjC when constructed
+mac_input = load_capture("mac_input.py")  # standard library only
 # SCStreamError codes — including _NOT_STOPPABLE — prove something only inside ScreenCaptureKit's own error domain;
 # the same number from any other domain is an unrelated error.
 _SCSTREAM_DOMAIN = capture._TCC_DECLINED[0]  # "com.apple.ScreenCaptureKit.SCStreamErrorDomain"
@@ -548,7 +550,14 @@ class StreamBridge(capture.Bridge):
 
 
 def _refusal(reason: str, error: str, **extra: Any) -> dict[str, Any]:
-    return {"ok": False, "reason": reason, "error": error, **extra}
+    return mac_input.with_refusal({"ok": False, "reason": reason, "error": error, **extra})
+
+
+def _grant_stop(facts: dict[str, Any]) -> dict[str, Any]:
+    """A stream the system ended for a missing grant (SCStreamError -3801) carries the structured refusal a denied
+    start carries: the owner must allow Screen Recording before a new session can work."""
+    stop = facts.get("stop") if isinstance(facts.get("stop"), dict) else {}
+    return mac_input.permission_refusal("screen_recording") if stop.get("reason") == "screen_recording_denied" else {}
 
 
 class WindowSessions:
@@ -626,8 +635,8 @@ class WindowSessions:
                                 "listing and the start share", stage=stage, app=target, **extra)
             facts = capture._error_facts(err if err is not None else "no result and no error")
             declined = (facts.get("error_domain"), facts.get("error_code")) == capture._TCC_DECLINED
-            return {"ok": False, "reason": "screen_recording_denied" if declined else "capture_failed", "stage": stage,
-                    "app": target, **extra, **facts}
+            return mac_input.with_refusal({"ok": False, "reason": "screen_recording_denied" if declined else "capture_failed",
+                                           "stage": stage, "app": target, **extra, **facts})
 
         arrived, content, err = capture.await_handler(bridge.shareable_content, deadline, pump=bridge.pump, clock=clock)
         if not arrived or err is not None or content is None:
@@ -673,12 +682,12 @@ class WindowSessions:
                     "cleanup": ending}
         if store.stop is not None:  # the stream reported its own end before its start answered
             _frame, state = store.snapshot()
-            return {**_refusal("stream_stopped", "the stream ended as it started", app=target, window=facts, **state),
+            return {**_refusal("stream_stopped", "the stream ended as it started", app=target, window=facts, **state), **_grant_stop(state),
                     "cleanup": self._end(session, "released", STOP_TIMEOUT_MS)}
-        return {"ok": True, "state": "live", "backend": "ScreenCaptureKit", "app": target, "window": facts,
-                "stream": applied, "point_pixel_scale": scale, "start_ms": round((clock() - started) * 1000, 1),
-                "window_gone_check": "window_server",
-                "mapped_input_available": False, "note": _NOTE}
+        return mac_input.proved({"ok": True, "state": "live", "backend": "ScreenCaptureKit", "app": target, "window": facts,
+                                 "stream": applied, "point_pixel_scale": scale, "start_ms": round((clock() - started) * 1000, 1),
+                                 "window_gone_check": "window_server",
+                                 "mapped_input_available": False, "note": _NOTE}, "screen_recording")  # a live stream
 
     # -- frame --------------------------------------------------------------------------------------------------
 
@@ -729,7 +738,7 @@ class WindowSessions:
                  "mapped_input_available": False}
 
         def withhold(reason: str, error: str) -> tuple[dict[str, Any], None]:
-            return {"ok": False, "reason": reason, "error": error, "image": False, **facts}, None
+            return {"ok": False, "reason": reason, "error": error, "image": False, **facts, **_grant_stop(facts)}, None
 
         if state["state"] != "live":
             # The native stream's fate stays answerable until release: the same witness release/_end confirm by,
