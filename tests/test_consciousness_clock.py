@@ -175,3 +175,26 @@ def test_a_message_without_a_zone_keeps_the_earlier_dated_fact(monkeypatch):
     assert _intake(monkeypatch, ctx, _message(None, name="no-zone"),
                    _message(None, chat=42, sender=7, source="skill:telegram-bridge", name="tg")) == earlier
     assert ctx.state["last_owner_message_at"], "the stamp it rides in still ran"
+
+
+def test_the_zone_is_dated_by_its_own_message_and_an_older_one_never_replaces_a_newer_report(monkeypatch):
+    """A message accepted earlier and processed later keeps the time it came in its reference (``accepted_source_ref``):
+    that time dates the fact, so it never replaces a report dated later, and a newer one replaces it; a message whose
+    reference carries no time is dated at ingress, as before."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+
+    def accepted(zone, ts, name):
+        ref = build_owner_message_ref(chat_id=1, client_message_id=name, ts=ts, text="hello")
+        row = {"direction": "in", "source": "web", "chat_id": 1, "client_message_id": name, "ts": ts, "text": "hello"}
+        return {**_message(zone, name=name), "accepted_source_ref": ref, "accepted_source_row": row}
+
+    newer = {"zone": "Asia/Dubai", "at": "2026-11-21T09:00:00+00:00"}
+    ctx = _Ctx({**BOUND, clock.OWNER_ZONE_STATE_KEY: newer})
+    assert _intake(monkeypatch, ctx, accepted("Europe/Moscow", "2026-11-21T08:00:00+00:00", "a8")) == newer
+    fact = _intake(monkeypatch, ctx, accepted("Europe/Berlin", "2026-11-21T09:30:00+00:00", "a930"))
+    assert fact["zone"] == "Europe/Berlin" and fact["at"] == fact["message"]["ts"] == "2026-11-21T09:30:00+00:00"
+    live = {clock.OWNER_ZONE_STATE_KEY: newer}
+    clock.note_owner_zone(live, {"client_surface": {"timezone": "Asia/Tokyo"}}, own=True,
+                          message={"chat_id": 1, "client_message_id": "c2"}, at="2026-11-21T10:00:00+00:00")
+    assert live[clock.OWNER_ZONE_STATE_KEY] == {"zone": "Asia/Tokyo", "at": "2026-11-21T10:00:00+00:00",
+                                                "message": {"chat_id": 1, "client_message_id": "c2"}}

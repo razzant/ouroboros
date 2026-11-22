@@ -16,7 +16,8 @@ a wake. With consciousness on, a time at or before the pending appointment is re
 off, it is the first wake when consciousness is turned on while it is still ahead (``consciousness.start``).
 
 My human's last reported zone (``OWNER_ZONE_STATE_KEY``) is overwritten at owner ingress (``note_owner_zone``) from
-their own message whose client reported a valid IANA zone; any other message leaves the dated fact as it is.
+their own message whose client reported a valid IANA zone, dated by that message's own time, never over a report
+dated later; any other message leaves the dated fact as it is.
 
 ``own_clock_lines`` renders both for a wake with its appointment and the owner's bounds: facts with their meanings,
 no instruction and no cause beyond them (P5). They are the "Own clock" standing section
@@ -167,14 +168,24 @@ def choice_receipt(seen: Dict[str, Any], *, interval: Optional[int], clamp_note:
 
 def note_owner_zone(live: Dict[str, Any], metadata: Any, *, own: bool, message: Any, at: str) -> None:
     """At owner ingress, inside the write that stamps their activity: my human's own message (``own``) whose client
-    reported a valid IANA zone overwrites the one dated fact; any other message leaves it as it is."""
+    reported a valid IANA zone overwrites the one dated fact, dated by the ``ts`` its reference carries (a message
+    accepted earlier and processed later keeps when it came), so it never replaces a report dated later; a reference
+    without one is dated ``at``. Any other message leaves the fact as it is."""
     from ouroboros.client_surface import normalize_timezone_name
 
     surface = metadata.get("client_surface") if own and isinstance(metadata, dict) else None
     zone = normalize_timezone_name(surface.get("timezone")) if isinstance(surface, dict) else ""
-    if zone:
-        live[OWNER_ZONE_STATE_KEY] = {"zone": zone, "at": at,
-                                      **({"message": dict(message)} if isinstance(message, dict) else {})}
+    if not zone:
+        return
+    sent = parse_deadline_ts(message.get("ts")) if isinstance(message, dict) else None
+    if sent is not None:
+        held = live.get(OWNER_ZONE_STATE_KEY)
+        reported = parse_deadline_ts(held.get("at")) if isinstance(held, dict) else None
+        if reported is not None and reported > sent:
+            return
+        at = str(message["ts"])
+    live[OWNER_ZONE_STATE_KEY] = {"zone": zone, "at": at,
+                                  **({"message": dict(message)} if isinstance(message, dict) else {})}
 
 
 def _zone_name(fact: Any) -> str:
