@@ -365,8 +365,10 @@ def first_run_words(autonomy: str = "act") -> dict:
               else "answers in places you make Active")
     return {"gloss": SWITCH_GLOSS + ".", "choice": POSITION_WORDS[True], "off": POSITION_WORDS[False],
             "on": ON_WITHOUT_PLACES,
-            "meaning": ("Off: it works only when you write to it, and places you connect are heard, not answered. On: it "
-                        f"also wakes between your messages and {places}."),
+            # Start begins the first conversation either way (owner 21.11, 1C); on, the wakes go on before a reply.
+            "meaning": ("Off: it works when you write to it, and places you connect are heard, not answered. On: it also "
+                        f"keeps waking on its own within its daily allowance, even before your first reply, and {places}. "
+                        "Either way, Start begins your first conversation."),
             "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages.",
             "door": "Change it later in Dashboard › Consciousness; the allowance is in Dashboard › Costs."}
 

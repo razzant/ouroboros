@@ -62,7 +62,8 @@ def test_offered_exactly_while_a_first_state_is_to_come_and_setup_has_never_comp
     for enabled in (False, True, None):
         assert consciousness_offer({}, enabled=enabled, first_state=False)["offered"] is False
     assert consciousness_offer({}, enabled=False, first_state=False)["enabled"] is False  # shown, never offered
-    assert build_setup_bootstrap({}, "web")["stepOrder"] == ["accounts", "models", "review_mode", "consciousness", "budget", "summary"]
+    assert build_setup_bootstrap({}, "web")["stepOrder"] == [
+        "accounts", "models", "review_mode", "consciousness", "skills", "budget", "summary"]
     assert "consciousness" not in build_setup_bootstrap({}, "web", consciousness_first_state=False)["stepOrder"]
     assert "consciousness" not in build_setup_bootstrap({ONBOARDING_COMPLETED_KEY: "t"}, "web")["stepOrder"]
 
@@ -77,6 +78,10 @@ def test_the_limits_are_the_runtime_readers_values(monkeypatch):
     # The two positions of an install with no place yet, and a subscription's quota said where it is the one payer.
     assert (FIRST_RUN["off"], FIRST_RUN["on"]) == (POSITION_WORDS[False], ON_WITHOUT_PLACES)
     assert "quota" in FIRST_RUN["subscriptionCost"] and "allowance" not in FIRST_RUN["subscriptionCost"]
+    # On, the wakes go on before a first reply; either position, Start begins the first conversation (owner 21.11, 1C):
+    # no word ties the first message to the switch.
+    assert "even before your first reply" in FIRST_RUN["meaning"] and "Either way, Start begins" in FIRST_RUN["meaning"]
+    assert "only when you write" not in FIRST_RUN["meaning"]
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_AUTONOMY", "observe")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "0")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "0")

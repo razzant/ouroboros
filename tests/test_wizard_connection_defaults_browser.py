@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from tests._wizard_walk import past_consciousness, walk
+from tests._wizard_walk import past_quick_steps, walk
 
 from ouroboros.provider_models import CONNECTIONS_KEY, DIRECT_PROVIDER_DEFAULTS
 from tests import test_subscription_setup_browser as setup_browser
@@ -275,7 +275,7 @@ def _quick_finish(ui, page, label):
     page.wait_for_selector("#quick-start-btn:not([hidden])")
     page.wait_for_function("() => !document.querySelector('#onboarding-access-retry')?.disabled")
     page.click("#quick-start-btn")
-    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
+    past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector(".summary-card")
     return _quick_finish_from_summary(ui, page, label)
 

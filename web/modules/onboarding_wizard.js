@@ -23,7 +23,7 @@ import { mergeModelCatalog, catalogReadState, summarizeReadErrors } from './sett
 import { bindCompatibleModelLoader, createOnboardingCatalog } from './onboarding_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
-import { createStarterSkillsRow } from './onboarding_starter_skills.js';
+import { createStarterSkillsStep } from './onboarding_starter_skills.js';
 import { createConsciousnessStep } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
 import { PROVIDER_CARDS, createFlatKeyChoices, providerSettingsCard } from './settings_provider_cards.js';
@@ -122,7 +122,9 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     let footerObserver = null;
     let compatibleCatalogs = {};
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
-    const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
+    const starterSkills = createStarterSkillsStep({ offered: STEP_ORDER.includes('skills'), open: () => navigateStep('skills', { restorePosition: true }),
+        keyLabels: Object.fromEntries(PROVIDER_FIELDS.map((field) => [field.settingKey, field.label])) }); // the Skills step and its Summary row keep their ticks across renders
+    const QUICK = STEP_ORDER.filter((id) => ['consciousness', 'skills', 'summary'].includes(id));  // Review & start's own steps, in order
     const consciousness = createConsciousnessStep(bootstrap.consciousnessOffer); // its position rides the one completion request
     const supportsScopes = () => SETUP_CONTRACT.scopedModelCatalogs === true;
     const discovery = createOnboardingCatalog({ draftSettings, providerFields: PROVIDER_FIELDS, supportsScopes,
@@ -482,7 +484,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (agentsStep) void agentsStep.refreshSubagentsPreview({ force: true });
         const index = STEP_ORDER.indexOf(state.currentStep);
         if (index >= 0 && index < STEP_ORDER.length - 1) {
-            navigateStep(state.quickStarted && state.currentStep === 'consciousness' ? 'summary' : STEP_ORDER[index + 1]);
+            navigateStep(state.quickStarted && QUICK.includes(state.currentStep) ? QUICK[QUICK.indexOf(state.currentStep) + 1] : STEP_ORDER[index + 1]);
         }
     }
 
@@ -822,7 +824,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             state.error = agentsStep.previewError || 'Setup suggestions could not be prepared. Try again or choose your models manually.';
             syncCurrentStepActionState(); return;
         }
-        navigateStep((state.quickStarted = STEP_ORDER.includes('consciousness')) ? 'consciousness' : 'summary');  // its Continue goes to Summary
+        state.quickStarted = true;
+        navigateStep(QUICK[0]);  // Consciousness, then Skills, where offered: their Continue goes on to Summary
     }
 
     function subscriptionQuotaHtml() {
@@ -973,7 +976,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     <p class="step-copy">${escapeHtml(STEP_META.summary.copy)}</p>
                 </div>
             </div>
-            <div class="summary-card"><div data-starter-skills></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
+            <div class="summary-card"><div data-starter-skills="row"></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
             ${packetOnlyReviewPool(catalogDraft())
                 ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
             ${languageBlockHtml({ onboarding: true })}
@@ -1003,6 +1006,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (state.currentStep === 'accounts') return renderAccountsStep();
         if (state.completedRestartMode) return renderRestartRequiredScreen();
         if (state.currentStep === 'consciousness') return consciousness.html({ title: STEP_META.consciousness.title, subscriptionOnly: hasModelSubscription() && !hasApiAccess() });
+        if (state.currentStep === 'skills') return starterSkills.html(STEP_META.skills);
         if (state.currentStep === 'models') return renderModelsStep();
         if (state.currentStep === 'review_mode') return renderReviewModeStep();
         if (state.currentStep === 'budget') return renderBudgetStep();
@@ -1016,8 +1020,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             const meta = STEP_META[stepId];
             return `
                 <div class="wizard-step ${active ? 'active' : ''} ${done ? 'done' : ''}"${active ? ' aria-current="step"' : ''}>
-                    <div class="wizard-step-index"><span class="wizard-step-word">Step&nbsp;</span>${index + 1}</div>
-                    <p class="wizard-step-title">${escapeHtml(meta.title)}</p>
+                    <div class="wizard-step-index"><span class="wizard-step-word">Step&nbsp;</span>${index + 1}<span class="wizard-step-of">&nbsp;of ${STEP_ORDER.length}</span></div>
+                    <p class="wizard-step-title">${escapeHtml(meta.railTitle || meta.title)}</p>
                     <p class="wizard-step-copy">${escapeHtml(meta.railCopy || '')}</p>
                 </div>
             `;
@@ -1069,7 +1073,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
         renderLocalStatus();
         observeFooter();
-        revealCurrentStep();
     }
 
     // The page's scroll padding clears the pinned footer by its real height, which a wrapped reason changes.
@@ -1087,13 +1090,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     function clearFooterOnFocus(event) {
         const target = event.target;
         if (target instanceof Element && target.matches(':focus-visible') && !target.closest('.wizard-footer')) target.scrollIntoView({ block: 'nearest' });
-    }
-
-    // A rail narrower than its steps scrolls sideways: the current step, the one place this page says where you are, stays in it.
-    function revealCurrentStep() {
-        const rail = root.querySelector('.wizard-steps');
-        const current = rail?.querySelector('.wizard-step.active');
-        if (current && rail.scrollWidth > rail.clientWidth) rail.scrollLeft = current.offsetLeft - rail.offsetLeft - (rail.clientWidth - current.offsetWidth) / 2;
     }
 
         function bindClearButtons() {

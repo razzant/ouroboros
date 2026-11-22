@@ -26,6 +26,7 @@ import pytest
 from tests.candidate_checkout import case_checkout, require_candidate_interpreter, verify_checkout
 from tests.fixtures_mock_llm import MockLLMServer
 from tests.test_onboarding_attempt_browser import _start, _to_summary
+from tests._wizard_walk import step_order
 from tests.test_ui_smoke_playwright import (
     REPO_ROOT, _assert_served_candidate, _fixture_interpreter, _fixture_python, _free_port, _wait_health,
     _wait_supervisor_ready,
@@ -280,7 +281,8 @@ def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(s
             assert _text(page, STEP) == STEP_TEXT
             assert page.locator('[data-consciousness-choice="on"]').get_attribute("aria-pressed") == "true"
             page.screenshot(path=str(out / "first-setup-consciousness-step-webkit-light.png"), full_page=True)
-            _next(page, 2)  # Consciousness → Budget → Summary
+            order = step_order(page)  # Consciousness → (Skills, while the starter list never ran) → Budget → Summary
+            _next(page, order.index("summary") - order.index("consciousness"))
             row = page.locator(".summary-kv").filter(has=page.get_by_text("Consciousness", exact=True))
             assert " ".join(row.inner_text().split()) == f"Consciousness On · {FIRST_RUN['on']}"
             seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads

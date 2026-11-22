@@ -54,6 +54,7 @@
  * @typedef {Object} SetupStep
  * @property {string} id
  * @property {string} title
+ * @property {string} railTitle  // the step's short name in the rail; `title` heads the step itself
  * @property {string} railCopy
  * @property {string} copy
  * @property {string} footer

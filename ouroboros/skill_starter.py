@@ -29,7 +29,10 @@ log = logging.getLogger(__name__)
 STARTER_SETTING = "OUROBOROS_STARTER_SKILLS"
 MARKER_FILENAME = "skill_starter.json"
 _RETRY_CODES = frozenset({"fetch_failed", "source_unread"})
+# A marker in one of these states has its starter list behind it: a completed setup's ticks change nothing there.
+_LIST_RAN = frozenset({"done", "running", "pending", "upgrade"})
 _LOCK = threading.Lock()
+_MARKER_LOCK = threading.Lock()  # one read-merge-write of the marker at a time (the installer, the connection cards)
 _THREADS_LOCK = threading.Lock()
 _THREADS: set[threading.Thread] = set()
 
@@ -43,9 +46,13 @@ def read_marker(drive_root: pathlib.Path) -> Dict[str, Any]:
 
 
 def _write_marker(drive_root: pathlib.Path, **fields: Any) -> Dict[str, Any]:
-    marker = {**read_marker(drive_root), **fields, "schema_version": 1, "updated_at": utc_now_iso()}
-    atomic_write_json(marker_path(drive_root), marker)
+    with _MARKER_LOCK:
+        marker = {**read_marker(drive_root), **fields, "schema_version": 1, "updated_at": utc_now_iso()}
+        atomic_write_json(marker_path(drive_root), marker)
     return marker
+
+
+write_marker = _write_marker  # the setup's connection cards keep their consent and outcome here too
 
 
 def _offer(drive_root: pathlib.Path, rows: List[Dict[str, Any]], repo_dir: Optional[pathlib.Path],
@@ -117,12 +124,21 @@ def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, An
         if row["kind"] in {"builtin", "hub"} or any(i.startswith(row["id"] + "/") for i in ticked):
             statuses.append({**row, **status})
     groups: Dict[str, List[Dict[str, Any]]] = {}
+    from ouroboros.onboarding_connections import card_keys, starter_connection
+
     for item in _offer(drive_root, rows, repo_dir, ticked):
         category = (item.get("category") or ["other"])[0]
+        builtin = item["source_id"] == "builtin"
+        card = starter_connection(item["name"]) if builtin else None  # a built-in skill's declared card, if any
+        writes = set(card_keys(item["name"])[1:]) if card else set()  # the code the card writes is no prerequisite
         groups.setdefault(category, []).append({
-            "id": item["id"], "name": item["name"], "description": item.get("description", ""),
-            "official": bool(item.get("official")), "builtin": item["source_id"] == "builtin",
-            "recommended": item["id"] in ticked, "needs_keys": list(item.get("needs_keys") or []),
+            "id": item["id"], "name": item["name"], "title": item.get("title", ""), "pitch": item.get("pitch", ""),
+            "needs": item.get("needs"), "mark": item.get("mark", ""), "description": item.get("description", ""),
+            "icon": item.get("icon") or {},
+            "official": bool(item.get("official")), "builtin": builtin,
+            "recommended": item["id"] in ticked,
+            "needs_keys": [key for key in item.get("needs_keys") or [] if key not in writes],
+            **({"connection": card} if card else {}),
         })
     builtin_first = [cat for cat, items in groups.items() if any(i["builtin"] for i in items)]
     ranked = sorted(groups, key=lambda cat: (cat not in builtin_first,
@@ -234,6 +250,9 @@ def schedule_starter(drive_root: pathlib.Path, ids: Optional[List[str]], *, orig
             run_starter(drive_root, ids, origin=origin, repo_dir=repo_dir)
         except Exception:
             log.warning("Starter skill installation failed", exc_info=True)
+        from ouroboros.onboarding_connections import settle
+
+        settle(drive_root, repo_dir)  # a card whose skill is now installed: its grant and options (never raises)
 
     thread = threading.Thread(target=_run, daemon=True, name="starter-skills")
     with _THREADS_LOCK:
@@ -306,6 +325,9 @@ def at_startup(drive_root: pathlib.Path, settings: Dict[str, Any], *, provider_r
             retry = None if marker.get("resolve_default") else list(marker.get("requested") or [])
             schedule_starter(drive_root, retry, origin=str(marker.get("origin") or "retry"), repo_dir=repo_dir)
             return "retrying"
+        from ouroboros.onboarding_connections import settle_later
+
+        settle_later(drive_root, repo_dir)  # a card's grant or options a stop interrupted
         return state
     except Exception:
         log.warning("Starter skill startup work failed", exc_info=True)
@@ -323,11 +345,24 @@ def skills_startup(drive_root: pathlib.Path, settings: Dict[str, Any], *, provid
     return at_startup(drive_root, settings, provider_ready=provider_ready)
 
 
+def starter_choice_open(drive_root: pathlib.Path, settings: Dict[str, Any]) -> bool:
+    """Whether a completed setup's starter ticks are honored here (``after_onboarding``): this data root's starter
+    list never ran. Before startup classifies the root, the evidence ``classify_first_start`` reads decides. The
+    setup's Skills step is offered only then (``settings_setup_contract.build_setup_bootstrap``). Never raises: a
+    root whose evidence cannot be read offers no choice."""
+    try:
+        state = str(read_marker(drive_root).get("state") or "")
+        return state not in _LIST_RAN if state else not _existing_install(drive_root, settings)
+    except Exception:
+        log.warning("Starter skill choice could not be judged", exc_info=True)
+        return False
+
+
 def after_onboarding(drive_root: pathlib.Path, ids: Optional[List[str]], *,
                      repo_dir: Optional[pathlib.Path] = None) -> str:
     """Run the installer for the owner's ticks once onboarding completed (``None`` = the default list)."""
     state = str(read_marker(drive_root).get("state") or "")
-    if state in {"done", "running", "pending", "upgrade"}:
+    if state in _LIST_RAN:
         return state
     if ids is not None and not ids:
         _write_marker(drive_root, state="done", origin="onboarding", requested=[], results={})
@@ -344,12 +379,15 @@ def onboarding_skill_choices(body: Dict[str, Any], settings: Dict[str, Any]) -> 
     source list; ``starter_skills`` is checked here and used after the write. A malformed choice raises
     ``ValueError`` so the completion saves nothing.
     """
+    from ouroboros.onboarding_connections import completion_settings
+
     starter = body.get("starter_skills")
     if starter is not None and (not isinstance(starter, list) or not all(isinstance(i, str) for i in starter)):
         raise ValueError("starter_skills must be a list of catalog ids.")
+    cards = completion_settings(body)  # a connection card's token and code, in this same write
     trust = body.get("skill_source_trust")
     if trust in (None, {}):
-        return {}
+        return cards
     if not isinstance(trust, dict) or any(value not in ("trusted", "review") for value in trust.values()):
         raise ValueError("skill_source_trust must map source ids to trusted or review.")
     from ouroboros.skill_sources import SOURCES_SETTING, load_sources, with_changed_source
@@ -357,11 +395,12 @@ def onboarding_skill_choices(body: Dict[str, Any], settings: Dict[str, Any]) -> 
     rows = load_sources(dict(settings))
     for source_id, value in trust.items():
         rows = with_changed_source(rows, str(source_id), trust=value, confirmed=True)
-    return {SOURCES_SETTING: json.dumps(rows, ensure_ascii=False, separators=(",", ":"))}
+    return {**cards, SOURCES_SETTING: json.dumps(rows, ensure_ascii=False, separators=(",", ":"))}
 
 
 __all__ = [
     "MARKER_FILENAME", "STARTER_SETTING", "after_onboarding", "at_startup", "classify_first_start", "default_starter_ids",
     "join_starters", "onboarding_skill_choices", "read_marker",
-    "run_starter", "schedule_starter", "skills_startup", "starter_groups", "starter_ids",
+    "run_starter", "schedule_starter", "skills_startup", "starter_choice_open", "starter_groups", "starter_ids",
+    "write_marker",
 ]

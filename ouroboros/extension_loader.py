@@ -306,6 +306,10 @@ def _finalize_extension_reconcile(
     record_health_for_runtime_state(drive_root, skill_name, state, stamp=health_stamp, companions=companions,
                                     skill_dir=directory, foreign=foreign,
                                     observe_retained=lambda: _observe_retained_companions(state, skill))
+    if reason == "loaded" and state["process"] == "server":  # a setup card waiting for this skill to serve posts now
+        from ouroboros.onboarding_connections import settle_later
+
+        settle_later(drive_root)
 
 
 def reconcile_extension(

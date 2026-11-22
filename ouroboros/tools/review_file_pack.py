@@ -74,7 +74,8 @@ _SENSITIVE_NAMES = frozenset({
 _VENDORED_SUFFIXES = frozenset({".min.js", ".min.css", ".min.mjs"})
 
 
-_VENDORED_NAMES = frozenset({"chart.umd.min.js"})
+# Vendored files that keep their release's own (unminified) name: copied byte for byte (web/vendor/VENDOR-MANIFEST.md).
+_VENDORED_NAMES = frozenset({"chart.umd.min.js", "qrcodegen.js"})
 
 
 _FULL_REPO_BINARY_EXTENSIONS = frozenset({

@@ -61,6 +61,7 @@ test('every fixture is an instance of the host contract it stands for', () => {
     const starter = fixture('onboarding_starter_skills.json');
     assertShape(starter, 'StarterSkillsResponse', 'onboarding_starter_skills.json');
     starter.sources.forEach((row) => assertShape(row, 'SkillSourceRow', `starter source ${row.id}`));
+    starter.groups.flatMap((group) => group.items).forEach((item) => assertShape(item, 'StarterSkillItem', `starter ${item.id}`));
 });
 
 test('the shape check refuses a field the contract does not have, and a missing required one', () => {
