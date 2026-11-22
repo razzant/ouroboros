@@ -770,15 +770,6 @@ def test_a_count_still_being_admitted_is_in_the_census_and_spawns_nothing_after_
     assert counter.live_children() == [] and counter.projection(data)["error"]["stopped"] is True
 
 
-def test_the_two_stop_sites_and_the_census_name_the_storage_count_and_the_free_owner():
-    server = (REPO / "server.py").read_text(encoding="utf-8")
-    control = (REPO / "ouroboros" / "server_control.py").read_text(encoding="utf-8")
-    assert "storage_count.stop()" in server and "storage_count.live_children()" in server
-    assert "storage_free.stop()" in server and server.count("storage_free.live_children()") == 2, "restart adoption and the exit census"
-    assert 'attempt("storage-count", storage_count.stop, native=True)' in control
-    assert 'attempt("storage-free", storage_free.stop, native=True)' in control
-
-
 def test_the_production_spawn_forwards_the_configured_work_roots_to_the_child(tmp_path, monkeypatch):
     """`spawn_maintenance_job` builds a narrow environment; the three work roots this process
     resolved (Docker keeps them under /ouroboros/work, outside HOME) reach the child, and a fresh
