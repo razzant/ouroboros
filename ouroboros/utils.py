@@ -1329,6 +1329,17 @@ def sanitize_task_for_event(
             metadata = {**metadata, "wake_observation": {**kept, **{f"{key}_len": len(wake[key]) for key in bodies}}}
             sanitized["metadata"] = metadata
 
+        # A decision turn's routing lists (``server_routing_context._decision_turn_metadata``: Main's manifest, a Project
+        # room's manifest, this chat's live roots) grow with the install; the task document keeps them whole, an event
+        # copy keeps each list's length and every other fact.
+        for key in ("main_routing_manifest", "project_routing_manifest", "current_chat"):
+            facts = metadata.get(key) if isinstance(metadata, dict) else None
+            if isinstance(facts, dict):
+                metadata = {**metadata, key: {(f"{name}_len" if isinstance(value, list) else name):
+                                              (len(value) if isinstance(value, list) else value)
+                                              for name, value in facts.items()}}
+                sanitized["metadata"] = metadata
+
         # The event needs one contract; the live task keeps both mirrors.
         contract = sanitized.get("task_contract")
         if isinstance(metadata, dict) and contract and metadata.get("task_contract") == contract:
