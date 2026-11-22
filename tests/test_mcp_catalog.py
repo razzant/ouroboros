@@ -901,11 +901,13 @@ def test_a_task_session_server_answering_with_a_json_rpc_error_is_answering(tmp_
     wire(monkeypatch, registry, raw_server(tmp_path, task_session=True))
     try:
         with owner(registry):
-            assert call(registry, "ping", {"mode": "disconnect"}, server_id="demo").code == "MCP_ERROR"
-            assert call_now()["ok"] is False
+            # The answer first: a dropped connection ends the task's session, so a later call would meet
+            # the closed session rather than the server.
             refused = call(registry, "ping", {"mode": "protocol"}, server_id="demo")
             assert refused.code == "MCP_ERROR" and "invalid params" in refused.text
             assert call_now()["ok"] is True
+            assert call(registry, "ping", {"mode": "disconnect"}, server_id="demo").code == "MCP_ERROR"
+            assert call_now()["ok"] is False
     finally:
         mcp_task_session.close_context_sessions(registry._ctx)
 
