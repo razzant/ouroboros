@@ -19,15 +19,15 @@ let activeClose = null;
 function mountDialog({ title, bodyHtml = '', wide = false, onSettle }) {
     if (activeClose) activeClose();
     const backdrop = document.createElement('div');
-    backdrop.className = 'marketplace-modal-backdrop confirm-dialog-backdrop';
+    backdrop.className = 'ui-modal-backdrop confirm-dialog-backdrop';
     backdrop.innerHTML = `
-        <div class="marketplace-modal confirm-dialog skills-dialog${wide ? ' is-wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="skills-dialog-title">
-            <div class="marketplace-modal-head">
+        <div class="ui-modal confirm-dialog skills-dialog${wide ? ' is-wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="skills-dialog-title">
+            <div class="ui-modal-head">
                 <h3 id="skills-dialog-title">${escapeHtml(title)}</h3>
                 <button type="button" class="btn btn-default btn-sm" data-dialog-cancel aria-label="Close">Close</button>
             </div>
-            <div class="marketplace-modal-body">${bodyHtml}</div>
-            <div class="marketplace-modal-actions"></div>
+            <div class="ui-modal-body">${bodyHtml}</div>
+            <div class="ui-modal-actions"></div>
         </div>`;
     let settled = false;
     let disposeFocus = null;
@@ -48,8 +48,8 @@ function mountDialog({ title, bodyHtml = '', wide = false, onSettle }) {
     activeClose = cancel;
     return {
         backdrop, dialog, close, cancel,
-        body: dialog.querySelector('.marketplace-modal-body'),
-        actions: dialog.querySelector('.marketplace-modal-actions'),
+        body: dialog.querySelector('.ui-modal-body'),
+        actions: dialog.querySelector('.ui-modal-actions'),
         focus(initial) { disposeFocus?.({ restoreFocus: false }); disposeFocus = bindDialogFocus(dialog, { initialFocus: initial, onEscape: cancel }); },
     };
 }

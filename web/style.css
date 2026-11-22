@@ -6264,34 +6264,6 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
 }
 
 
-/* Every layer over the room lies over one veil, the theme's --scrim (ui.css; U020): the dialogs here, the Project
-   panel's, the file dialog's and the document reader's, and the feed under a long-pressed row. */
-.ui-modal-backdrop,
-:where(.marketplace-modal-backdrop) {
-    position: fixed;
-    inset: 0;
-    z-index: 90;
-    display: flex;
-    justify-content: center;
-    overflow-y: auto;
-    background: var(--scrim);
-}
-
-/* A dialog stands in the middle of the window, clear of the bars (U024); one taller than the window starts at its top
-   and scrolls (the auto margins centre only while there is room). While a phone's keyboard is up the window keeps its
-   height under it, so a dialog stands at the top instead, its foot above the keyboard (M12). */
-.ui-modal,
-:where(.marketplace-modal) {
-    width: 100%;
-    margin-block: auto;
-    display: flex;
-    flex-direction: column;
-    border: 1px solid transparent;
-    background: var(--ui-modal-bg);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-}
-body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
-
 .section-title {
     font-size: 14px;
     font-weight: 600;
@@ -8019,28 +7991,8 @@ html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var
 .skills-sheet-facts dd { margin: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
 
 
-/* Detail modal. */
-
-.marketplace-modal-backdrop {
-    align-items: flex-start;
-    padding: calc(4vh + var(--inset-top)) 16px 4vh;
-}
-
-.marketplace-modal {
-    max-height: calc(var(--vvh) - 8vh - var(--inset-top));
-    min-height: 0;
-    border-color: transparent;
-    border-radius: var(--radius-object);
-    background: var(--popup-float);
-    box-shadow: var(--elev-float);
-    -webkit-backdrop-filter: var(--glass);
-    backdrop-filter: var(--glass);
-    padding: 16px;
-    max-width: 900px;
-    gap: 12px;
-}
-
-/* Confirm/input/alert dialogs must stay usable over EVERY overlay (the Panic
+/* The confirm dialog (confirm_dialog.js), composed on the shared dialog (ui.css .ui-modal).
+   Confirm/input/alert dialogs must stay usable over EVERY overlay (the Panic
    confirm is the canonical case: it must be clickable while the socket is
    down; no veil covers the app then, owner 20.10 Q4). Overlay scale:
    modals 90 · toasts/menus 120 · dialogs 1100. */
@@ -8052,7 +8004,7 @@ html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var
     max-width: 520px;
 }
 
-.confirm-dialog .marketplace-modal-body p {
+.confirm-dialog .ui-modal-body p {
     margin: 0;
     white-space: pre-line;
 }
@@ -8085,7 +8037,7 @@ html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var
 .confirm-dialog .confirm-dialog-content p:last-child { margin-block-end: 0; }
 /* Beside rendered prose, the dialog's consequences and its Details summary read at the prose's
    size and ink, so the plain facts never outweigh what changes. Ordinary dialogs keep theirs. */
-.confirm-dialog.has-content .marketplace-modal-body > p,
+.confirm-dialog.has-content .ui-modal-body > p,
 .confirm-dialog.has-content .confirm-dialog-details > summary {
     font-size: var(--type-body);
     line-height: var(--line-body);
@@ -8115,35 +8067,6 @@ html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var
     margin: 0;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
-}
-
-.marketplace-modal-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-}
-
-/* A long unbroken title (a skill name) wraps; Close never leaves the dialog. */
-.marketplace-modal-head > h3 { min-width: 0; overflow-wrap: anywhere; }
-.marketplace-modal-head > button { flex: 0 0 auto; }
-
-.marketplace-modal-head, .marketplace-modal-actions { flex-shrink: 0; }
-.marketplace-modal-body > * { flex-shrink: 0; }
-.marketplace-modal-body {
-    min-height: 0;
-    flex: 1 1 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    overflow-y: auto;
-}
-
-.marketplace-modal-actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 8px;
 }
 
 /* Widgets page. Masonry (web/modules/masonry.js) measures and packs the cards
@@ -11931,7 +11854,7 @@ html[data-layout="stack"] .project-panel {
     max-width: 480px;
 }
 /* Keep this reading surface opaque even under the theme's shared floating-sheet rule. */
-.marketplace-modal.secret-request-dialog {
+.ui-modal.secret-request-dialog {
     background-color: var(--bg-secondary);
 }
 .secret-request-body,
