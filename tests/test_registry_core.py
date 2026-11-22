@@ -881,3 +881,32 @@ def test_named_discovery_reads_availability_only_when_it_decides(tmp_path, monke
     assert reads == ["read", "read"]
     assert any(row.get("reason") == "missing_credential" and row.get("tools") == ["github_read"]
                for row in registry.capability_omissions())
+
+
+def test_every_built_in_reader_answers_by_the_one_rule(tmp_path, monkeypatch):
+    """The five readers decide a built-in by ``_builtin_verdict`` alone: under a Presence ceiling without list_files
+    all of them hide it, and when the rule is made to admit it, all of them show it, named discovery included."""
+    from ouroboros.presence_authority import PresenceCapabilityCeiling, PresenceToolGrant, presence_ceiling_payload
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    ceiling = PresenceCapabilityCeiling(
+        skill_name="behavior", skill_content_hash="a" * 64, profile_fingerprint="b" * 64,
+        state_fingerprint="c" * 64, selection_fingerprint="d" * 64, model_slot="main", inline_max_rounds=3,
+        tool_grants=(PresenceToolGrant("read_file"),), resource_grants=(), digest="0" * 64)
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="presence",
+                                     task_contract={"capability_ceiling": presence_ceiling_payload(ceiling)}))
+
+    def answers():
+        return (
+            "list_files" in {schema["function"]["name"] for schema in registry.schemas()},
+            "list_files" in registry.available_tools(),
+            registry.policy_hidden_reason("list_files") is None,
+            registry.get_schema_by_name("list_files") is not None,
+            "list_files" in {row["name"] for row in registry.callable_rows("builtin")},
+        )
+
+    assert answers() == (False,) * 5
+    monkeypatch.setattr(ToolRegistry, "_builtin_verdict", lambda self, entry, view, availability=None: (None, availability))
+    assert answers() == (True,) * 5

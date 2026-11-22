@@ -895,16 +895,8 @@ class ToolRegistry:
         requested = str(name or "").strip()
         if requested == "presence_finish":
             self._retry_schedule_door()
-        acting_subagent = self._is_acting_subagent()
-        acting_grants = self._acting_tool_grants() if acting_subagent else set()
-        # Declarative tool policy applies across ALL discovery sources (built-in, extension, MCP),
-        # so enable_tools/discovery can never surface a disabled name — consistent with schemas()/execute().
-        if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
-            return None
-        if not _presence_tool_allowed(self._ctx, requested):
-            return None
         entry = self._entries.get(requested)
-        if entry:
+        if entry:  # a built-in answers by the one rule, which holds the contract and the Presence ceiling
             cause, availability = self._builtin_verdict(entry, self._builtin_view())
             if cause == "unavailable" and availability[1]:
                 self._capability_omissions.append({
@@ -914,6 +906,14 @@ class ToolRegistry:
                     "details": {requested: availability[2]},
                 })
             return None if cause else self._schema_for_entry(entry)
+        # Declarative tool policy applies across ALL discovery sources (built-in, extension, MCP),
+        # so enable_tools/discovery can never surface a disabled name — consistent with schemas()/execute().
+        if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
+            return None
+        if not _presence_tool_allowed(self._ctx, requested):
+            return None
+        acting_subagent = self._is_acting_subagent()
+        acting_grants = self._acting_tool_grants() if acting_subagent else set()
         try:
             from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
         except Exception:
