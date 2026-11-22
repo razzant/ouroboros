@@ -560,17 +560,19 @@ def _annotate_terminal_task_truth(
                 if same_attempt and latest_progress_by_task.get(task_id) is message and task_id in running_gate_by_task:
                     message["review_overrides"] = running_gate_by_task[task_id]  # the card's line on a reload
             plain_final = task_id not in carriers and plain_finals.get(task_id) is message
+            # #496: an anchored child whose progress rows fell out of the read tail keeps its executor receipt (its harness
+            # chip needs no "Load older") on one answer row: its selected summary of this attempt, else its selected plain words.
+            answer = task_id in anchored and task_id not in latest_progress_by_task and message is next(
+                (row for row in (summaries.get(task_id), plain_finals.get(task_id))
+                 if row is not None and matches_history_attempt(row, recorded_attempt(cache.get(task_id, {})))), None)
             if (same_attempt and task_id in terminal_status_by_task
                     and (message.get("is_progress") or is_summary or plain_final or message.get("system_type") == "task_evidence")):
                 message["task_terminal_status"] = terminal_status_by_task[task_id]
-                if latest_progress_by_task.get(task_id) is message:
+                if latest_progress_by_task.get(task_id) is message or answer:
                     message.update(terminal_receipt_by_task.get(task_id) or {})
             elif same_attempt and latest_progress_by_task.get(task_id) is message:
                 message.update(live_cost_by_task.get(task_id) or {})
-            elif same_attempt and task_id in anchored and task_id not in latest_progress_by_task:
-                # #496: a still-anchored child whose progress rows fell out of the
-                # read tail keeps its executor receipt on the one final row the
-                # window still holds, so its harness chip needs no "Load older".
+            elif same_attempt and answer:
                 message.update(terminal_receipt_by_task.get(task_id) or {})
             system_type = str(message.get("system_type") or "")
             is_latest = latest_progress_by_task.get(task_id) is message

@@ -1621,6 +1621,32 @@ test('a parent whose evidence arrives later re-nests its child, keeping the node
     } finally { instance.destroy(); restoreDom(prior); }
 });
 
+// A replayed child's card is finished by its terminal lifecycle event alone (no task_terminal_status) and a later
+// lifecycle row does not reopen it; `interrupted` is the one end that stays open (retryable).
+test('a replayed child is finished by its terminal subagent event alone, interrupted stays open (#1/#2/#20)', async () => {
+    const life = (n, event) => ({ chat_id: 2, role: 'system', is_progress: true, narration: false, task_id: 'kid-e',
+        subagent_task_id: 'kid-e', parent_task_id: 'par-e', root_task_id: 'par-e', delegation_role: 'subagent',
+        subagent_role: 'reader', subagent_event: event, content: `kid ${event}`, text: `kid ${event}`,
+        ts: `2026-11-20T10:00:0${n}Z`, history_id: `progress:${n}`, history_position: { source: 'progress', offset: n } });
+    const parentRow = { chat_id: 2, role: 'system', is_progress: true, system_type: 'host_progress', task_id: 'par-e',
+        content: 'Parent planning', text: 'Parent planning', narration: false, ts: '2026-11-20T10:00:01Z',
+        history_id: 'progress:1', history_position: { source: 'progress', offset: 1 } };
+    const finishedAfter = async (rows) => {
+        const { instance, prior, messages } = a5Instance([rows]);
+        try {
+            await instance.refreshHistory({ revision: 1 });
+            const kid = walkCard(messages(), 'kid-e');
+            assert.equal(kid.parentNode?.dataset?.subagentsFor, 'par-e', 'the child is its parent\'s nested card');
+            return kid.dataset.finished === '1';
+        } finally { instance.destroy(); restoreDom(prior); }
+    };
+    for (const event of ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected']) {
+        assert.equal(await finishedAfter([parentRow, life(2, 'scheduled'), life(3, 'running'), life(4, event)]), true, event);
+    }
+    assert.equal(await finishedAfter([parentRow, life(2, 'completed'), life(3, 'running')]), true, 'a later row does not reopen it');
+    assert.equal(await finishedAfter([parentRow, life(2, 'scheduled'), life(3, 'running'), life(4, 'interrupted')]), false);
+});
+
 // #2801: answer first. The root's final is saved before its result is stored; a reload in between replays the
 // final with its own status while the saved result still runs. Shapes are the real server's (isolated witness).
 test('an answer saved before its result is stored replays as Finalizing…, never a finished Done (#2801)', async () => {

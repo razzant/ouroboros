@@ -133,6 +133,7 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
         from ouroboros.outcomes import collect_trace_refs, derive_loop_outcome
         from ouroboros.agent_task_pipeline import build_trace_summary
         from ouroboros.task_results import STATUS_FAILED, _TRULY_TERMINAL_STATUSES, write_task_result
+        from ouroboros.terminal_time import source_task_attempt
 
         loop_outcome = derive_loop_outcome(text, usage, llm_trace)
         write_task_result(
@@ -140,6 +141,9 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
             _field_projector=(lambda current, incoming: None if current.get("status") in _TRULY_TERMINAL_STATUSES
                               else incoming) if keep_terminal else None,
             _terminal_observed=True, result=text, reason_code="task_exception", loop_outcome={k: v for k, v in loop_outcome.items() if k != "trace_refs"},
+            # A start that failed before its own record (``_persist_running_record``) left no row naming this attempt, and
+            # copy-back refuses a replica naming none beside a canonical row that does (``replica_attempt_matches``).
+            **({"task_attempt": n} if (n := source_task_attempt(task)) is not None else {}),
             outcome_axes=loop_outcome.get("outcome_axes") or infra_failed_axes(
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),

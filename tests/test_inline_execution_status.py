@@ -195,8 +195,12 @@ def test_canonical_assignment_beats_a_pre_resume_child_owner(tmp_path):
     assert observed["status"] == "failed"
 
 
-@pytest.mark.parametrize("child_terminal", [False, True])
+@pytest.mark.parametrize("child_terminal", [False, True, "own"])
 def test_canonical_new_attempt_stays_bound_beside_old_child(tmp_path, monkeypatch, child_terminal):
+    # True: a completed end on the reused drive whose row still names attempt 1 is that old attempt's late end
+    # (attempt 2's body records its start there first, ``_persist_running_record``); it lends attempt 2 neither
+    # status nor words and stays readable in its own row. "own": that start record is there, so attempt 2's end lands.
+    from ouroboros.agent import OuroborosAgent
     from supervisor import worker_assignment, workers
 
     root, child = tmp_path / "canonical", tmp_path / "child"
@@ -204,19 +208,27 @@ def test_canonical_new_attempt_stays_bound_beside_old_child(tmp_path, monkeypatc
     _seed(child, "retry", _attempt=1,
           execution_owner=execution_owner_record(root, {"id": "retry", "_attempt": 1}, "pooled"))
     monkeypatch.setattr(workers, "DRIVE_ROOT", root)
-    worker_assignment._mirror_assigned_running_status(
-        {"id": "retry", "_attempt": 2, "budget_drive_root": str(root), "drive_root": str(child)})
+    task = {"id": "retry", "_attempt": 2, "budget_drive_root": str(root), "drive_root": str(child)}
+    worker_assignment._mirror_assigned_running_status(task)
     write_task_result(root, "retry", "running", ts=_stamp(time.time() - 200))
+    if child_terminal == "own":
+        actor = object.__new__(OuroborosAgent)
+        actor.env = SimpleNamespace(drive_root=child, budget_drive_root=root)
+        actor._task_started_ts = time.time()
+        actor._persist_running_record(task)
     if child_terminal:
         write_task_result(child, "retry", "completed", result="Actual child answer")
     observed = load_effective_task_result(root, "retry")
     assert observed["task_attempt"] == observed["execution_owner"]["task_attempt"] == 2
     assert "_attempt" not in observed  # an old secondary carrier cannot be borrowed either
-    if child_terminal:
+    if child_terminal == "own":
         assert observed["status"] == "completed" and observed["result"] == "Actual child answer"
     else:
         assert observed["status"] == "failed" and observed["execution_observation"]["kind"] == "pooled"
+        assert observed.get("result") != "Actual child answer"
         assert reconcile_orphaned_running_tasks(root) == 1
+    if child_terminal is True:
+        assert load_task_result(child, "retry")["result"] == "Actual child answer"
 
 
 @pytest.mark.parametrize("outcome_failure", [False, True])
