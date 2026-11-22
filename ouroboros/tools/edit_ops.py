@@ -1248,6 +1248,7 @@ def _edit_batch(
     force: bool = False,
     _resolved_binding: ResolvedResourceBinding | tuple[ResolvedResourceBinding, ...] | None = None,
     source_tool: str = "edit_batch",
+    path: str = "",  # outside the schema: dispatch gives it to the edits without one and removes it
 ) -> str:
     if not edits or not isinstance(edits, list):
         return "⚠️ EDIT_BATCH_ERROR: edits must be a non-empty array."
@@ -1485,6 +1486,9 @@ def _unified_diff(rel: str, before: str, after: str, cap: int = 400) -> str:
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
+
+setattr(_edit_batch, "_hidden_legacy_params", ("path",))
+
 
 def get_tools() -> List[ToolEntry]:
     return [
