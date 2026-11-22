@@ -241,9 +241,19 @@ def note_failed_call(cfg: Any, exc: BaseException, *, method: str = "") -> None:
         note_call(cfg, ok=mark[0], code=mark[1], method=method)
 
 
+def _later(first: Any, second: Any) -> bool:
+    """Whether ISO time ``first`` is later than ``second``; an unreadable time is never later."""
+    try:
+        return datetime.fromisoformat(str(first)) > datetime.fromisoformat(str(second))
+    except (TypeError, ValueError):
+        return False
+
+
 def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
     """Write a changed call outcome under the record's name lock; False when nothing was written (unchanged on
-    disk, or the lock is busy: the next changed call writes it). The server's catalog is never touched."""
+    disk, older than the observation on disk, or the lock is busy: the next changed call writes it). The
+    observation is dated before the lock (``at``), so a writer that waited never moves the record back in time.
+    The server's catalog is never touched."""
     from ouroboros import store
 
     try:
@@ -251,8 +261,8 @@ def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
             data = read_json_dict(calls_path(cfg.id)) or {}
             current = data.get("latest_call") if (data.get("server_id"), data.get("identity")) == (
                 cfg.id, identity(cfg)) else None
-            if not call_changed(current, ok=ok, code=code):
-                return False
+            if not call_changed(current, ok=ok, code=code) or _later((current or {}).get("at"), at):
+                return False  # unchanged, or an older observation than the one on disk
             atomic_write_json(calls_path(cfg.id), {"_schema_version": 1, "server_id": cfg.id, "identity": identity(cfg),
                                                    "latest_call": call_mark(current, ok=ok, code=code, method=method, at=at)})
             return True
