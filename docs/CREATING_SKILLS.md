@@ -994,9 +994,11 @@ loopback, so the route's own guard (owner changes only from the owner's local se
 can choose what it posts. It posts on events that already happen, never on a timer: the starter install's end, a
 saved completion for a skill already installed, the skill's extension finishing its load, and the next start; a route
 that does not serve yet (409) waits for the next of them. A route that answers 200 with `owner_ignored: true` left
-the owner's values unchanged: that is recorded as not saved, never as a success. The card grants nothing: where
-reviewed skills are granted automatically, the install's own grant covers the token; where they are not, the card
-says the skill starts after the owner allows it in Extensions, and that load is the event that posts. The code leaves
+the owner's values unchanged: that is recorded as not saved, never as a success. Where reviewed skills are granted
+automatically, that policy covers the owner's consent too: a skill installed but not granted and on (its own install
+never granted it, e.g. a payload a Reset kept) gets the lifecycle's grant of every key and permission it asks, enable
+after grant, before the post (the record's `grant` says what happened). Where they are not, the card grants nothing:
+it says the skill starts after the owner allows it in Extensions, and that load is the event that posts. The code leaves
 the record once posted or refused; each outcome is recorded there and none blocks Start. A card missing any part the host needs is not shown, and the skill
 stays an ordinary row.
 

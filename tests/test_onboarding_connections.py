@@ -5,8 +5,9 @@ routes; the token check calls the declared function of a built-in skill only and
 address, and asks the server a declared reader names; the completion saves the token alone under its declared key in
 its one write, keeps the code out of Settings, and refuses a card's values from the Telegram Mini App; after the write
 the owner's consent is recorded and, once the skill serves, the code with the options is posted once to the route they
-declare, after which the code leaves the record. The card grants nothing: where the install grants reviewed skills
-nothing on its own, the step is told the skill starts once the owner allows it.
+declare, after which the code leaves the record. Where the install grants reviewed skills on its own, the consent turns
+on a skill its install never granted (a payload a Reset kept) through the lifecycle's grant; where it grants nothing
+on its own, neither does the card, and the step is told the skill starts once the owner allows it.
 """
 from __future__ import annotations
 
@@ -243,14 +244,14 @@ def test_the_telegram_mini_app_cannot_arm_a_code_and_a_saved_completion_records_
     assert settled == [drive] and len(reached) == 3 and reached[-1] == connections
 
 
-def test_after_finish_the_code_is_posted_once_the_skill_serves_and_the_card_grants_nothing(skills, tmp_path, monkeypatch):
+def test_after_finish_the_code_is_posted_once_the_skill_serves(skills, tmp_path, monkeypatch):
     drive = tmp_path / "data"
     assert len(cards.record_consent(drive, _entry())) == 1
     installed, posts = [False], []
     monkeypatch.setattr(cards, "_installed", lambda _drive, _name: installed[0])
 
     def grant(*_a, **_k):
-        raise AssertionError("the card grants nothing: the install's grant, or the owner in Extensions, does")
+        raise AssertionError("no payload on disk here: nothing for the consent to turn on")
 
     monkeypatch.setattr("ouroboros.skill_lifecycle_actions.run_skill_action", grant)
     answers = iter([(409, {}), (200, {"ok": True, "owner_ignored": False}), (200, {"ok": True})])
@@ -271,6 +272,43 @@ def test_after_finish_the_code_is_posted_once_the_skill_serves_and_the_card_gran
     assert "code" not in skill_starter.read_marker(drive)["connections"][0], "the code leaves the host's record"
     cards.settle(drive, post=post)
     assert len(posts) == 2, "settled cards are not settled again"
+
+
+def test_where_reviewed_skills_are_granted_on_their_own_the_consent_turns_on_a_skill_its_install_never_granted(
+        skills, tmp_path, monkeypatch):
+    """A payload already on disk (a Reset keeps them) is installed but was never granted. Where the install grants
+    reviewed skills on its own, the consent given at Finish grants what the skill asks through the lifecycle and turns
+    it on, and the grant exists; where it does not, the card grants nothing; a skill granted and on is left alone."""
+    import shutil
+
+    from ouroboros import config, skill_lifecycle_actions
+    from ouroboros.skill_loader import SkillReviewState, find_skill, load_enabled, load_skill_grants, save_review_state
+
+    drive = tmp_path / "data"
+    shutil.copytree(skills / "demo", drive / "skills" / "external" / "demo")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(tmp_path / "empty"))
+    read = config.load_settings  # Finish saved the token: Settings now hold it, which is what makes it grantable
+    monkeypatch.setattr(config, "load_settings", lambda *a, **k: {**read(*a, **k), "DEMO_TOKEN": "1:abc"})
+    automatic = [False]
+    monkeypatch.setattr(config, "get_auto_grant_enabled", lambda: automatic[0])
+    save_review_state(drive, "demo", SkillReviewState(status="clean", content_hash=find_skill(drive, "demo").content_hash))
+    calls, real = [], skill_lifecycle_actions.run_skill_action
+    monkeypatch.setattr(skill_lifecycle_actions, "run_skill_action", lambda *a, **k: calls.append(k) or real(*a, **k))
+
+    def post(path, body):  # the route does not serve here: the post waits for the next event
+        return 409, {}
+
+    cards.record_consent(drive, _entry())
+    record = cards.settle(drive, post=post)[0]
+    assert (calls, "grant" in record, record["post"]) == ([], False, "waiting"), "the owner allows it in Extensions"
+    assert load_skill_grants(drive, "demo")["granted_keys"] == [] and load_enabled(drive, "demo") is False
+    automatic[0] = True
+    record = cards.settle(drive, post=post)[0]
+    assert record["grant"] == "granted", record
+    assert load_skill_grants(drive, "demo")["granted_keys"] == ["DEMO_TOKEN"] and load_enabled(drive, "demo") is True
+    assert (calls[0]["items"], calls[0]["_enable_after_grant"], calls[0]["_owner_actor"]) == (["DEMO_TOKEN"], True, "owner_ui")
+    cards.settle(drive, post=post)
+    assert len(calls) == 1, "granted and on: the next event grants nothing again"
 
 
 def test_a_card_that_sent_its_token_alone_records_no_code_and_posts_nothing(skills, tmp_path, monkeypatch):

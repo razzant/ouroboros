@@ -19,9 +19,11 @@ host:
   the wizard drew the QR and the link that hold that code; without them the token comes alone and nothing is posted;
 - makes ONE post of every skill-settings value of the card (the code with the options) to the route they declare,
   from this server over loopback: the owner's local session as the route's guard reads it, reachable only from that
-  recorded consent (``settle``, one run at a time). It grants nothing: where reviewed skills are granted
-  automatically the install's own grant covers the token; where they are not, the owner allows the skill in
-  Extensions. It runs on events that already happen, never on a timer: the starter install's end, a saved completion
+  recorded consent (``settle``, one run at a time). Where reviewed skills are granted automatically, that policy
+  covers the owner's consent too: a skill installed but not granted and on (one its own install never granted, such
+  as a payload a Reset kept) gets the lifecycle's grant of what it asks, enable after grant (``_turn_on``); where they
+  are not, the card grants nothing and the owner allows the skill in Extensions. It runs on events that already
+  happen, never on a timer: the starter install's end, a saved completion
   (a skill already installed), the skill's extension finishing its load, and the next start. A route not serving yet
   leaves the card waiting for the next of them. The code is dropped from the record once posted or refused. Every
   outcome is recorded there; none blocks Start.
@@ -347,6 +349,37 @@ def _installed(drive_root: pathlib.Path, name: str) -> bool:
     return skill is not None and not getattr(skill, "load_error", "")
 
 
+def _turn_on(drive_root: pathlib.Path, name: str) -> str:
+    """Where the install grants reviewed skills on its own, the owner's consent turns on an installed skill that is not
+    yet granted and on: the lifecycle's grant of every key and permission it asks, enable after grant (the install's
+    own policy, applied to the consent given at Finish), or its enable when it asks for nothing to grant. "" when
+    nothing was done: the skill is already granted and on, or the install grants nothing on its own (the owner allows
+    the skill in Extensions); else what happened."""
+    from ouroboros.config import REPO_DIR, get_auto_grant_enabled, get_skills_repo_path
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, load_enabled
+
+    if not get_auto_grant_enabled():
+        return ""
+    skill = find_skill(drive_root, name, repo_path=get_skills_repo_path() or None)
+    if skill is None or getattr(skill, "load_error", ""):
+        return ""
+    status = grant_status_for_skill(drive_root, skill)
+    if status["all_granted"] and load_enabled(drive_root, name):
+        return ""
+    from ouroboros.gateway.extensions import _ApiReviewCtx
+    from ouroboros.skill_lifecycle_actions import run_skill_action
+
+    ctx = _ApiReviewCtx(pathlib.Path(drive_root), pathlib.Path(REPO_DIR))
+    ctx.task_id = ""
+    ctx._skill_owner_client_host = "setup"  # the owner's consent was given at the setup's Finish
+    items = [*status["requested_keys"], *status["requested_permissions"]]
+    result = run_skill_action(ctx, name, "grant" if items else "enable", items=items or None,
+                              repo_path=get_skills_repo_path(), _owner_actor="owner_ui", _enable_after_grant=bool(items))
+    if not result.get("ok"):
+        return f"failed: {str(result.get('error') or 'refused')[:200]}"
+    return "granted" if result.get("enabled") else f"granted, not on: {str(result.get('setup_error') or '')[:200]}"
+
+
 def _server_port() -> int:
     import os
 
@@ -420,9 +453,10 @@ def _loopback_post(path: str, body: Dict[str, str]) -> Answer:
 
 def settle(drive_root: pathlib.Path, *,
            post: Optional[Callable[[str, Dict[str, str]], Answer]] = None) -> List[Dict[str, Any]]:
-    """For each recorded card whose skill is installed: its one post. The outcome lands in the marker and the code
-    leaves it once posted or refused; a skill not installed yet, or a route not serving yet (a skill the owner has
-    still to allow among them), waits for the next event. Never raises; call it off the server's event loop."""
+    """For each recorded card whose skill is installed: its turn-on where the install grants on its own
+    (``_turn_on``), then its one post. The outcomes land in the marker and the code leaves it once posted or refused;
+    a skill not installed yet, or a route not serving yet (a skill the owner has still to allow among them), waits for
+    the next event. Never raises; call it off the server's event loop."""
     from ouroboros.skill_starter import read_marker, write_marker
 
     try:
@@ -439,6 +473,10 @@ def _settle_records(drive_root: pathlib.Path, read_marker: Callable[..., Any], w
     for record in records:
         if record.get("post") not in ("pending", "waiting") or not _installed(drive_root, str(record.get("skill") or "")):
             continue
+        turned = _turn_on(drive_root, str(record["skill"]))
+        if turned:
+            record["grant"] = turned
+            write_marker(drive_root, connections=records)
         record["post"] = _post(record, post=post)
         if record["post"] != "waiting":
             record.pop("code", None)  # posted, or refused by the route: the code leaves the host's record
