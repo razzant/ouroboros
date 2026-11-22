@@ -1173,13 +1173,35 @@ def test_a_no_while_the_history_is_still_importing_is_unknown_and_a_yes_stands(t
         dialogue_store.owner_exchange(tmp_path)
     assert setup_fact(tmp_path)["exchange"] == "unknown: the dialogue could not be read (StoreMigrating)"
     with pytest.MonkeyPatch.context() as patch:  # a message of mine found while still importing: a yes stands
-        patch.setattr(dialogue_store, "require_imported", lambda *a, **k: pytest.fail("a yes needs no full history"))
+        patch.setattr(dialogue_store, "_unimported", lambda *a, **k: pytest.fail("a yes needs no full history"))
         with dialogue_store.transaction(tmp_path, write=True) as conn:
             conn.execute("INSERT INTO dialogue (stream, seq, length, segment, ordinal, ts, chat_id, direction, body) "
                          "VALUES ('chat', 999999, 1, 0, 999999, '', 1, 'out', '{}')")
             conn.execute("INSERT INTO dialogue (stream, seq, length, segment, ordinal, ts, chat_id, direction, body) "
                          "VALUES ('chat', 1999999, 1, 0, 1999999, '', 1, 'in', '{}')")
         assert dialogue_store.owner_exchange(tmp_path) == (True, True)
+
+
+def test_a_no_and_the_history_s_import_are_read_in_one_snapshot(tmp_path, monkeypatch):
+    """«Not written» stands only on the read that also finds the history imported: ONE transaction holds the two probes
+    and the import ledger's, so a segment whose import commits between them cannot certify an answer it holds (rv2 C4);
+    a pending import read there is unknown."""
+    from ouroboros import dialogue_store
+    from ouroboros.store import StoreMigrating
+
+    (tmp_path / "state").mkdir()
+    _said(tmp_path, ("10:00", "system"), kind="task_summary")
+    real, opened = dialogue_store.transaction, []
+    monkeypatch.setattr(dialogue_store, "transaction", lambda *a, **k: opened.append(k.get("write")) or real(*a, **k))
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)
+    assert opened == [False], "the probes and the import ledger: one read"
+    with real(tmp_path, write=True) as conn:
+        conn.execute("DELETE FROM meta WHERE key='cutover'")
+    dialogue_store._PLANNED.discard(str(dialogue_store.path(tmp_path)))
+    opened.clear()
+    with pytest.raises(StoreMigrating):
+        dialogue_store.owner_exchange(tmp_path)
+    assert opened == [False]
 
 
 @pytest.mark.parametrize("shape", ["pressed", "written", "no_press", "unknown_exchange"])
