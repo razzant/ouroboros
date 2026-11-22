@@ -288,7 +288,7 @@ def _exact_reservations(ctx: "_RoundLimitContext", probe_messages: list, balance
             llm=ctx.llm, messages=probe_messages, model=ctx.active_model, task_id=ctx.task_id,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
-            **task_pacing.wrapup_model_options(ctx),
+            use_local=ctx.active_use_local, **task_pacing.wrapup_model_options(ctx),
         )
     wrapup_args = dict(request=probe, **balances, allow_ordinary_lookup=True)
     fits = task_pacing.wrapup_reservation_fits(**wrapup_args)

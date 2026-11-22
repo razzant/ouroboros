@@ -16,7 +16,6 @@ import copy
 import hashlib
 import json
 import logging
-import os
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ouroboros.request_wire_recovery import request_wire_scoped
@@ -616,7 +615,9 @@ class _ProviderRoutingMixin:
         return probe_provider_readiness(self, model, settings=settings, timeout=timeout)
 
     def _get_local_client(self):
-        port = int(os.environ.get("LOCAL_MODEL_PORT", "8766"))
+        from ouroboros.local_model import local_dispatch_port
+
+        port = local_dispatch_port()
         if self._local_client is None or self._local_port != port:
             from openai import OpenAI
             self._local_client = OpenAI(
