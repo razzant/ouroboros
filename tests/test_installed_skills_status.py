@@ -434,22 +434,22 @@ def test_a_source_whose_manifest_check_fails_is_named_and_its_neighbours_keep_th
     (hidden / "inside").mkdir(parents=True)
     (hidden / "inside" / "SKILL.md").write_text("---\nname: inside\ndescription: d\nversion: '1'\n"
                                                 "type: instruction\n---\nB\n", encoding="utf-8")
-    real_is_file, real_iterdir = pathlib.Path.is_file, pathlib.Path.iterdir
+    real_stat, real_iterdir = pathlib.Path.stat, pathlib.Path.iterdir
 
     def closed(path):
         return path == hidden or hidden in path.parents
 
-    def is_file(self, *args, **kwargs):
-        if closed(self):
+    def stat(self, *args, **kwargs):  # mode 000: the folder itself can be stat'ed, nothing inside it (RV5 R5-3)
+        if hidden in self.parents:
             raise PermissionError(13, "Permission denied", str(self))
-        return real_is_file(self, *args, **kwargs)
+        return real_stat(self, *args, **kwargs)
 
     def iterdir(self):
         if closed(self):
             raise PermissionError(13, "Permission denied", str(self))
         return real_iterdir(self)
 
-    monkeypatch.setattr(pathlib.Path, "is_file", is_file)
+    monkeypatch.setattr(pathlib.Path, "stat", stat)
     monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
     section = _context_shape(tmp_path)
     for text in (section.full_text, section.operative_view):
