@@ -5,12 +5,13 @@ The engine owns every verdict (``claudexor_observations.quota_availability``, th
 primary observation share); this module only counts them. ``build_census`` is the pure count over one passive read
 (``gateway/claudexor_passive``: the roster and one quota epoch, no handshake, no refresh) and ``census_text`` its
 facts-only words. The census duty (``dispatch``, ticked by ``server_maintenance``) runs ``refresh`` every ``DUTY_SEC``
-while someone works, or ``REQUEST_MIN_SEC`` after a refresh request (a run, thread turn, seat or model call refused
-or settled on a limit code, a confirmed account change); each dispatch removes the request it answers, so a failed
-read is retried on the cadence, never sooner, and a restart never answers it again. ``refresh`` rewrites
-``CENSUS_FILE`` when what the text states changed; its ``since`` moves only with the trigger (the counts, resets and
-model-scoped blocks; share ranges and a stale block's ``seen`` are not in it). ``quota_part`` is the round's reader: the file alone, never a
-connection, for the foci that may choose an executor, change-only against the latest part still in view. Nothing
+while someone works, or at the next tick after a refresh request, never sooner than ``REQUEST_MIN_SEC`` after its
+previous pass (a run, thread turn, seat or model call refused or settled on a spent window or quota pool, a confirmed
+account change; a plain rate limit asks nothing); each dispatch removes the request it answers, so a failed read is
+retried on the cadence, never sooner, and a restart never answers it again. ``refresh`` rewrites ``CENSUS_FILE`` when
+what the text states changed; its ``since`` moves only with the trigger (the counts, resets and model-scoped blocks;
+share ranges and a stale block's ``seen`` are not in it). ``quota_part`` is the round's reader: the file alone, never
+a connection, for the foci that may choose an executor, change-only against the latest part still in view. Nothing
 here selects, starts, refreshes, switches or advises.
 """
 from __future__ import annotations
@@ -41,9 +42,10 @@ REQUEST_MIN_SEC = 15.0  # a refresh request is answered no sooner than this afte
 _MAX_BYTES = 262_144  # the read bound of the file
 # ``subject.credential_route`` of a vendor login; ``managed_api_key`` is a paid key and ``local`` a local model.
 SUBSCRIPTION_ROUTES = frozenset({"vendor_native"})
-# A run, seat or model call refused or settled on one of these engine codes asks for a fresh census.
+# A run, seat or model call refused or settled on one of these engine codes (a spent window or quota pool) asks for a
+# fresh census; a plain rate limit (``rate_limited``) does not: a burst of 429s on a loaded engine adds no reads.
 LIMIT_FAILURE_CODES = frozenset({"vendor_limit_rejected", "subscription_window_exhausted",
-                                 "credential_pool_exhausted", "rate_limited"})
+                                 "credential_pool_exhausted"})
 LABEL = "subscription accounts"
 RETRACTION = f"({LABEL}, engine verdicts): no enabled subscription accounts now"
 UNCONFIRMED = f"({LABEL}): the previous summary is no longer confirmed"

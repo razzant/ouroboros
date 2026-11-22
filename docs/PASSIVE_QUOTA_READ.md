@@ -148,9 +148,10 @@ unproven or mixed-scope replacement clears it. No new request is made.
 
 `subscription_census.py` reads this passive path (`_quota_payload`: the roster and one quota epoch, no handshake
 or refresh) from its own maintenance duty: every 600 s while a task runs or a direct actor works (a pending-only queue
-reads nothing), or 15 s after a refresh request, which any process leaves when the engine refuses or settles a run,
-a review thread turn, a reviewer seat or a model call (its create included) on a limit code (a structural pool
-excepted), or Settings confirms an account created, enabled, disabled or removed. Each dispatched pass removes the
+reads nothing), or at the next tick after a refresh request, never sooner than 15 s after its previous pass. Any
+process leaves one when the engine refuses or settles a run, a review thread turn, a reviewer seat (a plan fan-out
+seat included) or a model call (its create included) on a spent window or quota pool (a structural pool excepted; a
+plain rate limit asks nothing), or Settings confirms an account created, enabled, disabled or removed. Each dispatched pass removes the
 request it answers, failed read or not, so an engine that does not answer is asked again only at the 600 s cadence
 or on a newer request, never in a 15 s loop (on 21.11 the managed engine stalled under load with a full accept
 queue), and a restart never answers an answered request again; an engine never provisioned is never asked. Per

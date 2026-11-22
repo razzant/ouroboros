@@ -785,7 +785,7 @@ def test_settled_money_reaches_the_rendered_card_and_survives_reload(tmp_path, m
 
 @pytest.mark.parametrize("state,code,asks", [
     ("failed", "vendor_limit_rejected", True), ("failed", "subscription_window_exhausted", True),
-    ("failed", "credential_pool_exhausted", True), ("failed", "rate_limited", True),
+    ("failed", "credential_pool_exhausted", True), ("failed", "rate_limited", False),  # a plain rate limit
     ("failed", "internal_error", False), ("succeeded", "", False),
 ])
 def test_a_run_settled_on_a_limit_code_asks_the_subscription_census_for_a_read(tmp_path, monkeypatch, state, code,

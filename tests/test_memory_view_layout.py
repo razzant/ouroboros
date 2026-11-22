@@ -488,7 +488,6 @@ def _vary_reviews(env, monkeypatch, **_kw):
     """Two settled ledger records, a settled last review of the fixture pool's first seat (``review-1``: its activity
     row in C carries it, ``subagent_runtime.py:380-387``), and a review price."""
     from ouroboros import review_ledger, review_price, reviewer_slot_config
-
     settled = {"review-1": {"status": "ok", "ts": "2026-10-29T08:00:00+00:00", "cost_usd": 0.4321}}
     price = review_price.ReviewPrice(usd=0.4321, reviews=2, low=0.21, high=0.65)
     monkeypatch.setattr(reviewer_slot_config, "reviewer_slot_last_executions", lambda: settled)
@@ -507,9 +506,10 @@ def _vary_accounts(env, monkeypatch, **_kw):
         "generated_at": "2026-11-20T10:00:00+00:00", "routes": [{"harness": "codex", "access": "full", "runs": 40,
         "failed": 9, "top_failures": [{"category": "quota", "code": "quota_exhausted", "count": 9}]},
         {"harness": "claude", "access": "readonly", "runs": 12, "failed": 0, "top_failures": []}]})
-    census._write({"type": census.CENSUS_TYPE, "read": "ok", "since": "2026-11-20T10:00:00+00:00",  # never in A', D or B
+    census._write({"type": census.CENSUS_TYPE, "read": "ok", "since": "2026-11-20T10:00:00+00:00",  # in no system block
                    "read_at": "2026-11-20T10:00:00+00:00", "families": {"codex": {"at_limit": 3}}}, env.drive_root)
-    return lambda first, second: "codex full 9/40" in second["C"] and "codex full 9/40" not in first["C"]
+    return lambda first, second: ("codex full 9/40" in second["C"] and "codex full 9/40" not in first["C"]
+                                  and "codex 3 at limit" not in second["C"])  # C too, beside A', D and B
 
 
 def _vary_registration(env, monkeypatch, *, start, **_kw):

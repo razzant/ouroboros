@@ -534,7 +534,7 @@ def test_earlier_dispatched_rotation_cannot_hide_behind_final_not_started(setup)
     ("not_started", {"code": "credential_pool_exhausted", "message": "quota", "context": {"poolCause": "quota"}}, True),
     ("response_received", {"code": "subscription_window_exhausted", "message": "spent", "retryable": True,
                            "context": {"resetsAt": "2099-01-01T00:00:00Z", "httpStatus": 429}}, True),
-    ("response_received", {"code": "rate_limited", "message": "slow down", "context": {"httpStatus": 429}}, True),
+    ("response_received", {"code": "rate_limited", "message": "slow down", "context": {"httpStatus": 429}}, False),
     ("not_started", {"code": "credential_pool_exhausted", "message": "no account serves it",
                      "context": {"poolCause": "structural"}}, False),
     ("response_received", {"code": "provider_failed", "message": "ordinary"}, False),

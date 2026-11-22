@@ -631,7 +631,8 @@ def test_a_stop_during_the_read_writes_and_confirms_nothing(engine, monkeypatch)
 
 def test_limit_codes_ask_for_a_read_unless_the_pool_is_structural_or_no_engine_exists(engine, monkeypatch):
     for code, problem in (("internal_error", None), ("", None), (None, None), ("run_failed", None),
-                          (["rate_limited"], None), ("credential_pool_exhausted", {"context": {"poolCause": "structural"}})):
+                          ("rate_limited", None), (["rate_limited"], None),  # a plain rate limit: no read
+                          ("credential_pool_exhausted", {"context": {"poolCause": "structural"}})):
         census.note_limit_failure(code, problem)
     assert census.request_mtime() is None
     for code in sorted(census.LIMIT_FAILURE_CODES):
