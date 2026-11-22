@@ -556,13 +556,13 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
         const messagesRect = messagesDiv.getBoundingClientRect();
         // The phone drawer scales the room card. Anchors are in scroll pixels, not transformed screen pixels.
         const scale = messagesRect.height / messagesDiv.offsetHeight || 1;
-        // The row read is the first in the read band, below the bar's reach (the feed runs on under the bar); a row
-        // whose picture still loads grows when it lands, so the row after it holds the place. Offsets stay feed-relative.
+        // The row read is the first in the read band (the feed runs on under the bar); one whose picture still loads above
+        // the band's top is passed over, as that picture grows up out of it (one in the band grows down). Feed-relative.
         const bandTop = Math.max(messagesRect.top, band()?.top ?? messagesRect.top);
         const inBand = (item, rect = item.getBoundingClientRect()) => rect.width > 0 && rect.height > 0
             && rect.bottom > bandTop && rect.top < messagesRect.bottom;
-        let topNode = nodes.find(item => inBand(item) && ![...item.querySelectorAll('img')].some(img => !img.complete))
-            || nodes.find(item => inBand(item)) || null;
+        let topNode = nodes.find(item => inBand(item) && ![...item.querySelectorAll('img')]
+            .some(img => !img.complete && img.getBoundingClientRect().top < bandTop)) || nodes.find(item => inBand(item)) || null;
         if (!topNode) return null;
         const firstShown = nodes.indexOf(topNode);
         const followingVisible = () => nodes.find((item, index) => {

@@ -647,8 +647,8 @@ test('scaled drawer restoration uses scroll pixels and ignores subpixel rounding
 
 // A small layout model: a child's top follows its parent's top, the parent's own
 // scrollTop when the parent scrolls, and its offset in the parent's content.
-function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null, parent = null } = {}) {
-    const node = { classNames: new Set(classes), attrs: { ...data }, y, height, children: [], parentElement: null, isConnected: true };
+function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null, parent = null, tag = '' } = {}) {
+    const node = { classNames: new Set(classes), attrs: { ...data }, y, height, children: [], parentElement: null, isConnected: true, tag };
     let top = 0;
     Object.defineProperty(node, 'scrollTop', { get: () => top,
         set: value => { top = scroll === null ? 0 : Math.max(0, Math.min(scroll, value)); } });
@@ -657,7 +657,7 @@ function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null,
     node.dataset = new Proxy({}, { get: (_, key) => node.attrs[`data-${String(key).replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`] });
     node.classList = { contains: value => node.classNames.has(value) };
     const one = selector => selector.startsWith('.') ? node.classNames.has(selector.slice(1))
-        : selector.startsWith('[') ? selector.slice(1, -1).split('=')[0] in node.attrs : false;
+        : selector.startsWith('[') ? selector.slice(1, -1).split('=')[0] in node.attrs : selector === node.tag;
     node.matches = selector => selector.split(',').some(part => one(part.trim()));
     node.getBoundingClientRect = () => {
         const parent = node.parentElement;
@@ -910,6 +910,24 @@ test('an expanded live card collapsing under a floating bar keeps the row after 
         assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
         if (bar) assert.equal(after.getBoundingClientRect().top, 500, 'under the bar the row after the card stays');
         else assert.equal(card.getBoundingClientRect().top, 20, 'with no bar the card keeps its own top');
+    }
+});
+
+test('a row whose picture still loads above the band is passed over; one whose picture starts in the band holds', () => {
+    // A late picture grows when it lands: above the band's top it grows up out of view, so the row after it is read;
+    // starting in the band it grows down, and its own row stays the place.
+    for (const top of [40, 100]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map(), band: () => ({ top: 88, bottom: 750 }) });
+        const photo = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:photo' }, y: 2000 + top, height: 260, parent: feed });
+        const picture = layoutNode({ tag: 'img', y: 0, height: 200, parent: photo });
+        picture.complete = false;
+        const next = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:next' }, y: 2310 + top, height: 100, parent: feed });
+        feed.scrollTop = 2000;
+        assert.equal(anchors.captureVisibleTimelineAnchor().node, top < 88 ? next : photo,
+            top < 88 ? 'a picture above the band grows out of it' : 'a picture in the band is the place read');
+        picture.complete = true;
+        assert.equal(anchors.captureVisibleTimelineAnchor().node, photo, 'a picture landed is no reason to pass its row');
     }
 });
 
