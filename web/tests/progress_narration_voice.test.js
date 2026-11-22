@@ -13,6 +13,7 @@ import test, { after } from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { buildTimelineItemHtml } from '../modules/chat_activity.js';
+import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { formatMsgTime } from '../modules/utils.js';
 import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 
@@ -693,4 +694,36 @@ test('a host notice on a task card says its line with its step, and its raw deta
         const [card] = f.rows();
         assert.ok(card.classList.contains('expandable'), 'the notice reached the card: its raw details open from the line');
     } finally { f.close(); }
+});
+
+test('a notice row says its phrase and keeps its raw facts behind its details, row by row (RVD4 1)', () => {
+    const notice = (code, details, line) => ({ code, details, line });
+    const install = (extra, details) => summarizeChatLiveEvent({ type: 'chat', is_progress: true, role: 'system', ts: TS,
+        task_id: 'skill_lifecycle_install_alpha_job-1', content: 'Skill install: `alpha` — failed',
+        lifecycle: { id: 'job-1', kind: 'install', target: 'alpha', error: details, ...extra },
+        notice: notice('skill_install_failed', details, 'Skill install: `alpha` — failed') });
+    // A failed install: its phrase heads the row, the raw error only opens from it.
+    const failed = install({ status: 'failed', phase: 'failed' }, 'ENOENT: no such file, open /x/skill.json');
+    assert.equal(failed.headline, 'Skill install: `alpha` — failed');
+    assert.equal(failed.body, '', 'the collapsed row holds no raw error');
+    assert.equal(failed.fullBody, 'ENOENT: no such file, open /x/skill.json');
+    // A stale install keeps its recovery hint on the row and its error behind it.
+    const stale = install({ status: 'running', phase: 'running', stale: true, recovery_hint: 'Restart may be required.' }, 'EACCES');
+    assert.equal(stale.body, 'Restart may be required.');
+    assert.equal(stale.fullBody, 'Restart may be required.\n\nEACCES');
+    // A host warning inside a delegated child's turn keeps its details.
+    const child = summarizeChatLiveEvent({ type: 'chat', is_progress: true, role: 'system', ts: TS, delegation_role: 'subagent',
+        task_id: 'child-1', content: 'A worker read a changed checkout.',
+        notice: notice('worker_checkout_drift', 'baseline aaaa, observed bbbb', 'A worker read a changed checkout.') });
+    assert.match(child.fullBody, /baseline aaaa, observed bbbb/);
+    // Two notices with the same words and other details are two rows, each with its own details, never a "2x".
+    const record = { items: [] };
+    for (const details of ['ENOENT: first', 'ENOENT: second']) {
+        const view = summarizeChatLiveEvent({ type: 'chat', is_progress: true, role: 'system', ts: TS, task_id: 'turn-1',
+            content: 'A skill could not start.', notice: notice('skill_start_failed', details, 'A skill could not start.') });
+        updateLiveTimelineItem(record, view, { ts: '12:00', rawTs: TS, syntheticKey: view.dedupeKey, headline: view.headline });
+    }
+    assert.deepEqual(record.items.map((item) => [item.fullBody, item.count]), [['ENOENT: first', 1], ['ENOENT: second', 1]]);
+    const plain = summarizeChatLiveEvent({ type: 'chat', is_progress: true, role: 'system', ts: TS, content: 'Same words.' });
+    assert.equal(plain.dedupeKey, 'progress:Same words.', 'a row without details keys as before');
 });

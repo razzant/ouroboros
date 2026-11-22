@@ -216,41 +216,84 @@ def test_a_refused_turn_keeps_its_step_in_the_result_and_the_key_in_details():
     assert said["notice"] == {"code": "budget_exhausted", "step": "raise_total_budget", "details": "setting: TOTAL_BUDGET"}
 
 
-def test_an_update_outcome_is_worded_from_its_finalization_and_its_stash():
-    """RV4 6: a finished update whose local changes came back is not reported as failed; the note stays its detail."""
+def test_an_update_outcome_is_worded_from_its_observed_outcome_and_its_verified_stash():
+    """RV4 6, RVD4 6 and Fable N1: the phrase follows the outcome the boot branch observed, never a finalized flag
+    alone; a deferred rollback has only recorded its switch; "not lost" is said only of a stash Git verifiably kept."""
     from supervisor.update_merge import boot_outcome_notice
 
-    done = boot_outcome_notice({"finalized": True, "stash_restore_status": "restored", "stash_note": "local changes restored"})
-    assert done["text"] == "The update is in place, and your local changes were put back."
+    said = lambda **result: boot_outcome_notice({"stash_note": "the note", **result})["text"]
+    assert said(finalized=True, stash_restore_status="restored") == "The update is in place, and your local changes were put back."
+    assert said(finalized=True, observed={"outcome": "applied"}) == "The update is in place."
+    assert said(finalized=True, observed={"outcome": "rolled_back"}) == "The last update was rolled back."
+    assert said(finalized=True, observed={"outcome": "not_applied"}) == "The last update was not applied."
+    assert said(rolled_back=True, rollback_deferred=True) == "The last update will be rolled back as the app restarts."
+    assert said(rolled_back=True) == "The last update was rolled back."
+    assert said(finalized=False, stash_restore_status="preserved") == (
+        "The last update did not finish cleanly; Git kept your local changes aside, so they are not lost.")
+    assert said(finalized=True, stash_restore_status="incomplete") == (
+        "The update is in place; your local changes have not been put back yet.")
     kept = boot_outcome_notice({"finalized": False, "stash_restore_status": "preserved", "stash_note": "git stash apply X"})
-    assert kept["text"] == "The last update did not finish cleanly; Git kept your local changes aside, so they are not lost."
-    assert kept["progress_meta"]["notice"]["details"] == "git stash apply X"
-    assert boot_outcome_notice({"rolled_back": True, "stash_note": "rolled back"})["text"] == "The last update was rolled back."
-    assert all("Details" not in row["text"] for row in (done, kept))
+    assert kept["progress_meta"]["notice"]["details"] == "git stash apply X" and "Details" not in kept["text"]
 
 
+def test_a_second_boot_after_a_rollback_and_a_deferred_rollback_say_what_happened(monkeypatch):
+    """RVD4 6 on the boot branches themselves: the restored generation's marker cleanup observed a rollback, and the
+    boot-smoke door that only recorded its switch leaves HEAD on the update until the restart."""
+    from ouroboros import deployment_policy
+    from supervisor import update_merge
+
+    monkeypatch.setattr(update_merge, "_log_supervisor", lambda _row: True)
+    monkeypatch.setattr(deployment_policy, "body_replacement_refusal", lambda: "")
+    monkeypatch.setattr(update_merge, "clear_update_tx", lambda: True)
+    monkeypatch.setattr(update_merge, "read_update_tx_strict", lambda: ("ok", {
+        "phase": update_merge.MARKER_CLEANUP_RETRY_PHASE, "gate_blocked_reason": "rollback_restart_pending",
+        "gate_blocked_detail": "rolled back to 0123456789ab", "attempt_id": "a1", "pre_update_sha": "0123456789ab"}))
+    cleanup = update_merge._finalize_managed_update_locked(True)
+    assert cleanup["finalized"] is True and cleanup["observed"]["outcome"] == "rolled_back"
+    assert update_merge.boot_outcome_notice(cleanup)["text"] == "The last update was rolled back."
+    monkeypatch.setattr(update_merge, "_boot_smoke_rollback",
+                        lambda _tx, _reason: (True, "authority switch recorded", {"rollback_deferred": True}))
+    monkeypatch.setattr(update_merge._g, "git_capture", lambda _cmd: (0, "f" * 40, ""))
+    deferred = update_merge._finalize_pending_boot_smoke(
+        {"merge_commit": "e" * 40, "strategy": "replace", "boot_attempts": 1}, True)
+    assert deferred["rolled_back"] is True and deferred["rollback_deferred"] is True
+    assert update_merge.boot_outcome_notice(deferred)["text"] == "The last update will be rolled back as the app restarts."
+
+
+KEPT_SHA = "0123456789abcdef0123"
 KEPT_NOTE = ('conflicting paths: "a.py"; the original local changes remain in stash 0123456789ab and current files '
-             "should be inspected before recovering with `git stash apply 0123456789abcdef0123`")
+             f"should be inspected before recovering with `git stash apply {KEPT_SHA}`\nGit diagnostics:\nCONFLICT (content)")
 
 
 def test_only_a_kept_stash_sends_the_owner_to_its_git_command_and_the_window_line_stays_one_line():
-    """RV4 15 (Q1=C): the update whose stash Git kept aside carries the step to put the changes back, its exact command
-    as the details; a restored, rolled-back or still unfinished restore carries no such step. The closed table still
-    refuses a step nobody wrote, and the window's line holds no command and names no Details."""
+    """RV4 15 and RVD4 15 (Q1=C): a kept stash carries the step and its exact command as the notice's typed one-line
+    instruction (an interrupted apply's step asks a look at the current files first), the whole note as its details; a
+    restored, rolled-back or unfinished restore carries neither. The closed table still refuses a step nobody wrote,
+    and the window's line holds no command and names no Details."""
     from supervisor.update_merge import boot_outcome_notice
 
-    kept = boot_outcome_notice({"finalized": True, "stash_restore_status": "preserved", "stash_note": KEPT_NOTE})
+    command = f"git stash apply {KEPT_SHA}"
+    kept = boot_outcome_notice({"finalized": True, "stash_restore_status": "preserved", "stash_note": KEPT_NOTE,
+                                "stash_command": command, "stash_interrupted": False})
     assert kept["progress_meta"]["notice"] == {
-        "code": "managed_update_finalized", "step": "restore_kept_changes", "details": KEPT_NOTE}
+        "code": "managed_update_finalized", "step": "restore_kept_changes", "details": KEPT_NOTE, "instruction": command}
+    interrupted = boot_outcome_notice({"finalized": True, "stash_restore_status": "preserved", "stash_note": KEPT_NOTE,
+                                       "stash_command": command, "stash_interrupted": True})["progress_meta"]["notice"]
+    assert (interrupted["step"], interrupted["instruction"]) == ("inspect_then_restore_kept_changes", command)
+    assert "check the current files first" in host_notice.STEPS["inspect_then_restore_kept_changes"]
     for result in ({"finalized": True, "stash_restore_status": "restored", "stash_note": "local changes restored"},
                    {"rolled_back": True, "stash_note": "rolled back to 0123456789ab"},
-                   {"finalized": False, "stash_restore_status": "incomplete", "stash_note": "Do not apply it."}):
-        assert "step" not in boot_outcome_notice(result)["progress_meta"]["notice"], result
+                   {"finalized": False, "stash_restore_status": "incomplete", "stash_note": "Do not apply it.",
+                    "stash_command": command}):
+        notice = boot_outcome_notice(result)["progress_meta"]["notice"]
+        assert "step" not in notice and "instruction" not in notice, result
     with pytest.raises(ValueError):
         host_notice.notice("managed_update_finalized", step="restore_changes", details=KEPT_NOTE)
+    assert host_notice.notice("c", instruction=" git stash\n apply  x ")["instruction"] == "git stash apply x", "one line"
     line = host_notice.notice_line({"text": kept["text"], "role": "system", **kept["progress_meta"]}, "")
     assert line == f"{kept['text']} {host_notice.STEPS['restore_kept_changes']}" and "git stash" not in line
     assert "Details" not in host_notice.STEPS["restore_kept_changes"]
+    assert host_notice.stored({"notice": kept["progress_meta"]["notice"]})["instruction"] == command, "history keeps it"
 
 
 def test_crash_recovery_keeps_the_record_a_notice_row_was_sent_with(tmp_path, monkeypatch):
@@ -273,12 +316,17 @@ def test_crash_recovery_keeps_the_record_a_notice_row_was_sent_with(tmp_path, mo
 
 
 def test_a_typed_answer_is_never_classified_by_an_old_prefix():
-    """RV4 8: the prefix table reads only text whose producer typed no status; both directions."""
+    """RV4 8 and RVD4 8: the prefix table reads only text whose producer typed nothing. The loop stamps its model's
+    final answer ``model_final`` and no status (``_handle_text_response``); that answer quoting an old host prefix stays
+    the model's answer. Host text that typed nothing keeps the old reading."""
+    from ouroboros.loop_messages import _handle_text_response
     from ouroboros.outcomes import derive_loop_outcome
 
-    quoted = derive_loop_outcome("⚠️ Error during processing: quoted from a log", {
-        "execution_status": "ok", "reason_code": "final_message", "terminal_origin": "model_final"}, {})
-    assert quoted["outcome_axes"]["execution"]["status"] != "infra_failed"
+    text, usage, trace = _handle_text_response("⚠️ Error during processing: quoted from a log", {"reasoning_notes": []}, {})
+    assert usage == {"terminal_origin": "model_final"}, "the loop's own stamping, no execution status"
+    assert derive_loop_outcome(text, usage, trace)["outcome_axes"]["execution"]["status"] == "ok"
+    typed = derive_loop_outcome(text, {"execution_status": "ok", "reason_code": "final_message"}, {})
+    assert typed["outcome_axes"]["execution"]["status"] == "ok"
     untyped = derive_loop_outcome("⚠️ Error during processing: RuntimeError: x", {}, {})
     assert untyped["outcome_axes"]["execution"]["status"] == "infra_failed"
 
@@ -311,6 +359,29 @@ def test_a_provider_outage_says_a_stable_phrase_with_its_diagnostic_behind_detai
     assert notice["step"] == "inspect_task" and diagnostic in notice["details"] and "task t-down" in notice["details"]
 
 
+def test_a_full_local_slot_is_worded_as_local_capacity_never_a_provider_outage(tmp_path):
+    """RVD4 10: the terminal's typed cause words the incident. The loop's own provider terminal over a full local model
+    slot (nothing dispatched) stamps the install's capacity; with a retained model answer as the primary, the incident
+    names that capacity, not a provider outage, while a provider terminal keeps the outage phrase."""
+    from ouroboros.task_finalization import send_provider_death_notice, terminal_result_fields
+    from tests.test_delivery_forced_finalization import _forced_test_context
+
+    slot = {"_last_llm_error_kind": "transport_unavailable", "_last_llm_provider_code": "model_capacity_unavailable",
+            "_last_llm_attempt_custody": "released"}  # what loop_llm_call stamps from the limiter's refusal
+    loop, _registry, limit_ctx, _trace = _forced_test_context(tmp_path, usage=dict(slot))
+    _text, usage, _trace = loop._handle_provider_unavailable(
+        limit_ctx, error_kind="transport_unavailable", wait_cause="transport_unavailable", waited_sec=60.0)
+    assert (usage["reason_code"], usage["terminal_provider_cause"]) == ("provider_unavailable", "local_capacity")
+    sent = []
+    ctx = SimpleNamespace(send_with_budget=lambda chat_id, text, **kw: sent.append((text, kw)))
+    assert send_provider_death_notice(ctx, 7, "t-slot", {**terminal_result_fields(usage), "terminal_origin": "model_final"})
+    assert send_provider_death_notice(ctx, 7, "t-down", {"terminal_origin": "model_final", "terminal_provider_notice": "529"})
+    (local, local_kw), (outage, outage_kw) = sent
+    assert "outage" not in local and "local model slot" in local
+    assert local_kw["progress_meta"]["notice"]["code"] == "local_model_capacity"
+    assert outage.startswith("A model-provider outage stopped this task") and outage_kw["progress_meta"]["notice"]["code"] == "provider_outage"
+
+
 def test_a_refused_evolution_start_says_a_phrase_with_its_lock_reason_behind_details(monkeypatch):
     """RV4 12: the state lock's reason is the notice's detail, never the words of the command's or switch's reply."""
     from supervisor import events_runtime_controls, evolution_lifecycle, state
@@ -323,6 +394,28 @@ def test_a_refused_evolution_start_says_a_phrase_with_its_lock_reason_behind_det
     monkeypatch.setattr(state, "update_state", refused)
     refusal = events_runtime_controls.owner_evolution_start("tidy", source="owner_chat")
     assert "lock_timeout" not in refusal["text"] and refusal["notice"]["details"] == "lock_timeout"
+
+
+def test_an_agent_evolution_start_that_hits_the_state_lock_says_the_owners_phrase(monkeypatch):
+    """RVD4 12: the agent's own start whose activation the state lock refused sends the phrase the owner's start sends,
+    with the lock's reason behind Details, never "ON" with the raw reason."""
+    from supervisor import events_runtime_controls, evolution_lifecycle, state
+
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr(evolution_lifecycle, "evolution_stop_reason", lambda *_a: "")
+    monkeypatch.setattr(evolution_lifecycle, "start_evolution_campaign", lambda *_a, **_k: {"id": "c1"})
+
+    def refused(*_a, **_k):
+        raise state.StateUnavailable("lock_timeout")
+
+    monkeypatch.setattr(state, "update_state", refused)
+    sent = []
+    ctx = SimpleNamespace(send_with_budget=lambda chat, text, **kw: sent.append((text, kw)),
+                          load_state=lambda: {"owner_chat_id": 7, "evolution_owner_stopped": False})
+    events_runtime_controls._handle_toggle_evolution({"enabled": True, "objective": "tidy", "source": "agent_tool"}, ctx)
+    [(text, kw)] = sent
+    assert text == "Evolution did not turn on: the runtime state could not be saved." and "lock_timeout" not in text
+    assert kw["progress_meta"]["notice"] == {"code": "evolution_start_unsaved", "details": "lock_timeout"}
 
 
 def test_a_split_custody_row_never_inherits_the_answers_notice():
@@ -356,6 +449,29 @@ def test_a_version_switch_chooses_its_words_by_its_typed_cause_and_its_step_by_w
     assert free_kw["progress_meta"]["notice"]["details"].endswith(": the export failed twice and was abandoned")
     assert typed == "Rollback did not happen: the export failed twice and was abandoned. The app is running the current version."
     assert typed_kw["progress_meta"]["notice"]["step"] == "press_again"
+
+
+def test_a_switch_failure_names_its_own_record_which_the_next_switch_never_overwrites(tmp_path, monkeypatch):
+    """RVD4 21: Git's multiline output is cut to its headline and the address of this failure's own outcome record, never
+    the shared receipt the next switch rewrites; after the next switch fails too, that record still holds the whole text."""
+    from ouroboros import store_switch
+    from supervisor import message_bus as bus
+
+    sent, stamps = [], iter(["2026-11-22T10:00:00.000001+00:00", "reported", "2026-11-22T11:00:00.000002+00:00"])
+    monkeypatch.setattr(bus, "send_with_budget", lambda chat, text, **kw: sent.append(kw))
+    monkeypatch.setattr(store_switch, "utc_now_iso", lambda: next(stamps))
+    intent = {"door": "ui_rollback", "target_ref": "v7.6.0", "target_sha": "a" * 40, "requested_at": "first"}
+    first = "error: Your local changes would be overwritten by checkout:\n\tweb/app.js\nAborting"
+    store_switch._progress(tmp_path, "switch_failed", intent=intent, message=first)
+    store_switch.report_outcomes(tmp_path, 7)
+    details = sent[0]["progress_meta"]["notice"]["details"]
+    assert details.startswith("Rollback to v7.6.0: error: Your local changes would be overwritten by checkout:")
+    assert f"{store_switch.PROGRESS_REL}, outcome at 2026-11-22T10:00:00.000001+00:00" in details
+    assert str(store_switch.RECEIPT_REL) not in details
+    (tmp_path / store_switch.RECEIPT_REL).write_text(json.dumps({"intent": {**intent, "requested_at": "next"}}), encoding="utf-8")
+    store_switch._progress(tmp_path, "switch_failed", intent={**intent, "requested_at": "next"}, message="fatal: other\nmore")
+    outcomes = json.loads((tmp_path / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))["outcomes"]
+    assert [row["message"] for row in outcomes if f"outcome at {row['at']}" in details] == [first]
 
 
 def test_an_agent_rollback_is_worded_from_its_deferral_and_restart_facts(monkeypatch):

@@ -744,16 +744,17 @@ def test_boot_smoke_rollback_records_the_switch_for_a_store_less_pre_update_tree
     monkeypatch.setattr(update_merge, "rollback_managed_update",
                         lambda reason, *, reopen_writer_admission: resets.append((reason, reopen_writer_admission)) or (True, "reset"))
     tx = {"phase": "pending_boot_smoke", "pre_update_sha": old, "pre_update_branch": "ouroboros"}
-    assert update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")[0] is True
+    # Only the intent is recorded: the door says so, and the checkout moves at the restart exit.
+    assert update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")[::2] == (True, {"rollback_deferred": True})
     intent = store_switch.read_switch_intent(root)
     assert intent["door"] == "boot_smoke_rollback" and intent["target_sha"] == old and intent["target_ref"] == "ouroboros"
     assert intent["reason"] == "post_boot_smoke_failed" and resets == []
     # The second failure before the restart is a refusal, not a second intent.
-    ok, message = update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")
-    assert ok is False and "intent" in message
+    ok, message, facts = update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")
+    assert ok is False and "intent" in message and facts == {}
     # A store-bearing pre-update tree resets now, as before the store; a missing SHA is the owner's own refusal.
-    assert update_merge._boot_smoke_rollback({"pre_update_sha": new}, "x") == (True, "reset")
-    assert update_merge._boot_smoke_rollback({}, "y") == (True, "reset")
+    assert update_merge._boot_smoke_rollback({"pre_update_sha": new}, "x") == (True, "reset", {})
+    assert update_merge._boot_smoke_rollback({}, "y") == (True, "reset", {})
     assert resets == [("x", False), ("y", False)]
 
 

@@ -987,7 +987,8 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     else:
         job['task']['type'] = job['meta']['task']['type'] = 'evolution'
     monkeypatch.setattr(W, 'load_state', lambda: {'evolution_mode_enabled': False})
-    monkeypatch.setattr(W, 'send_with_budget', lambda *_a, **_k: None)
+    sent = []
+    monkeypatch.setattr(W, 'send_with_budget', lambda *_a, **kw: sent.append(kw))
     monkeypatch.setattr(W, 'reconstruct_task_cost', lambda *_a, **_k: {
         'cost_accounting_status': 'available', 'cost_final': False,
         'accounted_upper_bound_usd': 12.5, 'rounds': 7,
@@ -998,6 +999,9 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     assert result['reason_code'] == ('evolution_stopped_no_retry' if cause == 'evolution_stopped'
                                      else 'worker_crash_owner_wait')
     assert result['status'] == ('cancelled' if cause == 'evolution_stopped' else 'failed')
+    if cause != 'evolution_stopped':  # RVD4 11: past an owner-wait checkpoint a repeat could redo completed actions
+        [notice] = [kw['progress_meta']['notice'] for kw in sent if 'notice' in (kw.get('progress_meta') or {})]
+        assert notice['code'] == 'worker_crash_owner_wait' and 'step' not in notice
     done = events.get_nowait()
     assert done['accounted_upper_bound_usd'] == 12.5 and done['rounds'] == 7
     q.enqueue_task.assert_not_called()

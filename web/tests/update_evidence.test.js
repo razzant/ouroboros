@@ -212,4 +212,9 @@ test('the Apply dialog names versions only for the very range preflight pinned (
     assert.equal(applyTitle(status, { base_sha: 'a'.repeat(40), target_sha: 'c'.repeat(40) }), 'Update',
         'a newer release pinned since the cached read: no cached version names the dialog');
     assert.equal(applyTitle({}, {}), 'Update');
+    // RVD4 5: an unreadable version of the pinned range never puts "unknown" in the title.
+    const pinned = { base_sha: 'a'.repeat(40), target_sha: 'b'.repeat(40) };
+    assert.equal(applyTitle({ ...status, latest_version: '' }, pinned), 'Update');
+    assert.equal(applyTitle({ ...status, current_version: '' }, pinned), 'Update');
+    assert.equal(applyTitle({ ...status, latest_version: '1.0', behind: 2 }, pinned), 'Update: 2 new changes');
 });
