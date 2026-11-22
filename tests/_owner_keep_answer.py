@@ -20,7 +20,7 @@ def _inside(store: str, place: str) -> bool:
 
 def outside_store(answer: Dict[str, Any], root: Any, task_id: str) -> Dict[str, Any]:
     """``answer`` without the entries for files inside ``task_id``'s canonical store. Every file it drops from
-    ``retained``/``retired`` must carry its state in ``releases``, and none may be a saved state for exact return."""
+    ``retained``/``retired`` must carry a state that agrees with its list, and none may be a saved state for exact return."""
     from ouroboros.payload_release_state import store_of
     from ouroboros.saved_state_retirement import worked_copy
 
@@ -28,9 +28,17 @@ def outside_store(answer: Dict[str, Any], root: Any, task_id: str) -> Dict[str, 
     releases = answer.get("releases") or {}
     named = [place for key in ("retained", "retired") for place in answer.get(key) or () if _inside(store, place)]
     assert all(place in releases for place in named), (named, releases)
-    per_file = [place for place in releases if _inside(store, place)
+    handles = os.path.join(store, "source_handles")
+    per_file = [place for place in releases if os.path.dirname(os.path.dirname(place)) == handles
                 and worked_copy(os.path.basename(os.path.dirname(place)), os.path.basename(place))]
     assert not per_file, f"saved states are named by their folder, never per file: {per_file}"
+    for key, allowed in (("retained", {"held", "queued"}), ("retired", {"moved", "staged", "deleting", "deleted", "missing"})):
+        wrong = {place: releases.get(place) for place in answer.get(key) or () if _inside(store, place)
+                 and releases.get(place) not in allowed}
+        assert not wrong, f"a stored file's list and its release state disagree ({key}): {wrong}"
+    stray = [place for place, state in releases.items() if _inside(store, place) and state == "unknown"
+             and place in [*(answer.get("retained") or ()), *(answer.get("retired") or ())]]
+    assert not stray, f"an unknown stored file is claimed kept or gone: {stray}"
     return {**answer,
             "retained": [place for place in answer.get("retained") or () if not _inside(store, place)],
             "retired": [place for place in answer.get("retired") or () if not _inside(store, place)],
