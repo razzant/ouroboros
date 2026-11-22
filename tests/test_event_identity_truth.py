@@ -65,6 +65,12 @@ def test_the_event_counts_the_routing_lists_only_after_the_start_record_holds_th
         assert seen == [[]], "the start record is written before the event"
         assert row['task']['metadata']['main_routing_manifest'] == (
             {'projects_len': 1, 'omissions': {'projects': 0}} if stored else manifest)
+    from ouroboros import agent as module  # the real start record answers whether it stored the task
+
+    host = SimpleNamespace(env=SimpleNamespace(drive_root=tmp_path))
+    assert module.OuroborosAgent._persist_running_record(host, {'id': 'stored'}) is True
+    monkeypatch.setattr(module, 'write_task_result', lambda *args, **kwargs: (_ for _ in ()).throw(OSError('full')))
+    assert module.OuroborosAgent._persist_running_record(host, {'id': 'refused'}) is False
 
 
 @pytest.mark.parametrize(("lineage", "fault"), [
