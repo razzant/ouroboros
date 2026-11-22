@@ -424,3 +424,35 @@ def test_one_discovery_decides_the_catalog_and_the_always_in_context_block(tmp_p
     _env, text = _build(tmp_path)
     assert "GUIDE_SENTINEL" not in text and "Context: always" not in text
     assert "The skill list could not be read (PermissionError: [Errno 13] Permission denied)" in text
+
+
+def test_a_source_whose_manifest_check_fails_is_named_and_its_neighbours_keep_their_cards(tmp_path, monkeypatch):
+    """As under mode 000: even checking for a manifest inside the folder fails, before any listing (RV2 DX2). The
+    walk notes that folder and goes on, so the readable neighbour keeps its card."""
+    _skill(tmp_path, "kept")
+    hidden = tmp_path / "skills" / "clawhub"
+    (hidden / "inside").mkdir(parents=True)
+    (hidden / "inside" / "SKILL.md").write_text("---\nname: inside\ndescription: d\nversion: '1'\n"
+                                                "type: instruction\n---\nB\n", encoding="utf-8")
+    real_is_file, real_iterdir = pathlib.Path.is_file, pathlib.Path.iterdir
+
+    def closed(path):
+        return path == hidden or hidden in path.parents
+
+    def is_file(self, *args, **kwargs):
+        if closed(self):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_file(self, *args, **kwargs)
+
+    def iterdir(self):
+        if closed(self):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(pathlib.Path, "is_file", is_file)
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    section = _context_shape(tmp_path)
+    for text in (section.full_text, section.operative_view):
+        assert "\n- kept (instruction, v1, " in text and "inside" not in text
+        assert text.endswith(f"Skill folders that could not be read (their skills are missing here): {hidden} "
+                             "(PermissionError)")

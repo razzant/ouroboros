@@ -600,3 +600,27 @@ def test_a_long_note_is_a_bounded_preview_in_the_index_and_whole_in_the_named_ro
     [named] = _listed(registry, name="mixed")["skills"]
     assert named["notes"] == [whole]
     assert "notes" not in _listed(registry, name="plain")["skills"][0]
+
+
+def test_after_an_incomplete_walk_the_tool_names_the_unread_folder_and_claims_no_absence(registry, monkeypatch):
+    """The only source cannot be listed: list_skills says which folder, gives no total, no "No skills are installed."
+    and no found:false for a name that may sit there (RV2 DX2, D2); an empty readable install keeps its hint."""
+    drive = registry._ctx.drive_root
+    (drive / "skills" / "external").mkdir(parents=True)
+    empty = _listed(registry)
+    assert empty["count"] == 0 and empty["hint"].startswith("No skills are installed.")
+    hidden = drive / "skills" / "clawhub"
+    _seed(registry, "known", bucket="clawhub")
+    real_iterdir = Path.iterdir
+
+    def iterdir(self):
+        if self == hidden:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    page = _listed(registry)
+    assert page["unreadable_sources"] == [f"{hidden} (PermissionError)"] and page["count"] is None
+    assert "No skills are installed." not in page["hint"] and page["skills"] == []
+    named = _listed(registry, name="known")
+    assert named["found"] is None and named["unreadable_sources"] == [f"{hidden} (PermissionError)"]

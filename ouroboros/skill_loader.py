@@ -884,25 +884,29 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
     )
 
 
-_UNLISTED_DIRS: Dict[str, str] = {}  # a folder the walk could not list -> its error, until one listing succeeds
-
-
 def _safe_listdir(root: pathlib.Path, *, strict: bool = False) -> List[pathlib.Path]:
     try:
-        listed = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+        return sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
     except OSError as exc:
         if strict:
             raise
         log.warning("Failed to list skills repo %s", root, exc_info=True)
-        _UNLISTED_DIRS[str(root)] = type(exc).__name__
+        from ouroboros.skill_discovery_reuse import note_unreadable
+
+        note_unreadable(root, exc)  # the walk says this folder, never that it is empty
         return []
-    _UNLISTED_DIRS.pop(str(root), None)
-    return listed
 
 
 def _looks_like_skill_dir(path: pathlib.Path) -> bool:
-    """Return True when ``path`` directly contains a skill manifest."""
-    return path.is_dir() and any((path / candidate).is_file() for candidate in _MANIFEST_NAMES)
+    """Return True when ``path`` directly contains a skill manifest; a check that cannot be made is a noted gap of
+    the walk, so its neighbours still load."""
+    try:
+        return path.is_dir() and any((path / candidate).is_file() for candidate in _MANIFEST_NAMES)
+    except OSError as exc:
+        from ouroboros.skill_discovery_reuse import note_unreadable
+
+        note_unreadable(path, exc)
+        return False
 
 
 def load_skill(
@@ -1355,7 +1359,11 @@ def discover_skills(
     """Scan data-plane skills plus the optional user checkout; ``strict`` raises on an unlistable directory."""
     candidates = _skill_location_inventory(
         drive_root, repo_path=repo_path, listdir=(lambda root: _safe_listdir(root, strict=True)) if strict else None)
-    return _load_skill_location_candidates(candidates, drive_root=drive_root)
+    from ouroboros.skill_discovery_reuse import WalkedSkills
+
+    found = WalkedSkills(_load_skill_location_candidates(candidates, drive_root=drive_root))
+    found.gaps = getattr(candidates, "gaps", ())  # the folders this walk could not read
+    return found
 
 
 def discover_selected_skill_candidates(
@@ -1566,6 +1574,7 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
         "warning_review": warning_review,
         "broken": broken,
         "skills": rows,
+        "unreadable_sources": list(getattr(skills, "gaps", ())),  # rows exist only for the folders that were read
     }
 
 

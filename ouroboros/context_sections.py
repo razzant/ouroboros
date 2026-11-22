@@ -269,7 +269,7 @@ _INSTALLED_SKILLS_HEADING = ("## Installed Skills (enabled and reviewed; then th
 def _installed_skills_section(env: Any, skills: Any) -> HostSection:
     # ``skills``: the context build's own discovery, so this catalog and its always-on block agree
     from ouroboros.skill_catalogue import (SkillDiscoveryFailure, always_in_context_skills, discover_context_skills,
-                                           off_state, skill_status, unlisted_skill_sources)
+                                           off_state, skill_status)
     from ouroboros.skill_loader import summarize_skills
     skills = discover_context_skills(env.drive_root) if skills is _NOT_PASSED else skills
     if isinstance(skills, SkillDiscoveryFailure):
@@ -354,7 +354,7 @@ def _installed_skills_section(env: Any, skills: Any) -> HostSection:
         elif skill.get("runnable_via_skill_exec"):
             lines.append("  Tools: skill_exec")
     _append_unadmitted(lines, operative, summary.get("skills") or [], env.drive_root, _field, off_state, skill_status,
-                       unlisted_skill_sources(env.drive_root))
+                       summary.get("unreadable_sources") or [])
     if listed:  # a skill_exec line names no registered tool, and its skill's name loads nothing
         lines.insert(1, 'A "Tools" line that lists a skill\'s registered tools names all of them; '
                         'enable_tools("<skill name>") loads them in one call where their schemas are not in the '

@@ -44,22 +44,6 @@ def discover_context_skills(drive_root: Any) -> List[Any]:
         return SkillDiscoveryFailure(exc)
 
 
-def unlisted_skill_sources(drive_root: Any) -> List[str]:
-    """The folders of this drive's skills root or of a connected skill source that the last walk could not list,
-    each with its error's name: their skills are missing from any list built from that walk."""
-    import os
-
-    from ouroboros.skill_loader import _UNLISTED_DIRS
-    from ouroboros.skill_sources import load_sources
-
-    roots = [pathlib.Path(drive_root) / "skills"]
-    roots += [pathlib.Path(row["path"]).expanduser() for row in load_sources(dict(os.environ)) if row["kind"] == "local"]
-    prefixes = [os.path.realpath(root) for root in roots]
-    return [f"{folder} ({error})" for folder, error in sorted(_UNLISTED_DIRS.items()) if os.path.isdir(folder)
-            and any(os.path.realpath(folder) == prefix or os.path.realpath(folder).startswith(prefix + os.sep)
-                    for prefix in prefixes)]
-
-
 def _reviewed_instructions(skills: Any) -> List[Any]:
     """Enabled instruction skills whose current bytes carry an executable review."""
     return [skill for skill in skills
@@ -368,8 +352,11 @@ def _with_status(row: dict, drive_root: Any) -> dict:
     return out
 
 
-def _named(rows: list, name: str, drive_root: Any = None) -> dict:
+def _named(rows: list, name: str, drive_root: Any = None, unread: Any = ()) -> dict:
     matches = [_with_status(row, drive_root) for row in rows if row.get("name") == name]
+    if not matches and unread:  # unknown, never absent: it may sit in a folder this walk could not read
+        return {"found": None, "name": name, "unreadable_sources": list(unread), "message": (
+            "No readable skill folder holds this name; the folders in unreadable_sources could not be read.")}
     if not matches:
         return {"found": False, "name": name,
                 "message": "No installed skill has this exact name; list_skills() pages every name."}
@@ -401,24 +388,29 @@ def list_skills_payload(summary: dict, *, name: str = "", offset: int = 0,
         raise ValueError("name selects one skill; offset and snapshot page the index without name")
     rows = sorted(summary.get("skills") or [],
                   key=lambda row: (str(row.get("name") or ""), str(row.get("location") or "")))
+    unread = list(summary.get("unreadable_sources") or [])  # folders this walk could not read: no claim beyond them
     if name:
-        return _named(rows, name, drive_root)
+        return _named(rows, name, drive_root, unread)
     # Membership only: readiness, review and payload edits never refuse a page.
     token = sha256(_encode([[row.get("name"), row.get("location")] for row in rows])
                    .encode("utf-8")).hexdigest()[:16]
     start = min(offset, len(rows))
     out = {key: summary.get(key) for key in _COUNTS}
     out.update(offset=start, returned=0, next=None, snapshot=token, skills=[])
+    if unread:  # an incomplete walk: the total is unknown and the page names what could not be read
+        out.update(count=None, unreadable_sources=unread)
     if snapshot and snapshot != token:
         out.update(ok=False, error={"code": "SKILLS_SNAPSHOT_CHANGED", "message": (
             "Skills were added or removed; no mixed page was returned; restart at offset=0.")})
         return out
-    if not rows:
+    if not rows and not unread:
         out["hint"] = (
             "No skills are installed. skill_search finds skills in the connected sources and "
             "skill_install installs one by its catalog id; a local folder (OUROBOROS_SKILLS_REPO_PATH, "
             "Extensions → Sources) is read in place."
         )
+    elif not rows:
+        out["hint"] = "No skill was found in the folders that could be read; the skills in unreadable_sources are unknown."
     # Whole records only; the reserve leaves room for host notes on the result.
     budget = tool_result_limit("list_skills") - 1000 - len(
         _encode({**out, "next": {"offset": len(rows), "snapshot": token}}))
