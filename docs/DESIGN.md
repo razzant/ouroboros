@@ -3321,13 +3321,14 @@ The column reads from the top: Ouroboros's card, which is Main (its picture, wit
 while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
-with + (New project) at the end of its row; then the Projects, the column's only scroller; then the six sidebar
-sections, Circles, Files, Extensions, Widgets, Dashboard and Settings, at the bottom edge, as many to a line as hold
-their names whole (three in a wide sidebar, two at its default width and in the drawer, one where two do not fit),
-each its glyph and its word, the one where you are the strong crimson capsule; and under them the
-foot, the version and the update, above the safe area. The Projects take all the free room between the field and
-the sections; there is no Projects heading, no collapse and no unread total. A Project row is two lines: the name
-and its time, then one line with the row's mark (a name with no such line may take both): the opening words of the
+with + (New project) at the end of its row; then the Projects, the column's only scroller, in the free room (no
+heading, collapse or unread total); then two cards on the bottom edge above the safe area: Circles, Files, Extensions and
+Widgets two to a line, Dashboard and Settings a line each over a hairline and the version; each card one line from a
+475 px sidebar (where four fit), edges shared. A row is its glyph and word, whole on one line (a name wider than the
+card wraps at a space), chosen in the strong crimson. The version is the update check (no Check button; its glyph
+turns while checking), still one beside Up to date or Check failed; the Update capsule, an update under way or an
+install without the check leave it plain. A Project row is two lines: the name and its time, then one line with
+the row's mark (a name with no such line may take both): the opening words of the
 question that waits for the owner, or the sentence that says what waits where it has no words of its own (an action
 only the owner can take, an answer whose delivery is unknown), else what its work is doing; the row's name for
 readers ends with the same words. The list stands beside the room and is never louder than the room's own text: a
@@ -3348,9 +3349,9 @@ all projects. A list that could not be read again says so, with the time of the 
 read answers, nothing is called missing. Neither reads a room's history or marks anything read. A browse keeps its
 rows, sorting on: off the top the first row in view that kept its place holds the reading place, focus its row; a
 find's rows stand while it has words. A Project outside the list opens by its own id; a missing or deleting one
-leaves the room on screen and says so. No label is set in capitals. A short window first compacts rows (fine
-pointer only), then lets the whole column scroll with Ouroboros's card at the top and the sections, the version
-and the update on the bottom edge; a section never becomes an unlabelled icon. One destination is chosen at a
+leaves the room on screen and says so. A short window first compacts rows (fine pointer only), then scrolls the whole
+column, Ouroboros's card at the top and the cards on the bottom edge, or, too short to show a Project between them,
+at its two ends. One destination is chosen at a
 time, its fill alone with no stripe, rule or mark at its edge, and pressing it opens it, never closes it.
 
 ### A navigation row

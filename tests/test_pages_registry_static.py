@@ -20,7 +20,7 @@ def _read(rel: str) -> str:
 
 def _registry():
     source = _read("web/modules/pages.js")
-    rows = re.findall(r"\{ id: '([a-z]+)', label: '([^']+)', icon: '([a-z]+)', zone: '([a-z]+)'(?:, hint: '[^']+')?, init: '([A-Za-z]+)' \}", source)
+    rows = re.findall(r"\{ id: '([a-z]+)', label: '([^']+)', icon: '([a-z]+)', zone: '([a-z]+)'(?:, hint: '[^']+')?(?:, group: '(?:sections|system)')?, init: '([A-Za-z]+)' \}", source)
     assert rows, "the registry rows must stay readable to this parity guard"
     return rows
 

@@ -4,7 +4,7 @@ import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, checkFailureReason, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -420,9 +420,8 @@ export function requestFailureText(err) {
 // in place. The headline says it over that check's own answer; once a newer read replaced that answer, the hint keeps
 // saying it until a later check or a newer recorded one (render).
 export function checkFailure(answer, previous, error = null) {
-    const text = error?.unreadable ? 'the response to the update check could not be read'
-        : error ? String(error.message || error) : ((answer?.warnings || []).join(', ') || 'the check did not complete');
-    return { at: new Date().toISOString(), checkedAt: String(previous?.checked_at || ''), text };
+    return { at: new Date().toISOString(), checkedAt: String(previous?.checked_at || ''),
+        text: checkFailureReason(answer, error) };
 }
 
 // The headline's ordinary check (nothing applying, recovering or unread) is Check and describe: the server checks,
@@ -1233,7 +1232,8 @@ export function initUpdates({ mount, state, ws }) {
                 statusRefreshNext = null;
                 if (!options.preservePhase) setPhase(options.fetchRemote ? 'checking' : 'loading');
                 try {
-                    const status = await (options.fetchRemote ? apiClient.updateCheck() : apiClient.updateStatus());
+                    const status = await (options.fetchRemote
+                        ? apiClient.updateCheck(latestStatus?.update_channel) : apiClient.updateStatus());
                     const data = retainUnreadLetter(status, latestStatus);
                     // The explicit check's own outcome: its failure outlives a newer read queued meanwhile (render).
                     if (options.fetchRemote) letterRefreshError = data?.check_ok === false ? checkFailure(data, latestStatus) : null;

@@ -41,7 +41,7 @@ import { getInterfaceSize } from './modules/interface_size.js';
 import { initDashboard } from './modules/dashboard.js';
 import { initStorage } from './modules/storage.js';
 import { SHELL_ICONS } from './modules/page_icons.js';
-import { pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
+import { mountNavFoot, pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
 import { bindPageBack, renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
 import { bindKeyboardViewport } from './modules/keyboard_viewport.js';
@@ -125,9 +125,10 @@ const shellMotion = createShellMotion({ content: document.getElementById('conten
 // The places come from the one registry (pages.js): Main into the pinned head, the tools into the foot that
 // follows the Projects, before the version. Nothing below looks a row up before this.
 primarySidebar?.querySelector('.sidebar-head')?.insertAdjacentHTML('beforeend', renderNavRows('head'));
-// The tools stand at the column's bottom edge, three to a line (two in the phone drawer), above the version (owner
-// 12.11, the fifth round).
-primarySidebar?.querySelector('.sidebar-foot-meta')?.insertAdjacentHTML('beforebegin', `<div class="nav-tools">${renderNavRows('foot')}</div>`);
+// The tools stand at the column's bottom edge in two cards, the sections and the system rows with the version (owner
+// 21.11); a document that holds a foot or a version row gets them composed by mountNavFoot (pages.js) — the retained
+// version moves into the cards, v7.7.0 gets its foot there and its replaced Utilities group leaves: one set stands.
+if (primarySidebar?.querySelector('.sidebar-foot, #nav-version')) mountNavFoot(primarySidebar);
 measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head and foot
 // A short window scrolls the whole column: rows that wait past a pinned bar fade under it (style.css), as the list's do.
 if (primarySidebar) bindScrollFade(primarySidebar);
