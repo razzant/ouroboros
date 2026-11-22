@@ -123,7 +123,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             useDefaults() ? 'If you finish before it is ready, Ouroboros installs the default starter list once it can read the hub.' : '',
             state.error && state.status === 'ready' ? `The list couldn’t be refreshed (${state.error}).` : ''].filter(Boolean).join(' ');
     }
-    const unreadText = () => `The list couldn’t be read (${state.error}). Ouroboros installs the recommended skills after it starts; you can change them on the Skills page.`;
+    const unreadText = () => `The list couldn’t be read (${state.error}). Ouroboros installs the recommended skills after it starts. Manage them in Extensions › Skills.`;
     const countText = () => `${tickedItems().length} of ${items().length} ticked`;
 
     function rowHtml() {
@@ -192,7 +192,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
 
     function stepHtml(arrive) {
         if (state.status !== 'ready') {
-            const words = { loading: 'Reading the list…', error: unreadText(), empty: 'No skills are offered here. You can add skills any time on the Skills page.' }[state.status];
+            const words = { loading: 'Reading the list…', error: unreadText(), empty: 'No skills are offered here. You can add skills any time in Extensions › Browse.' }[state.status];
             return `<p class="skills-starter-sub" role="status">${escapeHtml(words)}</p>`;
         }
         let order = 0;

@@ -189,7 +189,7 @@ test('an unreadable list leaves the host defaults and says so; the Finish payloa
     await step.loading;
     const host = fakeHost();
     step.mount(host);
-    assert.match(text(host.innerHTML), /^The list couldn’t be read \(offline\)\. Ouroboros installs the recommended skills after it starts; you can change them on the Skills page\.$/);
+    assert.match(text(host.innerHTML), /^The list couldn’t be read \(offline\)\. Ouroboros installs the recommended skills after it starts\. Manage them in Extensions › Skills\.$/);
     assert.doesNotMatch(host.innerHTML, /data-arrive/);
     const row = fakeHost('row');
     step.mount(row);

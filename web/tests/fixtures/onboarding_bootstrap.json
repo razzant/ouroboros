@@ -434,7 +434,7 @@
       },
       {
         "copy": "Ouroboros starts with the ticked skills; clear any you do not want.",
-        "footer": "Add or remove skills any time on the Skills page.",
+        "footer": "Add or remove skills any time in Extensions.",
         "id": "skills",
         "railCopy": "What it can do",
         "railTitle": "Skills",
