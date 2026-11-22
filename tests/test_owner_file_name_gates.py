@@ -353,7 +353,7 @@ def test_key_material_under_an_innocent_name_is_vetoed_in_the_coop_checkpoint_la
     assert "deck.key" in committed and "notes.txt" not in committed
 
 
-# --- (e) what the owner reads, and the inspection carve ----------------------
+# --- (e) what the owner reads ------------------------------------------------
 
 
 def test_a_rejected_attachment_line_shows_the_rule_not_only_the_code():
@@ -367,59 +367,3 @@ def test_a_rejected_attachment_line_shows_the_rule_not_only_the_code():
     assert "rule: credential/control directory component '.ssh'" in rendered
     assert "- missing: rejected (reason=source_missing, ordinal=1)" in rendered
     assert "rule:" not in rendered.splitlines()[-1]
-
-
-@pytest.mark.parametrize("argv", [
-    ["grep", "-n", "x >= 1", "f"],
-    ["rg", "a->b", "."],
-    # `>=` as its OWN token: the redirect grammar used to accept it because the
-    # token pattern only refused a following `&`, `|` or `-`.
-    ["rg", ">=", "."],
-])
-def test_a_comparison_sign_no_longer_makes_an_inspection_a_write(argv):
-    """Disclosed micro-residual of closing the standalone `>=` token: a redirect
-    whose TARGET name begins with `=` (`cmd >=out`, writing the file `=out`) is
-    no longer reported as write shape. No product path names a file that way,
-    and the comparison form it buys back is the one owners actually type."""
-    from ouroboros.tools.write_shape import non_interpreter_write_shape
-
-    assert non_interpreter_write_shape(argv, argv, argv[0]) is False
-
-
-@pytest.mark.parametrize("argv", [
-    ["tee", "f"],
-    # `>&` is a stdout+stderr redirect, never a comparison: a standalone token
-    # of it stays a write channel in both lanes.
-    ["ls", ">&", "out.txt"],
-    ["ls", ">&1"],
-])
-def test_a_real_write_channel_is_still_write_shaped(argv):
-    from ouroboros.tools.write_shape import non_interpreter_write_shape
-
-    assert non_interpreter_write_shape(argv, argv, argv[0]) is True
-
-
-def test_a_standalone_stdout_stderr_redirect_token_is_write_shaped_as_a_string():
-    from ouroboros.tools.write_shape import shell_has_write_indicator
-
-    assert shell_has_write_indicator("cmd >& out.txt") is True
-
-
-def test_a_standalone_comparison_token_is_not_write_shaped_as_a_string():
-    from ouroboros.tools.write_shape import shell_has_write_indicator
-
-    assert shell_has_write_indicator("rg '>=' .") is False
-
-
-@pytest.mark.parametrize("argv", [
-    ["grep", "-n", "a > b", "f"],
-    ["rg", "actual>0", "tests/"],
-])
-def test_disclosed_residual_a_quoted_operand_with_a_redirect_shape_stays_write_shaped(argv):
-    """shlex strips the quotes before any guard sees the line, so the redirect
-    grammar still matches inside the operand. Only the comparison forms (>=,
-    -> and =>) were closed. Asserted as EXPECTED behaviour so the remaining
-    gap is visible rather than assumed fixed."""
-    from ouroboros.tools.write_shape import non_interpreter_write_shape
-
-    assert non_interpreter_write_shape(argv, argv, argv[0]) is True

@@ -62,6 +62,17 @@ def pause_author(fence: dict | None) -> dict:
     return {"actor": "", "text": "", "at": at}
 
 
+def creating_author(fence: dict | None) -> dict:
+    """``pause_author`` of the press that CREATED this fence generation (``requests[request_id]``), read the same
+    way: a later press may fill the top-level ``by`` of a fence that declared nobody, never this one. A fence
+    without that entry keeps only its own top-level legacy fields (``actor``, ``text``), never a later ``by``."""
+    fence = fence if isinstance(fence, dict) else {}
+    entry = (fence.get("requests") or {}).get(str(fence.get("request_id") or ""))
+    own = {key: fence[key] for key in ("actor", "text", "reason", "requested_at") if key in fence}
+    return pause_author({**own, **{key: value for key, value in (entry if isinstance(entry, dict) else {}).items()
+                                   if key not in {"fence_id", "requests"}}})
+
+
 @contextmanager
 def mind_control(actor_task_id: str, reason: str):
     from ouroboros.utils import utc_now_iso
