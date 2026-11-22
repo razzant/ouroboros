@@ -519,8 +519,7 @@ def get_tools() -> List[ToolEntry]:
                 "after MIN (an exhausted allowance waits for its reset or a changed daily limit), and none starts "
                 "sooner than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward."),
             "parameters": {"type": "object", "properties": {
-                "seconds": {"type": "integer", "description": (
-                    "Seconds from the end of a wake-up to the next one (the interval); a named time stays standing")},
+                "seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one (the interval)"},
                 "at": {"type": "string", "description": (
                     "A named time: ISO 8601 with an explicit UTC offset or Z, e.g. 2026-11-21T09:00:00+03:00; a time "
                     "without an offset, or not in the future, is refused, and so is one at or before a wake-up already "
