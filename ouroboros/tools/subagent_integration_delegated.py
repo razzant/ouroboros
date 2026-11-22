@@ -147,7 +147,7 @@ def _capture_at_disposition(
         block = {"status": "", "note": f"capture raised {type(exc).__name__}: {exc}"}
     cap_status, note = str(block.get("status") or ""), str(block.get("note") or "")
     if block.get("disposition") == "no_changes":
-        return note  # capture closed it; an orphan is no longer an undisposed target to re-admit
+        return f"OK: delegated run {rid} closed as no_changes. {note}"  # no orphan re-admission after closure
     step = "A later call may capture it." if block.get("retry") == "transient" else ""
     if cap_status in _READY_CAPTURE_STATUSES:
         return ""
@@ -780,7 +780,8 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
                     f"unknown. Verdict: {verdict_path or '(unwritten)'}. Reason: {reason or '(none)'}.{note}")
         return (
             f"{orphan_note}🚫 Rejected delegated run {rid}'s captured patch ({len(touched)} file(s) not "
-            f"applied); its disposition is recorded. Verdict: {verdict_path or '(unwritten)'}. "
+            f"applied); {'its disposition is recorded' if note else 'its private copy and pins are released'}. "
+            f"Verdict: {verdict_path or '(unwritten)'}. "
             f"Reason: {reason or '(none)'}.{format_patch_exclusions(manifest, file_changes)}{note}"
         )
 
@@ -1006,6 +1007,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     return (
         f"{orphan_note}✅ Integrated delegated run {rid}'s patch into {target} ({staged}).{prot_note}{delivered}\n"
         f"{diffstat}{format_patch_exclusions(manifest, file_changes, 'applied', unindexed)}\n"
-        f"Verdict: {verdict_path or '(unwritten)'}. Disposition recorded.\n"
+        f"Verdict: {verdict_path or '(unwritten)'}. "
+        f"{'Disposition recorded.' if note else 'Its private copy and pins are released.'}\n"
         f"{closing} — review them yourself; you are the sole committer.{note}"
     )
