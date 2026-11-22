@@ -397,6 +397,7 @@ class LLMClient(
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs.
 
@@ -443,6 +444,7 @@ class LLMClient(
                     cache_affinity=cache_affinity, model_role=model_role,
                     model_poll_control=model_poll_control,
                     model_operation_observer=model_operation_observer,
+                    **({"response_format": response_format} if response_format is not None else {}),
                     model_account_override=model_account_override,
                     model_turn_state=carried_turn_state,
                 )
@@ -469,6 +471,20 @@ class LLMClient(
                 )
             result[1]["ledger_attempt_ids"] = list(attempt_ids)
             return result
+        from ouroboros.llm_routing import configured_window
+        from ouroboros.llm_ollama import OllamaProgramChanged, chat_ollama_async, is_ollama_async, route_notices
+        retired_attempt_ids = []
+        if await is_ollama_async(target, no_proxy=no_proxy, before_send=True):
+            try:
+                with capture_attempt_ids() as attempt_ids:
+                    result = await chat_ollama_async(
+                        target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
+                        no_proxy=no_proxy, timeout=timeout, stream=stream, model_role=model_role,
+                        window=configured_window(target), response_format=response_format)
+                result[1]["ledger_attempt_ids"] = list(attempt_ids)
+                return _one_shot_result(result, tools)
+            except OllamaProgramChanged:  # retired: this call continues on /v1 below
+                retired_attempt_ids = list(attempt_ids)
         if no_proxy:
             _oa_client, _http_client = self._make_no_proxy_async_client(target, timeout=timeout)
             try:
@@ -476,6 +492,7 @@ class LLMClient(
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
                     skip_capability_fetch=True,
                     allow_server_web_search=allow_server_web_search,
+                    **({"response_format": response_format} if response_format is not None else {}),
                     cache_affinity=cache_affinity,
                     **({"stream": True} if stream else {}),
                 )
@@ -492,7 +509,7 @@ class LLMClient(
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
                 )
-                result[1]["ledger_attempt_ids"] = list(attempt_ids)
+                result[1].update(ledger_attempt_ids=[*retired_attempt_ids, *attempt_ids], **route_notices(target))
                 return _one_shot_result(result, tools)
             finally:
                 try:
@@ -504,6 +521,7 @@ class LLMClient(
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
             allow_server_web_search=allow_server_web_search,
+            **({"response_format": response_format} if response_format is not None else {}),
             cache_affinity=cache_affinity,
             **({"stream": True} if stream else {}),
         )
@@ -523,7 +541,7 @@ class LLMClient(
             target,
             prompt_cache_ttl=prompt_cache_ttl,
         )
-        result[1]["ledger_attempt_ids"] = list(attempt_ids)
+        result[1].update(ledger_attempt_ids=[*retired_attempt_ids, *attempt_ids], **route_notices(target))
         return _one_shot_result(result, tools)
 
     @staticmethod

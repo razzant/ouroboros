@@ -312,12 +312,14 @@ def model_call_slot(model: str, use_local: bool = False, deadline_ts: float | No
     The owning sender must exit this context, even if its caller stops waiting.
     """
     if _managed(route) or not enabled(use_local):
-        yield
+        yield None
         return
     waiter = _Waiter(model, use_local, deadline_ts, route, cancel_event, check)
+    waited = False
     try:
         try:
             while not waiter.step():
+                waited = True
                 waiter.note()
                 delay = min(_POLL_SEC, waiter.remaining())
                 if cancel_event is not None:
@@ -329,7 +331,7 @@ def model_call_slot(model: str, use_local: bool = False, deadline_ts: float | No
         except OSError as error:
             raise ModelSlotUnavailable("Local model slot storage unavailable") from error
         waiter.note(admitted=True)
-        yield
+        yield waiter.remaining if waited else None
     finally:
         waiter.close()
 
@@ -339,12 +341,14 @@ async def model_call_slot_async(model: str, use_local: bool = False, deadline_ts
                                 *, route: dict | None = None, check: Callable | None = None):
     """Same queue with cancellable async waits, with no orphan acquiring thread."""
     if _managed(route) or not enabled(use_local):
-        yield
+        yield None
         return
     waiter = _Waiter(model, use_local, deadline_ts, route, None, check)
+    waited = False
     try:
         try:
             while not waiter.step():
+                waited = True
                 waiter.note()
                 await asyncio.sleep(min(_POLL_SEC, waiter.remaining()))
         except ModelSlotUnavailable:
@@ -352,7 +356,7 @@ async def model_call_slot_async(model: str, use_local: bool = False, deadline_ts
         except OSError as error:
             raise ModelSlotUnavailable("Local model slot storage unavailable") from error
         waiter.note(admitted=True)
-        yield
+        yield waiter.remaining if waited else None
     finally:
         waiter.close()
 
@@ -363,7 +367,7 @@ def reset_for_tests() -> None:
         _LOCAL.clear()
 
 
-def limit_physical_send(route: dict, send: Callable) -> Callable:
+def limit_physical_send(route: dict, send: Callable, *, after_wait: Callable | None = None) -> Callable:
     """Wrap the actual sender, preserving accounting's late-sender ownership."""
     from ouroboros.llm_attempt import require_physical_dispatch_window
 
@@ -371,12 +375,19 @@ def limit_physical_send(route: dict, send: Callable) -> Callable:
     local = str(route.get("provider") or "") == "local"  # the built-in server: it keeps three while no number is chosen
 
     def dispatch():
-        with model_call_slot(model, local, route=route, check=require_physical_dispatch_window):
+        with model_call_slot(model, local, route=route, check=require_physical_dispatch_window) as check_queued_send:
+            if check_queued_send and after_wait:
+                after_wait()
+                check_queued_send()  # Pause may have arrived during the metadata read.
             require_physical_dispatch_window()
             return send()
 
     async def dispatch_async():
-        async with model_call_slot_async(model, local, route=route, check=require_physical_dispatch_window):
+        async with model_call_slot_async(model, local, route=route, check=require_physical_dispatch_window) as check_queued_send:
+            if check_queued_send and after_wait:
+                from ouroboros._usage_wait import presend_off_loop
+                await presend_off_loop(after_wait)
+                check_queued_send()
             require_physical_dispatch_window()
             return await send()
 

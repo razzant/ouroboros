@@ -109,6 +109,8 @@ class StubModelServer:
             def do_GET(self):  # noqa: N802 - stdlib callback name
                 if self.path.rstrip("/").endswith("/models"):
                     return self._send({"data": [{"id": "mock-model", "max_model_len": 400000}]})
+                if self.path == "/props":  # names its program as llama.cpp does: an unnamed server needs consent
+                    return self._send({"default_generation_settings": {"n_ctx": 400000}, "total_slots": 1})
                 self.send_error(404)
 
             def do_POST(self):  # noqa: N802 - stdlib callback name

@@ -9,6 +9,10 @@ hides it, as an older build does.
 """
 from __future__ import annotations
 
+
+from types import SimpleNamespace
+from tests._ollama import TARGET, completed, overflow_reply, OllamaHTTP, install_http as install_http
+
 import json
 
 import pytest
@@ -126,3 +130,124 @@ def test_a_size_refusal_in_the_middle_of_a_task_rebinds_to_the_nano_set_and_keep
     assert not posts[-1].get("refused") and posts[-1]["n_prompt"] < N_CTX
     assert "Привет" in str(text)
     assert episode.tools._ctx.active_context_mode == "nano"
+
+@pytest.mark.parametrize("published", [False, True])
+def test_real_loop_first_contact_learns_native_window_without_server(tmp_path, monkeypatch, install_http, published):
+    """Run actual context fitting, LLMClient and recovery over MockTransport."""
+    import math
+    from tests._first_contact import _episode, _run, ANSWER
+
+    observations = []
+    proof = tmp_path / "repo" / "ollama-proof.txt"
+    sent_tool = False
+
+    def answer(body):
+        nonlocal sent_tool
+        tokens = math.ceil(len(json.dumps({"messages": body["messages"], "tools": body.get("tools")},
+                                         ensure_ascii=False).encode()) / 3)
+        observations.append({"tokens": tokens, "refused": tokens >= 80_000, "tools": bool(body.get("tools"))})
+        if tokens >= 80_000:
+            return overflow_reply(body, tokens, 80_000)
+        if body.get("tools") and not sent_tool:
+            sent_tool = True
+            return completed(message={"role": "assistant", "content": "", "tool_calls": [{"function": {
+                "name": "read_file", "arguments": {"path": str(proof)}}}]}, prompt_eval_count=tokens)
+        return completed(message={"role": "assistant", "content": ANSWER}, prompt_eval_count=tokens)
+
+    server = install_http(OllamaHTTP(answer, loaded=published))
+    # The episode helper only requires base_url; no ScriptedStubModel is created.
+    episode = _episode(tmp_path, monkeypatch, SimpleNamespace(base_url=TARGET["base_url"]))
+    proof.write_text("OLLAMA_NATIVE_TOOL_PROOF_9182", encoding="utf-8")
+    assert episode.plan.initial_mode == ("nano" if published else "max")
+    text, _, _ = _run(episode)
+    assert ANSWER in str(text), (text, observations)
+    assert all(post["truncate"] is False and post["shift"] is False for post in server.posts)
+    main = [row for row in observations if row["tools"]]
+    assert main and main[-1]["tokens"] < 80_000
+    assert episode.tools._ctx.active_context_mode == "nano"
+    if not published:
+        assert main[0]["refused"], observations
+    else:
+        assert not any(row["refused"] for row in observations)
+    assert "/api/ps" in server.gets
+    tool_messages = [message for post in server.posts for message in post["messages"] if message["role"] == "tool"]
+    assert any("OLLAMA_NATIVE_TOOL_PROOF_9182" in message["content"] for message in tool_messages), tool_messages
+    assert all(message["tool_name"] == "read_file" for message in tool_messages)
+
+
+@pytest.mark.parametrize('configured,expected', [(80000, 80000), (200000, 131072), (0, 4096)])
+def test_loaded_ollama_settings_window_applies_before_start_fit(tmp_path, monkeypatch, install_http, configured, expected):
+    import httpx
+    from tests import _first_contact as helpers
+    from tests._ollama import chat
+    from ouroboros import context_fit
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+    from ouroboros import capability_evidence as ce
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "data")
+    settings = helpers.keyless_settings
+    def configured_settings(*args, **kwargs):
+        return {**settings(*args, **kwargs), 'OUROBOROS_MODEL_CONTEXT_WINDOWS': {'main': configured}}
+    monkeypatch.setattr(helpers, 'keyless_settings', configured_settings)
+    server = OllamaHTTP(window=4096)
+    def handler(request):
+        if request.url.path == '/api/show':
+            return httpx.Response(200, json={'model_info': {'qwen35.context_length': 131072}})
+        return server(request)
+    install_http(handler)
+    if not configured:
+        with pytest.raises(context_fit.MinimumViewUnfit) as caught:
+            helpers._episode(tmp_path, monkeypatch, SimpleNamespace(base_url=TARGET['base_url']))
+        from ouroboros import capability_evidence as ce
+        assert any(row.get("window_tokens") == expected for row in ce._read(tmp_path / "data").get("probes", {}).values())
+        text = _context_capacity_terminal(caught.value)[0]
+        assert 'OLLAMA_CONTEXT_LENGTH' in text and 'start a new turn' in text
+        assert 'restart Ollama and reload the model' in text and '/api/ps' in text
+        assert not server.posts
+        return
+    episode = helpers._episode(tmp_path, monkeypatch, SimpleNamespace(base_url=TARGET['base_url']))
+    assert episode.plan.window_record.total.tokens == expected
+    # Use the real first assembled view and routing/configuration, without executing tools.
+    server.reply = completed(prompt_eval_count=50000)
+    chat(messages=episode.plan.messages_for(episode.plan.initial_mode))
+    assert server.posts[0]['options']['num_ctx'] == expected
+
+
+@pytest.mark.parametrize("configured", [0, 80000])
+def test_padding_main_completion_keeps_request_capacity(tmp_path, monkeypatch, install_http, configured):
+    import httpx
+    import shutil
+    from tests import _first_contact as helpers
+    from ouroboros import capability_evidence as ce, context_window as cw
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "data")
+    shutil.copytree(helpers.REPO / "docs/development", tmp_path / "repo/docs/development")
+    settings = helpers.keyless_settings
+    monkeypatch.setattr(helpers, "keyless_settings", lambda *a, **kw: {
+        **settings(*a, **kw), "OUROBOROS_MODEL_CONTEXT_WINDOWS": {"main": configured}})
+    server = OllamaHTTP(completed(model="mock-model:latest", prompt_eval_count=80042, prompt_eval_cached_count=40021, eval_count=1,
+        message={"role": "assistant", "content": ANSWER}), window=80000)
+    def handler(request):
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"model_info": {"qwen35.context_length": 131072}})
+        return server(request)
+    install_http(handler)
+    episode = helpers._episode(tmp_path, monkeypatch, SimpleNamespace(base_url=TARGET["base_url"]))
+    text, usage, _ = helpers._run(episode)
+    assert ANSWER in str(text)
+    last = usage["_last_round_cache_usage"]
+    assert (last["prompt_tokens"], last["cached_tokens"], last["capacity_input_tokens"]) == (80042, 40021, 80000)
+    assert {anchor["input_tokens"] for anchor in usage["_context_input_anchor"].values()} == {80042}
+    call = usage["llm_call_refs"][-1]
+    assert call["model"] == TARGET["requested_model"]
+    assert call["resolved_model"] == "openai-compatible/mock-model"
+    assert call["reported_model"] == "mock-model:latest"
+    assert set(usage["_context_accepted_inputs"].values()) == {80000}
+    evidence = ce._read(ce.canonical_evidence_root())
+    assert any(pair["prompt_tokens"] == 80042 and pair["route_fp"] == episode.plan.route_fp
+               for entry in evidence["token_density"].values() for pair in entry["pairs"])
+    rows = evidence["main_windows"]
+    assert max(row.get("accepted", 0) for record in rows.values() for row in record.get("observations", [])) == 80000
+    next_window = cw.resolve_window(episode.plan, 8192)
+    assert next_window.total.tokens == 80000
+    assert next_window.usable == 71808
+    if configured:
+        assert any(limit.source == ce.SOURCE_USER_SETTING for limit in next_window.declared)

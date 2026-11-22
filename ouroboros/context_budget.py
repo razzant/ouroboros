@@ -306,7 +306,7 @@ def context_overflow_message(text: Any) -> bool:
     return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low, server_forms=False) > 0
 
 
-LOCAL_CONTEXT_CODES = frozenset({"exceed_context_size_error"})  # llama.cpp n_ctx / n_prompt_tokens
+LOCAL_CONTEXT_CODES = frozenset({"exceed_context_size_error", "ollama_context_length_exceeded"})  # native adapters
 SIZE_REFUSAL_STATUSES = frozenset({400, 413, 422})
 _PLAIN_INTEGER = re.compile(r"(?<![\w.,-])\d+(?![\w]|[.,]\d)")
 

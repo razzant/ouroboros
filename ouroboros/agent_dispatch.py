@@ -205,7 +205,6 @@ def _context_capacity_terminal(unfit: Any) -> Tuple[str, Dict[str, Any], Dict[st
     loop evidence is absent, never a zero, so nothing here claims the task had no effect.
     """
     from ouroboros.context_budget import REQUIRED_BOOK_CHOICES
-    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
 
     # The comparison the fitter refused on: input plus the reserve kept for the reply and the work, against the
     # route's limit. The further room a start wants is no threshold (a start with less runs): named only as measured.
@@ -221,17 +220,38 @@ def _context_capacity_terminal(unfit: Any) -> Tuple[str, Dict[str, Any], Dict[st
     else:
         text += (" Choose a model with a larger window and send the request again: in the app, the model button under "
                  "the message box sets it for this chat, and Settings › Models sets the default for chats that follow "
-                 "Main. For a local model, raise its Context Length in Settings and restart it. If this chat follows "
+                 "Main. For a built-in local model, raise Context Length and restart it. If this chat follows "
                  "Main and the model's real limit is higher, set Main's window in Settings › Models.")
+    if getattr(unfit, "server_program", "") == "ollama":
+        text += (" Set the model's window in Settings and start a new turn. A larger window can reload the model and use more memory. With Auto, raise OLLAMA_CONTEXT_LENGTH, "
+                 "restart Ollama and reload the model so /api/ps reports its new window.")
     inside = [("core, request and tools", unfit.fixed_input_tokens - book), ("handbook", book),
               ("further memory", unfit.memory_view_tokens)]
     text += (f"\n\nMeasured, in tokens: input {unfit.estimated_input_tokens:,} ("
              + "; ".join(f"{name} {value:,}" for name, value in inside if value)
              + f") · reserve for the reply and the work {unfit.response_reserve_tokens:,} · limit {limit:,}"
              + (f" · further room the start wanted {unfit.work_room_tokens:,}" if unfit.work_room_tokens else "") + ".")
-    usage = {"execution_status": "infra_failed", "reason_code": "context_capacity",
+    return _unstarted_terminal(text, "context_capacity", {"reasoning_notes": ["context_capacity"]})
+
+
+def _unstarted_terminal(text: str, reason: str, trace: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """A pooled start's refusal as its outcome: infra-failed under a host notice, this attempt's own loop evidence absent
+    (never a zero), since no model ran it."""
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
+
+    usage = {"execution_status": "infra_failed", "reason_code": reason,
              "terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE, "loop_evidence_unavailable": True}
-    return text, usage, {"reasoning_notes": ["context_capacity"], "tool_calls": [], "loop_evidence_unavailable": True}
+    return text, usage, {**trace, "tool_calls": [], "loop_evidence_unavailable": True}
+
+
+def _start_refusal_terminal(refusal: Any) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """The named outcome of a known refusal that ends a pooled start: a window that cannot hold it (``MinimumViewUnfit``),
+    or a server that cannot keep its history whole (``OllamaUpgradeRequired``), whose own sentence names the upgrade."""
+    from ouroboros.llm_ollama import OllamaUpgradeRequired
+
+    if isinstance(refusal, OllamaUpgradeRequired):
+        return _unstarted_terminal(str(refusal), refusal.code, {})
+    return _context_capacity_terminal(refusal)
 
 
 def _persist_early_origin_stub(drive_root: Any, task: Dict[str, Any]) -> None:

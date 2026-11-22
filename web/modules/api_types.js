@@ -138,6 +138,8 @@
 /** @typedef {Object} ProviderTestResponse
  * @property {boolean} ok
  * @property {string=} error
+ * @property {string=} caution
+ * @property {('ollama_guard_consent'|'ollama_guard_held'|'ollama_guard_unavailable')=} code
  */
 /** @typedef {Object} AvailableSubagentRoute
  * @property {'api_model'|'agent_session'} kind

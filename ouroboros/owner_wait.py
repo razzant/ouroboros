@@ -183,6 +183,13 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     trace, usage, route, delivery candidate, admission-seal and owner-source
     identities, owner directives — so a second serializer could only drift from this one.
     """
+    from ouroboros.context_fit import native_load_window_binding
+    from ouroboros.model_slots import acting_model_role
+
+    role = acting_model_role(ctx)
+    plan = getattr(ctx, "context_fit_plan", None)
+    load_window = (native_load_window_binding(plan) if getattr(plan, "model", None) == getattr(ctx, "active_model", None)
+                   and getattr(plan, "model_role", None) == role else getattr(ctx, "_restored_native_load_window", None))
     if context_view is not None:
         # Pricing a forced call that never sent must not become the next ordinary call's view.
         # Keep current dialogue/tool results, projected from the pre-price plan's retained sources;
@@ -198,7 +205,6 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     model_state = model_wait.continuation_state() if model_wait is not None else {}
     from ouroboros.held_notes import continuation_capture
     from ouroboros.settings_integrity import captured_cognition
-    from ouroboros.model_slots import acting_model_role
 
     return {
         "task_id": ctx.task_id, "task_attempt": int(getattr(ctx, "task_attempt", None) or 1),
@@ -216,7 +222,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "nanny_activity": {key: getattr(ctx, key, None) for key in (
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
-        "context_model_role": acting_model_role(ctx),
+        "context_model_role": role,
+        **({"load_window_binding": load_window} if load_window else {}),
         # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
         "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them, and the journal boundary of its first
@@ -1237,6 +1244,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     applied = restore_current(ctx, messages)
     # Only a newer durable owner act moves the saved actor; pending tool choices belong to the next ordinary call.
     ctx._restored_context_model_role = (ctx.active_role_override if applied else state.get("context_model_role")) or ""
+    ctx._restored_native_load_window = _saved_native_load_window(ctx, state)
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
@@ -1265,6 +1273,11 @@ def _conversation_account(ctx: Any, messages: list, role: str, account: Any) -> 
     return send_account({"source": source, "resolved_model": native}, messages, {
         "model_role": role, "model_account_override": account, "cache_affinity": cache_key_for_model(model)},
         plan=getattr(ctx, "context_fit_plan", None))[1]
+
+
+def _saved_native_load_window(ctx: Any, state: dict):
+    binding = state.get("load_window_binding")
+    return binding if isinstance(binding, dict) and state.get("task_id") == getattr(ctx, "task_id", None) else None
 
 
 def _continuation_fit_route(ctx: Any, state: dict, messages: list, *, initial_effort: str | None = None) -> tuple:
@@ -1300,8 +1313,10 @@ def _continuation_fit_route(ctx: Any, state: dict, messages: list, *, initial_ef
         {"model_role": getattr(preview, "active_role_override", None) or state.get("context_model_role"),
          "task_metadata": preview.task_metadata}, context_fit_plan=getattr(preview, "context_fit_plan", None),
         overrides=preview.model_wait_context.overrides)
+    load_window = _saved_native_load_window(ctx, state)
     return {"model": preview.active_model, "use_local_model": preview.active_use_local,
             "model_role": role, "task_metadata": preview.task_metadata, "credential_profile_id": account,
+            **({"load_window_binding": load_window} if load_window else {}),
             "model_route": _conversation_account(preview, messages, role, account), "model_route_preferred": True}, effort
 
 
@@ -1342,6 +1357,7 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
         use_local=selected["use_local_model"], preferred_mode=owner, reasoning_effort=effort,
         tool_schemas=state["tool_schemas"], restoring_held=restoring_held,
         model_role=selected["model_role"], model_route=selected["model_route"], credential_profile_id=selected["credential_profile_id"],
+        **({"load_window_binding": selected["load_window_binding"]} if "load_window_binding" in selected else {}),
         route_is_preference=True,
     )
     plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, start_mode=restore_mode, **route)

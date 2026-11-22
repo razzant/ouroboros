@@ -702,6 +702,7 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
 
     safe = safe_error or sanitize_tool_result_for_log(repr(exc))
     if getattr(exc, "stream_rejected", False): return LlmErrorClassification("provider_error", False)  # complete wire judged unusable: a local verdict, never a same-model repeat
+    if str(getattr(exc, "code", "")).startswith("ollama_") and hasattr(exc, "retryable"): return LlmErrorClassification(exc.kind, exc.retryable, _exception_status_code(exc), exc.code)  # native Ollama verdicts (llm_ollama_wire) type their own repeat
     if getattr(exc, "code", "") == "model_outcome_unknown":
         return LlmErrorClassification("provider_outcome_unknown", False)
     if getattr(exc, "code", "") == "model_substituted": return LlmErrorClassification("model_substituted", False, 0, exc.code)  # a well-formed request the route answered with another model: chain-eligible, never cools the requested one
@@ -867,12 +868,13 @@ def _record_llm_call_error(
             "model_role": str(getattr(error, "model_role", "") or ""),
             "route": dict(getattr(error, "route", {}) or {}), "outcome": "unknown",
             "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
+            **({"retain_partial_reply": True} if getattr(error, "retain_partial_reply", False) else {}),
             **({"same_operation_recoverable": True} if getattr(error, "same_operation_recoverable", False) else {}),
         }
         # Only an explicit low-level repeat budget repeats here; each running turn's
         # new generation belongs to the round's recovery (its continuation and the configured routes).
         if (
-            is_retryable_transport_death(error)
+            not getattr(error, "retain_partial_reply", False) and is_retryable_transport_death(error)
             and repeats < ctx.transport_death_retries and ctx.attempt < ctx.transient_budget - 1
         ):
             backoff = _TRANSPORT_DEATH_BACKOFF_SEC[min(repeats + 1, len(_TRANSPORT_DEATH_BACKOFF_SEC)) - 1]
@@ -1123,6 +1125,10 @@ def _record_round_cache_facts(
     accumulated_usage["_last_round_cache_usage"] = {  # also this accepted call's own money, as its producer stated it
         "round": round_idx, "model": model, "provider": provider, "billing": (usage.get("cost_evidence") or {}).get("billing"),
         **{key: usage.get(key) for key in ("prompt_tokens", "cached_tokens", "cache_write_tokens", "cost", "cost_final")},
+        **({"capacity_input_tokens": usage["capacity_input_tokens"]} if usage.get("capacity_input_tokens") is not None else {}),
+        # The native load statement this accepted call was dispatched under (a pair; any other value states none); its
+        # acceptance binds only that load (context_anchor.record_input_anchor).
+        **({"ollama_load_statement": list(pair)} if isinstance(pair := usage.get("ollama_load_statement"), (list, tuple)) and len(pair) == 2 else {}),
         "finished_at": time.time(), **served_account_fields(usage, earlier, provider, model),  # wall clock: survives a restart
         REPORTED_TOKENS_KEY: reported}  # cache routing reads the billing-shaped counters above; route facts these
     settle_rewrite_reread(accumulated_usage)  # this answer measures the history change it carried
@@ -1179,6 +1185,20 @@ def _send_main_candidate(
         return llm.chat(**kwargs)
 
 
+def note_route_caution(accumulated_usage: Dict[str, Any], caution: Any, *, withheld: bool = False, route: str = "") -> None:
+    """The chat's words about an unidentified compatible route (``llm_ollama_guard``): why a send was withheld,
+    once per task it stops; a permitted send's caution once per ``route`` it was told for, at that route's first
+    use, after an answer and after a failure alike. The words cannot tell routes apart, so the route does. They
+    wait in the task's usage, through a retry or a later round, until a progress line carries them
+    (``loop_transport.emit_route_notice``): a route counts as told only then."""
+    seen = route or caution
+    if not caution or seen in accumulated_usage.get("_route_cautions_shown", ()):
+        return
+    pending = accumulated_usage.setdefault("_route_cautions_pending", [])
+    if all(entry["seen"] != seen for entry in pending):
+        pending.append({"words": caution, "route": route, "withheld": withheld, "seen": seen})
+
+
 def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated_usage: Dict[str, Any]) -> None:
     model_facts = usage.get("claudexor") or {}
     accumulated_usage["_model_route"] = dict(model_facts.get("route") or {})
@@ -1188,6 +1208,13 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
                   "_last_llm_provider_fields", "_last_llm_provider_answer", "_last_llm_provider_message_cut", "_last_llm_resource_refusal",
                   "_last_llm_output_exhausted", "_last_llm_attempt_custody", "_last_llm_size_refusal"):
         accumulated_usage.pop(stale, None)
+    previous = accumulated_usage.pop("_last_route_notice", None)
+    notice = usage.get("route_notice")
+    if notice:
+        accumulated_usage["_last_route_notice"] = notice
+        if notice != previous:
+            accumulated_usage["_route_notice"] = notice
+    note_route_caution(accumulated_usage, usage.get("route_caution"), route=usage.get("route_caution_key", ""))
     receipts = pop_custom_validation_receipts(usage, msg.get("tool_calls") or [])
     accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, None)
     if receipts:
@@ -1300,6 +1327,7 @@ def call_llm_with_retry(
     owner = current_model_wait()
     activity_attempt = task_attempt if task_attempt is not None or not owner or owner.task_id != task_id else owner.attempt
     response_cache_bypass_requested, send_messages = False, None
+    route_caution = (None, False, "")  # a failed send's caution, whether it was withheld and its route; noted when no answer came
     for attempt in range(transient_budget):
         for stale in ("_last_llm_failure", "_acting_route_failure"): accumulated_usage.pop(stale, None)  # a pre-send refusal cannot borrow the previous attempt
         if _deadline_not_dispatched(
@@ -1420,7 +1448,7 @@ def call_llm_with_retry(
             _remember_llm_call(
                 accumulated_usage, call_ids={**call_ids, "physical_attempt_id": (usage.get("ledger_attempt_ids") or [None])[-1]}, model=model,
                 display_model=display_model, provider=provider, request_ref=request_ref,
-                response_ref=response_ref, reported_model=usage.get("resolved_model"), use_local=bool(use_local),
+                response_ref=response_ref, reported_model=usage.get("reported_model", usage.get("resolved_model")), use_local=bool(use_local),
                 requested_profile=(usage.get("claudexor") or {}).get("requested_profile", host_route.get("credential_profile_id", model_account_override)),
                 observed_route=(usage.get("claudexor") or {}).get("route"),
             )
@@ -1503,6 +1531,10 @@ def call_llm_with_retry(
             _emit_main_llm_call_state(event_queue, call_identity, "failed")
             raise  # Monetary/ledger rails are not provider failures.
         except Exception as e:
+            if getattr(e, "route_caution_used", None):  # an earlier send of the call went on that route
+                note_route_caution(accumulated_usage, e.route_caution_used[0], route=e.route_caution_used[1])
+            if getattr(e, "route_caution", None):
+                route_caution = (e.route_caution, bool(getattr(e, "route_withheld", False)), getattr(e, "route_caution_key", ""))
             host_route = getattr(e, "model_role_route", {}) or {}
             model, use_local = host_route.get("model", model), host_route.get("use_local", use_local)
             if isinstance(getattr(e, "route", None), dict):  # a failed operation's route may name no model: the one it asked
@@ -1528,4 +1560,5 @@ def call_llm_with_retry(
                 call_identity,
             ):
                 break
+    note_route_caution(accumulated_usage, route_caution[0], withheld=route_caution[1], route=route_caution[2])
     return None, 0.0

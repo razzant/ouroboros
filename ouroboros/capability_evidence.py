@@ -345,7 +345,7 @@ def _store_transaction(drive_root: Any) -> Iterator[None]:
         yield
 
 
-def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) -> bool:
+def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any], *, previous=...) -> bool:
     """One ``_store_transaction`` writing one evidence entry of namespace ``kind``.
 
     It re-reads the CURRENT file inside the transaction, so no writer in any process saves a
@@ -361,9 +361,12 @@ def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) 
     try:
         with _store_transaction(drive_root):
             data = _load(drive_root)
-            if data.get(kind, {}).get(fp) == value:
+            held = data.get(kind, {}).get(fp)
+            if held == value:
                 return True
-            if not _physical_statement(value) and _later_statement(data.get(kind, {}).get(fp), value):
+            if previous is not ... and held != previous:
+                return False
+            if not _physical_statement(value) and _later_statement(held, value):
                 return False
             _drop_expired_probes(data)
             data.setdefault(kind, {})[fp] = value
@@ -1006,6 +1009,7 @@ def _probe_window(
     use_local: bool = False,
     allow_fetch: bool = True,
     force: bool = False,
+    target: Optional[dict] = None,
     api_key: Optional[str] = None,
 ) -> Tuple[CapabilityEvidence, str]:
     """Resolve Capability Evidence for a route, using the cache unless ``force``; with the fact of this call's
@@ -1033,11 +1037,32 @@ def _probe_window(
             ts=utc_now_iso(), detail="live serving window" if window > 0 else "serving window unknown",
         ), instance_id=getattr(window, "instance_id", "")), "answered" if window > 0 else ""
 
-    cached = data.get("probes", {}).get(fp)
+    cache_key = fp
+    from ouroboros.server_window import ollama_window_request, private_host, read_metadata_window, read_ollama_window
+    from ouroboros.llm_ollama import OllamaRouteUnsettledError, OllamaUpgradeRequired
+    try:
+        native = ollama_window_request(provider, model, base_url, api_key=api_key, headers=headers,
+                                       target=target, allow_fetch=allow_fetch, force=force, probes=data.get("probes"))
+    except OllamaUpgradeRequired:
+        raise
+    except OllamaRouteUnsettledError as exc:
+        return CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider, detail=str(exc)), "failed"
+    native_mode = ""
+    if native is not None:
+        from ouroboros.llm_ollama_policy import native_target_key
+        cache_key = native_target_key(native[0])
+        requested = native[1]
+        native_mode = f"Ollama /api/show ({requested})" if requested else "Ollama /api/ps"
+    cached = data.get("probes", {}).get(cache_key)
+    if native_mode and (cached or {}).get("detail") != native_mode:
+        cached = None  # Settings changed the load this route will request.
+    elif not native_mode and str((cached or {}).get("detail", "")).startswith("Ollama /api/"):
+        cached = None  # Pre-binding native receipts cannot identify the answering account.
+
     if subscription and not account_bound and str((cached or {}).get("status") or "") in _KNOWN_STATUS:
         # Model-only legacy evidence cannot certify any subscription account.
         cached = None
-    if cached and not force:
+    if cached and not force and not (native and allow_fetch):
         age = _probe_age(cached)
         ttl = _CONFIRMED_TTL_SEC if cached.get("status") == STATUS_CONFIRMED else _FAILED_TTL_SEC
         if age <= ttl:
@@ -1071,14 +1096,58 @@ def _probe_window(
         _store_evidence(drive_root, "probes", ev.route_fp, ev.to_json())
         return ev, read
 
-    window, observed_at, *stated = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch,
-                                                             api_key=api_key)  # a server's own read names its source
-    if window > 0:
+    if native is not None:
+        from ouroboros.llm_ollama import OllamaProgramChanged
+        try:
+            window, observed_at, stated = read_ollama_window(*native), utc_now_iso(), [SOURCE_SERVER_METADATA]
+        except OllamaProgramChanged:
+            native, native_mode, cached, cache_key = None, "", None, fp
+        except OllamaUpgradeRequired:
+            raise
+        except OllamaRouteUnsettledError as exc:
+            return CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider, detail=str(exc)), "failed"
+    if native is None and headers and target and provider == "openai-compatible" and private_host(base_url):
+        # A private gateway can route the same model name to a different runner by header.
+        window, source = read_metadata_window(model, base_url, target.get("api_key", ""), provider=provider,
+                                              evidence_root=drive_root, headers=headers)
+        observed_at, stated = utc_now_iso(), [source]
+    elif native is None:
+        window, observed_at, *stated = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch,
+                                                                 api_key=api_key)
+    if native is not None and window == 0:
+        # The current selected model has no reported load. An earlier /ps
+        # cannot size this call, or a subsequent cache-only projection.
+        ev = CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider,
+                                ts=observed_at, detail=native_mode)
+        from ouroboros.llm_ollama_policy import record_window
+        record_window(native[0], 0, root=drive_root, previous=data.get("probes", {}).get(cache_key))
+        return ev, "answered"
+    if window and window > 0:
+        if native is not None:
+            # A positive native read publishes through the load's own conditional
+            # writer, under the same transaction as an empty read: a probe whose
+            # network read paused cannot overwrite (or re-number) the statement a
+            # concurrent sender published meanwhile. On a win, the assigned order
+            # rides back to the planner on the stored row; a losing read returns
+            # the winner's current statement instead of replacing the current load.
+            from ouroboros.llm_ollama_policy import record_window
+            sequence = record_window(native[0], window, requested=native[1], root=drive_root,
+                                     previous=data.get("probes", {}).get(cache_key))
+            held = _read(drive_root).get("probes", {}).get(cache_key)
+            if isinstance(held, dict) and (sequence is not None or str(held.get("status") or "") in _KNOWN_STATUS):
+                # This call's own answer only while the stored row still carries the order its
+                # write was given: a statement published since is recorded, never just measured.
+                return _cached_evidence(held, fp, model, provider, stale=_probe_age(held) > _CONFIRMED_TTL_SEC), (
+                    "answered" if sequence is not None and held.get("window_sequence") == sequence else "")
+            # The winning statement was itself retired (a concurrent Auto read found
+            # no load): this call's sizing stays unknown, never its superseded read.
+            return CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider,
+                                      ts=observed_at, detail=native_mode), "answered"
         ev = CapabilityEvidence(window, STATUS_CONFIRMED, (stated or [SOURCE_PROVIDER_METADATA])[0], fp, model, provider,
                                 ts=observed_at, stale=_age_seconds(observed_at) > _CONFIRMED_TTL_SEC,
-                                detail="provider metadata")
+                                detail=native_mode or "provider metadata")
         stamp_receipt(ev)
-        _store_evidence(drive_root, "probes", fp, ev.to_json())
+        _store_evidence(drive_root, "probes", cache_key, ev.to_json())
         return ev, "answered"
 
     # window <= 0. A failed read must NEVER erase a prior known record (the module
@@ -1102,7 +1171,7 @@ def _probe_window(
     else:
         ev = CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
                                 detail="no provider window metadata; sizing evidence is unknown")
-    _store_evidence(drive_root, "probes", fp, ev.to_json())
+    _store_evidence(drive_root, "probes", cache_key, ev.to_json())
     return ev, "failed" if ev.status == STATUS_FAILED else ""
 
 
@@ -1203,16 +1272,23 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, target: Opti
     from dataclasses import asdict, replace
     from ouroboros.response_limits import probe_response_limit
 
+    from ouroboros.server_window import private_host
+    if target and route["provider"] == "openai-compatible" and private_host(target.get("base_url")):
+        if target.get("default_headers"):
+            route["headers"] = target["default_headers"]
+        if not (target.get("api_key") or target.get("keyless")):
+            route["allow_fetch"] = False
     identity = str((route.get("options") or {}).get("account_fingerprint") or "") if ask is not None else ""
-    evidence, read = _probe_window(drive_root, **{**route, "allow_fetch": False}) if identity else (None, "")
+    evidence, read = _probe_window(drive_root, target=target, **{**route, "allow_fetch": False}) if identity else (None, "")
     if evidence is None or evidence.stale or evidence.source == SOURCE_NONE:  # no usable record of the identity
         route = {**route, "options": ask} if identity else route
-        evidence, read = _probe_window(drive_root, **route)
+        evidence, read = _probe_window(drive_root, target=target, **route)
     read_failed, stated = read == "failed" or evidence.status == STATUS_FAILED, dict(evidence.response_limit or {})
-    if is_known(evidence, require_fresh=True):
+    if is_known(evidence, require_fresh=True):  # with the order a native read was published under: never renumbered
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
                                       source=evidence.source, observed_at=evidence.ts, read_id=evidence.window_read_id,
-                                      instance_id=evidence.window_instance_id)
+                                      instance_id=evidence.window_instance_id, sequence=evidence.window_sequence,
+                                      sequence_route=evidence.window_sequence_route)
     lent = None  # the pin's own record after a failed read: that account's output is read only from its records
     if read_failed and route.get("allow_fetch", True):  # after the server's word: the pool's bound or the pin's record
         pool = _pool_bound(drive_root, evidence, route)
@@ -1287,7 +1363,8 @@ def observe_token_density(request: Any, usage: Optional[Dict[str, Any]], *, driv
         # uncached == cached +-1 is a coincidence whose loss costs nothing
         # (writes are throttled and five pairs retained); uncached ABOVE cached
         # is ordinary and stays measurable.
-        if gateway_double_counted_cache(real, cached):
+        count_basis = getattr(request, "prompt_count_basis", "prompt")
+        if not count_basis or count_basis == "prompt" and gateway_double_counted_cache(real, cached):
             return
         # The witness MUST calibrate the basis the fit estimator measures on
         # (MAIN_DENSITY_BASIS: bounded image proxy, system counted) — the
@@ -1309,7 +1386,8 @@ def observe_token_density(request: Any, usage: Optional[Dict[str, Any]], *, driv
         main = bool(getattr(physical, "view_kind", ""))
         route = str(getattr(physical, "route_fp", "") or "")
         bound = provider != "claudexor" and bool(getattr(physical, "window_witness_bound", True))
-        if main and bound and route:
+        if main and bound and route and count_basis == "prompt":
+            # Backend evaluation can include padding beyond the serving window.
             from ouroboros.context_window import record_observation
             record_observation(drive_root_resolver(request.drive_root),
                 getattr(physical, "window_observation_fp", ""), accepted=real, kind="input",

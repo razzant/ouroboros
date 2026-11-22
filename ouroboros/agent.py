@@ -1098,6 +1098,7 @@ class OuroborosAgent:
 
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ouroboros.context_fit import MinimumViewUnfit
+        from ouroboros.llm_ollama import OllamaUpgradeRequired
         from ouroboros.terminal_time import source_task_attempt
 
         def finished(text: Any, usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
@@ -1271,13 +1272,13 @@ class OuroborosAgent:
             _retire_working_checkpoint(self.tools._ctx, task)  # retire only after durable persistence readback
             return events
 
-        except MinimumViewUnfit as unfit:
+        except (MinimumViewUnfit, OllamaUpgradeRequired) as refusal:
             if inline_execution(task):
                 raise  # a direct turn or a call reports its own refusal (``worker_chat_lane``)
             # A pooled start's known incompatibility is its outcome, never a worker crash. No model ran this
             # attempt, so nothing to synthesize; what earlier attempts saved or started keeps its own owners.
             task["_skip_post_task_synthesis"] = True
-            return finished(*_context_capacity_terminal(unfit), self.tools._ctx)
+            return finished(*_start_refusal_terminal(refusal), self.tools._ctx)
 
         except BudgetPauseRequested as exc:
             # The durable pause row already exists (the loop raised only after
@@ -1376,22 +1377,20 @@ class OuroborosAgent:
                        _task_id_override: Any = _PROGRESS_ID_UNSET,
                        _chat_id_override: Any = _PROGRESS_ID_UNSET,
                        _progress_meta_override: Any = _PROGRESS_ID_UNSET,
-                       _task_attempt_override: Any = _PROGRESS_ID_UNSET) -> None:
-        """Owner-visible note; ``incident`` is the typed ``task_incident``/``toast_once``
-        pair the browser toasts once.
-
-        ``card_row`` is the note's PLACEMENT fact: a host fact about this task
-        belongs to a row of its card, so a producer that has one states it here
-        rather than leaving the row to land beside the card. ``card_row_id``
+                       _task_attempt_override: Any = _PROGRESS_ID_UNSET) -> bool:
+        """Owner-visible note; ``incident`` is the typed ``task_incident``/``toast_once`` pair
+        the browser toasts once. Answers whether the event was enqueued: a line that must
+        reach the chat before it counts re-queues on ``False`` (``emit_route_notice``).
+        ``card_row`` is the note's PLACEMENT fact: a host fact about this task belongs to
+        a row of its card, stated here rather than left to land beside it; ``card_row_id``
         keeps that row the same row across a reload.
-
-        ``narration`` is the VOICE of the note, not its text: only the model's own
-        round narration (``loop_messages._emit_round_progress``) is the turn's
-        speech. Every other caller — checkpoints, fallback and plan notes, the
-        review, nudge and transport lines, and the whole ToolContext ABI
-        (``emit_progress_fn``) — is the HOST talking about the turn, so it keeps
-        the default. Both voices stay visible rows; only narration that is not the model's
-        display ``reasoning`` (stamped only when true) may claim the card title and collapsed line."""
+        ``narration`` is the VOICE, not the text: only the model's own round narration
+        (``loop_messages._emit_round_progress``) is the turn's speech; every other caller —
+        checkpoints, fallback and plan notes, the review, nudge and transport lines, and the
+        whole ToolContext ABI (``emit_progress_fn``) — is the HOST talking about the turn, so
+        it keeps the default. Both voices stay visible rows; only narration that is not the
+        model's display ``reasoning`` (stamped only when true) may claim the card title and
+        collapsed line."""
         self._last_progress_ts = time.time()
         chat_id = (
             self._current_chat_id if _chat_id_override is _PROGRESS_ID_UNSET else _chat_id_override
@@ -1400,7 +1399,7 @@ class OuroborosAgent:
             self._current_task_id if _task_id_override is _PROGRESS_ID_UNSET else _task_id_override
         )
         if self._event_queue is None or chat_id is None:
-            return
+            return False
         try:
             event = {
                 "type": "send_message", "chat_id": chat_id,
@@ -1446,8 +1445,10 @@ class OuroborosAgent:
             progress_meta.update(narration=bool(narration), **({"reasoning": True} if reasoning and narration else {}))
             event["progress_meta"] = progress_meta
             self._event_queue.put(event)
+            return True
         except Exception:
             log.warning("Failed to emit progress event", exc_info=True)
+            return False
 
     def _emit_typing_start(self) -> None:
         if self._event_queue is None or self._current_chat_id is None:
@@ -1578,14 +1579,13 @@ def make_agent(
 from ouroboros.agent_dispatch import (  # noqa: E402, F401 -- intentional public re-exports
     _record_executor_resolution,
     _blocked_executor_terminal,
-    _context_capacity_terminal,
+    _start_refusal_terminal,
     _persist_early_origin_stub,
     _budget_exhausted_message,
     _budget_resume_policy,
     _queued_budget_exhausted_message,
     _physical_calls_after_budget_rail,
     _initial_effort_for,
-    model_role_slot_override,
     resolve_dispatch_axes,
     _DELEGATE_VERBS,
     preflight_delegate_visibility,

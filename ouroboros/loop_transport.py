@@ -175,7 +175,7 @@ def new_generation_after_unknown(ctx: Any, accumulated_usage: Optional[Dict[str,
     pending = usage.get("_pending_transport_outcome") or {}
     return bool(ctx is not None and getattr(ctx, "task_id", "")
                 and not isinstance(usage.get(TRANSPORT_DEATHS_KEY), dict)
-                and not pending.get("same_operation_recoverable"))
+                and not (pending.get("same_operation_recoverable") or pending.get("retain_partial_reply")))
 
 
 def append_unknown_recovery_input(messages: list, accumulated_usage: dict, previous: Dict[str, Any], *,
@@ -206,6 +206,9 @@ def continue_unknown_transport(episode: TransportWaitEpisode, *, llm: Any, tools
     """Grant one NEW attempt only after upstream recovery, retaining old custody."""
     from ouroboros.deadline_utils import dispatch_window_remaining_sec
     from ouroboros.llm import LLMClient
+    previous = dict(accumulated_usage.get("_pending_transport_outcome") or episode.outcome_custody)
+    if previous.get("retain_partial_reply"):
+        return False
     remaining = dispatch_window_remaining_sec(deadline_ts=task_deadline_epoch(tools), reserve_sec=get_finalization_grace_sec())
     if remaining is not None and remaining <= 0:
         return False
@@ -236,7 +239,6 @@ def continue_unknown_transport(episode: TransportWaitEpisode, *, llm: Any, tools
         return False
     # The latest outstanding unknown is the attempt this generation follows: since the episode opened on the
     # primary's lost answer, a configured route may have lost its own.
-    previous = dict(accumulated_usage.get("_pending_transport_outcome") or episode.outcome_custody)
     append_unknown_recovery_input(messages, accumulated_usage, previous, connectivity=observed,
                                   lead="Upstream connectivity is available again.", continuation="new_physical_attempt")
     accumulated_usage.pop(TRANSPORT_DEATHS_KEY, None)
@@ -1191,6 +1193,33 @@ def emit_model_substitution(
             card_row="timeline",
             card_row_id=":".join(part for part in (task_id, "model_substitution", requested) if part),
         )
+
+
+def emit_route_notice(accumulated_usage: Dict[str, Any], emit_progress: Optional[Callable[..., None]]) -> None:
+    """Say once, as a progress line, what the serving program reported about its route (``_take_response_facts`` keeps
+    it only when it differs from the round before); that note is consumed whether or not a line can carry it.
+    The words about an unidentified route (``loop_llm_call.note_route_caution``) wait for a line that actually
+    carries them: an emitter that reports a failed enqueue (``Agent._emit_progress`` answers ``False``) leaves
+    them pending and their route untold (``llm_ollama_guard.caution_told``); delivered, they are shown for this
+    task, and a permitted send's route is told from then on."""
+    notice = accumulated_usage.pop("_route_notice", "")
+    if notice and emit_progress is not None:
+        emit_progress("🌐 " + notice)
+    pending = accumulated_usage.get("_route_cautions_pending")
+    if emit_progress is None or not pending:
+        return
+    from ouroboros.llm_ollama_guard import caution_told, mark_caution_told
+    shown = accumulated_usage.setdefault("_route_cautions_shown", [])
+    for entry in list(pending):
+        due = entry["withheld"] or not caution_told(entry["route"])
+        if due and emit_progress("🌐 " + entry["words"]) is False:
+            continue  # nothing was enqueued: the words wait for a line that carries them, the route stays untold
+        if due and not entry["withheld"]:
+            mark_caution_told(entry["route"])
+        shown.append(entry["seen"])
+        pending.remove(entry)
+    if not pending:
+        accumulated_usage.pop("_route_cautions_pending", None)
 
 
 def provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:

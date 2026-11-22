@@ -136,7 +136,7 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
 `GET /api/onboarding/bootstrap` returns `{ready, bootstrap}` and writes nothing. `bootstrap` is exactly what the builtin wizard renders. It contains:
 
 - **`contract`**, the setup vocabulary:
-  - `providerFields`: credential and endpoint inputs; `settingKey` is the settings key to send.
+  - `providerFields`: credential, endpoint and consent inputs; `settingKey` is the settings key to send.
   - `modelSlots`: model roles; `settingKey`. A `managed` slot is fixed by a deployment policy: show it, send nothing for it.
   - `runtimeModes`: `value` is what the setting stores; under a deployment policy it lists only the Access levels it allows. The review-enforcement fields (`reviewModes`, `initialState.reviewEnforcement`) are gone with the retired setting.
   - `localRoutingModes`.
@@ -199,6 +199,8 @@ To finish setup, send `POST /api/onboarding/complete`:
   "allow_empty_review_pool": true
 }
 ```
+
+A private compatible endpoint is read for its program before every request (Ollama 0.12.6 or later takes native chat, an older one is refused with its version; llama.cpp and LM Studio name themselves; a model list or reply names nothing). A server naming none gets a request only on a route its server is on record as answering before this check — at the one migration snapshot the configured target matched a request an earlier body recorded as accepted (a positive token count; a refusal-only history proves nothing, and the record claims no continuity beyond that snapshot), and an observed removal of the connection retires the permission from the migration onward (`admission: "prior"` in `_meta.connections[].unidentified` of `GET /api/settings`; a save that would bring a retired one back is refused with `409`, nothing written, when it cannot be kept retired) or with its owner's consent, `OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED` (a named key: its row's `continue_unconfirmed`): the base URL, kept as the endpoint's id, cleared to withdraw — where the launch environment holds one, withdrawing stores an explicit revocation that outweighs the environment — sent by setup as a `providerFields` row (`initialState` carries one only while it covers the endpoint shown). Where Ollama was seen at the address and the connection's own read does not name its program, nothing is sent, whatever else is set. `POST /api/providers/test` checks the draft as sent (its consent counts for that call only), saves no form, consent or readiness, and marks a refusal, whose words name the setting to change, with `code` (`ollama_guard_consent`, `ollama_guard_held`, `ollama_guard_unavailable`); reaching such a server adds `caution`. The first request to one says so in the chat; a reply never proves `/v1` kept the history.
 
 An empty review pool is an explicit choice, not a production recommendation. Setup validates configuration, not reachability or successful generation; test the provider separately. Optional model slots may be blank to keep inheritance. Completion on an existing install is still a settings write, not an idempotent readiness check. `400` rejects input, `403` is a permission refusal, and `409 onboarding_state_changed` means the settings changed before commit.
 

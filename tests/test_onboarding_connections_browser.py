@@ -27,7 +27,10 @@ def _server():
 
         def do_GET(self):
             calls.append({"path": self.path, "authorization": self.headers.get("Authorization")})
-            body = json.dumps({"data": [{"id": "same-model"}]}).encode()
+            # At /props it names its program as llama.cpp does: a private server that names none sends only with
+            # its connection's consent (ouroboros/llm_ollama_guard.py), and this journey is about routes and keys.
+            body = json.dumps({"default_generation_settings": {"n_ctx": 2_000_000}, "total_slots": 1}
+                              if self.path == "/props" else {"data": [{"id": "same-model"}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

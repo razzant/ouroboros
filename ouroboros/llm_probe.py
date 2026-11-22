@@ -11,11 +11,12 @@ never reserves a paid attempt or claims the prior generation completed.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import re
 from typing import Any, Mapping, Optional
 
-from ouroboros.model_concurrency import limit_physical_send
+from ouroboros.llm_ollama import limit_compatible_send
 
 from ouroboros.usage_accounting import (
     UsageScope,
@@ -71,13 +72,14 @@ def _accounted_send(
     )
     from ouroboros.model_slots import resolve_processing_preference
 
+    route = target  # the physical attempt's admission stays on the target its caller reads (``_route_facts``)
     target = {**target, "processing_preference": resolve_processing_preference(override=target.get("processing_preference"))}
     final_candidate = _physical_candidate(candidate)
     apply_processing_preference(target, final_candidate)
     request = _attempt_request(target, final_candidate, source=source)
     return _execute_candidate(
         request,
-        limit_physical_send(target, lambda: send(final_candidate)),
+        limit_compatible_send(route, lambda: send(final_candidate)),
         _candidate_before_dispatch(final_candidate, request),
     )
 
@@ -86,12 +88,18 @@ def accounted_one_shot(target: dict[str, Any], candidate: dict[str, Any], send, 
     """One accounted provider-test send attributed to ``system:<source>``; at most one physical attempt.
     A send made inside a task's own usage scope stays that task's (its root, budget and Stop fences), tagged
     ``source``: a synthetic system root would take the task's spending out of its control."""
+    with _probe_scope(source):
+        return _accounted_send(target, candidate, send, source=source)
+
+
+@contextmanager
+def _probe_scope(source):
     bound = current_usage_scope()
     task_id = f"system:{source}"
     scope = bound if bound is not None and bound.task_id and not bound.non_task_operation else UsageScope(
         task_id=task_id, root_task_id=task_id, category="provider_test", non_task_operation=True, source=source)
     with usage_scope(scope), physical_attempt_limit(1):
-        return _accounted_send(target, candidate, send, source=source)
+        yield
 
 
 def _plain(value: Any) -> Any:
@@ -220,6 +228,10 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
 
     if isinstance(exc, ProbeToolTestFailed):
         reason = exc.reason
+    elif getattr(exc, "code", "") == "ollama_route_unsettled" and getattr(exc, "probe_reason", None):
+        reason = exc.probe_reason
+    elif getattr(exc, "code", "") == "ollama_window_unavailable" or str(getattr(exc, "code", "")).startswith("ollama_guard_"):
+        reason = str(exc)  # an old Ollama, a held address or a missing consent: the owner's own next step
     elif status == 402 or code in credit_codes or error_type in credit_codes:
         reason = "No credits"
     elif status == 401:
@@ -333,6 +345,17 @@ def _modes(sent: list) -> dict[str, Any]:
     return {"requested": dict(sent[0]), "applied": dict(sent[-1])} if sent else {}
 
 
+def _route_facts(target: Mapping[str, Any], exc: Optional[BaseException] = None) -> dict[str, Any]:
+    """What the test's own decision about a private compatible server was, whatever its outcome: ``caution`` when
+    its physical send reached ``/v1`` on a server that named no program (``llm_ollama.limit_compatible_send``),
+    ``code`` when that decision sent nothing (the gateway publishes ``ProviderTestResponse``'s ``code``); a Test admits nothing."""
+    from ouroboros.llm_ollama_guard import TEST_CAUTION
+
+    code = str(getattr(exc, "code", "") or "")
+    return {**({"caution": TEST_CAUTION} if target.get("route_caution") else {}),
+            **({"code": code} if code.startswith("ollama_guard_") else {})}
+
+
 def _probe_candidate(target: Mapping[str, Any]) -> dict[str, Any]:
     provider = str(target.get("provider") or "")
     model = str(target.get("resolved_model") or "")
@@ -358,7 +381,7 @@ def _probe_candidate(target: Mapping[str, Any]) -> dict[str, Any]:
 def _target_is_configured(target: Mapping[str, Any]) -> bool:
     provider = str(target.get("provider") or "")
     if provider == "openai-compatible":
-        return bool(str(target.get("base_url") or "").strip())
+        return bool(target.get("base_url") and (target.get("api_key") or target.get("keyless")))
     if provider == "gigachat":
         return bool(
             str(target.get("api_key") or "").strip()
@@ -395,6 +418,21 @@ def probe_provider_readiness(
             }
         candidate = _probe_candidate(target)
         provider = str(target.get("provider") or "")
+
+        if provider == "openai-compatible":
+            from ouroboros.llm_ollama import OllamaProgramChanged, chat_ollama, is_ollama
+            from ouroboros.utils import transport_no_proxy
+            target["settings_test"] = True
+            no_proxy = transport_no_proxy()
+            if is_ollama(target, no_proxy=no_proxy, before_send=True):
+                try:
+                    with _probe_scope("provider_test"):
+                        chat_ollama(target, candidate["messages"], None, "none", PROVIDER_TEST_MAX_TOKENS, "auto",
+                                    no_proxy=no_proxy, timeout=timeout,
+                                    window=client.configured_window(target, settings))
+                    return {"ok": True, "status_code": 200, "exception_type": ""}
+                except OllamaProgramChanged:
+                    pass
 
         if provider in {
             "openrouter", "openai", "openai-compatible", "minimax", "cloudru",
@@ -459,9 +497,10 @@ def probe_provider_readiness(
             "status_code": 200,
             "exception_type": "",
             **_modes(sent),
+            **_route_facts(target),
         }
     except Exception as exc:
-        return {**controlled_probe_error(exc), **_modes(sent)}
+        return {**controlled_probe_error(exc), **_modes(sent), **_route_facts(target, exc)}
     finally:
         close = getattr(remote_client, "close", None)
         if callable(close):
@@ -523,7 +562,11 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
             return {}
         target = llm._resolve_remote_target(model)
         url = str(target.get("base_url") or "")
-        if not url or is_loopback_base_url(url):
+        if not url:
+            return {}
+        loopback = is_loopback_base_url(url)
+        if loopback and (target.get("provider") != "openai-compatible" or not target.get("resolved_model")
+                         or not (target.get("api_key") or target.get("keyless"))):
             return {}
         import httpx
         # Metadata carries no cognitive in-flight lease. Reuse the ordinary
@@ -531,12 +574,21 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
         timeout = min(float(timeout), float(llm._no_proxy_timeout(timeout).connect))
         from ouroboros.net_transport import verify_kwargs
         with httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False, **verify_kwargs()) as client:
+            from ouroboros.llm_ollama import _gate
+            if loopback or _gate(target, before_send=False) is True:
+                from ouroboros.server_window import ollama_server_ready
+                ready = ollama_server_ready(target, client)
+                if ready:
+                    return {"kind": "local_model_server", "program": "ollama",
+                            "model": target["resolved_model"], "observed_at": utc_now_iso()}
+                if ready is False or loopback:
+                    return {}
             response = client.head(url)
         # An upstream HTTP refusal still proves connectivity. A gateway/server
         # outage does not. This says nothing about the old generation's outcome.
         if 200 <= response.status_code < 500:
             return {"kind": "upstream_http", "status_code": response.status_code,
                     "observed_at": utc_now_iso()}
-    except Exception:
-        logging.getLogger(__name__).debug("upstream transport still unavailable", exc_info=True)
+    except Exception as error:
+        logging.getLogger(__name__).debug("upstream transport still unavailable (%s)", type(error).__name__)
     return {}

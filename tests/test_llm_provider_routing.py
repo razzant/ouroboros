@@ -1,3 +1,5 @@
+from tests._ollama import TARGET, MESSAGES, OllamaHTTP, LlamaCppHTTP, chat, _compatible_target, install_http as install_http
+
 import pytest
 
 from ouroboros.llm import LLMClient
@@ -1551,3 +1553,102 @@ def test_the_stands_text_answer_is_kept_without_its_reasoning():
     assert msg["content"].startswith("Готово! Вот итоги выполнения задачи:") and "think>" not in msg["content"]
     assert msg["reasoning"].startswith("Команда python3 была успешно выполнена") and "think>" not in msg["reasoning"]
     assert witness["content"].endswith(msg["content"])
+
+def test_shared_main_light_safety_runner_uses_one_explicit_load_window(install_http, monkeypatch):
+    from ouroboros import config
+    from ouroboros.llm_routing import configured_window
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY
+
+    settings = {"OUROBOROS_MODEL": TARGET["requested_model"], "OUROBOROS_MODEL_LIGHT": TARGET["requested_model"],
+                "OUROBOROS_MODEL_SAFETY": TARGET["requested_model"],
+                "OPENAI_COMPATIBLE_BASE_URL": TARGET["base_url"], "OPENAI_COMPATIBLE_API_KEY": "test-only",
+                MODEL_CONTEXT_WINDOWS_KEY: {"main": 80_000, "light": 32_768, "safety": 4096}}
+    monkeypatch.setattr(config, "runtime_settings", lambda: settings)
+    assert configured_window(TARGET) == 80_000
+    server = install_http(OllamaHTTP())
+    for role in ("main", "light", "safety"):
+        chat(model_role=role)
+    assert [body["options"]["num_ctx"] for body in server.posts] == [80_000] * 3
+
+
+
+@pytest.mark.parametrize("role", ["light", "vision", "safety"])
+def test_blank_following_slot_contributes_its_window_to_shared_runner(monkeypatch, role):
+    from ouroboros import config
+    from ouroboros.llm_routing import configured_window
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY, MODEL_ROLE_SETTINGS
+
+    settings = {"OUROBOROS_MODEL": TARGET["requested_model"], "OUROBOROS_MODEL_LIGHT": "",
+                MODEL_ROLE_SETTINGS[role]: "", "OPENAI_COMPATIBLE_BASE_URL": TARGET["base_url"],
+                MODEL_CONTEXT_WINDOWS_KEY: {"main": 80_000, role: 96_000}}
+    monkeypatch.setattr(config, "runtime_settings", lambda: settings)
+    assert configured_window(TARGET) == 96_000
+    settings["USE_LOCAL_MAIN"] = True
+    assert configured_window(TARGET) == 0, "inherited built-in local routes do not configure the API server"
+
+
+
+def test_separate_builtin_local_light_cap_does_not_reconfigure_api_main(monkeypatch):
+    from ouroboros import config
+    from ouroboros.llm_routing import configured_window
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY
+
+    settings = {"OUROBOROS_MODEL": TARGET["requested_model"], "OUROBOROS_MODEL_LIGHT": "",
+                "USE_LOCAL_LIGHT": True, "USE_LOCAL_MAIN": False,
+                "OPENAI_COMPATIBLE_BASE_URL": TARGET["base_url"],
+                MODEL_CONTEXT_WINDOWS_KEY: {"main": 80_000, "light": 96_000}}
+    monkeypatch.setattr(config, "runtime_settings", lambda: settings)
+    assert configured_window(TARGET) == 80_000
+
+
+
+def test_unrelated_role_with_disabled_connection_does_not_block_ollama_window(monkeypatch):
+    """R3 Qwen F2, review-scratch/qwen/repro_configured_window.py."""
+    from ouroboros import config
+    from ouroboros.llm_routing import configured_window
+
+    settings = {
+        "OUROBOROS_MODEL": "openai-compatible::mock-model",
+        "OUROBOROS_MODEL_LIGHT": "openai-compatible@dead::some-model",
+        "OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:11434/v1", "OPENAI_COMPATIBLE_API_KEY": "k",
+        "OUROBOROS_CONNECTIONS": [{"kind": "openai-compatible", "name": "dead", "enabled": False,
+                                   "base_url": "http://127.0.0.1:9/v1", "api_key": "x"}],
+        "OUROBOROS_MODEL_CONTEXT_WINDOWS": {"main": 80000, "light": 32768},
+    }
+    monkeypatch.setattr(config, "runtime_settings", lambda: settings)
+    assert configured_window({**TARGET, "base_url": "http://127.0.0.1:11434/v1"}) == 80_000
+
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("no_proxy", [False, True])
+def test_ollama_replaced_by_llamacpp_on_same_address_retires_identity_and_answers_via_v1(
+        install_http, monkeypatch, asynchronous, no_proxy):
+    import asyncio
+    import copy
+    from ouroboros import capability_evidence as ce, llm_ollama
+    from ouroboros.llm import LLMClient
+
+    target = _compatible_target(monkeypatch, "http://127.0.0.1:11464/v1")
+    install_http(OllamaHTTP())
+    assert llm_ollama.is_ollama(target)
+    identity = llm_ollama._identity(target)
+    assert ce._read(ce.canonical_evidence_root())["native_protocols"][identity]["protocol"] == "ollama"
+    server = install_http(LlamaCppHTTP())
+    monkeypatch.setattr("ouroboros.llm.transport_no_proxy", lambda: False)
+    client = LLMClient()
+    monkeypatch.setattr(client, "_resolve_remote_target", lambda model: dict(target))
+    kwargs = dict(messages=copy.deepcopy(MESSAGES), model=TARGET["requested_model"], max_tokens=64, no_proxy=no_proxy)
+    if asynchronous:
+        message, usage = asyncio.run(client.chat_async(**kwargs))
+    else:
+        message, usage = client.chat(**kwargs)
+    assert message["content"] == "from llama.cpp"
+    assert "no longer answers as Ollama" in usage["route_notice"] and "11464" in usage["route_notice"]
+    assert server.paths[:2] == [("GET", "/api/version"), ("GET", "/api/ps")]
+    assert ("POST", "/api/chat") not in server.paths
+    assert "truncat" in usage["route_notice"]
+    assert server.paths[-1] == ("POST", "/v1/chat/completions")
+    assert ce._read(ce.canonical_evidence_root())["native_protocols"][identity]["replaced"] == "ollama"
+    assert not llm_ollama.is_ollama(target)
+    assert server.paths.count(("GET", "/api/version")) == 1, "the retired route is not probed again at once"

@@ -49,6 +49,9 @@ class PhysicalAttemptContext:
     # it against the leading system content (``model_send_seal``). Carried beside the record, never in it: it is no
     # field, so no ``asdict`` of a ledger row, receipt, capture or checkpoint holds it; ``replace`` keeps it.
     base_prompt_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
+    # The native Ollama load this send's plan asked for (0: Auto), None for every other route. A record field, so the
+    # ledger row and a restored receipt carry it; last, so a positional caller of the fields above is unchanged.
+    requested_load_window: Optional[int] = None
 
     def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]]) -> None:
         # Only a witness is kept on the instance: without one, ``vars`` holds just the record's fields, and ``replace``

@@ -88,6 +88,10 @@ class SizeRefusal:
     upstream: str = ""   # the sentence the numbers were read from where the host's owner message lacks it: a gateway's
                          # nested upstream error (#3518), or an error given as a bare string (LM Studio, Ollama native)
 
+    nominal_window: Optional[int] = None  # native runner: zero means its unpadded window is unknown
+    ollama_scope: str = ""
+    ollama_read_sequence: Optional[int] = None  # the load statement at dispatch, not at refusal publication
+
     @property
     def has_numbers(self) -> bool:
         return any((self.window, self.requested, self.reply, self.requested_total))
@@ -95,7 +99,11 @@ class SizeRefusal:
     @property
     def token_window(self) -> int:
         """The window a plan may be sized by: a number in tokens, else 0."""
-        return self.window if self.units == "tokens" else 0
+        if self.units != "tokens" or self.nominal_window == 0:
+            return 0
+        if self.nominal_window is None:
+            return self.window
+        return min(self.window or self.nominal_window, self.nominal_window)
 
     @property
     def store_kind(self) -> str:
@@ -103,7 +111,13 @@ class SizeRefusal:
         return "input" if self.meaning == "input" else "total"
 
     def to_json(self) -> Dict[str, Any]:
-        return asdict(self)
+        row = asdict(self)
+        if self.nominal_window is None:
+            row.pop("nominal_window")
+        if not self.ollama_scope:
+            row.pop("ollama_scope")
+            row.pop("ollama_read_sequence")
+        return row
 
 
 def _int(value: Any) -> int:
@@ -114,11 +128,11 @@ def excludes_size(status: Optional[int], layers) -> bool:
     """A cause of another kind in ``layers`` (the recognised object's subtree; else the current path) outranks a
     size quotation: a code the classifier types otherwise (``loop_llm_call._provider_code_kind``, its retryable
     codes) or one of ``OTHER_CAUSE_CODES``, a body limit, or output wording beside no typed size code."""
-    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, output_or_body_size_message
+    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, LOCAL_CONTEXT_CODES, output_or_body_size_message
     from ouroboros.loop_llm_call import _RETRYABLE_PROVIDER_CODES, _provider_code_kind
 
     values = [layer.get(key) for layer in layers for key in ("code", "type", "limit_source")]
-    size_codes = CONTEXT_OVERFLOW_CODES | {LLAMA_CPP_TYPE}
+    size_codes = CONTEXT_OVERFLOW_CODES | LOCAL_CONTEXT_CODES
     typed_context = any(str(value or "").lower() in size_codes for value in values)
     generic = {"400", "badrequest", "badrequesterror", "invalidrequest", "invalidrequesterror", "error"}
     for value in values:
@@ -262,7 +276,12 @@ def _exception_numbers(exc: Any):
 
     answer = provider_answer(exc)
     status = None if isinstance(exc, LocalContextTooLargeError) else _exception_status_code(exc)
-    return _read_numbers(answer, status, message=repr(exc), typed=typed_values(exc, answer))
+    excluded, fact = _read_numbers(answer, status, message=repr(exc), typed=typed_values(exc, answer))
+    if fact and (nominal := getattr(exc, "nominal_context_window", None)) is not None:
+        from dataclasses import replace
+        scope, sequence = getattr(exc, "ollama_load_statement", ("", None))
+        fact = replace(fact, nominal_window=nominal, ollama_scope=scope, ollama_read_sequence=sequence)
+    return excluded, fact
 
 
 def from_exception(exc: Any) -> Optional[SizeRefusal]:
@@ -301,7 +320,7 @@ def for_usage(usage: Any) -> SizeRefusal:
     found = stamped(usage)
     if found is None and isinstance(answer.get("size"), dict):
         found = SizeRefusal(**answer["size"])
-    if found is not None and found.has_numbers:
+    if found is not None and (found.has_numbers or found.nominal_window is not None):
         return found
     if answer.get("basis") in {"status_413", "number_equals_declared"}:
         return SizeRefusal(window=int(answer.get("limit") or 0), units="unstated",
@@ -313,7 +332,9 @@ def refusal_measure(usage: Dict[str, Any], reply_allowance: int) -> Tuple[Option
     """The stated limit, reserved reply and provider-counted input for the recovery pass."""
     fact = for_usage(usage)
     cited = usage.get("_last_llm_provider_answer") or {}
-    stated = fact.token_window or cited.get("limit") or None
+    stated = fact.token_window or None
+    if stated is None and fact.nominal_window is None:
+        stated = cited.get("limit") or None
     requested, reply, total = (fact.requested, fact.reply, fact.requested_total) if stated else (0, 0, 0)
     reply = 0 if cited.get("limit_kind") == "input" else reply or reply_allowance
     return stated, reply, requested or max(0, total - reply)

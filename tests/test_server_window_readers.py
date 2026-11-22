@@ -48,6 +48,26 @@ def test_root_readers_take_the_slot_window_and_the_loaded_instance_only():
     assert sw._ollama_ps(_json("ollama-0.40-api-ps-empty.json"), sw.wanted_ids("qwen3.5:9b")) == 0  # before a load
 
 
+def test_a_program_is_named_only_by_its_own_document():
+    """``PROGRAM_DOCUMENTS``: the stand's llama.cpp ``/props`` and LM Studio's v0 listing name their programs; no
+    other recorded document, generic listing, version number or error body is taken for either."""
+    shapes = {name: (path, shaped) for name, path, shaped in sw.PROGRAM_DOCUMENTS}
+    assert {name: path for name, (path, _shaped) in shapes.items()} == {"llama.cpp": "/props", "LM Studio": "/api/v0/models"}
+    own = {"llama-b12421-props.json": "llama.cpp", "llama-b12421-np1-80k-props.json": "llama.cpp",
+           "llama-b12421-np2-80k-props.json": "llama.cpp", "lmstudio-0.4-api-v0-models.json": "LM Studio"}
+    recorded = sorted(path.name for path in ROOT.glob("*.json"))
+    assert set(own) < set(recorded)
+    for name in recorded:
+        named = {program for program, (_path, shaped) in shapes.items() if shaped(_json(name))}
+        assert named == ({own[name]} if name in own else set()), name
+    props = _json("llama-b12421-props.json")
+    for nothing in ({}, [], None, {"data": []}, {"version": "0.40.16"}, {"total_slots": 1},
+                    {**props, "total_slots": 0}, {**props, "default_generation_settings": {}},
+                    {"error": "Unexpected endpoint or method. (GET /api/v0/models)"},
+                    {"data": [{"id": "qwen", "state": "loaded"}]}, {"data": [{"id": "qwen", "max_context_length": 4096}]}):
+        assert not any(shaped(nothing) for _path, shaped in shapes.values()), nothing
+
+
 def _getter(routes, asked):
     def get(url, **kwargs):
         asked.append(url)
@@ -215,3 +235,74 @@ def test_a_failed_start_read_keeps_a_fresh_window_and_reads_once(monkeypatch, tm
         assert "this read stated no window" in evidence.detail
         kind, observed_at = ce.window_evidence(evidence, record)
         assert kind == "recorded" and datetime.fromisoformat(observed_at) < failed_at
+
+@pytest.mark.parametrize("host,private", [
+    ("http://ollama:11434/v1", True), ("http://llama:8080/v1", True), ("http://ollama.lan/v1", True),
+    ("http://gpu.internal:11434/v1", True), ("http://box.home.arpa/v1", True), ("http://nas.localdomain/v1", True),
+    ("http://ollama.local/v1", True), ("http://[::1]:11434/v1", True), ("http://192.168.1.20:11434/v1", True),
+    ("https://api.example.com/v1", False), ("https://ollama.com/v1", False), ("https://8.8.8.8/v1", False),
+    ("https://lan.example.com/v1", False), ("https://internal.example.org/v1", False), ("", False),
+])
+def test_private_host_covers_single_label_and_private_suffix_names(host, private):
+    from ouroboros.server_window import private_host
+
+    assert private_host(host) is private
+
+
+@pytest.mark.parametrize("host,address", [
+    ("10.1", "10.0.0.1"), ("0xa.0.0.1", "10.0.0.1"), ("0300.0250.0.1", "192.168.0.1"), ("167772161", "10.0.0.1"),
+    ("::ffff:10.0.0.1", "10.0.0.1"), ("8.8.8", "8.8.0.8"), ("134744072", "8.8.8.8"), ("::ffff:8.8.8.8", "8.8.8.8"),
+    ("fe80::1", "fe80::1"), ("ollama", None), ("gateway.lan", None), ("", None),
+])
+def test_a_numeric_host_is_the_address_it_reaches_in_any_spelling(host, address):
+    """One reading of a numeric host for the private-server question and for the address a hold names: the
+    spellings the OS connects by are that address, a name is no address, and nothing is resolved."""
+    import ipaddress
+
+    from ouroboros.llm_ollama_guard import address_scope
+    from ouroboros.server_window import host_address, private_host
+
+    url = f"http://[{host}]:8080/v1" if ":" in host else f"http://{host}:8080/v1"
+    if address is None:
+        assert host_address(host) is None
+        return
+    reached = ipaddress.ip_address(address)
+    assert host_address(host) == reached
+    assert private_host(url) is (reached.is_loopback or reached.is_private or reached.is_link_local)
+    quad = f"[{reached.compressed}]" if reached.version == 6 else str(reached)
+    assert address_scope(url) == f"http://{quad}:8080"
+
+
+def test_a_malformed_address_is_no_private_host():
+    assert not sw.private_host("http://[::1/v1") and not sw.private_host("not a url")
+
+
+def test_local_ready_carries_the_targets_custom_headers():
+    import httpx
+    seen = []
+    def handler(request):
+        seen.append(dict(request.headers))
+        if request.headers.get('X-Local-Route') != 'required':
+            return httpx.Response(403)
+        bodies = {'/api/version': {'version': '0.40.16'}, '/api/show': {
+            'model_info': {'general.architecture': 'qwen35'}, 'capabilities': ['completion']}}
+        return httpx.Response(200, json=bodies.get(request.url.path, {}))
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert sw.ollama_server_ready({'provider': 'openai-compatible', 'resolved_model': 'm',
+            'base_url': 'http://localhost:8080/v1', 'api_key': 'test-only',
+            'default_headers': {'X-Local-Route': 'required'}}, client)
+    assert seen and all(row['authorization'] == 'Bearer test-only' for row in seen)
+
+
+@pytest.mark.parametrize("architecture,lengths,maximum", [
+    ("text", {"text": 131072, "vision": 262144}, 131072),
+    ("text", {"vision": 262144}, 0),
+    (None, {"text": 131072}, 131072),
+    (None, {"text": 131072, "other": 131072}, 131072),
+    (None, {"text": 131072, "vision": 262144}, 0),
+])
+def test_ollama_model_maximum_uses_the_declared_architecture(architecture, lengths, maximum):
+    info = {f"{name}.context_length": size for name, size in lengths.items()}
+    if architecture:
+        info["general.architecture"] = architecture
+    assert sw.ollama_model_maximum({"model_info": info}) == maximum

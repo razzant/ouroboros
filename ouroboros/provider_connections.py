@@ -153,7 +153,10 @@ def connections_meta(settings: Mapping[str, Any], document: Mapping[str, Any]) -
     ``source`` says where its credential is read from now: the saved document,
     the environment (a key the document leaves unset), or nowhere yet. A compatible
     endpoint that refused prompt-cache hints and was learned without them carries
-    ``cache_hints: {refused, learned_at}`` (``request_wire_contract.endpoint_cache_hint_refusal``)."""
+    ``cache_hints: {refused, learned_at}`` (``request_wire_contract.endpoint_cache_hint_refusal``);
+    a private one carries ``unidentified``: its ``/v1`` admission at the endpoint it has (``consent``, ``prior``
+    or none), the Ollama read at its address and what its own last check identified there
+    (``llm_ollama_guard.connection_facts``)."""
     read, rows = settings_view(settings)
     saved = document if isinstance(document, Mapping) else {}
     saved_read, saved_rows = saved.get, connection_rows(saved.get(CONNECTIONS_KEY))
@@ -170,7 +173,7 @@ def connections_meta(settings: Mapping[str, Any], document: Mapping[str, Any]) -
             "configured": configured,
             "source": "none" if not configured else "settings" if in_document else "environment",
             "id": connection_id(route.kind, name), "display": connection_display(route.kind, name, rows),
-            **(_cache_hints(route, read, row) if route.kind == "openai-compatible" and configured else {}),
+            **(_compatible_facts(route, read, row) if route.kind == "openai-compatible" and configured else {}),
         })
     return out
 
@@ -219,12 +222,81 @@ def seed_new_api_surfaces(after: dict, before: Mapping[str, Any]) -> list[str]:
     return seeded
 
 
-def _cache_hints(route: RouteParts, read: Reader, row: Mapping[str, Any]) -> dict:
+def _compatible_address(route: RouteParts, read: Reader, row: Mapping[str, Any]) -> str:
+    """Where a compatible connection sends: a named row's own address, the built-in pair's (the legacy one too)."""
+    return _text(row.get("base_url")) if route.connection else compatible_endpoint(lambda key: _text(read(key, "")))[1]
+
+
+def compatible_addresses(settings: Mapping[str, Any] | None = None) -> list[tuple[str, str]]:
+    """``(connection id, base URL)`` of every compatible connection that can serve now, in owner order."""
+    read, rows = settings_view(settings)
+    return [(connection_id(route.kind, route.connection),
+             _compatible_address(route, read, find_row(rows, route.kind, route.connection) or {}))
+            for route in connection_routes(rows)
+            if route.kind == "openai-compatible" and connection_configured(route, read, rows)]
+
+
+def served_compatible_addresses(document: Mapping[str, Any] | None) -> list[tuple[str, str]]:
+    """``compatible_addresses`` of what the loader reads once ``document`` is the saved one (``None``: no file):
+    that document under the launch environment, without the values this process tree mirrored there from an
+    earlier document (``settings_integrity.skill_environ``). Those stand in until the next projection, and
+    would show a connection the document has just dropped as still served."""
+    from ouroboros import config
+    from ouroboros.settings_integrity import settings_read_environ, skill_environ
+
+    with settings_read_environ(skill_environ()):
+        return compatible_addresses(config.settings_of_document(document, present=document is not None))
+
+
+def canonical_builtin_consent(settings: dict, written: Mapping[str, Any]) -> None:
+    """The built-in compatible key's consent as a write saves it, in place (``llm_ollama_guard.consent_token``):
+    the id of the endpoint it names, never that URL. Only what ``written`` names: a value the document
+    or the launch holds stays as its author wrote it. A row's is made so by ``normalize_connections``.
+
+    A blank consent a write saves is a withdrawal, and a blank saved value can never outweigh a non-empty
+    launch environment (``config.settings_of_document``): where the launch itself holds a consent — not this
+    tree's own projection of a saved one — the write stores the explicit revocation word instead
+    (``CONSENT_REVOKED``), which every reader reads as no consent, so a launch-environment consent has an
+    honest status and a way back. A write that leaves no address in force takes the stored consent with it,
+    so a removed connection never leaves one dangling; rotating the key under a standing address keeps it —
+    consent belongs to the endpoint, not the credential."""
+    from ouroboros.llm_ollama_guard import CONSENT_FIELD, CONSENT_REVOKED, consent_token
+    from ouroboros.settings_integrity import projected_proposals, read_environ
+
+    key = PROVIDER_KINDS["openai-compatible"].flat_key(CONSENT_FIELD)
+
+    def blanked() -> None:
+        environ = read_environ()
+        launch = environ.get(key)
+        settings[key] = CONSENT_REVOKED if _text(launch) and launch != projected_proposals(environ).get(key) else ""
+
+    if key in written:
+        text = _text(settings.get(key))
+        if text == CONSENT_REVOKED:
+            return  # an explicit revocation travels unchanged
+        address_touched = any(name in written for name in ("OPENAI_COMPATIBLE_BASE_URL", "OPENAI_BASE_URL"))
+        if text and not (address_touched and not compatible_endpoint(lambda name: _text(settings.get(name)))[1]):
+            settings[key] = consent_token(text)
+        else:
+            blanked()  # withdrawn, or granted beside an address this same write empties: nothing stands to cover
+        return
+    # A write that empties the address in force (either pair) takes the stored consent with it, so a removed
+    # connection never leaves one dangling; rotating the key under a standing address keeps it — consent
+    # belongs to the endpoint, not the credential.
+    if (any(name in written for name in ("OPENAI_COMPATIBLE_BASE_URL", "OPENAI_BASE_URL"))
+            and not compatible_endpoint(lambda name: _text(settings.get(name)))[1]):
+        blanked()
+
+
+def _compatible_facts(route: RouteParts, read: Reader, row: Mapping[str, Any]) -> dict:
+    from ouroboros.llm_ollama_guard import CONSENT_FIELD, connection_facts
     from ouroboros.request_wire_contract import endpoint_cache_hint_refusal
 
-    builtin_url = compatible_endpoint(lambda key: _text(read(key, "")))[1]
-    learned = endpoint_cache_hint_refusal(route.kind, _text(row.get("base_url")) if route.connection else builtin_url)
-    return {"cache_hints": {"refused": True, "learned_at": learned}} if learned else {}
+    get = row.get if route.connection else lambda field: read(PROVIDER_KINDS[route.kind].flat_key(field), "")
+    base_url = _compatible_address(route, read, row)
+    learned = endpoint_cache_hint_refusal(route.kind, base_url)
+    return {**({"cache_hints": {"refused": True, "learned_at": learned}} if learned else {}),
+            **connection_facts(connection_id(route.kind, route.connection), base_url, get(CONSENT_FIELD))}
 
 
 def _subagent_routes(raw: Any) -> list[tuple[str, str]]:
@@ -239,24 +311,33 @@ def _subagent_routes(raw: Any) -> list[tuple[str, str]]:
             and item["route"].get("kind") in {"api_model", "api_chat"}]
 
 
-def connection_references(settings: Mapping[str, Any]) -> list[dict]:
-    """Role, fallback and agent rows that name a connection which cannot serve them:
-    removed, disabled, of another kind or misspelled. They keep their value and refuse."""
-    from ouroboros.llm_attempt import ConnectionUnavailable
+def _named_routes(settings: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+    """``(setting, entry, model route)`` of every route the settings name: each role, fallback and API agent row."""
     from ouroboros.configured_subagents import SUBAGENTS_SETTING
-
     from ouroboros.model_slots import MODEL_ROLE_SETTINGS
 
-    read, rows = settings_view(settings)
     named = []
     for key in dict.fromkeys((*MODEL_ROLE_SETTINGS.values(), *MODEL_SETTING_KEYS)):
         models = [model.strip() for model in str(settings.get(key) or "").split(",") if model.strip()]
         # A chain entry is named by its 1-based position, so the receipt can say "Fallback 2".
         named += [(key, str(index + 1) if len(models) > 1 or "FALLBACK" in key else "", model)
                   for index, model in enumerate(models)]
-    named += [(SUBAGENTS_SETTING, row_id, target) for row_id, target in _subagent_routes(settings.get(SUBAGENTS_SETTING))]
+    return named + [(SUBAGENTS_SETTING, row_id, target) for row_id, target in _subagent_routes(settings.get(SUBAGENTS_SETTING))]
+
+
+def model_routes(settings: Mapping[str, Any]) -> list[str]:
+    """Every model route the settings name, once, in their order."""
+    return list(dict.fromkeys(model for _setting, _entry, model in _named_routes(settings)))
+
+
+def connection_references(settings: Mapping[str, Any]) -> list[dict]:
+    """Role, fallback and agent rows that name a connection which cannot serve them:
+    removed, disabled, of another kind or misspelled. They keep their value and refuse."""
+    from ouroboros.llm_attempt import ConnectionUnavailable
+
+    read, rows = settings_view(settings)
     out = []
-    for setting, entry, model in named:
+    for setting, entry, model in _named_routes(settings):
         route = parse_model_route(model)
         if route.kind not in PROVIDER_KINDS:
             continue
@@ -271,6 +352,7 @@ def connection_references(settings: Mapping[str, Any]) -> list[dict]:
 def normalize_connections(raw: Any) -> tuple[list[dict], str]:
     """``(rows, error)`` for a saved ``OUROBOROS_CONNECTIONS``: the shape every reader
     relies on, or the first problem as one owner-facing sentence (nothing saved)."""
+    from ouroboros.llm_ollama_guard import CONSENT_FIELD, consent_token
     from ouroboros.llm_routing import _OR_PROVIDER_PRESETS
 
     if isinstance(raw, str):
@@ -314,7 +396,9 @@ def normalize_connections(raw: Any) -> tuple[list[dict], str]:
                 isinstance(routing, str) and (routing.strip().lower() in _OR_PROVIDER_PRESETS
                                               or isinstance(_json_object(routing), dict))):
             return [], f"{where}: provider_routing must be a preset ({', '.join(_OR_PROVIDER_PRESETS)}) or a JSON object."
-        rows.append({**row, "kind": kind, "name": name})
+        # A consent is saved as the id of the endpoint it names, never that URL.
+        consent = {CONSENT_FIELD: consent_token(row[CONSENT_FIELD])} if _text(row.get(CONSENT_FIELD)) else {}
+        rows.append({**row, **consent, "kind": kind, "name": name})
     return rows, ""
 
 

@@ -677,10 +677,11 @@ def test_settings_fix_exactly_the_fields_a_built_in_checker_reads(install, monke
     write_document(install, document)
     if managed:
         manage(install, monkeypatch, {"version": 1, "safety": {"checker": {"model": COMPATIBLE}}})
+    consent = ("OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED", "https://organization.invalid/v1")  # the connection's own field
     bound = {"legacy": [("OPENAI_API_KEY", "fixture-other-key"), ("OPENAI_BASE_URL", "https://employee.invalid/v1"),
-                        ("OPENAI_COMPATIBLE_BASE_URL", "https://employee.invalid/v1")],
+                        ("OPENAI_COMPATIBLE_BASE_URL", "https://employee.invalid/v1"), consent],
              "dedicated": [("OPENAI_COMPATIBLE_API_KEY", "fixture-other-key"), ("OPENAI_COMPATIBLE_BASE_URL", ""),
-                           ("OPENAI_COMPATIBLE_BASE_URL", "https://employee.invalid/v1")]}[pair]
+                           ("OPENAI_COMPATIBLE_BASE_URL", "https://employee.invalid/v1"), consent]}[pair]
     free = {"legacy": {}, "dedicated": {"OPENAI_API_KEY": "fixture-new-employee-key",
                                          "OPENAI_BASE_URL": "https://employee.invalid/v1"}}[pair]
     with TestClient(_settings_app(install, monkeypatch)) as client:
@@ -699,8 +700,9 @@ def test_settings_fix_exactly_the_fields_a_built_in_checker_reads(install, monke
         assert deployment is None and {key: answer.status_code for key, answer in refused.items()} == dict.fromkeys(refused, 200)
         return
     assert deployment["checker"]["connections"] == ["openai-compatible"], "the OpenAI row is not the checker's"
-    assert deployment["checker"]["fields"] == (["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_COMPATIBLE_BASE_URL"]
-                                               if pair == "legacy" else ["OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL"])
+    assert deployment["checker"]["fields"] == [
+        *(["OPENAI_API_KEY", "OPENAI_BASE_URL"] if pair == "legacy" else ["OPENAI_COMPATIBLE_API_KEY"]),
+        "OPENAI_COMPATIBLE_BASE_URL", consent[0]]
     assert {key: answer.status_code for key, answer in refused.items()} == dict.fromkeys(refused, 403), {
         key: answer.text for key, answer in refused.items()}
     kept = stored(install)

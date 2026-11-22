@@ -77,7 +77,9 @@ function server(t, { values = {}, status = statusAnswer(), skills = [] } = {}) {
             return [{ kind, name: '', builtin: true, enabled: !off, configured, source: configured ? 'settings' : 'none', id: kind, display: LABELS[kind] },
                 ...rows.filter((row) => row.kind === kind && row.name !== 'default').map((row) => ({ kind, name: row.name, label: row.label || '', builtin: false,
                     enabled: row.enabled !== false, configured: Boolean(row.api_key), source: 'settings', id: `${kind}@${row.name}`,
-                    display: `${LABELS[kind]} · ${row.label || row.name}` }))];
+                    display: `${LABELS[kind]} · ${row.label || row.name}`,
+                    // The server's own reading of a private compatible key: its consent stands for the address it has.
+                    ...(state.unidentified ? { unidentified: { ...state.unidentified, admission: row.continue_unconfirmed && row.continue_unconfirmed === row.base_url ? 'consent' : '' } } : {}) }))];
         });
         return { ...Object.fromEntries(Object.entries(now).map(([key, value]) => [key, secret(key) && value ? MASK : structuredClone(value)])),
             OUROBOROS_CONNECTIONS: rows.map((row) => ({ ...row, ...(row.api_key ? { api_key: MASK } : {}) })),
@@ -125,7 +127,7 @@ function server(t, { values = {}, status = statusAnswer(), skills = [] } = {}) {
         }
         if (path === '/api/claudexor/wake') { state.wakes += 1; return response(statusAnswer()); }
         if (path === '/api/claudexor/maintenance/harnesses') return response({ harnesses: [] });
-        if (path === '/api/providers/test') { state.askedTests.push(body); return response({ ok: false, error: 'No credits' }); }
+        if (path === '/api/providers/test') { state.askedTests.push(body); return response(state.testAnswer?.(body) ?? { ok: false, error: 'No credits' }); }
         if (path === '/api/settings/secret') return response({ value: state.values[body.key] });
         throw new Error(`Unexpected request ${method} ${url}`);
     };
@@ -444,6 +446,205 @@ test('a key\'s write whose outcome is unknown is judged by what a read shows, fi
     page.unmount();
 });
 
+test('a compatible key\'s consent is its own box: it stores the address shown, a new address clears it, Test checks the draft', async (t) => {
+    const LAB = { kind: 'openai-compatible', name: 'lab', label: 'Lab', base_url: 'http://lab.lan/v1', api_key: 'sk-lab' };
+    const world = server(t, { values: { OUROBOROS_CONNECTIONS: [LAB] } });
+    world.state.unidentified = { checked: { type: 'unknown', observed_at: '2026-11-19T10:00:00Z' } };
+    await world.mount(keyPath('openai-compatible', 'lab'));
+    const box = () => world.find('[data-connection-consent]');
+    const field = (name) => world.find(`[data-connection-field="${name}"]`);
+    const press = async (selector) => { await world.container.fire('click', { target: world.find(selector) }); await settle(); };
+    const tick = async (on) => { box().checked = on; await world.container.fire('input', { target: box() }); };
+    const stored = () => world.state.values.OUROBOROS_CONNECTIONS[0].continue_unconfirmed;
+    assert.equal(box().checked, false);
+    assert.match(world.container.textContent, /Continue via the compatible API without confirmation that history is preserved/);
+    assert.match(world.find('[data-connection-unidentified]').textContent, /^Server type not confirmed at the last check.*A request goes to one only with your consent\.$/);
+    // Ticked and not saved: Test checks what a save would allow, and nothing is stored.
+    await tick(true);
+    await press('[data-connection-test]');
+    assert.deepEqual(world.state.askedTests.at(-1), { provider_id: 'openai-compatible', connection: 'lab', overrides: { continue_unconfirmed: 'http://lab.lan/v1' } });
+    assert.equal(stored(), undefined);
+    await press('[data-editor-save]');
+    assert.equal(stored(), 'http://lab.lan/v1', 'the consent names the address shown');
+    assert.equal(box().checked, true, 'read back, it stands');
+    assert.match(world.find('[data-connection-unidentified]').textContent, /may shorten a long conversation without saying so\.$/, 'the ticked box says the rest');
+    // Another address typed: the consent was not given for it, and saving so withdraws it.
+    field('base_url').value = 'http://other.lan/v1';
+    await world.container.fire('input', { target: field('base_url') });
+    assert.equal(box().checked, false, 'a new address asks again');
+    await press('[data-editor-save]');
+    assert.deepEqual([world.state.values.OUROBOROS_CONNECTIONS[0].base_url, stored()], ['http://other.lan/v1', ''], 'no consent is left behind');
+    await tick(true);
+    await press('[data-editor-save]');
+    assert.deepEqual([world.state.values.OUROBOROS_CONNECTIONS[0].base_url, stored()], ['http://other.lan/v1', 'http://other.lan/v1']);
+    // Revoked by clearing the box.
+    await tick(false);
+    await press('[data-editor-save]');
+    assert.equal(stored(), '');
+    assert.equal(box().checked, false);
+    // Only the kind whose server can be a private one of unknown program has such a box.
+    assert.deepEqual(PROVIDER_CARDS.filter((card) => card.consent).map((card) => card.kind), ['openai-compatible']);
+});
+
+test('the consent box is offered only where a consent can matter', async (t) => {
+    const LAB = { kind: 'openai-compatible', name: 'lab', label: 'Lab', base_url: 'http://lab.lan/v1', api_key: 'sk-lab' };
+    const page = async (unidentified, row = LAB) => {
+        const world = server(t, { values: { OUROBOROS_CONNECTIONS: [row] } });
+        world.state.unidentified = unidentified;
+        await world.mount(keyPath('openai-compatible', 'lab'));
+        return world;
+    };
+    const offered = (world) => !world.find('.accounts-key-consent').hidden;
+    const seen = { type: 'ollama', version: '0.40.16', observed_at: '2026-11-19T10:00:00Z' };
+    // A private server that named no program, at its last check or before any.
+    assert.equal(offered(await page({ checked: { type: 'unknown' } })), true);
+    assert.equal(offered(await page({})), true);
+    // An identified server and an address where Ollama was seen: no consent changes what they send.
+    assert.equal(offered(await page({ checked: { type: 'llama.cpp' } })), false);
+    assert.equal(offered(await page({ ollama: seen })), false);
+    // A public address keeps no such fact, and typing another offers nothing: the page cannot tell a private server from a
+    // public one, so only a Test that was refused for want of the consent (or a consent that stands) opens the box.
+    const open = await page(null);
+    assert.equal(offered(open), false);
+    const address = open.find('[data-connection-field="base_url"]');
+    address.value = 'http://127.0.0.1:8000/v1';
+    await open.container.fire('input', { target: address });
+    assert.equal(offered(open), false);
+    // A consent that stands stays shown even where it decides nothing, so that it can be withdrawn.
+    const held = await page({ ollama: seen }, { ...LAB, continue_unconfirmed: LAB.base_url });
+    assert.deepEqual([offered(held), held.find('[data-connection-consent]').checked], [true, true]);
+    // A key with no address yet offers none either: its first Test says whether the server needs one.
+    const empty = server(t);
+    await empty.mount(keyPath('openai-compatible'));
+    assert.equal(offered(empty), false);
+});
+
+
+/** A compatible key's page and what it needs to be driven: the box, the note, the Test and its line. */
+async function compatiblePage(t, { unidentified, row = { kind: 'openai-compatible', name: 'lab', label: 'Lab', base_url: 'http://lab.lan/v1', api_key: 'sk-lab' } } = {}) {
+    const world = server(t, { values: { OUROBOROS_CONNECTIONS: [row] } });
+    world.state.unidentified = unidentified;
+    await world.mount(keyPath('openai-compatible', 'lab'));
+    const press = async (selector) => { await world.container.fire('click', { target: world.find(selector) }); await settle(); };
+    const type = async (name, value) => { const input = world.find(`[data-connection-field="${name}"]`); input.value = value; await world.container.fire('input', { target: input }); };
+    const tick = async (on) => { world.find('[data-connection-consent]').checked = on; await world.container.fire('input', { target: world.find('[data-connection-consent]') }); };
+    const view = () => ({ offered: !world.find('.accounts-key-consent').hidden, why: world.find('.accounts-key-consent').dataset.consentOffer,
+        ticked: world.find('[data-connection-consent]').checked, note: world.find('[data-connection-unidentified]'),
+        line: world.find('[data-editor-result]') });
+    return { world, press, type, tick, view };
+}
+const REFUSAL = (code, error) => ({ ok: false, code, error });
+const NO_PROGRAM = 'The server at http://lab.lan does not show which program it runs, so Ouroboros cannot confirm that it keeps the whole history; nothing was sent.';
+
+test('a Test that is refused for want of the consent opens its box unticked, even where the saved key knew a program; Test and Save then carry it', async (t) => {
+    // The key was identified at its last check; now the server names nothing.
+    const page = await compatiblePage(t, { unidentified: { checked: { type: 'llama.cpp', observed_at: '2026-11-18T10:00:00Z' } } });
+    const { world, press, tick, view } = page;
+    assert.deepEqual([view().offered, view().note.dataset.serverState], [false, 'identified'], 'a named program needs no consent, so no box yet');
+    world.state.testAnswer = () => REFUSAL('ollama_guard_consent', NO_PROGRAM);
+    await press('[data-connection-test]');
+    assert.deepEqual(world.state.askedTests.at(-1), { provider_id: 'openai-compatible', connection: 'lab', overrides: {} }, 'a Test of an untouched form sends nothing of the consent');
+    assert.deepEqual([view().offered, view().why, view().ticked], [true, 'test', false], 'actionable and unticked');
+    assert.equal(view().line.textContent, `Not ready — ${NO_PROGRAM}`);
+    assert.deepEqual([view().line.dataset.tone, view().line.dataset.testCode], ['warn', 'ollama_guard_consent']);
+    // Ticking is an edit of the form: the answer to the old request goes, the box stays where the owner put the cursor.
+    await tick(true);
+    assert.deepEqual([view().offered, view().ticked, view().line.textContent, view().line.dataset.testCode], [true, true, '', undefined]);
+    world.state.testAnswer = () => ({ ok: true, caution: 'Server type not confirmed: Ouroboros cannot tell whether it keeps the whole history.' });
+    await press('[data-connection-test]');
+    assert.deepEqual(world.state.askedTests.at(-1), { provider_id: 'openai-compatible', connection: 'lab', overrides: { continue_unconfirmed: 'http://lab.lan/v1' } },
+        'the Test checks what a save would allow');
+    assert.equal(view().line.dataset.tone, 'warn', 'a pass on a server that named no program is a warning');
+    assert.equal(world.state.values.OUROBOROS_CONNECTIONS[0].continue_unconfirmed, undefined, 'a Test saves no consent');
+    assert.equal(world.posts().length, 0, 'nor anything else');
+    await tick(false);
+    assert.equal(view().offered, true, 'unticked again it is still there: the control that was asked for does not leave');
+    await tick(true);
+    await press('[data-editor-save]');
+    assert.equal(world.state.values.OUROBOROS_CONNECTIONS[0].continue_unconfirmed, 'http://lab.lan/v1');
+});
+
+test('a hold or an old Ollama found by a Test is told in the server\'s words and offers no consent; the head says it short', async (t) => {
+    for (const [code, error, chip] of [['ollama_guard_held', 'Ollama was seen at http://lab.lan before, but this connection\'s program was not identified for this request, so nothing was sent.', 'Ollama was seen at this address'],
+        ['ollama_guard_unavailable', 'Ollama 0.12.5 can silently truncate history. Upgrade to 0.12.6 or later.', 'Ollama needs an update']]) {
+        const { world, press, view } = await compatiblePage(t, { unidentified: { admission: '', checked: { type: 'unknown', observed_at: '2026-11-18T10:00:00Z' } } });
+        assert.deepEqual([view().offered, view().why], [true, 'facts'], 'before the Test, the saved facts offer it');
+        world.state.testAnswer = () => REFUSAL(code, error);
+        await press('[data-connection-test]');
+        assert.deepEqual([view().offered, view().line.textContent, view().line.dataset.tone, view().line.dataset.testCode], [false, `Not ready — ${error}`, 'warn', code], code);
+        const head = keyHeads(await readSettings()).keys.find((key) => key.id === 'openai-compatible@lab');
+        assert.deepEqual(head.chip, { text: chip, tone: 'warn' }, 'a long sentence is no chip');
+    }
+});
+
+test('a held address shows no box to open it, and a consent that stands is shown only to be withdrawn', async (t) => {
+    const seen = { type: 'ollama', version: '0.40.16', observed_at: '2026-11-19T10:00:00Z' };
+    const { world, press, tick, view } = await compatiblePage(t, { unidentified: { ollama: seen, checked: { type: 'unknown', observed_at: '2026-11-19T10:00:00Z' } },
+        row: { kind: 'openai-compatible', name: 'lab', label: 'Lab', base_url: 'http://lab.lan/v1', api_key: 'sk-lab', continue_unconfirmed: 'http://lab.lan/v1' } });
+    assert.deepEqual([view().offered, view().why, view().ticked, view().note.dataset.serverState, view().note.dataset.admission], [true, 'ticked', true, 'held', 'consent']);
+    assert.doesNotMatch(view().note.textContent, /consent/, 'the hold says nothing a consent could change');
+    await tick(false);
+    await press('[data-editor-save]');
+    assert.equal(world.state.values.OUROBOROS_CONNECTIONS[0].continue_unconfirmed, '', 'withdrawn');
+    assert.deepEqual([view().offered, view().ticked], [false, false], 'withdrawn and held: nothing to offer');
+});
+
+test('a draft whose address is not the saved one leaves the saved facts out, starts unticked and carries no old answer', async (t) => {
+    const LAB = { kind: 'openai-compatible', name: 'lab', label: 'Lab', base_url: 'http://lab.lan/v1', api_key: 'sk-lab', continue_unconfirmed: 'http://lab.lan/v1' };
+    const { world, press, type, view } = await compatiblePage(t, { row: LAB, unidentified: { checked: { type: 'unknown', observed_at: '2026-11-19T10:00:00Z' } } });
+    assert.deepEqual([view().note.dataset.serverState, view().note.dataset.admission, view().ticked], ['unconfirmed', 'consent', true]);
+    world.state.testAnswer = () => REFUSAL('ollama_guard_consent', NO_PROGRAM);
+    await type('base_url', 'http://other.lan/v1');
+    assert.deepEqual([view().note.dataset.serverState, view().note.dataset.admission, view().ticked, view().offered], ['draft', undefined, false, false],
+        'the earlier note is labelled as of the saved address; the consent was not given for this one');
+    assert.match(view().note.textContent, /^This address has not been checked/);
+    await press('[data-connection-test]');
+    assert.deepEqual(world.state.askedTests.at(-1).overrides, { base_url: 'http://other.lan/v1', continue_unconfirmed: '' }, 'the draft is tested without the consent the saved address had');
+    assert.deepEqual([view().offered, view().why, view().ticked], [true, 'test', false]);
+    assert.equal(keyHeads(await readSettings()).keys.find((key) => key.id === 'openai-compatible@lab').chip, null, 'a Test of another address is not the saved key\'s word');
+    // Another address typed: what the Test found at the last is gone, and so is the offer.
+    await type('base_url', 'https://api.example.com/v1');
+    assert.deepEqual([view().offered, view().line.dataset.testCode], [false, undefined]);
+    // The saved address typed back: its facts and its consent stand again.
+    await type('base_url', 'http://lab.lan/v1');
+    assert.deepEqual([view().note.dataset.serverState, view().ticked, view().offered], ['unconfirmed', true, true]);
+    assert.equal(world.posts().length, 0, 'none of it was saved');
+});
+
+test('Default and named keys, fresh or saved, start without a consent and say nothing until something asks', async (t) => {
+    const world = server(t, { values: { OPENAI_COMPATIBLE_BASE_URL: 'http://lab.lan/v1', OPENAI_COMPATIBLE_API_KEY: 'sk-lab' } });
+    for (const path of [keyPath('openai-compatible'), 'accounts/key/new']) {
+        await world.mount(path);
+        if (path.endsWith('/new')) {  // the provider is chosen first
+            Object.assign(world.find('[data-key-kind]'), { value: 'openai-compatible' });
+            await world.container.fire('change', { target: world.find('[data-key-kind]') });
+        }
+        assert.equal(world.find('[data-connection-consent]').checked, false, path);
+        assert.equal(world.find('.accounts-key-consent').hidden, true, path);
+        assert.equal(world.find('[data-connection-unidentified]').hidden, true, path);
+    }
+});
+
+test('Remove on the built-in compatible key clears its address, key and consent; a consent the organization\'s checker reads stays', async (t) => {
+    const saved = { OPENAI_COMPATIBLE_BASE_URL: 'http://lab.lan/v1', OPENAI_COMPATIBLE_API_KEY: 'sk-lab', OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED: 'http://lab.lan/v1' };
+    for (const [checker, cleared] of [[null, Object.keys(saved)], [{ fields: ['OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED'] }, Object.keys(saved).slice(0, 2)]]) {
+        const world = server(t, { values: { ...saved } });
+        const read = world.state.document;
+        world.state.document = () => {  // the built-in key is saved; a managed deployment names what its checker reads
+            const document = read();
+            Object.assign(document._meta.connections.find((row) => row.id === 'openai-compatible'), { configured: true, source: 'settings' });
+            if (checker) document._meta.policy_state = { deployment: { checker } };
+            return document;
+        };
+        const page = await world.mount(keyPath('openai-compatible'));
+        await world.container.fire('click', { target: world.find('[data-editor-remove]') });
+        await settle();
+        assert.deepEqual(world.posts().at(-1), Object.fromEntries(cleared.map((key) => [key, ''])), JSON.stringify(checker));
+        assert.deepEqual(world.opened, ['accounts'], 'and the page returns to the list');
+        page.unmount();
+    }
+});
+
 test('a key\'s switch whose outcome is unknown is not called saved until a read shows it', async (t) => {
     const world = server(t);
     world.state.refuse = TIMED_OUT;
@@ -576,6 +777,90 @@ test('the wizard\'s provider step renders and collects as before', async (t) => 
     assert.deepEqual(editor.collect(), { OUROBOROS_CONNECTIONS: [{ kind: 'openrouter', name: 'research-credits', label: 'Research credits', api_key: MASK, enabled: false }] });
     assert.equal(world.posts().length, 0);
     editor.destroy();
+});
+
+test('the wizard\'s compatible rows carry the same consent box: it opens by a Test, rides the Test and the draft, and a new address starts it false', async (t) => {
+    const { createConnectionsEditor } = await import('../modules/settings_connections.js');
+    server(t);
+    const element = globalThis.Element;
+    globalThis.Element = NodeStub;
+    t.after(() => { globalThis.Element = element; });
+    const mount = (settings, answer = () => ({ ok: true })) => {
+        const root = new Stub('div');
+        root.innerHTML = `<div data-settings-panel="providers">${PROVIDER_CARDS.map(providerSettingsCard).join('')}</div>`;
+        const sent = [];
+        const editor = createConnectionsEditor({ root, test: async (body) => { sent.push(body); return answer(body); } });
+        const draft = { OPENAI_COMPATIBLE_BASE_URL: '', OPENAI_COMPATIBLE_API_KEY: '', OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED: '', OUROBOROS_CONNECTIONS: [], ...settings };
+        for (const field of PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible').fields) {  // the wizard puts the draft in the built-in fields first
+            root.querySelector(`#${field.id}`).value = draft[field.settingKey];
+        }
+        editor.load(draft, { modelSlots: [] });
+        const panel = root.querySelector('[data-settings-panel="providers"]');
+        const row = (named) => root.querySelectorAll('[data-connection-row]').find((each) => each.dataset.kind === 'openai-compatible'
+            && (named ? each.dataset.name === named || each.dataset.draft === '1' : each.dataset.builtin === '1'));
+        const view = (each) => ({ offered: !each.querySelector('.accounts-key-consent').hidden, why: each.querySelector('.accounts-key-consent').dataset.consentOffer,
+            ticked: each.querySelector('[data-connection-consent]').checked, line: each.querySelector('[data-connection-test-status]') });
+        const type = async (each, field, value) => { const input = each.querySelector(`[data-connection-field="${field}"]`); input.value = value; await panel.fire('input', { target: input }); };
+        const tick = async (each, on) => { each.querySelector('[data-connection-consent]').checked = on; await panel.fire('input', { target: each.querySelector('[data-connection-consent]') }); };
+        const test = async (each) => { await panel.fire('click', { target: each.querySelector('[data-connection-test]') }); await settle(); };
+        return { root, editor, sent, panel, row, view, type, tick, test };
+    };
+    const NONAME = REFUSAL('ollama_guard_consent', NO_PROGRAM);
+
+    // The built-in key: nothing is offered, ticked or sent before something asks.
+    const wizard = mount({}, () => NONAME);
+    const key = wizard.row();
+    assert.deepEqual([wizard.view(key).offered, wizard.view(key).ticked, wizard.editor.consent('openai-compatible')], [false, false, null]);
+    await wizard.type(key, 'base_url', 'http://lab.lan/v1');
+    assert.equal(wizard.view(key).offered, false, 'typing an address offers nothing');
+    await wizard.test(key);
+    assert.equal(wizard.sent.at(-1).overrides.OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED, undefined, 'an unticked draft sends no consent');
+    assert.deepEqual([wizard.view(key).offered, wizard.view(key).why, wizard.view(key).ticked], [true, 'test', false], 'the refusal opens the box, unticked');
+    assert.deepEqual([wizard.view(key).line.textContent, wizard.view(key).line.dataset.tone, wizard.view(key).line.dataset.testCode], [`Not ready — ${NO_PROGRAM}`, 'warn', 'ollama_guard_consent']);
+    await wizard.tick(key, true);
+    assert.equal(wizard.view(key).line.textContent, '', 'ticking is an edit: the answer to the old request goes');
+    assert.equal(wizard.editor.consent('openai-compatible'), 'http://lab.lan/v1', 'the draft names the address shown');
+    await wizard.test(key);
+    assert.equal(wizard.sent.at(-1).overrides.OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED, 'http://lab.lan/v1', 'a Test checks what finishing would allow');
+    assert.equal(wizard.sent.at(-1).api_key_setting, 'OPENAI_COMPATIBLE_API_KEY');
+    await wizard.type(key, 'base_url', 'http://other.lan/v1');
+    assert.deepEqual([wizard.view(key).ticked, wizard.view(key).offered, wizard.view(key).line.dataset.testCode, wizard.editor.consent('openai-compatible')], [false, false, undefined, null],
+        'a consent given for one address is not given for another, and nothing is left behind');
+
+    // A named key: the same box, its consent one field of the row the draft collects.
+    const named = mount({}, () => NONAME);
+    await named.panel.fire('click', { target: named.root.querySelector('[data-connection-add="openai-compatible"]') });
+    const fresh = named.row('new');
+    fresh.querySelector('[data-connection-label]').value = 'Lab';
+    await named.type(fresh, 'base_url', 'http://lab.lan/v1');
+    await named.test(fresh);
+    assert.deepEqual([named.view(fresh).offered, named.view(fresh).why], [true, 'test']);
+    await named.tick(fresh, true);
+    assert.deepEqual(named.editor.collect().OUROBOROS_CONNECTIONS, [{ kind: 'openai-compatible', name: 'lab', label: 'Lab', base_url: 'http://lab.lan/v1', continue_unconfirmed: 'http://lab.lan/v1' }]);
+    await named.test(fresh);
+    assert.deepEqual(named.sent.at(-1), { provider_id: 'openai-compatible', connection: 'lab', overrides: { base_url: 'http://lab.lan/v1', continue_unconfirmed: 'http://lab.lan/v1' } });
+    assert.equal(named.editor.consent('openai-compatible'), null, 'the built-in key is another row');
+
+    // A hold or an old Ollama is found by the Test: no box, the server's words, whatever is ticked before.
+    for (const code of ['ollama_guard_held', 'ollama_guard_unavailable']) {
+        const held = mount({ OPENAI_COMPATIBLE_BASE_URL: 'http://lab.lan/v1' }, () => REFUSAL(code, 'Ollama 0.12.5 can silently truncate history. Upgrade to 0.12.6 or later.'));
+        await held.test(held.row());
+        assert.deepEqual([held.view(held.row()).offered, held.view(held.row()).line.dataset.testCode], [false, code]);
+    }
+
+    // A draft that already holds a consent (an install's, or the wizard's own after Back): shown ticked, as loaded; withdrawing is an edit.
+    const loaded = mount({ OPENAI_COMPATIBLE_BASE_URL: 'http://lab.lan/v1', OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED: 'http://lab.lan/v1' });
+    const stood = loaded.row();
+    assert.deepEqual([loaded.view(stood).offered, loaded.view(stood).why, loaded.view(stood).ticked, loaded.editor.consent('openai-compatible')], [true, 'ticked', true, null]);
+    await loaded.tick(stood, false);
+    assert.equal(loaded.editor.consent('openai-compatible'), '');
+    await loaded.type(stood, 'base_url', 'http://other.lan/v1');
+    assert.deepEqual([loaded.view(stood).ticked, loaded.editor.consent('openai-compatible')], [false, ''], 'a new address withdraws the consent that stood');
+    await loaded.type(stood, 'base_url', 'http://lab.lan/v1');
+    assert.deepEqual([loaded.view(stood).ticked, loaded.editor.consent('openai-compatible')], [true, null], 'typed back, it covers the address again');
+    // A key that serves no private server has no such box.
+    assert.equal(loaded.root.querySelector('[data-connection-row][data-kind="openrouter"] [data-connection-consent]'), null);
+    for (const each of [wizard, named, loaded]) each.editor.destroy();
 });
 
 test('an added key\'s card row draws its API: a new one is saved and tested on Responses, a loaded one keeps what it stored', async (t) => {
