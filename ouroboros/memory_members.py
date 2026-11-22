@@ -184,14 +184,6 @@ class _Lister:
         self.root, self.store = root, store
         self.lineage = row_lineage(root)
         self._units: Optional[Dict[str, Any]] = None
-        self._maps: Dict[int, Tuple[List[memory_inventory.Entry], Dict[int, int]]] = {}
-
-    def _positions(self, stored: List[memory_inventory.Entry]) -> Dict[int, int]:
-        """The position map of one room read, built once per answer however many runs it holds."""
-        held = self._maps.get(id(stored))
-        if held is None or held[0] is not stored:
-            held = self._maps[id(stored)] = (stored, _position_map(stored))
-        return held[1]
 
     # --- addresses ------------------------------------------------------------------------------------
 
@@ -227,7 +219,8 @@ class _Lister:
             head += "".join(f"; incomplete: {GAP_DETAILS.get(kind, kind)}" for kind in sorted(gaps))
         head += (f"; untold rows: {sum(len(run) for run in runs)} in {_n(len(runs), 'run')}" if runs else
                  "; untold rows: none observed" if gaps else "; untold rows: none")
-        return head, entries + [_Entry(self._run_line("untold", room, run, every), run=("untold", room, run))
+        index = _position_map(every)  # one map for this room read, passed to each of its runs
+        return head, entries + [_Entry(self._run_line("untold", room, run, every, index), run=("untold", room, run))
                                 for run in runs]
 
     def _sealing_pages(self, room: str) -> set:
@@ -280,7 +273,9 @@ class _Lister:
             found = {entry[0]["row_sha256"] for run in runs for entry in run}
             missing = sorted(wanted - found)
             counted.append(f"room:{room} {len(wanted)} recorded, {len(found)} found, {len(missing)} missing")
-            entries += [_Entry(self._run_line("sealed", room, run, rows), run=("sealed", room, run)) for run in runs]
+            index = _position_map(rows)  # this room's map, released with its rows when the loop moves on
+            entries += [_Entry(self._run_line("sealed", room, run, rows, index), run=("sealed", room, run))
+                        for run in runs]
             if missing:  # an edited row changes its content hash: the page still names the old one
                 entries.append(_Entry(f"- sealed rows of room:{room} not found: {_n(len(missing), 'recorded row')} no "
                                       "longer resolve (an edited row changes its hash): " + ", ".join(
@@ -415,14 +410,14 @@ class _Lister:
         return self._units
 
     def _run_line(self, what: str, room: str, run: List[memory_inventory.Entry],
-                  stored: List[memory_inventory.Entry]) -> str:
+                  stored: List[memory_inventory.Entry], index: Mapping[int, int]) -> str:
         first, last = chat_chain.format_address(run[0][0]), chat_chain.format_address(run[-1][0])
         span = memory_inventory.period_text(_time_span(meta.get("ts") for _address, meta, _pos in run))
         speakers = Counter(str(row_author(meta, pos=pos, **self.lineage).get("label") or "author not recorded")
                            for _address, meta, pos in run)
         named = ", ".join(f"{label} {count}" for label, count in speakers.most_common())
         readers = "; ".join(f"memory_read(room_id='{room}', rows=true, from='{chat_chain.format_address(a)}', "
-                            f"to='{chat_chain.format_address(b)}')" for a, b in _slices(run, stored, self._positions(stored)))
+                            f"to='{chat_chain.format_address(b)}')" for a, b in _slices(run, stored, index))
         return (f"- {what} rows of room:{room}: {_n(len(run), 'row')}, {span}; speakers: {named}; from {first} to {last} "
                 f"in reading order; " + readers)
 
