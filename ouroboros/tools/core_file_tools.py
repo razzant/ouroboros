@@ -358,10 +358,8 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
         target.relative_to(work_domain.settle(root))
     except ValueError:
         raise _ListingFailure(f"Path escapes root: {rel}") from None
-    if not work_domain.exists(target):
-        raise _ListingMiss(f"Directory not found: {rel}")
-    if not work_domain.is_dir(target):
-        raise _ListingMiss(f"Not a directory: {rel}")
+    if not work_domain.is_dir(target):  # one check, worded by whether anything is there (as _tree_list)
+        raise _ListingMiss(f"{'Not a directory' if work_domain.exists(target) else 'Directory not found'}: {rel}")
     items = []
     # A hard iterdir/permission/race failure PROPAGATES: _list_files renders it
     # as a first-class "⚠️ LIST_FILES_ERROR" tool error, never an ok-shaped JSON
@@ -381,10 +379,8 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
 
 
 def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.Path, max_entries: int = 500) -> List[str]:
-    if not work_domain.exists(target):
-        raise _ListingMiss(f"Directory not found: {target}")
-    if not work_domain.is_dir(target):
-        raise _ListingMiss(f"Not a directory: {target}")
+    if not work_domain.is_dir(target):  # one check, worded by whether anything is there (as _tree_list)
+        raise _ListingMiss(f"{'Not a directory' if work_domain.exists(target) else 'Directory not found'}: {target}")
     items: List[str] = []
     hidden = 0
     # A hard iterdir/permission/race failure PROPAGATES to the first-class
