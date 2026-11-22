@@ -371,9 +371,10 @@ def _status_lines(status: dict, field: Any, row: dict) -> List[str]:
 
 def _append_unadmitted(lines: List[str], operative: List[str], rows: List[Any], root: Any, field: Any,
                        off_state: Any, skill_status: Any, unlisted: List[str]) -> None:
-    """After the admitted cards: enabled skills no review admits (each with the first reason), then the Off
-    installations, one entry per name (a name several folders claim is one entry), purpose in the full form;
-    then the folders the walk could not list. "No skills are installed." only after a complete walk found none."""
+    """After the admitted cards: enabled skills no review admits (each with its purpose and first reason in both
+    forms), then the Off installations, one entry per name (a name several folders claim is one entry), purpose in
+    the full form only; then the folders the walk could not list. "No skills are installed." only after a complete
+    walk found none."""
     unadmitted, off, seen = [], [], set()
     for row in rows:
         name = field(row.get("name"), 80) if isinstance(row, dict) else ""
@@ -384,7 +385,7 @@ def _append_unadmitted(lines: List[str], operative: List[str], rows: List[Any], 
         if row.get("enabled"):
             reason = _first_reason(status, row, field)
             unadmitted.append((f"- {name} ({field(row.get('type') or 'skill', 40)}): {purpose} "
-                               f"Status: not ready — {reason}", f"- {name}: not ready — {reason}"))
+                               f"Status: not ready — {reason}", f"- {name}: {purpose} Status: not ready — {reason}"))
         else:
             why = off_state(root, row)
             off.append((f"- {name}: {purpose}" + (f" (Off: {why})" if why else ""),

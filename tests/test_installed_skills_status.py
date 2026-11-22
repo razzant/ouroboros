@@ -65,7 +65,10 @@ def test_enabled_unreviewed_and_off_skills_are_each_named_once_beside_the_cards(
     assert "- reverted: Purpose of reverted. (Off: turned off after it failed to load)" in full
     assert "- fresh: Purpose of fresh. (Off: never turned on)" in full
     assert short.endswith(": chosen-off, fresh (never turned on), reverted (turned off after it failed to load)")
-    assert "Purpose of chosen-off" not in short
+    assert "Purpose of chosen-off" not in short  # an Off skill is its name in the compact form
+    # An enabled skill no review admits keeps its purpose in both forms (RV1 A6; v2 «имя, короткое назначение»).
+    assert "\n- unreviewed: Purpose of unreviewed. Status: not ready — " in short
+    assert "\n- unreviewed (instruction): Purpose of unreviewed. Status: not ready — " in full
 
 
 def test_all_off_still_shows_the_section_and_a_failed_read_says_so(tmp_path, monkeypatch):
