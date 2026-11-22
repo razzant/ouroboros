@@ -459,10 +459,7 @@ def test_bare_marker_never_yields_an_invented_horizon():
     """The 'second TTL truth' guard: the finalizer reports 'default' for ANY payload
     with markers — including routes it never normalizes, where a 5-minute horizon was
     never established. A bare marker must therefore keep every reader silent."""
-    from types import SimpleNamespace
-
     from ouroboros.llm import LLMClient, _route_normalizes_cache_breakpoints, cache_ttl_seconds
-    from ouroboros.tools.control import cache_horizon_note
 
     client = LLMClient.__new__(LLMClient)
     gemini = {
@@ -482,37 +479,9 @@ def test_bare_marker_never_yields_an_invented_horizon():
     assert client._normalize_payload_cache_ttl(gemini, payload) == "default"
     assert cache_ttl_seconds("default") is None
 
-    ctx = SimpleNamespace(_accumulated_usage={"_last_prompt_cache_ttl": "default"})
-    assert cache_horizon_note(ctx, 10_000.0) == ""
 
-
-def test_cache_horizon_note_reads_recorded_ttl_only():
-    """W3 wait-tool disclosure: one factual line when the wait outlived the APPLIED
-    cache horizon; silent below the horizon, silent without a recorded fact, and
-    NO token-count predictions in the text."""
-    from types import SimpleNamespace
-
-    from ouroboros.tools.control import cache_horizon_note
-
-    ctx = SimpleNamespace(_accumulated_usage={"_last_prompt_cache_ttl": "5m"})
-    note = cache_horizon_note(ctx, 301.0)
-    assert "cache horizon" in note
-    assert "may be cold" in note
-    assert "token" not in note.lower()  # facts only, no re-write predictions
-    assert cache_horizon_note(ctx, 299.0) == ""
-
-    ctx_1h = SimpleNamespace(_accumulated_usage={"_last_prompt_cache_ttl": "1h"})
-    assert cache_horizon_note(ctx_1h, 900.0) == ""
-    assert "1h" in cache_horizon_note(ctx_1h, 3601.0)
-
-    # No recorded fact (no cached send yet / non-cache route) -> no invented horizon.
-    assert cache_horizon_note(SimpleNamespace(_accumulated_usage={}), 9999.0) == ""
-    assert cache_horizon_note(SimpleNamespace(), 9999.0) == ""
-    assert cache_horizon_note(ctx, None) == ""
-
-
-def test_wait_for_task_appends_cache_horizon_note(tmp_path, monkeypatch):
-    """The wait tools surface the disclosure through their real result paths."""
+def test_in_slot_task_waits_report_their_duration_not_cache_state(tmp_path, monkeypatch):
+    """Tool results measure their waits even past a recorded request TTL; neither owns response age."""
     import json
     from types import SimpleNamespace
 
@@ -530,38 +499,18 @@ def test_wait_for_task_appends_cache_horizon_note(tmp_path, monkeypatch):
         _accumulated_usage={"_last_prompt_cache_ttl": "5m"},
     )
     out = control_mod._wait_for_task(ctx, "child42", timeout_sec=0)
-    assert "cache horizon" in out and "may be cold" in out
+    assert "Task wait completed after 720.0s." in out
+    assert "cache horizon" not in out and "last model response" not in out
 
     batch = json.loads(control_mod._wait_for_tasks(ctx, ["child42"], timeout_sec=0))
-    assert "cache horizon" in str(batch.get("cache_horizon_note"))
-
-    # Below the horizon the line is absent on both paths.
-    def _fast_wait(*args, **kwargs):
-        return {"all_terminal": True, "elapsed_sec": 10.0, "tasks": {}}
-
-    monkeypatch.setattr(control_mod, "wait_for_effective_tasks", _fast_wait)
-    assert "cache horizon" not in control_mod._wait_for_task(ctx, "child42", timeout_sec=0)
-    assert "cache_horizon_note" not in json.loads(
-        control_mod._wait_for_tasks(ctx, ["child42"], timeout_sec=0)
-    )
+    assert batch["elapsed_sec"] == 720.0 and "cache_horizon_note" not in batch
 
 
-def test_cache_horizon_reachability_matches_the_wait_clamps(tmp_path, monkeypatch):
-    """Honest reachability of the wait disclosure, measured on BEHAVIOR.
-
-    The root waits measure their own elapsed window, so their line's availability is
-    per-tool and per-TTL and follows the window each one actually hands the poller: at
-    the shipped '1h' default only wait_tasks (7200s) can genuinely emit it and
-    wait_task sits exactly on the 3600s horizon; at '5m' both do. delegate_wait no
-    longer measures its 3 s tick: its wake measures the time since the task's last
-    model response, so it can emit at ANY tier (pinned in the supervising-wake test
-    below). Fails if a clamp, the ceiling or the tier scale moves without revisiting
-    the disclosure."""
+def test_wait_clamps_bound_the_requested_window_independent_of_cache():
+    """The old cache warning is gone; the two tool windows still have their own ceilings."""
     from types import SimpleNamespace
 
-    from ouroboros.llm import cache_ttl_seconds
     from ouroboros.tools import control_task_results as control_mod
-    from ouroboros.tools.control import cache_horizon_note
 
     def _clamp(ceiling):
         # The one window ladder both task waits use, probed without a deadline.
@@ -574,53 +523,6 @@ def test_cache_horizon_reachability_matches_the_wait_clamps(tmp_path, monkeypatc
         "wait_tasks": _clamp(control_mod._WAIT_TASKS_CLAMP_SEC),
     }
     assert ceilings == {"wait_task": 3600, "wait_tasks": 7200}
-
-    def _emits(tier, ceiling):
-        ctx = SimpleNamespace(_accumulated_usage={"_last_prompt_cache_ttl": tier})
-        return bool(cache_horizon_note(ctx, float(ceiling)))
-
-    assert cache_ttl_seconds("1h") == 3600 and cache_ttl_seconds("5m") == 300
-    assert {name: _emits("1h", sec) for name, sec in ceilings.items()} == {
-        "wait_task": False, "wait_tasks": True}
-    assert {name: _emits("5m", sec) for name, sec in ceilings.items()} == {
-        "wait_task": True, "wait_tasks": True}
-
-    doc = cache_horizon_note.__doc__ or ""
-    assert "REACHABILITY" in doc  # the limitation is stated where the note is built
-
-
-def _response_meta(seconds_ago):
-    import datetime as _dt
-
-    stamp = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(seconds=seconds_ago)
-    return {"ts": stamp.isoformat(), "provider": "anthropic", "model": "m"}
-
-
-def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
-    """delegate_wait's note is computed ONCE per wake from the task's last model
-    response (a lower bound on cache age): it fires past the APPLIED horizon, stays
-    silent below it and on an unknown tier, and a replay repeats the recorded wake."""
-    import json
-    from types import SimpleNamespace
-
-    from ouroboros.delegate_supervision import run_wait
-    from tests._run_wait_shared import wake_now
-
-    def _wake(ttl, seconds_ago):
-        ctx = SimpleNamespace(
-            task_id=f"t-{ttl or 'none'}-{seconds_ago}", task_attempt=1, drive_root=tmp_path,
-            _accumulated_usage={"_last_prompt_cache_ttl": ttl,
-                                "_last_llm_call_meta": _response_meta(seconds_ago)})
-        raw = wake_now(ctx, "run-h", wait_once=lambda *_a: json.dumps(
-            {"status": "completed", "run_id": "run-h", "last_seq": 1})).text
-        return ctx, json.loads(raw)
-
-    _ctx, past = _wake("1h", 3700)
-    assert "1h" in past["cache_horizon_note"] and "may be cold" in past["cache_horizon_note"]
-    assert "cache_horizon_note" not in _wake("1h", 3500)[1]
-    assert "cache_horizon_note" not in _wake("", 10_000)[1]
-    replay = json.loads(run_wait(_ctx, "run-h").text)  # replayed before any sleep is armed or the run read
-    assert replay.pop("replay_of")["fresh_observation"] is False and replay == past  # marked, else as recorded
 
 
 # --- a work's cache life --------------------------------------------------------------------------------------------

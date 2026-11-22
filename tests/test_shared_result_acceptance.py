@@ -33,6 +33,7 @@ from ouroboros.tools.subagent_integration_delegated import _locked_apply
 from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
 from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from tests._store_shared import read_result, result_signature, seed_result
+from tests._workspace_git import git_repository
 from tests.test_continue_successor_integration import continue_from, interrupted_root
 
 # Every Git tree, state root and process is case-local; these fixtures may run in parallel.
@@ -79,10 +80,7 @@ def git(root, *args):
 
 
 def init(root, *, unborn=False, files=None):
-    root.mkdir()
-    git(root, "init", "-q")
-    git(root, "config", "user.name", "Fixture")
-    git(root, "config", "user.email", "fixture@example.invalid")
+    git_repository(root, unborn=True, identity=True)
     if unborn:
         return
     for name, data in {"README.md": b"# shared design tree\n", **(files or {})}.items():
@@ -771,8 +769,8 @@ def test_paths_no_git_entry_can_stand_for_are_type_changes_beside_known_paths(tm
     s.write({"edited.txt": b"edited later\n", "gone/inner.txt": b"a directory now\n"})
     for name in ("dir_now", "repo_now"):
         (s.tree / name).unlink()
-        (s.tree / name).mkdir()
-    git(s.tree / "repo_now", "init", "-q")  # a repository where the capture recorded a file, not a gitlink
+    (s.tree / "dir_now").mkdir()
+    git_repository(s.tree / "repo_now", unborn=True)  # a repository where the capture recorded a file, not a gitlink
     (s.tree / "fifo_now").unlink()
     os.mkfifo(s.tree / "fifo_now")
     (s.tree / "linked").rename(s.tree / "elsewhere")

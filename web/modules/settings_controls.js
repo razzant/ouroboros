@@ -142,16 +142,17 @@ const announce = (data) => globalThis.document?.dispatchEvent?.(new CustomEvent(
 /** One fresh read of the settings document; the helper keeps the newest for values, effects, tokens and the setup
  *  contract. A row whose write was not confirmed says it saved once a read shows the value it sent. The rows on
  *  screen are painted from the read that lands; while none has, from what the newest read says (settingsReadMessage). */
-export async function readSettings() {
-    const epoch = ++settingsEpoch;
-    if (unreadFailed) { unreadFailed = false; repaintAll(); }
-    let data;
-    try { data = await fetchJson('/api/settings', { cache: 'no-store' }); } catch (error) {
+export async function readSettings({ signal = null } = {}) {
+    const epoch = signal ? settingsEpoch : ++settingsEpoch;  // `signal`: a page's own end of this read; it takes its place in the order only when it lands
+    if (unreadFailed && !signal) { unreadFailed = false; repaintAll(); }
+    const data = await fetchJson('/api/settings', { cache: 'no-store', ...(signal && { signal }) }).catch((error) => {
         // Only the newest read, and only while nothing was read: an older failure never stands over a newer answer.
-        if (epoch === settingsEpoch && !lastSettings) { unreadFailed = true; repaintAll(); }
+        if (!signal?.aborted && epoch === settingsEpoch && !lastSettings) { unreadFailed = true; repaintAll(); }
         throw error;
-    }
+    });
+    if (signal && (signal.aborted || epoch !== settingsEpoch)) throw signal.reason ?? new DOMException('A newer read or write came first', 'AbortError');
     if (epoch !== settingsEpoch && lastSettings) return data;
+    if (signal) settingsEpoch += 1;
     lastSettings = data;
     announce(data);
     ROW_STATES.forEach((state) => {
@@ -984,8 +985,7 @@ const searchKeyOptionsShown = new WeakMap();  // key select -> the English optio
 export function syncSearchKey(source, field, select, keys = {}) {
     if (!source || !field || !select) return;
     const deepseek = source.value === 'deepseek';
-    [field, ...(field.labels || [])].forEach((el) => { el.hidden = deepseek; });
-    [select, ...(select.labels || [])].forEach((el) => { el.hidden = !deepseek; });
+    [[field, deepseek], [select, !deepseek]].forEach(([el, hidden]) => [el, ...(el.labels || [])].forEach((target) => { target.hidden = hidden; }));
     const key = deepseekSearchKey(field.value);
     const choice = key ? `${API_CHOICE_PREFIX}${key}` : 'saved';
     const [group] = routeChoiceGroups({ ...keys, currentChoice: key ? choice : '', includeSessions: false,

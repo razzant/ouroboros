@@ -7,9 +7,10 @@ writers behind it, and membership is the reservation time alone. Money by class 
 RECORDED cost is shared out by what the route's tariff charges for each class of that call's own tokens, so
 only price ratios enter and the parts of a model, with the cost that could not be shared, add up to its
 recorded cost. The tariff is one a display may read without a fetch (``pricing.display_tariff``); a model it
-does not price keeps its tokens and its whole cost unshared. Nothing is stored here, and no verdict,
-threshold or signal is derived. A consciousness wake reads the 24-hour view's cache writes as one fact row
-(``consciousness_view.cache_writes_text``).
+does not price keeps its tokens and its whole cost unshared, and so does a call whose row retains usage its
+text counts cannot carry (audio, image): no text price ratio says how that bill divides. Nothing is stored here,
+and no verdict, threshold or signal is derived. A consciousness wake reads the 24-hour view's cache writes as
+one fact row (``consciousness_view.cache_writes_text``).
 """
 
 from __future__ import annotations
@@ -48,45 +49,25 @@ def _epoch(stamp: Any) -> Optional[float]:
 
 
 def _shares(row: Dict[str, Any], tariff: Optional[tuple]) -> Optional[Dict[str, float]]:
-    """Each class's share of one call's recorded cost; None when the tariff or the call's counts cannot say."""
+    """Each class's share of one call's recorded cost; None when the tariff or the call's counts cannot say, as
+    when the row retains usage outside its text counts (``retained_usage``): the bill is not theirs alone."""
     from ouroboros.pricing import cost_class_weights
 
-    usage = dict(row)
-    try:
-        split = json.loads(row["write_split"]) if row.get("write_split") else None
-    except (TypeError, ValueError):
-        split = None
-    if isinstance(split, dict):
-        usage["cache_write_tokens_by_ttl"] = split
-    weights = cost_class_weights(tariff, usage)
+    weights = None if row.get("retained_usage") else cost_class_weights(tariff, row)
     total = sum(weights.values()) if weights else 0.0
     return {name: weight / total for name, weight in weights.items()} if total > 0 else None
-
-
-def _row_lifetimes(row: Dict[str, Any], written: int) -> Optional[tuple]:
-    """``(5-minute, 1-hour)`` tokens one call wrote: the provider's full split, else its named lifetime."""
-    from ouroboros.pricing import write_lifetimes
-
-    usage = {"prompt_cache_ttl": row.get("prompt_cache_ttl")}
-    try:
-        split = json.loads(row["write_split"]) if row.get("write_split") else None
-    except (TypeError, ValueError):
-        split = None
-    if isinstance(split, dict):
-        usage["cache_write_tokens_by_ttl"] = split
-    return write_lifetimes(usage, written)
 
 
 def _write_price_in_reads(tariff: Optional[tuple], ttl: str) -> Optional[float]:
     """How many read tokens one written token costs at this lifetime at the model's BASE price, both from the same
     catalogue: a prompt-length tier is a property of one call, not of a model. None for an unnamed lifetime."""
-    if not tariff or len(tariff) != 4 or not tariff[1] or tariff[2] is None or ttl not in ("5m", "1h"):
+    if not tariff or len(tariff) != 4 or not tariff[1] or ttl not in ("5m", "1h"):
         return None
-    write = float(tariff[2])
-    if ttl == "1h":
-        extended = getattr(tariff, "cache_write_1h", None)
-        write = float(extended) if extended is not None else write * (2.0 / 1.25)  # the estimator's own ratio
-    return round(write / float(tariff[1]), 1)
+    write = getattr(tariff, "cache_write_1h", None) if ttl == "1h" else tariff[2]
+    if write is None:
+        return None
+    ratio = float(write) / float(tariff[1])
+    return ratio if ratio < 0.1 else round(ratio, 1)  # keep a small positive write price distinct from zero
 
 
 def _read(data_dir: pathlib.Path, take: Any) -> Any:
@@ -105,7 +86,7 @@ def _read(data_dir: pathlib.Path, take: Any) -> Any:
 
 def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = None) -> Dict[str, Any]:
     """The period's models (cost, calls, tokens and money by class) and its cache writes by what they followed."""
-    from ouroboros.pricing import display_tariffs
+    from ouroboros.pricing import display_tariffs, write_lifetimes
     from ouroboros.provider_models import normalize_model_identity, provider_for_model
     from ouroboros.transcript_prefix import prefix_class
 
@@ -117,15 +98,20 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
     models: Dict[str, Dict[str, Any]] = {}
     causes: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
-    def tariff(model: str, provider: str) -> Optional[tuple]:
-        route = str(provider or provider_for_model(model) or "openrouter").strip().lower()
+    def tariff(row: Dict[str, Any]) -> Optional[tuple]:
+        model = row["model"]
+        route = str(row["provider"] or provider_for_model(model) or "openrouter").strip().lower()
+        if route == "openrouter":
+            # The no-fetch model catalogue has base ratios only. A processing receipt can also stand alone.
+            if row["service_tier"] not in (None, "", "default", "standard") or not row["base_router_processing"]:
+                return None
         if route not in catalogs:
             catalogs[route] = display_tariffs(route)  # read once per route of a period
         return catalogs[route][0].get(normalize_model_identity(model)) or None
 
     def entry(model: str) -> Dict[str, Any]:
         return models.setdefault(model or "unattributed", {
-            "calls": 0, "cost": 0.0, "priced_rows": 0, "open_rows": 0, "unpriced_rows": 0, "shared_cost": 0.0,
+            "calls": 0, "cost": 0.0, "priced_rows": 0, "open_rows": 0, "unpriced_rows": 0, "unshared_cost": 0.0,
             "uncounted_calls": 0, "uncounted_input_tokens": 0, "unshared_calls": 0,
             "tokens": dict.fromkeys(_CLASSES, 0), "tokens_shared": dict.fromkeys(_CLASSES, 0),
             "by_class": dict.fromkeys(_CLASSES, 0.0), "_written": {}})
@@ -147,24 +133,34 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
             for name, count in _tokens_by_class(row).items():
                 model["tokens"][name] += count
         for row in calls:
-            route_tariff = tariff(row["model"], row["provider"])
+            if row["write_split"] is not None:
+                try:
+                    split = json.loads(row["write_split"])
+                except (TypeError, ValueError):
+                    split = None
+                row["cache_write_tokens_by_ttl"] = split if isinstance(split, dict) else {"unknown": None}
+            route_tariff = tariff(row)
             shares = _shares(row, route_tariff) if row.get("usd") is not None else None
             model = entry(row["model"])
             if shares is not None:
-                model["shared_cost"] += float(row["usd"])
                 for name, share in shares.items():
                     model["by_class"][name] += float(row["usd"]) * share
                 for name, count in _call_tokens(row).items():  # beside the shared dollars, the tokens they are of
                     model["tokens_shared"][name] += count
             elif row.get("usd") is not None:
                 model["unshared_calls"] += 1
+                model["unshared_cost"] += float(row["usd"])
             written = int(row.get("cache_write_tokens") or 0)
-            if written <= 0:
+            if written <= 0 or row.get("cache_write_tokens_invalid"):
                 continue
-            lifetimes = _row_lifetimes(row, written) if route_tariff is not None else None
+            lifetimes = write_lifetimes(row, written)
             for ttl, count in zip(("5m", "1h"), lifetimes or ()):  # by the lifetimes the call was written at
                 if count:
-                    model["_written"].setdefault(ttl, [0, route_tariff])[0] += count
+                    ratio = _write_price_in_reads(route_tariff, ttl)
+                    observed = model["_written"].setdefault(ttl, [0, ratio])
+                    observed[0] += count
+                    if observed[1] != ratio:  # one model name can have writes on differently priced routes
+                        observed[1] = None
             try:
                 fact = json.loads(row["prefix"]) if row.get("prefix") else None
             except (TypeError, ValueError):
@@ -183,21 +179,17 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
     for name, model in models.items():
         if not (model["calls"] or model["open_rows"]):
             continue  # every reservation of the model was released before it was sent: no call started
-        lifetimes = sorted(model.pop("_written").items(), key=lambda item: (-item[1][0], item[0]))
-        ratios = [(ttl, _write_price_in_reads(held[1], ttl)) for ttl, held in lifetimes]
-        lifetime, ratio = next(((ttl, value) for ttl, value in ratios if value), ("", None))
+        written = model.pop("_written")
+        lifetime = min(written, key=lambda ttl: (-written[ttl][0], ttl), default="")
+        ratio = written[lifetime][1] if lifetime else None
         model.update(write_price_in_reads=ratio, write_price_lifetime=lifetime)
-        shared = model.pop("shared_cost")
         if not model["priced_rows"]:
             model["cost"] = None  # no call of the model has a recorded price: unknown, never $0
-        rows.append({"model": name, **model, "cost": None if model["cost"] is None else round(model["cost"], 6),
-                     # What no tariff or token count could share out stays one disclosed amount, never spread.
-                     "unshared_cost": round(max(0.0, (model["cost"] or 0.0) - shared), 6),
-                     "by_class": {key: round(value, 6) for key, value in model["by_class"].items()} if shared > 0 else None})
+        if not any(model["by_class"].values()):
+            model["by_class"] = None
+        rows.append({"model": name, **model})
     rows.sort(key=lambda row: (-(row["cost"] or 0.0), -sum(row["tokens"].values()), row["model"]))  # unpriced by their tokens
     writes = sorted(causes.values(), key=lambda cause: (-cause["write_cost"], -cause["write_tokens"], cause["class"], cause["detail"]))
-    for cause in writes:
-        cause["write_cost"] = round(cause["write_cost"], 6)
     return {"available": True, "period": period, "since": since_iso,
             "until": _dt.datetime.fromtimestamp(until, _dt.timezone.utc).isoformat(),
             # The date of the recorded catalogue when it, not this process's own tariffs, priced the shares.

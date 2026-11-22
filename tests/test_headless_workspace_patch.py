@@ -83,8 +83,7 @@ def test_received_paths_with_unavailable_original_base_are_named(tmp_path):
 
 def test_workspace_patch_includes_tracked_and_untracked_files(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     (repo / "tracked.txt").write_text("old\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True)
     subprocess.run(
@@ -240,8 +239,7 @@ def test_workspace_patch_retains_lock_when_pnpm_membership_is_unknown(tmp_path, 
 
 def test_workspace_patch_preserves_lockfile_when_other_changes_are_junk(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     # Version 3: generated output is excluded because the PROJECT declares it,
     # not because a host name rule guesses. Without the .gitignore the dist file
@@ -277,8 +275,7 @@ def test_workspace_patch_excludes_binary_junk_and_oversize(tmp_path, monkeypatch
     import ouroboros.workspace_patch_capture as workspace_patch_capture
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "seed.txt"], cwd=repo, check=True, capture_output=True)
     subprocess.run(
@@ -317,8 +314,7 @@ def test_workspace_patch_excludes_binary_junk_and_oversize(tmp_path, monkeypatch
 
 def test_workspace_patch_supports_unborn_git_worktree(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     (repo / "created.txt").write_text("hello\n", encoding="utf-8")
 
     artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
@@ -355,8 +351,7 @@ def test_workspace_patch_allows_external_workspace_first_commit(tmp_path):
     from ouroboros.workspace_preflight import _git_snapshot, summarize_workspace_preflight
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     admission = summarize_workspace_preflight({"git": _git_snapshot(repo)})
     assert admission["git"]["head_state"] == "unborn"
     (repo / "created.txt").write_text("hello\n", encoding="utf-8")
@@ -871,8 +866,7 @@ def test_machine_patch_ignores_a_projects_textconv_driver(tmp_path):
     from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
 
     project = tmp_path / "project"
-    project.mkdir()
-    _git(project, "init", "-q")
+    repository(project, unborn=True)
     table = project / "table.dat"
     before, after = b"\0\x0a\x01abc", b"\0\x0b\x02def"
     table.write_bytes(before)

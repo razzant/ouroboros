@@ -92,8 +92,12 @@ def test_tool_producers_keep_unknown_and_partial_usage(emitter, tokens, expected
         event = ctx.event_queue.get_nowait()
     else:
         from ouroboros.tools.search import _emit_simple_usage
-        _emit_simple_usage(ctx, provider="openai", model="model", usage=usage)
+        # A search event's money and counts are the fact its attempt row settled, its unknown counts included.
+        counts = {name: tokens.get(name) for name in COUNTERS}
+        _emit_simple_usage(ctx, provider="openai", model="model", usage=usage,
+                           settled={**counts, "cost": 0.0, "cost_final": True})
         event = ctx.pending_events[0]
+        usage = {**usage, "cost_final": True, "cost_estimated": False, "cost_invalid": False, "reported_tokens": counts}
     assert [event[key] for key in COUNTERS] == expected
     assert event["usage"] == usage and event["cost"] == 0.0
 
