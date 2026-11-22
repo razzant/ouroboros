@@ -756,7 +756,7 @@ def test_a_confirmed_settings_change_marks_the_subscription_census_and_a_refused
 
     engine = passive_engine
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(census, "_PASS", {"confirmed_at": None, "failing_since": None, "landed": 0.0, "dispatched": 0.0})
+    monkeypatch.setattr(census, "_PASS", {"confirmed_at": None, "failing_since": None, "dispatched": 0.0})
     _full_status_engine(engine, monkeypatch)
     named = deepcopy(_NAMED)
     named["profile"]["credential_kind"] = "config_dir_login"

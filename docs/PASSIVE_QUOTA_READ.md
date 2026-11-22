@@ -150,8 +150,10 @@ unproven or mixed-scope replacement clears it. No new request is made.
 or refresh) from its own maintenance duty: every 600 s while a task runs or a direct actor works (a pending-only queue
 reads nothing), or 15 s after a refresh request, which any process leaves when the engine refuses or settles a run,
 a reviewer seat or a model call on a limit code (a structural pool excepted), or Settings confirms an account
-created, enabled, disabled or removed. While someone works, a request is retried until a read lands; an engine never
-provisioned is never asked. Per family it counts the enabled named profiles of a subscription credential kind
+created, enabled, disabled or removed. Any attempted read answers the requests before it, failed or not, so an
+engine that does not answer is asked again only at the 600 s cadence or on a newer request, never in a 15 s loop
+(on 21.11 the managed engine stalled under load with a full accept queue); an engine never provisioned is never
+asked. Per family it counts the enabled named profiles of a subscription credential kind
 (`gateway/onboarding._SUBSCRIPTION_CREDENTIAL_KINDS`), each judged by the shared `quota_availability` on its
 subscription-route rows and absences alone (`vendor_native`; a paid key's rows of the same id stay out):
 verification failed first (the Accounts rule), then the engine's at-limit and with-room verdicts, then its unknowns
@@ -169,8 +171,8 @@ accepted read confirms. The part goes to the foci that may choose an executor (`
 every integrating focus, a Presence task whose ceiling grants an executor or reviewer tool, and a delegated focus
 holding the delegation right or an acting profile, a tool its contract withholds granting nothing. Disclosed: after
 an idle period the file is as old as that period until the duty's first read lands; after a restart `confirmed_at`
-is the stored one; a duty that stops silently cannot say so; an outstanding request costs two engine reads every
-15 s while someone works and the engine does not answer; two value epochs inside one minute compare equal.
+is the stored one; a duty that stops silently cannot say so; a request whose read failed waits for the cadence or
+a newer request (a pending file stays pending that long); two value epochs inside one minute compare equal.
 
 ## Primary-route observation
 

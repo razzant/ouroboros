@@ -300,7 +300,7 @@ def test_the_live_shaped_read_renders_its_line():
 # ---- the writer ----------------------------------------------------------------------------------------------------
 
 def _fresh_pass():
-    return {"confirmed_at": None, "failing_since": None, "landed": 0.0, "dispatched": 0.0}
+    return {"confirmed_at": None, "failing_since": None, "dispatched": 0.0}
 
 
 @pytest.fixture
@@ -615,18 +615,50 @@ def test_the_duty_is_due_on_its_cadence_while_someone_works_or_after_a_request(e
     census.request_refresh("test")
     marked = start + 1000.0
     os.utime(engine["request"], (marked, marked))
-    census._PASS.update(dispatched=marked - 1, landed=marked - 1)
+    census._PASS["dispatched"] = marked - 1
     assert not census.duty_due(marked + 5, working=False)  # at most one pass per REQUEST_MIN_SEC
     assert census.duty_due(marked + 15, working=False)  # a request is answered once, even on an idle install
-    census._PASS["dispatched"] = marked + 15  # that pass failed: no read landed
-    assert not census.duty_due(marked + 30, working=False)  # idle: the request waits for someone at work
-    assert census.duty_due(marked + 30, working=True)  # at work: retried until a read lands
-    census._PASS["landed"] = marked + 15
-    assert not census.duty_due(marked + 45, working=True)  # a read that began after the request answered it
+    census._PASS["dispatched"] = marked + 15  # that attempt answered it, whatever its read's outcome
+    assert not census.duty_due(marked + 30, working=False)
+    assert not census.duty_due(marked + 30, working=True)  # no retry at work either: the cadence or a newer request
     monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: False)
     assert not census.duty_due(start + 5000, working=True)  # no engine and no file: nothing to read
     engine["path"].write_text("{}", encoding="utf-8")
     assert census.duty_due(start + 5000, working=True)  # a census file to keep is read again
+
+
+def test_any_attempted_read_answers_the_requests_before_it_and_only_a_newer_one_asks_again(engine):
+    """A failed read consumes its request too, so an engine that does not answer (on 21.11 the managed one stalled
+    with a full accept queue) is not asked every 15 s: after a failure the next read comes on a request newer than
+    that attempt, or at the ordinary cadence."""
+    import threading
+
+    latch, tick = threading.Lock(), 1_800_000_000.0
+    engine["payload"] = _failed_payload("daemon_unreachable")
+
+    def tick_at(seconds):
+        census.dispatch(tick + seconds, True, latch, None, lambda: census.duty_pass(lambda: False, latch),
+                        lambda *_args: pytest.fail("the duty's latch was held"))
+
+    def request_at(seconds):
+        census.request_refresh("test")
+        os.utime(engine["request"], (tick + seconds, tick + seconds))
+
+    tick_at(0)
+    assert engine["reads"] == 1  # the cadence: one read, which failed
+    request_at(1)  # a request after that failure
+    tick_at(16)
+    assert engine["reads"] == 2  # one read answers it, and fails again
+    for seconds in (31, 46, 90):
+        tick_at(seconds)
+    assert engine["reads"] == 2  # the failed read consumed the request: none 15 s later, none after
+    request_at(95)  # a newer request
+    tick_at(96)
+    assert engine["reads"] == 3
+    tick_at(111)
+    assert engine["reads"] == 3
+    tick_at(96 + census.DUTY_SEC)
+    assert engine["reads"] == 4  # the ordinary cadence
 
 
 def test_dispatch_stamps_and_starts_a_due_pass_or_reports_a_held_latch(engine):

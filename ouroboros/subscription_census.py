@@ -5,8 +5,9 @@ The engine owns every verdict (``claudexor_observations.quota_availability``, th
 primary observation share); this module only counts them. ``build_census`` is the pure count over one passive read
 (``gateway/claudexor_passive``: the roster and one quota epoch, no handshake, no refresh) and ``census_text`` its
 facts-only words. The census duty (``dispatch``, ticked by ``server_maintenance``) runs ``refresh`` every ``DUTY_SEC``
-while someone works, or ``REQUEST_MIN_SEC`` after a refresh request (a run, seat or model call refused or settled on
-a limit code, a confirmed account change), and retries a request until a read lands. ``refresh`` rewrites
+while someone works, or ``REQUEST_MIN_SEC`` after a refresh request newer than its last attempt (a run, seat or
+model call refused or settled on a limit code, a confirmed account change); any attempt answers the requests before
+it, so a failed read is retried on the cadence, never sooner. ``refresh`` rewrites
 ``CENSUS_FILE`` when what the text states changed; its ``since`` moves only with the trigger (the counts, resets and
 model-scoped blocks; share ranges are not in it). ``quota_part`` is the round's reader: the file alone, never a
 connection, for the foci that may choose an executor, change-only against the latest part still in view. Nothing
@@ -61,9 +62,9 @@ _CLASSES = (("with_room", "with room"), ("at_limit", "at limit"), ("verification
 _SAFE_CODE = re.compile(r"[a-z0-9_]{1,64}")
 
 _LOCK = threading.Lock()  # one publication, failure record or invalidation at a time in this process
-# Memory only: the last accepted read, the start of the current failed streak, the start of the last pass the engine
-# answered (a request older than it is answered) and the duty's last dispatch.
-_PASS: Dict[str, Any] = {"confirmed_at": None, "failing_since": None, "landed": 0.0, "dispatched": 0.0}
+# Memory only: the last accepted read, the start of the current failed streak and the duty's last dispatch (an
+# attempt, which answers every request older than it, whatever the read's outcome).
+_PASS: Dict[str, Any] = {"confirmed_at": None, "failing_since": None, "dispatched": 0.0}
 _WRITES = frozenset({"written", "refreshed", "recovered", "confirmed", "none", "failure_recorded"})
 
 
@@ -361,11 +362,9 @@ def _refresh(stop: Callable[[], bool], root: Any) -> str:
         return _record_failure(_failure_code(payload), started, root)
     else:
         families = build_census(payload, now)
-    if families is None:  # an older engine certifies no text scope: the engine answered, its verdicts are no census
-        with _LOCK:
-            _PASS["landed"] = started
+    if families is None:  # an older engine certifies no text scope: its verdicts are no census
         return _record_failure("availability_scope_unhonored", started, root)
-    return _publish(families, started, now, revision, claudexor_accounts.account_read_revision, stop, root)
+    return _publish(families, now, revision, claudexor_accounts.account_read_revision, stop, root)
 
 
 def _failure_code(payload: Mapping[str, Any]) -> str:
@@ -397,18 +396,18 @@ def _record_failure(code: str, started: float, root: Any) -> str:
     return "failure_recorded"
 
 
-def _publish(families: Dict[str, Any], started: float, now: float, revision: int, current_revision: Callable[[], int],
+def _publish(families: Dict[str, Any], now: float, revision: int, current_revision: Callable[[], int],
              stop: Callable[[], bool], root: Any) -> str:
     """Accept the read and write the census when what it states changed (or a pending or failed file awaits it);
     never over a confirmed account change that crossed this read (the accounts module's revision), which requested
-    its own pass. Only an accepted read confirms: ``confirmed_at``, the failed streak and the answered requests."""
+    its own pass. Only an accepted read confirms: ``confirmed_at`` and the end of a failed streak."""
     body = body_text(families)
     with _LOCK:
         if current_revision() != revision:
             return "roster_changed"
         if stop():
             return "stopped"
-        _PASS.update(confirmed_at=now, failing_since=None, landed=started)
+        _PASS.update(confirmed_at=now, failing_since=None)
         existing = read_file(root)
         if (existing is not None and existing["read"] == "ok" and not existing.get("pending")
                 and body_text(existing["families"]) == body):
@@ -478,14 +477,14 @@ def request_mtime(root: Any = None) -> Optional[float]:
 def duty_due(now: float, working: bool, root: Any = None) -> bool:
     """The census duty's due condition, never sooner than ``REQUEST_MIN_SEC`` after its last dispatch: ``DUTY_SEC``
     after it while someone works (a running task or a direct actor; a pending-only queue reads nothing), or a refresh
-    request newer than it; while someone works, also a request no read has answered yet. Only an engine once
-    provisioned, or a census file to keep, has anything to read."""
+    request newer than it. That attempt answered every older request, failed or not, so an engine that does not
+    answer is asked again on the cadence or a new request, never in a 15 s loop. Only an engine once provisioned, or
+    a census file to keep, has anything to read."""
     last = _PASS["dispatched"]
     if now - last < REQUEST_MIN_SEC:
         return False
     requested = request_mtime(root)
-    due = ((working and (now - last >= DUTY_SEC or (requested is not None and requested > _PASS["landed"])))
-           or (requested is not None and requested > last))
+    due = (working and now - last >= DUTY_SEC) or (requested is not None and requested > last)
     if not due:
         return False
     from ouroboros.claudexor_daemon import owned_daemon_provisioned
