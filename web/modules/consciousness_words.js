@@ -211,11 +211,11 @@ export function allowanceText(snapshot) {
 }
 
 // The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit (new starts refused, or
-// its own wake held at the allowance it started with) or waiting for a first conversation. A failure is an outcome's
-// red dot, an unconfirmed outcome a ring, any other paused wake two bars, a due wake the still mark.
-const OWNER_MOVE = new Set(['allowance_exhausted', 'waiting_for_first_conversation']);
+// its own wake held at the allowance it started with). A failure is an outcome's red dot, an unconfirmed outcome or an
+// unreadable owner chat a ring, any other paused wake two bars, a due wake the still mark.
+const OWNER_MOVE = new Set(['allowance_exhausted']);
 const FAILED = new Set(['wake_failed', 'wake_rejected', 'stopped']);
-const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown']);
+const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown', 'owner_chat_unknown']);
 const ALLOWANCE_HOLDS = new Set(['allowance', 'allowance_and_cap']);
 
 /** Whether its own wake is held, proven, at the allowance it started with (consciousness_view.hold_cause): the

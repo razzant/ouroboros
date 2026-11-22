@@ -1015,6 +1015,33 @@ def newest_owner_candidates(root: Any, *, before: int, limit: int) -> List[Row]:
     return [_row(record) for record in records]
 
 
+# The rooms my human reads: Main, Project rooms and owner transport chats; 0 is the hidden partition, negative ids
+# are A2A traffic and ``places.conversation_chat_id`` puts correspondents' place rooms at 2**40 and above.
+_OWNER_ROOMS = (1, (1 << 40) - 1)
+# What I write to my human besides an untyped answer: send_user_message's rows and my questions.
+_MY_MESSAGE_KINDS = ("proactive_message", "main_notice", "relay_reply", "quiz")
+
+
+def owner_exchange(root: Any) -> Tuple[bool, bool]:
+    """``(my human has written, I have written to them)`` in the rooms my human reads, in ONE statement of two
+    existence probes over those rooms that stop at their first match: an untyped inbound row (``dialogue_inbound``;
+    my human's words, as ``newest_owner_candidates`` counts them) and an outbound row of mine, untyped (an answer)
+    or one of ``_MY_MESSAGE_KINDS`` (``dialogue_room``; host rows are System or other types). A store that cannot be
+    read raises: the caller says unknown, never no."""
+    low, high = _OWNER_ROOMS
+    kinds = ", ".join(f"'{kind}'" for kind in _MY_MESSAGE_KINDS)
+    if not present(root) and holds_dialogue_files(root):  # never a cutover from a read
+        raise StoreMigrating(f"dialogue store not created yet: {path(root)}")
+    with transaction(root, write=False) as conn:
+        theirs, mine = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_inbound WHERE stream='chat' AND direction='in' "
+            "AND chat_id BETWEEN ? AND ? AND kind IS NULL), EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_room "
+            "WHERE stream='chat' AND chat_id BETWEEN ? AND ? AND direction='out' "
+            f"AND (kind IS NULL OR kind IN ({kinds})))",
+            (low, high, low, high)).fetchone()
+    return bool(theirs), bool(mine)
+
+
 def latest_inbound_transport(root: Any, chat_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
     """Each chat's newest inbound row's ``transport``, by chat id, in one read (``dialogue_inbound``: one seek a chat):
     only that object leaves the store, never the row (what names a room, ``RoomLabelResolver.warm``)."""

@@ -47,7 +47,7 @@ OFFLINE = {
 MOCK_MODEL = "openai-compatible::mock-model"
 STEP = "[data-consciousness-step]"
 LIMITS = ("Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not "
-          "change itself. Up to $20.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own "
+          "change itself. Up to $15.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own "
           "tasks at once.")
 # The step's words are the host's (consciousness_view.first_run_words, owner 15.11, 5A); the meaning leads as its copy.
 STEP_TEXT = f"Off {FIRST_RUN['off']} On {FIRST_RUN['on']} {LIMITS} {FIRST_RUN['door']}"
@@ -175,9 +175,10 @@ def _text(page, selector: str) -> str:
 
 def _system_rows(url: str) -> list:
     """Main's System rows as ``(system_type, text)``: what the owner reads as the host speaking. Rows a work card
-    draws (web/modules/chat_preview.js ``CARD_ROWS``: a task's summary and evidence, a quiz, a card) are not one."""
+    draws (web/modules/chat_preview.js ``CARD_ROWS``: a task's summary and evidence, a quiz, a card) are not one, nor
+    a work's progress rows (``is_progress``, that filter's other half: a task's checkpoints fold into its card)."""
     return [(row.get("system_type"), row.get("text", "")) for row in _get(url, "/api/chat/history?limit=100")["messages"]
-            if (row.get("role") == "system" or row.get("system_type"))
+            if (row.get("role") == "system" or row.get("system_type")) and not row.get("is_progress")
             and row.get("system_type") not in {"task_evidence", "task_summary", "quiz", "card"}]
 
 
@@ -224,15 +225,26 @@ def _next(page, steps: int) -> None:
         page.wait_for_function("t => document.querySelector('.step-title')?.textContent !== t", arg=title, timeout=30_000)
 
 
-def _finish(page) -> None:
-    """Start Ouroboros once the wizard's own preview gate opens."""
-    for _ in range(60):
-        button = page.locator("#next-btn")
-        if button.count() and button.is_enabled():
-            button.click()
-            return
-        page.wait_for_timeout(500)
-    raise AssertionError("Start Ouroboros never became available")
+def _meetings(data_dir: pathlib.Path) -> list:
+    """The rows ``supervisor.first_meeting`` wrote to ``logs/events.jsonl``: one a start that tried."""
+    events = data_dir / "logs" / "events.jsonl"
+    lines = events.read_text(encoding="utf-8").splitlines() if events.exists() else []
+    return [row for row in map(json.loads, filter(None, lines)) if row.get("type") == "first_meeting"]
+
+
+def _settled(url: str, task_id: str, timeout: float = 240.0) -> str:
+    """The task's status once it is terminal (``task_results._TRULY_TERMINAL_STATUSES``): a stop before that holds the
+    work for Resume, and the restart's notice says so in Main."""
+    deadline, status = time.time() + timeout, None
+    while time.time() < deadline:
+        try:
+            status = _get(url, f"/api/tasks/{task_id}").get("status")
+        except Exception as exc:  # not readable yet
+            status = f"unreadable: {exc}"
+        if status in {"completed", "failed", "cancelled", "rejected_duplicate"}:
+            return status
+        time.sleep(1)
+    raise AssertionError(f"task {task_id} stayed {status!r}")
 
 
 def _browser(pw, engine="webkit", theme="light", size=(980, 752)):
@@ -243,8 +255,9 @@ def _browser(pw, engine="webkit", theme="light", size=(980, 752)):
 
 def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(setup_server, tmp_path):
     """A first setup without a provider: the step starts on, the completion carries it, the page sends no command and
-    the supervisor the save starts mints a state born on. After a first message and a restart Main holds no System
-    row and the state still shows on; a later ordinary Stop wins and survives a restart."""
+    the supervisor the save starts mints a state born on, which admits the one first meeting Start opens, in Main, and
+    it completes on its own. After a first message and a restart Main holds no System row, the state still shows on
+    and no second meeting opened; a later ordinary Stop wins and survives a restart."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
 
@@ -271,7 +284,7 @@ def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(s
             row = page.locator(".summary-kv").filter(has=page.get_by_text("Consciousness", exact=True))
             assert " ".join(row.inner_text().split()) == f"Consciousness On · {FIRST_RUN['on']}"
             seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads
-            _finish(page)
+            _start(page, seen["completions"])  # a click while the preview updates sends nothing; it is pressed again
             page.wait_for_url(srv.url + "/", timeout=240_000)
             assert seen["commands"] == [], "the builtin page sends no /bg"
             assert len(seen["completions"]) == 1 and seen["completions"][0]["consciousness"] is True
@@ -284,9 +297,13 @@ def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(s
             browser.close()
     saved = json.loads((srv.data_dir / "settings.json").read_text(encoding="utf-8"))
     assert saved.get("OUROBOROS_ONBOARDING_COMPLETED_AT") and saved.get("OUROBOROS_ONBOARDING_CONSCIOUSNESS") == "on"
+    [meeting] = _meetings(srv.data_dir)  # Start opened one first meeting, in Main, and it ends on its own
+    assert (meeting["outcome"], meeting["chat_id"]) == ("admitted", 1)
+    assert _settled(srv.url, meeting["task_id"]) == "completed"
     srv.stop()
     srv.start(supervisor=True)
     assert _control(srv.url) is True, "born on, and still on after a restart"
+    assert _meetings(srv.data_dir) == [meeting], "the restart opened no second meeting"
     assert _system_rows(srv.url) == [], "no System row in Main after setup, a first message and a restart"
     with sync_playwright() as pw:
         browser, page = _browser(pw)
@@ -337,6 +354,7 @@ def test_an_older_install_with_a_state_shows_no_step_and_stays_as_its_state_says
             assert len(seen["completions"]) == 1 and "consciousness" not in seen["completions"][0]
             time.sleep(3)
             assert _control(srv.url) is False
+            assert _meetings(srv.data_dir) == [], "a setup finished over an existing state opens no first meeting"
             assert not seen["errors"].unexpected(), seen["errors"].report()
         finally:
             browser.close()

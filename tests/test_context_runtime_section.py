@@ -3,8 +3,8 @@
 Split verbatim out of ``tests/test_context.py`` by theme. This module owns the
 legacy metadata that must not rewrite the user's text, the light-mode rule and filesystem affordances the runtime section states,
 the workspace rules that preserve system review/commit authority, the host routing
-manifest and manual contract, the improvement backlog digest, and the runtime_env
-block.
+manifest and manual contract, the improvement backlog digest, the runtime_env
+block, and the setup facts (``context_first_hour``).
 """
 
 from __future__ import annotations
@@ -983,3 +983,144 @@ def test_runtime_names_the_kept_services_custody_reads_now(tmp_path, monkeypatch
         assert "incomplete" not in fact
     finally:
         _settle(leader, identities=[(pid, birth)])
+
+
+# --- setup: how this install began and whether my human and I have met (context_first_hour.setup_fact) ---
+
+def _born(root, origin, **state):
+    """A data root whose first state ``origin`` minted (``first_boot`` or an owner Reset's pending identity)."""
+    from supervisor import state_initialization as witness
+
+    if origin == "owner_reset":
+        identity = witness.mark_pending(root, origin="owner_reset")
+    else:
+        identity = witness.initialization_decision(root)["initialization_id"]
+    (root / "state" / "state.json").write_text(json.dumps({"initialization_id": identity, **state}), encoding="utf-8")
+    assert witness.complete(root, identity, adopted=False)
+
+
+def _said(root, *rows, chat_id=1, kind=None):
+    from ouroboros import dialogue_store
+
+    for stamp, direction in rows:
+        dialogue_store.append(root, "chat", {"ts": f"2026-11-21T{stamp}:00.000000+00:00", "direction": direction,
+                                             "chat_id": chat_id, "text": direction, **({"type": kind} if kind else {})})
+
+
+@pytest.mark.parametrize("shape", ["first_boot", "owner_reset", "talked", "unread_binding"])
+def test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an_unreadable_binding(tmp_path, shape):
+    """Facts only, every line from its own source: a fresh first boot with an empty binding and no messages, a Reset's
+    new state (what a Reset deletes, never history), a bound install where my message followed my human's first
+    one, and a binding that cannot be read, kept apart from a known empty slot."""
+    from ouroboros.context_first_hour import setup_fact
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "settings.json").write_text(json.dumps({"OUROBOROS_ONBOARDING_COMPLETED_AT": "2026-11-21T09:58:12.000000+00:00"}),
+                                            encoding="utf-8")
+    bound = {"talked": 1, "unread_binding": 1}.get(shape)
+    _born(tmp_path, "owner_reset" if shape == "owner_reset" else "first_boot", owner_id=bound, owner_chat_id=bound,
+          bg_consciousness_enabled=shape != "talked",
+          **({"_recovery": {"unconfirmed": ["owner_chat_id"]}} if shape == "unread_binding" else {}))
+    if shape == "talked":
+        _said(tmp_path, ("10:00", "in"), ("10:01", "system"), ("10:02", "out"))
+    elif shape == "unread_binding":
+        _said(tmp_path, ("10:00", "in"))
+    fact = setup_fact(tmp_path)
+    assert fact["finished_at"] == "2026-11-21 09:58 UTC"
+    assert fact["state"].startswith("owner_reset: a new state born" if shape == "owner_reset"
+                                    else "first_boot: the first state of this data root, born")
+    assert ("a Reset deletes memory, chats" in fact["state"]) is (shape == "owner_reset")
+    assert fact["owner_chat"] == {"talked": "Main (chat 1)",
+                                  "unread_binding": "unknown: the owner chat binding is not confirmed",
+                                  }.get(shape, "none bound yet: no owner message has bound one")
+    assert fact["consciousness"] == ("off" if shape == "talked" else "on")
+    assert fact["exchange"] == {
+        "talked": "my human and I have both written",
+        "unread_binding": "my human has written to me; I have not written to them yet",
+    }.get(shape, "my human and I have not written to each other yet")
+    assert "starter_skills" not in fact and "startup_problems" not in fact  # never ran here, nothing recorded
+
+
+def test_setup_names_what_setup_left_running_and_a_first_message_of_mine_before_theirs(tmp_path):
+    """The starter installer's counts and the newest startup verification's problems join only once recorded; a wake
+    that spoke before my human wrote is my first message there, not a reply; an unreadable source says unknown."""
+    from ouroboros.context_first_hour import setup_fact
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "logs").mkdir()
+    _born(tmp_path, "first_boot", owner_id=None, owner_chat_id=None, bg_consciousness_enabled=True)
+    _said(tmp_path, ("10:05", "out"))
+    (tmp_path / "state" / "skill_starter.json").write_text(json.dumps({"state": "pending", "requested": ["a", "b", "c"],
+        "results": {"a": {"status": "installed"}, "b": {"status": "failed"}, "c": {"status": "pending"}}}), encoding="utf-8")
+    verification = {"type": "startup_verification", "ts": "2026-11-21T09:59:00.000000+00:00", "issues_count": 2,
+                    "checks": {"model": {"configured": "(not set)"}, "version_sync": {"status": "warning"},
+                               "budget": {"status": "skipped"}, "identity": {"exists": True, "non_empty": True}}}
+    (tmp_path / "logs" / "events.jsonl").write_text(json.dumps(verification) + "\n", encoding="utf-8")
+    fact = setup_fact(tmp_path)
+    assert fact["exchange"] == "I have written to my human; they have not written to me yet"
+    assert fact["starter_skills"] == "waiting to retry: 3 chosen; 1 installed, 1 pending, 1 failed (state/skill_starter.json)"
+    assert fact["startup_problems"] == ("2026-11-21 09:59 UTC, 2 issues: model not set, version_sync warning "
+                                        "(its startup_verification row in logs/events.jsonl)")
+    assert fact["finished_at"] == "none recorded"  # no setup ran here (Colab, headless, a preset)
+    clean = {**verification, "issues_count": 0, "checks": {"version_sync": {"status": "ok"}}}
+    (tmp_path / "logs" / "events.jsonl").write_text(json.dumps(clean) + "\n", encoding="utf-8")
+    (tmp_path / "state" / "skill_starter.json").write_text(json.dumps({"state": "upgrade"}), encoding="utf-8")
+    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "state" / "state.initialized.json").write_text("{not json", encoding="utf-8")
+    fact = setup_fact(tmp_path)
+    assert "startup_problems" not in fact and "starter_skills" not in fact  # a clean check; an install older than it
+    assert fact["finished_at"] == "unknown: the settings document cannot be read"
+    assert fact["state"] == "unknown: the initialization record is invalid"
+    assert fact["owner_chat"].startswith("unknown: runtime state unavailable") and fact["consciousness"] == "unknown"
+
+
+def test_the_exchange_counts_only_the_words_of_my_human_and_mine_in_rooms_they_read(tmp_path):
+    """One statement of two indexed existence probes (``dialogue_store.owner_exchange``): host rows, the hidden
+    partition and correspondents' place rooms are no exchange; an untyped answer or a typed message of mine to my human
+    is one; a store that cannot be read is unknown, never no."""
+    from ouroboros import dialogue_store
+    from ouroboros.context_first_hour import setup_fact
+    from ouroboros.places import conversation_chat_id
+    from ouroboros.store import StoreLost
+
+    (tmp_path / "state").mkdir()
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)  # no store at all: nothing was written
+    _said(tmp_path, ("10:00", "system"), ("10:01", "out"), kind="task_summary")  # host rows in Main
+    _said(tmp_path, ("10:02", "out"), ("10:03", "in"), chat_id=0)  # the hidden partition
+    _said(tmp_path, ("10:04", "out"), ("10:05", "in"), chat_id=conversation_chat_id("slack:c1"))  # a place's room
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)
+    _said(tmp_path, ("10:06", "out"), chat_id=1000 + 7, kind="proactive_message")  # a message of mine, in a Project room
+    assert dialogue_store.owner_exchange(tmp_path) == (False, True)
+    _said(tmp_path, ("10:07", "in"))
+    assert dialogue_store.owner_exchange(tmp_path) == (True, True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(dialogue_store, "owner_exchange", lambda root: (_ for _ in ()).throw(StoreLost("torn page")))
+        assert setup_fact(tmp_path)["exchange"] == "unknown: the dialogue could not be read (StoreLost)"
+
+
+@pytest.mark.parametrize("written", [False, True])
+def test_setup_carries_the_owners_first_meeting_words_only_while_i_have_not_written_and_only_once_they_exist(
+        tmp_path, written):
+    """``prompts/FIRST_MEETING.md`` waits for the owner's yes on its text: absent, nothing is carried; present, its
+    words ride the setup facts until I have written to my human, then they leave."""
+    from ouroboros.context_first_hour import setup_fact
+
+    (tmp_path / "data" / "state").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    if written:
+        _said(tmp_path / "data", ("10:00", "out"))
+    assert "first_meeting" not in setup_fact(tmp_path / "data", repo)  # no file: nothing
+    (repo / "prompts").mkdir(parents=True)
+    (repo / "prompts" / "FIRST_MEETING.md").write_text("Owner-approved words.\n", encoding="utf-8")
+    fact = setup_fact(tmp_path / "data", repo)
+    assert fact.get("first_meeting") == (None if written else "Owner-approved words.")
+    assert "first_meeting" not in setup_fact(tmp_path / "data")  # a caller that names no repository carries none
+
+
+def test_runtime_carries_setup_for_shared_inputs_and_not_for_declared_ones(tmp_path):
+    env = _make_health_env(tmp_path)
+    shared = json.loads(build_runtime_section(env, {"id": "task-1", "type": "task"}).split("\n\n", 1)[1])
+    assert shared["setup"]["owner_chat"].startswith("unknown: runtime state unavailable")  # the helper env has no witness
+    declared = json.loads(build_runtime_section(env, {"id": "task-2", "type": "task", "input_sources": "declared"})
+                          .split("\n\n", 1)[1])
+    assert "setup" not in declared

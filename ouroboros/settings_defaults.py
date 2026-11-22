@@ -194,7 +194,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_BG_WAKEUP_MIN": 900,
     "OUROBOROS_BG_WAKEUP_MAX": 14400,
     "OUROBOROS_CONSCIOUSNESS_AUTONOMY": "act",
-    "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 20.0,
+    "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 15.0,
     "OUROBOROS_CONSCIOUSNESS_MAX_TASKS": 2,
     # Post-task self-evolution envelope (V4). Owner-enabled capability whose
     # CONTENT stays LLM-first; default OFF. When enabled, after a qualifying task

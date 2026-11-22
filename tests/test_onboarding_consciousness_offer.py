@@ -72,7 +72,7 @@ def test_the_limits_are_the_runtime_readers_values(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     from ouroboros.consciousness_view import FIRST_RUN, ON_WITHOUT_PLACES, POSITION_WORDS, first_run_words
 
-    assert consciousness_offer({}) == {"offered": True, "enabled": None, "autonomy": "act", "dailyUsd": 20.0, "maxTasks": 2,
+    assert consciousness_offer({}) == {"offered": True, "enabled": None, "autonomy": "act", "dailyUsd": 15.0, "maxTasks": 2,
                                        "words": FIRST_RUN}  # the switch's words (owner 15.11, 5A)
     # The two positions of an install with no place yet, and a subscription's quota said where it is the one payer.
     assert (FIRST_RUN["off"], FIRST_RUN["on"]) == (POSITION_WORDS[False], ON_WITHOUT_PLACES)
@@ -251,6 +251,23 @@ def test_a_fresh_install_left_on_is_born_on_and_one_left_off_is_born_off(minted,
     _complete(minted, consciousness=False)
     assert not minted.saved().get(ONBOARDING_CONSCIOUSNESS_KEY)
     assert _boot_control() == (False, None)
+
+
+def test_a_state_minted_after_setup_owes_the_first_meeting_and_one_minted_before_does_not(minted, tmp_path):
+    """My human's press of Start (the completion fact) is what a first state is born owing: one first meeting
+    (``supervisor.first_meeting``), whatever the switch said. A root minted before any setup owes none, and a setup
+    finished over a state that already exists adds none."""
+    from supervisor import state
+    from supervisor.first_meeting import FIRST_MEETING_KEY
+
+    _complete(minted, consciousness=False)
+    read = state.init_state()
+    assert read.values[FIRST_MEETING_KEY] == {"state": "owed", "pressed_at": minted.saved()[ONBOARDING_COMPLETED_KEY]}
+    _forget_state(tmp_path)
+    minted.settings_path.unlink(missing_ok=True)
+    assert FIRST_MEETING_KEY not in state.init_state().values  # no setup recorded when it was minted
+    _complete(minted, consciousness=True)
+    assert FIRST_MEETING_KEY not in state.init_state().values  # setup over an existing state: nothing owed
 
 
 def test_an_owner_reset_then_setup_left_on_is_born_on(minted, tmp_path):
