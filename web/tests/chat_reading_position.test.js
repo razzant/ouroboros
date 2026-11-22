@@ -1434,3 +1434,12 @@ test('a row put back stays the row read through a passing layout; a row gone is 
     f.feed.clientWidth = f.feed.offsetWidth = 667; f.reading.reflow();
     assert.equal(f.searches(), 2, 'a row no longer placed yields to a fresh search');
 });
+
+test('the feed moved by a bar entering the flow outside its own parent shifts the place; an unmoved feed does not', t => {
+    const f = placedFixture(t);
+    f.reading.reflow();
+    assert.deepEqual(f.restored, [100], 'nothing moved: the row is put back where it was');
+    f.page.offsetTop = 56;  // a Project room's bar enters the flow above the room, outside the feed's own offsetParent
+    f.reading.reflow();
+    assert.deepEqual(f.restored, [100, 44], 'the feed moved down 56 px, so the row goes 56 px up in it and stays on the screen');
+});

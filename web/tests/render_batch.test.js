@@ -913,6 +913,20 @@ test('an expanded live card collapsing under a floating bar keeps the row after 
     }
 });
 
+test('the row read is the first in the read band, not a row under the bar', () => {
+    for (const bar of [88, 0]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map(),
+            band: () => (bar ? { top: bar, bottom: 750 } : null) });
+        const under = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:under' }, y: 2000, height: 60, parent: feed });
+        const read = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:read' }, y: 2070, height: 100, parent: feed });
+        feed.scrollTop = 2000;
+        const anchor = anchors.captureVisibleTimelineAnchor();
+        assert.equal(anchor.node, bar ? read : under, bar ? 'the bar covers the first row' : 'no bar: the first row is read');
+        assert.equal(anchor.offset, bar ? 70 : 0, 'offsets stay feed-relative');
+    }
+});
+
 test('a row whose picture still loads above the band is passed over; one whose picture starts in the band holds', () => {
     // A late picture grows when it lands: above the band's top it grows up out of view, so the row after it is read;
     // starting in the band it grows down, and its own row stays the place.
