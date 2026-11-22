@@ -17,15 +17,9 @@ from types import SimpleNamespace
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue, _parked, _pause
+from tests._worker_recovery_helpers import _pool_events, _queued
 
 RESTART_REASON = "Owner restart stopped this task before process restart."
-
-
-def _pool_events(workers, monkeypatch):
-    events: list = []
-    monkeypatch.setattr(workers, "_EVENT_Q_SHUTDOWN", False, raising=False)
-    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append), raising=False)
-    return events
 
 
 def _done_ids(events):
@@ -35,10 +29,6 @@ def _done_ids(events):
 def _supervisor_rows(root):
     path = root / "logs" / "supervisor.jsonl"
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
-
-
-def _queued(task_id, **extra):
-    return {"admitted_dispatch": "possible" if extra.get("_attempt", 1) > 1 else "none", "id": task_id, "type": "task", "chat_id": 0, "_attempt": 1, "text": task_id, **extra}
 
 
 @pytest.mark.parametrize("door", ["panic", "owner_restart"])

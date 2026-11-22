@@ -137,7 +137,7 @@ def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONI
     observation.update(exposed_units=[], physical_source_status="unavailable")
     if physical_capture is None or not physical_capture.candidate_manifest_ref:
         return
-    from ouroboros.context_compaction import exposed_context_units, exposed_context_units_from_atoms
+    from ouroboros.context_compaction import exposed_context_units, exposed_context_units_from_atoms, physical_message_rows
     from ouroboros.observability import read_blob_ref, read_call_manifest_ref
 
     for root in (getattr(ctx, "budget_drive_root", None), getattr(ctx, "drive_root", None)):
@@ -158,8 +158,8 @@ def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONI
                 basis = str(manifest.get("exposure_atoms_basis") or "prepared_atoms")
             else:
                 payload = read_blob_ref(Path(root), manifest["full_payload_ref"], task_id=ctx.task_id)
-                physical_messages = payload.get("messages")
-                if not isinstance(physical_messages, list):
+                physical_messages = physical_message_rows(payload)
+                if physical_messages is None:
                     continue
                 exposed, basis = exposed_context_units(observed, physical_messages), "redacted_projection"
             observation.update(

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import asyncio
+import json
 
 import server
 from ouroboros.gateway import control as gateway_control
@@ -234,6 +235,103 @@ def test_failed_visible_repair_command_does_not_poison_dedupe(monkeypatch):
     assert first.status_code == 400
     assert second.status_code == 200
     assert len(calls) == 1
+
+
+def _selected_reply_command(sent):
+    class Request:
+        app = SimpleNamespace(state=SimpleNamespace(drive_root="."))
+
+        async def json(self):
+            return {"cmd": "explain", "visible_text": "Explanation queued", "visible_task_id": "explain_passage",
+                    "reply_to": "row:1@2026-11-20T10:00:00Z#0123456789ab",
+                    "reply_excerpt": {"text": "this passage", "start_utf16": 4}}
+
+    class Bridge:
+        def ui_send(self, text, **kwargs):
+            sent.append((text, kwargs))
+
+    return Request, Bridge
+
+
+def test_selected_reply_command_is_queued_once_when_its_repeat_overlaps_the_reply_check(monkeypatch):
+    """The reply check runs in a worker thread, so a repeat of the same visible command can arrive while the first
+    is still being checked: one correlation id is one queued command."""
+    import time
+
+    sent, checked = [], []
+    Request, Bridge = _selected_reply_command(sent)
+
+    def slow_check(_root, body):
+        checked.append(body["visible_task_id"])
+        time.sleep(0.05)  # long enough for the other request to be at its own check meanwhile
+        return {"address": body["reply_to"], "excerpt": body["reply_excerpt"]}
+
+    monkeypatch.setattr(gateway_control, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr("ouroboros.chat_references.ingress_reply", slow_check)
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: Bridge())
+    monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
+    monkeypatch.setattr(gateway_control, "broadcast_ws_sync", lambda payload: None)
+
+    async def both():
+        return await asyncio.gather(gateway_control.api_command(Request()), gateway_control.api_command(Request()))
+
+    first, second = asyncio.run(both())
+
+    assert len(checked) == 2, "both requests were in their check at once"
+    assert len(sent) == 1, "and still only one command was queued"
+    assert sorted(response.status_code for response in (first, second)) == [200, 200]
+    assert b"deduped" in (first.body + second.body)
+    assert sent[0][1]["task_metadata"]["reply_excerpt"] == {"text": "this passage", "start_utf16": 4}
+
+
+def test_refused_or_failed_selected_reply_command_leaves_its_id_free_to_retry(monkeypatch):
+    sent, outcomes = [], iter([ValueError("The quoted message is unavailable."), RuntimeError("worker lost"), None])
+    Request, Bridge = _selected_reply_command(sent)
+
+    def check(_root, body):
+        outcome = next(outcomes)
+        if outcome:
+            raise outcome
+        return {"address": body["reply_to"], "excerpt": body["reply_excerpt"]}
+
+    monkeypatch.setattr(gateway_control, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr("ouroboros.chat_references.ingress_reply", check)
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: Bridge())
+    monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
+    monkeypatch.setattr(gateway_control, "broadcast_ws_sync", lambda payload: None)
+
+    statuses = [asyncio.run(gateway_control.api_command(Request())).status_code for _ in range(3)]
+
+    assert statuses == [400, 400, 200] and len(sent) == 1, "a refused or failed command is no queued one"
+    assert "explain_passage" in gateway_control._RECENT_VISIBLE_COMMANDS
+
+
+def test_a_repeat_of_a_queued_selected_reply_command_is_deduped_though_its_source_is_gone(monkeypatch):
+    """The earlier success stands: a repeat inside the dedupe window is answered before any source is read, so a source
+    that has become unavailable since cannot turn it into a refusal, and nothing is queued twice."""
+    sent, reads = [], []
+    Request, Bridge = _selected_reply_command(sent)
+    outcomes = iter([None, ValueError("The quoted message is unavailable. Retry or clear the quote.")])
+
+    def check(_root, body):
+        reads.append(body["visible_task_id"])
+        outcome = next(outcomes)
+        if outcome:
+            raise outcome
+        return {"address": body["reply_to"], "excerpt": body["reply_excerpt"]}
+
+    monkeypatch.setattr(gateway_control, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr("ouroboros.chat_references.ingress_reply", check)
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: Bridge())
+    monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
+    monkeypatch.setattr(gateway_control, "broadcast_ws_sync", lambda payload: None)
+
+    first = asyncio.run(gateway_control.api_command(Request()))
+    second = asyncio.run(gateway_control.api_command(Request()))
+
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert json.loads(second.body) == {"ok": True, "deduped": True, "task_id": "explain_passage"}
+    assert len(sent) == 1 and reads == ["explain_passage"], "the repeat read no source and queued nothing"
 
 
 def test_visible_repair_command_can_retry_after_short_dedupe_window(monkeypatch):

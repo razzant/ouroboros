@@ -22,6 +22,15 @@ pytestmark = pytest.mark.ui_browser
 skills_browser, manager, world = _skills_browser, _manager, _world
 
 
+def _status_answer(manager):
+    # The passive gateway read takes the current local configuration before projecting its status.
+    manager.reconfigure(config.load_settings())
+    return manager.status_payload()
+
+
+MCP_ANSWER = '[data-extensions-open="tools"] [data-extensions-answer]'
+
+
 @pytest.fixture(params=[("chromium", 1440, "light"), ("webkit", 390, "dark")], ids=["chromium-light", "webkit-dark"])
 def listing_page(request, skills_browser, world, manager, monkeypatch):
     engine, width, theme = request.param
@@ -60,6 +69,7 @@ def listing_page(request, skills_browser, world, manager, monkeypatch):
         return result
 
     skills.answers["/api/extensions"] = listing
+    skills.answers["/api/mcp/status"] = lambda _: _status_answer(manager)
     skills.answers["/api/skills/chrome_browser/mcp-connect"] = connect
     try:
         page.goto(URL, wait_until="networkidle")
@@ -74,6 +84,8 @@ def listing_page(request, skills_browser, world, manager, monkeypatch):
         capture(page, engine, width, "mcp-connect-preview")
         confirm.click()
         page.wait_for_function("document.querySelector('.skills-card').textContent.includes('configured · listing its tools')")
+        page.wait_for_function("selector => document.querySelector(selector).textContent === '1 of 1 on'", arg=MCP_ANSWER)
+        assert not skills.posted("/api/mcp/refresh")
         assert scheduled == ["skill_connect_mcp"]
         assert skills.answers["/api/skills/lifecycle-queue"]["events"] == [], "the lifecycle job is already done"
         page.evaluate("window.keptCard = document.querySelector('.skills-card')")
@@ -133,8 +145,27 @@ def test_connect_listing_settles_without_refresh(listing_page, world, manager, t
 def test_pending_listing_stops_when_not_visible(listing_page, leave):
     view = listing_page
     page, skills = view.page, view.skills
+    posts = list(skills.posts)
     if leave == "page":
-        page.evaluate("window.dispatchEvent(new CustomEvent('ouro:page-shown', {detail:{page:'chat'}}))")
+        # This document mounts only Extensions. A widget card gives it a real control that leaves
+        # the section through showPage while the original skill's Connect is still listing.
+        listing = skills.answers["/api/extensions"]
+
+        def with_widget(request):
+            facts = listing(request)
+            facts["skills"].append({"name": "status_widget", "type": "extension", "enabled": True,
+                                    "live_loaded": True, "review_gate": {"executable_review": True},
+                                    "grants": {"all_granted": True}})
+            facts["live"]["ui_tabs"] = [{"skill": "status_widget", "key": "status_widget:main"}]
+            return facts
+
+        skills.answers["/api/extensions"] = with_widget
+        button = page.get_by_role("button", name="Open widgets", exact=True)
+        button.wait_for(timeout=7000)
+        assert "configured · listing its tools" in view.card.inner_text()
+        button.click()
+        assert page.evaluate("window.shownPage") == "widgets"
+        assert page.locator("#page-skills").is_hidden()
     elif leave == "document":
         page.evaluate("""() => {
             Object.defineProperty(document, 'hidden', {configurable:true, value:true});
@@ -151,6 +182,7 @@ def test_pending_listing_stops_when_not_visible(listing_page, leave):
             document.dispatchEvent(new Event('visibilitychange'));
         }""")
         skills.wait_for_count(("GET", "/api/extensions"), reads + 1, timeout_ms=7000)
+    assert skills.posts == posts and len(skills.posted("/api/skills/chrome_browser/mcp-connect")) == 1
     assert not view.errors
 
 
@@ -217,6 +249,7 @@ def test_a_queued_connect_follows_its_job_and_never_claims_success_early(
         return {"ok": True, "pending": True, "job_id": jobs[-1].id, "message": ""}  # as the real route answers it
 
     skills.answers["/api/extensions"] = listing
+    skills.answers["/api/mcp/status"] = lambda _: _status_answer(manager)
     skills.answers["/api/skills/chrome_browser/mcp-connect"] = connect
     try:
         page.goto(URL, wait_until="networkidle")
@@ -232,6 +265,7 @@ def test_a_queued_connect_follows_its_job_and_never_claims_success_early(
         page.wait_for_function("() => document.querySelector('.skills-card').textContent.includes('Connecting tools…')")
         page.wait_for_function("() => window.toastLog.some((text) => text.includes('still working'))")
         assert json.loads((world.data / "settings.json").read_text())["MCP_SERVERS"] == []  # the fixture job has not run
+        assert page.locator(MCP_ANSWER).text_content() == "Off"
         capture(page, engine, width, f"mcp-connect-queued-then-{outcome}")
         # The job runs now, through the real Connect owner, and the queue reports how it ended.
         sent, job = confirmed[0], jobs[0]
@@ -249,6 +283,10 @@ def test_a_queued_connect_follows_its_job_and_never_claims_success_early(
         page.wait_for_function("text => document.querySelector('.skills-card').textContent.includes(text)",
                                arg=expected, timeout=10000)
         text = card.inner_text()
+        expected_answer = "1 of 1 on" if outcome == "succeeded" else "Off"
+        page.wait_for_function("([selector, text]) => document.querySelector(selector).textContent === text",
+                               arg=[MCP_ANSWER, expected_answer])
+        assert not skills.posted("/api/mcp/refresh")
         assert "Connecting tools…" not in text
         if outcome == "failed":
             assert result["error"] in text and json.loads((world.data / "settings.json").read_text())["MCP_SERVERS"] == []

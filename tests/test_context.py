@@ -447,7 +447,8 @@ def test_project_room_keeps_the_retention_proof_cross_room_directive_once(tmp_pa
     project_chat = int(project["chat_id"])
     directive = "d" * 500 + " CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3"
     ref = build_owner_message_ref(chat_id=1, client_message_id="cat-origin", ts="2026-08-21T00:00:00Z", text=directive)
-    bind_task_to_project(root, "cat-root", "cat-tower", project_chat, origin={"ref": ref, "text": directive})
+    bind_task_to_project(root, "cat-root", "cat-tower", project_chat,
+                         origin={"ref": ref, "text": directive, "snapshot": {"projectable": True}})
     source_row = {**ref, "direction": "in", "text": directive}
     follow = {"chat_id": project_chat, "direction": "in", "ts": "2026-08-21T00:01:00Z", "text": "continue"}
     # The chain does not hold the owner's row (an older install never stored it): the binding kept the words.

@@ -264,8 +264,8 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     prompt, sources = sources_of(later)
     brief = ("this task's brief: written by its parent task (Ouroboros) with blocks added by the host; "
              "not the owner's words")
-    record = ("(host record: my human pressed «1. Publish it» and wrote no words; the label is the asking task's "
-              "text)")  # the field carries the host's record of the act, never the label as their words
+    record = ("(host record: my human pressed «1. Publish it» and wrote no words; the label is the text of task "
+              "asker)")  # the field carries the host's record of the act, never the label as their words
     assert sources == [{"source": "initial_text", "content": "Ship the release notes.", "author": brief},
                        {"source": "owner_press", "content": record, "msg_id": "chat 1 / owner-answer",
                         "reply_to": card_reply, **later_words}]

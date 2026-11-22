@@ -256,6 +256,97 @@ def test_a_blocked_review_does_not_offer_author_continuation_or_rewrite_on_read(
     assert writes == [] and review_state.load_state(task.drive_root).attempts[-1] == before
 
 
+def test_an_interrupted_preparation_is_not_read_as_a_running_panel(task, monkeypatch):  # noqa: F811
+    """A commit attempt killed inside the tests preflight leaves the producer's own row marked reviewing, with no
+    reviewer operation, wave record or retry evidence beside it. ``review_status`` must then say that this record
+    does not confirm a dispatched panel — its preparation and its outcome may still be unknown — and it must leave
+    the row exactly as the producer wrote it: the reading is a reading, not a repair."""
+    import dataclasses
+    import json
+
+    from ouroboros import review_state
+    from ouroboros.tools.preflight_review import _handle_review_status
+
+    class _Killed(BaseException):
+        """The shape of a kill the pipeline does not catch."""
+
+    git_mod = _get_git_module()
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+
+    def killed(*_args, **_kwargs):
+        raise _Killed("the worker was killed inside the tests preflight")
+
+    monkeypatch.setattr(git_mod, "_run_review_preflight_tests", killed)
+    monkeypatch.setattr(git_mod, "_run_parallel_review",
+                        lambda *a, **kw: pytest.fail("an interrupted preparation buys no reviewer"))
+    with pytest.raises(_Killed):
+        git_mod._repo_commit_push(task, "candidate", skip_advisory_review=True)
+
+    attempt = review_state.load_state(task.drive_root).attempts[-1]
+    assert attempt.status == "reviewing", attempt.status
+    assert not attempt.triad_raw_results and not attempt.scope_raw_result
+    assert not attempt.review_record_id and not attempt.review_retry_key
+    before = dataclasses.replace(attempt)
+
+    payload = json.loads(_handle_review_status(task, task_id=task.task_id))
+    summary = payload["status_summary"]
+
+    assert "does not confirm" in summary and "dispatched or sent" in summary, summary
+    assert "may still be unknown" in summary, summary
+    assert "not_dispatched" not in summary, summary
+    assert payload["message"] == summary
+    # The reading changed nothing: the producer's own row is still the row.
+    assert review_state.load_state(task.drive_root).attempts[-1] == before
+
+
+def test_a_recorded_wave_or_a_saved_error_keeps_its_own_reading(task, monkeypatch):  # noqa: F811
+    """The unconfirmed reading belongs to a preparation row alone. A row that records a reviewer operation (a wave
+    that ran) and a row that recorded a saved error keep the readings they had: neither is rewritten into an
+    unconfirmed preparation, and the saved error keeps its own reason."""
+    import dataclasses
+    import json
+
+    from ouroboros import review_state
+    from ouroboros.tools.preflight_review import _handle_review_status
+
+    class _Killed(BaseException):
+        """The shape of a kill the pipeline does not catch."""
+
+    git_mod = _get_git_module()
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+
+    def killed(*_args, **_kwargs):
+        raise _Killed("the worker was killed inside the tests preflight")
+
+    monkeypatch.setattr(git_mod, "_run_review_preflight_tests", killed)
+    monkeypatch.setattr(git_mod, "_run_parallel_review",
+                        lambda *a, **kw: pytest.fail("an interrupted preparation buys no reviewer"))
+    with pytest.raises(_Killed):
+        git_mod._repo_commit_push(task, "candidate", skip_advisory_review=True)
+
+    def summary_after(**changes):
+        state = review_state.load_state(task.drive_root)
+        state.attempts[-1] = dataclasses.replace(state.attempts[-1], **changes)
+        review_state.save_state(task.drive_root, state)
+        return json.loads(_handle_review_status(task, task_id=task.task_id))["status_summary"]
+
+    # A recorded reviewer operation: the wave ran, its own reading stands.
+    with_operation = summary_after(triad_raw_results=[{"slot_id": "critic", "status": "responded",
+                                                        "operation_id": "op-critic", "operation_state": "settled"}])
+    assert "does not confirm" not in with_operation, with_operation
+    assert "Current advisory:" in with_operation, with_operation
+
+    # A saved error: its own reason stands, unrewritten.
+    with_error = summary_after(triad_raw_results=[], status="failed", block_reason="infra_failure",
+                                block_details="the transport died")
+    assert "does not confirm" not in with_error, with_error
+    assert "Last commit FAILED (infra_failure)" in with_error, with_error
+
+
 # --- repo_write tool registration ---
 
 class TestRepoWriteRegistration:

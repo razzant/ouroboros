@@ -634,14 +634,15 @@ def late_phase_settled(drive_root: Any, root_task_id: str) -> None:
 
 def complete_owner_pause_latch(root_task_id: str, fence: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Queue lock held: project the queue latch of ``fence`` (the root's exact closed
-    fence, just read) when none stands, as a replay of its accepted Pause would. A
+    fence, just read) when missing or superseded by confirmed delegated activity. A
     ``latch_pending`` Pause leaves only that durable fence, which every launch gate
     reads but no queue census or Resume lift sees. Returns the projected latch, or
     ``None`` when one already stood."""
+    from ouroboros.owner_pause import recovered_start_over_latch
     from supervisor import queue as q
     from supervisor.events_budget import _set_root_budget_pause_locked
 
-    if root_task_id in q.BUDGET_ROOT_FENCES:
+    if root_task_id in q.BUDGET_ROOT_FENCES and not recovered_start_over_latch(fence, q.BUDGET_ROOT_FENCES[root_task_id]):
         return None
     return _set_root_budget_pause_locked(root_task_id, {
         "fence_id": str(fence["fence_id"]), "cause": "owner_pause",
@@ -691,27 +692,22 @@ def _record_settled_member(q: Any, item: Dict[str, Any], row: Optional[Dict[str,
     # begins a whole list; an owner tick an older body ran there left these marks, so that list is partial.
     seen = row.get("settlement_observed_at") or any(isinstance(run, dict) and run.get("stop_policy") == "request_stop"
                                                     for run in (row.get("external_runs") or {}).get("runs") or [])
-    participants = episode_fields(row, observed, starts=bool(cold_receipt) and not seen)
+    update = episode_fields(row, observed, starts=bool(cold_receipt) and not seen)
     if task_owned_runs_open(observed):
         if observed.get("custody_read") == "ok" and _run_facts(observed) == _run_facts(row.get("external_runs")):
             return  # nothing moved: no rewrite of the same facts every tick
-        try:  # the fresh outcomes (requested -> confirmed, unknown) are the owner's facts
-            set_budget_pause(result_root, task_id, {**row, "external_runs": observed, **participants},
-                             expected_pause_id=str(row.get("pause_id") or ""),
-                             expected_state=str(row.get("state") or ""),
-                             expected_grant_id=str((row.get("grant") or {}).get("grant_id") or ""))
-        except BudgetPauseSuperseded:
-            log.debug("Owner pause observation of %s superseded by a newer pause row", task_id, exc_info=True)
-        return
-    try:
-        set_budget_pause(result_root, task_id, {**row, "external_runs": observed, **participants,
-                                                **({} if cold_receipt else {"settlement": SETTLEMENT_SETTLED}),
-                                                "settlement_observed_at": utc_now_iso()},
+    else:
+        if not cold_receipt:
+            update["settlement"] = SETTLEMENT_SETTLED
+        update["settlement_observed_at"] = utc_now_iso()
+    try:  # the fresh outcomes (requested -> confirmed, unknown) are the owner's facts
+        set_budget_pause(result_root, task_id, {**row, "external_runs": observed, **update},
                          expected_pause_id=str(row.get("pause_id") or ""),
                          expected_state=str(row.get("state") or ""),
                          expected_grant_id=str((row.get("grant") or {}).get("grant_id") or ""))
     except BudgetPauseSuperseded:
-        log.debug("Owner pause settlement of %s superseded by a newer pause row", task_id, exc_info=True)
+        stage = "settlement" if "settlement_observed_at" in update else "observation"
+        log.debug("Owner pause %s of %s superseded by a newer pause row", stage, task_id, exc_info=True)
 
 
 def _reread_warm_member(q: Any, task_id: str, meta: Dict[str, Any]) -> None:
@@ -799,7 +795,7 @@ def _stop_ended_members(q: Any, root_id: str, live: Iterable[str], stop_requeste
                     unread = True  # not ended: its own park or terminal comes first
                     continue
                 record = runs.member_stop_record(row, fence_id)
-            observed = observe_task_runs(root_drive, member, reason="owner_pause_ended_member",
+            observed = observe_task_runs(root_drive, member, reason="owner_pause_ended_member", pause_tree=root_id,
                                          stop_policy=STOP_POLICY_TASK_OWNED, prior=record.get("external_runs"))
         except Exception:
             log.warning("Stop of what ended member %s left (tree %s) stays owed", member, root_id, exc_info=True)
@@ -832,6 +828,8 @@ def _stop_ended_members(q: Any, root_id: str, live: Iterable[str], stop_requeste
 _BOOK_LOCK = threading.Lock()
 _LOOK_OWED = [True]
 _CHANGED: set = set()  # trees a transition named since their last look
+_RECOVERED: Dict[str, pathlib.Path] = {}  # trees whose accepted start may need a queue latch
+_DISCOVERY_OWED: set = set()  # drive roots whose boot fence discovery read failed: stays owed
 _AT_REST: Dict[str, tuple] = {}  # root -> (fence id, member signature) of the census that found nothing to observe
 _UNWRITTEN_STOPS: Dict[tuple, dict] = {}  # (root, fence id) -> ended members' records whose fence write failed
 
@@ -856,10 +854,37 @@ def _note_rest(root_task_id: str, rest: Optional[tuple], *, looked: bool = True)
                 _CHANGED.discard(root_task_id)
 
 
-def mark_tree_changed(root_task_id: str) -> None:
-    """A transition no direct census follows (a warm park): the tree is looked at on the next tick."""
+def mark_tree_changed(root_task_id: str, *, recovered_drive: Optional[pathlib.Path] = None) -> None:
+    """A direct census can consume a member's mark. A recovered writer still needs its queue latch checked."""
     with _BOOK_LOCK:
-        _CHANGED.add(str(root_task_id or ""))
+        if recovered_drive is None:
+            _CHANGED.add(str(root_task_id or ""))
+        else:
+            _RECOVERED[root_task_id] = recovered_drive
+            _LOOK_OWED[0] = True
+
+
+def defer_failed_recovery_discovery(drive_root: pathlib.Path) -> None:
+    """A boot fence discovery read that failed stays owed: no fence is inferred absent, and the
+    settlement cadence retries the indexed read until it succeeds."""
+    with _BOOK_LOCK:
+        _DISCOVERY_OWED.add(drive_root)
+        _LOOK_OWED[0] = True
+
+
+def _retry_owed_recovery_discovery(q: Any) -> None:
+    """The settlement pass's retry of a boot discovery read that failed; a retry that fails
+    again stays owed for the next cadence pass."""
+    with _BOOK_LOCK:
+        if q.DRIVE_ROOT not in _DISCOVERY_OWED:
+            return
+        _DISCOVERY_OWED.discard(q.DRIVE_ROOT)
+    from ouroboros.delegate_resume import restore_recovered_writer_hints
+    try:
+        restore_recovered_writer_hints(q.DRIVE_ROOT)
+    except Exception:
+        defer_failed_recovery_discovery(q.DRIVE_ROOT)
+        log.warning("Recovered writer fence discovery still unavailable; it stays owed", exc_info=True)
 
 
 def request_settlement_look() -> None:
@@ -871,16 +896,11 @@ def request_settlement_look() -> None:
 def settlement_look_owed(q: Any) -> bool:
     """The tick's scheduling hint, no store read: is a look owed and is there any owner Pause to look at?"""
     with _BOOK_LOCK:
-        owed = _LOOK_OWED[0] or bool(_CHANGED)
-    if not owed:
-        return False
-    if any(isinstance(fence, dict) and fence.get("cause") == "owner_pause"
-           for fence in list(q.BUDGET_ROOT_FENCES.values())):
-        return True
-    with _BOOK_LOCK:  # no Pause stands: a later Pause's own census starts its own account
-        _LOOK_OWED[0] = False
-        _CHANGED.clear()
-    return False
+        if _LOOK_OWED[0] and not (_CHANGED or _RECOVERED):
+            # Without a Pause the cadence owes nothing; a later Pause starts its own census.
+            _LOOK_OWED[0] = any(isinstance(fence, dict) and fence.get("cause") == "owner_pause"
+                                for fence in list(q.BUDGET_ROOT_FENCES.values()))
+        return bool(_CHANGED) or _LOOK_OWED[0] or any(path == q.DRIVE_ROOT for path in _DISCOVERY_OWED)
 
 
 def settle_requested_owner_pauses(q: Any = None, *, stop_requested: Any = None) -> List[str]:
@@ -898,16 +918,35 @@ def settle_requested_owner_pauses(q: Any = None, *, stop_requested: Any = None) 
     its census found ``paused``.
     """
     from ouroboros.budget_pause import budget_pause_row
-    from ouroboros.owner_pause import FENCE_PAUSED
-    from ouroboros.store_hot_facts import snapshot
+    from ouroboros.owner_pause import FENCE_PAUSED, fence_closed, launch_lock, read_fence
+    from ouroboros.store import acquisition_budget
+    from ouroboros.store_hot_facts import read_ahead, serving
     from supervisor.workers import direct_chat_turn
 
     if q is None:
         from supervisor import queue as q
+    _retry_owed_recovery_discovery(q)
     with _BOOK_LOCK:
-        changed = set(_CHANGED)
+        recovered = set()
+        if _LOOK_OWED[0]:
+            recovered = {tree for tree, drive in _RECOVERED.items() if drive == q.DRIVE_ROOT}
+            _RECOVERED.clear()
+        changed = _CHANGED | recovered
         _CHANGED.clear()
         _LOOK_OWED[0] = False
+    # A recovered writer can close a fence after task_done removed the last queue carrier.
+    for root_id in recovered:
+        try:
+            with q._queue_lock, launch_lock(q.DRIVE_ROOT, root_id, wait=False), acquisition_budget(0):
+                fence = read_fence(q.DRIVE_ROOT, root_id)
+                projected = (fence_closed(fence) and fence.get("active_delegated_start")
+                             and complete_owner_pause_latch(root_id, fence))
+            if projected:
+                q.persist_queue_snapshot(reason="recovered_writer_observed")
+        except Exception:
+            with _BOOK_LOCK:  # retry on the cadence, even if no queue latch stands
+                _RECOVERED.setdefault(root_id, q.DRIVE_ROOT)
+            log.warning("Recovered writer of %s awaits settlement", root_id, exc_info=True)
     with q._queue_lock:
         latches = {str(root_id): str(fence.get("fence_id") or "") for root_id, fence in q.BUDGET_ROOT_FENCES.items()
                    if isinstance(fence, dict) and fence.get("cause") == "owner_pause"}
@@ -933,23 +972,14 @@ def settle_requested_owner_pauses(q: Any = None, *, stop_requested: Any = None) 
         if root_id in changed or rest.get(root_id) != (fence_id, signature):
             due.append(root_id)
     parked = {root_id: [item for item in pending[root_id] if pause_marker(item)] for root_id in due}
-    addressed = {(str(item.get("id") or "")): pathlib.Path(item.get("budget_drive_root") or q.DRIVE_ROOT)
-                 for items in parked.values() for item in items}
-    rows: Dict[str, Any] = {}
-    if addressed:
-        with snapshot([(drive, task_id) for task_id, drive in addressed.items()]):
-            for task_id, drive in addressed.items():  # one read for the pass; closed before anything writes
-                try:
-                    rows[task_id] = budget_pause_row(drive, task_id)
-                except Exception as exc:
-                    rows[task_id] = exc
+    facts = read_ahead((item.get("budget_drive_root") or q.DRIVE_ROOT, item.get("id"))
+                       for items in parked.values() for item in items)
     settled: List[str] = []
-    looked: set = set()
     try:
         for root_id in due:
             if stop_requested is not None and stop_requested():
                 break
-            looked.add(root_id)
+            changed.discard(root_id)
             warm = [(task_id, meta) for task_id, meta in running[root_id] if warm_paused_member(meta)]
             try:
                 warm.extend(_warm_direct_root(q, root_id))
@@ -960,9 +990,8 @@ def settle_requested_owner_pauses(q: Any = None, *, stop_requested: Any = None) 
                 if stop_requested is not None and stop_requested():
                     return settled
                 try:
-                    row = rows[str(item.get("id") or "")]
-                    if isinstance(row, Exception):
-                        raise row
+                    with serving(facts):
+                        row = budget_pause_row(item.get("budget_drive_root") or q.DRIVE_ROOT, item["id"])
                     _record_settled_member(q, item, row)
                 except Exception:
                     log.warning("Owner pause settlement re-check of %s (tree %s) failed; it stays pausing",
@@ -992,5 +1021,5 @@ def settle_requested_owner_pauses(q: Any = None, *, stop_requested: Any = None) 
                 _note_rest(root_id, None)
     finally:
         with _BOOK_LOCK:  # a stopped pass owes the trees it never reached
-            _CHANGED.update(changed & (set(due) - looked))
+            _CHANGED.update(changed.intersection(due))
     return settled

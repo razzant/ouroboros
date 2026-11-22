@@ -326,6 +326,8 @@ def write_owner_message(
     card_press: Optional[Dict[str, Any]] = None,
     admit: Optional[Any] = None,
     reply_reference: Optional[Dict[str, Any]] = None,
+    origin_message_ref: Optional[Dict[str, Any]] = None,
+    origin_suppressed: bool = False,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -342,6 +344,7 @@ def write_owner_message(
     ``{card_id, request_id, canonical_root}`` its read settles. ``admit``: a check run under the
     mail lock before the append (a carried Presence author's intake), False writes nothing.
     ``reply_reference``: the door's typed reference to the message these words reply to.
+    ``origin_message_ref`` / ``origin_suppressed``: the door's source or known absence, separate from Reply and ``msg_id``.
     """
     from ouroboros.install_identity import StoreForeign, require_owned_root
 
@@ -356,6 +359,10 @@ def write_owner_message(
     }
     if str(client_message_id or ""):
         entry["client_message_id"] = str(client_message_id)
+    if origin_suppressed:
+        entry["origin_suppressed"] = True
+    elif origin_message_ref is not None:
+        entry["origin_message_ref"] = dict(origin_message_ref)
     from ouroboros.owner_quiz import late_answer_ref
 
     if quiz_delivery:
@@ -748,27 +755,19 @@ def drain_owner_entries(
                 continue
             text = entry.get("text", "")
             if text or kind == "relay_entry":
-                # ``ts`` is ADDITIVE (2026-08-15 Fable pin): typed controls such
-                # as ``hurry`` carry their request time into the drained entry so
-                # the attempt latch can preserve when the owner actually asked.
+                # Typed controls retain the owner's request time for the attempt latch.
                 drained = {
                     "msg_id": mid, "text": text, "kind": kind,
                     "ts": str(entry.get("ts") or ""),
                 }
-                # Owner Surface Fact: the drain projection must carry the field
-                # explicitly or a written fact is never delivered (the exact
-                # dead-wire class this sprint closes).
                 if isinstance(entry.get("client_surface"), dict) and entry.get("client_surface"):
                     drained["client_surface"] = dict(entry["client_surface"])
-                # Same explicit projection for the relayed owner-message id: the
-                # drain seam stamps it onto the turn's context, and a field left
-                # out here is a written fact nobody can read.
                 if str(entry.get("client_message_id") or ""):
                     drained["client_message_id"] = str(entry["client_message_id"])
-                # Same for a late quiz answer's typed provenance (the drain rebuilds the card frame
-                # for the model from it), a card press's read receipt and the message words reply to.
+                # Carry the host's typed source and delivery facts through the drain, by value.
                 for relay_field in ("relay", "owner_rows", "source_task_id", "source_row", "quiz_delivery", "card_delivery",
-                                    "card_press", "relay_canonical_root", "sender_origin", "reply_reference", "host_carried"):
+                                    "card_press", "relay_canonical_root", "sender_origin", "reply_reference", "host_carried",
+                                    "origin_message_ref", "origin_suppressed"):
                     if relay_field in entry:
                         drained[relay_field] = entry[relay_field]
                 if isinstance(entry.get("late_answer"), dict):
@@ -899,7 +898,7 @@ def mailbox_drain_ended(task_drive: pathlib.Path, task_id: str) -> bool:
 # Receipt vocabulary for a message written into a task's mailbox. A write proves only
 # that the row is durable; "read" is proven later by the recipient loop's acknowledgement
 # (``mail_read_state``), never claimed at write time.
-MAIL_QUEUED = "queued"  # the recipient has not started; it reads the row when it starts
+MAIL_QUEUED = "queued"  # requested or scheduled at observation, including a task awaiting readmission
 MAIL_DELIVERED = "delivered"  # a live drain reads it at its next checkpoint
 MAIL_RETAINED_UNREAD = "retained_unread"  # its drain ended: the result keeps it unread
 

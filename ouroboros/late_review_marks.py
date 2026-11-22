@@ -426,11 +426,14 @@ def current_outcome(row: Mapping[str, Any], delivery: Optional[Mapping[str, Any]
     row-level warning and the saved-answer pointer, never the task's own axes), the phase ``outcome_phase`` computes
     from them and the row's revision."""
     from ouroboros.outcomes import _merge_objective_warning
+    from ouroboros.project_completion_facts import recorded_attempt
     from ouroboros.project_dialogue import outcome_phase  # D15->D17 is lazy-only
     from ouroboros.task_finalization import quiet_finish
+    from ouroboros.terminal_time import terminal_time_fact
 
-    delivery = {key: str(value or "") for key, value in (delivery or {}).items() if key in ("state", "preserved_path")}
-    if delivery.get("state") in {"exhausted", "unknown"}:
+    delivery = {key: value for key, value in (delivery or {}).items()
+                if key in ("state", "delivery_id", "chat_id", "preserved_path", "scope")}
+    if delivery.get("state") in ("exhausted", "unknown"):
         stored = dict(row.get("outcome_axes") or {}) if isinstance(row.get("outcome_axes"), dict) else {}
         objective = dict(stored.get("objective") or {}) if isinstance(stored.get("objective"), dict) else {}
         _merge_objective_warning(objective, f"terminal_delivery_{delivery['state']}")
@@ -442,7 +445,12 @@ def current_outcome(row: Mapping[str, Any], delivery: Optional[Mapping[str, Any]
         axes["review"] = {key: value for key, value in axes["review"].items() if key not in _RESOLUTION_FACTS}
     answered = (isinstance(row.get("result"), str) and bool(row["result"])) if "result" in row else row.get(
         "_result_text_present") is True  # the answer's existence, as the ending row states it, never its words
+    # The end time is the host's fact for this row's own attempt, as every other reader validates it: a
+    # source label beside an attempt that moved on, or a time no observer recorded, leaves it unknown.
+    ended = terminal_time_fact(dict(row))
     return {**{key: row[key] for key in _CARD_FACTS if row.get(key) not in (None, "")},
+            **({"task_attempt": attempt} if (attempt := recorded_attempt(row)) is not None else {}),
+            **({"terminal_time": ended} if ended["source"] != "unknown" else {}),
             **{key: {part: row[key][part]} for key, part in _CARD_PARTS.items()
                if isinstance(row.get(key), dict) and part in row[key]},
             "_result_text_present": answered, "quiet_effective": quiet_finish(dict(row)), "outcome_axes": axes,
@@ -457,10 +465,19 @@ def late_current_outcome(drive_root: Any, row: Optional[Mapping[str, Any]]) -> O
     review = ((row or {}).get("outcome_axes") or {}).get("review") if isinstance((row or {}).get("outcome_axes"), dict) else None
     if not isinstance(review, dict) or not isinstance(review.get("late_verdict"), dict):
         return None
-    from ouroboros.terminal_projection import _delivery_disposition  # D15->D17 is lazy-only
+    return current_card_outcome(drive_root, row)
+
+
+def current_card_outcome(drive_root, row, recorded_delivery=None):
+    """Read the current task's outbox disposition once when projecting its revised ending.
+
+    A historical receipt may outlive the bounded registry. A failed read remains unknown,
+    and unbound exhaustion can only speak for the task.
+    """
+    from ouroboros.terminal_projection import current_answer_delivery  # D15->D17 is lazy-only
 
     try:
-        delivery = _delivery_disposition(drive_root, str(row.get("task_id") or ""))
+        delivery = current_answer_delivery(drive_root, row, recorded_delivery or row.get("terminal_delivery"))
     except Exception:  # an unreadable delivery registry is unknown, as the ending row reads it
         delivery = {"state": "unknown"}
     return current_outcome(row, delivery)

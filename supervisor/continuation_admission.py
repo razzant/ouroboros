@@ -13,9 +13,10 @@
 2. CLAIM on the predecessor before any effect (``claim_on_predecessor``): eligibility,
    complete owner sources, the author-stop money pre-check and binding (room from
    the predecessor's canonical Project binding, ``continuation_room``) precede the claim.
-   A failed write refuses with nothing done. The same nonce
-   resumes its own claim and frozen room; another nonce is answered with the
-   accepted successor.
+   The claim takes predecessor custody without waiting and re-reads the result there.
+   Scratch retirement holds that same lock while accepting release. A failed write refuses
+   with nothing done. The same nonce resumes its own claim and frozen room; another
+   nonce is answered with the accepted successor.
 3. ADMISSION through the existing reservation and durable enqueue (queue row
    under the queue lock, its snapshot published outside it, then the result row
    under the queue lock again, the row revalidated still queued). A
@@ -147,9 +148,8 @@ def action_writers(q: Any, predecessor: str, *, drive_root: Any = None, owner_pa
     passed through unchanged: only the owner's Continue and its held selection
     name ``CONTINUE_PURPOSE``; Pause and Resume keep the default census.
     """
-    from ouroboros.control_actor import accepted_unknown, control_actor
-    from ouroboros.local_custody_repair import accept_unknown_custody, repair_ended_local_custody
-    from ouroboros.utils import utc_now_iso
+    from ouroboros.control_actor import accepted_unknown
+    from ouroboros.local_custody_repair import repair_ended_local_custody
 
     root = pathlib.Path(drive_root or q.DRIVE_ROOT)
     events = pathlib.Path(q.DRIVE_ROOT) / "logs" / "events.jsonl"
@@ -164,19 +164,31 @@ def action_writers(q: Any, predecessor: str, *, drive_root: Any = None, owner_pa
             q.append_jsonl(events, {"type": "local_custody_retired", "root_task_id": predecessor, "retired": repaired})
     except Exception:
         log.warning("Ended local custody of %s was not repaired; it stays held", predecessor, exc_info=True)
-    decision = accepted_unknown()  # the caller's named decision for this call, on this tree only
-    if decision and members:
-        by = {"actor": "owner", "text": decision["text"], "at": utc_now_iso(), **control_actor()}
-        try:
-            outcome = accept_unknown_custody(root, members, decision["ids"], root_task_id=predecessor, by=by)
-            if outcome["accepted"] or outcome["refused"]:  # a later census of the same call finds nothing new
-                q.append_jsonl(events, {"type": "local_custody_unknown_accepted", "root_task_id": predecessor,
-                                        "by": by, **outcome})
-        except Exception:
-            log.warning("The named decision on %s was not recorded; its calls stay held", predecessor,
-                        exc_info=True)
+    # A Resume applies the decision at its grant edge, after checking the selected member.
+    from ouroboros.delegate_resume import deciding_resume
+    decision = accepted_unknown() if purpose == CONTINUE_PURPOSE or not deciding_resume() else {}
+    local_ids = [key for key in decision.get("ids", ()) if not key.startswith("delegate_start:")]
+    if local_ids and members:
+        accept_local_choice(q, root, predecessor, members, local_ids, decision)
     return conflicting_writers(q, predecessor, drive_root=drive_root, owner_pause_fence_id=owner_pause_fence_id,
                                purpose=purpose, gaps=gaps)
+
+
+def accept_local_choice(q, root, tree, members, ids, decision):
+    from ouroboros.control_actor import control_actor
+    from ouroboros.local_custody_repair import accept_unknown_custody
+    from ouroboros.utils import utc_now_iso
+
+    by = {"actor": "owner", "text": decision.get("text", ""), "at": utc_now_iso(), **control_actor()}
+    try:
+        outcome = accept_unknown_custody(root, members, ids, root_task_id=tree, by=by)
+    except Exception:
+        log.warning("The named decision on %s was not recorded", tree, exc_info=True)
+        return []
+    if outcome["accepted"] or outcome["refused"]:
+        q.append_jsonl(pathlib.Path(q.DRIVE_ROOT) / "logs" / "events.jsonl", {
+            "type": "local_custody_unknown_accepted", "root_task_id": tree, "by": by, **outcome})
+    return outcome["accepted"]
 
 
 # Integrity bound only: a recorded chain is a handful of Continues; a corrupted one
@@ -393,7 +405,8 @@ def _carry_inputs(q: Any, task: Dict[str, Any], predecessor: str, inputs: List[D
         raise ValueError("continuation_inputs_unavailable") from exc
     if authority:
         task.update(authority, attachments=authority["attachment_manifest"],
-                    attachment_images=[row for row in copied if row.get("status") == "staged" and row.get("is_image")])
+                    attachment_images=[row for row in copied if row.get("status") == "staged" and row.get("is_image")
+                                       and not row.get("path_only")])  # an inherited image stays a path here too
         task["text"] = task["objective"] = f"{task['text']}\n\n{inputs_text(predecessor, copied, authority)}"
     return copied
 
@@ -478,6 +491,12 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     # contract. Merge stored carriers per field, canonical winning; don't normalize
     # an absent handbook choice into false before deciding whether to copy it.
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    origin_metadata = {key: dict(metadata[key]) for key in ("origin_message_snapshot", "client_surface")
+                       if isinstance(metadata.get(key), dict) and metadata[key]}
+    if "origin_message_snapshot" not in origin_metadata and original and original.get("placeholder_text"):
+        # The source reader verified the legacy file-only opening. This is display, not owner words.
+        origin_metadata["origin_message_snapshot"] = {key: original[key] for key in ("placeholder_text", "attachments")
+                                                      if original.get(key)}
     model_role = str(metadata.get("model_role") or "").strip()
     # The same work keeps its primary, a recorded follow included (route_choice),
     # never the room's newer choice.
@@ -534,6 +553,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
             # the new objective below is still the host's continuation text.
             **({"origin_message_ref": dict(origin_ref), "origin_message_text": original["content"]}
                if isinstance(origin_ref, dict) and origin_ref else {}),
+            **origin_metadata,
             # The objective is host-composed facts; the owner corpus is seeded
             # with the owner's exact words only (loop_messages seeding).
             "objective_author": {"kind": "continuation", "predecessor_task_id": predecessor},
@@ -555,6 +575,13 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
             },
         },
     }
+    if (task.get("project_id") and not presence_binding_authority_metadata(metadata, task_contract=contract)
+            and consciousness_origin_metadata({**metadata, "task_id": predecessor,
+                                                "origin_message_ref": origin_ref}).get("work_kind") == "owner"):
+        from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+
+        if surface := reply_transport_from_metadata(q.DRIVE_ROOT, metadata, anchor=False):
+            task["metadata"][TURN_ADDRESS] = surface
     if authority_source:
         task["predecessor_task_id"] = predecessor
         task["predecessor_authority_source"] = authority_source
@@ -647,6 +674,10 @@ def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dic
         ref = bound.get("source_ref")
         origin = ({"ref": ref, **({"text": bound["source_text"]} if "source_text" in bound else {})}
                   if isinstance(ref, dict) else {"absent": bound.get("origin_absent") or "post_hoc_unresolved"})
+        if "source_projectable" in bound:
+            origin["snapshot"] = {"projectable": bound["source_projectable"], "input": bound.get("source_input"),
+                                  "attachments": bound.get("source_attachments"), "source": bound.get("source_channel"),
+                                  "placeholder_text": bound.get("source_text") if bound.get("source_text_placeholder") else ""}
         bind_task_to_project(q.DRIVE_ROOT, task["id"], task["project_id"], task["chat_id"],
                              origin=origin, admission_basis=basis)
     return basis
@@ -657,7 +688,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
     statement of who pressed, recorded as ``admission.by`` and never a permission; a mind's door binds ``control_actor``."""
     from ouroboros.owner_continue import (
         AUTHOR_STOP_CAUSE, VERB, BINDING_VERSION, binding_sha, carried_execution_fields, claim_on_predecessor, continuation_eligibility,
-        continuation_room, declared_inputs, execution_carry, owner_sources, successor_id, valid_nonce,
+        continuation_room, declared_inputs, execution_carry, owner_sources, recorded_task_type, successor_id, valid_nonce,
     )
     from ouroboros.task_results import STATUS_SCHEDULED, load_task_result, validate_task_id, write_task_result
 
@@ -682,6 +713,8 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
                 "successor_task_id": str(claim.get("successor_task_id") or ""),
                 **({"state": "bound", "action_nonce": claim.get("action_nonce")}
                    if claim.get("state") == "bound" else {})}
+    if claim and recorded_task_type(result) == "deep_self_review":  # an older bound claim never creates one now
+        return {"ok": False, "error": "deep_review_restart_required", "cause": "deep_self_review"}
     verdict = continuation_eligibility(result, predecessor) if not claim else {
         "eligible": True, "cause": str((claim.get("binding") or {}).get("cause") or ""), "refusal": ""}
     if not verdict["eligible"]:

@@ -21,8 +21,8 @@ subscription_ui = setup.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
 TITLE = "Fix duplicate posts in the RSS import"
 WORDS = "Keep the old feed address and add a redirect from /feed.xml."
-LINE = """cmid => {
-    const note = document.querySelector(`.chat-bubble.user[data-client-message-id="${cmid}"] .msg-routing-annotation`);
+LINE = """selector => {
+    const note = document.querySelector(`${selector} .msg-routing-annotation`);
     if (!note) return null;
     const lead = note.querySelector(':scope > span');
     const reference = note.querySelector('[data-intent="open-project"]');
@@ -33,14 +33,29 @@ LINE = """cmid => {
 }"""
 
 
-def _receipt(producer, root, bridge, cmid):
+def _receipt(producer, root, bridge, cmid, *, row, project, monkeypatch):
     if producer == "late_reply":  # the direct server path: words saved into the work's mailbox
-        from ouroboros.project_dialogue import routing_target_label
-        from ouroboros.server_owner_routing import _record_routing_receipt
+        from ouroboros import server_owner_routing
+        from ouroboros.owner_mailbox import drain_owner_entries
+        from ouroboros.owner_relay import owner_row_source
+        from ouroboros.server_routing_context import RootSnapshot
+        from tests.test_project_routing_v664 import _ctx
 
-        _record_routing_receipt(bridge, SimpleNamespace(DRIVE_ROOT=root), chat_id=1, client_message_id=cmid,
-                                action="mailbox_delivery", target="work-1",
-                                target_label=routing_target_label(root, "mailbox_delivery", "work-1"), status="delivered")
+        work = {"id": "work-1", "chat_id": project["chat_id"], "title": TITLE, "drive_root": str(root)}
+        host = _ctx(root, running={"work-1": {"task": work}},
+                    direct=lambda *_a, **_kw: pytest.fail("the existing work should take the message"))
+        candidate = {"task_id": "work-1", "room_reader": True, "late_input_of": "earlier-question"}
+        monkeypatch.setattr(server_owner_routing, "addressable_roots",
+                            lambda _ctx: RootSnapshot(((candidate, {1, project["chat_id"]}),)))
+        monkeypatch.setattr("supervisor.queue.DRIVE_ROOT", root)
+        monkeypatch.setattr("supervisor.queue.ACCEPTANCE_FENCES", {})
+        ref, text = owner_row_source(row)
+        server_owner_routing._route_owner_message(bridge, host, {
+            "chat_id": 1, "client_message_id": cmid, "text": text, "log_text": text, "origin_message_ref": ref,
+            "task_metadata": {"late_answer": {"task_id": "earlier-question", "quiz_id": "rss-question"}},
+        })
+        [entry] = drain_owner_entries(root, "work-1")
+        assert entry["text"] == text and entry["origin_message_ref"] == ref
     else:  # the supervisor's token-bound relay receipt
         from supervisor.events_project_routing import _emit_routing_receipt
 
@@ -56,32 +71,47 @@ def test_a_routed_message_receipt_reads_the_same_live_and_after_reload(
         subscription_ui, tmp_path, monkeypatch, producer, theme, width):
     from ouroboros.projects_registry import bind_task_to_project, create_project
     from ouroboros.task_results import write_task_result
+    from ouroboros.chat_chain import format_address, row_address
     from supervisor import message_bus
+    from tests import _dialogue as dialogue_test
 
     ui, out = subscription_ui, _evidence(tmp_path)
     page = ui["page"]
     bridge, frames = _host(tmp_path, monkeypatch)
+    # Two independent saved messages from an older conversation may share a client id. The router
+    # receives the first message's already accepted identity, not a request to find the latest one.
+    cmid = "web-late-answer-0001"
+    first = {"direction": "in", "chat_id": 1, "text": WORDS, "source": "web", "client_message_id": cmid,
+             "ts": "2026-09-01T00:00:00+00:00"}
+    sibling = {**first, "text": "Write a short release note.", "ts": "2026-09-01T00:00:09+00:00"}
+    if producer == "late_reply":
+        dialogue_test.seed(tmp_path, live={"chat": [first, sibling]})
+        dialogue_test.import_all(tmp_path)
+    else:
+        first = message_bus.log_chat("in", 1, 7, WORDS, source="web", client_message_id=cmid, drive_root=tmp_path)
     project = create_project(tmp_path, "blog", name="Blog")
     bind_task_to_project(tmp_path, "work-1", "blog", project["chat_id"], origin={"absent": "system"})
     write_task_result(tmp_path, "work-1", "running", chat_id=project["chat_id"], title=TITLE, result="working")
     room = dict(id="blog", name="Blog", chat_id=project["chat_id"], lifecycle="active", visible_revision=0)
-    # The owner's saved message in Main (its ingress already confirmed), then the receipt that answers it.
-    cmid = "web-late-answer-0001"
-    message_bus.log_chat("in", 1, 7, WORDS, source="web", client_message_id=cmid, drive_root=tmp_path)
     _serve_history(page, tmp_path)
     mounted = mount_sidebar(ui, width, theme, False, [room], [activity("work-1", "blog")])
     if width < 700:  # the narrow layout opened the navigation drawer; choosing Main Chat closes it
         page.locator('#primary-sidebar [data-nav-page="chat"]').click()
         wait_drawer_closed(page)
-    page.locator(f'.chat-bubble.user[data-client-message-id="{cmid}"]').wait_for()
+    selector = f'.chat-bubble.user[data-client-message-id="{cmid}"][data-row-address="{format_address(row_address(first))}"]'
+    other = page.locator(f'.chat-bubble.user[data-row-address="{format_address(row_address(sibling))}"]')
+    bubble = page.locator(selector)
+    bubble.wait_for()
+    if producer == "late_reply":
+        other.wait_for()
 
     sent = len(frames)
-    _receipt(producer, tmp_path, bridge, cmid)
+    _receipt(producer, tmp_path, bridge, cmid, row=first, project=project, monkeypatch=monkeypatch)
     _push(mounted, frames, sent)
-    bubble = page.locator(f'.chat-bubble.user[data-client-message-id="{cmid}"]')
     bubble.locator(".msg-routing-annotation").wait_for()
     page.evaluate(FRAMES)
-    live = page.evaluate(LINE, cmid)
+    live = page.evaluate(LINE, selector)
+    assert not other.locator(".msg-routing-annotation").count()
     bubble.scroll_into_view_if_needed()
     bubble.screenshot(path=str(out / f"receipt-{producer}-live-{theme}-{width}.png"), animations="disabled")
 
@@ -90,7 +120,10 @@ def test_a_routed_message_receipt_reads_the_same_live_and_after_reload(
     page.wait_for_function("() => window.__ouroWs?.ws?.readyState === WebSocket.OPEN")
     bubble.locator(".msg-routing-annotation").wait_for()
     page.evaluate(FRAMES)
-    replay = page.evaluate(LINE, cmid)
+    replay = page.evaluate(LINE, selector)
+    if producer == "late_reply":
+        other.wait_for()
+        assert not other.locator(".msg-routing-annotation").count()
     bubble.scroll_into_view_if_needed()
     bubble.screenshot(path=str(out / f"receipt-{producer}-reload-{theme}-{width}.png"), animations="disabled")
     (out / f"receipt-{producer}-{theme}-{width}.json").write_text(json.dumps({"live": live, "reload": replay}, indent=1))

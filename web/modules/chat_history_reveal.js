@@ -14,9 +14,10 @@
  *   records: Map<string, { root?: Element, items?: Array<Object>, parentGroupId?: string }>,
  *   present: () => boolean,  // the room is still shown and alive
  *   expand?: (record: Object) => void,  // existing card disclosure/materialization owner
+ *   hydrate?: (record: Object, wasOpen: boolean) => void, // the card owner decides if shown Details need a read
  * }} owners
  */
-export function createHistoryReveal({ pager, reading, feed, records, present, expand = () => {} }) {
+export function createHistoryReveal({ pager, reading, feed, records, present, expand = () => {}, hydrate = () => {} }) {
     // One history read for a navigation (the pager lets a window read in flight finish first): null once
     // the reader has moved on.
     async function read(isCurrent, load, claim = true) {
@@ -42,17 +43,26 @@ export function createHistoryReveal({ pager, reading, feed, records, present, ex
     // that handles its disclosure, then require the actual addressed node. A portal, retained context,
     // or a folded repeat with no original line is not an exact landing.
     function exact(address, id = '') {
-        const find = () => [...feed.querySelectorAll('[data-row-address], [data-history-id]')].find(node =>
-            (node.dataset.rowAddress === address || id && node.dataset.historyId === id)
-            && node.dataset.originProjected !== '1'
-            && (!address.startsWith('row:') || !node.closest?.('[data-portal="1"]'))) || null;
+        const opened = new Map();
+        const disclose = record => {
+            if (opened.has(record)) return;
+            opened.set(record, record.root?.dataset.expanded === '1');
+            expand(record);
+        };
+        function find() {
+            const nodes = [...feed.querySelectorAll('[data-row-address], [data-history-id]')].filter(node =>
+                node.dataset.originProjected !== '1' && (!address.startsWith('row:') || !node.closest?.('[data-portal="1"]')));
+            // A gallery tile owns both identities and includes its filename and caption; its wrapper may hold other rows.
+            const matches = nodes.filter(node => node.dataset.rowAddress === address);
+            return matches.find(node => node.matches?.('.chat-gallery-item, .chat-file-item')) || matches[0]
+                || (id && nodes.find(node => node.dataset.historyId === id && !node.dataset.rowAddress)) || null;
+        }
         let target = find();
         if (!target && id) {
             const record = [...records.values()].find(record => record.items?.some(item => item.historyId === id));
-            const seen = new Set();
-            for (let owner = record; owner && !seen.has(owner); owner = records.get(owner.parentGroupId)) {
+            for (let owner = record; owner && !opened.has(owner); owner = records.get(owner.parentGroupId)) {
                 if (owner.root?.dataset.portal === '1') return null;
-                seen.add(owner); expand(owner);
+                disclose(owner);
                 if (owner.episodeDisclosure) owner.episodeDisclosure.open = true;
             }
             target = find();
@@ -60,11 +70,16 @@ export function createHistoryReveal({ pager, reading, feed, records, present, ex
         for (let node = target?.parentElement; node && node !== feed; node = node.parentElement) {
             if (node.matches?.('details')) node.open = true;
             const record = records.get(node.dataset.taskId);
-            if (node.matches?.('.chat-live-card') && record) expand(record);
+            if (node.matches?.('.chat-live-card') && record) disclose(record);
         }
         // A relay deck owns this row's visibility: its caller opens the deck before positioning/focusing it.
-        return target && !target.closest?.('[hidden]')
-            && (target.getClientRects?.().length !== 0 || target.dataset.deckTucked === '1') ? target : null;
+        if (!target || target.closest?.('[hidden]')
+                || (target.getClientRects?.().length === 0 && target.dataset.deckTucked !== '1')) return null;
+        // Earlier episodes have their own native toggle reader; portals have no Details here.
+        for (const [record, wasOpen] of opened) {
+            if (!record.episodeDisclosure && record.root?.dataset.portal !== '1') hydrate(record, wasOpen);
+        }
+        return target;
     }
 
     return {
@@ -89,7 +104,8 @@ export function createHistoryReveal({ pager, reading, feed, records, present, ex
             const present = reading.stick === true && reading.nearBottom() === true;
             // A card's header names no row of its own: the card stands where its earliest row is (chat.js stamps it).
             const card = anchor?.cardChain?.find((link) => link.node?.dataset?.historySource)?.node.dataset;
-            const id = anchor?.historyId || (card ? `${card.historySource}:${card.historyOffset}` : '');
+            const id = anchor?.historyId || (card ? `${card.historySource}:${card.historyOffset}` : '')
+                || anchor?.fallbacks?.find((f) => f.historyId)?.historyId || '';
             return { anchor, cursor: (id && pager.pageOf?.(id)) || null, present };
         },
         // The page around a task: `{ target }` to land on; `{ state }` 'absent' (no message of it in this

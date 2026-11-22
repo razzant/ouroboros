@@ -215,7 +215,7 @@ export function normalizeQuiz(msg) {
         state: String(src.state || 'open'),
         taskId: String(msg.task_id || ''),
         ts: msg.ts || null,
-        answerFields: Object.fromEntries(['answered_index', 'comment', 'question_delivery', 'secret_outcome', 'secret_save']
+        answerFields: Object.fromEntries(['answered_index', 'comment', 'answer_row_address', 'question_delivery', 'secret_outcome', 'secret_save']
             .filter((key) => Object.hasOwn(src, key))
             .map((key) => [key, src[key]])),
         answeredIndex: Number.isInteger(src.answered_index) ? src.answered_index : null,

@@ -19,9 +19,13 @@ import {
     hurryRequestId,
     isRootTaskRow,
     pauseTaskAction,
+    requestHurry,
+    requestStop,
+    resumeEligible,
     resumeTaskAction,
     stopPolicyFor,
     taskControlActions,
+    taskControlBusy,
     taskControlTriggerLabel,
 } from '../modules/task_control_menu.js';
 import { ownerHurryProjection, summarizeChatLiveEvent, taskSoftStopPending } from '../modules/log_events.js';
@@ -334,6 +338,41 @@ test('a single offered action is the trigger itself: it names the action and a s
     assert.deepEqual(done, [ACTION_STOP_NOW], 'nothing runs before an item is chosen');
 });
 
+test('the Stop confirmation of an accepted unbound start says the request, never an immediate end (#3428)', async (t) => {
+    const { closeTaskControlMenu, openTaskControlMenu } = await import('../modules/task_control_menu.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    const prior = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class { observe() {} disconnect() {} takeRecords() { return []; } };
+    t.after(() => { closeTaskControlMenu(); globalThis.IntersectionObserver = prior; env.restore(); });
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+    const anchor = env.doc.createElement('button');
+    anchor.dataset.taskControlDirect = '1';
+    env.doc.body.append(anchor);
+    const asked = [];
+    const askConfirm = async (dialog) => { asked.push(dialog); return false; };
+    const open = () => openTaskControlMenu(anchor, { actions: [ACTION_STOP_NOW],
+        onAction: () => { throw new Error('a declined confirm never runs'); }, askConfirm });
+
+    open();
+    await settle();
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].body, 'It stops at once, with the subagents it started.', 'a bound run keeps its words');
+
+    // The same trigger on a work the server marks with an accepted unbound start (activity.js renders the fact):
+    // no engine run answers it yet, so the confirmation says the recorded request, not an immediate end
+    // (tests/test_settled_tree_run_stop.py: HTTP 202 pending, zero engine cancels while the start is unbound).
+    anchor.dataset.unboundStart = '1';
+    open();
+    await settle();
+    assert.equal(asked.length, 2);
+    assert.equal(asked[1].title, 'Stop this work now?');
+    assert.equal(asked[1].danger, true);
+    assert.equal(asked[1].confirmLabel, TASK_CONTROL_LABELS[ACTION_STOP_NOW]);
+    assert.equal(asked[1].body, 'Stop is requested at once. A subagent whose start was never confirmed may keep '
+        + 'working until it is identified and its stop is confirmed.');
+});
+
 test('the dropdown replaced the old cancel confirm dialogs (dismiss = continue)', () => {
     // Q2: dismissing the menu continues the run — no separate confirm dialog
     // remains on either cancel path (Activity keeps its schedule-delete one).
@@ -406,8 +445,7 @@ test('Activity marks root rows and hides Pause for a child; Chat cards stay root
     // A compact retry row can omit lineage; its own root-only census identity still counts.
     assert.match(activity, /phases\.has\(ownId\) \|\| isRootTaskRow\(t, ownId\)/);
     assert.match(activity, /wholeTree: btn\.dataset\.root === '1'/);
-    // Census rows are roots (the census lists root activities only).
-    assert.match(activity, /data-id="\$\{esc\(a\.activity_id \|\| ''\)\}" data-root="1"/);
+    // activity_work_truth.test.js checks the root and target on rendered census and tail-only buttons.
     // A chat card offers the menu only for a root (never a subagent card).
     assert.match(chat, /cancelRunEligibility\(\{\s*groupId: record\.groupId, isSubagent: record\.isSubagent/);
 });
@@ -543,6 +581,264 @@ test('a Resume held only by calls of unknown outcome asks once, then resumes nam
         toast, askOwner: async () => { throw new Error('a live call is never offered'); } });
     assert.equal(toasts.length, 1);
     assert.match(toasts[0][0], /^Resume refused: .*is in a live worker/);
+});
+
+test('the same confirmation exposes every addressed task and invocation before accepting running and spending risk', async () => {
+    const { renderConfirmDialogDetails } = await import('../modules/confirm_dialog.js');
+    const blockers = Array.from({ length: 7 }, (_, i) => ({
+        kind: 'delegated_run', task_id: `helper-${i}`, invocation_id: `lost-${i}`, run_id: '',
+        state: 'stop_unknown', stop_outcome: 'pending_invocation_unbound',
+        choice_id: `delegate_start:tree/helper-${i}/lost-${i}/tree/fence-id/park-id`,
+    }));
+    blockers.push({ kind: 'tool_handoff', task_id: 'tree', reason: 'local_completion_unknown', operation_id: 'op-8' });
+    const ids = blockers.map(b => b.choice_id || b.operation_id);
+    const calls = [];
+    const resume = async (task, body) => {
+        calls.push(body);
+        if (!body) throw Object.assign(new Error('held'), { status: 409, body: {
+            error: 'owner_pause_effects_unsettled', blockers, acceptable_unknown: ids,
+        } });
+        return { ok: true };
+    };
+    for (const confirmed of [false, true]) {
+        calls.length = 0;
+        await resumeTaskAction('tree', { resume, toast: () => {}, askOwner: async (dialog) => {
+            assert.match(dialog.body, /still be running, changing files or spending money/);
+            assert.match(renderConfirmDialogDetails(dialog.details), /<details[^>]* open>/);
+            assert.doesNotMatch(renderConfirmDialogDetails({ rows: dialog.details.rows }), /<details[^>]* open>/);
+            assert.equal(dialog.details.rows.length, ids.length);
+            dialog.details.rows.forEach(({ label, value }, i) => {
+                assert.ok(label.includes(blockers[i].task_id));
+                if (blockers[i].kind === 'delegated_run') {
+                    assert.equal(value, `Start request ${blockers[i].invocation_id}`);
+                } else assert.ok(value.includes(ids[i]));
+            });
+            return confirmed;
+        } });
+        assert.equal(calls.length, confirmed ? 2 : 1);
+        if (confirmed) {
+            assert.deepEqual(calls[1].accept_unknown, ids);
+            assert.match(calls[1].reason, /spending/);
+        }
+    }
+});
+
+// The one registry of a task's pending controls (docs/DESIGN.md "Work status": a press is pending until its answer and its
+// reconciling read are in). A Resume door reads `resumeEligible`, so a census older than the press is no leave to send
+// again; a menu reads `taskControlBusy` (a request awaiting its answer), which a Resume only awaiting its read is not.
+test('a Resume keeps its task pending until the read that reconciles it has settled, whatever the answer was', async () => {
+    const unknownOutcome = Object.assign(new Error('x'), { status: 409, body: { error: 'owner_pause_effects_unsettled',
+        blockers: [{ kind: 'tool_handoff', task_id: 'held', tool: 'run_command', reason: 'local_completion_unknown' }],
+        acceptable_unknown: ['op-1'] } });
+    const answers = [
+        ['accepted', async () => ({ ok: true })],
+        ['refused', async () => { throw Object.assign(new Error('replay_unsafe'), { status: 409, body: { message: 'Not safe to replay.' } }); }],
+        ['a network failure', async () => { throw new TypeError('Failed to fetch'); }],
+        ['an unknown acknowledgement', async () => null],
+        ['a declined Resume anyway', async () => { throw unknownOutcome; }],
+    ];
+    for (const [name, answer] of answers) {
+        const id = `pending-${name.replaceAll(' ', '-')}`;
+        const sent = [];
+        const resume = async (task) => { sent.push(task); return answer(); };
+        let reread;
+        const settle = () => new Promise((resolve) => { reread = resolve; });
+        const toast = () => {};
+        const first = resumeTaskAction(id, { resume, toast, askOwner: async () => false, settle });
+        for (let waited = 0; !reread && waited < 50; waited += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.ok(reread, `${name}: its reconciling read is out`);
+        assert.equal(resumeEligible(id, () => true), false, `${name}: pending while that read is out`);
+        assert.equal(taskControlBusy(id), false, `${name}: but no request is out: a menu stays enabled`);
+        await resumeTaskAction(id, { resume, toast, settle: () => { throw new Error('a pending task reads nothing for a second press'); } });
+        assert.deepEqual(sent, [id], `${name}: a second press of the pending task sends nothing`);
+        reread();
+        await first;
+        assert.equal(resumeEligible(id, () => true), true, `${name}: the pending ends with its read`);
+        assert.equal(resumeEligible(id, () => false), false, `${name}: and still follows the caller's own authority`);
+        assert.equal(await resumeTaskAction(id, { resume: async () => ({ ok: true }), toast }), undefined);
+    }
+});
+
+test('a Resume whose reconciling read fails still releases its task, and the failure reaches the door', async () => {
+    const sent = [];
+    const resume = async (id) => { sent.push(id); return { ok: true }; };
+    await assert.rejects(resumeTaskAction('read-fails', { resume, toast: () => {}, settle: async () => { throw new Error('read lost'); } }),
+        /read lost/);
+    assert.equal(resumeEligible('read-fails', () => true), true, 'a read that ended badly is no lock');
+    await resumeTaskAction('read-fails', { resume, toast: () => {} });
+    assert.deepEqual(sent, ['read-fails', 'read-fails'], 'the owner\'s retry sends');
+});
+
+// Every pending control is a lease its own operation gives back, and only that one. A Stop or a Hurry that ends (a
+// refusal too) must not free the wait of a Resume for its reconciling read: a census read before the Resume's answer
+// would then unlock a second Resume. Stop stays available throughout; nothing forbids it to keep the wait.
+test("a Stop, a Hurry or a second Stop that ends — refused too — frees only its own lease, never a Resume's wait", async (t) => {
+    const prior = globalThis.fetch;
+    t.after(() => { globalThis.fetch = prior; });
+    const posts = [];
+    globalThis.fetch = (url, init) => new Promise((resolve) => { posts.push({ url, method: init.method, resolve }); });
+    const reply = (index, ok = true) => posts[index].resolve({ ok, status: ok ? 200 : 409,
+        json: async () => (ok ? { ok: true } : { error: 'refused by the server' }) });
+    const until = async (ready) => {
+        for (let waited = 0; !ready() && waited < 100; waited += 1) await new Promise((resolve) => setImmediate(resolve));
+        assert.ok(ready());
+    };
+    const id = 'lease-task';
+    let reread;
+    const waiting = resumeTaskAction(id, { resume: async () => ({ ok: true }), toast: () => {},
+        settle: () => new Promise((resolve) => { reread = resolve; }) });
+    await until(() => reread);
+    const state = () => [resumeEligible(id, () => true), taskControlBusy(id)];
+    assert.deepEqual(state(), [false, false], 'a Resume awaiting its read holds the task; no request is out');
+
+    const refused = requestStop(id, 'stop_now');
+    await until(() => posts.length === 1);
+    assert.deepEqual(state(), [false, true], 'a Stop awaiting its answer is a request out');
+    reply(0, false);
+    await assert.rejects(refused, /refused by the server/);
+    assert.deepEqual(state(), [false, false], 'a refused Stop frees nothing of the Resume');
+
+    const accepted = requestStop(id, 'stop_now');
+    await until(() => posts.length === 2);
+    reply(1);
+    assert.equal((await accepted).ok, true);
+    assert.deepEqual(state(), [false, false], 'an accepted Stop frees nothing of the Resume');
+
+    const hurried = requestHurry(id);
+    await until(() => posts.length === 3);
+    assert.match(posts[2].url, /\/hurry$/);
+    reply(2);
+    await hurried;
+    assert.deepEqual(state(), [false, false], 'a Hurry frees nothing of the Resume');
+    const hurryRefused = requestHurry(id);
+    await until(() => posts.length === 4);
+    reply(3, false);
+    await assert.rejects(hurryRefused);
+    assert.deepEqual(state(), [false, false], 'a refused Hurry neither');
+
+    // Two Stops at once (a Wrap up, then its hard escalation): the first to end leaves the second's request out.
+    const soft = requestStop(id, 'finalize');
+    const hard = requestStop(id, 'stop_now');
+    await until(() => posts.length === 6);
+    reply(4);
+    await soft;
+    assert.deepEqual(state(), [false, true], 'the first Stop ended; the second still awaits its answer');
+    reply(5);
+    await hard;
+    assert.deepEqual(state(), [false, false], 'both ended: only the Resume still holds the task');
+
+    const sentAgain = [];
+    await resumeTaskAction(id, { resume: async (task) => { sentAgain.push(task); return { ok: true }; }, toast: () => {} });
+    assert.deepEqual(sentAgain, [], 'throughout, a second Resume of the pending task sent nothing');
+    reread();
+    await waiting;
+    assert.deepEqual(state(), [true, false], 'the Resume\'s read settled: the task is free again');
+});
+
+test("a work menu keeps Stop available while its Resume awaits its read: neither that Stop nor the read's end frees the wait early", async (t) => {
+    const { closeTaskControlMenu } = await import('../modules/task_control_menu.js');
+    const { openWorkControls } = await import('../modules/work_status.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    const prior = { observer: globalThis.IntersectionObserver, fetch: globalThis.fetch };
+    globalThis.IntersectionObserver = class { observe() {} disconnect() {} takeRecords() { return []; } };
+    const posts = [];
+    globalThis.fetch = (url, init) => new Promise((resolve) => { posts.push({ url, method: init.method, resolve }); });
+    t.after(() => { closeTaskControlMenu(); Object.assign(globalThis, { IntersectionObserver: prior.observer, fetch: prior.fetch }); env.restore(); });
+    const reply = (index, ok = true) => posts[index].resolve({ ok, status: ok ? 200 : 409, json: async () => (ok ? { ok: true } : { error: 'refused' }) });
+    const until = async (ready) => {
+        for (let waited = 0; !ready() && waited < 100; waited += 1) await new Promise((resolve) => setImmediate(resolve));
+        assert.ok(ready());
+    };
+    const anchor = env.doc.createElement('button');
+    env.doc.body.append(anchor);
+    const id = 'held-task';
+    const work = { episode: { task_id: id }, controls: [{ action: 'resume', target: id },
+        { action: 'stop', target: id, scope: 'cascade' }] };
+    const rereads = [];
+    let end;
+    const afterAction = (action) => {
+        rereads.push(action);
+        return action === 'resume' ? new Promise((resolve) => { end = resolve; }) : undefined;
+    };
+    const items = (menu) => menu.querySelectorAll('[data-task-control]').map((item) => [item.dataset.taskControl, item.disabled]);
+    const free = () => resumeEligible(id, () => true);
+
+    const first = openWorkControls(anchor, work, { withResume: true, afterAction });
+    assert.deepEqual(items(first), [['resume', false], ['stop_now', false]]);
+    first.querySelector('[data-task-control="resume"]').click();
+    await until(() => posts.length === 1);
+    assert.match(posts[0].url, /\/resume$/);
+    reply(0);
+    await until(() => end);
+    assert.deepEqual(rereads, ['resume'], "its read is the Resume's own, asked once");
+    assert.deepEqual([free(), taskControlBusy(id)], [false, false], 'the answer is in: the Resume awaits its read, no request is out');
+
+    // Reopened meanwhile: Stop is there and enabled, Resume is not offered again.
+    const again = openWorkControls(anchor, work, { withResume: true, afterAction });
+    assert.deepEqual(items(again), [['stop_now', false]]);
+    again.querySelector('[data-task-control="stop_now"]').click();
+    await until(() => posts.length === 2);
+    assert.match(posts[1].url, /\/cancel$/);
+    assert.deepEqual([free(), taskControlBusy(id)], [false, true], 'the Stop awaits its answer');
+    reply(1, false);  // refused
+    await until(() => !taskControlBusy(id));
+    assert.equal(free(), false, 'a refused Stop frees nothing of the Resume');
+    assert.equal(posts.filter((post) => post.url.endsWith('/resume')).length, 1, 'one Resume POST so far');
+
+    end();  // the Resume's read settles
+    await until(free);
+    const later = openWorkControls(anchor, work, { withResume: true, afterAction });
+    assert.deepEqual(items(later), [['resume', false], ['stop_now', false]], 'the task is free: Resume is offered again');
+    assert.equal(rereads.filter((action) => action === 'resume').length, 1, 'one read for the one Resume');
+});
+
+// Activity's own dispatch (activity.js `afterTaskControl`): a Resume's settle is its bounded state read alone, and the
+// page's schedules/services reads — started beside the confirmation — never enter it. The menu awaits exactly what
+// `afterAction('resume')` returns, so this pins the seam that keeps an unrelated read from prolonging the pending.
+test("Activity's Resume confirmation is its own bounded state read: an independent schedules read never prolongs it", async (t) => {
+    const { closeTaskControlMenu } = await import('../modules/task_control_menu.js');
+    const { openWorkControls } = await import('../modules/work_status.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    const prior = { observer: globalThis.IntersectionObserver, fetch: globalThis.fetch };
+    globalThis.IntersectionObserver = class { observe() {} disconnect() {} takeRecords() { return []; } };
+    const posts = [];
+    globalThis.fetch = (url, init) => new Promise((resolve) => { posts.push({ url, method: init.method, resolve }); });
+    t.after(() => { closeTaskControlMenu(); Object.assign(globalThis, { IntersectionObserver: prior.observer, fetch: prior.fetch }); env.restore(); });
+    const until = async (ready) => {
+        for (let waited = 0; !ready() && waited < 100; waited += 1) await new Promise((resolve) => setImmediate(resolve));
+        assert.ok(ready());
+    };
+    const anchor = env.doc.createElement('button');
+    env.doc.body.append(anchor);
+    const id = 'act-task';
+    const work = { episode: { task_id: id }, controls: [{ action: 'resume', target: id },
+        { action: 'stop', target: id, scope: 'cascade' }] };
+    const items = (menu) => menu.querySelectorAll('[data-task-control]').map((item) => [item.dataset.taskControl, item.disabled]);
+    const free = () => resumeEligible(id, () => true);
+
+    // A Resume's settle is the bounded state read alone; an independent schedules read stays out the whole time.
+    // afterAction runs only when something is pressed, so the healthy menu below can carry it from the start.
+    let stateRead = null;
+    const afterAction = (action) => (action === 'resume'
+        ? new Promise((resolve) => { stateRead = resolve; })
+        : new Promise(() => {}));  // an unrelated read that never settles: it must not be awaited
+
+    // The healthy control first: free, both offered and enabled.
+    const menu = openWorkControls(anchor, work, { withResume: true, afterAction });
+    assert.deepEqual(items(menu), [['resume', false], ['stop_now', false]], 'nothing pending: Resume and Stop are offered, both enabled');
+    menu.querySelector('[data-task-control="resume"]').click();
+    await until(() => posts.length === 1);
+    assert.match(posts[0].url, /\/resume$/);
+    posts[0].resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+    await until(() => stateRead);
+    assert.deepEqual([free(), taskControlBusy(id)], [false, false], 'the answer is in: only its own bounded read is awaited');
+    stateRead();  // the bounded read settles while the independent one is still out
+    await until(free);
+    assert.equal(posts.filter((post) => post.url.endsWith('/resume')).length, 1, 'one Resume POST, one confirmation');
+    const later = openWorkControls(anchor, work, { withResume: true, afterAction });
+    assert.ok(later.querySelector('[data-task-control="resume"]'), 'free again with the independent read still out: Resume is offered');
 });
 
 test('a held model answer receiver is worded by what is known', () => {

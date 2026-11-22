@@ -111,14 +111,20 @@ def test_place_round_limit_keeps_the_silent_finish_its_focus_selected(contact_ru
 
 
 def test_stop_now_during_the_forced_call_keeps_a_native_answer_unsent(owner_stop, monkeypatch):
-    """Stop now pressed while the forced call is out: its native finish answer stays on the row, never sent."""
+    """Stop keeps the forced successor's answer and choice on the cancelled row, never sends it."""
     r, press = owner_stop
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
     h = install_bootstrap_harness(monkeypatch, r.root, review_mode="off")
     stops = []
+    successor = "anthropic/forced-test-author"
+    authors = []
 
     def forced(_messages):
-        stops.append(press(h.agents[0].tools._ctx.task_id, cascade=True))
+        ctx = h.agents[0].tools._ctx
+        authors.append(ctx._completion_observation["model"])
+        # The scripted forced response came back on a different physical route from the tool round.
+        ctx._accumulated_usage["_last_llm_call_meta"] = {"model": successor}
+        stops.append(press(ctx.task_id, cascade=True))
         return native({"action": "finish", "answer": ANSWER})
 
     h.script = [{"content": None, "tool_calls": [tool_call("knowledge_list", {}, "look")]}, forced]
@@ -126,6 +132,12 @@ def test_stop_now_during_the_forced_call_keeps_a_native_answer_unsent(owner_stop
     assert h.calls == 2
     [stop] = stops
     _kept_unsent(r, h, stopped, stop, ANSWER)
+    row = load_task_result(r.root, h.agents[0].tools._ctx.task_id)
+    [handover] = row["authoring_handovers"]
+    assert authors[0] and authors[0] != successor and handover["from_model"] == authors[0]
+    assert (handover["to_model"], handover["reply_observed"]) == (successor, True)
+    assert (handover["status"], handover["selection"]) == ("selected", "answer")
+    assert row["outcome_axes"]["objective"]["status"] != "pass"
 
 
 def test_owner_wrap_up_accepts_the_native_finish_of_its_one_final_turn(owner_stop, monkeypatch):

@@ -2,15 +2,17 @@
  * The Model capsule (docs/DESIGN.md "Composer owner controls"): the first capsule of the composer's row, before
  * Subagents, Context and Effort, and one of their family closed. A Project room's capsule holds the model new work in
  * that room starts on and saves it for the room; until the room chooses it follows Main and says so: the name word is
- * `Main`, the value Main's model. In the Main chat the capsule is Main itself, and a pick there asks first (owner
- * 10.11, «1. A», «6. A»). Closed it always shows the room's choice, never the model of a running work (owner 11.11),
- * and its processing tier when that is not Standard.
+ * `Main`, the value Main's model. Changing Main's model or selecting Ultrafast for Main asks for confirmation.
+ * Closed, the capsule shows the room's model and its non-Standard tier, never the model of a running work.
  *
- * A press opens the Model sheet (model_sheet.js, owner 12.11 «A»; never hover): search, Main, the pinned and recent
+ * A press opens the Model sheet (model_sheet.js; never hover): search, Main, the pinned and recent
  * models, all sources, and at its foot the room's processing tier. The sheet lists only the sources that can lead a
  * work, one row per (source, model) (chat_model_routes.js); the catalog suggests and never admits, so any id can still
  * be typed. A room's pick saves at once through `POST /api/owner/chat-model`, its tier through
- * `POST /api/owner/chat-processing`; Send waits for both.
+ * `POST /api/owner/chat-processing`; Send waits for both. The strip offers what the scope's own route says where it
+ * is bound (processing_choice.js): what follows Main runs on Main's account, its pin or Auto, which the settings say
+ * (until they do nothing of an account is confirmed: an unread pin is never read as Auto); a room's own model on
+ * Auto across its source's accounts.
  */
 import { apiClient, taskModel } from './api_client.js';
 import { APPLIED_WORDS, basisWords, leadView, refusalWords } from './card_model.js';
@@ -19,16 +21,17 @@ import { fmt, fmtInto, tr, translateString } from './i18n.js';
 import { routeFacts } from './model_list.js';
 import { haptic } from './haptics.js';
 import { isCoarsePointer, isStackLayout } from './layout.js';
-import { modelCatalog } from './model_catalog_store.js';
+import { CONNECTION_CONDITION, modelCatalog, revisionIn } from './model_catalog_store.js';
 import { MAIN_FOLLOW_NOTE } from './model_roles.js';
 import { openModelSheet } from './model_sheet.js';
 import { sourceMark } from './model_source_mark.js';
-import { offersUltrafast, resolvedTier, tierExplanation, tierNamed, tierSupport, tierWord } from './processing_choice.js';
+import { MAIN_ULTRAFAST_SCOPE, MAIN_ULTRAFAST_ROLES, MAIN_ULTRAFAST_ROLLBACK, PIN_OBSERVATION, canChooseTier, confirmMainUltrafast, resolvedTier, routeTiers, tierBinding, tierNamed, tierWord } from './processing_choice.js';
+import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
 import { clock, workControls } from './work_status.js';
 import {
-    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, sameRoute, sourceUnlisted,
+    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, routeSource, sameRoute, shortName, sourceUnlisted,
 } from './chat_model_routes.js';
 
 // When a pick of Main takes effect, its confirming sheet's rule line.
@@ -38,6 +41,9 @@ export const MAIN_RULE = 'New work starts on it everywhere, unless a room has it
 export const MAIN_CACHE_NOTE = 'Whatever follows Main (running works, child works, a consciousness wake) may write most of its start to the new model\'s cache again at its next call.';
 // How long Main's sheet waits for a state read taken for it before it lists what the page already has.
 const FRESH_STATE_MS = 700;
+const MAIN_TIER_CHANGED = 'Main changed. Check the current model and account, then choose its tier again.';
+const MAIN_MODEL_CHANGED = 'Main changed on another device. Check its model and tier, then choose again: nothing was changed.';
+const SOURCE_CHANGED = 'The key {model} goes through changed on another device. Its tiers were read again: check them, then choose again.';
 let serial = 0;
 
 /**
@@ -123,7 +129,7 @@ function offList(doc, rows) {
  * on other models and the rooms with their own, each with a tick to move it too, none ticked beforehand.
  * Resolves false when the owner cancels, else `{ moves }`: the ticked rows, each to be moved by its own act.
  */
-export async function confirmMainChange({ next, previous, census = null, dialog = openConfirmDialog, doc = globalThis.document }) {
+export async function confirmMainChange({ next, previous, census = null, tierNote = '', dialog = openConfirmDialog, doc = globalThis.document }) {
     const resets = previous?.lane === 'subscription' && next.source !== previous.source
         ? 'If Main\'s account is pinned it becomes Auto, and a context window set by hand for Main is cleared.'
         : 'A context window set by hand for Main is cleared.';
@@ -154,7 +160,10 @@ export async function confirmMainChange({ next, previous, census = null, dialog 
             else fmtInto(count, '{n} running works follow Main now.', { n: lists.followers });
             const cache = line(next.cacheWrite ? `${translateString(MAIN_CACHE_NOTE)} ${next.cacheWrite}` : MAIN_CACHE_NOTE);
             if (next.cacheWrite) cache.dataset.i18nFmt = 'main cache note';  // composed: the overlay leaves it alone
-            container.append(row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), cache, count);
+            // Main's own tier goes with it: what the new route says of that tier, said before the write.
+            const tier = tierNote ? line(tierNote) : null;
+            if (tier) tier.dataset.i18nSkip = '';
+            container.append(...[row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), cache, tier, count].filter(Boolean));
             const sub = (text) => { const made = line(text); made.className = 'chat-model-sheet-sub'; return made; };
             const section = (entries, heading) => {
                 if (!entries.length) return;
@@ -201,7 +210,8 @@ export function showMainMoves({ results, dialog = openConfirmDialog, doc = globa
 /**
  * The capsule in its room's composer row. `save(body)` is the owner write (`apiClient.ownerChatModel`),
  * `saveTier(body)` the room's or Main's own processing tier (`apiClient.ownerChatProcessing`), `openSettings()`
- * Settings › Accounts and keys, `askMain({next, previous, census})` the Main chat's confirming sheet, `moveWork(taskId)`
+ * Settings › Accounts and keys, `askMain({next, previous, census, tierNote})` the Main chat's confirming sheet,
+ * `askTier(facts)` the question before Main takes Ultrafast (processing_choice.js), `moveWork(taskId)`
  * one work's return to Main and `sayMoves({results})` the sheet of what its ticks did, `store` the window's catalog
  * store, `place(sheet, anchor)` the sheet's place above the row.
  * Returns `{ el, capsule, syncState(data), hasPendingSave, pendingSave, pick, chooseTier, open, destroy }`.
@@ -209,7 +219,8 @@ export function showMainMoves({ results, dialog = openConfirmDialog, doc = globa
 export function createModelControl({
     el, row, projectId = '', chatId = projectId ? null : 1, save = apiClient.ownerChatModel,
     saveTier = apiClient.ownerChatProcessing, openSettings = () => {},
-    showToast = () => {}, refreshState = () => {}, onLayout, onSettled, askMain = confirmMainChange, store = modelCatalog,
+    showToast = () => {}, refreshState = () => {}, onLayout, onSettled, askMain = confirmMainChange,
+    askTier = confirmMainUltrafast, store = modelCatalog,
     moveWork = (taskId) => taskModel(taskId, globalThis.crypto?.randomUUID?.() || `main-sheet-${Date.now()}-${++serial}`, { action: 'follow' }),
     sayMoves = showMainMoves,
     isStack = () => isStackLayout(), isCoarse = () => isCoarsePointer(),
@@ -237,6 +248,7 @@ export function createModelControl({
     const state = { main: null, choice: { ...MAIN_CHOICE }, tier: '', works: null, complete: false, projects: [],
         saving: null, tierSaving: null, lastOk: true, destroyed: false };
     let sheet = null, markKey = null, nameWords = null;
+    let detailAsked = null;  // the routed value whose own endpoints the open sheet asked for
 
     const shown = () => (isMain || state.choice.kind === 'main' ? state.main : normalizeRoute(state.choice));
     const follows = () => isMain || state.choice.kind === 'main';
@@ -248,13 +260,30 @@ export function createModelControl({
     const tierOf = (route, { main = false } = {}) => (isMain ? resolved()
         : state.tier || resolvedTier({ follows: main, tiers: tiers() }));
     const describe = (route) => (route ? describeRoute(store.index(), route, { tier: resolved() }) : null);
+    // The account `route` runs on here: Main's own for what follows Main (its pin, '' for Auto, null until the
+    // settings say which: then no account's word is taken), Auto for a room's own model (CLIENT_CONTRACT: a carried
+    // model has no pinned account).
+    const accountOf = (route) => (follows() ? store.mainAccount?.(route) ?? null : '');
+    const tiersOf = (route, account = accountOf(route)) => routeTiers({ index: store.index(), route, account,
+        detail: store.detail?.(route) || null, sourceLabel: describe(route)?.sourceLabel });
+    // The open sheet asks once for its route's own endpoints, and again when the route under it changes.
+    function syncDetail() {
+        const route = shown();
+        // Asked again when the held answers were dropped (a connection changed under the same routed value).
+        const asking = `${route?.model}|${store.detailEpoch?.() ?? ''}`;
+        if (!sheet || !route || asking === detailAsked) return;
+        detailAsked = asking;
+        void store.readDetail?.(route);
+    }
 
     function render() {
         const said = describe(shown());
         el.dataset.known = String(Boolean(said));
         el.dataset.own = String(Boolean(said) && !follows());
-        const mark = said ? `${said.lane}|${said.harness}|${said.kind}|${said.sourceLabel}` : '';
-        if (mark !== markKey) { markKey = mark; glyph.innerHTML = sourceMark(said); }
+        // The mark itself is the identity: what it is drawn from (a subscription's `credentialHarness`) can arrive
+        // after the words it stands beside, and a key of hand-picked fields would hide that change.
+        const mark = sourceMark(said);
+        if (mark !== markKey) { markKey = mark; glyph.innerHTML = mark; }
         // Whose model this is: Main's, or its own source's.
         const sourceNamed = Boolean(said) && !follows();
         const words = sourceNamed ? said.sourceLabel : 'Main';
@@ -280,47 +309,96 @@ export function createModelControl({
         // cannot send, or in Main the cache tier a catalog's cache-write figure is said for (Main's confirming sheet).
         if (said && store.status().read && !store.status().failed
             && (sourceUnlisted(store.index(), shown()) || (isMain && store.index().cacheFigures))) void store.readConnections();
+        syncDetail();
         sheet?.paint();
     }
 
     /* --- the sheet's words: what the tier strip applies to, and what each tier means on this route --- */
-    function followersOfMainTier() {
-        if (!Array.isArray(state.works) || !state.complete) return null;
-        // A work follows Main's tier while it follows Main and has no tier of its own (owner 13.11 steering).
-        return state.works.filter((work) => work?.live !== false && work.activity !== 'queued' && work.confirmed !== false
-            && normalizeRoute(work.lead) && String(work.lead?.basis || '') === 'main' && !work.processing?.choice).length;
-    }
     function scopeWords() {
         const tier = resolved();
-        const state_ = isMain ? (tiers()?.main ? tierWord(tier) : fmt('Default · {tier}', { tier: tierWord(tier || 'standard') }))
-            : state.tier ? tierWord(state.tier)
-                : fmt(follows() ? 'Default · {tier} as Main' : 'Default · {tier}', { tier: tierWord(tier || 'standard') });
+        const own = isMain ? tiers()?.main : state.tier;
+        const state_ = own || !tier ? tierWord(tier)
+            : fmt(!isMain && follows() ? 'Default · {tier} as Main' : 'Default · {tier}', { tier: tierWord(tier) });
         // The tier a work runs on, its own or Default's (Main's included), reaches its new subagents without one
         // (owner 13.11).
         if (!isMain) return `${state_} · ${tr('processing.scope.room_helpers', 'for new work here and its new subagents without a tier of their own; running work keeps its own')}`;
-        const n = followersOfMainTier();
-        const followers = n === null ? tr('processing.scope.main_unknown', 'for Main, the running works that follow it and their new subagents')
-            : n === 0 ? tr('processing.scope.main_none', 'for Main and its new subagents; no running work follows it now')
-                : n === 1 ? tr('processing.scope.main_one', 'for Main, 1 running work that follows it and their new subagents')
-                    : fmt('for Main, {n} running works that follow it and their new subagents', { n });
-        return `${state_} · ${followers}`;
+        // The model census describes the acting route, not where its tier came from.
+        return `${state_} · ${tr('processing.scope.main_inheritance', 'for Main and work that inherits its tier, even on a fallback model; new subagents without their own tier inherit it too')}`;
     }
     const tierView = () => {
-        const route = shown();
-        const said = describe(route);
+        const here = tiersOf(shown());
         return {
             choice: isMain ? tiers()?.main || '' : state.tier,
             resolved: resolved(),
             busy: Boolean(state.tierSaving),
-            ultrafast: offersUltrafast({ main: isMain, support: tierSupport(store.index(), route, 'ultrafast'), choice: state.tier }),
             scope: scopeWords(),
-            supportOf: (tier) => tierSupport(store.index(), route, tier),
-            explain: (tier) => tierExplanation(tier, { support: tierSupport(store.index(), route, tier), route, sourceLabel: said?.sourceLabel }),
+            ...here,
         };
     };
+    // Main's Ultrafast asks first, for Main as it is bound at the press (its route, its account, and the engine
+    // store and account fingerprint the catalog names): what it reaches, what that route says of it and what it is
+    // listed at where that is told. A Main that moved under the question was not asked about: nothing is written.
+    async function confirmUltrafast() {
+        const fromSheet = sheet;
+        const bound = () => tierBinding(store.index(), state.main, accountOf(state.main));
+        const route = state.main;
+        const pin = accountOf(route);
+        const tier = tiers()?.main;
+        const shownSource = store.revisionOf?.(route) ?? null;  // the source whose tiers the sheet showed
+        let read;
+        try { read = await store.readMainTierSettings(); } catch (error) {
+            if (!state.destroyed) showToast(error?.message || MAIN_TIER_CHANGED, 'error');
+            return null;
+        }
+        if (state.destroyed || sheet !== fromSheet) return null;
+        // The read is what the question stands on: its source, its pin, its tiers. A pin this page had not read yet
+        // (null) is learnt, never a change; one it had read and that now reads otherwise is one.
+        store.adoptSettings?.(read.settings);
+        const source = revisionIn(read.settings, route);
+        const asked = bound();
+        const stillShown = () => bound() === asked && tiers()?.main === tier && canChooseTier('ultrafast', tiersOf(state.main))
+            && (store.revisionOf?.(route) ?? null) === source;
+        if (!sameRoute(state.main, route) || !sameRoute(read.route, route) || (pin !== null && read.account !== pin) || read.tier !== tier) {
+            showToast(MAIN_TIER_CHANGED, 'info');
+            return null;
+        }
+        if (source === null) {  // an API connection the read gives no revision for: nothing to bind the yes to
+            showToast('Could not verify the key Main uses. Reload, then choose again.', 'error');
+            return null;
+        }
+        if (shownSource && shownSource !== source) {  // another source than the one shown: its own word first
+            await store.readDetail?.(route);
+            if (!state.destroyed) showToast(fmt(SOURCE_CHANGED, { model: describe(route)?.short || '' }), 'info');
+            return null;
+        }
+        await store.readDetail?.(route);  // this source's endpoints, never another's: the price below is theirs
+        // The question stands on what was read before this wait (route, pin, tier, source); a sheet dismissed
+        // meanwhile was not a press anyone still makes: nothing opens.
+        if (state.destroyed || sheet !== fromSheet) return null;
+        if (!stillShown()) {  // the same Main, now known whole: its account does not offer Ultrafast
+            showToast(fmt('Ultrafast is not offered for {model} here. {words}', { model: describe(route)?.short || '',
+                words: tiersOf(route).explain('ultrafast') }), 'info');
+            return null;
+        }
+        const said = describe(read.route);
+        const here = tiersOf(read.route, read.account);
+        const pinned = said?.lane === 'subscription' && Boolean(read.account);
+        closeSheet({ focus: true });  // the sheet stays usable during the read; the question opens alone
+        const yes = await askTier({ model: said?.short || '', source: [said?.sourceLabel, here.accountLabel].filter(Boolean).join(' · '), pinned,
+            explain: here.explain('ultrafast'), priceSaid: Boolean(here.priceOf('ultrafast')), doc });
+        if (!yes || state.destroyed) return null;
+        if (stillShown()) return { pinned, condition: { ...read.binding, ultrafast: asked, ...(source ? { [CONNECTION_CONDITION]: source } : {}) } };
+        showToast('Main changed while you were asked: Ultrafast was not set.', 'info');
+        return null;
+    }
 
     /* --- saving: a room's pick posts at once; Main's asks first, then writes Main itself --- */
-    function write(body, accept) {
+    function readChangedMain(pinned) {
+        // A pinned confirmation can be refused by the account observation even when none of the settings changed.
+        const settings = store.readConnections({ fresh: true });
+        return pinned ? Promise.all([settings, store.read({ force: true })]) : settings;
+    }
+    function write(body, accept, pinned = false) {
         if (state.saving || state.destroyed) return state.saving;
         el.dataset.disabled = 'true';
         state.saving = (async () => {
@@ -334,7 +412,10 @@ export function createModelControl({
             } catch (error) {
                 if (state.destroyed) return false;
                 state.lastOk = false;
-                showToast(error?.message || 'Could not change the model.', 'error');
+                if (error?.body?.code === 'settings_changed_elsewhere') {
+                    showToast(MAIN_MODEL_CHANGED, 'info');
+                    await readChangedMain(pinned);
+                } else showToast(error?.message || 'Could not change the model.', 'error');
             } finally {
                 state.saving = null;
                 if (!state.destroyed) {
@@ -378,29 +459,79 @@ export function createModelControl({
         await sayMoves({ results, doc });
     }
     async function changeMain(route) {
-        const next = describe(route);
+        const shownSource = store.revisionOf?.(route) ?? null;  // the picked route's source as this sheet showed it
         // The sheet lists the works and rooms of the page's last state: read it once more first, so an act made a
         // moment ago (a card's model, another room's capsule) is in it. A slow read does not hold the sheet back.
         await Promise.race([Promise.resolve().then(() => refreshState(true)).catch(() => {}),
             new Promise((resolve) => { setTimeout(resolve, FRESH_STATE_MS); })]);
         if (state.destroyed) return false;
-        const answer = await askMain({ next, previous: describe(state.main), doc,
+        // Main as stored now, and the tokens that bind this change to it: the tier said below is the one the new model
+        // keeps, a tier chosen elsewhere a moment ago included, and a move elsewhere before the write is refused (409).
+        let read;
+        try { read = await store.readMainTierSettings(); } catch (error) {
+            if (!state.destroyed) showToast(error?.message || MAIN_MODEL_CHANGED, 'error');
+            return false;
+        }
+        if (state.destroyed) return false;
+        if (!sameRoute(read.route, state.main)) {
+            showToast(MAIN_MODEL_CHANGED, 'info');
+            refreshState(true);
+            return false;
+        }
+        store.adoptSettings?.(read.settings);  // Main's tier and pin, and the sources, as this read has them
+        // Main's own tier goes to the new route with it: a pinned account stays only within its source.
+        const kept = read.tier;
+        // An Ultrafast carried onto an API connection stands on that connection as shown: the read must name it, and a
+        // source other than the one the sheet showed is read again before anything is asked.
+        const source = kept === 'ultrafast' ? revisionIn(read.settings, route) : '';
+        if (source === null) {
+            showToast(fmt('Could not verify the key {model} goes through. Reload, then choose again.', { model: shortName(route) }), 'error');
+            return false;
+        }
+        const effective = kept || String(read.settings[PROCESSING_PREFERENCE_KEY] || '');
+        if (tierNamed(effective)) await store.readDetail?.(route);
+        if (state.destroyed) return false;
+        if (!sameRoute(read.route, state.main)) { showToast(MAIN_MODEL_CHANGED, 'info'); return false; }
+        const connectionMoved = () => source && (store.revisionOf?.(route) ?? null) !== source;
+        if ((source && shownSource && shownSource !== source) || connectionMoved()) {
+            showToast(fmt(SOURCE_CHANGED, { model: shortName(route) }), 'info');
+            return false;
+        }
+        // Standard's catalog amount and cache write do not describe a premium tier, even when its price is unknown.
+        const next = describeRoute(store.index(), route, { tier: effective });
+        const previous = describe(read.route);
+        const pin = next.lane === 'subscription' && next.source === routeSource(read.route) ? read.account : '';
+        const confirmedTier = () => tierBinding(store.index(), route, pin);
+        const asked = kept === 'ultrafast' ? confirmedTier() : '';
+        const tiers = tiersOf(route, pin);
+        const tierNote = tierNamed(effective) ? fmt('Main keeps its tier, {tier}. {words}', { tier: tierWord(effective),
+            words: [tiers.accountLabel, tiers.explain(effective),
+                asked && !tiers.priceOf(effective) && translateString('What Ultrafast costs on this route is not known here.'),
+                ...(asked ? [MAIN_ULTRAFAST_SCOPE, MAIN_ULTRAFAST_ROLES, MAIN_ULTRAFAST_ROLLBACK, pin && PIN_OBSERVATION]
+                    .filter(Boolean).map((words) => translateString(words)) : [])].filter(Boolean).join(' ') }) : '';
+        const answer = await askMain({ next, previous, doc, tierNote,
             census: { works: state.works, complete: state.complete, projects: state.projects, index: store.index() } });
         if (!answer || state.destroyed) return false;
-        const written = await writeMain(route);
+        // A source that moved under the question was not the one asked about: nothing is written.
+        if ((asked && asked !== confirmedTier()) || connectionMoved()) {
+            showToast(fmt(SOURCE_CHANGED, { model: next.short }), 'info');
+            return false;
+        }
+        const written = await writeMain(route, { ...read.binding, ...(asked ? { ultrafast: asked } : {}), ...(source ? { [CONNECTION_CONDITION]: source } : {}) }, Boolean(asked && pin));
         if (written && answer.moves?.length && !state.destroyed) await moveToMain(answer.moves);
         return written;
     }
-    function writeMain(route) {
-        return write({ kind: 'model', model: route.model, use_local: route.use_local }, (reply) => {
+    function writeMain(route, binding, pinned) {
+        return write({ kind: 'model', model: route.model, use_local: route.use_local, if_unchanged: binding }, (reply) => {
             const written = normalizeRoute(reply.main_route);
             if (!written) throw new Error('The server did not confirm the model.');
             state.main = written;
             // What else the write changed, from its own answer: a dropped pin and a cleared manual window.
+            if (reply.account === 'auto') store.adoptMainAccount?.('', written);
             const also = [reply.account === 'auto' ? 'Main\'s account is Auto now.' : '',
                 reply.window_reset === true ? 'Main\'s context window set by hand was cleared.' : ''].filter(Boolean);
             if (also.length) showToast(also.join(' '), 'info');
-        });
+        }, pinned);
     }
     /** One pick from the sheet: null follows Main again (its own row); a route becomes the room's own, even Main's
      *  model now (a model row is always that route). In the Main chat a pick changes Main itself. */
@@ -424,8 +555,16 @@ export function createModelControl({
         const saving = state.tierSaving;
         void (async () => {
             let ok = false;
+            let pinned = false;
             try {
-                const reply = await saveTier(projectId ? { processing: tier, project_id: projectId } : { processing: tier });
+                const body = projectId ? { processing: tier, project_id: projectId } : { processing: tier };
+                if (isMain && tier === 'ultrafast') {
+                    const confirmation = await confirmUltrafast();
+                    if (!confirmation || state.destroyed) return;
+                    body.if_unchanged = confirmation.condition;
+                    pinned = confirmation.pinned;
+                }
+                const reply = await saveTier(body);
                 if (state.destroyed) return false;
                 if ((reply?.project_id || '') !== projectId || reply?.ok !== true) throw new Error('The server did not confirm the tier.');
                 if (isMain) store.adoptTiers?.({ main: reply.main_processing, default: reply.processing_default });
@@ -433,7 +572,11 @@ export function createModelControl({
                 haptic('tick');
                 ok = true;
             } catch (error) {
-                if (!state.destroyed) showToast(error?.message || 'Could not change the processing tier.', 'error');
+                if (state.destroyed) return;
+                if (isMain && tier === 'ultrafast' && error?.body?.code === 'settings_changed_elsewhere') {
+                    showToast(MAIN_TIER_CHANGED, 'info');
+                    await readChangedMain(pinned);
+                } else showToast(error?.message || 'Could not change the processing tier.', 'error');
             } finally {
                 state.tierSaving = null;
                 if (!state.destroyed) { render(); refreshState(true); }
@@ -475,7 +618,7 @@ export function createModelControl({
                 onPin: setPinned,
                 onSettings: () => { closeSheet(); openSettings(); },
             },
-            tier: { onChoose: chooseTier, view: tierView },
+            tier: { onChoose: chooseTier, view: tierView, mainRoute: () => (follows() ? shown() : null) },
             onClose: () => {
                 sheet = null;
                 head.setAttribute('aria-expanded', 'false');
@@ -487,6 +630,8 @@ export function createModelControl({
         });
         void store.read();
         void store.readRecents();
+        detailAsked = null;
+        render();  // the open sheet's own reads: its route's endpoints, and Main's account where it decides a tier
         onLayout?.();
     }
     function closeSheet({ focus = false } = {}) {

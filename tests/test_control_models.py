@@ -30,6 +30,32 @@ def test_cited_main_write_distinguishes_refusal_uncertainty_and_success(model_st
     assert ('"ok": true' in result) is (failure is None)
 
 
+def test_cited_model_only_command_does_not_transfer_main_ultrafast(model_start, tmp_path, monkeypatch):
+    from ouroboros import config
+    from ouroboros.tools.control_models import cited_switch
+
+    ctx, _ = model_start
+    path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    initial = {"OUROBOROS_MODEL": "vendor/old", "OUROBOROS_MODEL_PROCESSING_PREFERENCES": '{"main":"ultrafast"}'}
+    path.write_text(json.dumps(initial))
+    recents = []
+    monkeypatch.setattr("ouroboros.gateway.ui_preferences.record_model_recent", lambda *args: recents.append(args))
+
+    def command():
+        return cited_switch(ctx, model="vendor/new", owner_words="Please use the other one",
+                            scope="main", project_id="", model_as_typed=True)
+
+    result = command()
+    assert "Confirm Ultrafast" in result and "Standard or Default" in result
+    assert not recents and json.loads(path.read_text()) == initial
+    path.write_text(json.dumps({**initial, "OUROBOROS_MODEL_PROCESSING_PREFERENCES": '{"main":"fast"}'}))
+    assert '"ok": true' in command()
+    assert len(recents) == 1
+    saved = json.loads(path.read_text())
+    assert saved["OUROBOROS_MODEL"] == "vendor/new" and json.loads(saved["OUROBOROS_MODEL_PROCESSING_PREFERENCES"])["main"] == "fast"
+
+
 @pytest.fixture
 def model_start(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolContext

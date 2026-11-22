@@ -18,6 +18,7 @@ attempt is unknown: refused, never read as zero, a fresh budget or no limit.
 from __future__ import annotations
 
 import copy
+import pathlib
 import queue as stdqueue
 import time
 from types import SimpleNamespace
@@ -63,7 +64,10 @@ def _admit_root(pool, task_id="budget-1", budget=BUDGET):
 
 
 def _start(pool, task_id, *, executed):
-    """The real assignment and the worker's start record; then ``executed`` seconds of work."""
+    """The real assignment and the worker's start record; then ``executed`` seconds of work.
+
+    The record lands where the worker runs (``worker_process.run_worker_task``): a forked row's own drive, which
+    names the started attempt its later end inherits, mirrored to the canonical row."""
     from ouroboros.agent import OuroborosAgent
 
     sent = []
@@ -71,7 +75,10 @@ def _start(pool, task_id, *, executed):
         wid=7, busy_task_id=None, reaping=False, in_q=SimpleNamespace(put=lambda row: sent.append(copy.deepcopy(row)))))
     pool.workers.assign_tasks()
     assert [row["id"] for row in sent] == [task_id]
-    OuroborosAgent._persist_running_record(SimpleNamespace(env=SimpleNamespace(drive_root=pool.root)), dict(sent[0]))
+    drive = pathlib.Path(sent[0].get("drive_root") or pool.root)
+    budget = pathlib.Path(sent[0].get("budget_drive_root") or pool.root)
+    OuroborosAgent._persist_running_record(
+        SimpleNamespace(env=SimpleNamespace(drive_root=drive, budget_drive_root=budget)), dict(sent[0]))
     meta = pool.workers.RUNNING[task_id]
     meta["started_at"] -= executed
     return sent[0], meta

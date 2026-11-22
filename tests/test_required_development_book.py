@@ -980,6 +980,8 @@ def test_the_terminal_preserves_saved_work_started_custody_and_unknown_money(tmp
     agent = _real_agent(repo, drive)
     events = agent._handle_task_scoped(_queued(task_id, _attempt=2, task_contract={KEY: True}))
     done = next(row for row in events if row["type"] == "task_done")
+    [start] = [frame["data"] for frame in agent._event_queue.queue if frame.get("data", {}).get("type") == "task_started"]
+    assert (start["task_id"], start["task_attempt"]) == (task_id, 2)
     assert ran == [] and done["reason_code"] == "context_capacity"
     assert done["delegated_runs_unreconciled"] == ["run-a1"]  # the started run stays open, disclosed beside the cause
     assert done["unknown_unmetered"] is True and done["unresolved_upper_bound_usd"] == 1.5  # the ledger's answer, unchanged
@@ -998,6 +1000,50 @@ def test_a_direct_turn_keeps_its_own_typed_owner(tmp_path, monkeypatch, fields):
         fit.MinimumViewUnfit("cannot", fixed_tokens=1, memory_tokens=1, reserve_tokens=1, window_tokens=1, ratio=1.0)))
     with pytest.raises(fit.MinimumViewUnfit):
         _real_agent(repo, drive)._handle_task_scoped(_queued("direct", **fields))
+
+
+def test_first_conversation_turn_names_the_same_attempt_at_start_and_finish(tmp_path, monkeypatch):
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.task_status import execution_owner_record
+    from supervisor.worker_chat_lane import _seed_task
+
+    repo, drive, ran = _agent_world(tmp_path, monkeypatch, 150_000)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **kw: None)
+    task = _seed_task(7, "Check the inventory.", None, None, None)
+    task["_execution_owner"] = execution_owner_record(drive, task, "direct")
+    agent = _real_agent(repo, drive)
+    events = agent._handle_task_scoped(task)
+    start, = [frame["data"] for frame in agent._event_queue.queue if frame.get("data", {}).get("type") == "task_started"]
+    metrics, = [row for row in events if row["type"] == "task_metrics"]
+    done, = [row for row in events if row["type"] == "task_done"]
+    assert ran == [task["id"]] and done["status"] == "completed"
+    assert start["task_attempt"] == metrics["task_attempt"] == done["execution_owner"]["task_attempt"] == 0
+
+
+def test_a_crash_retried_conversation_turn_names_its_own_attempt_at_start_and_finish(tmp_path, monkeypatch):
+    """The lane's crash readmission (``conversation_lane.readmit_after_crash``) is the retry's assignment: its first
+    ``task_started`` names the retry's attempt, as its metrics and terminal do, never the first admission's 0."""
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.task_status import execution_owner_record
+    from supervisor import conversation_lane, workers
+    from supervisor.worker_chat_lane import _seed_task
+
+    repo, drive, ran = _agent_world(tmp_path, monkeypatch, 150_000)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **kw: None)
+    monkeypatch.setattr(workers, "RUNNING", {})
+    monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
+    seed = _seed_task(7, "Check the inventory.", None, None, None)
+    seed["_execution_owner"] = execution_owner_record(drive, seed, "direct")  # its first admission: physical 0
+    with conversation_lane._queue_lock:
+        meta = conversation_lane.readmit_after_crash({**seed, "_attempt": 2}, {})
+    workers.RUNNING.clear()  # the carrier is another process: the server's row is not the agent's input
+    agent = _real_agent(repo, drive)
+    events = agent._handle_task_scoped(dict(meta["task"]))
+    start, = [frame["data"] for frame in agent._event_queue.queue if frame.get("data", {}).get("type") == "task_started"]
+    metrics, = [row for row in events if row["type"] == "task_metrics"]
+    done, = [row for row in events if row["type"] == "task_done"]
+    assert meta["attempt"] == 2 and ran == [seed["id"]] and done["status"] == "completed"
+    assert start["task_attempt"] == metrics["task_attempt"] == done["execution_owner"]["task_attempt"] == 2
 
 
 def test_only_a_known_incompatibility_takes_this_terminal(tmp_path, monkeypatch):

@@ -13,6 +13,7 @@
  */
 import { replayedEvidenceTs, updateLiveTimelineItem, upsertToolFoldRow } from './chat_render_batch.js';
 import { fmt, tr } from './i18n.js';
+import { failedStepHeadline, handledRefusalHeadline, heldCallPhrase, refusedByStop, refusedStepPhrase } from './task_reason_words.js';
 
 const MISSED_MATCH = {
     substring: ['task.check.text_not_found', 'expected text not found'],
@@ -26,12 +27,36 @@ const oneLine = (text, max) => {
     return s.length > max ? `${s.slice(0, max - 3)}...` : s;
 };
 
+function extractCommandText(args) {
+    const cmd = args?.cmd;
+    if (Array.isArray(cmd)) return cmd.map((part) => String(part || '').trim()).filter(Boolean).join(' ');
+    return typeof cmd === 'string' ? cmd.trim() : '';
+}
+
+/** The same invocation diagnostic for a live settlement and a bounded history observation. */
+export function toolStepDiagnostic(evt, callKey) {
+    const command = extractCommandText(evt.args);
+    const result = String(evt.result_preview || evt.error || '').trim();
+    const refusal = refusedStepPhrase(evt);
+    const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusal);
+    const extra = !held && refusal;  // an independent failure keeps its own headline
+    const warning = held || handledRefusalHeadline(evt) || evt.status === 'non_zero_exit';
+    return {
+        phase: refusedByStop(evt) ? 'info' : warning ? 'warn' : evt.status === 'interrupted' ? 'info' : 'error',
+        headline: failedStepHeadline(evt),
+        body: oneLine([extra, command && `Command: ${oneLine(command, 120)}`, result].filter(Boolean).join(' '), 220),
+        fullBody: [extra, command && `Command: ${command}`, result].filter(Boolean).join('\n\n'),
+        visible: true, hostRefusedStep: Boolean(refusal), dedupeKey: callKey, sourceTs: evt.ts || '',
+    };
+}
+
 /** What the check's own process did, said first so a failed criterion never reads as a
  *  failed command: a completed check whose criterion missed, a check that exited
  *  non-zero, or one the host stopped or a signal killed (process facts, not text). Exit 0
  *  says "not met" only where a comparison ran and missed (`matched` is false); a comparison
  *  that reached no verdict (a bytes_equal operand missing or refused) is not confirmed. */
 export function checkProcessSentence(evt, check = {}) {
+    if (check.contract_kind === 'artifact_observation') return '';
     if (evt.timed_out === true) return tr('task.check.process_timed_out', 'The host stopped the check at its time limit; no comparison ran.');
     if (evt.signal) return fmt('The check process was killed by {signal}.', { signal: evt.signal });
     if (Number.isInteger(evt.exit_code) && evt.exit_code !== 0) return fmt('The check ran and exited with code {code}.', { code: evt.exit_code });
@@ -47,6 +72,10 @@ export function checkProcessSentence(evt, check = {}) {
  *  a missing file or a comparison failure (then no `matched`), so it is shown as recorded.
  *  Without a recorded miss the criterion is unconfirmed, never asserted unmet. */
 export function checkFailureCause(evt, check) {
+    if (check.contract_kind === 'artifact_observation' || check.kind === 'artifact_observation') {
+        if (check.paths_named == null) return tr('task.check.not_confirmed', 'criterion not confirmed');
+        return check.paths_named ? tr('task.check.file_not_found', 'a named file was not found') : tr('task.check.no_files_named', 'no files were named');
+    }
     if (evt.timed_out === true) return tr('task.check.timed_out', 'timed out');
     if (evt.signal) return fmt('killed by {signal}', { signal: evt.signal });
     if (Number.isInteger(evt.exit_code) && evt.exit_code !== 0) return fmt('exit code {code}', { code: evt.exit_code });
@@ -65,7 +94,7 @@ export function redCheckPhrase(objective) {
     const fact = objective?.verification_red;
     if (!fact || typeof fact !== 'object') return '';
     const count = (value) => (Number.isInteger(value) && value > 0 ? value : 0);
-    const cause = fact.kind === 'artifact_observation'  // the host looked for the named files and ran no command
+    const cause = fact.kind === 'artifact_observation'  // the host observed the named files and ran no command
         ? (fact.paths_named ? tr('task.check.file_not_found', 'a named file was not found') : tr('task.check.no_files_named', 'no files were named'))
         : !fact.signal && !Number.isInteger(fact.exit_code) ? tr('task.check.no_exit_code', 'no exit code')
             : fact.signal || fact.exit_code !== 0 ? checkFailureCause(fact, fact)  // the row beside says the process exited 0; this line says it itself
@@ -93,7 +122,7 @@ export function checkFailureView(evt, callKey) {
     return {
         phase: 'warn',
         headline: fmt('Check did not pass: {cause}', { cause: checkFailureCause(evt, check) }),
-        body: oneLine([process, subject].filter(Boolean).join(' '), 220),
+        body: oneLine([process, subject, check.contract_kind === 'artifact_observation' ? check.detail : ''].filter(Boolean).join(' '), 220),
         fullBody: [process, subject, preview || check.detail || ''].filter(Boolean).join('\n\n'),
         visible: true,
         dedupeKey: `${callKey}:check`,
@@ -111,10 +140,8 @@ export function refusedStepView(seen, key, presentCall) {
     return { phase, headline, body, fullBody, visible: true, dedupeKey: key, sourceTs: String(seen.ts || '') };
 }
 
-/** Upsert one diagnostic row in place by its key; true when the timeline changed.
- *  Used for a live frame that lands after the task's terminal row as well, so the
- *  arrival order of terminal and diagnostic never decides whether the row exists. */
-export function placeCheckRow(record, view, ts, rawTs = view.sourceTs) {
+/** A settled invocation's diagnostic keeps its live key, even after the task ended. */
+export function placeToolDiagnostic(record, view, ts, rawTs = view.sourceTs) {
     const { timelineUpdate } = updateLiveTimelineItem(record, view,
         { ts, rawTs, syntheticKey: view.dedupeKey, headline: view.headline, inPlaceByKey: true });
     return !['none', 'duplicate-skip'].includes(timelineUpdate);
@@ -128,8 +155,11 @@ export function placeReplayedEvidence(record, fold, evidence, carrierTs, formatT
     const at = replayedEvidenceTs(evidence, carrierTs);
     let changed = !['none', 'duplicate-skip'].includes(upsertToolFoldRow(record, fold, formatTs(at), at).timelineUpdate);
     for (const seen of evidence?.observations || []) {
-        const view = refusedStepView(seen, seen.key, presentCall) || checkFailureView(seen, seen.key);
-        if (view) changed = placeCheckRow(record, view, formatTs(view.sourceTs)) || changed;
+        const settled = record.toolFold?.calls.get(seen.key)?.settlement;
+        if (seen.fact !== 'settled' || !settled || settled.status !== seen.status || settled.hostError !== Boolean(seen.hostError)) continue;
+        const view = refusedStepView(seen, seen.key, presentCall) || (seen.diagnostic ? toolStepDiagnostic({ ...seen.diagnostic, tool: seen.tool, ts: seen.ts,
+            is_error: seen.status === 'error' || seen.status === 'interrupted' }, seen.key) : checkFailureView(seen, seen.key));
+        if (view) changed = placeToolDiagnostic(record, view, formatTs(view.sourceTs)) || changed;
     }
     return changed;
 }

@@ -139,11 +139,11 @@ test('detailed Updates UI makes destructive replacement an explicit recovery act
 });
 
 
-test('the main pill says "Update available"; the commit identity is its title (owner Q6=A)', () => {
+test('the main pill says "Update", the word alone; the commit identity is its title (owner Q6=A, 21.11)', () => {
     const qa = { current_version: '6.87.6', latest_version: '6.87.6', current_sha: 'aaaaaaaa00000000', latest_sha: 'bbbbbbbb11111111' };
-    assert.equal(updatePillText(qa), 'Update available');
+    assert.equal(updatePillText(qa), 'Update');
     assert.equal(updatePillDetail(qa), 'Update aaaaaaaa → bbbbbbbb');
-    assert.equal(updatePillText({ current_version: '7.6.0', latest_version: '7.6.1' }), 'Update available');
+    assert.equal(updatePillText({ current_version: '7.6.0', latest_version: '7.6.1' }), 'Update');
     assert.equal(updatePillDetail({ current_version: '7.6.0', latest_version: '7.6.1' }), 'Update 7.6.0 → 7.6.1');
     assert.equal(updatePillDetail({}), 'Update available');
 });

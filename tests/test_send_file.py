@@ -1,5 +1,6 @@
 """Tests for the send_file (document/file) tool and MIME detection."""
 import base64
+import json
 import types
 
 import pytest
@@ -126,6 +127,27 @@ class TestSendFile:
         # Absolute on every OS: a drive-less "/nonexistent/..." is workspace-relative on Windows.
         result = _send_file(ctx, file_path=str(tmp_path / "nonexistent" / "report.pdf"))
         assert "not found" in result.lower()
+
+    def test_missing_document_message_identifies_the_byte_name(self, tmp_path):
+        from ouroboros.tools.core_artifacts import _file_not_found
+        from ouroboros.tools.tool_result import _TOOL_RESULT_ATTR
+
+        ctx = _make_ctx()
+        setattr(ctx, _TOOL_RESULT_ATTR, None)
+        raw_name = b"notes-\xff.txt"
+        name = raw_name.decode("utf-8", "surrogateescape")
+        resolved = tmp_path / name
+        text = _file_not_found(ctx, name, resolved)
+        result = getattr(ctx, _TOOL_RESULT_ATTR)
+        assert (result.status, result.code, result.text) == ("error", "LEGACY_TOOL_ERROR", text)
+        first, second = text.encode("utf-8").decode("utf-8").split(" (resolved: ", 1)
+        prefix = "⚠️ File not found: "
+        assert first.startswith(prefix)
+        assert json.loads(first.removeprefix(prefix)).encode("utf-8", "surrogateescape") == raw_name
+        assert json.loads(second.removesuffix(")")) == str(resolved)
+        literal = r"notes-\udcff.txt"
+        assert _file_not_found(ctx, literal, tmp_path / literal) == f"{prefix}{literal} (resolved: {tmp_path / literal})"
+        assert ctx.pending_events == []
 
     def test_directory_is_rejected(self, tmp_path):
         ctx = _make_ctx(drive_root=tmp_path)
