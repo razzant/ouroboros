@@ -320,8 +320,10 @@ export function paintCardModel(record, view, deps = {}) {
         rerender: renderLiveCardMeta, coarse: isCoarsePointer, stack: isStackLayout,
         place: (popup, anchor) => bindPopoverPosition(popup, { anchor, align: 'start' }), ...deps });
     const said = leadView(lead, { index: state.deps.store.index(), since: view.since || '', queued: Boolean(view.queued) });
+    // A repaint of the view a card already holds brings no new tiers, so it adopts none; only a view from the server does.
+    const replay = view === state.view;
     state.view = { ...view, lead, target: String(view.target || ''), main: normalizeRoute(view.main), said };
-    if (view.tiers) state.deps.store.adoptTiers?.(view.tiers);
+    if (view.tiers && !replay) state.deps.store.adoptTiers?.(view.tiers);
     record.lead = lead;
     shapeFact(record, state, Boolean(state.view.target));
     // The mark itself is the identity: what it is drawn from (a subscription's `credentialHarness`) can arrive
