@@ -27,6 +27,7 @@ from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture 
     _owned_gateway_uses_each_test_transport,
     Engine, ENQUEUE_ERROR, LOOKUPS, _delegating, _held, _lost_start, _rows, _start, _sweep,
 )
+from tests._delegate_plan_shared import plan_setup  # noqa: F401  (fixture: a found agent start in a Git tree)
 from tests._review_session_route_shared import fake_route as _fake_route_fixture
 
 fake_route = _fake_route_fixture  # the review seat's scripted engine (FakeGateway), for the panel's own rejoin
@@ -192,6 +193,33 @@ def test_an_accepted_retry_decides_its_lineage_line_from_its_own_recorded_reques
         carrier.chmod(0o755)
     assert answer["recovered_without_start"] and len(engine.creates) == len(engine.lookups) == 1, answer
     assert ("inputs: automatic lineage, no record" in answer["note"]) is first_folderless, answer["note"]
+
+
+@pytest.mark.parametrize("investigation", [True, False], ids=["investigation", "writer"])
+def test_a_start_found_by_its_key_says_when_it_is_an_evidence_only_investigation(plan_setup, monkeypatch, investigation):  # noqa: F811
+    """A found agent start reads its recorded purpose: an investigation says, briefly, that nothing from it is
+    applied (no promise about its copy); a found writing start, whose diff may land, says no such thing."""
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+
+    p = plan_setup
+    if investigation:
+        p.ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
+        p.ctx.workspace_mode = "external"
+    p.engine.fail_next = True
+    token = p.start("Look at the folder", mode="agent")["pending_invocation_id"]
+    record = c.invocation_record(p.root, token)
+    assert (record["authority_source"] == INVESTIGATION_AUTHORITY) is investigation and record["snapshot_id"], record
+    monkeypatch.setattr(p.engine, "operations", lambda: [{"method": "POST", "path": "/v2/runs/lookup"}], raising=False)
+    monkeypatch.setattr(p.engine, "lookup_run", lambda body, *, idempotency_key: {
+        "status": "found", "storeId": "store-plan", "handle": {
+            "jobId": "accepted", "runId": p.engine.accepted[idempotency_key]["runId"], "state": "running"}}, raising=False)
+    sent = len(p.engine.calls)
+    c._CUSTODY.clear()
+    found = p.start("", retry_of=token)
+    assert found.get("recovered_without_start") and len(p.engine.calls) == sent, found
+    said = "investigation: evidence-only investigation: nothing from it is applied" in found["note"]
+    assert said is investigation, found["note"]
 
 
 @pytest.mark.parametrize("consumer", ["retry", "sweep"])

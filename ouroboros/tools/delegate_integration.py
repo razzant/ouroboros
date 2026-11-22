@@ -299,7 +299,9 @@ def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, reques
     rows = selected if isinstance(selected, list) else (held.request_event or {}).get("input_files")
     facts = {**(start_facts(request, lineage) if isinstance(request, dict) else {"assignment": (NO_RECORD, PREPARED),
                                                                                   "lineage": lineage}),
-             "access": [("access", held.access, None)]}
+             "access": [("access", held.access, None)] + ([(  # its key found an investigation: say so, briefly
+                 "investigation", "evidence-only investigation: nothing from it is applied", False)]
+                 if evidence_only(held) and held.mode == "agent" else [])}
     if isinstance(rows, list):  # this invocation's recorded copies
         facts.update(inputs=rows, inputs_when="prepared before the first send", inputs_outside=sum(
             1 for row in rows if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
