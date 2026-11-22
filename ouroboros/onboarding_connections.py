@@ -105,22 +105,19 @@ def _normalize(name: str, root: pathlib.Path, raw: Any, fields: Dict[str, str]) 
 
 def declared_card(name: Any) -> Optional[Dict[str, Any]]:
     """The connection card the built-in skill ``name`` declares (the app's own bundled bytes), or None."""
-    from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
     from ouroboros.secret_requests import declared_secret_fields
     from ouroboros.skill_builtin import bundled_skills_dir
+    from ouroboros.skill_source_catalog import read_manifest
 
     name = str(name or "").strip()
     if not _NAME.fullmatch(name):
         return None
     root = bundled_skills_dir() / name
     try:
-        text = (root / "SKILL.md").read_text(encoding="utf-8")
-        if "connection_card" not in text:
-            return None
-        manifest = parse_skill_manifest_text(text)
-        return _normalize(name, root, (getattr(manifest, "raw_extra", None) or {}).get("connection_card"),
-                          declared_secret_fields(manifest))
-    except Exception:  # noqa: BLE001 — an unreadable or invalid manifest, or a card out of shape, declares no card
+        manifest = read_manifest(root)  # None for an unreadable or invalid manifest: no card
+        card = (getattr(manifest, "raw_extra", None) or {}).get("connection_card")
+        return _normalize(name, root, card, declared_secret_fields(manifest)) if card else None
+    except Exception:  # noqa: BLE001 — a card out of shape declares no card
         return None
 
 
