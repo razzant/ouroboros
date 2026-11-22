@@ -1,7 +1,9 @@
 """The post-merge check's hand-over (scripts/post_merge_routing.py): comments, issues, closing.
 
 Deterministic: GitHub is a fake in memory and the rechecks are fakes; each leg of the check owns
-the `post-merge-red` issues of its own system.
+the `post-merge-red` issues of its own system. A recorded failure of an earlier attempt keeps its
+own head, run and attempt: this file fixes that a check never files a historical red under its own
+head, never retires a newer failure, and returns what is still owed as records.
 """
 from __future__ import annotations
 
@@ -10,10 +12,13 @@ import urllib.error
 import pytest
 
 from scripts import post_merge_routing as routing
+from tests._post_merge_github import FakeGitHub, tracking_issue as _issue
 
 HEAD = "f" * 40
 LINTED = "ruff F811 tests/t.py fake_route"
 SIZED = "size tests/test_smoke.py::test_no_oversized_modules"
+OLD = "1" * 40  # a head an earlier attempt measured at
+REPO = "razzant/ouroboros"
 
 
 def test_the_machine_block_round_trips_through_an_issue_body():
@@ -24,53 +29,6 @@ def test_the_machine_block_round_trips_through_an_issue_body():
     assert routing.parse_machine_block(body) == block
     assert routing.parse_machine_block("no block here") is None
     assert routing.parse_machine_block("<!-- post-merge-red {not json} -->") is None
-
-
-class FakeGitHub:
-    """Issues, pull requests and labels in memory, with failures on demand."""
-
-    def __init__(self, *, issues=(), prs=None, label=False, fail=()):
-        self.issues = {issue["number"]: dict(issue, state="open") for issue in issues}
-        self.prs, self.label, self.fail = prs or {}, label, set(fail)
-        self.comments, self.posts = [], []
-
-    def _check(self, method, path):
-        if any((method, path.split("?")[0]) == entry or (method, None) == entry for entry in self.fail):
-            raise urllib.error.HTTPError(path, 502, "Bad Gateway", None, None)
-
-    def get(self, path):
-        self._check("GET", path)
-        if path == f"labels/{routing.LABEL}" and not self.label:
-            raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
-        return {}
-
-    def pages(self, path):
-        self._check("GET", path)
-        if path.startswith("issues?"):
-            return [issue for issue in self.issues.values() if issue["state"] == "open"]
-        return self.prs.get(path.split("/")[1], [])
-
-    def post(self, path, body):
-        self._check("POST", path)
-        self.posts.append((path, body))
-        if path == "labels":
-            self.label = True
-        elif path == "issues":
-            number = 100 + len(self.issues)
-            self.issues[number] = {"number": number, "body": body["body"], "title": body["title"], "state": "open"}
-            return {"number": number}
-        elif path.endswith("/comments"):
-            self.comments.append((int(path.split("/")[1]), body["body"]))
-        return {}
-
-    def patch(self, path, body):
-        self._check("PATCH", path)
-        self.issues[int(path.split("/")[1])].update(body)
-        return {}
-
-
-def _issue(number, block):
-    return {"number": number, "body": "text\n" + routing.machine_block({"format": 1, **block})}
 
 
 def _pr(number, sha, login="dev"):
@@ -86,6 +44,17 @@ def _route(github, failed, verdicts, *, recheck=None, flaky=(), node="success", 
                          recheck=recheck or (lambda ids: pytest.fail(f"nothing to recheck: {ids}")), **options)
 
 
+def _recorded(ids, *, head=OLD, run=71, attempt=2, base="a" * 40):
+    """One `prior_failures` entry: these IDs failed together at `head`, measured by that attempt against `base`."""
+    return [{"head": head, "run": run, "attempt": attempt, "base": base, "ids": list(ids)}]
+
+
+def _repo_github(*args, **kwargs):
+    github = FakeGitHub(*args, **kwargs)
+    github.repo = REPO  # the real reader names the repository; so do the links a record points at
+    return github
+
+
 def test_a_culprit_gets_one_pr_comment_and_one_new_issue():
     culprit = "c" * 40
     github = FakeGitHub(prs={culprit: [_pr(2066, "d" * 40), _pr(2067, culprit, login="author")]})
@@ -93,6 +62,7 @@ def test_a_culprit_gets_one_pr_comment_and_one_new_issue():
                 for nodeid in ("tests/t.py::test_a", "tests/t.py::test_b")]
     record = _route(github, ["tests/t.py::test_a", "tests/t.py::test_b"], verdicts)
     assert record["created"] == [100] and record["comments"] == [2067] and record["warnings"] == []
+    assert record["untracked"] == []
     assert record["handed"] == [{"ids": ["tests/t.py::test_a", "tests/t.py::test_b"], "pr": 2067, "issue": 100}]
     assert github.posts[0] == ("labels", {"name": routing.LABEL, "color": "b60205",
                                           "description": "A merge into ouroboros broke tests (post-merge check)"})
@@ -117,6 +87,7 @@ def test_an_open_issue_of_the_same_pull_request_is_extended_not_duplicated():
     verdicts = [{"id": "tests/t.py::test_new", "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}]
     record = _route(github, ["tests/t.py::test_new", "tests/t.py::test_a"], verdicts)
     assert record["created"] == [] and record["updated"] == [5] and record["closed"] == []
+    assert record["untracked"] == []
     assert routing.parse_machine_block(github.issues[5]["body"])["ids"] == ["tests/t.py::test_a", "tests/t.py::test_new"]
     assert [number for number, _ in github.comments] == [5, 2067]
     assert "labels" not in [path for path, _ in github.posts]
@@ -174,6 +145,22 @@ def test_a_recheck_closes_only_executed_passes_or_removed_tests(status, closed, 
     assert record["closed"] == ([5] if closed else [])
     assert github.issues[5]["state"] == ("closed" if closed else "open")
     assert bool(github.comments) is closed
+
+
+def test_only_a_head_at_or_after_the_recorded_failure_can_retire_or_narrow_it():
+    older, red, later = [str(i) * 40 for i in range(1, 4)]
+    ids = ["tests/t.py::test_a", "tests/t.py::test_b"]
+    github = FakeGitHub(issues=[_issue(5, {"kind": "unattributed", "ids": ids}, head=red)])
+    for tip, passed in ((older, ids), (later, ids[:1]), (later, ids[1:])):
+        record = routing.route(github, classification={}, attribution={}, head=tip, run_url="run",
+                               recheck=lambda asked: {n: "passed" if n in passed else "skipped" for n in asked},
+                               ancestor=lambda a, b: a < b)
+        if tip == older:
+            assert not record["closed"] and not record["narrowed"] and not github.comments
+        elif passed == ids[:1]:
+            assert record["narrowed"] == [{"issue": 5, "ids": ids[:1]}]
+        else:
+            assert record["closed"] == [5]
 
 
 def test_an_issue_loses_each_test_that_passes_and_keeps_what_is_not_green():
@@ -259,6 +246,23 @@ def test_the_hand_over_is_recorded_before_the_recheck_which_skips_what_this_run_
     assert [number for number, _ in github.comments] == [2067, 6]
 
 
+def test_a_carried_untracked_red_shares_the_tracking_recheck_batch():
+    renamed, tracked, skipped = [f"tests/t.py::test_{name}" for name in ("old_name", "tracked", "skipped")]
+    github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "unattributed", "ids": [tracked]})])
+    saved, batches = [], []
+
+    def recheck(ids):
+        batches.append(ids)
+        assert saved == [[renamed, skipped]]  # The checkpoint precedes any collection.
+        return {renamed: "absent", tracked: "passed"}
+
+    record = _route(github, [], [], owed=[renamed, skipped], recheck=recheck,
+                    owed_same_run=lambda ids: {skipped: "kept"},
+                    checkpoint=lambda row: saved.append(list(row["untracked"])))
+    assert batches == [[renamed, tracked]] and record["untracked"] == [skipped]
+    assert record["closed"] == [5]
+
+
 def test_a_lint_issue_closes_only_once_a_linted_head_no_longer_has_its_finding():
     def run(lint_checked, failed=()):
         github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "culprit", "pr": 1, "culprit": "c" * 40,
@@ -296,6 +300,7 @@ def test_api_errors_become_warnings_and_the_hand_over_goes_on():
     verdicts = [{"id": "tests/t.py::test_a", "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}]
     record = _route(github, ["tests/t.py::test_a"], verdicts)
     assert record["created"] == [] and record["comments"] == [2067]
+    assert record["untracked"] == ["tests/t.py::test_a"]
     assert record["warnings"] == ["create the post-merge-red label: HTTP 502 Bad Gateway",
                                   "create an issue: HTTP 502 Bad Gateway"]
     assert "Tracking issue" not in github.comments[0][1]
@@ -304,6 +309,23 @@ def test_api_errors_become_warnings_and_the_hand_over_goes_on():
     record = _route(github, ["tests/t.py::test_a"], verdicts)
     assert record["created"] == [] and record["comments"] == [2067] and len(record["warnings"]) == 1
     assert record["complete"] is False and record["rechecked"] == {}
+    assert record["untracked"] == ["tests/t.py::test_a"]
+
+
+@pytest.mark.parametrize("failure,untracked", [
+    (("PATCH", "issues/5"), ["new"]), (("POST", "issues/5/comments"), []),
+])
+def test_the_issue_block_decides_whether_a_red_survives_the_window(failure, untracked):
+    github = FakeGitHub(label=True, fail=[failure], issues=[_issue(5, {"kind": "unattributed", "ids": ["old"]})])
+    record = _route(github, ["old", "new"], [])
+    assert record["handed"][0]["issue"] == 5 and record["warnings"]
+    assert record["untracked"] == untracked
+
+
+def test_an_issue_number_without_the_tracking_label_cannot_carry_a_red():
+    github = FakeGitHub(fail=[("POST", "labels")])
+    record = _route(github, ["new"], [])
+    assert record["created"] == [100] and record["untracked"] == ["new"]
 
 
 def test_only_the_merge_commit_of_a_merged_pull_request_is_blamed():
@@ -352,7 +374,8 @@ def test_each_leg_extends_and_closes_only_the_issues_of_its_own_system():
 
 
 def test_a_size_issue_closes_only_once_its_own_base_measures_green():
-    """A later check's base already holds the growth, so not seeing it again proves nothing."""
+    """A later check's base already holds the growth, so not seeing it again proves nothing; a missing size
+    test proves even less — only a pass against the base the issue measures takes a size red off it."""
     pairwise = "size tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base"
     issues = [_issue(5, {"kind": "culprit", "pr": 1, "culprit": "c" * 40, "last_good": "b" * 40, "base": "0" * 40,
                          "ids": [pairwise]}),
@@ -366,7 +389,7 @@ def test_a_size_issue_closes_only_once_its_own_base_measures_green():
 
     closed, asked = run("passed")
     assert closed == [5, 6] and asked == [("a" * 40, [SIZED]), ("b" * 40, [pairwise])]  # culprit: its last good
-    assert run("absent")[0] == [5, 6]
+    assert run("absent")[0] == []  # a size red is never found gone: only a pass against its base retires it
     for status in ("failed", "skipped", "unknown"):
         assert run(status)[0] == [], status
     closed, asked = run("passed", failed=[SIZED])  # red in this run: not rechecked, not green
@@ -397,6 +420,7 @@ def test_a_size_red_is_handed_over_with_the_base_it_was_measured_against():
                 {"id": other, "verdict": "unattributed"}]
     record = _route(github, [SIZED, other], verdicts, classification={"size": {"base": "a" * 40}, "base": "f" * 40})
     assert record["created"] == [100, 101] and record["comments"] == [2067]
+    assert record["untracked"] == []
     assert routing.parse_machine_block(github.issues[100]["body"]) == {
         "format": 1, "os": "linux", "kind": "culprit", "pr": 2067, "culprit": culprit, "last_good": "b" * 40,
         "base": "a" * 40, "ids": [SIZED]}
@@ -420,6 +444,35 @@ def test_a_size_red_is_handed_over_with_the_base_it_was_measured_against():
     assert "it passes, or finds one outside the size check gone, and closes" in mixed
 
 
+@pytest.mark.parametrize("old_base", ["a" * 40, None])
+def test_a_size_red_an_issue_of_another_base_lists_gets_an_issue_of_this_base(old_base):
+    """An open issue keeps the base it measures its size tests against. The same test red against this window's base
+    is a delta that issue cannot recheck: it gets an issue of its own base, which carries it into the next window."""
+    old = {"kind": "unattributed", "ids": [SIZED], "base": old_base}
+    github = FakeGitHub(label=True, issues=[_issue(5, old)])
+    record = _route(github, [SIZED], [], classification={"base": "b" * 40})
+    assert record["untracked"] == [] and record["created"] == [101] and record["updated"] == []
+    assert routing.parse_machine_block(github.issues[101]["body"]) == {
+        "format": 1, "os": "linux", "kind": "unattributed", "base": "b" * 40, "ids": [SIZED]}
+    assert routing.parse_machine_block(github.issues[5]["body"]) == {"format": 1, **old}
+    # Grouping and the confirmation agree: the next window finds it carried and hands nothing over again.
+    again = _route(github, [SIZED], [], classification={"base": "b" * 40})
+    assert again["untracked"] == [] and again["created"] == again["updated"] == [] and again["handed"] == []
+
+
+@pytest.mark.parametrize("kind", ["culprit", "pre-existing", "unattributed"])
+def test_a_size_red_that_already_fails_at_the_window_base_stays_with_the_issue_that_lists_it(kind):
+    """Red at the window's base itself, a size test is red against any earlier base too: the issue that lists it,
+    whatever base it measures, carries it, and no second issue opens."""
+    old = {"kind": kind, "ids": [SIZED], **({"pr": 1, "culprit": "c" * 40, "last_good": "a" * 40} if kind == "culprit"
+                                           else {"base": "a" * 40})}
+    github = FakeGitHub(label=True, issues=[_issue(5, old)])
+    record = _route(github, [SIZED], [{"id": SIZED, "verdict": "pre-existing"}],
+                    classification={"base": "b" * 40, "size": {"base": "b" * 40}})
+    assert record["untracked"] == [] and record["created"] == record["updated"] == [] and record["handed"] == []
+    assert routing.parse_machine_block(github.issues[5]["body"]) == {"format": 1, **old}
+
+
 def test_a_label_the_other_leg_created_meanwhile_is_no_warning():
     def refused(code):
         def post(path, body):
@@ -440,3 +493,437 @@ def test_the_update_reader_asks_for_the_label_the_hand_over_gives():
 
     assert update_qualification.RED_LABEL == routing.LABEL
 
+
+# --- the receipt reader: proof of absence is not an unknown read --------------------------------
+
+
+class _ListingGitHub(routing.GitHub):
+    """The real reader over one crafted artifact listing; nothing here touches the network."""
+
+    def __init__(self, listing):
+        super().__init__(REPO, "")
+        self.listing = listing
+
+    def get(self, path):
+        if "/artifacts?name=" in path:
+            return self.listing
+        return {}
+
+
+def _receipt(payload: bytes) -> bytes:
+    import io
+    import zipfile
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        bundle.writestr("handoff.json", payload)
+    return buffer.getvalue()
+
+
+def _archive_download(monkeypatch, archive: bytes) -> None:
+    import urllib.request
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, limit=-1):
+            return archive if limit < 0 else archive[:limit]
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout=None: _Response())
+
+
+def test_a_complete_listing_without_the_receipt_proves_that_run_has_none():
+    with pytest.raises(FileNotFoundError):
+        _ListingGitHub({"total_count": 0, "artifacts": []}).handoff_json(71, 2, "linux", "0" * 64)
+
+
+def test_an_expired_receipt_in_a_complete_listing_is_gone_for_good():
+    listing = {"total_count": 1,
+               "artifacts": [{"id": 5, "name": "post-merge-handoff-linux-71-2", "expired": True}]}
+    with pytest.raises(FileNotFoundError):
+        _ListingGitHub(listing).handoff_json(71, 2, "linux", "0" * 64)
+
+
+@pytest.mark.parametrize("listing", [
+    {}, {"artifacts": []}, {"total_count": 1, "artifacts": "no"},
+    {"total_count": 2, "artifacts": [{"id": 5, "name": "n", "expired": False}]},
+    {"total_count": 1, "artifacts": [{"id": 5, "name": "another", "expired": False}]},
+    {"total_count": 2, "artifacts": [{"id": 5, "name": "post-merge-handoff-linux-71-2", "expired": False},
+                                     {"id": 6, "name": "post-merge-handoff-linux-71-2", "expired": False}]},
+    {"total_count": 1, "artifacts": [{"id": 5, "name": "post-merge-handoff-linux-71-2"}]},
+    {"total_count": 1, "artifacts": [{"name": "post-merge-handoff-linux-71-2", "expired": False}]},
+])
+def test_an_unreadable_or_ambiguous_listing_leaves_the_receipt_unknown(listing):
+    with pytest.raises(ValueError):
+        _ListingGitHub(listing).handoff_json(71, 2, "linux", "0" * 64)
+
+
+def test_a_failed_listing_is_unknown_not_absent():
+    class _Refused(_ListingGitHub):
+        def get(self, path):
+            raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
+
+    with pytest.raises(urllib.error.HTTPError):
+        _Refused(None).handoff_json(71, 2, "linux", "0" * 64)
+
+
+def test_a_well_formed_receipt_reads_back_through_its_archive(monkeypatch):
+    import hashlib
+    payload = b'{"untracked": {"linux": ["tests/t.py::test_x"]}}'
+    listing = {"total_count": 1,
+               "artifacts": [{"id": 5, "name": "post-merge-handoff-linux-71-2", "expired": False}]}
+    _archive_download(monkeypatch, _receipt(payload))
+    assert _ListingGitHub(listing).handoff_json(71, 2, "linux", hashlib.sha256(payload).hexdigest()) == {
+        "untracked": {"linux": ["tests/t.py::test_x"]}}
+    with pytest.raises(ValueError):  # bytes that do not match the digest: unknown, never absent
+        _ListingGitHub(listing).handoff_json(71, 2, "linux", "0" * 64)
+
+
+# --- recorded failures of earlier attempts: filed under their own source, never this run's head --
+
+
+def test_a_recorded_failure_is_filed_under_its_own_head_and_attempt_link():
+    github = _repo_github(label=True)
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded(["tests/t.py::test_x", "tests/t.py::test_y"]),
+                    origin={"head": HEAD, "run": 90, "attempt": 1, "base": "b" * 40})
+    assert record["created"] == [100] and record["updated"] == []
+    assert record["handed"] == [{"ids": ["tests/t.py::test_x", "tests/t.py::test_y"], "pr": None, "issue": 100}]
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+    body = github.issues[100]["body"]
+    assert f"Found failing at `{OLD}`: https://github.com/{REPO}/actions/runs/71/attempts/2" in body
+    assert f"Found failing at `{HEAD}`" not in body and "https://example.invalid/run/7" not in body
+    assert routing.parse_machine_block(body) == {"format": 1, "os": "linux", "kind": "unattributed",
+                                                 "base": "a" * 40,
+                                                 "ids": ["tests/t.py::test_x", "tests/t.py::test_y"]}
+    # The next run finds the red carried by the open issue and files nothing again.
+    again = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                   ancestor=lambda a, b: a < b,
+                   prior_failures=_recorded(["tests/t.py::test_x", "tests/t.py::test_y"]))
+    assert again["created"] == again["updated"] == [] and again["handed"] == []
+    assert again["untracked"] == [] and again["awaiting_handoff"] == []
+
+
+def test_a_recorded_failure_without_numbers_links_its_own_commit():
+    github = _repo_github(label=True)
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                    ancestor=lambda a, b: a < b,
+                    prior_failures=[{"head": OLD, "base": "a" * 40, "ids": ["tests/t.py::test_x"]}])
+    assert record["created"] == [100]
+    assert f"Found failing at `{OLD}`: https://github.com/{REPO}/commit/{OLD}" in github.issues[100]["body"]
+
+
+def test_a_refused_write_keeps_the_recorded_source_and_attempt_link():
+    github = _repo_github(label=True, fail={("POST", "issues")})
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "skipped"),
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded(["tests/t.py::test_x"]))
+    assert record["created"] == [] and "create an issue: HTTP 502 Bad Gateway" in record["warnings"]
+    assert record["untracked"] == ["tests/t.py::test_x"]
+    assert record["awaiting_handoff"] == [{"head": OLD, "run": 71, "attempt": 2, "base": "a" * 40,
+                                           "ids": ["tests/t.py::test_x"]}]
+    assert record["rechecked"] == {"tests/t.py::test_x": "skipped"}  # a skip settles nothing either
+
+
+def test_a_whole_pass_of_this_run_retires_a_recorded_red_without_filing_it():
+    asked = []
+    record = _route(_repo_github(label=True), [], [],
+                    recheck=lambda ids: asked.append(ids) or pytest.fail("nothing to recheck"),
+                    owed_same_run=lambda ids: {"tests/t.py::test_x": "passed"},
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded(["tests/t.py::test_x"]))
+    assert record["created"] == [] and record["handed"] == [] and asked == []
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+
+
+def test_a_late_rerun_cannot_retire_a_newer_recorded_failure():
+    """The K/A/B control: an issue filed at K still lists the red, a newer run recorded it failing at B,
+    and this rerun measures an older head between K and B. Its pass or absence retires nothing, and
+    the rerun spends no recheck on a failure it cannot reach."""
+    k, a, b = "1" * 40, "2" * 40, "3" * 40
+    x = "tests/t.py::test_x"
+    github = FakeGitHub(issues=[_issue(5, {"kind": "unattributed", "ids": [x]}, head=k)])
+    record = routing.route(github, classification={}, attribution={}, head=a, run_url="run",
+                           recheck=lambda asked: dict.fromkeys(asked, "passed"),
+                           ancestor=lambda older, newer: older < newer, owed=[x],
+                           prior_failures=_recorded([x], head=b))
+    assert record["closed"] == [] and record["narrowed"] == [] and not github.comments
+    assert record["rechecked"] == {}
+    assert routing.parse_machine_block(github.issues[5]["body"])["ids"] == [x]
+    assert github.issues[5]["state"] == "open"
+    assert record["untracked"] == [x]
+    assert record["awaiting_handoff"] == [{"head": b, "run": 71, "attempt": 2, "base": "a" * 40, "ids": [x]}]
+    # The same observation reaching the recorded head does retire it: the pass is on/after the failure.
+    github = FakeGitHub(issues=[_issue(5, {"kind": "unattributed", "ids": [x]}, head=k)])
+    record = routing.route(github, classification={}, attribution={}, head=b, run_url="run",
+                           recheck=lambda asked: dict.fromkeys(asked, "passed"),
+                           ancestor=lambda older, newer: older < newer, owed=[x],
+                           prior_failures=_recorded([x], head=b))
+    assert record["closed"] == [5] and record["untracked"] == [] and record["awaiting_handoff"] == []
+
+
+def test_a_record_beyond_the_head_is_settled_by_nothing_here():
+    b, x = "3" * 40, "tests/t.py::test_x"
+    asked = []
+    record = routing.route(_repo_github(label=True), classification={}, attribution={}, head="2" * 40,
+                           run_url="run", recheck=lambda ids: asked.append(ids) or dict.fromkeys(ids, "passed"),
+                           ancestor=lambda a, other: a < other,
+                           owed_same_run=lambda ids: {x: "passed"},  # even this run's whole passes settle
+                           prior_failures=_recorded([x], head=b))    # nothing about a newer failure
+    assert asked == [] and record["created"] == [] and record["rechecked"] == {}
+    assert record["untracked"] == [x]
+    assert record["awaiting_handoff"] == [{"head": b, "run": 71, "attempt": 2, "base": "a" * 40, "ids": [x]}]
+
+
+def test_a_new_failure_and_a_recorded_one_are_not_conflated():
+    culprit = "c" * 40
+    github = _repo_github(label=True, prs={culprit: [_pr(2067, culprit, login="author")]})
+    verdicts = [{"id": "tests/t.py::test_new_red", "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}]
+    record = _route(github, ["tests/t.py::test_new_red"], verdicts,
+                    recheck=lambda ids: dict.fromkeys(ids, "failed"), ancestor=lambda a, b: a < b,
+                    prior_failures=_recorded(["tests/t.py::test_old_red"]), origin={"head": HEAD, "run": 90})
+    assert record["created"] == [100, 101] and record["comments"] == [2067]
+    assert record["handed"] == [{"ids": ["tests/t.py::test_new_red"], "pr": 2067, "issue": 100},
+                                {"ids": ["tests/t.py::test_old_red"], "pr": None, "issue": 101}]
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+    fresh, recorded = github.issues[100]["body"], github.issues[101]["body"]
+    assert f"Found failing at `{HEAD}`: https://example.invalid/run/7" in fresh and OLD not in fresh
+    assert f"Found failing at `{OLD}`: https://github.com/{REPO}/actions/runs/71/attempts/2" in recorded
+    assert HEAD not in recorded and "https://example.invalid/run/7" not in recorded
+    assert routing.parse_machine_block(recorded)["kind"] == "unattributed"
+
+
+def test_a_recorded_size_red_tracks_only_against_the_base_its_record_names():
+    window_base, record_base = "b" * 40, "a" * 40
+    github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "unattributed", "base": window_base, "ids": [SIZED]})])
+    asked = []
+    record = _route(github, [], [],
+                    size_recheck=lambda base, ids: asked.append((base, ids)) or dict.fromkeys(ids, "failed"),
+                    ancestor=lambda a, b: a < b,
+                    classification={"size_checked": True, "size": {"base": window_base}, "base": window_base,
+                                    "size_passed": [SIZED]},
+                    prior_failures=_recorded([SIZED], base=record_base))
+    assert record["created"] == [101] and record["updated"] == []
+    assert (record_base, [SIZED]) in asked  # re-measured against the base its record names
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+    assert routing.parse_machine_block(github.issues[101]["body"]) == {"format": 1, "os": "linux",
+                                                                       "kind": "unattributed", "base": record_base,
+                                                                       "ids": [SIZED]}
+    # An issue measuring the record's own base carries the recorded red, and a window-base pass
+    # against another base discharges nothing: the red settles without any new issue.
+    github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "unattributed", "base": record_base, "ids": [SIZED]})])
+    record = _route(github, [], [], size_recheck=lambda base, ids: {}, ancestor=lambda a, b: a < b,
+                    classification={"size_checked": True, "size": {"base": window_base}, "base": window_base,
+                                    "size_passed": [SIZED]},
+                    prior_failures=_recorded([SIZED], base=record_base))
+    assert record["created"] == [] and record["untracked"] == [] and record["awaiting_handoff"] == []
+
+
+def test_records_of_one_red_file_from_the_latest_and_all_survive_a_refusal():
+    b1, b2 = "2" * 40, "3" * 40
+    x = "tests/t.py::test_x"
+    records = [{"head": b1, "run": 60, "attempt": 1, "base": "a" * 40, "ids": [x]},
+               {"head": b2, "run": 71, "attempt": 2, "base": "a" * 40, "ids": [x]}]
+    github = _repo_github(label=True)
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                    ancestor=lambda a, b: a < b, prior_failures=records)
+    assert record["created"] == [100]  # the newest record is the one a tracker names
+    assert f"Found failing at `{b2}`: https://github.com/{REPO}/actions/runs/71/attempts/2" in github.issues[100]["body"]
+    assert record["awaiting_handoff"] == [] and record["untracked"] == []
+    github = _repo_github(label=True, fail={("POST", "issues")})
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "skipped"),
+                    ancestor=lambda a, b: a < b, prior_failures=records)
+    assert record["created"] == []  # both sources and attempt links survive the refused write
+    assert record["awaiting_handoff"] == [{"head": b1, "run": 60, "attempt": 1, "base": "a" * 40, "ids": [x]},
+                                          {"head": b2, "run": 71, "attempt": 2, "base": "a" * 40, "ids": [x]}]
+
+
+def test_an_issue_holding_a_newer_observation_is_not_extended_with_an_older_one():
+    newer, x = "5" * 40, "tests/t.py::test_x"
+    github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "unattributed", "ids": ["tests/t.py::test_kept"],
+                                                       "base": "a" * 40}, head=newer)])
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded([x]))
+    assert record["updated"] == [] and record["created"] == []
+    assert "issue #5 has no observation at or before this head; its record was kept" in record["warnings"]
+    assert record["untracked"] == [x]
+    assert record["awaiting_handoff"] == [{"head": OLD, "run": 71, "attempt": 2, "base": "a" * 40, "ids": [x]}]
+    assert routing.parse_machine_block(github.issues[5]["body"])["ids"] == ["tests/t.py::test_kept"]
+
+
+def test_a_recorded_failure_extends_a_matching_issue_from_its_own_head():
+    x, y = "tests/t.py::test_x", "tests/t.py::test_y"
+    github = _repo_github(label=True, issues=[_issue(5, {"kind": "unattributed", "ids": [y]}, head=OLD)])
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded([x]))
+    assert record["created"] == [] and record["updated"] == [5]
+    assert [number for number, _ in github.comments] == [5]
+    assert github.comments[0][1].startswith(f"Also failing at `{OLD}`")
+    assert f"https://github.com/{REPO}/actions/runs/71/attempts/2" in github.comments[0][1]
+    assert routing.parse_machine_block(github.issues[5]["body"])["ids"] == [x, y]
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+
+
+def test_a_recorded_red_that_passes_the_recheck_is_tracked_then_closed_the_same_run():
+    """The hand-over precedes the recheck, so the red gets its tracker first; the recheck then retires
+    it with evidence — the issue is born and closed by one run, and nothing stays owed."""
+    x = "tests/t.py::test_x"
+    github = _repo_github(label=True)
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "passed"),
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded([x]))
+    assert record["created"] == [100] and record["closed"] == [100]
+    assert f"Found failing at `{OLD}`" in github.issues[100]["body"]
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+
+
+def test_the_recorded_hand_over_reaches_the_checkpoint_before_the_recheck():
+    import copy
+
+    x = "tests/t.py::test_x"
+    github = _repo_github(label=True)
+    saved = []
+
+    def recheck(ids):
+        [handed] = saved
+        assert handed["created"] == [100] and handed["awaiting_handoff"] == []
+        return dict.fromkeys(ids, "failed")
+
+    record = _route(github, [], [], recheck=recheck, ancestor=lambda a, b: a < b,
+                    prior_failures=_recorded([x]), checkpoint=lambda handed: saved.append(copy.deepcopy(handed)))
+    assert record["created"] == [100] and record["awaiting_handoff"] == []
+
+
+def test_a_flaky_pass_does_not_drop_a_recorded_red():
+    """A retry that passes is no whole pass, no issue and no disappearance: the recorded red keeps its
+    obligation, which the re-filing turns into a tracker instead of letting it vanish."""
+    x = "tests/t.py::test_x"
+    github = _repo_github(label=True)
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                    flaky=[x], classification={"flaky": [{"id": x, "retry": "passed"}]},
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded([x]))
+    assert record["created"] == [100] and record["untracked"] == [] and record["awaiting_handoff"] == []
+    # An ID owed without a record keeps the meaning it had: a flaky pass still settles it.
+    legacy = "tests/t.py::test_legacy"
+    record = _route(_repo_github(label=True), [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                    flaky=[legacy], classification={"flaky": [{"id": legacy, "retry": "passed"}]},
+                    owed=[legacy], ancestor=lambda a, b: a < b)
+    assert record["created"] == [] and record["untracked"] == [] and record["awaiting_handoff"] == []
+
+
+def test_unreadable_open_issues_leave_the_records_owed():
+    x = "tests/t.py::test_x"
+    github = _repo_github(fail={("GET", "issues")})
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, "failed"),
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded([x]))
+    assert record["created"] == [] and record["handed"] == []
+    assert record["complete"] is False
+    assert record["untracked"] == [x]
+    assert record["awaiting_handoff"] == [{"head": OLD, "run": 71, "attempt": 2, "base": "a" * 40, "ids": [x]}]
+
+
+def test_awaiting_records_keep_each_source_and_invent_none():
+    legacy, x, z = "tests/t.py::test_legacy", "tests/t.py::test_x", "tests/t.py::test_new_red"
+    github = _repo_github(label=True, fail={("POST", "issues")})
+    record = _route(github, [z], [], owed=[legacy], recheck=lambda ids: dict.fromkeys(ids, "skipped"),
+                    ancestor=lambda a, b: a < b, prior_failures=_recorded([x]),
+                    origin={"head": HEAD, "run": 90, "attempt": 1, "base": "b" * 40})
+    assert record["created"] == []
+    assert record["awaiting_handoff"] == [
+        {"head": OLD, "run": 71, "attempt": 2, "base": "a" * 40, "ids": [x]},
+        {"head": HEAD, "run": 90, "attempt": 1, "base": "b" * 40, "ids": [z]},
+        {"head": None, "run": None, "attempt": None, "base": None, "ids": [legacy]},
+    ]
+    # A call without an origin still dates this run's own red honestly: its head, nothing invented.
+    record = _route(_repo_github(label=True, fail={("POST", "issues")}), [z], [],
+                    recheck=lambda ids: dict.fromkeys(ids, "skipped"))
+    assert record["awaiting_handoff"] == [{"head": HEAD, "run": None, "attempt": None, "base": None, "ids": [z]}]
+
+
+def test_one_size_red_recorded_against_two_bases_is_owed_once_per_base():
+    """Two attempts measured the same size test against different bases: each record is its own obligation.
+    An issue measuring one base tracks that record only, so the other is filed against its own base under
+    its own attempt link; a refused write leaves exactly that one owed, and a pass against one base
+    settles one."""
+    listed, other = "a" * 40, "b" * 40
+    records = _recorded([SIZED], run=60, attempt=1, base=other) + _recorded([SIZED], base=listed)
+    tracker = _issue(5, {"kind": "unattributed", "base": listed, "ids": [SIZED]})
+    github = _repo_github(label=True, issues=[tracker])
+    record = _route(github, [], [], ancestor=lambda a, b: a < b, prior_failures=records)
+    assert record["created"] == [101] and record["updated"] == []
+    assert record["handed"] == [{"ids": [SIZED], "pr": None, "issue": 101}]
+    filed = github.issues[101]["body"]
+    assert routing.parse_machine_block(filed) == {
+        "format": 1, "os": "linux", "kind": "unattributed", "base": other, "ids": [SIZED]}
+    assert f"Found failing at `{OLD}`: https://github.com/{REPO}/actions/runs/60/attempts/1" in filed
+    assert routing.parse_machine_block(github.issues[5]["body"])["base"] == listed
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+    # A refused write releases only the record an issue of its own base carries.
+    github = _repo_github(label=True, issues=[tracker], fail={("POST", "issues")})
+    record = _route(github, [], [], ancestor=lambda a, b: a < b, prior_failures=records)
+    assert record["created"] == [] and record["untracked"] == [SIZED]
+    assert record["awaiting_handoff"] == [{"head": OLD, "run": 60, "attempt": 1, "base": other, "ids": [SIZED]}]
+    # This run's own size gate passed against one of the two bases: that settles one record, never the other.
+    github = _repo_github(label=True)
+    record = _route(github, [], [], ancestor=lambda a, b: a < b, prior_failures=records,
+                    classification={"size_checked": True, "size": {"base": listed}, "size_passed": [SIZED]})
+    assert record["created"] == [100] and record["untracked"] == [] and record["awaiting_handoff"] == []
+    assert routing.parse_machine_block(github.issues[100]["body"])["base"] == other
+
+
+@pytest.mark.parametrize("fails_here", [False, True])
+def test_a_newer_recorded_failure_survives_a_batch_that_files_another(fails_here):
+    """An issue filed at K lists the red, a newer run recorded it failing at B, and this rerun at A, between
+    them, re-files another recorded red in the same batch. Only what was re-filed can have gained a tracker:
+    the record at B stays owed whatever the older issue lists, also when this rerun saw that very test fail
+    itself, so a later run still knows the newer failure."""
+    k, a, b = "1" * 40, "2" * 40, "3" * 40
+    x, y = "tests/t.py::test_x", "tests/t.py::test_y"
+    github = _repo_github(label=True, issues=[_issue(5, {"kind": "unattributed", "ids": [x]}, head=k)])
+    record = routing.route(
+        github, classification={"failed": [{"id": x}] if fails_here else []}, attribution={}, head=a,
+        run_url="run", recheck=lambda asked: dict.fromkeys(asked, "failed"),
+        ancestor=lambda older, newer: older < newer,
+        prior_failures=_recorded([x], head=b) + _recorded([y], head=k, run=60, attempt=1))
+    assert record["updated"] == [5] and record["created"] == []  # the batch files the other recorded red
+    assert routing.parse_machine_block(github.issues[5]["body"])["ids"] == [x, y]
+    assert record["closed"] == [] and record["narrowed"] == []
+    assert record["untracked"] == [x]
+    assert record["awaiting_handoff"] == [{"head": b, "run": 71, "attempt": 2, "base": "a" * 40, "ids": [x]}]
+
+
+def test_a_recorded_node_lane_red_is_retired_by_a_whole_pass_never_by_a_passed_retry():
+    """The Node lane failed, then passed its retry: that is no whole pass, so an earlier attempt's record of
+    the lane gets its tracker and keeps it, and an issue that already tracks it stays open. A lane that
+    passed outright retires the record; an ID owed without a record keeps the meaning it had."""
+    lane, retried = routing.NODE_LANE, {"flaky": [{"id": routing.NODE_LANE, "retry": "passed"}]}
+    github = _repo_github(label=True)
+    record = _route(github, [], [], node="failure", classification=retried, ancestor=lambda a, b: a < b,
+                    prior_failures=_recorded([lane]))
+    assert record["created"] == [100] and record["closed"] == [] and github.issues[100]["state"] == "open"
+    assert routing.parse_machine_block(github.issues[100]["body"])["ids"] == [lane]
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+    github = _repo_github(label=True, issues=[_issue(5, {"kind": "unattributed", "ids": [lane]}, head=OLD)])
+    record = _route(github, [], [], node="failure", classification=retried, ancestor=lambda a, b: a < b,
+                    prior_failures=_recorded([lane]))
+    assert record["created"] == [] and record["closed"] == [] and github.issues[5]["state"] == "open"
+    assert record["untracked"] == [] and record["awaiting_handoff"] == []
+    # A whole pass of the lane retires the record without filing it.
+    record = _route(_repo_github(label=True), [], [], ancestor=lambda a, b: a < b,
+                    prior_failures=_recorded([lane]))
+    assert record["created"] == [] and record["untracked"] == [] and record["awaiting_handoff"] == []
+    # Owed without a record, the lane keeps the meaning it had: the passed retry settles it.
+    record = _route(_repo_github(label=True), [], [], node="failure", classification=retried, owed=[lane])
+    assert record["created"] == [] and record["untracked"] == [] and record["awaiting_handoff"] == []
+
+
+def test_current_and_prior_observations_do_not_retry_an_unconfirmed_issue_write():
+    x = "tests/t.py::test_x"
+    github = _repo_github(label=True, fail={("POST", "issues")})
+    prior = _recorded([x])
+    record = _route(github, [x], [], ancestor=lambda a, b: a < b, prior_failures=prior,
+                    origin={"head": HEAD, "run": 90, "attempt": 1, "base": "c" * 40})
+    assert record["warnings"].count("create an issue: HTTP 502 Bad Gateway") == 1
+    assert record["untracked"] == [x]
+    assert record["awaiting_handoff"] == prior + [
+        {"head": HEAD, "run": 90, "attempt": 1, "base": "c" * 40, "ids": [x]}]

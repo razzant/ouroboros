@@ -517,6 +517,12 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
         raw = _canonical(value)
         return raw, value, True, False, len(raw), False
     value = json.loads(raw)
+    if kind == "update_letter":  # as every Updates reader shows it (update_letter.read_record): no legacy coverage
+        from ouroboros.update_qualification import discard_legacy_coverage
+
+        if discard_legacy_coverage(value):
+            raw = _canonical(value)
+            return raw, value, True, False, len(raw), False
     from ouroboros.queue_observation import SHARED_KEY, expand_shared
 
     if kind == "queue_snapshot" and SHARED_KEY in value:  # replicated task values are published once; the agent reads whole rows
