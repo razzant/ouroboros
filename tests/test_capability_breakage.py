@@ -481,6 +481,17 @@ def test_a_changed_registry_omission_reaches_a_live_call_when_its_tools_are_sele
     assert [row for row in rows if row.get("_host_context_kind") == breakage.START_KIND] == starts  # never rebuilt
 
 
+def test_a_registry_omission_that_is_gone_is_said_to_be_gone_once():
+    told = {"facts": {}, "registry": ["[CAPABILITY_OMISSION_MANIFEST]", "- a tool withheld at the start"]}
+    registry = SimpleNamespace(_ctx=SimpleNamespace(**{breakage._TOLD: told}), capability_omissions=lambda: [])
+    rows = []
+    breakage.write_start_notice(registry, rows)
+    [row] = rows
+    assert row["content"].endswith("\nnone now")  # never a bare header
+    breakage.write_start_notice(registry, rows)
+    assert len(rows) == 1  # told once
+
+
 def test_the_round_appends_the_change_row_before_its_facts(monkeypatch, tmp_path):
     from ouroboros import loop as loop_mod
     from ouroboros import loop_messages

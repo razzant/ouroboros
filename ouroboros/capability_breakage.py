@@ -357,8 +357,9 @@ def write_start_notice(registry: Any, messages: list) -> None:
     told = getattr(tool_ctx, _TOLD, None)
     if isinstance(told, dict):
         if told.get("registry", lines) != lines:
+            body = "\n".join(lines) if len(lines) > 1 else "\n".join([*lines, "none now"])  # a gone omission is said
             messages.append(bound_host_row(CHANGE_KIND, f"{CHANGE_HEADER} What this work's tools leave out changed "
-                                           "since it was told (the registry's current omissions):\n" + "\n".join(lines)))
+                                           "since it was told (the registry's current omissions):\n" + body))
         told["registry"] = lines
         return
     if any(isinstance(row, dict) and row.get(HOST_CONTEXT_KIND_KEY) == START_KIND for row in messages):
