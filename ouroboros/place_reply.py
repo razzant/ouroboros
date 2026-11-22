@@ -70,7 +70,8 @@ def carrier_now(ctx, metadata=None) -> dict:
     doors it reads (``transport_skill``): a new selection of a retained legacy binding meets its place like any other,
     and retained bytes that never named their connector read the resolved place's own, as the work poll authenticates
     it; a stored result replays as it was selected. A run under a frozen Presence ceiling keeps its own outward
-    choice, the forced declaration (owner Q4)."""
+    choice, the forced declaration (owner Q4). An unreadable store resolves nothing, as ``_place_connector`` reads
+    no door: the metadata carrier stands (none for a legacy binding), never an exception."""
     if metadata is None:
         metadata = getattr(ctx, "task_metadata", None) or {}
     if not isinstance(metadata, dict):
@@ -81,7 +82,10 @@ def carrier_now(ctx, metadata=None) -> dict:
     if not frozen and (_legacy_binding(metadata) or (carrier and not connector)):
         from ouroboros.tool_access import canonical_data_root
         root = canonical_data_root(ctx)
-        carrier = resolved_carrier(root, metadata)
+        try:
+            carrier = resolved_carrier(root, metadata)
+        except Exception:  # an unreadable store (``places_unreadable``): no resolved carrier
+            carrier = reply_carrier(metadata)
         connector = connector or (_place_connector(root, carrier["place_id"]) if carrier else "")
     return {**carrier, "transport_skill": connector} if carrier else {}
 

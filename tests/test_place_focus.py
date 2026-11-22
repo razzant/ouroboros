@@ -1121,7 +1121,9 @@ def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, mon
 def test_a_refused_doorless_root_can_choose_the_silence_its_refusal_offers(focus, monkeypatch, legacy):
     """Review round 2 (Astra 6): Safety refuses a doorless root's automatic reply and the refusal offers
     ``finish_task(action="finish", silent=true)``; the finish door accepts that silence for a retained legacy binding as
-    for a place carrier, since both name the conversation the run answers (``carrier_now``)."""
+    for a place carrier, since both name the conversation the run answers (``carrier_now``). Review round 3 (Astra 3):
+    with the place store unreadable nothing resolves the legacy binding, so the door returns its typed refusal, as the
+    metadata-only check did, instead of raising out of the loop; a place carrier needs no read and keeps its silence."""
     from ouroboros.place_reply import prepare_focus_reply, refusal_facts
     from ouroboros.tools.control_runtime import completion_request
     from ouroboros.tools.registry import ToolRegistry
@@ -1139,6 +1141,12 @@ def test_a_refused_doorless_root_can_choose_the_silence_its_refusal_offers(focus
     assert 'finish_task(action="finish", silent=true)' in refusal_facts(ctx)
     request, error = completion_request(ctx, {"action": "finish", "silent": True, "answer": "Private note."})
     assert (error, request is not None) == ("", True)
+    p.places_path(root).write_text("{not json", encoding="utf-8")  # the store cannot be read (``places_unreadable``)
+    request, error = completion_request(ctx, {"action": "finish", "silent": True, "answer": "Private note."})
+    if legacy:
+        assert request is None and error.startswith("silent is available only on a self-started run"), error
+    else:
+        assert (error, request is not None) == ("", True)
 
 
 class _Death(BaseException):
