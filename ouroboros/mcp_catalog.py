@@ -192,9 +192,14 @@ def with_answer(session: Any, exc: BaseException) -> BaseException:
     return exc
 
 
+_POST_BODY = "ouroboros_mcp_post_body"  # a POST's own JSON body in ``httpx.Request.extensions``, which a redirect copies
+
+
 def http_transport(opener: Any) -> Any:
     """``opener`` (the SDK's Streamable HTTP or SSE transport) for one connection whose HTTP client notes each
-    ``tools/call`` POST answered with HTTP 404 (``_HTTP_STANDINS``, read by that connection's session)."""
+    ``tools/call`` POST answered with HTTP 404 (``_HTTP_STANDINS``, read by that connection's session), also at
+    the end of a same-origin 307/308 chain: the first hop keeps its body in its extensions, which every hop of the
+    chain carries while the redirected body is a stream httpx cannot read again."""
     @contextlib.asynccontextmanager
     async def opened(*args: Any, httpx_client_factory: Any, **kwargs: Any) -> Any:
         standins: set = set()
@@ -202,14 +207,20 @@ def http_transport(opener: Any) -> Any:
         def factory(*client_args: Any, **client_kwargs: Any) -> Any:
             client = httpx_client_factory(*client_args, **client_kwargs)
 
+            async def keep(request: Any) -> None:
+                if request.method == "POST" and _POST_BODY not in request.extensions:
+                    with contextlib.suppress(Exception):  # a body that is already a stream keeps no copy
+                        request.extensions[_POST_BODY] = request.content
+
             async def note(response: Any) -> None:
                 if response.status_code == 404 and response.request.method == "POST":
                     try:
-                        sent = json.loads(response.request.content or b"{}")
-                    except Exception:  # noqa: BLE001 - a streamed (redirected) or unreadable body names no call
+                        sent = json.loads(response.request.extensions.get(_POST_BODY) or b"{}")
+                    except Exception:  # noqa: BLE001 - an unreadable body names no call
                         return
                     if isinstance(sent, dict) and sent.get("method") == "tools/call":
                         standins.add(sent.get("id"))
+            client.event_hooks["request"].append(keep)
             client.event_hooks["response"].append(note)
             return client
 
