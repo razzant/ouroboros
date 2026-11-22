@@ -179,6 +179,7 @@ def _record_owner_directive(
     reply_to: Optional[Dict[str, str]] = None,
     carried: bool = False,
     words: Any = None,
+    attachments: Any = None,
 ) -> None:
     """Retain the task-local owner corpus across transcript compaction.
 
@@ -199,7 +200,7 @@ def _record_owner_directive(
     """
     if ctx is None:
         return
-    if isinstance(content, str) and not content.strip():
+    if isinstance(content, str) and not content.strip() and not attachments:
         return
     if content in (None, [], {}):
         return
@@ -209,7 +210,14 @@ def _record_owner_directive(
         setattr(ctx, "_owner_directives", directives)
     stable_id = str(msg_id or "").strip()
     client, room = (str((origin or {}).get(key) or "") for key in ("client_message_id", "chat_id"))  # unique per room
-    for known in directives:  # a client id is one message unless both rows name different rooms (``dialogue_store``)
+    digest = (origin or {}).get("row_sha256")
+    for known in directives:
+        if isinstance(known, dict) and (digest or known.get("row_sha256")):
+            if digest != known.get("row_sha256"):
+                continue
+            if not carried:
+                known.pop("carried", None)
+            return
         if isinstance(known, dict) and ((stable_id and str(known.get("msg_id") or "") == stable_id) or (
                 client and str(known.get("client_message_id") or "") == client
                 and room in ("", str(known.get("chat_id") or room)))):
@@ -227,6 +235,9 @@ def _record_owner_directive(
     row.update({key: str(value) for key, value in (origin or {}).items() if value})
     if reply_to:
         row["reply_to"] = dict(reply_to)
+    if attachments:
+        from ouroboros.chat_uploads import stored_refs
+        row["attachments"] = stored_refs(attachments)
     if carried:
         row["carried"] = True
     directives.append(row)
@@ -277,13 +288,19 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
-        for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words and a schedule's text as provenance (owed nothing)
+        for index, row in enumerate(metadata.get("owner_corpus") or []):
             if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") in {PLACE_CONFIRMED, SCHEDULE_TEXT}):
+                # Continue seeded its original in slot zero, with the address on the task.
+                if index == 0 and row.get("source") == "origin_message" and not row.get("carried"):
+                    from ouroboros.owner_words import _opening, _opening_identity
+                    if _opening(row, metadata.get("origin_message_ref") or {}, first=True):
+                        row = {**row, **_opening_identity(ctx, read=True)}
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"), words=row.get("words"),
                     msg_id=str(row.get("msg_id") or ""),
                     origin={key: row[key] for key in (*ROW_IDS[1:], *SCHEDULE_ITEM_IDS, "ts", "received", "basis", "cited") if row.get(key)},
                     reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
+                    attachments=row.get("attachments"),
                 )
         schedule_text()
         return  # The task-drafted objective is never an owner directive.
@@ -302,18 +319,27 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
             # The door's stamp names who started the run; a control's prompt is the host's words even then.
             composed = isinstance(author, dict) and author.get("kind") == "ui_control"
             stamped = run_origin({"metadata": metadata})["owner_ingress"] and not composed
-            target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
+            root = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
+            target = reply_target(root, metadata.get("reply_reference")) if stamped else {}
             # A late answer's head: my human's words with the card they answered, never the host's frame; a press
             # without words is their act, kept under the door's own message id and time.
-            root = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
             if stamped and (submitted := card_input(metadata, root, "initial_user")):
                 door = metadata.get("origin_message_ref") or {}
                 _loop()._record_owner_directive(ctx, source=submitted["source"], content=submitted["content"],
-                        reply_to=submitted.get("reply_to"), origin={**{key: door.get(key) for key in ("chat_id", "client_message_id", "ts")},
+                        reply_to=submitted.get("reply_to"), origin={**{key: door.get(key) for key in ("chat_id", "client_message_id", "ts", "row_sha256")},
                                                                    **{key: submitted.get(key) for key in ("source_task_id", "quiz_id")}})
                 break
+            snapshot = (metadata.get("origin_message_snapshot") or {}) if stamped else {}
+            content = message.get("content")
+            if snapshot.get("placeholder_text"):
+                content = ""
+            elif snapshot.get("attachments") and isinstance(metadata.get("origin_message_text"), str):
+                content = metadata["origin_message_text"]
             _loop()._record_owner_directive(ctx, source="initial_user" if stamped else "initial_text",
-                                            content=message.get("content"), reply_to=target or None)
+                                            content=content,
+                                            origin=({"row_sha256": metadata["origin_message_ref"]["row_sha256"]}
+                                                    if stamped and (metadata.get("origin_message_ref") or {}).get("row_sha256") else None),
+                                            attachments=snapshot.get("attachments"), reply_to=target or None)
             break
     schedule_text()
 

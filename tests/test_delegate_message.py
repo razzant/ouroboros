@@ -261,7 +261,15 @@ def test_foreign_and_unknown_runs_are_refused_without_a_wire_call(tmp_path, monk
     assert foreign["status"] == "refused" and foreign["reason"] == "run_not_owned"
     assert foreign["owner_task_id"] == "t-other"
     unknown = json.loads(_delegate_message(ctx, "run-nobody", "steer").text)
-    assert unknown["reason"] == "run_ownership_unknown"
+    assert unknown["reason"] == "run_ownership_unknown" and "hint" not in unknown
+    # A task id given as a run id: the same refusal names the read that answers it.
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_task_results import _status_root
+
+    write_task_result(_status_root(ctx), "kidtask11", "completed", result="done")
+    task = json.loads(_delegate_message(ctx, "kidtask11", "steer").text)
+    assert task["reason"] == "run_ownership_unknown" and task["hint"] == (
+        "That id names a task, not a delegated run: get_task_result(task_id='kidtask11') reads it.")
     assert stub.posts == [] and stub.reads == []
 
 

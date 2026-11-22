@@ -5,7 +5,6 @@ The common fixtures double OS/model boundaries; warm park saves through the real
 serializer and worker event handler, interrupted only after its acknowledgement.
 """
 import copy
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -127,23 +126,38 @@ def test_unknown_root_identity_refuses_without_member_grant(host, monkeypatch, c
     # The retired root can be terminal while its reciprocal physical successor lives.
     patch_document(host.root, "held", lambda row: {**row, "status": "failed"})
     before = copy.deepcopy(owner_pause.read_fence(host.root, "held"))
-    real, reads = cancel_intents._validated_single_cancel_target, []
+    real, reads = owner_pause.root_actor, []
     def transient(*args, **kwargs):
-        # Only the grant's classification fails; actual source/custody readers stay real.
-        if sys._getframe(1).f_code.co_name == "root_actor" and sys._getframe(2).f_code.co_name in {
-                "resume_warm_owner_pause_root", "_grant_exact_resume", "_resume_budget_paused_task"}:
+        if kwargs.get("strict"):
             reads.append(args[1])
             raise OSError("transient lineage read failure")
         return real(*args, **kwargs)
+    def classifying(fn):
+        def probed(*args, **kwargs):
+            with monkeypatch.context() as inside:
+                inside.setattr(owner_pause, "root_actor", transient)
+                return fn(*args, **kwargs)
+        return probed
+    # The grant's classification is root_actor's own strict mode ("A grant
+    # issuer uses strict"), armed only inside the seams a Resume door decides
+    # through: budget_resume._resume_actor (warm/exact grants) and
+    # events_budget._held_selection_authority (the selection doors' identity
+    # snapshot). Every other reader stays real: the Resume answer's own census
+    # (interrupted_member_resume), ordinary membership readers, and every
+    # source/custody reader below root_actor.
+    from supervisor import budget_resume, events_budget
     with monkeypatch.context() as fault:
-        fault.setattr(cancel_intents, "_validated_single_cancel_target", transient)
+        fault.setattr(budget_resume, "_resume_actor", classifying(budget_resume._resume_actor))
+        fault.setattr(events_budget, "_held_selection_authority",
+                      classifying(events_budget._held_selection_authority))
         result = queue.resume_budget_paused_task(task["id"])
     print("Unknown identity", {"door": door, "reads": reads, "result": result})
     assert reads == ["held"]
-    # Queued selection already refuses via its existing owner-fence authority;
-    # warm/exact grant issuers must not reinterpret unknown as member authority.
-    expected, message = (("selection_owner_held", "Resume refused: selection owner held")
-                         if door in {"queued", "unsaved"} else
+    # Warm/exact grant issuers must not reinterpret unknown as member authority;
+    # the unsaved selection door refuses through its own unreadable observation
+    # (r3 moved the grant's classification into that observation).
+    expected, message = (("selection_observation_unavailable", "Resume refused: selection observation unavailable")
+                         if door == "unsaved" else
                          ("owner_pause_custody_unreadable", "Resume refused: owner pause custody unreadable"))
     assert result == {"ok": False, "error": expected, "message": message}, result
     assert owner_pause.read_fence(host.root, "held") == before

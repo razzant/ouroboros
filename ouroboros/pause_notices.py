@@ -102,6 +102,9 @@ def authority_wait_text(cause: str) -> str:
 def notice_text(notice: dict) -> str:
     """The sentence one owed notice says; an owner Pause names the author its own fence declared, and the words that
     press recorded follow its head verbatim, whoever declared it (a press without words says none)."""
+    if notice.get("reason") == "delegated_start_risk":
+        from ouroboros.delegate_resume import risk_words
+        return risk_words(notice["decision"])
     if notice.get("reason") == "owner":
         by = notice.get("by") if isinstance(notice.get("by"), dict) else {}  # a notice saved before ``by``: nobody
         said = " ".join(str(by.get("text") or "").split())

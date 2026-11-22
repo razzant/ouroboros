@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import hashlib
 
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 from starlette.routing import Route
 
 from ouroboros import review_ledger as ledger
-from ouroboros.gateway._helpers import json_error, request_drive_root, run_sync_to_completion
+from ouroboros.gateway._helpers import UTF8JSONResponse, json_error, request_drive_root, run_sync_to_completion
 from ouroboros.observability import redact_projection
 from ouroboros.review_projection import task_review_history
 from ouroboros.task_results import validate_task_id
@@ -31,7 +31,7 @@ def _history(request):
         payload = task_review_history(request_drive_root(request), task_id, offset=offset, limit=limit)
     except Exception:
         return json_error("Review history could not be read.", 503, reason_code="review_history_unavailable")
-    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+    return UTF8JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 def _text_export(text, *, sha=""):

@@ -74,6 +74,7 @@ class Publication:
     bindings_revision: str
     roots: frozenset = frozenset()  # other data roots this production read: the next probe stamps them too
     jobs: Dict[str, Any] = field(default_factory=dict)  # the store's named-job rows this production read
+    member_run_activity: dict = field(default_factory=dict)  # addressed observer facts used by nested cards
 
 
 def encode(value: Any) -> bytes:
@@ -291,7 +292,12 @@ class Publisher:
         direct = _direct_turns_source()
         key = probe(self.drive_root, held.roots if held else frozenset(), direct=direct)
         if held is not None and held.key == key:
-            return held
+            if not held.member_run_activity:
+                return held
+            from ouroboros.delegate_feed import current_activities
+
+            if held.member_run_activity == current_activities(self.drive_root, held.member_run_activity):
+                return held
         produced = produce(direct)
         bindings = produced.pop("task_bindings") or {}
         with self._lock:
@@ -301,7 +307,7 @@ class Publisher:
                 key=key, generation=self._generation, published_at=time.time(), body=encode(produced["fields"]),
                 bindings=encode(bindings), bindings_revision=str(produced.get("task_bindings_revision") or ""),
                 roots=frozenset(map(str, produced.get("roots") or ())) - {self.drive_root},
-                jobs=dict(produced.get("jobs") or {}))
+                jobs=dict(produced.get("jobs") or {}), member_run_activity=produced.get("member_run_activity") or {})
             self.held = publication
         return publication
 

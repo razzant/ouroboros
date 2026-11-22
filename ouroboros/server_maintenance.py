@@ -446,7 +446,7 @@ def _periodic_supervisor_maintenance(
                                            (last_review_reconcile, stop_event, latch)):
             last_review_reconcile[0] = time.time()  # a start that failed still waits out a cadence
     from ouroboros.maintenance import child as maintenance_child
-    if maintenance_child.owed():  # a process's first look, or a job scheduled since: reserve the slot only
+    if maintenance_child.owed():  # a process's first look, or a job scheduled since: reserve the owed lanes only
         _tick_maintenance_child()
     # When a pass has something new to decide (a due instant, a table write, rows waiting on other
     # facts: ``schedule_time.pass_due``), never merely per tick; a pass still running skips this one.
@@ -1152,7 +1152,9 @@ def _run_periodic_reconcile_sweep(marker: list, stop_event: Any = None, latch: A
         except Exception as exc:  # the drive retirer's own fact; the sweep step still records its failure
             _retirer_threw("drive_settlement", "Drive custody pass failed", exc)
             raise
-        if not _stop_requested(stop_event):  # history-sized named jobs: the one maintenance child, never here
+        if not _stop_requested(stop_event):  # history-sized named jobs: the maintenance children, never here
+            from ouroboros.maintenance import child
+            child.request(retry=True)  # both lanes owe a look; trash retries unchanged entries atomically
             _tick_maintenance_child()
         _step_recovered("reconcile_sweep")
     except Exception:
@@ -1163,12 +1165,13 @@ def _run_periodic_reconcile_sweep(marker: list, stop_event: Any = None, latch: A
 
 
 def _tick_maintenance_child() -> None:
-    """The maintenance dispatcher: reserve the one child slot (``ouroboros/maintenance.py``); its
-    thread reads the job facts and spawns the child only when one is due."""
+    """The maintenance dispatcher: reserve each owed lane's child slot (``ouroboros/maintenance.py``); a lane's
+    thread reads the job facts and spawns its child only when one is due. No argument: the supervisor's patched
+    stand-ins and the cost contract call it bare, and a lane no producer asked for reserves no look."""
     from ouroboros.config import REPO_DIR
     from ouroboros.maintenance import child
 
-    child.tick(pathlib.Path(DATA_DIR), pathlib.Path(REPO_DIR))
+    child.tick(pathlib.Path(DATA_DIR), pathlib.Path(REPO_DIR), owed_only=True)
 
 
 class HostDuty(NamedTuple):

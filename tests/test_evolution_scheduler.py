@@ -262,9 +262,12 @@ def test_assignment_dispatches_exact_uncommitted_evolution_claim(tmp_path, monke
 
 def test_assignment_rejects_stale_or_committed_evolution_claim(tmp_path, monkeypatch):
     from ouroboros.task_results import load_task_result
+    from ouroboros.terminal_time import terminal_time_fact
     from supervisor import evolution_lifecycle
 
     workers, task, tx, worker, inbox, events = _assignment_case(tmp_path, monkeypatch)
+    observed = "2026-10-10T10:00:00+00:00"
+    monkeypatch.setattr("ouroboros.task_results.utc_now_iso", lambda: observed)
     task["metadata"]["evolution_transaction"]["task_id"] = "other-task"
 
     workers.assign_tasks()
@@ -274,6 +277,9 @@ def test_assignment_rejects_stale_or_committed_evolution_claim(tmp_path, monkeyp
     assert worker.busy_task_id is None
     stored = load_task_result(tmp_path, task["id"])
     assert stored["status"] == "cancelled"
+    clock = terminal_time_fact(stored)
+    assert (clock["source"], clock["occurred_at"]) == ("supervisor_cancel", observed)
+    assert not stored.get("started_at") and "cancel_origin" not in stored
     assert stored["reason_code"] == "evolution_authority_missing"
     assert stored["authority_reason"] == "task_mismatch"
     assert events.items[-1]["metadata"]["evolution_transaction"]["task_id"] == "other-task"

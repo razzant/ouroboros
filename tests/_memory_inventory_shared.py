@@ -45,7 +45,9 @@ def projects(root: pathlib.Path) -> Dict[str, int]:
     beta = create_project(root, "beta", name="Beta")
     ref = build_owner_message_ref(chat_id=1, client_message_id="origin-a", ts="2026-09-01T00:05:00+00:00",
                                   text=ORIGIN)
-    bind_task_to_project(root, "bound", alpha["id"], origin={"ref": ref, "text": ORIGIN})
+    # Some views have only the retained opening; bind it with the visibility the host measured.
+    bind_task_to_project(root, "bound", alpha["id"], origin={"ref": ref, "text": ORIGIN,
+                         "snapshot": {"projectable": True}})
     return {"alpha": int(alpha["chat_id"]), "beta": int(beta["chat_id"])}
 
 

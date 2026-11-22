@@ -395,8 +395,8 @@ test('question photos reuse the existing file preview and the reader, from their
         document.body.append(card);
         let rendered = '';
         syncQuestionMaterials(card, [{ task_id: 'task-1', name: 'material-safe.png', label: 'Design.png',
-            size: 24, sha256: 'abc', download_url: '/api/files/download?path=arbitrary' }], row => {
-            const bubble = fx.controller.buildDocumentBubble(row);
+            size: 24, sha256: 'abc', download_url: '/api/files/download?path=arbitrary' }], (row, options) => {
+            const bubble = fx.controller.buildDocumentBubble(row, options);
             rendered = bubble.innerHTML;
             return bubble;
         });
@@ -407,6 +407,7 @@ test('question photos reuse the existing file preview and the reader, from their
         await card.querySelector('.chat-file-card').click();
         const reader = document.body.querySelector('.document-reader');
         assert.ok(reader?.attributes.has('open'), 'the photo opens in the reader, not outside the app');
+        assert.equal(reader.querySelector('.document-reader-title').textContent, 'Design.png');
         assert.ok(reader.querySelector('[data-reader-action="download"]'), 'Download stays');
         const image = fx.tracker.created.filter((node) => node.tagName === 'IMG').at(-1);
         assert.equal(image.getAttribute('src'), '/api/tasks/task-1/artifacts/material-safe.png');

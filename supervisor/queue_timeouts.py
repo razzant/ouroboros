@@ -66,7 +66,7 @@ REASON_ABSOLUTE_CEILING, REASON_DEADLINE, REASON_IDLE_TIMEOUT = TIMEOUT_TERMINAL
 )
 
 
-def _task_deadline_ts(task: Dict[str, Any]) -> float:
+def _task_deadline_ts(task: Dict[str, Any], *, missing: float = 0.0) -> float:
     raw = str(task.get("deadline_at") or "").strip()
     if not raw:
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
@@ -75,14 +75,14 @@ def _task_deadline_ts(task: Dict[str, Any]) -> float:
         contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
         raw = str(contract.get("deadline_at") or "").strip()
     if not raw:
-        return 0.0
+        return missing
     try:
         parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=datetime.timezone.utc)
         return float(parsed.timestamp())
     except Exception:
-        return 0.0
+        return missing
 
 
 def _task_drive_for_task(task: Dict[str, Any], task_id: str, *, canonical: Any = None) -> pathlib.Path:

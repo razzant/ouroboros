@@ -126,7 +126,8 @@ test('a captured place restores its retained owners before their independent rea
         const restored = [], opener = {}, root = {}, state = { activePage: page, settingsPath: 'tools', dashboardActiveSubtab: 'logs' };
         const owner = { capture: () => ({ label: page === 'settings' ? 'Tools' : 'Logs', title: page === 'settings' ? 'Settings › Tools' : 'Dashboard › Logs', restore: () => restored.push('level') }) };
         const captured = capturePagePlace({ state, navState: {}, settingsControls: owner, dashboardControls: owner,
-            skillsControls: { capture: () => () => restored.push('tab') },
+            skillsControls: { capture: () => ({ key: 'skills:tools/docs', label: 'Docs', title: 'Extensions › MCP servers › Docs',
+                retains: el => el === root, release: () => restored.push('release'), restore: () => restored.push('level') }) },
             mainChat: { captureReading: () => () => restored.push('feed') }, logsControls: { captureReading: () => () => restored.push('logs') },
             doc: { getElementById: () => root }, restorePlaces: { capture: (place, pressed) => {
                 assert.equal(place, root); assert.equal(pressed, opener); return () => restored.push('scroll/focus');
@@ -134,15 +135,20 @@ test('a captured place restores its retained owners before their independent rea
         }, opener);
         state.activePage = 'widgets'; state.settingsPath = ''; state.dashboardActiveSubtab = 'costs';
         const reading = captured.restore();
-        assert.deepEqual(restored, page === 'skills' ? ['tab'] : ['settings', 'dashboard'].includes(page) ? ['level'] : []);
+        assert.deepEqual(restored, ['settings', 'dashboard', 'skills'].includes(page) ? ['level'] : []);
         reading();
         assert.ok(restored.includes('scroll/focus'));
         assert.equal(restored.includes('feed'), page === 'chat');
         assert.equal(restored.includes('logs'), page === 'dashboard');
-        assert.equal(captured.key, ({ settings: 'settings:tools', dashboard: 'dashboard:logs', skills: 'skills', chat: 'chat' })[page]);
-        assert.equal(captured.label, ({ settings: 'Tools', dashboard: 'Logs', skills: 'Skills', chat: 'Main' })[page]);
-        assert.equal(captured.title, ({ settings: 'Settings › Tools', dashboard: 'Dashboard › Logs', skills: 'Skills', chat: 'Main' })[page],
+        assert.equal(captured.key, ({ settings: 'settings:tools', dashboard: 'dashboard:logs', skills: 'skills:tools/docs', chat: 'chat' })[page]);
+        assert.equal(captured.label, ({ settings: 'Tools', dashboard: 'Logs', skills: 'Docs', chat: 'Main' })[page]);
+        assert.equal(captured.title, ({ settings: 'Settings › Tools', dashboard: 'Dashboard › Logs', skills: 'Extensions › MCP servers › Docs', chat: 'Main' })[page],
             'a section\'s return names the section, then its page');
+        if (page === 'skills') {
+            assert.equal(captured.retains(root), true);
+            captured.release();
+            assert.equal(restored.at(-1), 'release');
+        }
     }
 });
 

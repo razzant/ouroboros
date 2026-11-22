@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ouroboros.review_substrate import TYPED_FAILURE_FACT_KEYS
+from ouroboros.review_records import TYPED_FAILURE_FACT_KEYS, reported_review_cost
 from ouroboros.utils import truncate_review_artifact
 
 
@@ -24,34 +24,18 @@ def review_operation_fields(actor: dict) -> dict:
     }
 
 
-def _reported_cost(usage: dict, headers: Any) -> float | None:
-    """Preserve reported money independently of whether an answer arrived."""
-    if usage.get("cost_estimated") is True:
-        return None
-    try:
-        if "cost" in usage:
-            return float(usage["cost"]) if usage["cost"] is not None else None
-        if "total_cost" in usage:
-            return float(usage["total_cost"]) if usage["total_cost"] is not None else None
-        for key, value in (headers or {}).items():
-            if key.lower() == "x-openrouter-cost":
-                return float(value)
-    except (ValueError, TypeError, KeyError):
-        pass
-    return None
-
-
 def parse_model_response(model: str, result: Any, headers_dict: Any) -> dict:
     usage = result.get("usage", {}) if isinstance(result, dict) else {}
     resolved_model = str(usage.get("resolved_model") or model)
     provider = str(usage.get("provider") or "openrouter")
     slot_id = str(result.get("slot_id") or "") if isinstance(result, dict) else ""
     operation_fields = review_operation_fields(result if isinstance(result, dict) else {})
-    cost = _reported_cost(usage, headers_dict)
+    cost = reported_review_cost(usage, headers_dict)
     if isinstance(result, str) or (isinstance(result, dict) and result.get("error")):
         return {
-            "model": resolved_model, "request_model": model,
-            "provider": provider, "verdict": "PENDING" if operation_fields["late_result_pending"]
+            "model": "" if operation_fields["operation_state"] == "not_dispatched" else str(usage.get("resolved_model", model) or ""),
+            "request_model": model,
+            "provider": str(usage.get("provider") or "unknown"), "verdict": "PENDING" if operation_fields["late_result_pending"]
             and operation_fields["operation_state"] != "custody_lost" else "ERROR",
             "text": result if isinstance(result, str) else str(result.get("error") or ""),
             "tokens_in": 0, "tokens_out": 0, "cost_estimate": cost,

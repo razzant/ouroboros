@@ -65,12 +65,14 @@ def test_light_seats_without_a_light_binding_keep_the_panels_plain_seat(install,
     assert delegate == (model, False, "")
 
 
-def test_a_panel_without_light_seats_keeps_mains_binding_beside_a_distinct_light(install):
+@pytest.mark.parametrize("main_tier,row_tier", [("fast", "fast"), ("ultrafast", "economy")])
+def test_a_panel_without_light_seats_copies_only_a_tier_its_rows_can_store(install, main_tier, row_tier):
     main = ANTHROPIC_DIRECT_DEFAULTS["main"]
     _write(install, {"OPENROUTER_API_KEY": "sk-or-present-key", "ANTHROPIC_API_KEY": "sk-ant-present-key",
                      "OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": main, "USE_LOCAL_LIGHT": True,
-                     **LOCAL_SOURCE, "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {"main": "fast", "light": "economy"}})
-    # Anthropic's panel is Main once (owner Q5=A): one seat in Main's whole binding.
+                     **LOCAL_SOURCE, "OUROBOROS_PROCESSING_PREFERENCE": "economy",
+                     "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {"main": main_tier, "light": "economy"}})
+    # The generated row uses the global tier when Main has its Main-only preference.
     seats, delegate = _seats_and_delegate(_task_start(), "review-1")
-    assert seats == [(main, "fast", False, "high")]
-    assert delegate == (main, False, "fast")
+    assert seats == [(main, row_tier, False, "high")]
+    assert delegate == (main, False, row_tier)

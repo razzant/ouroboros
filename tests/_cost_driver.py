@@ -323,8 +323,14 @@ def _stub_duty_effects(result: Dict[str, Any]) -> Dict[str, Any]:
     workers._EVENT_Q = ObservedEventQueue()
     claudexor_daemon.read_owned_gateway = no_daemon
     claudexor_daemon.ensure_owned_gateway = no_daemon
-    maintenance.spawn_maintenance_job = lambda data_root, repo_dir, purpose, **_k: (
-        result.setdefault("child_spawns", []).append(tag_of()) or _NoProcess())
+    def spawn_maintenance_job(data_root, repo_dir, purpose, **kw):
+        # The child the product would start, without a process: its own --lane is what its pass runs.
+        args = kw.get("args") or ()
+        result.setdefault("child_spawns", []).append(tag_of())
+        result.setdefault("child_lanes", []).append(args[args.index("--lane") + 1] if "--lane" in args else None)
+        return _NoProcess()
+
+    maintenance.spawn_maintenance_job = spawn_maintenance_job
     maintenance.finish_maintenance_job = lambda *_args, **_kwargs: None
     park, clock = _Park(delegate_collection.BodyRuntime.tick), _Clock()
     delegate_collection.BodyRuntime.tick = park.parked()
@@ -795,12 +801,18 @@ def _drain(meter: CostMeter, tag: str, sm: Any, root: pathlib.Path, stop: thread
     child reports stays on the pass's tag (``child_reports``), where B7 reads it: a thread does not lose it."""
     from ouroboros import maintenance
 
-    def child_pass() -> None:
+    def child_pass(lanes: List[Any]) -> None:
         done: Dict[str, Any] = {}
 
         def jobs() -> None:
             try:
-                done["report"] = maintenance.run(root, should_stop=lambda: False)
+                report: Dict[str, Any] = {"status": "completed", "jobs": {}}
+                for lane in lanes:  # each new spawn's own lane; a pre-lane body (no --lane) runs every job
+                    part = maintenance.run(root, should_stop=lambda: False, **({"lane": lane} if lane else {}))
+                    if part.get("status") == "failed":
+                        report["status"] = "failed"
+                    report["jobs"].update(part.get("jobs") or {})
+                done["report"] = report
             except Exception as exc:  # what the child process reports for a pass that raised (maintenance.main)
                 done["report"] = {"status": "failed", "jobs": {}, "raised": f"{type(exc).__name__}: {exc}"}
 
@@ -818,8 +830,9 @@ def _drain(meter: CostMeter, tag: str, sm: Any, root: pathlib.Path, stop: thread
             result["errors"].append(f"{tag}: threads still alive: {alive}")
         woke = False
         if len(result.get("child_spawns", ())) > spawned:
+            lanes = [lane for lane in (result.get("child_lanes") or [])[spawned:] if lane] or [None]
             spawned, woke = len(result["child_spawns"]), True
-            tagged(tag, child_pass)
+            tagged(tag, lambda: child_pass(lanes))
         if maintenance.child.owed():
             woke = True
             tagged(tag, sm._tick_maintenance_child)

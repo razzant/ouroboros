@@ -1014,8 +1014,17 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # that met the live index unusable or damaged and removed by its rebuild (``ouroboros/evidence_packs.py``,
 # ``DAMAGED_MARK``); the existing evidence-pack row names it.
 # 479 -> 480: the capture reader also names the existing task artifact workspace.patch.
-# 480 -> 482: the subscription census and its refresh request (``ouroboros/subscription_census.py``), each with its row.
-EXPECTED_SCAN_PATHS = 482
+# 480 -> 479: an immutable artifact copy's name is built by ``immutable_artifact_name`` (``ouroboros/artifacts.py``), no
+# longer by an f-string at its writer, so the scan loses the family spelling ``task_results/artifacts/*/*-*``; the writer
+# and its ``task_results/artifacts/<id>/**`` row are unchanged.
+# 479 -> 480: a closed service's exact private copy, ``observability/service_logs/<sha256>.log``
+# (``tools/services._preserve_service_log``); its own row. The local filename owner in ``launch_custody``
+# now spells one host and one executor family (plain and launch-bound stems share the same suffixes).
+# 480 -> 481: staged session scratch records its source task in handoff.json.
+# 481 -> 487: the subscription census and its refresh request (``ouroboros/subscription_census.py``), each with
+# its row, and the four ``released`` holders of staged and trashed custody (``ouroboros/payload_release.py``), which
+# the scan already held under the previous pin.
+EXPECTED_SCAN_PATHS = 487
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

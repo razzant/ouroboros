@@ -75,7 +75,8 @@ VIEW_TRACE_KEY = "memory_view"
 # request keeps only its attribution fact, a transport its ``_TRANSPORT_NESTED`` facts: ``row_meta``) stay
 # in the chain, read by address. Facts stored before a field joined this list keep their old form (the
 # stored prefix is never rewritten for it): a reader shows such a field as unknown.
-_META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id", "root_task_id",
+_META_FIELDS = ("chat_id", "ts", "type", "kind",  # ``kind``: the display stamp (``stamped_room_echo``)
+                "direction", "task_id", "parent_task_id", "root_task_id",
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
@@ -83,7 +84,9 @@ _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id
                 "wake_summary",  # a finished root's closing sentence: how my other conversations know that turn
                 "fold_read")  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
-_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved")
+# ``telegram_room_chat_id``: the room the host decided for the bundled bridge's Reply (``room_membership``); no
+# stored prefix lacks it wrongly, since no released body wrote it before it joined this list.
+_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved", "telegram_room_chat_id")
 # What a row's ``transport`` keeps: its scalars, which ``dialogue_provenance.place_row_facts`` spreads as the row's
 # place facts (``place_activity`` reads the event, place and conversation keys) and which name its provider, account,
 # conversation and thread (``dialogue_provenance``, ``RoomLabelResolver.label``), so a row that came over a transport
@@ -107,9 +110,10 @@ _TRANSPORT_NESTED = {
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
 # fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
-# closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest): a prefix of another version
-# is another source, read live until the maintenance job ``memory_tail`` refills it.
-_META_VERSION = 9
+# closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest; 10: the row's
+# ``kind`` stamp; 11: whole-row identity for a bound opening, including an answered card): a prefix of another
+# version is another source, read live until the maintenance job ``memory_tail`` refills it.
+_META_VERSION = 11
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
@@ -143,13 +147,15 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
                         "secret_outcome": {key: outcome[key] for key in ("event", "pluginName", "fields") if key in outcome}}
     if isinstance(ref := row.get("reply_to"), dict):  # ``room_membership.reply_target_room`` reads these, a
         meta["reply_to"] = {key: ref[key] for key in _REPLY_FIELDS if key in ref}  # saved target by its address
-    if str(row.get("direction") or "") == "in":
+    if str(row.get("direction") or "") == "in" or row.get("type") == "quiz_answer":
         from ouroboros.project_dialogue import _entry_source_identities, _text_sha256  # D15->D17 is lazy-only
 
-        meta["text_sha256"] = _text_sha256(row.get("text"))
-        if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
-            meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
-        meta["source_keys"] = tuple(sorted(_entry_source_identities(row)))
+        if row.get("direction") == "in":
+            meta["text_sha256"] = _text_sha256(row.get("text"))
+            if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
+                meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
+        if keys := _entry_source_identities(row):
+            meta["source_keys"] = tuple(sorted(keys))
     return meta
 
 
@@ -182,18 +188,22 @@ def membership_facts(root: Any) -> MembershipFacts:
 
 
 def _membership_facts(root: Any) -> MembershipFacts:
-    from ouroboros.project_dialogue import _source_ref_identity  # D15->D17 is lazy-only
+    from ouroboros.project_dialogue import _source_ref_identity, physical_origin_refs  # D15->D17 is lazy-only
     from ouroboros.projects_registry import all_task_bindings, list_reserved_projects, project_task_bindings, RoomResolver
 
     projects = frozenset(int(project["chat_id"]) for project in list_reserved_projects(root))
     by_key: Dict[Tuple[Any, ...], set] = {}
+    bound = []
     for binding in project_task_bindings(root).values():
         try:
             chat = int(binding.get("project_chat_id") or 0)
         except (TypeError, ValueError):
             continue
-        ref = binding.get("source_ref")
-        key = _source_ref_identity(ref) if chat in projects and isinstance(ref, dict) and ref else None
+        if chat in projects:
+            bound.append((chat, binding))
+    # Every older partial address of the snapshot resolves in one read, never one lookup per binding.
+    for (chat, _binding), ref in zip(bound, physical_origin_refs(root, [binding for _chat, binding in bound])):
+        key = _source_ref_identity(ref) if ref else None
         if key is not None:
             by_key.setdefault(key, set()).add(chat)
     return MembershipFacts(projects, dict(all_task_bindings(root)),
@@ -412,22 +422,33 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
         if frontier is None:
             return {}
         facts = membership_facts(root)
-        grouped: Dict[str, List[Entry]] = {}
         projected = _projection_rows(root, frontier)
         # The rows' task lineages in one read a generation (``RoomResolver.warm``), not one read per task.
         facts.rooms.warm({str(entry[1].get(key) or "") for entry in projected
                           for key in ("task_id", "parent_task_id", "root_task_id")} - {""})
+        from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
+        from ouroboros.room_membership import capture_reply_targets, unknown_target_rooms
+
+        def group():
+            grouped: Dict[str, List[Entry]] = {}
+            considered: Dict[str, List[Entry]] = {}
+            missing = set()
+            for entry in projected:
+                for room in rooms_of_row(entry[1], facts):
+                    grouped.setdefault(room, []).append(entry)
+                    if quiet is not None and entry[1].get("quiet_finish") is True:
+                        considered.setdefault(room, []).append(entry)
+                if gaps is not None and isinstance(entry[1].get("reply_to"), dict):
+                    missing.update(unknown_target_rooms(entry[1], facts.project_chat_ids, facts.rooms))
+            return grouped, considered, missing
+
+        grouped, considered, missing = capture_reply_targets(facts.rooms, group)
+        if quiet is not None:
+            for room, rows in considered.items():
+                quiet.setdefault(room, []).extend(rows)
         if gaps is not None:
-            from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
-            from ouroboros.room_membership import unknown_target_rooms
-        for entry in projected:
-            for room in rooms_of_row(entry[1], facts):
-                grouped.setdefault(room, []).append(entry)
-                if quiet is not None and entry[1].get("quiet_finish") is True:
-                    quiet.setdefault(room, []).append(entry)
-            if gaps is not None and isinstance(entry[1].get("reply_to"), dict):
-                for room in unknown_target_rooms(entry[1], facts.project_chat_ids, facts.rooms):
-                    gaps.setdefault(str(room), set()).add(REPLY_TARGET_UNREADABLE)
+            for room in missing:
+                gaps.setdefault(str(room), set()).add(REPLY_TARGET_UNREADABLE)
         rooms: Dict[str, List[Entry]] = {}
         timed = rooms_read_by_time(root, (entry[1] for entry in projected))  # every room at once, sealed rows or not
         for room, entries in grouped.items():

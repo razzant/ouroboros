@@ -19,6 +19,7 @@ import pytest
 from ouroboros.config import CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION
 from ouroboros.gateways import claudexor as cx
 
+from tests._budget_pause_exact_helpers import _install_fresh_supervisor_memory
 from tests._cancel_intents_shared import qenv as _qenv
 from tests._store_shared import unreadable_result
 from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture applies on import)
@@ -43,10 +44,20 @@ def startup_owners(tmp_path, monkeypatch):
     monkeypatch.setattr(server_maintenance, "_tick_maintenance_child", lambda: None)
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "PENDING", [])
+    # The fences object is shared with task_lifecycle's name for it: the tick's
+    # settlement_look_owed recomputes from it, so it starts empty here too.
+    fences: dict = {}
+    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", fences)
+    from supervisor import task_lifecycle
+    monkeypatch.setattr(task_lifecycle, "BUDGET_ROOT_FENCES", fences)
     monkeypatch.setattr(workers, "WORKERS", {})
     monkeypatch.setattr(post_task_checkpoint, "POST_TASK_SYNTHESIS_INFLIGHT", {})
     registry = active_activity.DirectActivityRegistry()
     monkeypatch.setattr(active_activity, "_DIRECT_ACTIVITY_REGISTRY", registry)
+    # This room drives the maintenance tick itself: run it with this fixture's own
+    # supervisor state, so a settlement look an earlier test left owed cannot start
+    # the owner_pause_settlement duty thread here (#3428 cross-test leak).
+    _install_fresh_supervisor_memory(monkeypatch)
     return queue, workers, post_task_checkpoint, registry
 
 
@@ -711,6 +722,7 @@ def test_a_review_panels_run_outlives_every_owner_terminal_but_cancellation(
 
 @pytest.mark.parametrize("deliberate,expected", [
     ("cancelled", "cancelled"),
+    ("interrupted", "left_live"),
     ("completed", "left_live"),
 ])
 def test_only_a_claimed_cancellation_speaks_for_a_review_panels_run(

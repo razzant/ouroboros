@@ -104,7 +104,7 @@ def test_a_live_answer_stays_an_owner_input_and_only_words_are_their_words(tmp_p
         assert (row["source"], row["content"]) == ("owner_press", "1. Publish it")
         assert row["source"] in ow.OWNER_SOURCES and row["source"] not in ow.OWNER_WORD_SOURCES
         assert (" · owner · owner_press of task asker · msg quiz_answer:asker:q7]\n(host record: my human pressed "
-                "«1. Publish it» and wrote no words; the label is the asking task's text)\n") in rendered
+                "«1. Publish it» and wrote no words; the label is the text of task asker)\n") in rendered
         assert not ow.owner_words_contain(ctx, "Publish it")  # the label is never cited or attested as their words
         basis, error = ow.cited_owner_basis(ctx, "Publish it")
         assert not error and basis["source"] == "owner_press" and basis["basis"] == "cited"

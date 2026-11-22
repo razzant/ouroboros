@@ -233,10 +233,11 @@ test('parseChartConfig exposes only allowlisted chart and dataset keys', () => {
                 borderWidth: 2,
                 fill: false,
                 tension: 0.25,
+                parsing: { yAxisKey: 'walk.distance' },
                 extra: { nested: true },
             }],
         },
-        options: { animation: false },
+        options: { animation: false, parsing: { yAxisKey: 'walk.total' } },
     }));
     assert.deepEqual(parsed, {
         type: 'line',
@@ -252,7 +253,7 @@ test('parseChartConfig exposes only allowlisted chart and dataset keys', () => {
                 tension: 0.25,
             }],
         },
-        options: { animation: false, responsive: true, maintainAspectRatio: false },
+        options: { animation: false, parsing: { yAxisKey: 'walk.total' }, responsive: true, maintainAspectRatio: false },
     });
 });
 

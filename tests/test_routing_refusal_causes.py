@@ -53,8 +53,8 @@ REFUSAL_REASONS = (
     "mailbox_write_failed", "presence_author_closed", "presence_author_elsewhere", "presence_author_unreadable",
     # ensure_project_scope (worker_promotion, events_project_routing)
     "project_scope_conflict", "missing_task_or_project", "ensure_project_scope_failed",
-    # the parallel receipt producer (ouroboros/server_owner_routing.py)
-    "project_unavailable",
+    # the parallel receipt producer (ouroboros/server_owner_routing.py), the owner bot's Reply included
+    "project_unavailable", "reply_target_unavailable",
     # route_to_project's typed abstention (ouroboros/tools/control_routing.py)
     "target_unspecified", "invalid_project_id", "target_not_found",
 )

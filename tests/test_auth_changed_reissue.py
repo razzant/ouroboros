@@ -73,7 +73,7 @@ def test_a_reissue_whose_next_attempt_cannot_be_prepared_is_not_recorded(setup, 
     def refuse(_target, _payload, parameters, error):
         raise ModelWaitInterrupted("model_wait_reprepare_required", role=parameters.get("model_role", ""), cause=error)
 
-    monkeypatch.setattr(transport, "_unstarted_retry_preparation", refuse)
+    monkeypatch.setattr(transport, "_retry_preparation", refuse)
     with pytest.raises(ModelWaitInterrupted) as raised:
         send(client, asynchronous)
     assert raised.value.control_reason == "model_wait_reprepare_required"
@@ -142,8 +142,8 @@ def test_each_cause_keeps_its_one_repair_in_the_same_bounded_loop(setup, monkeyp
     gateway.dispatch = [steps[cause][1] for cause in order] + ["response_received"]
     client.chat([result()["message"]], MODEL, processing_preference="economy")
     assert len(gateway.accepted_operations) == len(order) + 1
-    states = [row["state"] for row in {row["attempt_id"]: row for row in ledger(root)}.values()]
-    assert states == ["released"] * len(order) + ["settled"]
+    states = [row["state"] for row in ledger(root)]
+    assert states == ["settled" if cause == "processing" else "released" for cause in order] + ["settled"]
 
 
 def test_a_discarded_answer_ends_presence_no_start_but_not_the_repair(setup, monkeypatch):
