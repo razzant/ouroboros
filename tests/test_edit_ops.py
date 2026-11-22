@@ -649,9 +649,10 @@ def test_repo_batch_tool_protected_name_depends_on_physical_target(
 
 
 def test_edit_batch_shared_path_reaches_every_write_guard(tmp_path, monkeypatch):
-    """A top-level path is outside edit_batch's schema. Dispatch gives it to each edit that names none
-    BEFORE the write guards collect their targets, so a protected file or a path outside the root is
-    refused exactly as when each edit names it; an allowed shared path runs and the result says so."""
+    """A top-level path is outside edit_batch's schema. Dispatch gives it to each edit that names none and
+    removes it BEFORE any guard reads the call, so a protected file, a path outside the root, or (light mode)
+    a skill-file decoy beside a memory edit is refused exactly as when each edit names its path; an allowed
+    shared path runs and the result says how many edits it named."""
     registry, _ctx, system, project = _workspace_guard_registry(tmp_path, monkeypatch)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     (system / "BIBLE.md").write_text("SYSTEM = 1\n", encoding="utf-8")
@@ -668,10 +669,33 @@ def test_edit_batch_shared_path_reaches_every_write_guard(tmp_path, monkeypatch)
     allowed = registry.execute("edit_batch", {"path": "mod.py", "edits": [
         {"old_str": "A = 1", "new_str": "A = 2"}, {"path": "other.py", "old_str": "C = 1", "new_str": "C = 2"},
         {"old_str": "B = 1", "new_str": "B = 2"}]})
-    assert allowed.startswith("✅") and "path='mod.py' named each edit that had no path" in allowed, allowed
-    own = registry.execute("edit_batch", {"path": "mod.py", "edits": [
+    assert allowed.startswith("✅") and "path='mod.py' named the 2 edit(s) that had no path" in allowed, allowed
+    own = registry.execute("edit_batch", {"path": "other.py", "edits": [
         {"path": "other.py", "old_str": "C = 2", "new_str": "C = 3"}]})
-    assert own.startswith("✅") and "path='mod.py' ignored: every edit names its own path" in own, own
+    assert own.startswith("✅") and "path='other.py' ignored: every edit names its own path" in own, own
+    note = {"path": "Desktop/absent-note.txt", "old_str": "N", "new_str": "M"}
+    per_item = registry.execute("edit_batch", {"root": "user_files", "edits": [note]})
+    unused = registry.execute("edit_batch", {"root": "user_files", "path": str(project / "mod.py"), "edits": [note]})
+    assert per_item in unused and "ROOT_REQUIRED" not in unused, unused
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    identity = tmp_path / "drive" / "memory" / "identity.md"
+    identity.parent.mkdir(parents=True, exist_ok=True)
+    identity.write_text("OLD\n", encoding="utf-8")
+    plugin = tmp_path / "drive" / "skills" / "external" / "demo" / "plugin.py"
+    plugin.parent.mkdir(parents=True, exist_ok=True)
+    plugin.write_text("P = 1\n", encoding="utf-8")
+    memory_edit = {"path": "memory/identity.md", "old_str": "OLD", "new_str": "NEW"}
+    per_edit = registry.execute("edit_batch", {"root": "runtime_data", "edits": [memory_edit]})
+    assert "LIGHT_MODE_BLOCKED" in per_edit, per_edit
+    decoy = registry.execute("edit_batch", {"root": "runtime_data", "path": "skills/external/demo/plugin.py",
+                                            "edits": [memory_edit]})
+    assert decoy == per_edit
+    plugin_edit = {"old_str": "P = 1", "new_str": "P = 2"}
+    mixed = registry.execute("edit_batch", {"root": "runtime_data", "path": "skills/external/demo/plugin.py",
+                                            "edits": [plugin_edit, memory_edit]})
+    assert not mixed.startswith("✅") and mixed == registry.execute("edit_batch", {"root": "runtime_data", "edits": [
+        {"path": "skills/external/demo/plugin.py", **plugin_edit}, memory_edit]}), mixed
+    assert identity.read_text(encoding="utf-8") == "OLD\n" and plugin.read_text(encoding="utf-8") == "P = 1\n"
     assert (system / "BIBLE.md").read_text(encoding="utf-8") == "SYSTEM = 1\n"
     assert (tmp_path / "outside.txt").read_text(encoding="utf-8") == "OUT = 1\n"
     assert (project / "mod.py").read_text(encoding="utf-8") == "A = 2\nB = 2\n"

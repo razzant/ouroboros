@@ -1248,14 +1248,8 @@ def _edit_batch(
     force: bool = False,
     _resolved_binding: ResolvedResourceBinding | tuple[ResolvedResourceBinding, ...] | None = None,
     source_tool: str = "edit_batch",
-    path: str = "",
+    path: str = "",  # outside the schema: dispatch gives it to the edits without one and removes it
 ) -> str:
-    if path:  # outside the schema: dispatch gave it to each edit without one (tool_resolution, before the guards)
-        used = any(isinstance(item, dict) and item.get("path") == path for item in edits or [])
-        return with_argument_notes(ctx, _edit_batch(ctx, edits, root, bucket, skill_name, force, _resolved_binding,
-                                                    source_tool),
-                                   [f"path={path!r} named each edit that had no path" if used else
-                                    f"path={path!r} ignored: every edit names its own path"])
     if not edits or not isinstance(edits, list):
         return "⚠️ EDIT_BATCH_ERROR: edits must be a non-empty array."
     from ouroboros.tools.tool_resolution import inferred_file_root

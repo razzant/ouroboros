@@ -215,7 +215,35 @@ def inferred_file_root(ctx: Any, name: str, root: str | None, paths: list[str]) 
     return next(iter(selected), "active_workspace"), ""
 
 
+def _share_edit_batch_path(name: str, args: Dict[str, Any]) -> str:
+    """edit_batch's top-level ``path`` (outside its schema; the handler lists it) becomes the path of
+    each edit that names none and leaves the call, before root inference, binding or any guard reads
+    the call, so every reader sees only per-edit targets. Returns the dispatch note."""
+    if name != "edit_batch" or "path" not in args:
+        return ""
+    shared, edits = args.pop("path"), args.get("edits")
+    if not isinstance(shared, str) or not shared.strip() or not isinstance(edits, list):
+        return f"path={shared!r} ignored: edit_batch takes each edit's path"
+    filled = [isinstance(item, dict) and item.get("path") in (None, "") for item in edits]
+    args["edits"] = [{**item, "path": shared} if fill else item for item, fill in zip(edits, filled)]
+    return (f"path={shared!r} named the {sum(filled)} edit(s) that had no path" if any(filled)
+            else f"path={shared!r} ignored: every edit names its own path")
+
+
 def _normalize_dispatch_path_args_result(
+    ctx: Any,
+    name: str,
+    args: Dict[str, Any],
+) -> _DispatchPathNormalization:
+    """Dispatch path normalization (below) after edit_batch's shared path is given to its edits."""
+    shared_note = _share_edit_batch_path(name, args)
+    result = _normalize_dispatch_paths(ctx, name, args)
+    if not shared_note or result.required_root:
+        return result
+    return _DispatchPathNormalization(text="\n\n".join(part for part in (result.text, shared_note) if part))
+
+
+def _normalize_dispatch_paths(
     ctx: Any,
     name: str,
     args: Dict[str, Any],
@@ -477,12 +505,6 @@ def _normalize_tool_call_args(entry: "ToolEntry", args: dict[str, Any]) -> None:
         # #1304: the schema's documented default IS omission (the #882 rule), removed
         # before the configured-session selector check and the payload binder read it.
         args.pop("root")
-    shared = args.get("path") if tool_name == "edit_batch" and isinstance(args.get("edits"), list) else None
-    if isinstance(shared, str) and shared.strip():
-        # A shared path names each edit that has none, here, before any write guard collects the targets;
-        # the handler names the acceptance in its result.
-        args["edits"] = [{**item, "path": shared} if isinstance(item, dict) and item.get("path") in (None, "")
-                         else item for item in args["edits"]]
 
 
 def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any]) -> str:
