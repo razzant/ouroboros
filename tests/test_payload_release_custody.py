@@ -328,6 +328,32 @@ def test_keep_endpoint_keeps_last_canonical_material_after_drive_retirement(real
     assert pr.holds(root, TASK, read_document(root, TASK), lambda _task: False) == "owner_keep"
 
 
+def test_keep_saves_fact_when_payload_read_fails(real_finished, monkeypatch):
+    """From f6bfcc318, in this branch's per-file format: an OSError reading the canonical release facts under the
+    custody lock still saves an explicit Keep (``canonical_payloads`` unknown, files listed by the inventory without a
+    release state); a release (keep=False) on the same error raises and leaves the saved fact in place."""
+    root, canonical = _retire_empty_drive(real_finished)
+    assert _propose(root)["ok"]
+
+    def unreadable_store(*_args):
+        raise PermissionError(errno.EACCES, "synthetic canonical inventory unavailable")
+
+    monkeypatch.setattr(release_state, "keep_places", unreadable_store)
+    with _client(root) as client:
+        answer = _keep(client)
+    assert answer["keep"] and answer["status"] == "partly_retired", answer
+    assert "canonical_payloads" in answer["unknown"]
+    for rel in (SNAP, REPORT, SCRIPT, CARRIER):
+        path = str(canonical / rel)
+        assert path in answer["retained"] and path not in answer["releases"], answer
+    fact = read_document(root, TASK)["owner_keep"]
+    assert fact["source"]["basis"] == "authenticated_gateway_request"
+    assert pr.holds(root, TASK, read_document(root, TASK), lambda _task: False) == "owner_keep"
+    with pytest.raises(PermissionError):
+        owner_keep.set_owner_keep(root, TASK, keep=False, source={"basis": "test"})
+    assert read_document(root, TASK)["owner_keep"] == fact
+
+
 @pytest.mark.parametrize("order", ["keep_first", "free_first"])
 def test_real_keep_and_free_in_both_orders(real_finished, order):
     root, canonical = _retire_empty_drive(real_finished)
