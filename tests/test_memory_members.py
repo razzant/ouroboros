@@ -564,3 +564,20 @@ def test_a_row_whose_time_cannot_be_read_is_counted_with_the_room_wide_search(tm
     clean.mkdir()
     ok = listed(members(install(clean)[0], room_id="1", words=["flaky"]))
     assert not any("no readable time" in item for item in ok)
+
+
+def test_a_rooms_position_map_is_built_once_per_answer(tmp_path, monkeypatch):
+    """A fragmented room (sealed and open rows alternating) has many runs; the stored-position map their readers use
+    is built once per read of a room's rows, never once per run."""
+    import ouroboros.memory_members as members_module
+
+    ctx, rows, _page, _note = install(tmp_path)
+    write(ctx, kind="page", text="Row three alone.", covers={"from": addr(rows[3]), "to": addr(rows[3])})
+    built: list = []
+    real = members_module._position_map
+    monkeypatch.setattr(members_module, "_position_map", lambda stored: built.append(id(stored)) or real(stored))
+    text = members(ctx, room_id="1")
+    assert "untold rows: 2 in 2 runs" in text.split("\n")[0]
+    assert len(built) == len(set(built))  # one build for each read (the room's, each expanded page's), not each run
+    untold = [line for line in listed(text) if line.startswith("- untold")]
+    assert len(untold) == 2 and built.count(built[0]) == 1

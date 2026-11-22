@@ -184,6 +184,14 @@ class _Lister:
         self.root, self.store = root, store
         self.lineage = row_lineage(root)
         self._units: Optional[Dict[str, Any]] = None
+        self._maps: Dict[int, Tuple[List[memory_inventory.Entry], Dict[int, int]]] = {}
+
+    def _positions(self, stored: List[memory_inventory.Entry]) -> Dict[int, int]:
+        """The position map of one room read, built once per answer however many runs it holds."""
+        held = self._maps.get(id(stored))
+        if held is None or held[0] is not stored:
+            held = self._maps[id(stored)] = (stored, _position_map(stored))
+        return held[1]
 
     # --- addresses ------------------------------------------------------------------------------------
 
@@ -414,7 +422,7 @@ class _Lister:
                            for _address, meta, pos in run)
         named = ", ".join(f"{label} {count}" for label, count in speakers.most_common())
         readers = "; ".join(f"memory_read(room_id='{room}', rows=true, from='{chat_chain.format_address(a)}', "
-                            f"to='{chat_chain.format_address(b)}')" for a, b in _slices(run, stored))
+                            f"to='{chat_chain.format_address(b)}')" for a, b in _slices(run, stored, self._positions(stored)))
         return (f"- {what} rows of room:{room}: {_n(len(run), 'row')}, {span}; speakers: {named}; from {first} to {last} "
                 f"in reading order; " + readers)
 
@@ -469,10 +477,16 @@ class _Lister:
         return added
 
 
-def _slices(run: List[memory_inventory.Entry], stored: List[memory_inventory.Entry]) -> List[Tuple[Any, Any]]:
+def _position_map(stored: List[memory_inventory.Entry]) -> Dict[int, int]:
+    """Each row's place in one read of a room in stored order, by stream position: built once per read."""
+    return {entry[2]: at for at, entry in enumerate(stored)}
+
+
+def _slices(run: List[memory_inventory.Entry], stored: List[memory_inventory.Entry],
+            index: Mapping[int, int]) -> List[Tuple[Any, Any]]:
     """The run's maximal stored-contiguous slices, ``(first, last)`` addresses in stored order: rows=true between
-    each pair returns exactly those rows of the run, whatever the room's reading order."""
-    index = {entry[2]: at for at, entry in enumerate(stored)}
+    each pair returns exactly those rows of the run, whatever the room's reading order (``index``: ``_position_map``
+    of ``stored``)."""
     places = sorted(index[entry[2]] for entry in run if entry[2] in index)
     slices, begin = [], None
     for at, place in enumerate(places):
