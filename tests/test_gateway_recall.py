@@ -294,8 +294,8 @@ def test_no_runnable_next_while_the_capture_is_unstable_and_dash_values_round_tr
     monkeypatch.setattr(dialogue_recall, "search", unstable)
     shaky = _search(tmp_path, "-rf", count=1)
     assert shaky["next"] is None and shaky["snapshot"] is None and shaky["more"] == 2 and shaky["observed"] == 3
-    assert shaky["notes"] == ["no continuation: the capture did not stabilize (part of the conversation is still "
-                              "importing); ask again from offset 0 when the import has finished"]
+    assert shaky["notes"] == [recall.UNSTABLE_READ]
+    assert recall.UNSTABLE_READ == "The conversation changed during this read. Start again without snapshot or offset."
 
 
 @pytest.mark.parametrize("items", [
@@ -383,3 +383,65 @@ def test_voice_owner_at_the_door_finds_a_card_the_owner_answered_by_its_question
     owner = _search(tmp_path, "when do we archive", voice="owner")
     assert [row["matched"] for row in owner["rows"]] == [["question"]]
     assert _search(tmp_path, "when do we archive")["total"] == 2
+
+
+def test_a_malformed_snapshot_is_a_typed_400_and_an_unstable_one_a_409_with_its_sentence(tmp_path, monkeypatch):
+    for minute in range(3):
+        _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", f"archive {minute}")
+    first = _search(tmp_path, "archive", count=1)
+    token = first["snapshot"]
+    for bad in ("nothex", token + ":x", token + ":5", token + ":0"):  # a scan issues no window suffix at all
+        assert _refused(tmp_path, ("words", "archive"), ("snapshot", bad)) == (400, {
+            "code": "recall_bad_snapshot",
+            "error": "Invalid snapshot. Use the snapshot from a search response or start again without it."})
+    assert _ok(tmp_path, ("words", "archive"), ("snapshot", token), ("offset", "1"))["rows"]
+    revisions = iter([1, 2])
+    monkeypatch.setattr(dialogue_recall, "_text_revision", lambda _root: next(revisions, 2))
+    assert _refused(tmp_path, ("words", "archive"), ("snapshot", token), ("offset", "1")) == (409, {
+        "code": "recall_snapshot_changed", "error": recall.UNSTABLE_READ})
+
+
+def test_the_doors_window_carries_nothing_of_a_row_it_does_not_serve_in_either_order(tmp_path, monkeypatch):
+    from ouroboros import dialogue_word_index as dwi
+
+    if not dwi.fts5_available():
+        pytest.skip("this SQLite has no FTS5: no postings window")
+    _say(tmp_path, "2026-11-01T10:00:00Z", "archive visible")
+    _say(tmp_path, "2026-11-02T22:22:22Z", "archive hidden", chat_id=0)
+    dwi.run(tmp_path, lambda: False)
+    monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 1)
+    for order, served_first in (("newest", False), ("oldest", True)):
+        first = _search(tmp_path, "archive", order=order)
+        assert "22:22:22" not in json.dumps(first) and "archive hidden" not in json.dumps(first)
+        assert (len(first["rows"]) == 1) is served_first and first["next"] is not None
+        second = _ok(tmp_path, *_run(first["next"]))
+        assert "22:22:22" not in json.dumps(second)
+        assert [row["ts"] for row in first["rows"] + second["rows"]] == ["2026-11-01T10:00:00Z"]
+
+
+def test_a_projects_founding_message_is_found_and_reopened_in_both_its_rooms(tmp_path):
+    from tests import _memory_inventory_shared as shared
+
+    rooms = shared.world(tmp_path, activate=False)
+    alpha = str(rooms["alpha"])
+    found = _search(tmp_path, "inventory work")
+    row, = found["rows"]
+    assert set(row["rooms"]) == {"1", alpha}
+    assert _search(tmp_path, "inventory work", room_id=alpha)["rows"][0]["address"] == row["address"]
+    reopened = _ok(tmp_path, *_run(row["reopen"]))
+    assert set(reopened["row"]["rooms"]) == {"1", alpha}
+
+
+def test_an_unreadable_registry_is_one_gap_and_leaves_the_total_unknown(tmp_path, monkeypatch):
+    from ouroboros import projects_registry
+
+    _say(tmp_path, "2026-11-01T10:00:00Z", "archive")
+    assert _search(tmp_path, "archive")["total"] == 1
+
+    def broken(*_args, **_kwargs):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", broken)
+    shaky = _search(tmp_path, "archive")
+    assert shaky["total"] is None and sum("rooms_unreadable" in gap for gap in shaky["gaps"]) == 1
+    assert not any("rooms_unreadable" in note for note in shaky["notes"])

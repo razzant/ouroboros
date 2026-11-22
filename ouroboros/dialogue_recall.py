@@ -37,6 +37,7 @@ import hashlib
 import json
 import logging
 import pathlib
+import re
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from ouroboros.dialogue_words import Field, WordQuery, excerpt, fields_of, match_fields, parse
@@ -178,8 +179,9 @@ def _scan(memory: Any, room: Optional[int], keep: Callable[[Dict[str, Any]], boo
 
 def _posted(memory: Any, query: WordQuery, *, newest: bool, start: int) -> Optional[Dict[str, Any]]:
     """The postings path for a read of every room: in ONE read transaction the candidates below a frozen
-    upper bound, ordered by ``time_key`` from the asked end, cut to ``[start, start + RECHECK_BOUND)``, and the
-    original rows of that window. ``None``: no sound postings here; the caller scans."""
+    upper bound, ordered by ``time_key`` from the asked end, cut to ``[start, start + RECHECK_BOUND)`` and then to
+    the end of that last recorded time, and the original rows of that window. ``None``: no sound postings here;
+    the caller scans. ``{"malformed": True}``: ``start`` is no boundary a window of this plan ends at."""
     from ouroboros import dialogue_store as ds, dialogue_word_index as dwi
 
     root = pathlib.Path(memory.drive_root)
@@ -195,7 +197,12 @@ def _posted(memory: Any, query: WordQuery, *, newest: bool, start: int) -> Optio
             keyed += [(time_key({"ts": ts}, seq), str(ts or "")) for seq, ts in conn.execute(
                 f"SELECT seq, ts FROM dialogue WHERE stream='chat' AND seq IN ({','.join('?' * len(chunk))})", chunk)]
         keyed.sort(reverse=newest)
-        window = keyed[start:start + RECHECK_BOUND]
+        if start and (start >= len(keyed) or keyed[start - 1][0][:2] == keyed[start][0][:2]):
+            return {"malformed": True}  # no window this plan issued begins there
+        end = min(len(keyed), start + RECHECK_BOUND)
+        while end < len(keyed) and keyed[end][0][:2] == keyed[end - 1][0][:2]:
+            end += 1  # a window never splits rows of one recorded time: copies of one row stay together
+        window = keyed[start:end]
         wanted = sorted(key[2] for key, _ts in window)
         pages = [ds._page(conn, f"WHERE stream='chat' AND seq IN ({','.join('?' * len(chunk))})", tuple(chunk))
                  for chunk in (wanted[at:at + _CHUNK] for at in range(0, len(wanted), _CHUNK))]
@@ -264,18 +271,34 @@ def _seals(root: pathlib.Path, wanted: List[Tuple[int, str]]) -> Tuple[Dict[Tupl
     return found, ""
 
 
-def _showing(root: pathlib.Path, pairs: List[Tuple[int, Dict[str, Any]]]) -> Tuple[Dict[int, List[int]], str]:
-    """``({seq: rooms showing the row now}, gap)`` by the room rule, for one page's rows."""
-    from ouroboros.chat_chain import row_address
-    from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
-    from ouroboros.room_membership import row_rooms
+class Showing:
+    """The rooms that show a row now, by the store's own projection (``memory_inventory.rooms_of_row`` over one
+    ``membership_facts`` capture: the room rule plus a Project's founding owner message), read once per read and
+    used for admission, labels, seals and reopen alike. An unreadable project registry is ``gap`` (the caller
+    counts it) and each row then names the chat it was written in."""
 
-    try:
-        projects, rooms = frozenset(reserved_project_chat_ids(root, strict=True)), RoomResolver(root, strict=True)
-        return {seq: sorted(row_rooms(row_address(row)["chat_id"], row, projects, rooms)) for seq, row in pairs}, ""
-    except Exception as exc:  # the registry is unreadable: each row names its written chat, said
-        return ({seq: [row_address(row)["chat_id"]] for seq, row in pairs},
-                f"rooms_unreadable ({type(exc).__name__}): each row names the chat it was written in")
+    def __init__(self, root: pathlib.Path):
+        from ouroboros.projects_registry import reserved_project_chat_ids
+
+        self.facts, self.gap = None, ""
+        try:
+            reserved_project_chat_ids(root, strict=True)  # the registry must read; membership's own read is lenient
+            from ouroboros.memory_inventory import membership_facts
+
+            self.facts = membership_facts(root)
+        except Exception as exc:
+            self.gap = f"rooms_unreadable ({type(exc).__name__}): each row names the chat it was written in"
+        self._known: Dict[str, List[int]] = {}
+
+    def rooms(self, row: Mapping[str, Any]) -> List[int]:
+        from ouroboros.chat_chain import row_address, source_row_id
+        from ouroboros.memory_inventory import rooms_of_row, row_meta
+
+        key = source_row_id(dict(row))
+        if key not in self._known:
+            self._known[key] = (sorted(int(room) for room in rooms_of_row(row_meta(row), self.facts))
+                                if self.facts is not None else [int(row_address(row)["chat_id"])])
+        return self._known[key]
 
 
 def _authors(root: pathlib.Path, pairs: List[Tuple[int, Dict[str, Any]]], lineage: Mapping[str, Any]
@@ -349,6 +372,25 @@ def _reader(room: Optional[int], row: Mapping[str, Any], address: str) -> str:
     return f'memory_read(rows=true, room_id="{room}", from="{address}", to="{address}")'
 
 
+_TOKEN = re.compile(r"[0-9a-f]{64}(:[0-9]+)?")
+UNSTABLE_GAP = ("capture_unstable: the conversation changed during this read (an edited row); the count is what it "
+                "saw; start again without snapshot or offset")
+_REFUSALS = {
+    "malformed": "CHAT_HISTORY_SNAPSHOT_INVALID: this snapshot was not issued by a words read; start again with "
+                 "offset=0 and no snapshot.",
+    "unstable": "CHAT_HISTORY_SNAPSHOT_CHANGED: the conversation changed during this read; no mixed page was "
+                "returned; restart with offset=0 and no snapshot.",
+    "changed": "CHAT_HISTORY_SNAPSHOT_CHANGED: the query, the archive/live generations or an edited row changed; "
+               "no mixed page was returned; restart with offset=0 and no snapshot.",
+}
+
+
+def _refusal(kind: str) -> Dict[str, Any]:
+    """A continuation this read cannot serve: ``malformed`` (no read issued it), ``unstable`` (the capture moved
+    under it) or ``changed`` (another capture or query)."""
+    return {"refused": _REFUSALS[kind], "refused_kind": kind}
+
+
 def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "", order: str = "",
            count: int = 100, offset: int = 0, snapshot: str = "", filters: Mapping[str, str],
            visible_only: bool = False) -> Dict[str, Any]:
@@ -379,8 +421,11 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         if voice == "owner":
             gaps_extra.append("owner_accounts_unreadable: place rows of my human not confirmed")
     accounts = lineage.get("owner_accounts")
-    requested, _, start_text = str(snapshot or "").strip().lower().partition(":")
-    start = int(start_text) if start_text.isdigit() and requested else 0
+    token = str(snapshot or "").strip().lower()
+    requested, colon, start_text = token.partition(":")
+    if token and (not _TOKEN.fullmatch(token) or (colon and int(start_text) == 0)):
+        return {**_refusal("malformed")}
+    start = int(start_text) if colon else 0
     revision = _text_revision(root)
     judged: Dict[int, List[str]] = {}
 
@@ -396,6 +441,8 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
 
     newest = order != "oldest"
     read = _posted(memory, query, newest=newest, start=start) if room is None else None
+    if (read or {}).get("malformed") or (start and read is None):
+        return _refusal("malformed")  # a window suffix this read never issued (a scan issues none)
     if read is not None:
         read["pairs"] = [(seq, row) for seq, row in read["pairs"] if judge(row)]
     else:
@@ -407,48 +454,50 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         if identity not in seen:  # one source row, whatever its fields or physical copies
             seen.add(identity)
             hits_all.append((seq, row))
+    showing = Showing(root)  # one projection of the rooms for this read: admission, labels, seals, readers
     if visible_only:  # the hidden partition (0) and synthetic traffic are no room a person reads
-        shown, rooms_gap = _showing(root, hits_all)
-        hits_all = [(seq, row) for seq, row in hits_all if any(chat > 0 for chat in shown[seq])]
-        notes.extend([rooms_gap] if rooms_gap else [])
-    stable = bool(coverage.get("snapshot_stable")) and _text_revision(root) == revision
+        hits_all = [(seq, row) for seq, row in hits_all if any(chat > 0 for chat in showing.rooms(row))]
+    moved = _text_revision(root) != revision
+    stable = bool(coverage.get("snapshot_stable")) and not moved
     windowed = read["bounded"] or bool(start)
     normalized = {**normalized_chat_history_query(filters, ""), "words": list(query.items),
                   "room_id": "" if room is None else str(room), "voice": voice, "order": order or "newest",
                   "chat_text_revision": revision, "plan": read["plan"] if windowed else "",
                   **({"visible_only": True} if visible_only else {})}
     current = _snapshot(coverage, normalized)
-    result: Dict[str, Any] = {"refused": None, "path": read["path"], "span": "", "beyond": None}
     if requested and (not stable or requested != current):
-        result["refused"] = ("CHAT_HISTORY_SNAPSHOT_CHANGED: the query, the archive/live generations or an edited "
-                             "row changed; no mixed page was returned; restart with offset=0 and no snapshot.")
-        return result
+        return _refusal("unstable" if not stable else "changed")
+    result: Dict[str, Any] = {"refused": None, "refused_kind": None, "path": read["path"], "span": "",
+                              "beyond": None}
     gaps = [f"{gap.get('kind') or 'unknown'}" + (f" ({gap['detail']})" if gap.get("detail") else "")
             for gap in coverage.get("gaps") or []] + gaps_extra
+    if showing.gap:
+        gaps.append(showing.gap)
+    if moved:  # an edit landed while this read ran: its count is what it saw, never exact
+        gaps.append(UNSTABLE_GAP)
     if windowed:
-        result["span"] = read["span"]
-        if read["bounded"]:
+        # The door's answer never carries the time or address of a row it does not serve: its window says counts.
+        result["span"] = read["span"] if not visible_only else read["span"].split(", from ")[0]
+        if read["bounded"] and stable:
             result["beyond"] = f"{current}:{start + read['examined']}"
-        gaps.append(f"recheck_bound: {read['span']}; " + (
+        gaps.append(f"recheck_bound: {result['span']}; " + (
             f"the rest was not examined: continue beyond with offset=0, snapshot={result['beyond']}"
-            if read["bounded"] else "this is the last window") + (
-            f"; earlier windows held {start} candidates" if start else ""))
+            if result["beyond"] else "the rest was not examined" if read["bounded"] else "this is the last window")
+            + (f"; earlier windows held {start} candidates" if start else ""))
     offset, count = max(0, int(offset)), max(1, int(count))
     page = hits_all[offset:offset + count]
-    showing, rooms_gap = _showing(root, page)
-    if rooms_gap:
-        notes.append(rooms_gap)
+    rooms_of = {seq: showing.rooms(row) for seq, row in page}
     authors, lineage_gap = _authors(root, page, lineage)
     if lineage_gap:
         notes.append(lineage_gap)
     wanted = [(chat, source_row_id(row)) for seq, row in page
-              for chat in {*showing[seq], *([room] if room is not None else [])}]
+              for chat in {*rooms_of[seq], *([room] if room is not None else [])}]
     seals, seal_gap = _seals(root, wanted) if page else ({}, "")
     hits = []
     for seq, row in page:
         address = format_address(row_address(row))
         written = row_address(row)["chat_id"]
-        rooms = showing[seq]
+        rooms = rooms_of[seq]
         reader_room = room if room is not None else (written if written in rooms else (rooms[0] if rooms else None))
         author = authors[seq]
         reply = row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}

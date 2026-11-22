@@ -366,3 +366,18 @@ def test_a_generation_still_on_its_first_pass_leaves_the_read_to_the_scan(tmp_pa
     assert dwi.run(tmp_path, lambda: False)["state"] == "done"
     built = _read(tmp_path, words=["fox"])
     assert "Read by postings" in built and _total(built) == _total(partial)
+
+
+def test_a_window_never_splits_rows_of_one_recorded_time(tmp_path, monkeypatch):
+    row = {"ts": "2026-11-01T10:00:00Z", "direction": "in", "chat_id": 1, "text": "twice stored plum"}
+    ds.append(tmp_path, "chat", dict(row))
+    ds.append(tmp_path, "chat", dict(row))  # a crash-retry copy: same source, same time
+    _say(tmp_path, "2026-10-01T10:00:00Z", "older plum")
+    dwi.run(tmp_path, lambda: False)
+    monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 1)
+    first = _read(tmp_path, words=["plum"])
+    assert "2 of 3 candidate rows re-checked" in first and first.count("twice stored plum") == 1
+    token = re.search(r"snapshot=([0-9a-f]{64}:2)", first).group(1)
+    rest = _read(tmp_path, words=["plum"], snapshot=token)
+    assert "older plum" in rest and "twice stored" not in rest
+    assert _read(tmp_path, words=["plum"], snapshot=token[:-1] + "1").startswith("CHAT_HISTORY_SNAPSHOT_INVALID")
