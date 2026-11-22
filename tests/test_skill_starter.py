@@ -70,9 +70,31 @@ def test_offer_keeps_configured_id_visible_while_source_is_unavailable(setup, mo
     monkeypatch.setattr("ouroboros.skill_source_catalog.snapshot_for", lambda *a, **kw: (None, {"state": "error"}))
     offer = skill_starter.starter_groups(drive, rows=hub.rows(), repo_dir=repo)
     items = [item for group in offer["groups"] for item in group["items"]]
-    assert items == [{"id": "ouroboros-community/notes", "name": "notes",
-                      "description": "Source details are not available yet.", "official": False,
+    assert items == [{"id": "ouroboros-community/notes", "name": "notes", "title": "", "pitch": "", "needs": None, "mark": "",
+                      "description": "Source details are not available yet.", "icon": {}, "official": False,
                       "builtin": False, "recommended": True, "needs_keys": []}]
+
+
+def test_offer_carries_the_catalogs_own_words_for_people_and_falls_back_without_them(setup):
+    """A ``builtin.json`` row and a hub entry may carry a title, a one-line pitch, the prerequisite in words and in a
+    few (``mark``); a blank ``needs`` says the skill needs nothing, an absent one says nothing (the row then names the
+    settings it reads). Without them the item keeps its name and description, as before."""
+    from ouroboros.skill_source_catalog import refresh_source
+
+    drive, hub, repo = setup
+    index = json.loads((repo / "skills" / "builtin.json").read_text(encoding="utf-8"))
+    index["skills"][0].update(title="Telegram", pitch="Chat from your phone", needs="Needs a Telegram bot token", mark="bot token")
+    (repo / "skills" / "builtin.json").write_text(json.dumps(index), encoding="utf-8")
+    hub.entries["duckduckgo"].update(title="Web search", pitch="Search the web, free", needs=" ")
+    hub.commit()
+    refresh_source(drive, hub.rows()[1])
+    offer = skill_starter.starter_groups(drive, rows=hub.rows(), repo_dir=repo)
+    items = {item["id"]: item for group in offer["groups"] for item in group["items"]}
+    words = lambda item_id: tuple(items[item_id][key] for key in ("title", "pitch", "needs", "mark", "description"))
+    assert words("builtin/telegram") == ("Telegram", "Chat from your phone", "Needs a Telegram bot token", "bot token", "Owner bridge")
+    assert words("ouroboros/duckduckgo") == ("Web search", "Search the web, free", "", "", "duckduckgo card text")
+    assert words("builtin/unix_computer_use") == ("", "", None, "", "Desktop tools")
+    assert words("ouroboros/weather") == ("", "", None, "", "weather card text")
 
 
 def test_offer_includes_configured_items_from_other_sources_in_their_category(setup, monkeypatch):
@@ -156,6 +178,31 @@ def test_run_installs_builtins_offline_and_retries_an_unread_hub_later(setup, mo
     assert skill_starter.after_onboarding(drive, ["builtin/unix_computer_use"]) == "done"  # never runs twice
 
 
+def test_a_ticked_skill_already_installed_that_nobody_switched_is_turned_on_like_a_new_one(setup, monkeypatch):
+    """A Reset keeps the payloads: a ticked skill found already installed, with no enable choice recorded, takes the
+    path a new install takes (its record asks to turn on when ready; the acceptance applies the install's own
+    auto-grant, dependencies and turn-on). One somebody switched, or a build that asks no first enablement, does not."""
+    from ouroboros.skill_loader import save_enabled, skill_state_dir_path
+
+    drive, hub, repo = setup
+    accepted, requested = [], []
+    monkeypatch.setattr("ouroboros.skill_source_install.run_in_lane", lambda _d, _k, _i, job, **_kw: job())
+    monkeypatch.setattr("ouroboros.skill_source_install.install_item",
+                        lambda *a, **k: {"name": "telegram", "already_installed": True})
+    monkeypatch.setattr("ouroboros.skill_source_install.accept_and_turn_on",
+                        lambda _d, name, **k: accepted.append(name) or {"turn_on": "enabled"})
+    monkeypatch.setattr("ouroboros.skill_install_record.update_install_record",
+                        lambda _d, name, **changes: requested.append((name, changes)))
+    assert skill_starter._install_one(drive, "builtin/telegram", hub.rows(), repo)["status"] == "installed"
+    assert (accepted, requested) == (["telegram"], [("telegram", {"turn_on_when_ready": True})])
+    save_enabled(drive, "telegram", False, actor="owner_ui")  # somebody switched it: that choice stands
+    skill_starter._install_one(drive, "builtin/telegram", hub.rows(), repo)
+    (skill_state_dir_path(drive, "telegram") / "enabled.json").unlink()
+    monkeypatch.setattr("ouroboros.config.get_starter_skills_turn_on", lambda: False)  # the build asks no first turn-on
+    skill_starter._install_one(drive, "builtin/telegram", hub.rows(), repo)
+    assert accepted == ["telegram"] and len(requested) == 1
+
+
 def test_review_items_start_their_review_and_an_empty_choice_finishes(setup, monkeypatch):
     drive, hub, repo = setup
     reviews = []
@@ -166,6 +213,35 @@ def test_review_items_start_their_review_and_an_empty_choice_finishes(setup, mon
     other.mkdir()
     assert skill_starter.after_onboarding(other, []) == "done"
     assert skill_starter.read_marker(other)["requested"] == []
+
+
+@pytest.mark.parametrize("state, open_", [("", True), ("fresh", True), ("done", False), ("running", False),
+                                           ("pending", False), ("upgrade", False)])
+def test_the_setup_choice_is_open_exactly_where_finish_honors_the_ticks(tmp_path, monkeypatch, state, open_):
+    """The setup's Skills step is offered only where ``after_onboarding`` would install the ticks: a root whose starter
+    list never ran. Asking writes nothing; the same root then honors (or ignores) a completed setup's choice."""
+    scheduled = []
+    monkeypatch.setattr(skill_starter, "schedule_starter", lambda d, ids, origin, repo_dir=None: scheduled.append(ids))
+    if state:
+        skill_starter._write_marker(tmp_path, state=state)
+    before = skill_starter.marker_path(tmp_path).read_bytes() if state else None
+    assert skill_starter.starter_choice_open(tmp_path, {}) is open_
+    assert (skill_starter.marker_path(tmp_path).read_bytes() if state else None) == before, "asking wrote the marker"
+    assert not skill_starter.marker_path(tmp_path).exists() or state, "asking classified the root"
+    outcome = skill_starter.after_onboarding(tmp_path, ["builtin/telegram"])
+    assert (outcome == "scheduled" and scheduled == [["builtin/telegram"]]) is open_, outcome
+
+
+def test_an_unclassified_root_with_an_earlier_life_offers_no_choice(tmp_path, monkeypatch):
+    """Before startup classifies a root, the evidence ``classify_first_start`` reads decides; an unreadable marker
+    offers nothing rather than ticks a completed setup would ignore."""
+    assert skill_starter.starter_choice_open(tmp_path, {}) is True
+    assert skill_starter.starter_choice_open(tmp_path, {"OUROBOROS_ONBOARDING_COMPLETED_AT": "2026-11-21T10:00:00Z"}) is False
+    (tmp_path / "skills" / "native").mkdir(parents=True)
+    (tmp_path / "skills" / "native" / ".bootstrap-seed-complete").write_text("done", encoding="utf-8")
+    assert skill_starter.starter_choice_open(tmp_path, {}) is False
+    monkeypatch.setattr(skill_starter, "read_marker", lambda _root: (_ for _ in ()).throw(OSError("unreadable")))
+    assert skill_starter.starter_choice_open(tmp_path / "other", {}) is False
 
 
 def test_onboarding_choices_confirm_hub_rows_and_refuse_malformed_input(setup):

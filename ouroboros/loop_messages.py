@@ -728,7 +728,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
                        focus_fact: str = "", subagents_fact: Optional[str] = None, now: Optional[float] = None) -> str:
     """Round facts, no advice (owner decisions 5A, 11 Oct 1A).
     ``_remember_main_fit`` supplies distinct window/target room, largest residents and own cost; tariffs stay cached.
-    ``money`` is the round's wallet/tree/ceiling/quota observation, each bound named.
+    ``money`` is the round's wallet/tree/ceiling observation, each bound named, and ``quota`` the subscription
+    census part when it changed (``subscription_census.quota_part``).
     Time and nanny burn keep their owners/anchors; tool counts are observed results.
     ``measured=False`` reports unmeasured input rather than stale numbers.
     ``now`` is the row's sample instant, shared with the focus line's age; None samples the clock.
@@ -1034,6 +1035,7 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     obsolete snapshots. The caller remeasures including this line before sending.
     """
     from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.subscription_census import quota_part
     from ouroboros.transcript_prefix import reasoning_retirement_fact
 
     usage = ctx.accumulated_usage
@@ -1041,15 +1043,17 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     now = time.time()  # the row's one sample instant: its clock segment and its focus line's age
     focus_identity, focus_fact = _own_focus_fact(ctx, now)
     subagents_fact = subagents_fact_line()
+    quota, quota_term = quota_part(ctx)  # the census file alone, change-only against the latest part in view
     source = [{k: v for k, v in m.items() if k != "cache_control"} for m in ctx.messages if m.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME]
     source.append({"role": "system", "content": json.dumps(ctx.tool_schemas, ensure_ascii=False, sort_keys=True)})
     key = (ctx.round_idx, ctx.active_model, ctx.active_context_mode, ctx.active_effort,
            str(getattr(plan, "route_fp", "")), str(getattr(plan, "status", "")),
            bool(getattr(plan, "stale", False)), int(getattr(plan, "window_tokens", 0) or 0),
-           context_reclaim_transcript_sha256(source), focus_identity, subagents_fact, reasoning_retirement_fact(usage, ctx.round_idx))
+           context_reclaim_transcript_sha256(source), focus_identity, subagents_fact, reasoning_retirement_fact(usage, ctx.round_idx),
+           quota_term)
     visible = any(m.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME and m.get("content") == usage.get("_context_facts_line")
                   for m in ctx.messages)
-    if tuple(usage.get("_context_facts_key") or ()) == key and visible:
+    if tuple(usage.get("_context_facts_key") or ()) == key and visible and quota is None:  # a due quota part is sent
         return False
     measured = False
     if plan is not None:
@@ -1070,6 +1074,8 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
                 refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC))
         money = {"wallet": observed["wallet"], "tree": observed["tree"],
                  "cost_ceiling": getattr(tool_ctx, "_cost_ceiling", None)}
+    if quota is not None:
+        money = {**money, "quota": quota}
     line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact, subagents_fact=subagents_fact,
                               now=now)
     ctx.messages.append(bound_host_row(CONTEXT_FACTS_NAME, line))

@@ -551,6 +551,8 @@ def plan_health_skip_rows(slots: list, evidence: Optional[Dict[str, Dict[str, st
             live.append(slot)
             continue
         code, reset = str(ev.get("failure_code") or ""), str(ev.get("reset_at") or "")
+        from ouroboros.subscription_census import note_limit_failure
+        note_limit_failure(code)  # a seat dropped on a spent route asks the census for a read (the snapshot only reads)
         pin = str(getattr(slot, "session_profile", "") or "")
         scope = (
             f"Evidence is scoped to this slot's pinned credential profile {pin!r}."

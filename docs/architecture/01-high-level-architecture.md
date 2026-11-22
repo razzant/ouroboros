@@ -34,7 +34,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     settings_ui.js, settings_home.js, settings_rows.js, settings_provider_cards.js, settings_catalog.js, settings_controls.js, settings_policy.js, settings_secrets.js, settings_connections.js, connection_labels.js, settings_local_model.js, settings_autostart.js, mcp_settings.js, mcp_header_fields.js, mcp_import_dialog.js — Settings: catalog, binders, policy, secrets, keys, local models, MCP (§3)
     model_roles.js, model_chooser.js — the Models editor and editable chooser shared by Settings, onboarding and route editors; catalog arrival never assigns a value (§3 Navigation)
     subagents_settings.js, subagent_status_primitives.js, route_editor_primitives.js, harness_accounts.js, harness_account_rows.js, account_resources.js, harness_login_cards.js, claudexor_status_store.js — Agents and accounts (§3 Agent accounts)
-    onboarding_agents_step.js, onboarding_starter_skills.js, onboarding_overlay.js, project_create.js, utils.js — first-run accounts step and starter skills; the wizard frame's sandbox policy, one security boundary; New Project dialog; shared utilities (§2; §3 Project rooms)
+    onboarding_agents_step.js, onboarding_starter_skills.js, onboarding_connection_card.js, qr_svg.js, onboarding_overlay.js, project_create.js, utils.js — first-run Accounts and Skills steps, a skill's connection card (local QR); the wizard frame's sandbox policy, one security boundary; New Project dialog; shared utilities (§2; §3 Project rooms)
     review_command.js — `/review` chooser and send, from Evolution (§3)
     review_presentation.js, review_opinions.js, plan_record_presentation.js, review_record_card.js, review_dom_patch.js, harness_presentation.js — Read-side Reviews groups/opinions, record facts, keyed DOM updates; sole harness identity markup (§3)
     acceptance_incident_presentation.js — a stored task-acceptance incident, read-only; no reviewer authority (§6 Result review)
@@ -269,7 +269,7 @@ ouroboros/ — agent core and shared runtime (§6)
   delegate_interactions.py, delegate_shared.py — nanny input into a live session: typed `waiting_on_user`, validated `_delegate_answer`, capability-gated `_delegate_message`; `_owned_run` keeps live control with the starter, confirmed successors can read and dispose of settled products (§6 Delegated subagents)
   route_spec.py — neutral route primitive: kind/target/pin normalization and effort validation
   configured_subagents.py, subagent_runtime.py — the canonical `OUROBOROS_SUBAGENTS` parser/serializer; immutable task-start snapshots and exact `subagent_id` selection (§6 Delegated subagents)
-  subagent_route_health.py, claudexor_observations.py, subagent_inspection.py — manifest route health, shared passive evidence and exact configured-actor inspection (§6 Route health)
+  subagent_route_health.py, claudexor_observations.py, subagent_inspection.py, subscription_census.py — manifest route health, shared passive evidence, exact configured-actor inspection (§6 Route health), census (PASSIVE_QUOTA_READ)
   subagent_work_order.py, subagent_bootstrap.py, delegate_start_instructions.py — owner-word-preserving work orders, host pre-start, stable instructions with a separately hashed coordination appendix (§6 Delegated subagents)
   delegate_supervision.py — sleep on runs and owed wake delivery (§6 Supervision, activity and recovery)
   delegate_recovery.py, delegate_continuation.py, delegate_pending.py, delegate_accepted.py, delegate_resume.py — exact-leaf recovery, `continue_from` after stops, keyed lookup/replay or lookup-only Resume (§6 Delegated subagents)
@@ -375,7 +375,7 @@ ouroboros/ — agent core and shared runtime (§6)
   presence_call.py, presence_events.py — Presence call admission and shared event identity (§12)
   realtime_turn.py, realtime_setup.py, realtime_credentials.py — call route evidence, host-selected provider input and the one credential capture a session prepares and opens with (§13)
   skill_token.py — Opaque Host Service token minting/validation (§12)
-  skill_sources.py, skill_source_git.py, skill_source_catalog.py, skill_source_install.py, skill_starter.py — Sources, git caches, catalogs, install lifecycle, starter (§13)
+  skill_sources.py, skill_source_git.py, skill_source_catalog.py, skill_source_install.py, skill_starter.py, onboarding_connections.py — Sources, git caches, catalogs, install lifecycle, starter, setup cards (§13)
   marketplace/ — ClawHub and install substrate (§13)
     clawhub.py, fetcher.py, adapter.py, install.py, install_specs.py, isolated_deps.py, provenance.py — Registry, fetch, adaptation, install specs, isolated deps, receipts
   skill_lifecycle_queue.py — Single FIFO skill-mutation lane and event snapshot (§13)
@@ -719,6 +719,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── scheduled_tasks.json   ← cron/one-shot schedules and `kind:"notify"` notes (§5)
 │   │   ├── claudexor_rotation_provisioning.json ← last rotation receipt
 │   │   ├── claudexor_route_health.json ← the engine's newest per-route failure shares, replaced on change
+│   │   ├── subscription_census.json ← counted verdicts; `.request` asks a read
 │   │   ├── subagent_last_delegation.json ← dated helper observations, not dispatch authority
 │   │   ├── update_letter.json     ← description, its range, check facts
 │   │   ├── update_material.json   ← checked range for its author

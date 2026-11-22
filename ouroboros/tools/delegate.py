@@ -42,6 +42,7 @@ from ouroboros.delegate_source_coverage import (
     record_started_custody,
 )
 from ouroboros.delegate_reply import REPLY_TO_SCHEMA
+from ouroboros.subscription_census import note_limit_failure
 from ouroboros.delegate_supervision import delegate_wait_entry as _delegate_wait_entry
 from ouroboros.delegate_start_instructions import (
     HOST_FACTS_INSTRUCTION as _HOST_FACTS_INSTRUCTION,
@@ -517,6 +518,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         )
         if resolution.blocked:
             record_start_blocked(ctx, str(getattr(ctx, "task_id", "") or ""), resolution.reason)
+            note_limit_failure(resolution.reason)  # a start refused on a spent route asks the census for a read
             return _fail(
                 "delegate_start", resolution.reason,
                 "The delegated route cannot run now. This is a typed blocker: do NOT "

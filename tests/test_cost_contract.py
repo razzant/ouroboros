@@ -808,6 +808,7 @@ COMPANION_COUNTERS = {
     "held_continuation_recheck": ("writes",),
     "pause_notice_replay": ("writes",),
     "post_task_synthesis_recovery": ("writes",),
+    "subscription-census": ("open",),  # the engine's descriptor, read once a census file exists
 }
 
 
