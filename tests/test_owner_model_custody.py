@@ -209,7 +209,7 @@ def test_reversed_mail_applies_the_later_durable_decision_once(host, monkeypatch
     second = act(host, model=C, request_id="second")
     assert first.status_code == second.status_code == 200
     assert second.json()["lead"] == {"model": A, "use_local": False, "basis": "main",
-                                     "pending": {"model": C, "use_local": False}}
+                                     "pending": {"model": C, "use_local": False, "basis": "owner"}}
     assert ctx.active_model == A  # admission never touches the running call
     for args, kwargs in reversed(delayed):
         assert write(*args, **kwargs)
@@ -383,7 +383,9 @@ def test_owner_fallback_exits_use_the_same_return_and_wait_as_the_tool(host, mon
     _other_tools, other = turn(host, monkeypatch)
     other.active_model = B
     assert "primary route" in _switch_model(other, primary=action)
-    assert act(host, action).status_code == 200
+    response = act(host, action)
+    assert response.status_code == 200
+    assert response.json()["lead"] == {**lead_fact.lead_fact(ctx), "pending": {"model": A, "use_local": False}}
     drain_and_apply(host, tools, ctx)
     assert ctx.active_model == other.active_model_override == A
     assert ctx.route_wait_on_primary is (action == "wait")
@@ -569,7 +571,7 @@ def test_model_control_and_pending_share_the_census_and_work_projection(host, mo
         return work
     assert {"action": "model", "target": "work"} in snapshot()["controls"]
     assert act(host, model=B).status_code == 200
-    assert snapshot()["lead"]["pending"] == {"model": B, "use_local": False}
+    assert snapshot()["lead"]["pending"] == {"model": B, "use_local": False, "basis": "owner"}
     drain_and_apply(host, tools, ctx)
     for event in list(ctx.event_queue.queue):
         _handle_work_lead(event, host[1])
@@ -832,6 +834,25 @@ def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_c
     assert ctx.active_model_override == B and ctx.active_role_override == "lead"
     write_task_result(host[0], "work", "completed", result="Done.")
     assert _successor(host[0], "work")["metadata"]["lead"] == carrier
+
+
+def test_same_model_can_change_binding_before_its_acting_fact_changes(host):
+    model = 'claudexor::codex=example'
+    save_owner({'OUROBOROS_MODEL': model, 'OUROBOROS_MODEL_ACCOUNTS': json.dumps({'main': 'home'})})
+    task = running(host)
+    acting = {'model': model, 'use_local': False, 'basis': 'main'}
+    live = host[2].RUNNING['work']
+    live['lead'] = acting
+    new = {'model': model, 'use_local': False, 'basis': 'owner'}
+    response = act(host, model=model)
+    assert response.json()['lead'] == {**acting, 'pending': new}
+    assert lead_fact.project_lead(acting, task) == response.json()['lead']
+    live.update(lead=new, _lead_request_id='press')
+    assert 'pending' not in act(host, model=model, request_id='same-choice').json()['lead']
+    response = act(host, 'follow', request_id='main-again')
+    assert response.json()['lead'] == {**new, 'pending': acting}
+    assert lead_fact.project_lead(new, task) == response.json()['lead']
+    assert 'pending' not in lead_fact.project_lead(acting, {**task, '_lead_request_id': 'main-again'})
 
 
 @pytest.mark.parametrize("action", ["return", "wait"])

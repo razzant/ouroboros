@@ -162,7 +162,7 @@ def test_reads_in_one_millisecond_keep_their_request_order(pins_ui):
     ui["client"].post('/api/projects/archive-301/update', json={"name": "Archive renamed before the pin"}).raise_for_status()
     with page.expect_request(is_list):
         changed(control, "archive-301")
-    # Use the real keyboard menu: a frozen wall clock deliberately cannot expire a touch lift's click guard.
+    # Pin by the row's own menu, opened and pressed from the keyboard.
     target = row(page, "archive-000").locator('.nav-project-row')
     target.focus()
     target.press("Shift+F10")

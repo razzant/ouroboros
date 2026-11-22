@@ -561,8 +561,14 @@ def test_raw_malformed_counts_do_not_discard_provider_cash(cash, body_error, led
     _, row = _settled_row(ledger, _pinned(tariff), {"prompt_tokens": -1, "completion_tokens": 0.9,
                                                         "prompt_cache_hit_tokens": "0", "cost": cash},
                           body_error=body_error)
-    assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (cash, False, True)
-    assert "tariff_pricing" not in row["cost_evidence"]
+    # A positive charge stands as reported, and so does a zero on a reply that is no error. A zero on an error body
+    # beside counts nobody can read is not a proved free call (they leave open whether work occurred): that amount
+    # alone stays unknown and non-final, and the pinned tariff cannot price unreadable counts either.
+    unproved_zero = body_error and cash == 0
+    assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (
+        (None, False, False) if unproved_zero else (cash, False, True))
+    assert (row["cost_evidence"].get("tariff_pricing") or {}).get("unpriced") == ("usage_malformed" if unproved_zero else None)
+    assert ("tariff_pricing" in row["cost_evidence"]) is unproved_zero
 
 
 @pytest.mark.parametrize("body_error", [False, True])

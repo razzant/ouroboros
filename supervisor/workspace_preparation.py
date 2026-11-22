@@ -546,14 +546,14 @@ class PreparationClaim:
 
         route = self.route
         root_task_id = str(route.get("root_task_id") or self.task_id)
-        return bool(self.store_gate(functools.partial(_reject_schedule_task,
+        return _reject_schedule_task(
             self.ctx, tid=self.task_id, chat_id=route.get("chat_id"),
             delegation_role=str(route.get("delegation_role") or "subagent"), parent_id=route.get("parent_id"),
             root_task_id=root_task_id, role=str(route.get("role") or ""),
             result_fields={"parent_task_id": route.get("parent_id"), "root_task_id": root_task_id,
                            "delegation_role": "subagent", "role": str(route.get("role") or "")},
             detail=detail, reason_code=reason_code, extra_fields=extra_fields,
-            persist_result=persist_result, preparation=self), controls=False))
+            persist_result=persist_result, preparation=self)
 
     def disclose_unknown(self) -> None:
         """Unreadable authority before any claim: the existing notice only, nothing reserved or written."""

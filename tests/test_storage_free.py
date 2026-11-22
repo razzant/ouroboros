@@ -666,7 +666,7 @@ def test_a_stuck_entry_removed_just_before_storebusy_still_gets_its_retirement_s
     sibling = root / "state" / "custody_trash" / "unread-0123456789ab"
     sibling.mkdir()
     # Its producer holds it. The name still enumerates; only its identity observation fails.
-    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda _root, _entry, owed=None: (True, []))
+    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda _root, _entry, owed=None, **kwargs: (True, []))
     _unreadable_trash_identity(monkeypatch, sibling)
     monkeypatch.setattr(maintenance_retirement, "schedule_in", schedule)
     assert task_custody.custody_trash_scan(root) == ([(sibling.name, None)], True)

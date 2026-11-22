@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeModelWaits, createModelWaitController, isModelWaitReference, MODEL_WAIT_REASONS, mergeModelWaits, modelWaitAction, modelWaitReasonLabel, modelWaitRoleLabel, unsavedPersistenceNotice } from '../modules/model_wait.js';
+import { activeModelWaits, createModelWaitController, isModelWaitReference, MAIN_KEEPS_TIER, MODEL_WAIT_REASONS, mergeModelWaits, modelWaitAction, modelWaitReasonLabel, modelWaitRoleLabel, unsavedPersistenceNotice } from '../modules/model_wait.js';
 import { desiredLiveCardPhase } from '../modules/task_phase_chip.js';
 import { emptyWorkState, roomStatusView } from '../modules/work_status.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
@@ -271,4 +271,32 @@ test('Sign in again opens the provider page that holds the sign-in card; Setting
     await new Promise((done) => setTimeout(done, 0));
     assert.equal(opened.at(-1), 'accounts', 'without an exact account there is no provider page to sign in on');
     assert.equal(logins.length, 1);
+});
+
+test('saving a new Main model from its wait card says once, before Apply, that Main\'s current tier stays on it, whatever another tab set', async (t) => {
+    const env = installDom();
+    t.after(() => restoreDom(env.prior));
+    const root = document.createElement('div');
+    const timelineEl = document.createElement('div');
+    root.append(timelineEl);
+    // The card read Main at Standard; another tab may set Ultrafast before Apply: the sentence holds either way.
+    const answers = { '/api/settings': { OUROBOROS_MODEL_PROCESSING_PREFERENCES: {}, _meta: { connections: [] } },
+        '/api/model-catalog': { items: [], errors: [], model_sources: [] } };
+    const store = { snapshot: {}, accountsKnown: true, subscribe: () => () => {} };
+    const controller = createModelWaitController({ getRecord: () => ({ root, timelineEl, finished: false }), store,
+        read: async (url) => structuredClone(answers[url]) });
+    t.after(() => controller.destroy());
+    const main = (revision = 1, role = 'main') => controller.observe('task', { model_waits: { 'wait-main': row({ wait_id: 'wait-main', role, revision }) } });
+    main();
+    root.querySelector('[data-wait-change]').click();
+    for (let i = 0; i < 6; i += 1) await new Promise((done) => setTimeout(done, 0));
+    const scope = () => root.querySelector('[data-wait-scope]').textContent;
+    assert.equal(scope(), 'This role changes until the task ends.', 'only for this task: nothing of Main\'s tier to say');
+    root.querySelector('[data-wait-persist]').checked = true;
+    main(2);
+    assert.equal(scope(), MAIN_KEEPS_TIER);
+    assert.match(MAIN_KEEPS_TIER, /confirm it in Main or Settings/);
+    // Another role saved in Settings takes nothing of Main's tier.
+    main(3, 'light');
+    assert.doesNotMatch(scope(), /tier/);
 });

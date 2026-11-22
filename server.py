@@ -286,7 +286,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any, *, timeout: float = 1
 
 
 def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: list) -> int:
-    from supervisor.message_bus import coerce_chat_identity
+    from supervisor.message_bus import coerce_chat_identity, record_inbound_message
     from ouroboros.chat_uploads import attachment_placeholder
 
     for upd in updates:
@@ -300,8 +300,9 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         if hasattr(bridge, "activate_update_transport"):
             bridge.activate_update_transport(msg)
 
-        chat_id = coerce_chat_identity((msg.get("chat") or {}).get("id"), 1)
-        user_id = coerce_chat_identity((msg.get("from") or {}).get("id"), chat_id or 1)
+        sender_id, conversation_id = (msg.get("from") or {}).get("id"), (msg.get("chat") or {}).get("id")
+        chat_id = coerce_chat_identity(conversation_id, 1)
+        user_id = coerce_chat_identity(sender_id, chat_id or 1)
         text = str(msg.get("text") or "")
         source = str(msg.get("source") or "web")
         sender_session_id = str(msg.get("sender_session_id") or "")
@@ -359,8 +360,6 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 bound_pair == (user_id, chat_id)):
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
             return offset
-
-        from supervisor.message_bus import record_inbound_message
 
         # The writer validates or mints the canonical row and may resolve Reply in task metadata.
         origin_message_ref = record_inbound_message(
@@ -463,8 +462,6 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 result = ctx.consciousness.start() if on else ctx.consciousness.stop(source=OWNER_STOP)
                 reply(f"🧠 {result}")
             else:
-                from supervisor.state import control_value
-
                 known, enabled = control_value(ctx.load_state(), "bg_consciousness_enabled")
                 described = _describe_bg_consciousness_state(bool(enabled) if known else None)
                 from ouroboros.consciousness_view import status_reply
@@ -490,6 +487,10 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "origin_message_ref": origin_message_ref,
                     "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
+                    # Match the bridge's positive identities, not the display defaults above.
+                    "bound_external_owner": (is_external_transport and ext_known and owner_ext_id is not None
+                                             and all(type(value) is int and value > 0 for value in (sender_id, conversation_id))
+                                             and bound_pair == (sender_id, conversation_id)),
                 },
             )
     return offset

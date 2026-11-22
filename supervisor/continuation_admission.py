@@ -13,10 +13,10 @@
 2. CLAIM on the predecessor before any effect (``claim_on_predecessor``): eligibility,
    complete owner sources, the author-stop money pre-check and binding (room from
    the predecessor's canonical Project binding, ``continuation_room``) precede the claim.
-   The claim takes Q then predecessor custody without waiting for custody or store access.
-   Scratch retirement holds that same predecessor while accepting release. A failed write refuses with nothing done. The same nonce
-   resumes its own claim and frozen room; another nonce is answered with the
-   accepted successor.
+   The claim takes predecessor custody without waiting and re-reads the result there.
+   Scratch retirement holds that same lock while accepting release. A failed write refuses
+   with nothing done. The same nonce resumes its own claim and frozen room; another
+   nonce is answered with the accepted successor.
 3. ADMISSION through the existing reservation and durable enqueue (queue row
    under the queue lock, its snapshot published outside it, then the result row
    under the queue lock again, the row revalidated still queued). A
@@ -729,10 +729,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
     binding["admission_token"] = f"continue:{binding_sha({k: v for k, v in binding.items() if k != 'admission_token'})[:40]}"
     if not claim:
         try:
-            from ouroboros.store import admission_acquisition
-
-            with q.task_settlement_interlock(), admission_acquisition():
-                claim, _created = claim_on_predecessor(q.DRIVE_ROOT, predecessor, nonce, binding, declared_by=declared_by)
+            claim, _created = claim_on_predecessor(q.DRIVE_ROOT, predecessor, nonce, binding, declared_by=declared_by)
         except ValueError as exc:
             text = str(exc)
             if text.startswith("already_continued:"):

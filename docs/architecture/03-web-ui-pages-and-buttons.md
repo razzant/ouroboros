@@ -18,14 +18,14 @@ The page's stored choice is the one appearance authority. Before CSS, `web/theme
 
 Iframes inherit no host tokens or choice; `render.appearance` declares their policy (CREATING_SKILLS). `webview.start(private_mode=False)` keeps what pywebview otherwise erases each opening; macOS also needs stable identity across source handoff (§2), never merging ordinary-app and legacy Python profiles. Windows persistence stays unqualified.
 
-`pages.js` lists places. `syncNavigationState()` owns page/Project/expansion/drawer; widths are owner-local (`panel_widths.js`). `#<page>` is read once, never written (no desktop address bar; Telegram loads `/`). Projects are panels, not routes, in the sole `<nav>`: `projects_nav.js` keys rows; Pin on hover/focus or in ⋯. Pins survive `/api/state`'s cap; `?all=1` loads older rooms on demand. `PROJECT_NAME_MAX` and lifecycle govern names; deleting rooms cannot open until registry publication. `style.css`: Main in track 2/2, panels overlaid; below `layout.js`'s switch, Main in track 1, sidebar as drawer, Project fills content. `layers.js` owns dismissal; `host_telegram.js` binds Telegram Back/fullscreen/edges; `drawer_drag.js` speeds visible controls; `shell_motion.js`/`room_retire.js`/`page_places.js`/`motion.js` move between places (DESIGN §10).
+`pages.js` lists places. `syncNavigationState()` owns page/Project/expansion/drawer; widths are owner-local (`panel_widths.js`). `#<page>` is read once, never written (no desktop address bar; Telegram loads `/`). Projects are panels, not routes, in the sole `<nav>`: `projects_nav.js` keys rows. Pins survive `/api/state`'s cap; `?all=1` loads older rooms on demand. `PROJECT_NAME_MAX`/lifecycle govern names; deleting rooms cannot open until registry publication. `style.css`: Main in track 2/2, panels overlaid; below `layout.js`'s switch, Main in track 1, sidebar drawer, Project fills content. `layers.js`: dismissal; `host_telegram.js`: Telegram Back/fullscreen/edges; `keyboard_viewport.js`: visual-viewport fit; `drawer_drag.js` speeds visible controls; `shell_motion.js`/`room_retire.js`/`page_places.js`/`motion.js` move between places (DESIGN §10).
 
 - `web/ui.css` ← tokens, the locked control box, material, shared parts (`.ui-action-row`, `.ui-result`, `.ui-disclosure`, `.ui-row`, `.ui-list-more`, `[data-primary]`); `style.css` composes pages (Dashboard tab body, shell/card geometry, System's edge-free shadow).
 - `theme_palette.js` ← `--chart-*` tokens into mounted Chart options, a host chart's series too; updates keep data and caller-authored option groups.
 - `page_header.js` / `page_icons.js` / `fluent_glyphs.js` ← headers (`bindPageHeader` places tabs/path/actions), `bindTabStrip`, `renderSegmentedField` (the strip, `segment_fill.js`), icons.
 - `ui_interactions.js` ← `bindDialogFocus`, `bindMenu`, `bindPopoverPosition`, `bindEnterSubmit`; every binding returns teardown.
 - `ui_hint.js` ← the one hint: a control's words over the page (DESIGN "Hints").
-- `status_mark.js` ← every status mark; `row_menu_gesture.js` ← a Project row menu's long press (DESIGN §10).
+- `status_mark.js` ← every status mark; `row_menu_gesture.js` ← a Project row menu's long press; `gesture_tail.js` ← release click (DESIGN §10).
 - `scroll_fade.js` ← `bindScrollFade` (edges), `restoreFocusWithoutReveal`.
 - `api_client.js` / `api_types.js` / `model_route_types.js` / `decision_types.js` / `logs_types.js` ← browser API calls with typed errors; mirrors of browser-facing contract shapes.
 - `ui_primitives.js` ← safe fields, tone/status, attribute escaping, action results (`setResult`, `clearResultOnEdit`, `errorWords`); `ui_helpers.js`/`utils.js` re-export it.
@@ -36,14 +36,11 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `client_surface.js` ← send-time raw observables in each chat frame, no device taxonomy.
 - `chat_markdown.js` ← marked+DOMPurify, chat URLs, KaTeX, lazy Mermaid, bounded charts, unloaded images (DESIGN §5; vendors: `web/vendor/VENDOR-MANIFEST.md`).
 - `selection_lifecycle.js` ← document-level stale-selection dismissal for desktop mouse/pen; touch and intentional selection remain native (DESIGN §5).
-- `document_reader.js` ← chat text (`DOCUMENT_READER_MAX_BYTES`) and chat images;
-  reads/loads use `DOCUMENT_READER_TIMEOUT_MS`, while image-only scenes own
-  bounded focal zoom/pinch/pan and keyboard/visible reset controls (DESIGN
-  "Document reading").
+- `document_reader.js` ← chat text (`DOCUMENT_READER_MAX_BYTES`) and chat images; reads/loads use `DOCUMENT_READER_TIMEOUT_MS`, while image-only scenes own their zoom and pan (DESIGN "Document reading").
 - `log_events.js` ← event classification and the one factual task-presentation projection for Chat and Logs: task truth maps only to DESIGN §4's five task words; it owns no actions, incidents or notifications, and compact headlines never expose raw reason codes. Task-to-task delivery appears in the receiving timeline (`task_message_injected`), delivery or refusal in the sending one (`task_message_routed`).
 - `effort_evidence.js` ← Logs: requested effort, host carrier, engine preparation, sourced provider observation; missing echoes stay unknown.
 - `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts (DESIGN §4), layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
-- `result_files.js` ← Files and validated question materials via canonical artifacts, the reader and explicit downloads.
+- `result_files.js` ← Files and validated question materials: canonical artifacts, reader and explicit downloads. Question materials keep addressable files only; Files may show an opaque (POSIX byte) name, never a link.
 - `history_retention.js` ← history-transfer details and storage problems for Chat and Logs; routine transfer alters no task outcome.
 - `settled_card.js::syncSettledItems` ← one detail drives Files, Continue and the stored Details row (`model_handover.js`); `review_gate_card.js`, each detail's review gate.
 - `task_continue.js` ← Continue projects the host's `continuation_offer` (who may: §6 Continue); `hard_limit_reached` is one neutral reason that buys no model call; one stored nonce per task makes a retry return the same admission.
@@ -55,7 +52,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 #### Timeline ownership and ordering
 
-`chat.js` owns timelines/cards/routing, runtime/budget, subscriptions/threads/unread/reconnect (its owed catch-up: `room_retire.createCatchUp`) and focus. Text: `chat_text_bubble.js`; media/paste/drop/transient sheets: `chat_media.js` (living cards: `chat_cards.js`); staged/owner files: `chat_attachments.js`; field height: `chat_input_sizing.js`. ACKs update only the owner's `client_message_id` sidecar. Share: `message_actions.js` → `message_share.js` (`message_share_file.js` page; Telegram: its skill).
+`chat.js` owns timelines/cards/routing, runtime/budget, subscriptions/threads/unread/reconnect (owed catch-up: `room_retire.createCatchUp`) and focus. Text: `chat_text_bubble.js`; media/paste/drop/transient sheets: `chat_media.js` (living cards: `chat_cards.js`); staged/owner files: `chat_attachments.js`; field: `chat_input_sizing.js`. ACKs update only the owner's `client_message_id` sidecar. Share: `message_actions.js` → `message_share.js` (`message_share_file.js` page; Telegram: its skill).
 
 Keyed replay preserves nodes, disclosure, focus, selection and child lifecycle; current results win. Bounds: `LIVE_CARD_CAP` live cards; `chat_history.js` pages; `chat_preview.js` unread saved text without actions/coverage/receipts. `chat_reading_position.js` owns anchors and cancellable claims: ↓ reaches retained rows while loading; `showLatest({arrive})`/`project_read_state.js` land covered arrivals. `createHistoryControls` puts gaps at the feed edge, not notices over newest rows. Floating headers reserve measured height. Origins: `project_dialogue.project_origin_identity`.
 

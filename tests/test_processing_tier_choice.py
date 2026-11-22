@@ -78,6 +78,8 @@ def room(isolated_runtime, monkeypatch):  # noqa: F811 -- the imported fixture, 
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "_worker_pool_execution_state",
                         lambda *_a, **_kw: {"available": True, "disabled_reason": "", "worker_count": 1})
+    monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda source, pin:
+                        ("fixture-store", "fixture-account") if (source, pin) == ("codex", "acc-main") else None)
     save_owner(OWNER)
     for pid in ("alpha", "beta"):
         projects.create_project(isolated_runtime, pid, origin="owner_ui")
@@ -86,6 +88,7 @@ def room(isolated_runtime, monkeypatch):  # noqa: F811 -- the imported fixture, 
                             Route("/api/state", api_state)])
     app.state.drive_root = isolated_runtime
     app.state.app_start = 0.0
+    app.state.bind_host = "127.0.0.1"  # the server's default bind; an unset host reads as a wildcard and probes the LAN
     return isolated_runtime, TestClient(app)
 
 
@@ -384,12 +387,9 @@ def test_a_refused_tier_says_nothing_was_saved(room, body, status, code):
     assert (_saved(), _registry(root)) == before
 
 
-def test_a_room_takes_ultrafast_while_mains_own_tier_refuses_it(room):
+def test_a_room_takes_ultrafast_without_writing_main(room):
     root, client = room
-    settings, registry = _saved(), _registry(root)
-    refused = client.post(CHAT_PROCESSING, json={"processing": "ultrafast"})
-    assert refused.status_code == 400 and refused.json()["code"] == "chat_processing_invalid", refused.text
-    assert refused.json()["saved"] is False and (_saved(), _registry(root)) == (settings, registry)
+    settings = _saved()
     taken = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "project_id": "alpha"})
     assert taken.status_code == 200, taken.text
     assert taken.json() == {"ok": True, "project_id": "alpha", "processing_choice": "ultrafast",
@@ -404,12 +404,326 @@ def test_a_room_takes_ultrafast_while_mains_own_tier_refuses_it(room):
     assert _saved() == settings, "a room's Ultrafast never reaches the settings document"
 
 
+MAIN_TIER_KEYS = ("OUROBOROS_MODEL", "USE_LOCAL_MAIN", MODEL_ACCOUNTS_KEY, ROLES)
+
+
+def _binding(connection: str = "", *, model=None) -> dict:
+    """The four read tokens, confirmed destination and its API revision if applicable."""
+    from ouroboros.gateway.owner_settings import CONNECTION_CONDITION, connection_revision, setting_tokens
+
+    saved = _saved()
+    target = model or saved["OUROBOROS_MODEL"]
+    pin = json.loads(saved[MODEL_ACCOUNTS_KEY]).get("main", "") if target.startswith("claudexor::codex=") else ""
+    confirmed = json.dumps([target, False, pin, "fixture-store" if pin else "", "fixture-account" if pin else ""])
+    return {"ultrafast": confirmed, **setting_tokens(saved, MAIN_TIER_KEYS), **({CONNECTION_CONDITION: connection_revision(saved, connection)} if connection else {})}
+
+
+def test_main_ultrafast_conditions_are_exact_and_exclusive_to_main_ultrafast(room):
+    root, client = room
+    tokens = _binding()  # Main is a subscription: no API connection to bind
+    body = {"processing": "ultrafast", "if_unchanged": tokens}
+    before = config.SETTINGS_PATH.read_bytes(), _registry(root)
+    for invalid in (
+        {**body, "project_id": "alpha"}, {**body, "processing": "standard"},
+        {**body, "if_unchanged": None}, {**body, "if_unchanged": {}},
+        {**body, "if_unchanged": {k: v for k, v in tokens.items() if k != MODEL_ACCOUNTS_KEY}},
+        {**body, "if_unchanged": {**tokens, "OPENROUTER_API_KEY": "unexpected"}},
+        {**body, "if_unchanged": {**tokens, GLOBAL: "unexpected"}},
+        {**body, "if_unchanged": {**tokens, ROLES: 1}}, {**body, "if_unchanged": {**tokens, ROLES: ""}},
+        {**body, "if_unchanged": {**tokens, "connection": ""}},
+        {**body, "if_unchanged": {**tokens, "connection": "unknown#" + "a" * 24}},
+        {**body, "if_unchanged": {**tokens, "connection": "openai@invalid@name#" + "a" * 24}},
+        {**body, "if_unchanged": {key: token for key, token in tokens.items() if key != "ultrafast"}},
+        # A current read naming a connection Main's route does not send to: wrong destination (a made-up revision
+        # would be stale first, 409: test_main_ultrafast_binds_the_named_connection_under_the_same_route).
+        {**body, "if_unchanged": {**tokens, "connection": _binding("openai")["connection"]}},
+        {**body, "if_unchanged": {**tokens, "main_connection": "x"}},
+    ):
+        reply = client.post(CHAT_PROCESSING, json=invalid)
+        assert reply.status_code == 400 and reply.json()["code"] == "chat_processing_invalid", reply.text
+        assert reply.json()["saved"] is False
+        assert (config.SETTINGS_PATH.read_bytes(), _registry(root)) == before
+
+
+@pytest.mark.parametrize("changed", MAIN_TIER_KEYS)
+def test_main_ultrafast_compares_every_read_token_before_writing(room, changed):
+    from ouroboros.gateway.owner_settings import setting_tokens
+
+    _, client = room
+    tokens = _binding()
+    # A token from a different read of just this field, with every other token current.
+    other = {"OUROBOROS_MODEL": ASTRA, "USE_LOCAL_MAIN": True,
+             MODEL_ACCOUNTS_KEY: '{"main":"another"}', ROLES: '{"main":"standard"}'}
+    tokens.update(setting_tokens({**_saved(), changed: other[changed]}, [changed]))
+    before = config.SETTINGS_PATH.read_bytes()
+    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": tokens})
+    assert reply.status_code == 409 and reply.json()["code"] == "settings_changed_elsewhere", reply.text
+    assert reply.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
+
+
+def test_main_ultrafast_conditions_survive_an_unrelated_settings_save(room):
+    _, client = room
+    before = _saved()
+    tokens = _binding()
+    save_owner({**before, GLOBAL: "fast"})
+    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": tokens})
+    assert reply.status_code == 200 and reply.json()["processing_default"] == "fast", reply.text
+    saved = _saved()
+    assert saved[GLOBAL] == "fast" and json.loads(saved[ROLES]) == {**json.loads(before[ROLES]), "main": "ultrafast"}
+
+
+@pytest.mark.parametrize("new_identity", [("fixture-store", "replacement"), ("replacement-store", "fixture-account"), None])
+def test_replaced_pinned_identity_refuses_composer_and_settings(room, monkeypatch, new_identity):
+    from ouroboros.gateway.safety_settings import api_owner_safety_model
+
+    _, client = room
+    client.app.router.routes.append(Route("/api/owner/safety-model", api_owner_safety_model, methods=["POST"]))
+    # A booted install: its locked boot read saved the one-time Safety upgrade. Otherwise the Settings writer's own
+    # locked read (``safety_settings._persist``) saves it before any refusal, as every writer's locked read may.
+    config.load_settings(migrate=True)
+    assert _saved()["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "full"
+    seen = _binding()
+    before = config.SETTINGS_PATH.read_bytes()
+    monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda source, pin: new_identity)
+    for url, body in [(CHAT_PROCESSING, {"processing": "ultrafast"}),
+                      ("/api/owner/safety-model", {"settings": {ROLES: {"main": "ultrafast"}}})]:
+        reply = client.post(url, json={**body, "if_unchanged": seen})
+        assert reply.status_code == 409 and not reply.json()["saved"]
+        assert config.SETTINGS_PATH.read_bytes() == before
+
+
+def test_safety_model_writer_returns_shared_invalid_main_binding_code(room):
+    from ouroboros.gateway.safety_settings import api_owner_safety_model
+
+    _, client = room
+    client.app.router.routes.append(Route("/api/owner/safety-model", api_owner_safety_model, methods=["POST"]))
+    config.load_settings(migrate=True)
+    before = config.SETTINGS_PATH.read_bytes()
+    reply = client.post("/api/owner/safety-model", json={"settings": {ROLES: {"main": "ultrafast"}}})
+    assert reply.status_code == 400, reply.text
+    assert reply.json()["code"] == "main_binding_invalid" and reply.json()["saved"] is False
+    assert config.SETTINGS_PATH.read_bytes() == before
+
+
+@pytest.mark.parametrize("writer", ["tier", "model"])
+def test_a_choice_refused_for_a_replaced_pinned_identity_is_saved_when_made_again_on_the_one_observed(room, monkeypatch, writer):
+    """The owner's second choice after that 409. The refusal wrote nothing and moved no token, so the same read with
+    the store and fingerprint a catalog reread names is saved; the identity first shown, sent again, is refused again."""
+    _, client = room
+    if writer == "model":  # Main already holds Ultrafast: its model change carries the tier to the new destination
+        assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    url, body, shown = ((CHAT_MODEL, CHOSEN, _binding(model=ASTRA)) if writer == "model"
+                        else (CHAT_PROCESSING, {"processing": "ultrafast"}, _binding()))
+    observed = ("replacement-store", "replacement-account")
+    monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda source, pin: observed)
+    before = config.SETTINGS_PATH.read_bytes()
+    for _ in range(2):
+        refused = client.post(url, json={**body, "if_unchanged": shown})
+        assert refused.status_code == 409 and refused.json()["code"] == "settings_changed_elsewhere", refused.text
+        assert refused.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
+    again = {**shown, "ultrafast": json.dumps([*json.loads(shown["ultrafast"])[:3], *observed])}
+    reply = client.post(url, json={**body, "if_unchanged": again})
+    assert reply.status_code == 200, reply.text
+    saved = _saved()
+    assert saved["OUROBOROS_MODEL"] == (ASTRA if writer == "model" else SOL)
+    assert json.loads(saved[ROLES])["main"] == "ultrafast" and json.loads(saved[MODEL_ACCOUNTS_KEY])["main"] == "acc-main"
+
+
+def test_auto_ultrafast_confirms_the_model_without_freezing_account_membership(room, monkeypatch):
+    _, client = room
+    save_owner({**OWNER, MODEL_ACCOUNTS_KEY: "{}"})
+    monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda *_: pytest.fail("Auto never reads an account"))
+    assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    before = config.SETTINGS_PATH.read_bytes()
+    assert client.post(CHAT_MODEL, json=CHOSEN).status_code == 400
+    assert config.SETTINGS_PATH.read_bytes() == before
+    assert client.post(CHAT_MODEL, json={**CHOSEN, "if_unchanged": _binding(model=ASTRA)}).status_code == 200
+
+
+WORK = {"kind": "openai", "name": "work", "api_key": "sk-test-first-synthetic-key"}
+KEYED = {**OWNER, "OUROBOROS_MODEL": "openai@work::gpt-6.1", MODEL_ACCOUNTS_KEY: json.dumps({"fallback": ["acc-fallback"]}),
+         "OUROBOROS_CONNECTIONS": json.dumps([WORK])}
+
+
+def _connections(*rows) -> dict:
+    return {"OUROBOROS_CONNECTIONS": json.dumps(list(rows))}
+
+
+@pytest.mark.parametrize("edit", [
+    _connections({**WORK, "api_key": "sk-test-second-synthetic-key"}),  # the named key rotated under the same route
+    _connections({**WORK, "api_surface": "responses"}),  # the named connection's API surface
+], ids=["named-credential", "api-surface"])
+def test_main_ultrafast_binds_the_named_connection_under_the_same_route(room, edit):
+    """Window 1 reads Main's binding; window 2 changes the connection Main's route names, not its route: window 1's
+    Ultrafast is refused. The revision says no secret, and another connection's or setting's edit never moves it."""
+    from ouroboros.gateway.owner_settings import BindingRefused, connection_revisions
+
+    _, client = room
+    save_owner(KEYED)
+    tokens = _binding("openai@work")
+    assert "sk-test" not in json.dumps(tokens) and tokens["connection"].startswith("openai@work#")
+    other = {"kind": "openai", "name": "home", "api_key": "sk-test-home-synthetic-key"}
+    save_owner({**KEYED, "OUROBOROS_BG_WAKEUP_MIN": 750, **_connections(WORK, other)})  # unrelated edits
+    assert _binding("openai@work") == tokens
+    rows = connection_revisions([{"id": "openai@work"}, {"id": "openai@home"}], _saved())
+    assert rows[0]["revision"] == tokens["connection"] and rows[1]["revision"].startswith("openai@home#")
+    assert "sk-test" not in json.dumps(rows)
+    save_owner({**KEYED, "OUROBOROS_BG_WAKEUP_MIN": 750, **edit})
+    assert _binding("openai@work")["connection"] != tokens["connection"]
+    before = config.SETTINGS_PATH.read_bytes()
+    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": tokens})
+    assert reply.status_code == 409 and reply.json()["code"] == "settings_changed_elsewhere", reply.text
+    assert reply.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
+    selected = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding("openai@work")})
+    assert selected.status_code == 200, selected.text
+    saved = _saved()
+    selected_binding = _binding("openai@work")
+    with pytest.raises(BindingRefused, match="Standard or Default"):
+        save_owner({**saved, **_connections(WORK)})
+    assert _saved() == saved
+    save_owner({**saved, **_connections(*json.loads(edit["OUROBOROS_CONNECTIONS"]), other)})
+    assert _binding("openai@work") == selected_binding
+
+
+def test_confirming_ultrafast_again_checks_the_same_unauthored_main_the_composer_read(room):
+    from ouroboros.gateway.owner_settings import connection_revision
+    from ouroboros.gateway.settings import api_settings_get
+
+    _, client = room
+    save_owner({"OPENAI_API_KEY": "fixture-openai-only"})
+    client.app.router.routes.append(Route("/api/settings", api_settings_get, methods=["GET"]))
+
+    def read_choice():
+        result = client.get("/api/settings")
+        assert result.status_code == 200, result.text
+        shown = result.json()
+        model, meta = shown["OUROBOROS_MODEL"], shown["_meta"]
+        assert "OUROBOROS_MODEL" not in _saved() and model.startswith("openai::")
+        revision = next(item["revision"] for item in meta["connections"] if item["id"] == "openai")
+        return {**{key: meta["tokens"][key] for key in MAIN_TIER_KEYS}, "connection": revision,
+                "ultrafast": json.dumps([model, False, "", "", ""])}
+
+    def choose(seen):
+        return client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": seen})
+
+    first = choose(read_choice())
+    assert first.status_code == 200 and first.json()["main_processing"] == "ultrafast", first.text
+    unchanged = config.SETTINGS_PATH.read_bytes()
+    again = read_choice()  # fresh tokens for the now-saved tier, still no authored model
+    same = choose(again)
+    assert same.status_code == 200 and same.json()["previous_main_processing"] == "ultrafast", same.text
+    wrong = choose({**again, "connection": connection_revision(_saved(), "openrouter")})
+    assert wrong.status_code == 400 and wrong.json()["saved"] is False, wrong.text
+    assert config.SETTINGS_PATH.read_bytes() == unchanged
+
+
+def test_main_ultrafast_on_an_api_connection_needs_its_revision(room):
+    _, client = room
+    save_owner(KEYED)
+    before = config.SETTINGS_PATH.read_bytes()
+    bare = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()})
+    assert bare.status_code == 400 and bare.json()["code"] == "chat_processing_invalid", bare.text
+    assert config.SETTINGS_PATH.read_bytes() == before
+    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding("openai@work")})
+    assert reply.status_code == 200, reply.text
+
+
+def test_mains_model_change_stands_on_the_tier_it_was_shown(room):
+    """Window 1 shows Main with its tier and asks to change the model; window 2 sets Main's Ultrafast meanwhile. Window
+    1's write is refused (nothing of it lands) instead of carrying Ultrafast to the new model unasked; read again, it
+    writes, and an unrelated save between read and write does not refuse it."""
+    _, client = room
+    shown = _binding()
+    assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    before = config.SETTINGS_PATH.read_bytes()
+    refused = client.post(CHAT_MODEL, json={**CHOSEN, "if_unchanged": shown})
+    assert refused.status_code == 409 and refused.json()["code"] == "settings_changed_elsewhere", refused.text
+    assert refused.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
+    again = _binding(model=ASTRA)
+    save_owner({**_saved(), "OUROBOROS_BG_WAKEUP_MIN": 750})
+    reply = client.post(CHAT_MODEL, json={**CHOSEN, "if_unchanged": again})
+    assert reply.status_code == 200, reply.text
+    saved = _saved()
+    assert saved["OUROBOROS_MODEL"] == ASTRA and json.loads(saved[ROLES])["main"] == "ultrafast"
+    assert saved["OUROBOROS_BG_WAKEUP_MIN"] == 750
+
+
+def test_a_model_change_carrying_ultrafast_onto_a_key_stands_on_that_key_as_shown(room):
+    """The picked route's connection, not Main's old one: its revision as window 1 showed it is the condition."""
+    _, client = room
+    save_owner({**OWNER, **_connections(WORK)})
+    assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    picked = {"kind": "model", "model": "openai@work::gpt-6.1", "use_local": False}
+    for missing in (_binding(), {**_binding(), "connection": _binding("openai@work", model=picked["model"])["connection"].replace("openai@work", "openai")}):
+        reply = client.post(CHAT_MODEL, json={**picked, "if_unchanged": missing})
+        assert reply.status_code == 400 and reply.json()["code"] == "chat_model_invalid", reply.text
+    shown = _binding("openai@work", model=picked["model"])
+    save_owner({**_saved(), **_connections({**WORK, "api_key": "sk-test-rotated-synthetic-key"})})
+    rotated = client.post(CHAT_MODEL, json={**picked, "if_unchanged": {**_binding(), "connection": shown["connection"]}})
+    assert rotated.status_code == 409 and rotated.json()["saved"] is False, rotated.text
+    assert _saved()["OUROBOROS_MODEL"] == SOL, "nothing of the refused change landed"
+    reply = client.post(CHAT_MODEL, json={**picked, "if_unchanged": _binding("openai@work", model=picked["model"])})
+    assert reply.status_code == 200, reply.text
+
+
+@pytest.mark.parametrize("body", [
+    {**CHOSEN, "project_id": "alpha", "if_unchanged": {}},  # a room's model names no binding of Main
+    {**CHOSEN, "if_unchanged": {"OUROBOROS_MODEL": "x"}},
+    {**CHOSEN, "if_unchanged": {**{key: "x" for key in MAIN_TIER_KEYS}, GLOBAL: "x"}},
+    {**CHOSEN, "if_unchanged": "tokens"},
+    {**CHOSEN, "if_unchanged": {**{key: "x" for key in MAIN_TIER_KEYS}, "connection": "openai#x"}},  # a subscription has none
+])
+def test_a_model_choice_with_a_malformed_binding_saves_nothing(room, body):
+    root, client = room
+    before = config.SETTINGS_PATH.read_bytes(), _registry(root)
+    reply = client.post(CHAT_MODEL, json=body)
+    assert reply.status_code == 400 and reply.json()["code"] == "chat_model_invalid", reply.text
+    assert reply.json()["saved"] is False and (config.SETTINGS_PATH.read_bytes(), _registry(root)) == before
+
+
+@pytest.mark.parametrize("reset", ["", "standard"], ids=["default", "standard"])
+def test_main_ultrafast_round_trips_until_the_owner_resets_it_for_rollback(room, reset):
+    from ouroboros.settings_setup_contract import build_initial_setup_state
+
+    _root, client = room
+    before = config.SETTINGS_PATH.read_bytes()
+    refused = client.post(CHAT_PROCESSING, json={"processing": "ultrafast"})
+    assert refused.status_code == 400 and not refused.json()["saved"] and config.SETTINGS_PATH.read_bytes() == before
+    selected = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()})
+    assert selected.status_code == 200, selected.text
+    roles = {**json.loads(OWNER[ROLES]), "main": "ultrafast"}
+    loaded = config.load_settings(strict=True)
+    assert json.loads(_saved()[ROLES]) == json.loads(loaded[ROLES]) == roles
+    assert build_initial_setup_state(loaded)["modelProcessingPreferences"] == roles
+    assert _state(client)["processing_tiers"] == {"main": "ultrafast", "default": "economy"}
+    work = {"metadata": {"lead": {"source": "main"}, "processing": DEFAULT}}
+    assert task_processing_preference(work) == "ultrafast"
+    own_model = {"source": "room", "model": ASTRA, "use_local": False}
+    assert task_processing_preference({"metadata": {"lead": own_model}}) == "economy"
+    assert task_processing_preference(work, model_role="fallback:0") == "fast"
+    assert task_processing_preference(work, model_role="fallback:1") == "ultrafast"
+
+    # An unrelated Settings edit goes through a different reader and writer than the composer.
+    config.save_settings({**loaded, "OUROBOROS_BG_WAKEUP_MIN": 750})
+    assert json.loads(config.load_settings(strict=True)[ROLES]) == roles
+    saved = client.post(CHAT_PROCESSING, json={"processing": reset})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["previous_main_processing"] == "ultrafast"
+    assert saved.json()["main_processing"] == reset
+    compatible = json.loads(OWNER[ROLES])
+    if reset:
+        compatible["main"] = reset
+    assert json.loads(_saved()[ROLES]) == compatible
+    assert task_processing_preference(work) == (reset or "economy")
+    assert _saved()["OUROBOROS_BG_WAKEUP_MIN"] == 750
+
+
 @pytest.mark.parametrize("values", [
-    {ROLES: json.dumps({"main": "ultrafast"})},
+    {ROLES: json.dumps({"main": "ultrafast", "light": "ultrafast"})},
     {ROLES: json.dumps({"light": "economy", "fallback": ["ultrafast"]})},
     {GLOBAL: "ultrafast"},
 ])
-def test_a_settings_write_of_ultrafast_is_refused_and_saves_nothing(room, values):
+def test_a_settings_write_of_ultrafast_outside_main_is_refused_atomically(room, values):
     _root, client = room
     before = config.SETTINGS_PATH.read_bytes()
     with pytest.raises(ValueError):
@@ -776,3 +1090,47 @@ def test_a_promoted_root_reads_its_rooms_tier_anew(room, monkeypatch, carried):
     assert queue.reserve_task_admission(event["task_id"], event["routing_token"], drive_root=root)["status"] == "reserved"
     assert workers.promote_chat_to_task(event, host)["status"] == "scheduled"
     assert queue.PENDING[-1]["metadata"]["processing"] == ROOM_ECONOMY
+
+
+def test_a_stale_binding_is_409_before_any_destination_rule(room):
+    """Window 1 was shown Fast and picks a key model, so it rightly names no connection; window 2 sets Ultrafast while
+    the question stands. The lock judges staleness first: 409 and nothing saved, never a 400 for a missing revision."""
+    _, client = room
+    save_owner({**OWNER, ROLES: json.dumps({"main": "fast"}), **_connections(WORK)})
+    shown = _binding()
+    assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    before = config.SETTINGS_PATH.read_bytes()
+    reply = client.post(CHAT_MODEL, json={"kind": "model", "model": "openai@work::gpt-6.1", "use_local": False, "if_unchanged": shown})
+    assert reply.status_code == 409 and reply.json()["code"] == "settings_changed_elsewhere", reply.text
+    assert reply.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
+
+
+@pytest.mark.parametrize("direction", ["api_to_subscription", "subscription_to_api"])
+def test_main_ultrafast_read_on_one_route_is_409_after_main_moved_to_the_other_kind(room, direction):
+    """The question was shown for Main on a key (with its revision) or on a subscription (with none); window 2 moves
+    Main to the other kind before the write. Its tokens are stale: 409, whatever the new route would need."""
+    _, client = room
+    keyed = {**OWNER, "OUROBOROS_MODEL": "openai@work::gpt-6.1", MODEL_ACCOUNTS_KEY: json.dumps({}), **_connections(WORK)}
+    start, then = (keyed, {**keyed, "OUROBOROS_MODEL": SOL}) if direction == "api_to_subscription" else ({**OWNER, **_connections(WORK)}, keyed)
+    save_owner(start)
+    shown = _binding("openai@work" if direction == "api_to_subscription" else "")
+    save_owner(then)
+    before = config.SETTINGS_PATH.read_bytes()
+    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": shown})
+    assert reply.status_code == 409 and reply.json()["code"] == "settings_changed_elsewhere", reply.text
+    assert reply.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
+
+
+def test_an_openrouter_revision_moves_with_the_routing_its_requests_apply(room):
+    """The global provider filter decides which endpoint carries a tier, so it is part of the key's revision; an
+    unrelated setting is not. One effective view serves a whole GET's rows."""
+    from ouroboros.gateway.owner_settings import connection_revision, connection_revisions
+
+    save_owner({**OWNER, "OPENROUTER_API_KEY": "sk-or-test-synthetic"})
+    first = connection_revision(_saved(), "openrouter")
+    save_owner({**_saved(), "OUROBOROS_BG_WAKEUP_MIN": 750})
+    assert connection_revision(_saved(), "openrouter") == first
+    save_owner({**_saved(), "OUROBOROS_OR_PROVIDER": json.dumps({"only": ["synthetic-provider"]})})
+    filtered = connection_revision(_saved(), "openrouter")
+    assert filtered != first and "sk-or" not in filtered
+    assert connection_revisions([{"id": "openrouter"}], _saved()) == [{"id": "openrouter", "revision": filtered}]

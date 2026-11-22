@@ -855,7 +855,7 @@ def test_an_unchanged_hold_is_retried_only_on_the_reconcile_cadence_then_removed
     holding = [True]
     retained = [{"class": "producer_retained", "example": "its marker", "since": 1793491200.0}]
     monkeypatch.setattr(session_scratch, "release_trash_entry",
-                        lambda root, path, owed=None: (holding[0], retained if holding[0] else []))
+                        lambda root, path, owed=None, **kwargs: (holding[0], retained if holding[0] else []))
     spawns = []
 
     def spawn(root, repo, purpose, **kw):
@@ -899,7 +899,7 @@ def test_a_lost_retirement_wake_stays_owed_beside_an_unchanged_hold_and_is_sched
     base = data / "state" / "custody_trash"
     (base / "held-0123456789ab").mkdir(parents=True)
     retained = [{"class": "producer_retained", "example": "its marker", "since": 1793491200.0}]
-    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda root, path, owed=None: (
+    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda root, path, owed=None, **kwargs: (
         path.name.startswith("held"), retained if path.name.startswith("held") else []))
     assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 0}  # held, nothing attempted
     assert "retire_owed" not in maintenance_jobs.job(data, "custody_trash")
@@ -934,7 +934,7 @@ def test_stop_mid_listing_records_removals_but_keeps_the_recorded_holds(data, mo
     base = data / "state" / "custody_trash"
     (base / "held-0123456789ab").mkdir(parents=True)
     retained = [{"class": "producer_retained", "example": "its marker", "since": 1793491200.0}]
-    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda root, path, owed=None: (
+    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda root, path, owed=None, **kwargs: (
         path.name.startswith("held"), retained if path.name.startswith("held") else []))
     assert maintenance.run_job(data, "custody_trash")["state"] == "done"
     recorded = maintenance_jobs.job(data, "custody_trash")

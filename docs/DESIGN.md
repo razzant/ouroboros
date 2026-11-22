@@ -518,18 +518,24 @@ The catalog suggests and never admits: any id can be used as typed. It is read w
 Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the field, then
 closes. A room's pick posts at once and closes; Send waits for it, Panic never does.
 
-**The tier strip** stands at the sheet's foot: `Flex · Standard · Fast` (Flex is the stored `economy`), `Ultrafast` too
-where the route's source and model both list it and never for Main, the scope's own choice filled, `Default` beside
-it while there is one to leave. Default takes Main's tier while the scope follows Main, else the default one, and that
-tier wears a ring; an explicit Standard is a choice, never Default. Under it what the choice applies to and now is
-(`Default · Standard as Main · for new work here and its new subagents without a tier of their own; running work keeps
-its own`; in the Main chat `for Main, 3 running works that follow it and their new subagents`, counting only works on
-Main without a tier of their own; on a card `for this work from its next call and its new subagents …`, its last call's
-deviation in the sheet's head) and, under the mouse or focus before any press (a finger only taps), in a line as tall
-as its tallest, what that tier means on this route: listed, `Not confirmed for <model> here: a provider may serve it
-as Standard`, or `<source> does not list <tier> for <model>: its calls go as Standard`. No tier is refused or waited
-for; a proven refusal before generation continues as Standard, its receipt keeping the tier asked, which the card
-then says. Each work captures its room's tier once at admission; a press writes at once and leaves the sheet open.
+**The tier strip** at the Model sheet's foot offers Flex (`economy`), Standard, Fast and Ultrafast for the current
+model, transport and account: a follower reads Main's pin or Auto on opening, unknown until confirmed; an own model uses Auto.
+Partial evidence reads “some accounts” or “not confirmed”, dotted; a tier the host transport cannot carry, “not sent”.
+Offer new Ultrafast only on a transport known to carry it. Keep saved choices and distinct inherited tiers. Hide
+Standard alone only when inherited processing already means Standard. An own choice is filled, with Default beside
+it; an inherited one wears a ring. With no tier requested the route decides (OpenRouter: its workspace default).
+
+Below, say who takes the choice: a room's new work at admission, Main and work inheriting its tier (even on a
+fallback), a card's work from its next call, and new subagents without their own tier. Hover or focus
+previews in space kept for the longest explanation. A key's rate or range needs a complete priced endpoint list for
+that model and tier, else “Price unknown”. A press saves in place; a proven refusal before generation can continue on
+Standard, and the card shows the receipt.
+
+**Ultrafast for Main asks first** when enabled or moved. Show model, account, known price or uncertainty, and
+scope: Main, inheriting work and fallbacks, new helpers, direct Main review and Safety falling back to Main without an override.
+Before rollback choose Standard or Default. A changed route, pin, account or key invalidates the answer. Auto follows
+its pool. Confirm in Models or switch the waiting task. A role hides redundant Standard-only processing, not a saved
+override or distinct inherited default. An empty Supervisor names its inherited route, account and tier.
 
 Each is a neutral **capsule** of the pills' height — glyph, name, value: `Main gpt-6-astra`, `Subagents Auto`,
 `Context Max`, `Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
@@ -1744,8 +1750,8 @@ reviews create child tasks or prove execution.
 - Harness marks are monochrome `currentColor` vectors with adjacent visible
   text, identity only, neutral across states, with a generic text-preserving
   fallback; direct API shows as `API`. Claude, Cursor and OpenCode paths come
-  from Simple Icons, Codex/OpenAI from SVGL; names and marks belong to their
-  owners.
+  from Simple Icons, Codex/OpenAI from SVGL, Antigravity from Google's own one-colour mark
+  (`antigravity.google/assets/image/brand/antigravity-icon__one-color.svg`); names and marks belong to their owners.
 
 ### Quiz card
 
@@ -2484,19 +2490,18 @@ the label they pressed. This includes the primary's citation while the work runs
 identifies a primary awaiting application. Authored text keeps its exact case and whitespace and is never translated.
 CSS alone clips a long quotation, the shared `Show all` / `Show less` control exposes the complete published span
 by press or tap, and an excerpt marked by the server is labelled as an excerpt. When the next step will run on another route the
-fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work), so a change of
-Main never looks failed while a call in flight finishes. Where the server offers the work's `model` control the
-fact is a quiet capsule in the line's own ink (stronger for a model of the work's own) that opens the Model sheet
-anchored to it, so nothing in the transcript moves: whose model this is first, then the field, the list and this
-work's own tier. The list's Main row is the one way to follow Main, and its facts say so (`this work will follow
-Main`; `this work follows Main` on a follower). A pick or a tier is one act, and its answer says when it applies:
+fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work). Where offered,
+the model capsule opens the anchored sheet without moving the transcript: acting model first, then the field,
+list and tier for the next route and its account, if known. Only the Main row follows Main (`this work will follow Main`;
+`this work follows Main` on a follower). A pick or a tier is one act, and its answer says when it applies:
 `Switches at the next step; the running call finishes.` or, for a queued work, `Applies when it starts.`; a tier
 act moves nothing else (its fallback, wait, account and window stay); new subagents without a tier of their own take
 the tier the work runs on, Main's included, started ones keep theirs.
-After the model the line names a tier other than Standard and, when its newest call was served otherwise, that too
-(`Fast · Fast asked · served Standard`). A refused act is said in the popover in the owner's
-words, by the server's reason; when the server saved the decision and only its delivery failed, `Retry` sends
-the same request again. Without the offered control the fact is plain text: a control is the
+After the model the line names a tier other than Standard and what its newest call came to when that differs:
+`Ultrafast asked · served Fast` (the provider's word), `Fast asked · sent as Standard` (a native setting or the host's
+continuation), `· sent with no tier`, `· served mixed tiers`, `· provider said auto` (no tier's word), `· not
+confirmed` (no field). A refused act is said in the popover by the server's reason; when only its delivery failed,
+`Retry` sends the same request. Without the offered control the fact is plain text: a control is the
 server's decision and is never guessed. A card whose work publishes no such fact (an older record, a child, a
 portal) keeps the line below. On a narrow card the source gives way before the model's name.
 An owner move on a wait card uses ordinary ink, names the unchanged primary it left, and offers the ordinary model
@@ -2803,7 +2808,11 @@ a server entry):
    keep the status wording their own contract requires.
 5. **Meta line** — `--type-meta`, `--text-meta`, on its own line under the
    name. Quantities are stated in human words ("38% used · resets in 2h"), and
-   an instant is humanized. A row never leads with a raw ISO timestamp.
+   an instant is humanized. A row never leads with a raw ISO timestamp. In
+   Settings → Agents, a head says its source, then the whole rate its key
+   publishes (`$4 in / $20 out per 1M tokens`, `free`; never a condition, an
+   unknown or a measured review cost), wrapped, never cut; its description is a
+   second line.
 6. **Actions** — docked right in a slot of their own, legible at rest. An action
    rendered at secondary ink reads as disabled: its label is `--text-primary` (a
    capsule's name and an unchosen option take the secondary ink, bible principle 4).
@@ -3523,8 +3532,7 @@ name's capsule opens the work list without a caret, since Telegram's ⌄ stands 
 whole or not at all, as the status word does, so a narrow phone may show the status mark alone (from 360 px; at
 320 px even the mark is cut). The consciousness chip
 becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
-(both are layers); the work list and the consciousness sheet hang under the row at the page's width. With the keyboard
-up the bar stays in the row, in the page's flow as every keyboard room's bar is.
+(both are layers). The work list and consciousness sheet hang below at page width. Typing keeps the same row.
 
 ### A room's edges
 
@@ -3537,8 +3545,9 @@ then tapers to clear within 32 px below the bar on every layout. The composer ha
 its top 32 px. The first row and every landing clear the header's reach; a row under it is not read yet. The top
 effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
 do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
-both themes. With the keyboard up the bar and the composer stand in the page's flow and nothing passes under either: the
-room draws neither edge, and a short keyboard room keeps a line of the newest message and its foot. On a dark room a room bar's capsules are the composer
+both themes. While typing in Telegram the feed still passes under both. The newest line and time rest just above the
+measured composer. In a tight room the top extension yields to the feed. Reading history holds the passage in place.
+Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter
 ink over a light veil, still glass beside its neighbours.
@@ -3609,8 +3618,8 @@ chips that scrolls gives its controls the minimum as their own height, so no
 reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so do a
 disclosure's summary and a field. One exception, the folded composer row's last step before Model is cut ("Composer
 owner controls"). In a capsule's open levels on a narrow phone a value
-keeps only its drawn height. Nothing that acts is hidden until hover
-there (a Project row's menu is reached by its long press).
+keeps only its drawn height. Touch actions need no hover: hold a Project row for its menu. Lifting after a hold or swipe
+activates nothing under the finger; the next tap acts immediately.
 A page's strips may scroll sideways inside themselves with the shared fade; code, tables and a bar's
 Files location do too. Text wraps before it widens a column. A pinch only magnifies (owner 23.10): while it
 holds, the room keeps its size and a sideways finger pans the magnified page instead

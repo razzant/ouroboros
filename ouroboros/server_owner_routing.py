@@ -729,11 +729,15 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     try:  # the owner bot's own chat id is a Telegram address, never a room's: only a decided Reply leaves it
         reserved_project = decided_project if telegram_room else ({} if physical else _reserved_project_for_chat(ctx, chat_id))
     except (OSError, ValueError) as exc:
-        _record_routing_receipt(
-            bridge, ctx, chat_id=ingress_chat, client_message_id=client_message_id,
-            action="project_route", status="project_unavailable",
-            reason="project_routing_fence_lookup_failed", detail=str(exc))
-        return
+        if incoming.get("bound_external_owner") is not True:
+            _record_routing_receipt(
+                bridge, ctx, chat_id=ingress_chat, client_message_id=client_message_id,
+                action="project_route", status="project_unavailable",
+                reason="project_routing_fence_lookup_failed", detail=str(exc))
+            return
+        # The bridge matched the stored owner pair at ingress; an unreadable room registry
+        # cannot take away that Main conversation. A Project Reply was resolved separately above.
+        reserved_project = {}
     project_id = (
         str(reserved_project.get("id") or "")
         if reserved_project.get("lifecycle") == "active"

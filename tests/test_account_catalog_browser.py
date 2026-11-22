@@ -227,13 +227,17 @@ def test_models_auto_does_not_borrow_largest_context_or_processing_modes(account
     row.locator("summary").click()
     note = row.locator("[data-model-context-note]")
     assert "272k" not in note.inner_text()  # Window authority comes from the server preview, not this catalog.
-    assert "Fast is not advertised" in row.locator("[data-processing-capability]").inner_text()
+    # The pinned account's list names Standard only: an account's list is its positive word, never proof a tier is
+    # absent, so the route says Fast is not confirmed here (a provider may serve it as Standard), not that it is refused.
+    assert "Not confirmed for catalog-shared here" in row.locator("[data-processing-capability]").inner_text()
     account.select_option("")
     assert {"catalog-only-a", "catalog-only-b"} <= set(suggestions(page, field, {"catalog-shared", "catalog-only-a", "catalog-only-b"}))
     assert "unknown" in note.inner_text() or "not known" in note.inner_text()
     assert "1M" not in note.inner_text()
     account.select_option("work")
     assert "1M" not in note.inner_text()
-    assert row.locator("[data-processing-capability]").inner_text() == ""
+    listed = row.locator("[data-processing-capability]").inner_text()  # this account lists Fast: no caveat is added
+    assert listed.startswith("Requests faster processing.") and not any(
+        caveat in listed for caveat in ("Not confirmed", "does not list", "Only some")), listed
     assert field.input_value() == "catalog-shared"
     roles.capture(page, "account-catalog-exact-context-processing")

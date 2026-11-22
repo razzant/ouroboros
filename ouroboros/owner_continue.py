@@ -1239,8 +1239,8 @@ def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str, 
 
     from ouroboros.task_custody import task_custody_lock
 
-    # Admission may hold Q: never acquire Q from custody. Scratch release takes this
-    # same predecessor lock before accepting deletion, then removes bytes off-lock.
+    # Take predecessor custody alone. Scratch release takes this same lock before
+    # accepting deletion, then removes bytes off-lock.
     with task_custody_lock(drive_root, predecessor_task_id, timeout_sec=0) as locked:
         if not locked:
             raise ValueError("continuation_custody_busy")

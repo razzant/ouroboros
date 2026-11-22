@@ -65,6 +65,10 @@ jobs:
           systemctl show user@$(id -u).service --property=LoadState; echo "sys_rc=$?"
           DIAG
           printf '[Service]\nMemoryMax=512M\nMemorySwapMax=0\nExecStartPre=/bin/sh /home/cmtest/busdiag.sh\n' | sudo -u cmtest tee "$unit/ouroboros.service.d/verify.conf" >/dev/null
+          # Pin the service's own runtime dir: a user manager started through
+          # sudo can inherit an XDG_RUNTIME_DIR of the calling session, which
+          # belongs to another uid and is not writable by the service user.
+          printf 'Environment=XDG_RUNTIME_DIR=/run/user/%s\nEnvironment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%s/bus\n' "$uid" "$uid" | sudo -u cmtest tee -a "$unit/ouroboros.service.d/verify.conf" >/dev/null
           as_user systemctl --user daemon-reload
           as_user systemctl --user start --wait ouroboros.service || status=$?
           sudo cp /home/cmtest/command-memory-unit.json "$RUNNER_TEMP/command-memory-unit.json" || true

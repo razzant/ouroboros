@@ -148,13 +148,14 @@ def _check_budget_limits(
             global_remaining is not None or (cost_ceiling.root_cap_usd is not None and deciding is not None)):
         finish_reason = task_pacing.wrapup_last_fit_text(deciding, cost_ceiling, global_remaining)
         forced_prompt = f"[BUDGET LIMIT] {finish_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}"
-        request_args = dict(model=ctx.active_model, prompt_tokens=prompt_estimate,
-                            use_local=ctx.active_use_local)
+        request_args = dict(model=ctx.active_model, llm=ctx.llm, prompt_tokens=prompt_estimate,
+                            use_local=ctx.active_use_local, screen=True,
+                            processing_preference=task_pacing.wrapup_model_options(ctx)["processing_preference"])
         balances = dict(root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding,
                         global_remaining_usd=global_remaining)
         wrapup_args = dict(**request_args, **balances)
         wrapup_fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
-        two_fit = _second_reservation_fits(ctx, wrapup_args, wrapup_fits, relaxed=last_fit_relaxed)
+        two_fit = _second_reservation_fits(ctx, wrapup_args, wrapup_fits, relaxed=False)
         server_web = _loop()._server_web_allowed_by_task(getattr(getattr(ctx, "tools", None), "_ctx", None))
         if wrapup_fits is False or two_fit is False or (
             wrapup_fits is True and messages_carry_native_images(ctx.messages)
@@ -280,11 +281,12 @@ def _exact_reservations(ctx: "_RoundLimitContext", probe_messages: list, balance
     # the window leaves, not the whole ceiling (which over-reserved a wrap-up that fits).
     with bind_physical_attempt_context(_forced_physical_context(ctx, probe_messages)):
         probe = task_pacing.prospective_wrapup_attempt_request(
-            llm=ctx.llm, messages=probe_messages, model=ctx.active_model,
+            llm=ctx.llm, messages=probe_messages, model=ctx.active_model, task_id=ctx.task_id,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
+            **task_pacing.wrapup_model_options(ctx),
         )
-    wrapup_args = dict(request=probe, **balances)
+    wrapup_args = dict(request=probe, **balances, allow_ordinary_lookup=True)
     fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
     return fits, _second_reservation_fits(ctx, wrapup_args, fits, relaxed=relaxed)
 
@@ -422,7 +424,7 @@ def _soft_land_exhausted_ceiling(
     admission = dict(root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding or 0.0,
                      global_remaining_usd=_wrapup_global_remaining() if not limit_ctx.active_use_local else None,
                      use_local=limit_ctx.active_use_local)
-    if task_pacing.wrapup_reservation_fits(request=request, **admission) is False:
+    if task_pacing.wrapup_reservation_fits(request=request, **admission, allow_ordinary_lookup=True) is False:
         limit_ctx.accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
         return _loop()._forced_fallback_result(
             limit_ctx, trace, soft_land_reason, "budget_exhausted",
@@ -868,16 +870,21 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
 def _finish_tool_round_budget(
     ctx: _RoundLimitContext, budget_remaining_usd: Optional[float],
     cost_ceiling: "task_pacing.CostCeiling", active_model: str,
-    active_use_local: bool, active_effort: str,
+    active_use_local: bool, active_effort: str, *, context_prepared: bool = False, ready_finish: bool = False,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Complete the existing budget decision after warm or cold owner input.
 
     The batch's delegate requests were observed with its response, before any
     save or park, so a cold continuation owes only this decision: no old tool
-    is executed and no nanny anchor is rebuilt here.
+    is executed and no nanny anchor is rebuilt here. ``context_prepared``: the loop already read the candidate's
+    evidence for this tail. ``ready_finish``: a selected finish waits behind this call, so only money that is
+    actually gone decides here; a prospective wrap-up margin buys nothing over ready work.
     """
-    _loop()._prepare_post_tool_budget_context(
-        ctx.tools, ctx, ctx.llm_trace, active_model, active_use_local, active_effort)
+    if not context_prepared:
+        _loop()._prepare_post_tool_budget_context(
+            ctx.tools, ctx, ctx.llm_trace, active_model, active_use_local, active_effort)
+    if ready_finish and not authored_completion_budget_exhausted(ctx, budget_remaining_usd, cost_ceiling):
+        return None
     result = _loop()._check_budget_limits(ctx, budget_remaining_usd, cost_ceiling=cost_ceiling)
     if result is None:
         return None

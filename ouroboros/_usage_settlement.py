@@ -20,28 +20,16 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from ouroboros._usage_response import _reported_token_count, processing_receipt, observed_processing_mode, provider_cost_value
+from ouroboros._usage_response import (
+    _reported_token_count, nontext_counts, observed_processing_mode, processing_receipt, provider_cost_value,
+)
 
 
 def has_nontext_usage(usage) -> bool:
     """Aggregate prompt totals cannot price reported audio/image usage as text. A null count is unreported (an SDK
     model fills its absent detail fields with None), not usage; any other nonzero value, or a non-text modality
     without a zero count, is."""
-    if isinstance(usage, Mapping):
-        if "modality" in usage and str(usage["modality"]).upper() != "TEXT":
-            return usage.get("tokenCount", usage.get("token_count")) != 0
-        for key, value in usage.items():
-            if key in {"audio_input_tokens", "audio_output_tokens", "image_input_tokens", "image_output_tokens",
-                       "audio_tokens", "image_tokens", "input_audio_tokens", "output_audio_tokens",
-                       "input_image_tokens", "output_image_tokens", "cached_audio_input_tokens",
-                       "cached_image_input_tokens", "video_input_tokens", "thinking_tokens", "connected_seconds"} \
-                    and value is not None and value != 0:
-                return True
-            if has_nontext_usage(value):
-                return True
-    elif isinstance(usage, (list, tuple)):
-        return any(has_nontext_usage(item) for item in usage)
-    return False
+    return any(count != 0 for count in nontext_counts(usage))
 
 
 _MALFORMED = object()
@@ -212,6 +200,7 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
             if cost is not None:
                 normalized["price_source"] = f"litellm@{evidence['tariff_quote']['fetched_at']}"
     elif (cost is None and cost_usd is None and not normalized.get("cost_invalid") and has_usage
+          and not reservation.provider_reported_cost_only and not reservation.unpriced_add_on
           and normalized.get("cost_coverage") != "partial" and not has_nontext_usage(normalized)):
         cost = estimate_cost_optional(
             reservation.model,

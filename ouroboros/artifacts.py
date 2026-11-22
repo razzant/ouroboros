@@ -1373,6 +1373,14 @@ def _copy_work_file_to_task_artifacts(ctx: Any, source: pathlib.Path, *, kind: s
         shutil.rmtree(private, ignore_errors=True)
 
 
+def _immutable_artifact_name(source: pathlib.Path, digest: str) -> str:
+    """The name of an immutable copy: bounded stem, content digest, bounded suffix. A raw POSIX name byte has no
+    UTF-8 spelling, so the suffix spells it ``_`` as the stem does; every other source name keeps its carrier."""
+    stem = _safe_attachment_name(source.stem).removesuffix("-" + digest).encode("utf-8")[:120].decode("utf-8", errors="ignore")
+    suffix = re.sub(r"[\ud800-\udfff]", "_", source.suffix).encode("utf-8")[:20].decode("utf-8", errors="ignore")
+    return f"{stem}-{digest}{suffix}"
+
+
 def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str], *, kind: str = "user_file", immutable: bool = False, expected: Any = None,
                                 logical: Any = None) -> Dict[str, Any] | None:
     """Copy a generated file, preserving an immutable rebase's original identity. A store file keeps
@@ -1406,10 +1414,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         dest = artifact_dir / name
     elif immutable:
         source_identity = stream_artifact_file(source, expected=expected)
-        stem = _safe_attachment_name(source.stem).removesuffix("-" + source_identity["sha256"])
-        stem = stem.encode("utf-8")[:120].decode("utf-8", errors="ignore")
-        suffix = source.suffix.encode("utf-8")[:20].decode("utf-8", errors="ignore")
-        dest = artifact_dir / f"{stem}-{source_identity['sha256']}{suffix}"
+        dest = artifact_dir / _immutable_artifact_name(source, source_identity["sha256"])
     if captured and not immutable:
         dest, reused_existing_source = pathlib.Path(captured["path"]), True
     if (
@@ -1420,10 +1425,8 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
             and not reused_existing_source and not immutable
         )
     ):
-        suffix = source.suffix
-        stem = source.name[: -len(suffix)] if suffix else source.name
         digest = sha256(str(logical or source.resolve(strict=False)).encode("utf-8", errors="replace")).hexdigest()[:8]
-        dest = artifact_dir / f"{stem}.{digest}{suffix}"
+        dest = artifact_dir / f"{source.stem}.{digest}{source.suffix}"
     if reused_existing_source and dest.resolve(strict=False) != source.resolve(strict=False):  # user files and process outputs alike
         _archive_previous_artifact_version(drive_root, task_id, dest, source)
     if immutable and dest.exists() and not dest.is_symlink() and (not source.exists() or not dest.samefile(source)):

@@ -44,7 +44,7 @@ from ouroboros.tools.process_facts import (
     receipt_line_safe, redact_process_data, record_runtime_selection, selected_process_environment,
 )
 from ouroboros.tools.shell_process import CommandStopped, _oom_note, command_start_refusal, command_timeout_for_call, start_refused_result, turn_stop_reader
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import path_for_prose, utc_now_iso
 
 # The typed process facts a run-kind receipt DISCLOSES (D6/R4). `duration_ms` —
 # always, for every run-kind check: a 9ms SIGKILL and a 5-minute honest red are
@@ -283,16 +283,14 @@ def _within_readonly_orchestrator_root(ctx: ToolContext, candidate: pathlib.Path
 
 
 def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | None, str]:
-    """SSOT confinement for a declared artifact path. The RESOLVED path (whether the input
-    was absolute or relative) must stay inside the active workspace, OR a read-only
-    orchestrator root (subagent_projects / deliverables — existence observation of a child's
-    deliverable), else clear the user_files guards (control-plane/secret and outside-home
-    refused) — so a relative `../../etc/passwd` cannot probe arbitrary host files. Returns
-    (candidate, refused_reason): candidate is the resolved host path; refused_reason is
-    non-empty when refused; both falsy for empty input. Used by _observe_artifacts."""
+    """SSOT confinement for a declared artifact path. The RESOLVED path (absolute or relative) must stay inside the active
+    workspace, OR a read-only orchestrator root (subagent_projects / deliverables — existence observation of a child's
+    deliverable), else clear the user_files guards (control-plane/secret and outside-home refused) — so a relative
+    `../../etc/passwd` cannot probe arbitrary host files. Returns (candidate, refused_reason): the resolved host path, and
+    a non-empty reason when refused; both falsy only for the empty string, because whitespace is part of a name."""
     from ouroboros.tool_access import path_is_relative_to, user_files_path_block_reason
 
-    text = str(raw or "").strip()
+    text = str(raw or "")
     if not text:
         return None, ""
     active = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
@@ -302,7 +300,8 @@ def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | N
     if within_active or _within_readonly_orchestrator_root(ctx, candidate):
         return candidate, ""
     if user_files_path_block_reason(ctx, candidate):
-        return None, f"path refused (outside workspace / control-plane): {text}"
+        # Prose for the call's result text: `path_for_prose` keeps a POSIX byte name exact and encodable.
+        return None, f"path refused (outside workspace / control-plane): {path_for_prose(text)}"
     return candidate, ""
 
 
@@ -319,10 +318,11 @@ def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[str
         if refused:
             return "refused_out_of_scope", refused
         if candidate is not None:
-            name = str(raw or "").strip()
+            name = path_for_prose(str(raw))  # the same prose rule, for the spelling that was looked up
             seen.append(name)
             if not candidate.exists():  # a relative name resolves under the active workspace: say where the host looked
-                missing.append(name if pathlib.Path(name).is_absolute() else f"{name} (resolved as {candidate})")
+                missing.append(name if pathlib.Path(raw).is_absolute()
+                               else f"{name} (resolved as {path_for_prose(str(candidate))})")
     if not seen:
         return "fail", "no artifact_paths given"
     if missing:
@@ -376,13 +376,16 @@ def _compare_files_bytes_equal(
     files (artifact_paths[0] vs [1]) — the golden-file/migration-parity shape a weaker
     substring check silently under-verifies. Runs on the SAME surface as the check
     (executor `cmp` in-container when the cwd is executor-mapped, host chunked read
-    otherwise). Both operands are CONFINED first (see _bytes_equal_confinement_block).
+    otherwise). Both operands are CONFINED first (see _bytes_equal_confinement_block) and reach both
+    surfaces exactly as declared — a name's edge whitespace belongs to it, so no trimmed sibling is
+    ever compared behind it (the receipt attests the name that was asked for).
     Returns (equal, detail); detail carries a BOUNDED hexdump around the first
     divergence so the receipt shows WHERE the bytes differ, never whole files.
     ``equal`` is None when no byte verdict was reached (a refused operand, a missing
     file, cmp without an exit status or outside its 0/1 verdicts): still a FAIL, never
     a claim that the bytes differ (#1585)."""
-    a_raw, b_raw = str(artifact_paths[0]).strip(), str(artifact_paths[1]).strip()
+    a_raw, b_raw = artifact_paths
+    a_name, b_name = path_for_prose(a_raw), path_for_prose(b_raw)
     refusal = _bytes_equal_confinement_block(ctx, a_raw, b_raw, use_executor=use_executor)
     if refusal:
         return None, refusal
@@ -397,11 +400,11 @@ def _compare_files_bytes_equal(
         try:
             rc = int(rc_raw)
         except (TypeError, ValueError):
-            return None, f"bytes_equal: executor cmp returned no exit status for {a_raw} vs {b_raw}"
+            return None, f"bytes_equal: executor cmp returned no exit status for {a_name} vs {b_name}"
         # only this diagnostic note can be lost to a mask that cannot complete; the cmp exit and verdict below cannot
         out = masked_process_or_withheld((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
         if rc == 0:
-            return True, f"bytes_equal: {a_raw} == {b_raw} (executor cmp)"
+            return True, f"bytes_equal: {a_name} == {b_name} (executor cmp)"
         if rc != 1:
             # cmp semantics: 0=equal, 1=differ, >1=trouble (missing file, missing cmp
             # binary =127; a signal-killed cmp is no verdict either). Still a FAIL, but the
@@ -409,16 +412,16 @@ def _compare_files_bytes_equal(
             # byte divergence (triad r3).
             return None, (
                 f"bytes_equal infra error (cmp exit {rc}, not a byte verdict) "
-                f"({a_raw} vs {b_raw}): {out[:400] or 'no output'}"
+                f"({a_name} vs {b_name}): {out[:400] or 'no output'}"
             )
-        return False, f"bytes differ ({a_raw} vs {b_raw}): {out[:400] or 'cmp exit ' + str(rc)}"
+        return False, f"bytes differ ({a_name} vs {b_name}): {out[:400] or 'cmp exit ' + str(rc)}"
 
     def _resolve(text: str) -> pathlib.Path:
         p = pathlib.Path(text)
         return (p if p.is_absolute() else pathlib.Path(work_dir) / text).resolve(strict=False)
 
     a_path, b_path = _resolve(a_raw), _resolve(b_raw)
-    for label, path in ((a_raw, a_path), (b_raw, b_path)):
+    for label, path in ((a_name, a_path), (b_name, b_path)):
         if not path.is_file():
             return None, f"bytes_equal: file not found: {label}"
     a_size, b_size = a_path.stat().st_size, b_path.stat().st_size
@@ -440,7 +443,7 @@ def _compare_files_bytes_equal(
                 break
             offset += len(ca)
     if first_diff < 0 and a_size == b_size:
-        return True, f"bytes_equal: {a_raw} == {b_raw} ({a_size} bytes)"
+        return True, f"bytes_equal: {a_name} == {b_name} ({a_size} bytes)"
     if first_diff < 0:
         first_diff = min(a_size, b_size)
     window_start = max(0, first_diff - 16)
@@ -455,8 +458,8 @@ def _compare_files_bytes_equal(
 
     return False, (
         f"bytes differ at offset {first_diff} (sizes {a_size} vs {b_size}).\n"
-        f"{a_raw} @{window_start}: {_hexwin(a_path)}\n"
-        f"{b_raw} @{window_start}: {_hexwin(b_path)}"
+        f"{a_name} @{window_start}: {_hexwin(a_path)}\n"
+        f"{b_name} @{window_start}: {_hexwin(b_path)}"
     )
 
 
@@ -472,10 +475,7 @@ def _probe_artifact_lifecycle(
     lifecycle: list[dict] = []
     missing_after: list[str] = []
     surface = "executor" if use_executor else "host"
-    for raw in list(artifact_paths or [])[:20]:
-        text = str(raw or "").strip()
-        if not text:
-            continue
+    for text in artifact_paths[:20]:
         exists: bool | None = None
         check_surface = surface
         try:
@@ -520,9 +520,9 @@ def _probe_artifact_lifecycle(
                         check_surface = "unavailable"
         except Exception:  # noqa: BLE001 — probe is advisory; never break the receipt
             exists, check_surface = None, "unavailable"
-        lifecycle.append({"path": text[:300], "exists_after": exists, "check_surface": check_surface})
+        lifecycle.append({"path": text, "exists_after": exists, "check_surface": check_surface})
         if exists is False:
-            missing_after.append(text[:300])
+            missing_after.append(text)
     return lifecycle, missing_after
 
 
@@ -657,7 +657,9 @@ def _verify_and_record(
     **kwargs,
 ) -> str:
     expected_match = kwargs.get("expected_match", "substring")
-    artifact_paths = kwargs.get("artifact_paths")
+    # Only the empty string names nothing; spaces are part of the operand.
+    raw_paths = kwargs.get("artifact_paths")
+    artifact_paths = [p for p in raw_paths if isinstance(p, str) and p] if isinstance(raw_paths, (list, tuple)) else []
     criterion_source = kwargs.get("criterion_source", "")
     criterion_basis = kwargs.get("criterion_basis", "")
     bucket = str(kwargs.get("bucket") or "")
@@ -741,7 +743,7 @@ def _verify_and_record(
         argv = _normalize_check(check)
         if not argv:
             return _missing_check_refusal(kind, check)
-        if match_mode == "bytes_equal" and len([p for p in (artifact_paths or []) if str(p or "").strip()]) != 2:
+        if match_mode == "bytes_equal" and len(artifact_paths) != 2:
             return (
                 "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal requires "
                 "artifact_paths=[<file_a>, <file_b>] — exactly two files to compare byte-for-byte "
@@ -857,9 +859,8 @@ def _verify_and_record(
         if match_mode == "bytes_equal":
             # v6.60.0: after the check, the VERDICT is the byte-parity of the two
             # declared files (golden-file shape); the check's own exit still gates.
-            _paths2 = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
             matched, _cmp_detail = _compare_files_bytes_equal(
-                ctx, _paths2, pathlib.Path(work_dir), use_executor=use_executor
+                ctx, artifact_paths, pathlib.Path(work_dir), use_executor=use_executor
             )
             _cmp_detail = masked_process_or_withheld(_cmp_detail)  # one masked text for the metadata detail and the shown note
         else:
@@ -887,9 +888,8 @@ def _verify_and_record(
         # C: after-only artifact-lifecycle FLAG (status unchanged — flag-only). If the agent
         # declared artifact_paths, record whether each still exists after the check, probed via
         # the SAME surface as the check, so a build-then-delete is visible to the advisory reviewer.
-        _decl = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
-        if _decl:
-            _lifecycle, _missing_after = _probe_artifact_lifecycle(ctx, _decl, pathlib.Path(work_dir), use_executor=use_executor)
+        if artifact_paths:
+            _lifecycle, _missing_after = _probe_artifact_lifecycle(ctx, artifact_paths, pathlib.Path(work_dir), use_executor=use_executor)
             if _lifecycle:
                 receipt["artifact_lifecycle"] = _lifecycle
             if _missing_after:
@@ -915,15 +915,12 @@ def _verify_and_record(
         ), receipt, compared=compared, detail=_cmp_detail if match_mode == "bytes_equal" else "")
 
     if kind == "artifact_observation":
-        paths = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
-        obs_status, detail = _observe_artifacts(ctx, paths)
-        # receipt_identity_projection bounds the display after canonicalizing the entire set.
-        receipt.update({"status": obs_status, "paths": paths, "summary": detail})
+        obs_status, detail = _observe_artifacts(ctx, artifact_paths)
+        receipt.update({"status": obs_status, "paths": artifact_paths, "summary": detail})
         if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
             return _receipt_custody_failure(kind, f"{obs_status}: {detail}")
-        # refused_out_of_scope is a POLICY block, not a verification failure — surface it
-        # honestly (not a red FAIL) so a deliverable outside the observable roots doesn't
-        # force the agent to declare no_visible_machine_contract (v6.57.0).
+        # refused_out_of_scope is a POLICY block, not a verification failure — surface it honestly (not a red FAIL) so a
+        # deliverable outside the observable roots doesn't force the agent to declare no_visible_machine_contract (v6.57.0).
         if obs_status == "refused_out_of_scope":
             return (
                 "verify_and_record [artifact_observation] REFUSED_OUT_OF_SCOPE: "

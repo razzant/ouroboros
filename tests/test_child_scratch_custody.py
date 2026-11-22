@@ -952,39 +952,26 @@ def test_a_root_continue_taken_first_holds_the_childs_scratch(tmp_path, monkeypa
     assert (scratch / "env" / "pyvenv.cfg").is_file()  # the extended line holds the undecided child
 
 
-def test_the_claims_admission_interlock_is_q_then_custody(tmp_path, monkeypatch):
+def test_the_claim_takes_predecessor_custody_alone(tmp_path, monkeypatch):
     import contextlib
 
     from supervisor import queue as queue_module
     from supervisor.continuation_admission import admit_continuation
     from tests.test_owner_continue import NONCE
 
-    data, scratch, entry = _pred_child(tmp_path, monkeypatch)
-    real_interlock, real_custody = queue_module.task_settlement_interlock, task_custody.task_custody_lock
-    order = []
-
-    @contextlib.contextmanager
-    def interlock(stop=None):
-        order.append("Q-in")
-        with real_interlock(stop):
-            yield
-        order.append("Q-out")
+    _pred_child(tmp_path, monkeypatch)
+    real_custody, seen = task_custody.task_custody_lock, []
 
     @contextlib.contextmanager
     def custody(root, task, **kwargs):
-        from ouroboros.store import STORE_WAIT_SEC, bounded_wait
-
-        if order == ["Q-in"]:
-            assert kwargs["timeout_sec"] == 0 and bounded_wait(STORE_WAIT_SEC) == 0
-        order.append("C-in")
+        if task == PRED:
+            seen.append((kwargs.get("timeout_sec"), queue_module._queue_lock._is_owned()))
         with real_custody(root, task, **kwargs) as held:
             yield held
-        order.append("C-out")
 
-    monkeypatch.setattr(queue_module, "task_settlement_interlock", interlock)
     monkeypatch.setattr(task_custody, "task_custody_lock", custody)
     assert admit_continuation(PRED, action_nonce=NONCE)["ok"]
-    assert order[:4] == ["Q-in", "C-in", "C-out", "Q-out"]  # the claim takes custody only inside Q
+    assert seen and all(timeout == 0 and not owned for timeout, owned in seen)
 
 
 def test_a_root_continue_cannot_claim_inside_the_release_window(tmp_path, monkeypatch):
