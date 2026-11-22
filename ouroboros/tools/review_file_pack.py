@@ -74,8 +74,12 @@ _SENSITIVE_NAMES = frozenset({
 _VENDORED_SUFFIXES = frozenset({".min.js", ".min.css", ".min.mjs"})
 
 
-# Vendored files that keep their release's own (unminified) name: copied byte for byte (web/vendor/VENDOR-MANIFEST.md).
-_VENDORED_NAMES = frozenset({"chart.umd.min.js", "qrcodegen.js"})
+_VENDORED_NAMES = frozenset({"chart.umd.min.js"})
+
+
+# Vendored files that keep their release's own (unminified) name, by their exact repo path: copied byte for byte
+# (web/vendor/VENDOR-MANIFEST.md). A first-party file of the same name anywhere else stays reviewed and gated.
+_VENDORED_PATHS = frozenset({"web/vendor/qrcodegen/qrcodegen.js"})
 
 
 _FULL_REPO_BINARY_EXTENSIONS = frozenset({
@@ -574,7 +578,7 @@ def iter_repo_pack_entries(
             omitted.append(f"{rel} (binary/media)")
             continue
 
-        if fname in _VENDORED_NAMES or any(fname.endswith(s) for s in _VENDORED_SUFFIXES):
+        if fname in _VENDORED_NAMES or rel_norm in _VENDORED_PATHS or any(fname.endswith(s) for s in _VENDORED_SUFFIXES):
             omitted.append(f"{rel} (vendored/minified)")
             continue
 

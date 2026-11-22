@@ -764,6 +764,7 @@ from ouroboros.tools.review_file_pack import (  # noqa: E402, F401 -- intentiona
     _SENSITIVE_EXTENSIONS,
     _SENSITIVE_NAMES,
     _VENDORED_NAMES,
+    _VENDORED_PATHS,
     _VENDORED_SUFFIXES,
     _is_probably_binary,
     _raw_bytes_binary,
