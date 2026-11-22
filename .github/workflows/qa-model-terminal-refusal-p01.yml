@@ -1,0 +1,107 @@
+name: Terminal Codex refusal qualification
+on:
+  push:
+    branches: ['qa/model-terminal-refusal-p01-20261122']
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      BASE: '97d6dcafeb0a8c2dbf68725937c98692e9203343'
+      PRODUCT: '49bbfab6cdc572e4af248b5712774b81ea720dc2'
+      PRODUCT_TREE: '719c4699390ec8a644685b4569d2a8fc316700e3'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind this workflow to the exact isolated tree
+        id: subject
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-list --parents -1 HEAD)" == "$GITHUB_SHA $PRODUCT" ]]
+          [[ "$(git rev-list --parents -1 "$PRODUCT")" == "$PRODUCT $BASE" ]]
+          [[ "$(git rev-parse "$PRODUCT^{tree}")" == "$PRODUCT_TREE" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT" HEAD)" == $'A\t.github/workflows/qa-model-terminal-refusal-p01.yml' ]]
+          mkdir -p "$RUNNER_TEMP/terminal-proof"
+          git checkout --detach "$PRODUCT"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Install locked test dependencies
+        id: deps
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Exercise caller-owned transport and finalization on synthetic responses
+        id: product
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -I -S scripts/safe_test.py --timeout 250 --evidence-dir "$RUNNER_TEMP/terminal-raw-product" -- \
+            python -m pytest -q --tb=short --show-capture=no -o 'addopts=' -o 'junit_family=xunit1' \
+            tests/test_llm_claudexor.py tests/test_native_fallback_binding_acceptance.py \
+            tests/test_forced_model_binding.py tests/test_model_wait_controls.py \
+            tests/test_delivery_forced_finalization.py::test_a_received_codex_denial_buys_the_two_attempt_forced_rail_no_second_send \
+            --junitxml="$RUNNER_TEMP/terminal-product.xml"
+      - name: Check size, book balance and owning contracts
+        id: structural
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.BASE }}
+          OURO_BOOK_GROWTH_MODE: block
+        run: |
+          set -euo pipefail
+          env -u GITHUB_EVENT_NAME -u GITHUB_REF python -I -S scripts/safe_test.py --timeout 110 \
+            --evidence-dir "$RUNNER_TEMP/terminal-raw-size" -- python -m pytest -q --tb=line -o 'addopts=' \
+            -m size_ratchet tests/test_post_merge_check.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py \
+            --junitxml="$RUNNER_TEMP/terminal-size.xml"
+          python -I -S scripts/safe_test.py --timeout 105 --evidence-dir "$RUNNER_TEMP/terminal-raw-contract" -- \
+            python -m pytest -q --tb=short -o 'addopts=' tests/test_domain_manifest.py tests/test_generated_inventories.py \
+            --junitxml="$RUNNER_TEMP/terminal-contract.xml"
+      - name: Retain case results on this subject
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        env:
+          PRODUCT_OUTCOME: ${{ steps.product.outcome }}
+          STRUCTURAL_OUTCOME: ${{ steps.structural.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          proof = root / 'terminal-proof'
+          fields = ('BASE', 'PRODUCT', 'PRODUCT_TREE', 'GITHUB_SHA', 'PRODUCT_OUTCOME', 'STRUCTURAL_OUTCOME')
+          report = {key.lower(): os.environ[key] for key in fields}
+          report['cases'] = {}
+          for lane in ('product', 'size', 'contract'):
+              try:
+                  cases = list(ET.parse(root / f'terminal-{lane}.xml').iter('testcase'))
+              except (OSError, ET.ParseError):
+                  cases = []
+              report['cases'][lane] = [[row.get('classname'), row.get('name'), next(
+                  (word for word in ('failure', 'error', 'skipped') if row.find(word) is not None), 'passed')]
+                  for row in cases]
+          required = ["test_a_settled_codex_content_policy_denial_ends_its_call_with_custody_intact", "test_only_the_exact_received_typed_denial_is_a_denial", "test_a_control_interruption_after_receipt_outranks_the_denial", "test_admission_is_still_asked_for_an_ordinary_answer", "test_primary_denial_sends_nothing_after_it_through_the_real_main_walk", "test_denial_from_the_first_alternative_sends_nothing_after_it", "test_a_received_codex_denial_buys_the_two_attempt_forced_rail_no_second_send"]
+          names = [name.split('[', 1)[0] for _, name, state in report['cases']['product'] if state == 'passed']
+          report['required_missing'] = sorted(set(required) - set(names))
+          (proof / 'summary.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          print({lane: len(rows) for lane, rows in report['cases'].items()})
+          if report['required_missing'] or any(os.environ[key] != 'success' for key in fields[-2:]) or any(
+              not rows or any(case[-1] != 'passed' for case in rows) for rows in report['cases'].values()):
+              raise SystemExit('Qualification did not pass all required lanes')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        with:
+          name: model-terminal-refusal-proof
+          path: |
+            ${{ runner.temp }}/terminal-proof/summary.json
+          if-no-files-found: error
+          retention-days: 7
