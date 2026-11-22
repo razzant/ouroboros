@@ -153,6 +153,26 @@ def _git_workspace_start(tmp_path, monkeypatch, case, **options):
     return payload, engine
 
 
+@pytest.mark.parametrize("kind", ["investigation", "readonly", "writer"])
+def test_only_an_investigation_start_says_its_copy_is_evidence_only(tmp_path, monkeypatch, kind):
+    """Nothing an investigation's private copy holds can land, so its start's receipt says so in place of a write
+    root; a writing start keeps its write root and a plain read-only start says neither."""
+    from tests.test_investigation_start_roots import _consumer, _project
+
+    if kind == "writer":
+        note = _git_workspace_start(tmp_path, monkeypatch, "omit")[0]["note"]
+    else:
+        _root, folder = _project(tmp_path)
+        started = _consumer(tmp_path, monkeypatch, "workspace_write" if kind == "investigation" else "readonly",
+                            workspace=folder)[2]()
+        assert started["status"] == "started", started
+        note = started["note"]
+    said = ("investigation: evidence-only investigation in a private copy (execution_root) of authority_target_root: "
+            "its changes are kept as evidence and never applied") in note
+    assert said is (kind == "investigation"), note
+    assert ("write root: private snapshot" in note) is (kind == "writer"), note
+
+
 def test_a_git_workspace_treats_the_named_default_as_omission_and_still_refuses_real_geometry(
     tmp_path, monkeypatch,
 ):

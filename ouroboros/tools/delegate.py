@@ -747,12 +747,14 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
     facts["access"] = [("access", authority.access + (
         " (scoped HOME selects native state and credentials, not filesystem confinement)"
         if authority.isolation == "live" else ""), None)]
-    if snapshot_id and access != "readonly":  # a plan turn keeps its snapshot for its continuation, writes nothing
-        facts["write_root"] = ("private copy (execution_root) of authority_target_root, its changes kept as evidence and "
-                               "never applied (integrate_delegated_patch refuses)" if authority.investigation
-                               else "private snapshot (execution_root) of authority_target_root: only a diff captured at "
-                               "terminal can land there, through integrate_delegated_patch") + (
-                               ", and the host's instructions forbid commits")
+    if snapshot_id and authority.investigation:  # nothing from its copy can land: no write root, this fact instead
+        facts["access"].append(("investigation", "evidence-only investigation in a private copy (execution_root) of "
+                                "authority_target_root: its changes are kept as evidence and never applied "
+                                "(integrate_delegated_patch refuses), and the host's instructions forbid commits", False))
+    elif snapshot_id and access != "readonly":  # a plan turn keeps its snapshot for its continuation, writes nothing
+        facts["write_root"] = ("private snapshot (execution_root) of authority_target_root: only a diff captured at "
+                               "terminal can land there, through integrate_delegated_patch, and the host's instructions "
+                               "forbid commits")
     if input_files is not None:
         facts.update(inputs=input_files, inputs_when="prepared before sending", inputs_outside=sum(
             1 for row in input_files if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
