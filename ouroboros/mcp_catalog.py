@@ -12,14 +12,17 @@ lock; the envelope stays the server's alone (only listings publish it), so a cal
 rewrites the listing every process adopts. A failed listing keeps the start of its open
 failing series (``listing_failing_since``) and a failed call its own (``latest_call.since``)
 on repeats; a record without one has an unknown start. Whether the server answered is seen
-at the session boundary (``answering_session``), before the SDK checks what it answered.
+where its message arrives (``answering_session``), before the SDK parses or checks it; the HTTP
+transport's own stand-in for a lost session is told apart there (``http_transport``).
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
 import logging
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -141,49 +144,83 @@ def note_call(cfg: Any, *, ok: bool, code: str = "", method: str = "") -> None:
         log.debug("MCP call outcome mark failed for %s", getattr(cfg, "id", "?"), exc_info=True)
 
 
+# A connection's ``tools/call`` ids whose POST its HTTP transport answered itself: an HTTP 404 with no JSON-RPC
+# message, for which the SDK makes its own error ("Session terminated") that no server sent (``http_transport``).
+_HTTP_STANDINS: ContextVar = ContextVar("mcp_http_standins", default=None)
+
+
 def answering_session(base: Any) -> Any:
-    """``base`` (the SDK's ``ClientSession``) telling the failure that follows a ``tools/call`` answer so: the
-    server's own JSON-RPC error matched to the request, and a result that then fails the declared output schema,
-    raise with ``mcp_server_answered``. The SDK's stand-ins for no answer (a closed connection, a request timeout)
-    do not. Every session of a call, a task session's too, is built from this class."""
+    """``base`` (the SDK's ``ClientSession``) noting when its ``tools/call`` was answered: the server's JSON-RPC
+    ``result`` or ``error`` with that call's id, seen as it arrives, before the SDK parses or checks it
+    (``mcp_call_answered``). A failure after it (the server's error whatever its code, a result the SDK refuses,
+    a timeout or a close during the SDK's output-schema listing) carries ``mcp_server_answered``. The SDK's
+    stand-ins for no answer never arrive so: a closed connection and a request timeout are made inside the
+    session, and an HTTP 404 to the call's POST is its transport's (``http_transport``). Every session of a
+    call, a task session's too, is built from this class and runs one call at a time."""
     if base is None:
         return None
 
-    def is_call(request: Any) -> bool:
-        return getattr(getattr(request, "root", request), "method", None) == "tools/call"
-
     class AnsweringSession(base):
-        async def send_request(self, request: Any, *args: Any, **kwargs: Any) -> Any:
-            try:
-                result = await super().send_request(request, *args, **kwargs)
-            except BaseException as exc:
-                if is_call(request) and _server_error_answer(exc):
-                    exc.mcp_server_answered = True
-                raise
-            if is_call(request):
-                self.mcp_call_answered = True
-            return result
+        mcp_call_answered = False
+        _mcp_call_id = None
 
         async def call_tool(self, *args: Any, **kwargs: Any) -> Any:
-            self.mcp_call_answered = False
+            # The call's tools/call is the next request this session sends: it takes the next id.
+            self._mcp_call_id, self.mcp_call_answered = getattr(self, "_request_id", None), False
             try:
                 return await super().call_tool(*args, **kwargs)
             except BaseException as exc:
-                if self.mcp_call_answered:  # the answer arrived; the SDK's own check of it failed
+                if self.mcp_call_answered:  # the answer arrived; what failed came after it
                     exc.mcp_server_answered = True
                 raise
+
+        async def _handle_response(self, message: Any) -> None:
+            raw = getattr(getattr(getattr(message, "message", None), "root", None), "id", None)
+            answered = getattr(self, "_normalize_request_id", lambda value: value)(raw) if raw is not None else None
+            if answered is not None and answered == self._mcp_call_id and answered not in (_HTTP_STANDINS.get() or ()):
+                self.mcp_call_answered = True
+            await super()._handle_response(message)
 
     return AnsweringSession
 
 
-def _server_error_answer(exc: BaseException) -> bool:
-    """The server's own JSON-RPC error, not the SDK's stand-in for a closed connection or a timed-out request."""
-    import httpx
-    from mcp.shared.exceptions import McpError
-    from mcp.types import CONNECTION_CLOSED
+def with_answer(session: Any, exc: BaseException) -> BaseException:
+    """``exc`` carrying ``mcp_server_answered`` when ``session``'s call was answered before it ran out of time
+    or its session closed (a task session raises its own error then)."""
+    if getattr(session, "mcp_call_answered", False):
+        exc.mcp_server_answered = True
+    return exc
 
-    return isinstance(exc, McpError) and getattr(exc.error, "code", None) not in (
-        CONNECTION_CLOSED, httpx.codes.REQUEST_TIMEOUT)
+
+def http_transport(opener: Any) -> Any:
+    """``opener`` (the SDK's Streamable HTTP or SSE transport) for one connection whose HTTP client notes each
+    ``tools/call`` POST answered with HTTP 404 (``_HTTP_STANDINS``, read by that connection's session)."""
+    @contextlib.asynccontextmanager
+    async def opened(*args: Any, httpx_client_factory: Any, **kwargs: Any) -> Any:
+        standins: set = set()
+
+        def factory(*client_args: Any, **client_kwargs: Any) -> Any:
+            client = httpx_client_factory(*client_args, **client_kwargs)
+
+            async def note(response: Any) -> None:
+                if response.status_code == 404 and response.request.method == "POST":
+                    try:
+                        sent = json.loads(response.request.content or b"{}")
+                    except ValueError:
+                        return
+                    if isinstance(sent, dict) and sent.get("method") == "tools/call":
+                        standins.add(sent.get("id"))
+            client.event_hooks["response"].append(note)
+            return client
+
+        token = _HTTP_STANDINS.set(standins)
+        try:
+            async with opener(*args, httpx_client_factory=factory, **kwargs) as streams:
+                yield streams
+        finally:
+            with contextlib.suppress(ValueError):  # a generator closed from another context keeps its value
+                _HTTP_STANDINS.reset(token)
+    return opened
 
 
 def _leaves(exc: BaseException) -> list:
