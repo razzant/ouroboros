@@ -5959,7 +5959,9 @@ body.keyboard-open .model-sheet[data-sheet="bottom"] {
 /* The tier strip at the sheet's foot (processing_choice.js): the shared strip, Default beside it while there is a
    choice to leave, then what the choice applies to and what the tier under the mouse or focus means on this route,
    in a box as tall as its tallest explanation (hidden copies stacked in its one cell), so nothing jumps while a
-   pointer moves. A tier taken without a choice of its own wears a ring; one this route does not list is quieter. */
+   pointer moves. The strip holds only the tiers its route does not prove absent, and none where only Standard is
+   left. A tier taken without a choice of its own wears a ring; one not confirmed here, or listed by some accounts
+   only, is dotted under its word; a chosen or inherited one this route does not list is quieter. */
 .model-tier {
     flex: 0 0 auto;
     margin-top: var(--space-2);
@@ -5969,7 +5971,9 @@ body.keyboard-open .model-sheet[data-sheet="bottom"] {
 .model-tier-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .model-tier-seg[data-resolved="true"] { box-shadow: inset 0 0 0 1px rgba(var(--neutral-rgb), 0.28); color: var(--text-primary); }
 .model-tier-seg[data-support="unlisted"]:not([aria-checked="true"]) { color: var(--text-disabled); }
-.model-tier :is(.model-tier-seg, .model-tier-default)[aria-disabled="true"] { cursor: progress; opacity: var(--control-disabled-opacity); }
+.model-tier-seg:is([data-support="unknown"], [data-support="some"]) { text-decoration: underline dotted; text-underline-offset: 3px; }
+.model-tier :is(.model-tier-seg, .model-tier-default)[aria-disabled="true"] { cursor: default; opacity: var(--control-disabled-opacity); }
+.model-tier[aria-busy="true"] [data-tier] { cursor: progress; }
 .model-tier-scope, .model-tier-means, .model-tier-sizer { margin: 0; overflow-wrap: anywhere; }
 .model-tier-scope { margin-top: var(--space-2); color: var(--text-secondary); font-size: var(--type-meta); }
 .model-tier-meansbox { display: grid; margin-top: 2px; }

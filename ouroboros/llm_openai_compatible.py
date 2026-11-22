@@ -33,8 +33,7 @@ from ouroboros.llm_capability_policy import (
     _OPTIONAL_DROPPABLE_PARAMS,
     normalize_reasoning_effort,
 )
-from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
-from ouroboros.llm_routing import _resolve_or_provider
+from ouroboros.llm_routing import _resolve_or_provider, openrouter_chat_routing
 from ouroboros.provider_models import (
     normalize_deepseek_reasoning_effort,
     normalize_minimax_reasoning_effort,
@@ -47,7 +46,7 @@ from ouroboros.request_wire_recovery import (
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
-from ouroboros._usage_response import normalize_go_price, observed_processing_mode, reported_price
+from ouroboros._usage_response import normalize_go_price, observed_processing_mode, response_reported_price
 from ouroboros.event_usage import REPORTED_TOKENS_KEY
 
 
@@ -329,39 +328,9 @@ class _OpenAICompatibleLaneMixin:
             # OpenRouter request fields; session_id provides sticky routing.
             extra_body["session_id"] = cache_identity
 
-        if cache_model.startswith("anthropic/"):
-            extra_body["provider"] = {
-                "require_parameters": True,
-            }
-        # Replayed reasoning is endpoint-bound only when the artifact itself is SEALED
-        # (opaque or signed, and not vouched by the signed-portable roster) — see
-        # transcript_has_sealed_reasoning. Readable text/summary artifacts replay fine on
-        # any sibling endpoint of the same model, so they must stay failover-eligible:
-        # pinning them surfaces one upstream's rate-limit while healthy siblings idle
-        # (issue #468). Routing is sticky, so the prompt cache stays warm on the primary
-        # and only a real outage triggers the cross-provider failover. The reactive 400
-        # strip-and-retry (_openrouter_signature_retry_kwargs) remains the safety net for a
-        # misclassification in either direction.
-        if transcript_has_sealed_reasoning(messages, cache_model):
-            provider_body = extra_body.setdefault("provider", {})
-            if isinstance(provider_body, dict):
-                provider_body["allow_fallbacks"] = False
-        # Owner-configured OpenRouter provider routing (resilience/repro): the global
-        # setting with this connection's own ``provider_routing`` merged over it. Gap-merge:
-        # NEVER override the anthropic require_parameters pin or the (sealed-artifact)
-        # reasoning-continuity allow_fallbacks=False pin set above. Affects same-model
-        # provider routing only — it never changes the MODEL, so the P3 reviewer context
-        # floor is untouched.
-        _or_provider = _resolve_or_provider(target.get("provider_routing"))
-        if _or_provider:
-            provider_body = extra_body.setdefault("provider", {})
-            if isinstance(provider_body, dict):
-                for _k, _v in _or_provider.items():
-                    if _k == "require_parameters" and provider_body.get("require_parameters"):
-                        continue
-                    if _k == "allow_fallbacks" and provider_body.get("allow_fallbacks") is False:
-                        continue
-                    provider_body[_k] = _v
+        routing = openrouter_chat_routing(target, messages)
+        if routing:
+            extra_body["provider"] = routing
 
         kwargs: Dict[str, Any] = {
             "model": resolved_model,
@@ -457,6 +426,8 @@ class _OpenAICompatibleLaneMixin:
         A Responses reply is read through ``openai_responses.completion_view`` and leaves with its exact items
         and terminal facts attached (``attach_reply_facts``); every other step is the one Chat takes."""
         responses_facts = None
+        cost, cost_invalid, cost_basis = response_reported_price(
+            resp_dict, dict(resp_dict.get("usage") or {}), getattr(wire_completion, "total_cost_usd", None))
         if responses_route(target):
             resp_dict, responses_facts = completion_view(resp_dict)
         usage = dict(resp_dict.get("usage") or {})
@@ -466,12 +437,15 @@ class _OpenAICompatibleLaneMixin:
             normalize_go_price(usage)
         else:
             # What the reply consumed (a BYOK reply: gateway charge + provider-billed share).
-            usage["cost"], cost_invalid, cost_basis = reported_price(usage, resp_dict.get("total_cost_usd"))
+            usage["cost"] = cost
+            usage.pop("cost_estimated", None)  # Only the host's estimator below sets this flag.
             usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
             if cost_invalid:
                 usage["cost_invalid"] = True
             if cost_basis:
                 usage["cost_basis"] = cost_basis
+        usage.pop("processing", None)  # The adapter constructs this receipt, including on compatible endpoints.
+        usage.pop("service_tier", None)
         if "service_tier" in resp_dict:
             usage["service_tier"] = resp_dict["service_tier"]
         attach_processing_receipt(target, usage)
@@ -627,7 +601,7 @@ class _OpenAICompatibleLaneMixin:
             from ouroboros._usage_settlement import settled_cost_facts
 
             usage.update(settled_cost_facts(usage))  # its attempt row's pinned amount, never a fresh price
-        if (usage.get("cost") is None and not usage.get("cost_invalid")
+        if (usage.get("cost") is None and not usage.get("cost_invalid") and not usage.get("provider_reported_cost_only")
                 and (usage.get("prompt_tokens") or usage.get("completion_tokens"))):
             from ouroboros.pricing import estimate_cost_optional
 
@@ -752,26 +726,39 @@ def openrouter_web_search_server_tool(
     accounting_scope: Optional[UsageScope] = None,
     timeout: Optional[float] = None,
     processing_preference: str | None = None,
+    target: Optional[Dict[str, Any]] = None,
     _recovery: Any,
 ) -> Any:
-    """Run OpenRouter's provider-owned web_search server tool."""
+    """Run OpenRouter's provider-owned web_search server tool.
+
+    ``target`` is the search leg's resolved connection (``llm_routing.resolve_target``): the send carries its
+    endpoint, credential, headers, redirect rule, billing identity (``usage_model``) and provider routing, merged
+    as a chat send merges it (``_resolve_or_provider``), so a named connection's restrictions hold and it is
+    priced as that connection. Without one: the built-in public connection with ``api_key`` and the app identity.
+    The tier is projected as on any send; the server tool's per-use charge leaves the reservation unknown
+    (``llm_routing.carries_add_on_charge``)."""
 
     from ouroboros.net_transport import web_search_openai_client
     from ouroboros.model_slots import resolve_processing_preference
     from ouroboros.usage_accounting import current_usage_scope
     from dataclasses import replace
 
-    target = {"provider": "openrouter", "usage_model": model, "resolved_model": model,
-              "processing_preference": resolve_processing_preference("websearch", override=processing_preference)}
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
+
+    target = dict(target) if target is not None else {
+        "provider": "openrouter", "usage_model": model, "resolved_model": model,
+        "base_url": OPENROUTER_BASE_URL, "api_key": api_key, "default_headers": dict(OPENROUTER_APP_HEADERS)}
+    target["processing_preference"] = resolve_processing_preference("websearch", override=processing_preference)
 
     client = web_search_openai_client(
-        api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
+        api_key=target["api_key"],
+        base_url=target["base_url"],
         timeout=timeout,
-        default_headers=dict(OPENROUTER_APP_HEADERS),
+        default_headers=dict(target.get("default_headers") or {}),
+        follow_redirects=target.get("follow_redirects") is not False,
     )
     payload = dict(
-        model=model,
+        model=str(target.get("resolved_model") or model),
         messages=[{"role": "user", "content": query}],
         tools=[{
             "type": "openrouter:web_search",
@@ -781,9 +768,12 @@ def openrouter_web_search_server_tool(
             },
         }],
     )
+    routing = _resolve_or_provider(target.get("provider_routing"))
+    if routing:
+        payload["extra_body"] = {"provider": routing}
     apply_processing_preference(target, payload)
     if timeout is not None:
         payload["timeout"] = float(timeout)  # the leg's own bound: each send narrows it, never replaces it (#572)
     scope = replace(accounting_scope or current_usage_scope() or UsageScope(), source="web_search.openrouter")
     with usage_scope(scope):
-        return _recovery(client.chat.completions.create, payload, target)
+        return _recovery(client.chat.completions.create, payload, target, search_server_tool=True)

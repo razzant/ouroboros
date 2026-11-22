@@ -84,7 +84,9 @@ export function catalogReadFailed(data = {}) {
     return data?.read_state ? true : !Array.isArray(data.items);
 }
 
-/** Enrich the existing editor state; a read gap cannot erase last-known choices. */
+/** Enrich the existing editor state; a read gap cannot erase last-known choices. `current` is the answer this read
+ *  itself gave (null when it listed nothing): what a gap keeps from an earlier read is shown and proves nothing of
+ *  what an account or a transport serves now (chat_model_routes.js `tiers`). */
 export function mergeModelCatalog(previous = {}, incoming = {}) {
     const read_state = catalogReadState(incoming);
     const retain = read_state !== 'ok';
@@ -106,6 +108,7 @@ export function mergeModelCatalog(previous = {}, incoming = {}) {
         errors: incoming.errors || (incoming.error ? [{ error: incoming.error }] : []),
         items: merge('items', (item) => JSON.stringify([item.value || item.id, item.credential_profile_id || ''])),
         model_sources: merge('model_sources', (source) => source.id),
+        current: 'current' in incoming ? incoming.current : Array.isArray(incoming.items) ? incoming : null,
     };
 }
 
@@ -148,6 +151,14 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
     }
     return {
         get(query) { return snapshots.get(String(query)); },
+        invalidate(query) {
+            const key = String(query);
+            const pending = requests.get(key);
+            pending?.controller.abort();
+            requests.delete(key);
+            snapshots.delete(key);
+            return Boolean(pending);
+        },
         read(query, { force = false, joinPending = false } = {}) {
             const key = String(query);
             const pending = requests.get(key);
@@ -155,19 +166,27 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
             if (!force && snapshots.has(key)) return Promise.resolve(snapshots.get(key));
             pending?.controller.abort();
             const controller = new AbortController();
-            const promise = Promise.resolve().then(() => fetchScope(key, controller.signal)).then(data => {
+            let timer;
+            const timeout = new Promise(resolve => {
+                timer = setTimeout(() => {
+                    resolve({ read_state: 'transport', errors: [{ error: 'Model catalog read timed out.' }] });
+                    controller.abort();
+                }, MODEL_CATALOG_TIMEOUT_MS);
+            });
+            const read = Promise.resolve().then(() => fetchScope(key, controller.signal)).then(data => {
                 const field = key === 'view=sources' ? 'model_sources' : 'items';
                 if (!Array.isArray(data?.[field])) throw new Error(data?.error || 'Model catalog response is unreadable.');
                 return data;
-            }).catch(error => ({ read_state: 'transport', errors: [{ error: error.message || String(error) }] }))
+            }).catch(error => ({ read_state: 'transport', errors: [{ error: error.message || String(error) }] }));
+            const promise = Promise.race([read, timeout])
                 .then(data => {
-                    if (controller.signal.aborted) return;
+                    if (requests.get(key)?.controller !== controller) return;
                     requests.delete(key);
                     const merged = mergeModelCatalog(snapshots.get(key), data);
                     snapshots.set(key, merged);
                     onUpdate(key, merged);
                     return merged;
-                });
+                }).finally(() => clearTimeout(timer));
             requests.set(key, { controller, promise });
             return promise;
         },
@@ -301,6 +320,12 @@ function fillCatalogDatalist(data) {
         }
     }
     broadcastCatalog(data);
+}
+
+/** A connection changed: a catalog read already out answers for the earlier source, so it is not broadcast (nor
+ *  adopted by any reader); the next refresh is this source's. */
+export function invalidateModelCatalogReads() {
+    catalogRefreshSeq += 1;
 }
 
 export async function refreshModelCatalog({ button } = {}) {

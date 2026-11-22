@@ -13,7 +13,9 @@
  * applies; a tier press is its own act and moves nothing else. A refusal is said in the sheet in the owner's words,
  * and one whose decision the server saved (a 503) offers the same request again. Without the control the fact is plain
  * text: a control is the server's decision and is never guessed here. Beside the model the fact names the work's tier
- * when it is not Standard, and what its newest call was served as when that differs (`works[].processing`).
+ * when it is not Standard, and what its newest call came to when that differs (`works[].processing`). The sheet's
+ * strip uses the same next route as the chosen row and endpoint read: Main's bound account for a follower, Auto
+ * for an explicit lead, otherwise no account assumed.
  */
 import { taskModel } from './api_client.js';
 import { renderLiveCardMeta } from './chat_activity.js';
@@ -24,14 +26,12 @@ import { isCoarsePointer, isStackLayout } from './layout.js';
 import { modelCatalog } from './model_catalog_store.js';
 import { closeModelSheet, openModelSheet } from './model_sheet.js';
 import { sourceMark } from './model_source_mark.js';
-import {
-    offersUltrafast, receiptWords, resolvedTier, servedWords, tierExplanation, tierNamed, tierSupport, tierWord,
-} from './processing_choice.js';
+import { receiptWords, resolvedTier, routeTiers, servedWords, tierNamed, tierWord } from './processing_choice.js';
 import { modelWaitReasonLabel, modelWaitRoleLabel } from './model_wait.js';
 import { controlIcon } from './page_icons.js';
 import { showToast } from './toast.js';
 import { bindPopoverPosition } from './ui_interactions.js';
-import { describeRoute, normalizeRoute, sameRoute, shortName } from './chat_model_routes.js';
+import { describeRoute, normalizeRoute, routeKey, sameRoute, shortName } from './chat_model_routes.js';
 
 // When a change of a work's model takes effect, in the answer's own code (`applied`).
 export const APPLIED_WORDS = Object.freeze({
@@ -72,6 +72,8 @@ const REFUSAL_WORDS = Object.freeze({
 });
 // How many recent models the sheet offers under Main and the pinned ones.
 const RECENT_ROWS = 3;
+// These admitted leads use Auto. A wait-card move is not such a lead, even though it says `owner`.
+const EXPLICIT_LEADS = new Set(['room', 'owner', 'owner_words', 'owner_press', 'place', 'circle']);
 let serial = 0;
 let openPopover = null;  // one sheet in the window: opening another closes it
 
@@ -125,7 +127,8 @@ export function leadView(lead, { index = null, since = '', queued = false } = {}
     const primary = normalizeRoute(lead.primary);
     const pending = normalizeRoute(lead.pending);
     // A newly accepted primary can be published before the acting call changes (CLIENT_CONTRACT §5).
-    const awaitingPrimary = Boolean(primary && pending && sameRoute(primary, pending) && !sameRoute(pending, said.route));
+    const awaitingPrimary = sameRoute(primary, pending) && (!sameRoute(pending, said.route)
+        || Boolean(lead.pending.basis && lead.pending.basis !== basis));
     // What the acting route left: Main for a work that followed it, else the model that was the work's own.
     const leftMain = primary && lead.primary.basis === 'main';
     const leftName = primary ? (leftMain ? 'Main' : shortName(primary)) : '';
@@ -257,6 +260,15 @@ export function workTier(view) {
     return resolvedTier({ choice: own, follows, tiers: view?.tiers || null });
 }
 
+// The chooser acts on the next call; the card's fact and last receipt stay on the acting/observed route.
+function nextChoice({ lead, said, main }) {
+    const pending = normalizeRoute(lead.pending);
+    const basis = pending ? lead.pending.basis : said.basis;
+    const follows = basis === 'main';
+    return { route: pending || (follows && main) || said.said.route, follows, pending,
+        explicit: EXPLICIT_LEADS.has(basis) && Boolean(pending || lead.cause !== 'wait_card') };
+}
+
 /**
  * Paints one card's model fact. `view` is `{ lead, target, main, queued, since, processing, tiers }`: the published
  * fact, the task id the server's `model` control acts on ('' when it offers none), Main's route, whether the work has
@@ -297,8 +309,8 @@ export function paintCardModel(record, view, deps = {}) {
     state.tier.hidden = !tierText;
     // The receipt in full (asked, sent, served, a provider's own words) is the card's Details line, not the meta line's.
     const receipt = receiptWords(state.view.processing?.last);
-    const detail = receipt ? fmt('{tier} · last call: {receipt}', { tier: state.view.processing?.choice ? tierWord(tier)
-        : fmt('Default · {tier}', { tier: tierWord(tier || 'standard') }), receipt }) : '';
+    const detail = receipt ? fmt('{tier} · last call: {receipt}', { tier: state.view.processing?.choice || !tier ? tierWord(tier)
+        : fmt('Default · {tier}', { tier: tierWord(tier) }), receipt }) : '';
     const detailChanged = (record.processingDetail || '') !== detail;
     record.processingDetail = detail;
     // Whose model this is rides the node as its look: the default is quiet, a choice stronger, a fallback amber.
@@ -387,10 +399,17 @@ export function openCardModel(record) {
     let sheet = null;
     let again = null;  // the refused request a 503 may send again, under its own id
     let unsubscribe = () => {};
+    let detailAsked = null;  // the routed value whose own endpoints this sheet asked for
     const view = () => state.view;
-    // An accepted act the running call has not reached yet (`lead.pending`) is this work's choice already.
-    const pending = () => normalizeRoute(view().lead.pending);
-    const follows = () => view().said.basis === 'main' && !pending();
+    const next = () => nextChoice(view());
+    function readTierDetail() {
+        const { route } = next();
+        const asking = `${routeKey(route)}|${store.detailEpoch?.() ?? ''}`;  // again after another connection's drop
+        if (asking === detailAsked) return;
+        detailAsked = asking;
+        void store.readDetail?.(route);
+    }
+    const follows = () => next().follows;
 
     async function run(action, route = null, requestId = globalThis.crypto?.randomUUID?.() || `card-model-${Date.now()}-${++serial}`,
         tier = undefined) {
@@ -438,8 +457,9 @@ export function openCardModel(record) {
     // Main's row follows Main; any other row is that route, Main's model now included (a model row is always itself).
     // The route still serving a pending switch is a choice again: it cancels the switch before the next step.
     const pick = (route) => {
-        if (!route) return follows() ? close({ focus: true }) : run('follow');
-        if (view().said.basis !== 'main' && !view().said.fallback && !pending() && sameRoute(route, view().said.said.route)) return close({ focus: true });
+        const choice = next();
+        if (!route) return choice.follows ? close({ focus: true }) : run('follow');
+        if (!choice.follows && !view().said.fallback && !choice.pending && sameRoute(route, choice.route)) return close({ focus: true });
         return run('set', route);
     };
 
@@ -447,7 +467,7 @@ export function openCardModel(record) {
         const now = view();
         const said = now.said;
         let heading = said.fallback
-            ? [said.awaitingPrimary ? `${said.name} · ${said.pending}`
+            ? [said.awaitingPrimary ? [said.name, said.pending].filter(Boolean).join(' · ')
                 : said.leftName ? fmt(said.since ? 'Left {model} at {time}' : 'Left {model}', { model: said.leftName, time: said.since })
                     : said.name, said.cause].filter(Boolean).join(' · ')
             : [tr('model.popover.title', 'Model for this work'), said.why || basisWords(said.basis),
@@ -513,21 +533,19 @@ export function openCardModel(record) {
     // The strip's words: this work's own tier from its next call (`Applies when it starts.` for a queued one).
     const tierView = () => {
         const now = view();
-        const route = now.said.said.route;
+        const { route, follows, explicit, pending } = next();
         const own = String(now.processing?.choice || '');
-        const tier = workTier(now);
-        const stated = own ? tierWord(own) : fmt('Default · {tier}', { tier: tierWord(tier || 'standard') });
+        const tier = !pending || typeof now.processing?.resolved === 'string' ? workTier(now)
+            : (follows || explicit) ? resolvedTier({ choice: own, follows, tiers: now.tiers || store.tiers?.() }) : own;
+        const stated = own || !tier ? tierWord(own || tier) : fmt('Default · {tier}', { tier: tierWord(tier) });
         // The tier this work runs on, its own or Default's (Main's included), reaches its new subagents without one.
         const scope = now.queued ? tr('processing.scope.work_queued_helpers', 'for this work when it starts, and its new subagents without a tier of their own')
             : tr('processing.scope.work_helpers', 'for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs');
-        return {
-            choice: own, resolved: tier, busy,
-            ultrafast: offersUltrafast({ support: tierSupport(store.index(), route, 'ultrafast'), choice: own }),
-            scope: `${stated} · ${scope}`,
-            supportOf: (choice) => tierSupport(store.index(), route, choice),
-            explain: (choice) => tierExplanation(choice, { support: tierSupport(store.index(), route, choice), route,
-                sourceLabel: now.said.said.sourceLabel }),
-        };
+        const account = follows ? store.mainAccount?.(route) ?? null : explicit ? '' : null;
+        const index = store.index();
+        const here = routeTiers({ index, route, account,
+            detail: store.detail?.(route) || null, sourceLabel: describeRoute(index, route).sourceLabel });
+        return { choice: own, resolved: tier, busy, scope: `${stated} · ${scope}`, ...here };
     };
 
     const onActs = (event) => {
@@ -554,6 +572,7 @@ export function openCardModel(record) {
         sync() {
             if (closed) return;
             if (!state.view?.target || record.cardModel !== state) { close({ focus: false }); return; }
+            readTierDetail();
             paintHead();
             sheet?.paint();
         },
@@ -564,8 +583,7 @@ export function openCardModel(record) {
         stack: deps.stack || (() => false), coarse: deps.coarse, returnFocus: state.fact,
         list: {
             store, main: () => view().main, follows,
-            // The row that is this work's now: a pending switch's, else Main's while it follows Main, else its own.
-            current: () => pending() || (view().said.basis === 'main' ? view().main : view().said.said.route),
+            current: () => next().route,
             recents: () => store.recents().slice(0, RECENT_ROWS),
             mainRow: 'follow',
             tierOf: (_route, { main = false } = {}) => String(view().processing?.choice || '')
@@ -575,12 +593,14 @@ export function openCardModel(record) {
             onRoute: pick,
             onPin: (route, pinned) => store.setPinned(route, pinned).catch((error) => deps.toast(error?.message || 'Could not change the pinned models.', 'error')),
         },
-        tier: { onChoose: (tier) => run('processing', null, undefined, tier), view: tierView },
+        tier: { onChoose: (tier) => run('processing', null, undefined, tier), view: tierView,
+            mainRoute: () => { const { follows, route } = next(); return follows ? route : null; } },
         onClose: () => { if (!closed) close({ focus: false }); },
     });
     void store.read();
     void store.readRecents();
-    unsubscribe = store.subscribe(() => { if (!closed) { paintHead(); sheet?.paint(); } });
+    unsubscribe = store.subscribe(() => { if (!closed) { readTierDetail(); paintHead(); sheet?.paint(); } });
+    readTierDetail();
     acts.addEventListener('click', onActs);
     retry.addEventListener('click', onRetry);
     state.fact.setAttribute('aria-expanded', 'true');
