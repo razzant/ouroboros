@@ -125,6 +125,21 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(
     assert "The host's measure of this start" in selected.low_projection.system_content_json
 
 
+def test_a_max_start_the_window_took_to_nano_is_named_nano_in_its_facts(tmp_path, monkeypatch):
+    """Review round 1 (Astra 4): the owner's shape at 92K leaves even the maps frame no room, so its Max start runs in
+    Nano; its captured facts name Nano, temporarily, for the window, never the Low words, while a start the window took
+    to Low keeps them."""
+    from tests import _memory_scale_fixture as scale
+
+    nano = scale.build(tmp_path, monkeypatch)
+    assert nano.initial_mode == "nano" and _fact(nano)["cause"] in ("crowded", "route")
+    line = memory_facts(nano, "nano")
+    assert f"; Nano, temporarily, for the window, cause {mf.lowered_cause(_fact(nano))}" in line and "Low, temp" not in line
+    core = _core()
+    low = _start(core, _crowded_window(_fact(_start(core, 2_000_000, monkeypatch))), monkeypatch)
+    assert low.initial_mode == "low" and "; Low, temporarily, for the window, cause memory; " in memory_facts(low, "low")
+
+
 def test_reprojected_restore_names_its_captured_build_not_an_unknown_original_start(monkeypatch):
     built = _start(_core(), 2_000_000, monkeypatch)
     restored = cf.restored_start(built, None)

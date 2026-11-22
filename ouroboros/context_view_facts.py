@@ -81,8 +81,9 @@ def memory_facts(plan, mode, messages=()):
         if room.get("cause") == "held":
             line += "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room.get("cuts") else "")
         elif room.get("cause") in ("crowded", "route"):  # any other value is a measure without a settled cause
-            cause = floor.lowered_cause(room)
-            line += f"; {floor.TEMPORARY_LOW}, cause {cause}" + (
+            cause = floor.lowered_cause(room)  # Nano where protected words left the maps frame no room
+            ran = "Nano, temporarily, for the window" if mode == "nano" else floor.TEMPORARY_LOW
+            line += f"; {ran}, cause {cause}" + (
                 ", a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here"
                 if cause == "route" else "")
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
