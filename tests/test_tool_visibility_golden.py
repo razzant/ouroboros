@@ -218,9 +218,11 @@ def _catalog_patches(name: str, spec: dict, root: pathlib.Path):
         mp.setattr(extension_loader, "is_extension_live", lambda skill, *_a, **_k: live.get(skill, False))
         mp.setattr(extension_dispatch, "_adopt_extension_generation", lambda _ctx: {"action": "in_sync"})
         if spec.pop("_runtime_mode", "") == "cyber_pro":
-            from tests.test_acting_subagents import _enable_cyber_mode_for_test
+            from ouroboros.config import get_runtime_mode
 
-            _enable_cyber_mode_for_test(mp)
+            # The product's own scale must hold the mode; the row never adds it for itself.
+            mp.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+            assert get_runtime_mode() == "cyber_pro", "the effective runtime mode is not Cyber Pro"
         if spec.pop("_unavailable", False):
             mp.delenv("GITHUB_TOKEN", raising=False)
             mp.setattr(github, "github_cli_configured", lambda: False)
