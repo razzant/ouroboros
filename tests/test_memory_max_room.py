@@ -358,17 +358,46 @@ def test_a_start_without_a_known_window_asks_once_more_and_is_never_a_held_max(m
     learned, asked = build(unknown, known)
     assert asked == 2 and learned.start == ("max", "") and _fact(learned)["cause"] == "held"
     assert mode_words(learned, "max") == "max"
-    # A window learned later (a rebind, a refusal) keeps the start's record but is a measured Max in the facts row.
-    rebound = dataclasses.replace(plan, window_record=learned.window_record, window_tokens=learned.window_tokens)
-    assert rebound.start == ("max", "unmeasured") and mode_words(rebound, "max") == "max"
-    # Max on a window the plan does not know is not measured, whatever its start: a held start moved onto it too.
-    moved = dataclasses.replace(learned, window_record=plan.window_record, window_tokens=plan.window_tokens)
-    assert moved.start == ("max", "") and mode_words(moved, "max") == "max (window not known: Max not measured)"
     # A second ask that fails keeps the first answer: its route and evidence, never the failed read's.
     kept, asked = build(unknown, RuntimeError("route read failed"))
     assert asked == 2 and kept.start == ("max", "unmeasured") and kept.route_fp == "r" and kept.model == "test"
     held, asked = build(known)
     assert asked == 1 and held.start == ("max", "")  # a known window is asked once
+
+
+def test_max_rebound_onto_an_unknown_window_is_not_measured_as_its_window_text_says(tmp_path, monkeypatch):
+    """Review round 2 (Carbon 1, Opus 1, Astra 3): a route rebind onto a window nothing names drops the plan's window
+    record (``reproject_for_route``); the facts row's mode reads the window as its window text does
+    (``context_view_facts.row_window``), so a held start and an unmeasured start rebound there both say Max is not
+    measured, and rebound onto a known window both say Max. A window learned later keeps the start."""
+    from ouroboros import context, loop
+    from ouroboros.context_view_facts import mode_words, window_fact
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    unknown = SimpleNamespace(route_fp="rebind-unknown", status="failed", stale=True, window_tokens=0)
+    known = ce.CapabilityEvidence(2_000_000, "confirmed", "metadata", "rebind-known")
+
+    def start(evidence):
+        return cf.build_context_fit_plan(None, _core(), {"id": "room01", "usage_category": "consciousness"},
+            preferred_mode="max", route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"}, evidence))
+
+    def rebind(plan, evidence):
+        tools = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+        tools._ctx.task_id = "rebind"
+        monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: ({"provider": "test", "model": "test"}, evidence))
+        return loop._rebind_context_fit_plan(plan, tools, plan.messages_for("max"), model="test", use_local=False,
+                                             tool_schemas=[])[0]
+
+    held, unmeasured = start(known), start(unknown)
+    assert held.start == ("max", "") and unmeasured.start == ("max", "unmeasured")
+    for plan in (held, unmeasured):
+        moved, back = rebind(plan, unknown), rebind(plan, known)
+        assert (moved.initial_mode, moved.start, back.initial_mode, back.start) == ("max", plan.start, "max", plan.start)
+        assert mode_words(moved, "max") == "max (window not known: Max not measured)"
+        assert window_fact(moved, moved.output_reserve_tokens).startswith("window unknown;")  # the two labels agree
+        assert mode_words(back, "max") == "max"
+        assert window_fact(back, back.output_reserve_tokens).startswith("window 2,000,000 total:")
 
 
 @pytest.mark.parametrize("ask", ["direct", "beside the build", "at the usual point"])

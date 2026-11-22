@@ -116,8 +116,9 @@ def mode_words(plan, mode):
     """The facts row's mode: a Low the window took from my human's Max named so beside that choice, with its recorded
     cause (``context_measurement.mode_cause``) and, where this capture's Max room lost its books to that same cause
     (a cold restore's capture may have lowered for another), its shortfall on that cause's basis
-    (``memory_floor.lowered_need``); Max on a window the plan does not know says Max is not measured, whatever its
-    start, and a window learned later (a rebind, a refusal) is a measured Max."""
+    (``memory_floor.lowered_need``); Max says Max is not measured where the row's own window text knows no window
+    (``row_window``), whatever its start, a rebind or restore onto an unknown window too, and a window learned later
+    (a rebind, a refusal) is a measured Max."""
     preferred = str(getattr(plan, "preferred_mode", "") or "")
     if mode == "low" and preferred == "max":
         from ouroboros.context_measurement import mode_cause
@@ -128,8 +129,7 @@ def mode_words(plan, mode):
         short = floor.lowered_need(room)[1] - room["window"] if same else 0
         return (f"{floor.TEMPORARY_LOW.lower()} (my human's mode: max)" + (f"; cause {cause}" if cause else "")
                 + (f"; short {short:,}{_SHORT_BASIS.get(cause, '')}" if short > 0 else ""))
-    record = getattr(plan, "window_record", None)
-    if mode == "max" and record is not None and getattr(record, "usable", None) is None:
+    if mode == "max" and plan is not None and row_window(plan).usable is None:
         return "max (window not known: Max not measured)"
     return mode
 
@@ -399,10 +399,15 @@ def window_projection(record, *, under_way: bool = False):
                 basis=limit.basis if limit else "")
 
 
-def window_fact(plan, reserve):
+def row_window(plan, reserve=0):
+    """The plan's window as its facts row reads it, one reading for the window text and the mode's words: a rebind
+    onto an unknown window drops the plan's record, and a refusal another work recorded is read from the store."""
     from ouroboros.context_window import resolve_window
 
+    return resolve_window(plan, int(reserve or 0), bound=getattr(plan, "window_witness_bound", True))
+
+
+def window_fact(plan, reserve):
     if plan is None:
         return ""
-    record = resolve_window(plan, int(reserve or 0), bound=getattr(plan, "window_witness_bound", True))
-    return window_projection(record, under_way=True)["text"]
+    return window_projection(row_window(plan, reserve), under_way=True)["text"]
