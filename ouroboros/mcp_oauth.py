@@ -72,10 +72,20 @@ def _path(server_id: str):
     return config.DATA_DIR / "state" / "mcp" / "oauth" / f"server-{server_id}.json"
 
 
+_FORMAT = 2  # v2: an open sign-in requirement's ``since`` is its start; a v1 writer moved it to every refusal
+
+
 def _load(cfg: Any) -> Dict[str, Any]:
-    """The server's sign-in file; a file written for another address of the same id is not its grant."""
+    """The server's sign-in file; a file written for another address of the same id is not its grant. Every reader
+    and writer comes through here: a v1 file's open requirement reads with its start unknown (``since: None``),
+    its grant, pending sign-in and other fields kept, and the next write stores the current format."""
     doc = read_json_dict(_path(cfg.id)) or {}
-    return doc if doc.get("url") == cfg.url else {}
+    if doc.get("url") != cfg.url:
+        return {}
+    record = doc.get("sign_in") or {}
+    if doc.get("v") != _FORMAT and record.get("state") == SIGN_IN_REQUIRED:
+        doc = {**doc, "sign_in": {**record, "since": None}}
+    return {**doc, "v": _FORMAT}
 
 
 _DRAFT: "contextvars.ContextVar[bool]" = contextvars.ContextVar("mcp_oauth_draft", default=False)
@@ -100,7 +110,7 @@ def _save(cfg: Any, doc: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(path.parent, 0o700)  # a rewrite's temporary file is never readable by another account
-    atomic_write_json(path, {**doc, "v": 1, "url": cfg.url})
+    atomic_write_json(path, {**doc, "v": _FORMAT, "url": cfg.url})
     with contextlib.suppress(OSError):
         os.chmod(path, 0o600)
 
