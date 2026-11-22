@@ -358,7 +358,8 @@ Failure returns `{ok:false, code, error}` with its HTTP status.
 
 The separate `/ws/call/{call_id}` socket carries JSON controls and
 binary PCM16 media. `GET /api/contract` publishes its header, payload limits
-and control-schema names as `call_socket` (`gateway/call_contracts.py`);
+and control-schema names as `call_socket` (`gateway/call_contracts.py`; browser twin
+`web/modules/call_contract_types.js`);
 `call_protocol.py` owns the codec. A peer first sends
 `{type:"hello", protocol:1, role:"owner", mic, speaker, rate, video?}`.
 Directions may narrow its admitted rights. `mute`, `played`, `context`,

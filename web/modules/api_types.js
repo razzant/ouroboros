@@ -226,11 +226,11 @@
 /** @typedef {import('./client_contract_types.js').ChatInbound} ChatInbound */
 /** @typedef {import('./client_contract_types.js').CommandInbound} CommandInbound */
 /** @typedef {import('./client_contract_types.js').PanicAcceptedOutbound} PanicAcceptedOutbound */
-/** @typedef {import('./client_contract_types.js').CallOpenRequest} CallOpenRequest */
-/** @typedef {import('./client_contract_types.js').CallOpenResponse} CallOpenResponse */
-/** @typedef {import('./client_contract_types.js').CallRefusal} CallRefusal */
-/** @typedef {import('./client_contract_types.js').CallSocketContract} CallSocketContract */
-/** @typedef {import('./client_contract_types.js').ConversationFinishedOutbound} ConversationFinishedOutbound */
+/** @typedef {import('./call_contract_types.js').CallOpenRequest} CallOpenRequest */
+/** @typedef {import('./call_contract_types.js').CallOpenResponse} CallOpenResponse */
+/** @typedef {import('./call_contract_types.js').CallRefusal} CallRefusal */
+/** @typedef {import('./call_contract_types.js').CallSocketContract} CallSocketContract */
+/** @typedef {import('./call_contract_types.js').ConversationFinishedOutbound} ConversationFinishedOutbound */
 /** @typedef {Object} ChatOutbound
  * @property {import('./client_contract_types.js').PresenceContact=} presence_contact
  * @property {{kind:'publication'|'answer'|'closure',state:'owed'|'delivered',reason_code?:string,dismissed?:boolean}=} question_delivery Canonical settlement delivery fact.
