@@ -44,6 +44,9 @@ _NOT_FOUND = "no dialogue row the door reads has this address"
 
 UNSTABLE_READ = "The conversation changed during this read. Start again without snapshot or offset."
 IMPORT_INCOMPLETE = "History import is incomplete. Start again without snapshot or offset after it completes."
+IMPORT_FAILED = "A history segment could not be imported. Retry without snapshot or offset after the import is repaired."
+_UNSTABLE_SAID = {"edit": UNSTABLE_READ, "unstable": UNSTABLE_READ, "import": IMPORT_INCOMPLETE,
+                  "importing": IMPORT_INCOMPLETE, "import_failed": IMPORT_FAILED}
 INVALID_SNAPSHOT = "Invalid snapshot. Use the snapshot from a search response or start again without it."
 
 
@@ -149,9 +152,8 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
                                    visible_only=True)
     if found["refused_kind"] == "malformed":
         raise Refusal(400, "recall_bad_snapshot", INVALID_SNAPSHOT)
-    if found["refused_kind"] in ("unstable", "importing"):
-        raise Refusal(409, "recall_snapshot_changed",
-                      IMPORT_INCOMPLETE if found["refused_kind"] == "importing" else UNSTABLE_READ)
+    if found["refused_kind"] in ("unstable", "importing", "import_failed"):
+        raise Refusal(409, "recall_snapshot_changed", _UNSTABLE_SAID[found["refused_kind"]])
     if found["refused"]:
         raise Refusal(409, "recall_snapshot_changed", "the conversation or the query changed since this snapshot; "
                       "no mixed page was returned: start again without snapshot and offset")
@@ -164,7 +166,7 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
         following = [*same, ("count", str(count)), ("offset", str(offset + len(hits))), ("snapshot", current)]
     notes = [_outward(note) for note in found["notes"]]
     if current is None:  # no continuation of a capture that moved or is still importing
-        notes.append(IMPORT_INCOMPLETE if found.get("unstable") == "import" else UNSTABLE_READ)
+        notes.append(_UNSTABLE_SAID.get(found.get("unstable") or "edit", UNSTABLE_READ))
     labels = RoomLabelResolver(root)
     return {"mode": "search", "words": list(words), "room_id": room_text, "voice": voice, "order": order or "newest",
             "total": found["total"], "observed": found["observed"], "offset": found["offset"], "more": more,
