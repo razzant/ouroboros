@@ -181,13 +181,13 @@ def note_owner_zone(live: Dict[str, Any], metadata: Any, *, own: bool, message: 
     """At owner ingress, inside the write that stamps their activity: my human's own message (``own``) whose client
     reported a valid IANA zone overwrites the one dated fact, dated by the ``ts`` its reference carries (a message
     accepted earlier and processed later keeps when it came), so it never replaces a report dated later; a reference
-    without one is dated ``at``. An item carrying its accepted row (``accepted``) reads the zone that row recorded,
-    since a same-id retry carries the first acceptance's row beside its own metadata; else its metadata's. Any other
-    message leaves the fact as it is."""
+    without one is dated ``at``. The zone is the surface its accepted row (``accepted``) recorded, since a same-id
+    retry carries the first acceptance's row beside its own metadata; a row with none (named external ingress,
+    ``message_ingress.accept_local_message``) leaves the metadata's. Any other message leaves the fact as it is."""
     from ouroboros.client_surface import normalize_timezone_name
 
-    source = accepted if isinstance(accepted, dict) and accepted else metadata
-    surface = source.get("client_surface") if own and isinstance(source, dict) else None
+    carried = [source.get("client_surface") for source in (accepted, metadata) if isinstance(source, dict)]
+    surface = next((item for item in carried if isinstance(item, dict) and item), None) if own else None
     zone = normalize_timezone_name(surface.get("timezone")) if isinstance(surface, dict) else ""
     if not zone:
         return

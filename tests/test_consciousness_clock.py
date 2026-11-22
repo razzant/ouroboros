@@ -194,6 +194,26 @@ def test_a_retry_takes_the_zone_and_its_time_from_the_row_it_repeats(monkeypatch
     assert _intake(monkeypatch, _Ctx(BOUND), telegram)["zone"] == "Europe/Berlin", "no accepted row: its metadata"
 
 
+def test_a_named_delivery_whose_row_recorded_no_surface_takes_the_zone_its_metadata_carries(tmp_path, monkeypatch):
+    """Named external ingress (``message_ingress.accept_local_message``) accepts the row without the surface the
+    bound external owner supplied and queues it beside that metadata: the zone then comes from the metadata, dated by
+    the accepted row's time; a row that recorded a surface still wins (the retry test above)."""
+    import server
+    from supervisor import message_bus
+
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "_route_owner_message", lambda bridge, ctx, incoming: None)
+    bridge = message_bus.LocalChatBridge()
+    row, rejoined = message_bus.accept_local_message(
+        bridge, tmp_path, "hello", chat_id=42, user_id=7, client_message_id="tg:42:1", source="skill:telegram-bridge",
+        task_metadata={"client_surface": {"timezone": "Europe/Berlin"}})
+    assert not rejoined and not row.get("client_surface"), "the named row keeps no surface"
+    ctx = _Ctx({**BOUND, clock.OWNER_ZONE_STATE_KEY: {"zone": "UTC", "at": "2020-01-01T00:00:00+00:00"}})
+    server._process_bridge_updates(bridge, 0, ctx)
+    fact = ctx.state[clock.OWNER_ZONE_STATE_KEY]
+    assert fact["zone"] == "Europe/Berlin" and fact["at"] == fact["message"]["ts"] == row["ts"]
+
+
 def test_a_display_default_sender_in_the_bound_owner_chat_is_not_my_human(monkeypatch):
     """The zone takes the bridge's positive identities, as a task's owner binding does (``bound_external_owner``): in
     a private chat bound as (42, 42), a message without a sender id reads as the chat's id only by display default."""
