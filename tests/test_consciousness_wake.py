@@ -608,6 +608,23 @@ def test_terminals_no_chat_row_announced_reach_the_next_wake_once(tmp_path):
     assert _wake(tmp_path, second.boundary, T0 + 1200).events == ()
 
 
+def test_the_wake_line_of_a_helper_whose_first_coding_attempt_failed_states_only_that(tmp_path):
+    """The wake reads the stored typed fact through the shared verdict: no claim about later runs, the answer or the whole work."""
+    _write(tmp_path, "root1", status="running", ts=_iso(T0 - 900), updated_at=_iso(T0 - 900))
+    _write(tmp_path, "kid1", status="running", ts=_iso(T0 - 800), updated_at=_iso(T0 - 800),
+           parent_task_id="root1", delegation_role="subagent", description="child work")
+    first = _wake(tmp_path, None, T0)
+    fact = {"status": "incomplete", "reason": "initial_execution_unresolved",
+            "initial_execution": {"state": "failed", "run_id": "run-1", "invocation_id": "inv-1"}}
+    _write(tmp_path, "kid1", status="completed", updated_at=_iso(T0 + 100), reason_code="configured_actor_incomplete",
+           outcome_axes={"execution": {"status": "degraded", "reason_code": "configured_actor_incomplete",
+                                       "actor_first_terminal": fact}})
+    line = _lines(_wake(tmp_path, first.boundary, T0 + 600))[0]
+    assert line.startswith("- child task kid1 of root1 Done with warnings")
+    assert "(First coding attempt failed.)" in line
+    assert "no such run" not in line and "came without" not in line
+
+
 def test_a_task_first_recorded_after_the_scan_is_new_and_a_proven_terminal_keeps_its_own_stamp(tmp_path):
     _write(tmp_path, "seed", status="running", ts=_iso(T0 - 10), updated_at=_iso(T0 - 10))
     first = _wake(tmp_path, None, T0)

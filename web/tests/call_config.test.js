@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { deferred } from './helpers/voice_env.js';
 
 async function fixture() {
-    const requests = [], states = [], controller = new AbortController();
+    const requests = [], states = [], settings = [], controller = new AbortController();
     const win = new EventTarget(), doc = new EventTarget();
     doc.hidden = false;
     const previous = { window: globalThis.window, document: globalThis.document };
@@ -13,17 +13,21 @@ async function fixture() {
     globalThis.__callConfig = {
         fetchJson() { const request = deferred(); requests.push(request); return request.promise; },
         mountCall: () => ({ state: value => states.push(value), destroy: () => destroyed++ }),
+        mountCallSettings(form) {
+            const held = { form, released: 0 }; settings.push(held);
+            return { dispose: () => held.released++ };
+        },
     };
     const source = readFileSync(new URL('../../skills/live_conversation/ui/index.js', import.meta.url), 'utf8')
         .replace(/import .*mountCall.*;\n/, 'const { mountCall } = globalThis.__callConfig;\n')
-        .replace(/import .*mountCallSettings.*;\n/, 'const mountCallSettings = () => ({dispose() {}});\n')
+        .replace(/import .*mountCallSettings.*;\n/, 'const { mountCallSettings } = globalThis.__callConfig;\n')
         .replace(/import .*fetchJson.*;\n/, 'const { fetchJson } = globalThis.__callConfig;\n');
     const { mount } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#${Math.random()}`);
     const handle = mount({ skill: 'live_conversation', signal: controller.signal, providers: {
         register(kind, value) { assert.equal(kind, 'conversation'); provider = value; return () => unregistered++; },
     } });
     provider.mountRoom({});
-    return { requests, states, win, doc, controller, provider,
+    return { requests, states, settings, win, doc, controller, provider,
         cleanup() { handle.dispose(); Object.assign(globalThis, previous); delete globalThis.__callConfig; },
         counts: () => ({ destroyed, unregistered }) };
 }
@@ -51,6 +55,32 @@ test('failed config reads keep the last good config; focus, visible return and S
         f.requests.at(-1).resolve({ enabled: false });
         await settled();
         assert.equal(f.states.at(-1).enabled, false, 'only a successful off read disables calls');
+    } finally { f.cleanup(); }
+});
+
+test('another skill mounting preserves a retained Calls form; only its actual release disposes it', async () => {
+    const f = await fixture();
+    try {
+        const form = { dataset: { skill: 'live_conversation', route: 'config' } };
+        const root = { querySelectorAll: () => [form], contains: node => node === form };
+        form.closest = () => root;
+        const signal = (name, host) => f.win.dispatchEvent(Object.assign(new Event(`ouro:extension-settings-${name}`), { detail: { root: host } }));
+        signal('mounted', root);
+        assert.equal(f.settings.length, 1);
+        // The retained host is not in the document. An unrelated page mounts while it waits for Back.
+        f.doc.querySelectorAll = () => [];
+        const other = { querySelectorAll: () => [] };
+        signal('mounted', other);
+        f.win.dispatchEvent(new Event('ouro:extension-settings-mounted'));
+        signal('unmounted', other);
+        assert.equal(f.settings[0].released, 0, 'autosave and device bindings stay with the retained form');
+        // Rendering that same host anew replaces only its own binding; actual closure releases it once.
+        signal('mounted', root);
+        assert.equal(f.settings[0].released, 1);
+        assert.equal(f.settings.length, 2);
+        signal('unmounted', root);
+        f.controller.abort();
+        assert.equal(f.settings[1].released, 1);
     } finally { f.cleanup(); }
 });
 

@@ -1,17 +1,14 @@
 """Impact keeps source anchors useful without spending quotas on import joins."""
 
-import subprocess
-
 import pytest
 
 from ouroboros.tools.registry import ToolRegistry
+from tests._workspace_git import git_repository
 
 
 @pytest.fixture
 def project(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True)
     return repo, ToolRegistry(repo_dir=repo, drive_root=tmp_path / "data")
 
 

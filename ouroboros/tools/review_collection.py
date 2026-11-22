@@ -171,8 +171,22 @@ def collect_change(ctx, reference, continue_seats=None):
     """Join original operations at $0; never freeze, test, apply or consume a cycle. ``continue_seats`` (or a
     recorded continuation this collection finds unsent) sends the chosen successors first, in the same wave."""
     root, attempt, record = resolve_reference(ctx, reference)
-    return collect_wave(ctx, root, attempt, record, continue_seats,
-                        reissue="review_change(review_reference=the original reference)")
+    result = collect_wave(ctx, root, attempt, record, continue_seats,
+                          reissue="review_change(review_reference=the original reference)")
+    return _with_run_answers(ctx, attempt, record, result)[1]
+
+
+def _with_run_answers(ctx, attempt, record, result):
+    """``(record, result)`` with each seat's separately attested run answer and its provenance (``review_history``):
+    retained once the record binds the attempt, then read back whole. Nothing is sent."""
+    from ouroboros.review_history import read_original_run_answers, retain_original_run_answers
+    from ouroboros.tools.review_change import review_result
+
+    revised = retain_original_run_answers(ctx, attempt, record, result)
+    if revised is not None:
+        record, result = revised, {**result, **review_result(revised, reused=result.get("reused", True))}
+    read_original_run_answers(ctx, attempt.task_id, result["rows"])
+    return record, result
 
 
 def _row_deferred(exc):

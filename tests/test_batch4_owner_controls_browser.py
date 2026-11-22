@@ -362,7 +362,7 @@ def _restart_dialog(page, opener):
     dialog = page.locator(".confirm-dialog")
     dialog.wait_for(state="visible", timeout=10_000)
     return (dialog, dialog.locator("#confirm-dialog-title").inner_text(),
-            dialog.locator(".marketplace-modal-body p").inner_text())
+            dialog.locator(".ui-modal-body p").inner_text())
 
 
 def _restart_policy(dialog):
@@ -475,7 +475,7 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 assert "Runnable ones return to the queue" in policy
                 assert "still pausing" not in body and "could not be read" not in body
                 shot("02-header-restart-confirm")
-                dialog.locator(".marketplace-modal-actions [data-confirm-cancel]").click()
+                dialog.locator(".ui-modal-actions [data-confirm-cancel]").click()
                 expect(dialog).to_be_hidden()
                 record["header_body"] = body
                 page.locator('[data-nav-page="settings"]').click()
@@ -494,7 +494,7 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 assert (s_title, s_body, _restart_policy(dialog)) == (title, body, policy), \
                     "header and Settings must open the SAME confirmation"
                 shot("03-settings-restart-confirm")
-                dialog.locator(".marketplace-modal-actions [data-confirm-cancel]").click()
+                dialog.locator(".ui-modal-actions [data-confirm-cancel]").click()
                 expect(dialog).to_be_hidden()
                 assert page.evaluate("window.__restartSends") == 0, "a cancelled confirmation sent /restart"
                 page.locator('[data-nav-page="chat"]').click()

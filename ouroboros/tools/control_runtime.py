@@ -976,6 +976,8 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         return (f"Current available models: {', '.join(available)}. Pass model and/or effort to switch, "
                 "or primary='return'/'wait' to go back to this turn's primary route.")
 
+    if (requested_primary or model) and ctx.active_model_override != getattr(ctx, "active_model", None):
+        ctx._pending_handover_reason = "mind_switch"
     return f"OK: switching to {', '.join(changes)} on next round." + (f" {effort_note}" if effort_note else "")
 
 
@@ -1104,6 +1106,16 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         "wake_summary": (not ignored and summary) or None, "fold_read": True if fold_read and not ignored else None,
         "swarm_comparison": arguments.get("swarm_comparison"), "ignored": ignored or None,
     }, allow_empty=bool(silent))
+
+
+def staged_request_identity(ctx: ToolContext | None, tool: object, arguments: object) -> tuple:
+    """What staging compares (``_stage_checked_completion``), read for one recorded completion call.
+
+    A ``finish_task`` call is the normalized request it stages, so two spellings of one choice (an omitted or an
+    empty unused field, a named default) are one identity, as they were to the staging that admitted both. Another
+    command, or arguments this contract refuses, has no reader here: it is identical only to the same call."""
+    request = completion_request(ctx, arguments)[0] if tool == "finish_task" else None
+    return (tool, None, arguments) if request is None else (tool, request, None)
 
 
 def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "finish_task",

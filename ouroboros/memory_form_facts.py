@@ -49,7 +49,7 @@ def _composition_source(source, room_id=None, *, citation=False):
         result["author"] = source["author"]
     if isinstance(source.get("origin_ref"), dict):
         result["origin_ref"] = {key: source["origin_ref"][key] for key in
-            ("chat_id", "client_message_id", "ts", "text_sha256") if key in source["origin_ref"]}
+            ("chat_id", "client_message_id", "ts", "text_sha256", "row_sha256") if key in source["origin_ref"]}
     room_id = source.get("room_id", room_id)
     if room_id is not None:
         result["room_id"] = room_id

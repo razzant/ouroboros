@@ -4,6 +4,8 @@
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 import { admittedSuccessor, createTaskEpisodes, episodeSpan, noteEpisodeFacts, renderEpisodes } from '../modules/task_episodes.js';
+import { acceptLiveFrame, replayedTerminalRecords } from '../modules/settled_card.js';
+import { renderLiveCardMeta } from '../modules/chat_activity.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 // The browser's text serializer, as utils.escapeHtmlText reads it back.
@@ -33,7 +35,7 @@ test('one attempt\'s facts: when it started, when and how it ended, its cause in
     let episode = noteEpisodeFacts({}, { terminal_time: { attempt: { started_at: '2026-10-10T17:33:00Z' } } });
     assert.equal(episode.started, '2026-10-10T17:33:00Z');
     episode = noteEpisodeFacts(episode, { system_type: 'task_summary', status: 'failed', ts: '2026-10-10T18:15:00Z',
-        reason_code: 'provider_failure', terminal_time: { occurred_at: '2026-10-10T18:15:00Z' } });
+        reason_code: 'provider_failure', terminal_time: { source: 'executor_terminal', occurred_at: '2026-10-10T18:15:00Z' } });
     assert.equal(episode.ended, '2026-10-10T18:15:00Z');
     assert.equal(episode.phase, 'error');
     assert.equal(episode.cause, 'The model provider failed to answer, so the task could not finish');
@@ -47,12 +49,135 @@ test('one attempt\'s facts: when it started, when and how it ended, its cause in
         { name: 'A subject', summary: 'Sent the partial status.', started: '' }, 'the closing sentence is its own fact');
 });
 
+test('an episode keeps its observed cancellation, explicit unknown or legacy receipt across replay', () => {
+    const row = { status: 'cancelled', system_type: 'task_summary', started_at: '2026-10-10T17:00:00Z',
+        ts: '2026-10-12T19:45:00Z' };
+    const unknown = { ...row, terminal_time: { source: 'unknown', occurred_at: null } };
+    const cancel = { ...row, terminal_time: { source: 'supervisor_cancel', occurred_at: '2026-10-10T18:00:00Z' } };
+    const fold = (...rows) => rows.reduce(noteEpisodeFacts, {});
+    const legacy = fold(row);
+    assert.deepEqual([legacy.ended, legacy.endSource, legacy.addedAt], ['', 'unknown', row.ts],
+        'the receipt time is not an occurred_at');
+    const legacyLine = lines();
+    renderEpisodes(legacyLine, [legacy, legacy]);
+    assert.equal((legacyLine.innerHTML.match(/End time not recorded · added /g) || []).length, 2);
+    assert.doesNotMatch(legacyLine.innerHTML, /since /);
+    for (const gap of [unknown, { ...row, terminal_time: null }, { ...cancel, terminal_time: { ...cancel.terminal_time, occurred_at: 'bad' } }]) {
+        for (const episode of [fold(row, gap), fold(gap, row)]) {
+            assert.deepEqual([episode.ended, episode.endSource, episode.addedAt], ['', 'unknown', row.ts]);
+            const el = lines();
+            renderEpisodes(el, [episode, episode]);
+            assert.equal((el.innerHTML.match(/End time not recorded · added /g) || []).length, 2);
+            assert.doesNotMatch(el.innerHTML, /since /);
+        }
+    }
+    for (const episode of [fold(unknown, cancel, row), fold(cancel, row, unknown)]) {
+        assert.equal(episode.ended, cancel.terminal_time.occurred_at);
+        const el = lines();
+        renderEpisodes(el, [{}, episode]);
+        assert.match(el.innerHTML, /Started .* · Cancelled /);
+        assert.doesNotMatch(el.innerHTML, /since |added |Oct 12/);
+    }
+    for (const transient of [{ ...row, task_phase: 'finalizing' }, { ...row, outcome_final: false },
+        { status: 'cancel_requested', ts: row.ts }]) assert.equal(fold(transient).finished, undefined);
+    const reopened = noteEpisodeFacts(legacy, { type: 'task_started', task_attempt: 2,
+        started_at: '2026-10-13T08:00:00Z' });
+    assert.equal(reopened.started, '2026-10-13T08:00:00Z');
+    for (const key of ['ended', 'endSource', 'addedAt', 'finished', 'phase']) {
+        assert.equal(Object.hasOwn(reopened, key), false, `${key} belongs to the old attempt`);
+    }
+    assert.equal(noteEpisodeFacts(reopened, row), reopened, 'an unnumbered late replay restores none of it');
+});
+
 test('an episode\'s time reads as the chat clock does', () => {
     const at = (h, m, d = 10) => new Date(2026, 9, d, h, m).getTime();
     assert.equal(episodeSpan(at(17, 33), at(18, 15)), '17:33–18:15');
     assert.equal(episodeSpan(at(19, 42), at(2, 59, 11)), '19:42–02:59 next day');
     assert.equal(episodeSpan(at(19, 42), ''), 'since 19:42');
     assert.equal(episodeSpan('', ''), '');
+});
+
+test('only positive live evidence reopens an unnumbered terminal', () => {
+    const finished = () => ({ isSubagent: false, finished: true, cardAttempt: undefined,
+        replayedEnding: { attempt: undefined }, root: { dataset: { finished: '1' } } });
+    const start = { type: 'task_started', task_id: 'retry', task_attempt: 2 };
+    const current = finished();
+    assert.equal(acceptLiveFrame(start, false, () => current), true);
+    assert.deepEqual([current.finished, current.cardAttempt, current.root.dataset.finished], [false, 2, '0']);
+    for (const [row, replayActive] of [
+        [{ ...start, _historical: true }, false], [start, true], [{ ...start, task_attempt: undefined }, false],
+    ]) {
+        const doubtful = finished();
+        assert.equal(acceptLiveFrame(row, replayActive, () => doubtful), true);
+        assert.equal(doubtful.finished, true);
+        assert.equal(doubtful.cardAttempt, undefined);
+    }
+    const same = finished();
+    same.cardAttempt = 2;
+    assert.equal(acceptLiveFrame(start, false, () => same), false, 'the same attempt is not positive evidence of a reopen');
+    assert.equal(same.finished, true);
+});
+
+for (const [name, currentAttempt, currentTime, expectedEnd] of [
+    ['a numbered current outcome keeps its own observed time', 2,
+        { v: 1, source: 'executor_terminal', occurred_at: '2026-11-18T10:20:00Z',
+            attempt: { task_attempt: 2, started_at: '2026-11-18T10:00:00Z' } }, '2026-11-18T10:20:00Z'],
+    ['an unnumbered current outcome keeps its own observed time', undefined,
+        { v: 1, source: 'executor_terminal', occurred_at: '2026-11-18T10:20:00Z',
+            attempt: { started_at: '2026-11-18T10:00:00Z' } }, '2026-11-18T10:20:00Z'],
+    ['an unnumbered current outcome with unknown time never borrows the publication\'s', undefined,
+        { v: 1, source: 'unknown', occurred_at: null, attempt: {} }, ''],
+]) test(`replay joins only one attempt's facts: ${name}`, () => {
+    const oldTime = { v: 1, source: 'executor_terminal', occurred_at: '2026-11-18T09:00:00Z',
+        attempt: { task_attempt: 1, started_at: '2026-11-18T08:00:00Z' } };
+    const published = { task_id: 'retry', role: 'system', system_type: 'task_summary', task_attempt: 1,
+        status: 'failed', task_terminal_status: 'failed', reason_code: 'tool_error', terminal_origin: 'host_notice',
+        outcome_phase: 'error', outcome_final: true, wake_summary: 'Old closing sentence.', rounds: 4, tool_calls: 3,
+        ts: '2026-11-18T09:30:00Z', terminal_time: oldTime };
+    const current = { task_id: 'retry', status: 'completed', reason_code: 'final_message', terminal_origin: 'model_final',
+        outcome_phase: 'done', wake_summary: 'New closing sentence.', revision: '2026-11-18T10:30:00Z', rounds: 17,
+        ...(currentAttempt === undefined ? {} : { task_attempt: currentAttempt }), terminal_time: currentTime };
+    const ending = replayedTerminalRecords([{ ...published, current_outcome: current }], new Map(), new Map()).get('retry');
+    assert.ok(ending, 'the separate current outcome can settle the card');
+    assert.equal(ending.detail.status, 'completed');
+    assert.equal(ending.detail.task_attempt, currentAttempt);
+    assert.equal(ending.detail.wake_summary, current.wake_summary);
+    assert.equal(ending.detail.rounds, 17, 'the current result carries its own count, not the publication\'s four');
+    assert.deepEqual(ending.detail.terminal_time, currentTime);
+    const episode = noteEpisodeFacts({}, ending.detail);
+    assert.equal(episode.ended, expectedEnd);
+    assert.equal(episode.summary, current.wake_summary);
+    assert.equal(episode.phase, 'done');
+    assert.notEqual(episode.ended, oldTime.occurred_at);
+});
+
+test('a wholly unnumbered legacy pair keeps its original enrichment', () => {
+    const unknownTime = { v: 1, source: 'unknown', occurred_at: null, attempt: {} };
+    const published = { task_id: 'legacy', role: 'system', system_type: 'task_summary', status: 'failed',
+        task_terminal_status: 'failed', outcome_phase: 'error', outcome_final: true, rounds: 4, tool_calls: 3,
+        ts: '2026-11-18T09:30:00Z', terminal_time: unknownTime };
+    const current = { task_id: 'legacy', status: 'completed', outcome_phase: 'done', revision: '2026-11-18T10:30:00Z',
+        terminal_time: unknownTime };
+    const ending = replayedTerminalRecords([{ ...published, current_outcome: current }], new Map(), new Map()).get('legacy');
+    assert.equal(ending.detail.status, 'completed');
+    assert.equal(ending.detail.rounds, 4, 'the legacy carrier keeps its old metrics beside the current outcome');
+    assert.equal(ending.detail.tool_calls, 3);
+    assert.deepEqual(ending.detail.terminal_time, unknownTime);
+});
+
+test('a receipt backs only a current outcome of its own attempt', () => {
+    const frozen = { status: 'completed', phase: 'warn', task_attempt: 1, ts: '2026-11-18T09:30:00Z',
+        provenance: 'canonical_task_result_after_finalization', wake_summary: 'Old closing sentence.' };
+    const receipt = (current) => ({ task_id: 'retry', role: 'system', system_type: 'task_summary', task_attempt: 1,
+        summary_kind: 'terminal_root_projection', ts: frozen.ts, historical_terminal: frozen,
+        current_outcome: { task_id: 'retry', status: 'completed', outcome_phase: 'done', revision: '2026-11-18T10:30:00Z', ...current } });
+    const settle = (current) => replayedTerminalRecords([receipt(current)], new Map(), new Map()).get('retry');
+    const own = settle({ task_attempt: 1 });
+    assert.deepEqual([own.phase, own.detail.wake_summary, own.detail.ts], ['done', frozen.wake_summary, frozen.ts]);
+    // A stored result that names no attempt is not this receipt's attempt: nothing of the receipt is lent to it.
+    const unknown = settle({});
+    assert.deepEqual([unknown.phase, unknown.detail.status, unknown.detail.task_attempt], ['done', 'completed', undefined]);
+    assert.deepEqual([unknown.detail.wake_summary, unknown.detail.ts, unknown.detail.provenance], [undefined, undefined, undefined]);
 });
 
 function lines() {
@@ -136,6 +261,9 @@ test('an unnamed successor never takes the work\'s borrowed heading as its own e
     episodes.rename(next, 'Continue: Audit the projects');
     assert.match(own(), /chat-live-episode-name">Continue: Audit the projects/);
     assert.equal(next.titleEl.textContent, 'Audit the projects');
+    episodes.note(next, { status: 'cancelled', ts: '2026-10-12T19:45:00Z', terminal_time: { source: 'unknown' } });
+    assert.match(own(), /End time not recorded/);
+    assert.doesNotMatch(own(), /Started |since /, 'the card anchor is not an observed start of a finished episode');
 });
 
 test('a successor with no card here is handed on once admitted; a bound claim hands on and folds nothing', () => {
@@ -189,8 +317,11 @@ test('an unknown episode code is inside its disclosure, never in the summary, an
         const records = new Map([[first.groupId, first], [next.groupId, next]]);
         const episodes = createTaskEpisodes({ records, reanchor: () => false, activity: () => null });
         episodes.note(first, { status: 'failed', system_type: 'task_summary', reason_code: 'example_new_reason',
+            started_at: '2026-10-10T17:00:00Z', ts: '2026-10-12T19:45:00Z', terminal_time: { source: 'unknown', occurred_at: null },
             continued_by: { state: 'admitted', successor_task_id: next.groupId } });
         const disclosure = first.episodeDisclosure;
+        assert.match(disclosure.firstElementChild.textContent, /End time not recorded/);
+        assert.doesNotMatch(disclosure.firstElementChild.textContent, /since |Oct 12/);
         assert.match(disclosure.firstElementChild.textContent, /The recorded reason has no description yet/);
         assert.doesNotMatch(disclosure.firstElementChild.textContent, /example_new_reason/);
         const codes = disclosure.querySelector('.chat-episode-codes');
@@ -207,6 +338,50 @@ test('an unknown episode code is inside its disclosure, never in the summary, an
     } finally { restoreDom(prior); }
 });
 
+
+test('an earlier episode paints its facts again when its heading or disclosed content moved, never on a quiet sync', () => {
+    const { prior } = installDom();
+    try {
+        const first = card('t-1', 1000, 'Audit the projects');
+        const next = card('t-2', 5000, 'Continue: Audit the projects');
+        first.detailsEl = document.createElement('div');
+        next.episodeHistoryEl = document.createElement('div');
+        const records = new Map([[first.groupId, first], [next.groupId, next]]);
+        const painted = [];
+        const episodes = createTaskEpisodes({ records, reanchor: () => false, activity: () => null,
+            meta: (record) => painted.push({ id: record.groupId, words: record.episodeHeadingWords,
+                disclosed: record.detailsEl.parentNode === record.episodeDisclosure }) });
+        episodes.note(first, { wake_summary: 'Checked three of five.',
+            continued_by: { state: 'admitted', successor_task_id: next.groupId } });
+        assert.deepEqual(painted, [{ id: 't-1', words: ['Audit the projects', 'Checked three of five.'], disclosed: true }],
+            'its Details moved in, then its facts were painted with the heading\'s words known');
+        episodes.sync(next);
+        episodes.note(first, { wake_summary: 'Checked three of five.' });
+        assert.equal(painted.length, 1, 'the same heading and the same content paint nothing');
+        episodes.note(first, { wake_summary: 'Checked all five.' });
+        assert.equal(painted.length, 2, 'a heading that says something else paints again');
+        assert.deepEqual(painted[1].words, ['Audit the projects', 'Checked all five.']);
+    } finally { restoreDom(prior); }
+});
+
+test('Details leave out only the closing sentence the heading above them says in exactly those words', () => {
+    const { prior } = installDom();
+    try {
+        const sentence = 'Checked three of five.';
+        const painted = (episodeHeadingWords) => {
+            const facts = { dataset: { liveFacts: '' }, innerHTML: '', hidden: true };
+            renderLiveCardMeta({ groupId: 'e', items: [], finished: true, wakeSummary: sentence, initiator: 'consciousness',
+                metaEl: { isConnected: true, innerHTML: '' }, root: { children: [facts] }, episodeHeadingWords });
+            return facts.innerHTML;
+        };
+        assert.match(painted(undefined), /<dt>In its words<\/dt><dd><span data-i18n-authored>Checked three of five\.<\/span><\/dd>/,
+            'a card with no heading above it says its sentence, with the authored mark');
+        assert.match(painted(['Audit', 'Checked three of five']), /In its words/, 'a near miss is not the same words');
+        assert.match(painted([]), /In its words/);
+        assert.doesNotMatch(painted(['Audit', sentence]), /In its words/);
+        assert.doesNotMatch(painted([sentence]), /In its words/, 'the heading may carry the sentence as the name');
+    } finally { restoreDom(prior); }
+});
 
 test('the original Reviews reading door follows its host, never the old work controls', () => {
     const { prior } = installDom();

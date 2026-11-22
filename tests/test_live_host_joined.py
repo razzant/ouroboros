@@ -177,6 +177,87 @@ def test_feature_renewal_joins_cancelled_real_mailbox(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('cancel_stage', [None, 'collection', 'finish'])
+@pytest.mark.parametrize('handler_fails', [False, True])
+def test_extension_cancellation_drains_the_call_and_preserves_the_primary_outcome(
+        monkeypatch, cancel_stage, handler_fails):
+    from contextlib import contextmanager
+
+    from ouroboros import call_peers, live_conversation
+    from ouroboros import extension_registry_state as registry
+    from supervisor import workers
+
+    events, registered = [], []
+    watching = asyncio.Event()
+    turn = object.__new__(live_conversation.LiveConversationTurn)
+    turn.spec = SimpleNamespace(call_id='synthetic', chat_id=1, opened_by='owner')
+    turn.config = None
+    turn._lock, turn._closed = threading.Lock(), False
+    turn.publish = lambda event: events.append(event['type'])
+    ctx = SimpleNamespace(task_id='synthetic', is_direct_chat=True)
+    actor = SimpleNamespace(_owner_message_admission_lock=threading.Lock(), _current_task_id=ctx.task_id,
+                            _realtime_turn=turn, _accepting_owner_messages=True)
+
+    @contextmanager
+    def scope(_feature, work):
+        assert work.task is asyncio.current_task()
+        registered.append(work)
+        try:
+            yield
+        finally:
+            events.append('scope released')
+
+    async def handler(_host):
+        await watching.wait()
+        if handler_fails:
+            raise ValueError('synthetic handler failure')
+
+    async def request_stop(stage):
+        if cancel_stage == stage:
+            registered[0].cancel()  # the same _LoopWork cancellation used by extension unload
+            await asyncio.sleep(0)  # dispatch the cancellation while the selected step is still running
+
+    async def check():
+        pass
+
+    async def watch_controls():
+        try:
+            watching.set()
+            await asyncio.Future()
+        finally:
+            await request_stop('collection')
+            events.append('watch drained')
+
+    async def finish():
+        assert events == ['watch drained'] and not actor._accepting_owner_messages
+        await request_stop('finish')
+        events.append('host finished')
+
+    turn.feature = {'handler': handler, 'configure': lambda: None}
+    host = SimpleNamespace(check=check, watch_controls=watch_controls, finish=finish, warm=lambda: None,
+        trace={}, observe=lambda *_: None, executor=SimpleNamespace(shutdown=lambda **_: None),
+        wire=SimpleNamespace(close=lambda: events.append('wire closed')))
+    hub = SimpleNamespace(input_audio_evidence=dict)
+    monkeypatch.setattr(live_conversation, 'ConversationHost', lambda *_: host)
+    monkeypatch.setattr(call_peers, 'get_hub', lambda _: hub)
+    monkeypatch.setattr(call_peers, 'close_hub', lambda *_, **_kwargs: events.append('hub closed'))
+    monkeypatch.setattr(registry, 'extension_work_scope', scope)
+    monkeypatch.setattr(workers, 'get_direct_chat_agent', lambda _: actor)
+
+    _, terminal, _ = turn.run(ctx, [], [], task={'origin_message_ref': {'synthetic': True}}, initial_effort='')
+    assert events == ['watch drained', 'host finished', 'scope released', 'hub closed', 'wire closed',
+                      'conversation_finished']
+    assert turn._closed and registered[0].cancel_requested is (cancel_stage is not None)
+    if handler_fails:
+        assert (terminal['reason_code'], terminal['execution_status']) == ('call_failed', 'infra_failed')
+        assert terminal['failure']['message'] == 'synthetic handler failure'
+        assert terminal['failure']['origin'].endswith(' in handler')
+    elif cancel_stage is not None:
+        assert (terminal['reason_code'], terminal['execution_status']) == ('cancelled', 'cancelled')
+    else:
+        assert (terminal['reason_code'], terminal['execution_status']) == ('finished', 'ok')
+
+
 @pytest.mark.parametrize('cancel', [False, True])
 def test_caption_completes_history_handoff_before_cancel(host_world, monkeypatch, cancel):
     from ouroboros import dialogue_store

@@ -119,6 +119,146 @@ def _root_ctx(tmp_path):
     return _drain(ctx, tmp_path)
 
 
+@pytest.mark.parametrize(("reader", "kind"), [
+    ("ouroboros.launch_custody.unsettled_rows", "process_custody_unreadable"),
+    ("ouroboros.owner_pause.tree_model_requests", "attempt_custody_unreadable"),
+    ("ouroboros.delegate_custody_current.tree_task_ids", "tree_census_unreadable"),
+])
+def test_selected_child_waits_for_unattributed_custody(tmp_path, monkeypatch, reader, kind):
+    from ouroboros import delegate_custody as custody
+    from supervisor import tree_census
+    from tests._owner_pause_ended_helpers import _pending, _resume
+
+    tree = _held_tree(tmp_path, monkeypatch)
+    _pending(tmp_path, "child-run", "lost")
+    choice, = _resume("mind", selected="child-run")["acceptable_unknown"]
+
+    def unreadable(*args, **kwargs):
+        raise TimeoutError()
+
+    with monkeypatch.context() as fault:
+        tree_census.forget(tmp_path)
+        fault.setattr(reader, unreadable)
+        refusal = _resume("mind", [choice], selected="child-run")
+        assert not refusal["ok"] and not refusal.get("acceptable_unknown")
+        assert any(b["kind"] == kind for b in refusal["blockers"])
+        assert not custody.invocation_record(tmp_path, "lost").get("resume_decisions")
+        assert not any(row.get("_budget_pause_resume") for row in tree.workers.PENDING)
+    assert _resume("mind", [choice], selected="child-run")["ok"]
+
+
+def test_selected_child_can_pass_a_known_sibling_but_not_an_unattributed_launch(tmp_path, monkeypatch):
+    from ouroboros import delegate_custody as custody
+    from ouroboros import launch_custody
+    from tests._owner_pause_ended_helpers import _pending, _resume
+
+    _held_tree(tmp_path, monkeypatch)
+    _pending(tmp_path, "child-run", "lost")
+    choice, = _resume("mind", selected="child-run")["acceptable_unknown"]
+    sibling = {"pid": 7, "owner_task": "child-new"}
+    view = launch_custody.LaunchCustody(True, [sibling], {}, set(), "", b"", [])
+    monkeypatch.setattr(launch_custody, "unsettled_selection", lambda _root, rows, _view: [(r, "unknown") for r in rows])
+    monkeypatch.setattr(launch_custody, "read_custody", lambda *_a, **_kw: view)
+    # The sibling's legacy model attempt names its member, even if its consumer cannot be read.
+    attempt = {"state": "unresolved", "task_id": "child-new", "local_answer_consumer_id": ["damaged"]}
+    monkeypatch.setattr("ouroboros.owner_pause.tree_model_requests", lambda *_a: [attempt])
+    with monkeypatch.context() as partial:
+        partial.setattr(launch_custody, "read_custody", lambda *_a, **_kw: view._replace(blind="unattributed launch"))
+        assert not _resume("mind", [choice], selected="child-run")["ok"]
+        assert not custody.invocation_record(tmp_path, "lost").get("resume_decisions")
+    assert _resume("mind", [choice], selected="child-run")["ok"]
+    assert _read(tmp_path, "child-new")["current_stop"]["state"] == "held"
+
+
+@pytest.mark.parametrize("first", ["activity", "answer"])
+def test_first_child_start_choice_during_parent_answer_publication(tmp_path, monkeypatch, first):
+    from ouroboros import delegate_accepted, delegate_custody, delegate_resume, utils
+    from ouroboros.task_finalization import OWED_REGISTERED, register_final_answer_owed
+    from supervisor import terminal_delivery
+    from tests._delegated_transport_shared import Engine
+    from tests._owner_pause_ended_helpers import REQUEST, _fence, _pending, _resume
+
+    _held_tree(tmp_path, monkeypatch)
+    _pending(tmp_path, "child-run", "lost")
+    choice, = _resume("owner", selected="child-run")["acceptable_unknown"]
+    ctx, limit = _loop_ctx(tmp_path, "root-1")
+    ctx._selected_answer_context = delegate_resume.selected_answer_context(limit)
+    publish = delegate_resume.answer_publication(ctx)
+    assert _resume("owner", [choice], selected="child-run")["ok"]
+    engine = Engine(tmp_path)
+    job = engine.accept("lost", REQUEST)
+    record = dict(delegate_custody.invocation_record(tmp_path, "lost"), invocation_id="lost")
+    path, replace = terminal_delivery._registry_path(tmp_path), utils.replace_atomic
+
+    def discover():
+        with engine.gateway() as gateway:
+            delegate_accepted.recover(tmp_path, gateway, record)
+
+    def at_rename(src, dst, **kwargs):
+        if dst == path and first == "activity":
+            discover()
+        written = replace(src, dst, **kwargs)
+        if dst == path and first == "answer":
+            discover()
+        return written
+
+    monkeypatch.setattr(utils, "replace_atomic", at_rename)
+    task = {"id": "root-1", "root_task_id": "root-1"}
+    answer = {"type": "send_message", "task_id": "root-1", "chat_id": 2, "text": "Ready before the choice."}
+    if first == "activity":
+        with pytest.raises(delegate_resume.AnswerHeld):
+            register_final_answer_owed(task, answer, env_drive_root=tmp_path, publication=publish)
+        assert not terminal_delivery.pending_deliveries(tmp_path, strict=True)
+    else:
+        assert register_final_answer_owed(task, answer, env_drive_root=tmp_path, publication=publish) == OWED_REGISTERED
+        [owed] = terminal_delivery.pending_deliveries(tmp_path, strict=True)
+        assert owed["text"] == answer["text"]
+    assert _fence(tmp_path)["active_delegated_start"]["run_id"] == engine.commands[job]["run"]
+    assert not engine.creates and not engine.cancels
+
+
+def test_parent_selects_a_lost_child_start_from_its_own_addressed_refusal(tmp_path, monkeypatch):
+    from ouroboros import delegate_custody as custody
+    from ouroboros.owner_mailbox import deliver_task_message, drain_owner_entries
+    from ouroboros.tools import join_ledger
+    from supervisor.events_budget import _handle_budget_resume_child
+    from tests._owner_pause_ended_helpers import REASON, _pending
+
+    tree = _held_tree(tmp_path, monkeypatch)
+    _pending(tmp_path, "child-run", "lost")
+    parent = _root_ctx(tmp_path)
+    private = tmp_path / "parent-drive"
+    parent.drive_root = private
+    tree.workers.RUNNING[parent.task_id]["task"]["child_drive_root"] = str(private)
+    events = []
+    parent.event_queue = SimpleNamespace(put_nowait=events.append)
+    monkeypatch.setattr(join_ledger, "_record_child_decision_beacon", lambda *_: None)
+    bridge = _bridge(tree, [])
+
+    def request(choices=None):
+        reply = join_ledger._resume_child_task(parent, "child-run", reason=REASON, accept_unknown=choices)
+        assert "Resume requested" in reply
+        _handle_budget_resume_child(events.pop(), bridge)
+
+    request()
+    message, = drain_owner_entries(private, parent.task_id, set(), parent.task_attempt)
+    transcript = []
+    deliver_task_message(message, parent.task_id, None, transcript.append)
+    assert message["text"] in transcript[0]
+    outcome = json.loads(message["text"])
+    assert message["provenance"] == "system" and outcome["requested_by"] == parent.task_id
+    assert outcome["task_id"] == "child-run" and not outcome["ok"]
+    choice, = outcome["acceptable_unknown"]
+    with monkeypatch.context() as changed:
+        changed.setattr("ouroboros.launch_custody.unsettled_rows", lambda *_a, **_kw: [({"owner_task": "child-run"}, "live")])
+        request([choice])
+        assert not custody.invocation_record(tmp_path, "lost").get("resume_decisions")
+    request([choice])
+    assert [row["id"] for row in tree.workers.PENDING if row.get("_budget_pause_resume")] == ["child-run"]
+    decision = custody.invocation_record(tmp_path, "lost")["resume_decisions"]["child-run"]
+    assert (decision["by"]["task_id"], decision["choice_id"]) == (parent.task_id, choice)
+
+
 def test_root_only_resume_shows_each_retained_child_held_with_its_request_door(tmp_path, monkeypatch):
     from ouroboros import budget_pause
     from ouroboros.tools.control_task_results import _get_task_result, _wait_for_task, _wait_for_tasks

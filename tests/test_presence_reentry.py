@@ -243,3 +243,48 @@ def test_retained_source_keeps_all_gap_locations_when_note_is_bounded(tmp_path):
     source = _read_all(registry, _reader(note))
     assert [gap["offset"] for gap in source["gaps"]] == offsets
     assert all(gap["path"] == "state/dialog.sqlite" for gap in source["gaps"])
+
+
+def test_a_raw_byte_name_in_a_row_travels_the_note_and_the_retained_source(tmp_path):
+    """A connector message whose words and structured fields name a file whose POSIX bytes are not
+    UTF-8: the note, the retained snapshot and every reader page cross their UTF-8 boundaries with
+    that name kept exact — no UnicodeEncodeError anywhere in the reentry path (PR #3756 class)."""
+    from ouroboros.presence_runner import _stable_numeric_id
+
+    registry, ctx = _actor(tmp_path)
+    _append(tmp_path, _row(KEY, "before the yield"))
+    cursor = pc._chat_cursor(tmp_path)
+    byte_name = "report_\udcff.txt"  # POSIX `surrogateescape` of the name byte FF, spelled out for every platform
+    padded = " padded  copy.bin"  # an edge space is part of the name
+    text = f"see {byte_name} and {padded} — отчёт.md"
+    row = {"ts": "2026-10-06T10:00:00+00:00", "chat_id": _stable_numeric_id("presence-conversation", KEY),
+           "direction": "in", "text": text, "client_message_id": "telegram:bot-1:msg-byte-name-row",
+           "sender_label": "alex", "task_id": "turn-x",
+           "transport": {"conversation_key": KEY,
+                         "message": {"attachments": [{"file_name": byte_name, "file_size": 12}]}}}
+    # The raw name bytes enter the chain the way production writers put them there: the stored line is
+    # UTF-8 with the byte escaped (machine_json), and readers decode it back as a lone surrogate.
+    from ouroboros.utils import json_dumps_utf8
+    _append(tmp_path, raw=json_dumps_utf8(row, ensure_ascii=False).encode("utf-8") + b"\n")
+
+    note = pc.reentry_note(_binding(tmp_path, cursor), ctx)
+    note.encode("utf-8")  # the note crosses UTF-8 boundaries (task row, transport, trace)
+    assert "report_\\udcff.txt" in note  # the exact byte name, escaped wherever prose carries it
+    assert " padded  copy.bin" in note  # an edge space stays part of the name in the quoted words
+
+    source = _read_all(registry, _reader(note))  # every page's text encodes UTF-8 on its way out
+    retained = source["rows"][-1]
+    assert retained["text"] == text, "the retained observation keeps the exact name bytes"
+    assert retained["transport"]["message"]["attachments"][0]["file_name"] == byte_name
+
+
+def test_ordinary_reentry_snapshot_bytes_are_unchanged_by_the_name_escape(tmp_path):
+    """Old digests stay valid: json_dumps_utf8 serializes rows without raw POSIX name bytes byte-
+    identically to the previous plain json.dumps, so already-published checkpoints keep hashing equal."""
+    from ouroboros.utils import json_dumps_utf8
+
+    snapshot = {"kind": "presence_reentry", "task_id": "t",
+                "rows": [{"text": "обычная phrase and padded  name.bin", "ts": "2026-10-06T10:00:00+00:00"},
+                         {"attachments": [{"file_name": " report.txt"}]}]}
+    assert (json_dumps_utf8(snapshot, ensure_ascii=False, sort_keys=True)
+            == json.dumps(snapshot, ensure_ascii=False, sort_keys=True))

@@ -27,6 +27,7 @@ export function bindDeviceSettings(root, env = globalThis) {
     const $ = selector => root.querySelector(selector);
     const media = env.navigator?.mediaDevices;
     const status = $('[data-call-device-status]');
+    const onScreen = () => !env.document.hidden && root.isConnected && root.getClientRects().length;
     let disposed = false, generation = 0, capture = null, context = null, frame = 0, timer = 0;
     async function paint() {
         const prefs = loadDevicePrefs(env);
@@ -56,14 +57,17 @@ export function bindDeviceSettings(root, env = globalThis) {
         for (const [key,,label] of DEVICES) $(`[data-call-test="${key}"]`).textContent = key === 'speaker' ? 'Play a test sound' : `Test ${label.toLowerCase()}`;
     }
     async function test(kind) {
+        if (disposed || !onScreen()) return;
         if (capture || context) { stop(); return; }
         const token = ++generation, prefs = loadDevicePrefs(env);
+        const current = () => !disposed && token === generation;
         try {
             if (kind === 'speaker') {
                 const audio = new env.AudioContext(); context = audio;
                 await audio.resume();
+                if (!current()) return;
                 await routeSpeaker(audio, prefs);
-                if (disposed || token !== generation) return;
+                if (!current()) return;
                 const oscillator = audio.createOscillator(), gain = audio.createGain();
                 oscillator.frequency.value = 660; gain.gain.value = .12;
                 oscillator.connect(gain).connect(audio.destination);
@@ -76,24 +80,25 @@ export function bindDeviceSettings(root, env = globalThis) {
                 constraints:kind === 'camera' ? cameraConstraints(prefs).video : microphoneConstraints(prefs).audio});
             capture = pending.release ? pending : null;
             const lease = await pending;
-            if (disposed || token !== generation) { lease.release?.(); return; }
+            if (!current()) { lease.release?.(); return; }
             if (lease.code) { capture = null; status.textContent = captureReason(lease.code, lease.label); return; }
             capture = lease;
-            lease.signal.addEventListener('abort', stop, {once:true});
+            lease.signal.addEventListener('abort', () => { if (current()) stop(); }, {once:true});
             $(`[data-call-test="${kind}"]`).textContent = 'Stop the test';
             timer = env.setTimeout(stop, 15000);
             if (kind === 'camera') {
                 const preview = $('[data-call-camera-preview]'); preview.srcObject = lease.stream; preview.hidden = false;
                 await preview.play().catch(() => {});
+                if (!current()) return;
                 status.textContent = 'This camera preview stays on this device.';
             } else {
                 const audio = new env.AudioContext(); context = audio; await audio.resume();
-                if (disposed || token !== generation) return;
+                if (!current()) return;
                 const analyser = audio.createAnalyser(); analyser.fftSize = 512;
                 audio.createMediaStreamSource(lease.stream).connect(analyser);
                 const samples = new Float32Array(analyser.fftSize), meter = $('[data-call-meter]'); meter.hidden = false;
                 const draw = () => {
-                    if (disposed || token !== generation) return;
+                    if (!current()) return;
                     analyser.getFloatTimeDomainData(samples);
                     meter.value = Math.min(1, Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length) * 6);
                     frame = env.requestAnimationFrame(draw);
@@ -102,6 +107,7 @@ export function bindDeviceSettings(root, env = globalThis) {
             }
             void paint();
         } catch {
+            if (!current()) return;
             stop(); status.textContent = 'The device test could not start. Check this browser’s device permissions.';
         }
     }
@@ -113,18 +119,22 @@ export function bindDeviceSettings(root, env = globalThis) {
         stop();
     };
     const clicked = event => { const kind = event.target.closest?.('[data-call-test]')?.dataset.callTest; if (kind) void test(kind); };
-    const left = event => { if (event.detail?.page !== 'settings') stop(); };
-    const hidden = () => { if (env.document.hidden) stop(); };
+    // A section or level can leave while keeping these nodes for Back and leaving autosave bound.
+    const left = () => {
+        if ((capture || context) && !onScreen()) { stop(); status.textContent = ''; }
+    };
     root.addEventListener('change', changed); root.addEventListener('click', clicked);
     media?.addEventListener?.('devicechange', paint);
     env.addEventListener?.('ouro:page-shown', left); env.addEventListener?.('pagehide', stop); env.addEventListener?.('ouro:panic', stop);
-    env.document.addEventListener?.('visibilitychange', hidden);
+    env.addEventListener?.('ouro:settings-page-shown', left);
+    env.document.addEventListener?.('visibilitychange', left);
     void paint();
     return () => {
         disposed = true; stop();
         root.removeEventListener('change', changed); root.removeEventListener('click', clicked);
         media?.removeEventListener?.('devicechange', paint);
         env.removeEventListener?.('ouro:page-shown', left); env.removeEventListener?.('pagehide', stop); env.removeEventListener?.('ouro:panic', stop);
-        env.document.removeEventListener?.('visibilitychange', hidden);
+        env.removeEventListener?.('ouro:settings-page-shown', left);
+        env.document.removeEventListener?.('visibilitychange', left);
     };
 }

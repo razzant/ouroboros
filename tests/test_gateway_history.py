@@ -153,6 +153,53 @@ def test_chat_history_replays_delivered_document_row(tmp_path):
     assert rec["size_bytes"] == 4096
 
 
+def test_chat_history_replays_posix_document_labels_from_live_delivery(tmp_path, monkeypatch):
+    from ouroboros.chat_chain import recorded_context
+    from ouroboros.gateway.chat_search import make_chat_search_endpoint
+    from ouroboros.gateway.ws import _encode
+    from ouroboros.utils import path_for_prose
+    from supervisor import message_bus
+
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_args: None)
+    monkeypatch.setattr(message_bus, "utc_now_iso", lambda: "2026-07-09T00:00:00Z")
+    bridge, live = message_bus.LocalChatBridge(), []
+    bridge._broadcast_fn = lambda frame: live.append(json.loads(_encode(frame).encode("utf-8")))
+    deliveries = (("report-\udcff.txt", ""), (r"report-\udcff.txt", ""), ("файл🪶.txt", ""),
+                  ("report-weekly.txt", "Weekly notes — итоги"))
+    filenames = tuple(name for name, _caption in deliveries)
+    url = "/api/tasks/document/artifacts/captured.txt"
+    for name, caption in deliveries:
+        assert bridge.send_document(1, b"report\n", filename=name, caption=caption,
+                                    download_url=url, task_id="document")[0]
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={})))
+    assert response.status_code == 200
+    wire = response.body.decode("utf-8")
+    assert r'"report-\udcff.txt"' in wire and r'"report-\\udcff.txt"' in wire and "файл🪶.txt" in wire
+    rows = {row["filename"]: row for row in json.loads(wire)["messages"] if row.get("msg_type") == "document"}
+    assert set(rows) == set(filenames)
+    assert len({row["row_address"] for row in rows.values()}) == len(filenames)
+    for frame, (name, caption) in zip(live, deliveries, strict=True):
+        row = rows[name]
+        assert row["row_address"] == frame["row_address"] and frame["filename"] == name
+        assert row["caption"] == caption and row["download_url"] == url and "file_base64" not in row
+        _, source = recorded_context(tmp_path, row["row_address"])
+        record = json.loads(source.decode("utf-8"))
+        # The host-generated default text is UTF-8 prose (a byte name is spelled by path_for_prose,
+        # an authored caption is recorded as given); the exact structured filename is established
+        # independently by frame["filename"] above and by these history rows keyed on the raw name.
+        assert record["text"] == (caption or f"📎 {path_for_prose(name)}")
+
+    search = asyncio.run(make_chat_search_endpoint(tmp_path)(SimpleNamespace(query_params={"q": "report"})))
+    assert search.status_code == 200
+    candidates = json.loads(search.body.decode("utf-8"))["candidates"]
+    assert {item["filename"]: item["row_address"] for item in candidates if item.get("msg_type") == "document"} == {
+        name: row["row_address"] for name, row in rows.items()}
+
+
 def test_chat_history_replays_links_with_task_grouping_fields(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -804,6 +851,142 @@ def test_chat_history_replays_the_rows_current_custody_debt_beside_its_raw_histo
     assert replayed["owed"]["delegated_runs_unreconciled"] == ["run-1"] and replayed["owed"]["outcome_phase"] == "warn"
     for record in replayed.values():
         assert record["reason_code"] == stamp and record["outcome_axes"]["objective"]["warning"] == stamp
+
+
+def test_chat_history_gives_a_terminal_frame_beside_its_summary_the_rows_current_debt_list(tmp_path):
+    """#1583 on the frame a card replays from: a child's terminal progress row stores the list its writer saw. Beside a
+    task_summary row it replays the stored result's CURRENT list (an explicit [] too); a result with no list proves
+    nothing, so the frame keeps what it stored. Only the list moves: the frame's own answer and status stay as written.
+    A later body-adoption Reviews row that wins latest-progress for one task must not strand its notice on the stale list."""
+    from ouroboros import dialogue_store
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    project = create_project(tmp_path, "debt-room", name="Debt room")
+    room = int(project["chat_id"])
+    parent = "proof-parent"
+    bind_task_to_project(tmp_path, parent, project["id"], room, origin={"absent": "system"})
+    written = {"healed": ["run-1"], "owed": [], "unlisted": ["run-9"]}  # the list each frame's writer saw at the terminal
+    current = {"healed": [], "owed": ["run-1"]}  # the stored result's list now; "unlisted" holds none
+    for task_id in written:
+        bind_task_to_project(tmp_path, task_id, project["id"], room, origin={"absent": "system"})
+    # An in-room parent progress row BEFORE the notices: the lineage floor must not
+    # evict the dead children when the Reviews row is the newest non-lineage telemetry.
+    dialogue_store.append(tmp_path, "progress", {
+        "ts": "2026-11-20T00:00:50Z", "task_id": parent, "chat_id": room,
+        "content": "Parent working.", "role": "assistant", "is_progress": True})
+    for task_id, debt in written.items():
+        dialogue_store.append(tmp_path, "chat", {
+            "ts": "2026-11-20T00:00:52Z", "direction": "system", "type": "task_summary",
+            "task_id": task_id, "chat_id": room, "text": "Summary written at the terminal."})
+        dialogue_store.append(tmp_path, "progress", {
+            "ts": "2026-11-20T00:00:51Z", "task_id": task_id, "chat_id": room,
+            "content": f"Subagent {task_id} completed.", "role": "system",
+            "system_type": "subagent_terminal_notice", "type": "send_message", "is_progress": True,
+            "subagent_event": "completed", "status": "completed",
+            "result": f"The answer of {task_id}.", "delegated_runs_unreconciled": debt,
+            "parent_task_id": parent, "root_task_id": parent, "delegation_role": "subagent",
+            "subagent_task_id": task_id})
+    # A later Reviews row for one task: newer than its notice, it wins latest-progress for that task.
+    dialogue_store.append(tmp_path, "progress", {
+        "ts": "2026-11-20T00:00:53Z", "task_id": "healed", "chat_id": room,
+        "content": "Body adopted.", "role": "system", "system_type": "body_adoption",
+        "type": "send_message", "is_progress": True, "narration": False,
+        "card_row": "reviews", "card_row_id": "body-adoption:healed", "card_row_revision": 1})
+    for task_id in written:
+        seed_result(tmp_path, task_id, {"_schema_version": 1, "task_id": task_id, "status": "completed",
+                                        **({"delegated_runs_unreconciled": current[task_id]} if task_id in current else {})})
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(
+        query_params={"chat_id": str(room), "n_human": "50", "n_progress": "50"})))
+    replayed = json.loads(response.body.decode("utf-8"))["messages"]
+    frames = {item["task_id"]: item for item in replayed if item.get("system_type") == "subagent_terminal_notice"}
+    adoptions = {item["task_id"]: item for item in replayed if item.get("system_type") == "body_adoption"}
+    assert set(frames) == set(written), frames
+    assert {task_id: frame["delegated_runs_unreconciled"] for task_id, frame in frames.items()} == {
+        "healed": [], "owed": ["run-1"], "unlisted": ["run-9"]}
+    for task_id, frame in frames.items():
+        assert frame["result"] == f"The answer of {task_id}." and frame["status"] == "completed"
+        assert frame["text"] == f"Subagent {task_id} completed."
+    # the later Reviews row is present, won latest-progress (it took the healed current list), and the
+    # superseded notice still states the row's current list — old code left "healed"'s notice on ["run-1"]
+    assert set(adoptions) == {"healed"} and adoptions["healed"]["delegated_runs_unreconciled"] == []
+
+
+def test_chat_history_settles_a_card_from_the_reviews_row_it_stamps_with_canonical_truth(tmp_path):
+    """R6 (3): the row a settled card replays from is the LAST status-stamped row the client keeps — a later
+    Reviews progress row wins that slot over its own older terminal notice and full summary (the fixture row
+    beside this one builds the same topology). It must carry the summary's canonical truth, one projection of
+    the already-read result: before, only the summary was stamped and the card settled from the Reviews row's
+    partial facts (a typed degraded execution read as plain Done; a proven first attempt lost with it).
+    Independent facts stay independent: the notice keeps its own answer and status as written, an explicit []
+    clears the custody list alone, and an absent list proves nothing."""
+    from ouroboros import dialogue_store
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    project = create_project(tmp_path, "stamp-room", name="Stamp room")
+    room = int(project["chat_id"])
+    parent = "stamp-parent"
+    bind_task_to_project(tmp_path, parent, project["id"], room, origin={"absent": "system"})
+    stamp = "delegated_custody_unreconciled"
+    first_fact = {"status": "unknown", "reason": "initial_execution_display_only",
+                  "initial_execution": {"state": "interrupted", "run_id": "run-1"},
+                  "delegated_runs_succeeded": 1}
+    axes = {"execution": {"status": "ok", "reason_code": "final_message", "actor_first_terminal": first_fact},
+            "objective": {"status": "not_evaluated", "source": "none", "warning": stamp, "warnings": [stamp]}}
+    notice_debt = {"stamped": ["run-1"], "cleared": ["run-9"], "unlisted": ["run-5"]}  # each frame's writer saw
+    current = {"stamped": ["run-1"], "cleared": []}                                  # the stored result's list now
+    for task_id in notice_debt:
+        bind_task_to_project(tmp_path, task_id, project["id"], room, origin={"absent": "system"})
+    dialogue_store.append(tmp_path, "progress", {
+        "ts": "2026-11-21T00:00:50Z", "task_id": parent, "chat_id": room,
+        "content": "Parent working.", "role": "assistant", "is_progress": True})
+    for task_id, debt in notice_debt.items():
+        dialogue_store.append(tmp_path, "chat", {
+            "ts": "2026-11-21T00:00:52Z", "direction": "system", "type": "task_summary",
+            "task_id": task_id, "chat_id": room, "text": "Summary written at the terminal."})
+        dialogue_store.append(tmp_path, "progress", {
+            "ts": "2026-11-21T00:00:51Z", "task_id": task_id, "chat_id": room,
+            "content": f"Subagent {task_id} completed.", "role": "system",
+            "system_type": "subagent_terminal_notice", "type": "send_message", "is_progress": True,
+            "subagent_event": "completed", "status": "completed",
+            "result": f"The answer of {task_id}.", "delegated_runs_unreconciled": debt,
+            "parent_task_id": parent, "root_task_id": parent, "delegation_role": "subagent",
+            "subagent_task_id": task_id})
+        # a later Reviews row: newer than its notice, it wins latest-progress for that task
+        dialogue_store.append(tmp_path, "progress", {
+            "ts": "2026-11-21T00:00:53Z", "task_id": task_id, "chat_id": room,
+            "content": "Body adopted.", "role": "system", "system_type": "body_adoption",
+            "type": "send_message", "is_progress": True, "narration": False,
+            "card_row": "reviews", "card_row_id": f"body-adoption:{task_id}", "card_row_revision": 1})
+    for task_id in current:
+        seed_result(tmp_path, task_id, {"_schema_version": 1, "task_id": task_id, "status": "completed",
+                                        "reason_code": stamp, "outcome_axes": axes,
+                                        "delegated_runs_unreconciled": current[task_id]})
+    seed_result(tmp_path, "unlisted", {"_schema_version": 1, "task_id": "unlisted", "status": "completed"})
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(
+        query_params={"chat_id": str(room), "n_human": "50", "n_progress": "50"})))
+    replayed = json.loads(response.body.decode("utf-8"))["messages"]
+    chosen = {item["task_id"]: item for item in replayed if item.get("system_type") == "body_adoption"}
+    notices = {item["task_id"]: item for item in replayed if item.get("system_type") == "subagent_terminal_notice"}
+    summaries = {item["task_id"]: item for item in replayed if item.get("system_type") == "task_summary"}
+    assert set(chosen) == set(notice_debt), chosen
+    # canonical truth once, on the row the client actually settles from
+    assert chosen["stamped"]["outcome_phase"] == summaries["stamped"]["outcome_phase"] == "warn"
+    assert chosen["stamped"]["outcome_final"] is True and chosen["stamped"]["reason_code"] == stamp
+    assert chosen["stamped"]["outcome_axes"]["execution"]["actor_first_terminal"]["reason"] == "initial_execution_display_only"
+    assert chosen["cleared"]["outcome_phase"] == summaries["cleared"]["outcome_phase"] == "done"
+    # the custody list alone: an explicit [] clears it, an absent list proves nothing
+    assert chosen["stamped"]["delegated_runs_unreconciled"] == ["run-1"]
+    assert chosen["cleared"]["delegated_runs_unreconciled"] == []
+    assert "delegated_runs_unreconciled" not in chosen["unlisted"]
+    # the superseded notice keeps its own answer and status as written, and its stated list stands
+    for task_id, frame in notices.items():
+        assert frame["result"] == f"The answer of {task_id}." and frame["status"] == "completed"
+    assert {task_id: frame["delegated_runs_unreconciled"] for task_id, frame in notices.items()} == {
+        "stamped": ["run-1"], "cleared": [], "unlisted": ["run-5"]}
 
 
 def test_chat_history_never_turns_a_legacy_stamp_into_its_execution_cause(tmp_path):

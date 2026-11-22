@@ -119,6 +119,27 @@ test('a bound card becomes its work\'s portal in place: Project reference, the r
 
 const messages = (f) => f.messages.children;
 
+test('a portal whose attempt is selected without a scalar keeps the census count on its line', async () => {
+    const f = fixture();
+    try {
+        f.narrate('w-1', 'Reading the logs before the audit.');
+        // A journal-only metrics frame for a numbered attempt selects the attempt (its scalar
+        // store empties) without stating this attempt's counters: the census count is the work's
+        // whole present and must keep the line, not the empty attempt store.
+        f.emit('log', { chat_id: 1, data: { task_id: 'w-1', type: 'task_metrics_event', task_attempt: 1,
+            tool_evidence: { observations: [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }] } } });
+        await settle();
+        f.state({ task_bindings: { 'w-1': { project_id: 'p-1', chat_id: 7 } }, projects: [{ id: 'p-1', name: 'Audit' }],
+            active_chat_activities: [room({ last_line: 'Checking the third project.', last_line_at: '2026-10-10T12:05:00Z',
+                tool_calls: 41 })] });
+        await settle();
+        const node = f.card('w-1');
+        assert.ok(node, 'the work card is in Main');
+        assert.equal(node.dataset.portal, '1');
+        assert.match(f.part('w-1', 'live-meta').innerHTML, /41 tool calls/);
+    } finally { f.close(); }
+});
+
 test('an older census without the new facts leaves today\'s card: its own line, a start time, no invented count', async () => {
     const f = fixture();
     try {
@@ -149,6 +170,32 @@ test('a census row naming the work\'s Project binds it too; detached work says i
         assert.equal(node.dataset.portal, '1');
         assert.equal(reference(node).getAttribute('aria-label'), 'Open project Second room');
         assert.equal(f.part('w-1', 'live-phase-secondary')?.textContent, 'in background');
+    } finally { f.close(); }
+});
+
+test('a Main-addressed row\'s Project ID is a folder lease, not a room: the card stays Main\'s own', async () => {
+    // The scope/census twin of the server rule (gateway/main_decisions.py): a Main start in a registered
+    // room's folder carries that room's own ID as its lease scope while its census row keeps Main's
+    // address. The ID alone binds nothing; a real move re-homes the row's address with its binding.
+    const f = fixture();
+    try {
+        f.narrate('w-1', 'Reading the logs before the audit.');
+        const node = f.card('w-1');
+        f.state({ projects: [{ id: 'p-2', name: 'Second room' }],
+            active_chat_activities: [room({ chat_id: 1, project_id: 'p-2', project_name: 'Second room' })] });
+        await settle();
+        assert.ok(f.card('w-1') === node, 'the SAME card stays mounted in Main');
+        assert.ok(node.dataset.portal !== '1', 'a lease is no move: the card is no portal');
+        assert.equal(node.querySelectorAll('[data-intent="open-project"]').length, 0,
+            'the scope alone draws no Project reference');
+        // The host re-homes the row's address with its durable binding: now the same ID is the room.
+        f.state({ task_bindings: { 'w-1': { project_id: 'p-2', chat_id: 7 } },
+            projects: [{ id: 'p-2', name: 'Second room' }],
+            active_chat_activities: [room({ chat_id: 7, project_id: 'p-2', project_name: 'Second room' })] });
+        await settle();
+        assert.ok(f.card('w-1') === node, 'a real move keeps the work\'s one card');
+        assert.equal(node.dataset.portal, '1');
+        assert.equal(reference(node).getAttribute('aria-label'), 'Open project Second room');
     } finally { f.close(); }
 });
 
@@ -272,8 +319,10 @@ test('Main only: a Project room\'s portals bind nothing and read nothing', () =>
 // A Continue made in the Project room (owner QB = A, 16.10 Q1 = A): Main sees none of the successor's frames, so the
 // predecessor's admitted link (its durable detail) and the successor's census row are what its ONE card follows.
 const bindings = { 'w-1': { project_id: 'p-1', chat_id: 7 } };
+// A task detail's end as the host records it (terminal_time.py): the executor observed it.
+const endedAt = (occurred_at, started_at) => ({ v: 1, occurred_at, source: 'executor_terminal', attempt: { started_at } });
 const failedDetail = (extra = {}) => ({ task_id: 'w-1', status: 'failed', reason_code: 'model_provider_failed',
-    terminal_time: { occurred_at: '2026-10-10T12:20:00Z', attempt: { started_at: '2026-10-10T12:00:00Z' } }, ...extra });
+    terminal_time: endedAt('2026-10-10T12:20:00Z', '2026-10-10T12:00:00Z'), ...extra });
 const continuedBy = (state = 'admitted') => ({
     continued_by: { state, successor_task_id: 'w-1-c1', action_nonce: 'n-1', binding: { project_id: 'p-1', chat_id: 7 } },
     continuation_offer: state === 'bound'
@@ -793,7 +842,7 @@ test('after a room reload its history folds the same chain: one card for the wor
 // settles from that outcome; a bound claim or an absent record changes nothing.
 const finishedSuccessor = (id = 'w-1-c1', extra = {}) => ({ task_id: id, status: 'completed', chat_id: 7, project_id: 'p-1',
     outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } },
-    terminal_time: { occurred_at: '2026-10-10T12:42:00Z', attempt: { started_at: '2026-10-10T12:30:00Z' } }, ...extra });
+    terminal_time: endedAt('2026-10-10T12:42:00Z', '2026-10-10T12:30:00Z'), ...extra });
 
 function assertSettledFollow(f, folded, { id = 'w-1-c1', episodes = 2 } = {}) {
     const next = f.card(id);
@@ -871,7 +920,7 @@ test('a chain of successors that each ended unseen follows its proven links to o
         // The first successor failed too and was continued; the second finished. Each record names the next.
         details['w-1-c1'] = finishedSuccessor('w-1-c1', { status: 'failed', reason_code: 'model_provider_failed',
             outcome_axes: { lifecycle: { status: 'failed' } },
-            terminal_time: { occurred_at: '2026-10-10T12:35:00Z', attempt: { started_at: '2026-10-10T12:30:00Z' } },
+            terminal_time: endedAt('2026-10-10T12:35:00Z', '2026-10-10T12:30:00Z'),
             continued_by: { state: 'admitted', successor_task_id: 'w-1-c2', binding: { project_id: 'p-1', chat_id: 7 } } });
         details['w-1-c2'] = finishedSuccessor('w-1-c2');
         f.state({ task_bindings: bindings, active_chat_activities: [] });

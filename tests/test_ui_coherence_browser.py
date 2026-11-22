@@ -391,8 +391,9 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
 
 
 def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(subscription_ui):
-    """A tool server's page (Settings › Tools › a server): every field is the shared control under its own label, an
-    edit changes that field alone, and the environment's JSON is judged by the form before any Save."""
+    """A tool server's page (Extensions › MCP servers › a server, opened by its old Settings address): every field is
+    the shared control under its own label, an edit changes that field alone, and the environment's JSON is judged by
+    the form before any Save. A second server's page replaces the first; it never lies over it."""
     servers = [dict(id='web', name='HTTP server', transport='streamable_http', url='https://example.test/mcp',
                     auth_token='***', auth_header='Authorization', custom_option='retained'),
                dict(id='local', name='Local server', transport='stdio', command='npx', args=['-y','server'],
@@ -424,6 +425,7 @@ def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(
     refused = f'async () => {module}.validateMcpSettings().map(e=>e.input.dataset.mcpField)'
     assert page.evaluate(refused) == []
     level = server_page('local')
+    assert page.locator('#page-skills [data-settings-page^="tools/"]').count() == 1, 'one server page at a time'
     cards = level.locator('[data-mcp-card]')
     field = level.get_by_label('Environment (JSON)', exact=True)
     for invalid in ['{unfinished', '[]', '5', '{"PORT":8080}', '{"":"value"}']:
@@ -1047,9 +1049,9 @@ def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscripti
             .openConfirmDialog({ title, body: 'Grant access?', confirmLabel: 'Grant access' }); }""", title)
         box = page.locator('.confirm-dialog').evaluate("""dialog => {
             const d = dialog.getBoundingClientRect(), h = dialog.querySelector('h3').getBoundingClientRect();
-            const c = dialog.querySelector('.marketplace-modal-actions [data-confirm-cancel]').getBoundingClientRect();
+            const c = dialog.querySelector('.ui-modal-actions [data-confirm-cancel]').getBoundingClientRect();
             return {inside: h.left >= d.left && h.right <= d.right + 0.5 && c.right <= d.right + 0.5,
-                headClose: dialog.querySelectorAll('.marketplace-modal-head button').length,
+                headClose: dialog.querySelectorAll('.ui-modal-head button').length,
                 centred: Math.abs((d.top + d.bottom) / 2 - innerHeight / 2) <= 1,
                 cancel: c.width, overflow: document.documentElement.scrollWidth - innerWidth};
         }""")

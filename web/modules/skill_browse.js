@@ -1,4 +1,4 @@
-// Skills → Browse (UX §2, boards B2, B2c, B5, B5b, B14): every connected
+// Extensions › Browse (UX §2, boards B2, B2c, B5, B5b, B14): every connected
 // source's catalog as one board of cards in sort order. Search filters the
 // loaded catalogs while typing; Enter also asks the registry (ClawHub), whose
 // hits join the board. A registry chosen alone with nothing typed shows its own
@@ -97,11 +97,22 @@ function installedHere(item, row) {
 }
 
 /**
- * One Browse card's action row: a consequence sentence and one action, from the
- * catalog item, its source, the installed listing (`listed`: it has been read)
- * and the installs started here.
+ * How a new install of an entry goes, as its catalog read it: `trust` is its source's setting then. The host reads the
+ * source again at Install and installs by what it finds, so the sentences built on this say «while» (trustSentence).
+ * Whether the owner confirmed that setting is said only by a catalog row that is the same source with the same
+ * setting: a registry hit comes from another answer than `catalog.sources`, and an id may name another source by then.
  */
-export function browseCardState(item, { source = null, installed = null, listed = true, pending = null, failure = '', reviewing = false, pageModules = {} } = {}) {
+export function installPolicy(item, catalogSources = []) {
+    const row = (catalogSources || []).find((each) => each.id === item.source_id && each.name === item.source_name && each.trust === item.trust);
+    return { trust: item.trust, name: item.source_name, confirmed: row?.confirmed };
+}
+
+/**
+ * One Browse card's action row: a consequence sentence and one action, from the
+ * catalog item, how it installs (`policy`), the installed listing (`listed`: it has
+ * been read) and the installs started here.
+ */
+export function browseCardState(item, { policy = installPolicy(item), installed = null, listed = true, pending = null, failure = '', reviewing = false, live = {}, pageModules = {} } = {}) {
     const id = escapeHtml(item.id);
     const act = (label, action, tone = 'default', extra = '') => buttonHtml(label, { tone, attrs: `data-browse-action="${action}" data-item="${id}"${extra ? ` ${extra}` : ''}` });
     if (pending && !installed?.lifecycle_virtual) {
@@ -133,7 +144,7 @@ export function browseCardState(item, { source = null, installed = null, listed 
             const other = installed.install?.source?.name || 'another source';
             return { status: statusHtml(`You have another “${escapeHtml(item.name)}” (from ${escapeHtml(other)})`, 'warn'), action: act('Compare…', 'compare') };
         }
-        const model = installedSkillModel(installed, { reviewing, pageModules });
+        const model = installedSkillModel(installed, { reviewing, live, pageModules });
         const v = escapeHtml(versionText(installed.version));
         const update = installed.install?.update_available;
         const retryUpdate = update && installed.install?.update_rejected;
@@ -151,16 +162,16 @@ export function browseCardState(item, { source = null, installed = null, listed 
         return { status: statusHtml(`Off · ${v}`, 'muted'), action: act('Turn on', 'turn_on') };
     }
     if (item.withdrawn) return { status: statusHtml(`Withdrawn by ${escapeHtml(item.source_name || 'its source')}`, 'muted'), action: '' };
-    return { status: statusHtml(escapeHtml(trustSentence(source)), 'muted'), action: act('Install', 'install', 'primary') };
+    return { status: statusHtml(escapeHtml(trustSentence(policy)), 'muted'), action: act('Install', 'install', 'primary') };
 }
 
 /** One Browse card: the shared head, the facts, and the consequence row. */
-export function renderBrowseCard(item, { source, state, categoryLabels = new Map(), showCategory = true } = {}) {
+export function renderBrowseCard(item, { state, categoryLabels = new Map(), showCategory = true } = {}) {
     const id = escapeHtml(item.id);
     const long = String(item.description || '').length > CLAMP_CHARS;
     const marks = [
         item.source_id === 'builtin' ? chipHtml('Built in', 'neutral') : '',
-        item.official ? officialMarkHtml({ sourceId: item.source_id }) : '',
+        item.official ? officialMarkHtml() : '',  // explained from this entry (`officialSource`), never a source looked up by id
     ].join('');
     const facts = factsText(item);
     const connects = connectsText(item);
@@ -189,15 +200,17 @@ function groupHeadHtml(title, { copy = '', actions = '', count = '' } = {}) {
 
 /**
  * Mount the Browse view. `host` = {
- *   installedByName(): Map|null, refreshInstalled(): Promise, sources(force): Promise<sources[]>,
- *   catalog({refresh}): Promise<catalog>, runInstalledAction(name, action): Promise,
+ *   installedByName(): Map|null, live(): object, refreshInstalled(): Promise, sources(options): Promise<sources[]>,
+ *   sourceSnapshot(): { rows } (the shared source read: it names the filters and the registry; what a card says of
+ *   an install comes from its catalog entry, so a list that settles later changes no card, sheet or dialog),
+ *   catalog({refresh}): Promise<catalog>, runInstalledAction(name, action, options): Promise,
  *   confirmFirstStart(sourceId): Promise, compare(item, installedRow): Promise<'replace'|'keep'|null>,
- *   toast(msg, tone), showInstalled(name) }.
+ *   toast(msg, tone), showInstalled(name, opener) }.
  */
 export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi }) {
     const state = {
         query: '', source: 'all', sort: 'popular', officialOnly: false, category: 'all',
-        catalog: null, catalogError: '', sources: [], search: null, searching: false, searchError: '',
+        catalog: null, catalogError: '', search: null, searching: false, searchError: '',
         browse: null,  // one registry's own pages: {sort, items, cursor, loading, more, error}; dropped with its source
         pending: new Map(), failures: new Map(), sheet: null,
     };
@@ -224,7 +237,8 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     const moreButton = moreEl.querySelector('button');
     if (categoriesEl) bindScrollFade(categoriesEl, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
 
-    const sourceById = () => new Map(state.sources.map((source) => [source.id, source]));
+    const sourceRows = () => host.sourceSnapshot().rows || [];
+    const policyOf = (item) => installPolicy(item, state.catalog?.sources);
     const categoryLabels = () => new Map([...(state.catalog?.categories || []).map((cat) => [cat.id, cat.label || cat.id]), [CONNECTORS, 'Connectors']]);
     const catalogItems = () => (Array.isArray(state.catalog?.items) ? state.catalog.items : []);
     const allKnownItems = () => {
@@ -233,7 +247,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         return seen;
     };
     // The registry shown on its own: chosen by name, with nothing typed.
-    const browsedRegistry = () => (state.query ? null : state.sources.find((source) => source.kind === 'registry' && source.id === state.source) || null);
+    const browsedRegistry = () => (state.query ? null : sourceRows().find((source) => source.kind === 'registry' && source.id === state.source) || null);
 
     function paintSortOptions() {
         // «Recently updated» needs the entries' dates; a catalog without them offers no such sort.
@@ -249,7 +263,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     function paintSourceOptions() {
         const counts = new Map();
         for (const item of catalogItems()) counts.set(item.source_id, (counts.get(item.source_id) || 0) + 1);
-        const options = [['all', 'All sources'], ...state.sources.map((source) => [source.id,
+        const options = [['all', 'All sources'], ...sourceRows().map((source) => [source.id,
             source.kind === 'registry' ? source.name : `${source.name} (${counts.get(source.id) || 0})`])];
         if (!options.some(([value]) => value === state.source)) state.source = 'all';
         sourceSelect.innerHTML = options.map(([value, label]) => `<option value="${escapeHtml(value)}"${value === state.source ? ' selected' : ''}>${escapeHtml(label)}</option>`).join('');
@@ -278,7 +292,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     }
 
     // The registry a search also asks (ClawHub by default); none connected, none asked.
-    const registry = () => state.sources.find((source) => source.kind === 'registry'
+    const registry = () => sourceRows().find((source) => source.kind === 'registry'
         && (state.source === 'all' || state.source === source.id)) || null;
 
     function browseStatus(count) {
@@ -331,17 +345,17 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         const pageModules = host.pageModuleFacts?.() || {};
         const pending = state.pending.get(item.id) || null;
         return browseCardState(item, {
-            source: sourceById().get(item.source_id) || null,
+            policy: policyOf(item),
             installed: listing?.get(item.name) || null, listed: Boolean(listing),
             pending, failure: state.failures.get(item.id) || '',
-            pageModules,
+            live: host.live?.(), pageModules,
         });
     }
 
     function gridHtml(items, key, showCategory) {
         const labels = categoryLabels();
         return `<div class="skills-board" data-browse-grid="${key}">${items.map((item) => renderBrowseCard(item, {
-            source: sourceById().get(item.source_id), state: stateFor(item), categoryLabels: labels, showCategory,
+            state: stateFor(item), categoryLabels: labels, showCategory,
         })).join('')}</div>`;
     }
 
@@ -379,16 +393,26 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         };
     }
 
-    /** A rebuilt board gives the keyboard back to the same card and action it was on, while they are still shown. */
-    function keepFocus() {
-        const focused = document.activeElement;
-        if (!focused || !board.contains(focused)) return () => {};
-        const item = focused.closest('[data-item]')?.dataset.item || '';
-        const action = focused.closest('[data-browse-action]')?.dataset.browseAction || '';
+    // The name, Read more and the consequence row can all open one item; keep the pressed door, not the first action.
+    function currentControl(node) {
+        const item = node.closest('.marketplace-card')?.dataset.item;
+        const inActionRow = Boolean(node.closest('.skills-card-action-row'));
+        const selector = node.matches('.skills-card-name') ? '.skills-card-name'
+            : node.matches('.skills-read-more') ? '.skills-read-more' : `[data-browse-action="${CSS.escape(node.dataset.browseAction)}"]`;
         return () => {
-            const card = item ? board.querySelector(`[data-item="${CSS.escape(item)}"]`) : board;
-            const target = action ? card?.querySelector(`[data-browse-action="${CSS.escape(action)}"]`) : card;
-            if (target && target !== board && document.activeElement !== target) target.focus({ preventScroll: true });
+            if (board.contains(node)) return node;
+            const card = item ? board.querySelector(`article[data-item="${CSS.escape(item)}"]`) : board;
+            return (inActionRow ? card?.querySelector('.skills-card-action-row') : card)?.querySelector(selector);
+        };
+    }
+
+    function keepFocus() {
+        const focused = document.activeElement?.closest('[data-browse-action]');
+        if (!focused || !board.contains(focused)) return () => {};
+        const current = currentControl(focused);
+        return () => {
+            const target = current();
+            if (target && document.activeElement !== target) target.focus({ preventScroll: true });
         };
     }
 
@@ -397,6 +421,12 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         const reading = Boolean(state.browse?.loading && state.browse?.more);
         moreButton.textContent = reading ? 'Reading…' : 'Show more';
         moreButton.setAttribute('aria-busy', reading ? 'true' : 'false');  // stays enabled: a press mid-read is ignored and the keyboard keeps its place
+    }
+
+    function shelfCopy(items) {
+        if (new Set(items.map((item) => item.source_id)).size !== 1) return 'Picked by Ouroboros · Each card says how it installs';
+        const hub = (state.catalog?.sources || []).find((row) => row.id === items[0].source_id && row.kind === 'hub');
+        return `Picked by ${hub?.name || 'Ouroboros'} · ${trustSentence(policyOf(items[0]))}`;
     }
 
     function render() {
@@ -411,15 +441,12 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         const items = browsing ? visibleItems() : sortCatalogItems(visibleItems(), state.sort, state.query);  // a registry's page keeps its order
         statusEl.innerHTML = statusLine(items.length);
         statusEl.dataset.tone = (state.catalogError && !state.catalog) || (browsing && state.browse?.error) ? 'danger' : 'muted';
-        const official = state.sources.find((source) => source.kind === 'hub' && source.part === 'official');
         const shelf = shelfItems(state.catalog, host.installedByName(), state);
         // Shown once: Hide dismisses the shelf on this device for good (SPEC §8.2).
         const showShelf = shelf.length > 0 && !readHiddenShelf();
         let html = '';
         if (showShelf) {
-            const copy = official?.trust === 'trusted'
-                ? `Picked by ${escapeHtml(official.name)}. They install without review — you trust ${escapeHtml(official.name)}.`
-                : `Picked by ${escapeHtml(official?.name || 'Ouroboros')}. Ouroboros reviews each one before it runs.`;
+            const copy = escapeHtml(shelfCopy(shelf));
             html += groupHeadHtml('Recommended to start', { copy, actions: `${buttonHtml(`Install all ${shelf.length}`, { tone: 'primary', attrs: 'data-browse-action="install_all"' })}${buttonHtml('Hide', { tone: 'ghost', attrs: 'data-browse-action="hide_shelf"' })}` });
             html += gridHtml(sortCatalogItems(shelf, 'popular'), 'recommended', state.category === 'all');
             const shown = new Set(shelf.map((item) => item.id));
@@ -430,7 +457,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         } else if (browsing) {
             html += browseEmptyHtml(browsing);
         } else if (state.catalog) {
-            html += `<p class="skills-empty">${state.sources.length ? (state.query ? 'No skill matches this search.' : 'Nothing to show with these filters.') : 'No sources connected, so there is nothing to browse. Skills made here still work.'}</p>`;
+            html += `<p class="skills-empty">${sourceRows().length ? (state.query ? 'No skill matches this search.' : 'Nothing to show with these filters.') : 'No sources connected, so there is nothing to browse. Skills made here still work.'}</p>`;
         }
         const scroller = board.closest('.skills-scroll');
         let held = scroller?.scrollTop || 0;
@@ -466,7 +493,6 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
                 state.pending.delete(item.id);
             }
             const next = stateFor(item);
-            if (state.sheet && !state.sheet.handle.closed && state.sheet.item.id === item.id) state.sheet.handle.setActions(sheetActions(item));
             const row = card.querySelector('.skills-card-action-row');
             const html = `${next.status}<div class="skills-card-actions-end">${next.action || ''}</div>`;
             if (row && row.innerHTML !== html) row.innerHTML = html;
@@ -481,15 +507,16 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
                 else note.remove();
             }
         }
+        // An open sheet's head mirrors the card's one action for the entry it shows, never another found by its id.
+        if (state.sheet && !state.sheet.handle.closed) state.sheet.handle.setActions(sheetActions(state.sheet.item));
     }
 
     async function load({ refresh = false } = {}) {
         const current = ++loadGeneration;
-        const [catalog, sources] = await Promise.allSettled([host.catalog({ refresh }), host.sources(refresh)]);
+        const [catalog] = await Promise.allSettled([host.catalog({ refresh }), host.sources({ replace: refresh })]);
         if (destroyed || current !== loadGeneration) return;
         if (catalog.status === 'fulfilled') { state.catalog = catalog.value; state.catalogError = ''; }
         else state.catalogError = catalog.reason?.message || String(catalog.reason);
-        if (sources.status === 'fulfilled') state.sources = Array.isArray(sources.value) ? sources.value : [];
         render();
         if (refresh && browsedRegistry()) browseRegistry();
         else ensureBrowse();
@@ -607,21 +634,23 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
 
     function openSheet(item, opener) {
         state.sheet?.handle.close();
+        const currentOpener = currentControl(opener);
         const handle = openSkillDetailSheet({
             item, installed: installedHere(item, host.installedByName()?.get(item.name)),
-            source: sourceById().get(item.source_id) || null,
+            policy: policyOf(item),
             actionsHtml: sheetActions(item),
             // A registry hit has no entry to read until it is installed; its card is all there is.
-            readDetail: sourceById().get(item.source_id)?.kind === 'registry' || item.registry_slug ? null
+            readDetail: sourceRows().find((row) => row.id === item.source_id)?.kind === 'registry' || item.registry_slug ? null
                 : ({ signal } = {}) => api.item(item.source_id, item.name, { signal }),
-            onAction: (action, button) => act(action, button),
-            returnFocus: opener,
+            onAction: (action, button) => act(action, button, currentOpener, item),
+            returnFocus: currentOpener,
         });
         state.sheet = { item, handle };
     }
 
-    async function act(action, node) {
-        const item = allKnownItems().get(node?.dataset?.item || '');
+    // A sheet acts on the entry it shows (`shown`); a card on the entry it was drawn from.
+    async function act(action, node, sheetOpener = null, shown = null) {
+        const item = shown || allKnownItems().get(node?.dataset?.item || '');
         if (action === 'hide_shelf') { writeHiddenShelf('1'); render(); return; }
         if (action === 'browse_more') { await showMore(); return; }
         if (action === 'browse_retry') { await retryBrowse(); return; }
@@ -640,8 +669,15 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             if (await host.compare(item, installed) === 'replace') await install(item, { replace: true });
             return;
         }
-        if (action === 'installed') { host.showInstalled(item.name); return; }
-        const map = { skip: 'attest_review', update: 'update', turn_on: 'turn_on', widgets: 'open_widgets' };
+        if (action === 'installed' || action === 'widgets') {
+            // A departed sheet has no focus target; its opening control on Browse is the return.
+            const opener = sheetOpener ? sheetOpener() : node;
+            if (sheetOpener) state.sheet?.handle.close();
+            if (action === 'installed') await host.showInstalled(item.name, opener);
+            else await host.runInstalledAction(item.name, 'open_widgets', sheetOpener ? { opener } : undefined);
+            return;
+        }
+        const map = { skip: 'attest_review', update: 'update', turn_on: 'turn_on' };
         if (map[action]) {
             await host.runInstalledAction(item.name, map[action]);
             repaintStates();
@@ -696,6 +732,11 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         show: (options) => (loaded = load(options)),
         refresh: () => (loaded = load({ refresh: true })),
         repaintStates,
+        /** What the Official mark of a shown entry may say of its source: the entry's own facts, or null. */
+        officialSource(id) {
+            const item = allKnownItems().get(id);
+            return item ? { ...policyOf(item), url: item.repo_url } : null;
+        },
         async searchFor(name) {
             searchInput.value = name;
             state.query = name;

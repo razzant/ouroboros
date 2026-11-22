@@ -27,7 +27,6 @@ retires only the sleep timing; its own readiness never starts or spends under F.
 
 from __future__ import annotations
 
-import copy
 import json
 import time
 from types import SimpleNamespace
@@ -553,11 +552,11 @@ def test_a_readiness_wake_beneath_the_latch_neither_starts_nor_spends(tmp_path, 
     from tests.test_model_sleep import _mail
 
     queue, workers, _sup_ctx, _child, fence_f, sent = _sleeper_under_latch(tmp_path, monkeypatch, senders=[SIBLING])
-    prior_handoff = copy.deepcopy(_pending(workers, CHILD).get("_budget_pause_resume"))
+    assert "_budget_pause_resume" not in _pending(workers, CHILD)
     _mail(tmp_path, CHILD, "done", sender=SIBLING)
     woke = wake_ready_sleepers(queue)
     assert [outcome.get("error") for outcome in woke] == ["sleep_wake_vetoed"], woke
-    assert _pending(workers, CHILD).get("_budget_pause_resume") == prior_handoff
+    assert "_budget_pause_resume" not in _pending(workers, CHILD)
     workers.assign_tasks()
     row = budget_pause.budget_pause_row(tmp_path, CHILD)
     evidence = {"fence_f": fence_f, "dispatched": [task["id"] for task in sent], "reserve": _reserve(tmp_path, CHILD),

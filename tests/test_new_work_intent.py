@@ -13,7 +13,8 @@ from tests.test_startup_terminal_files import roots  # noqa: F401
 def event():
     return {"type": "promote_chat_to_task", "task_id": "new", "routing_token": "stable-token",
             "objective": "Separate work", "title": "Separate", "project_id": "", "source_text": "owner words",
-            "source_ref": {"chat_id": 1, "client_message_id": "original"}, "attachment_uploads": [{"ref": "upload"}]}
+            "source_ref": {"chat_id": 1, "client_message_id": "original"}, "attachment_uploads": [{"ref": "upload"}],
+            "owner_source": "row:1@2024-04-08T13:45:00+00:00#0123456789ab"}
 
 
 def test_complete_intent_precedes_emit(tmp_path, monkeypatch):
@@ -56,10 +57,14 @@ def test_boot_distinguishes_proof_and_never_enqueues(tmp_path, phase):
     stored = load_task_result(tmp_path, "new", strict=True)
     assert stored["promotion_intent"] == evt
     if phase == "prepared":
+        from ouroboros.promotion_intent import promotion_intent_notice
+
         assert report["not_started"] == ["new"]
         assert stored["promotion_admission"]["status"] == "not_started"
         assert stored["promotion_admission"]["retry_available"] is True
         assert "Retry explicitly" in stored["result"]
+        # The explicit retry names the owner message the start answered, as the first call did.
+        assert '"owner_source": "row:1@2024-04-08T13:45:00+00:00#0123456789ab"' in promotion_intent_notice("new", stored)
     elif phase == "admitted":
         assert stored["status"] == "scheduled" and report == {"not_started": [], "held": []}
     else:

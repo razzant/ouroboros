@@ -455,8 +455,9 @@ def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_e
     length (``INPUT_STRING_LENGTH_CODES``) adds none at any size: it says nothing of the token window.
     A refusal recognised only by HTTP 413 or by a cited number equal to a declared limit (``UNTAUGHT_BASES``)
     writes nothing, the measured size included: neither states a unit, and the host's estimate is no provider
-    limit. Below an accepted input, a token limit teaches only a single-server route (local or custom
-    OpenAI-compatible): that server may have restarted smaller. A gateway scope does not name the
+    limit. A refusal typed only by the Z.ai 1261 pair while stating no token window (#3858, ``SizeRefusal.retry_only``)
+    records nothing at any size either. Below an accepted input, a token limit teaches only a single-server route
+    (local or custom OpenAI-compatible): that server may have restarted smaller. A gateway scope does not name the
     serving endpoint; its smaller statement sizes only this round (``loop_model_call._refusal_window``)."""
     from ouroboros import capability_evidence as ce
     from ouroboros.context_budget import INPUT_STRING_LENGTH_CODES
@@ -468,6 +469,8 @@ def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_e
     from ouroboros.size_refusal import for_usage
     refusal = for_usage(usage)
     limit = refusal.token_window
+    if not limit and refusal.retry_only:
+        return
     if not limit:
         if (int(refused_input or 0) > 0
                 and str(usage.get("_last_llm_provider_code") or "").lower() not in INPUT_STRING_LENGTH_CODES):

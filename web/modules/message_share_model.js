@@ -183,15 +183,17 @@ function collectBlocks(container, ctx, out) {
     flush();
 }
 
+function describeBlock(item, index) {
+    const words = item.runs.map((run) => run.text).join('');
+    return { ...item, index, math: ['heading', 'paragraph', 'item', 'table'].includes(item.kind) && MATH.test(words),
+        rtl: item.kind !== 'code' && textDirection(words) === 'rtl' };
+}
+
 /** The share model of a rendered message `root`: ordered blocks, each `{index, kind, depth, quote, runs, ...}`. */
 export function shareBlocks(root) {
     const out = [];
     collectBlocks(root, { depth: 0, quote: 0, links: 0 }, out);
-    return out.map((item, index) => {
-        const words = item.runs.map((run) => run.text).join('');
-        return { ...item, index, math: ['heading', 'paragraph', 'item', 'table'].includes(item.kind) && MATH.test(words),
-            rtl: item.kind !== 'code' && textDirection(words) === 'rtl' };
-    });
+    return out.map(describeBlock);
 }
 
 /** `rtl` when the first letter of `text` belongs to a right-to-left script. */
@@ -299,7 +301,7 @@ export function sliceBlocks(blocks, pieces) {
     return [...byBlock.values()].map((item) => {
         const runs = item.kind === 'code' || item.kind === 'diagram' || item.kind === 'chart' || item.kind === 'table'
             ? item.runs : tidyRuns(item.runs);
-        return { ...item, runs };
+        return describeBlock({ ...item, runs }, item.index);
     }).filter((item) => item.runs.length);
 }
 

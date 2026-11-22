@@ -43,11 +43,14 @@ def atomic_temp_path(path: pathlib.Path, *, tag: str = "") -> pathlib.Path:
     suffix = f"{'.' + tag if tag else ''}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
     stem = path.name
     room = _NAME_MAX_BYTES - 1 - len(suffix.encode("utf-8"))
-    if len(stem.encode("utf-8")) > room:
+    # POSIX may have returned surrogate-escaped bytes in this basename. Measure
+    # those filesystem bytes, not a strict UTF-8 rendering of the name as prose.
+    name_bytes = stem.encode("utf-8", "surrogateescape")
+    if len(name_bytes) > room:
         import hashlib
 
-        digest = "~" + hashlib.sha256(stem.encode("utf-8")).hexdigest()[:12]
-        keep = stem.encode("utf-8")[:max(0, room - len(digest))].decode("utf-8", "ignore")
+        digest = "~" + hashlib.sha256(name_bytes).hexdigest()[:12]
+        keep = name_bytes[:max(0, room - len(digest))].decode("utf-8", "ignore")
         stem = keep + digest
     return path.with_name(f".{stem}{suffix}")
 

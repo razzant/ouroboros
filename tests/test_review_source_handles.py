@@ -94,11 +94,17 @@ def test_failed_completion_promotion_retains_child_until_retry(tmp_path, monkeyp
     assert artifacts.read_actor_source_bytes(parent, "source", ref) == raw
 
 
-def test_source_download_is_bound_and_distinct_from_same_named_user_file(tmp_path):
+def test_source_download_is_bound_and_distinct_from_same_named_user_file(tmp_path, monkeypatch):
+    from ouroboros import task_finalization
+    from ouroboros.server_web import TEXT_COMPRESSION
+
     ref = _old_published_panel(tmp_path, "applied", _run())
     name = Path(ref["path"]).name
     artifacts.store_task_artifact_bytes(tmp_path, "applied", name, b"user result", kind="user_file")
-    app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)])
+    record = b'{"record": "' + b"stored acceptance " * 200 + b'"}'
+    # Under the core's text filter: a stored source is a file, delivered as its exact bytes, never re-encoded.
+    app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)],
+                    middleware=TEXT_COMPRESSION)
     app.state.drive_root = tmp_path
     with TestClient(app) as client:
         url = f"/api/tasks/applied/artifacts/{name}"
@@ -108,8 +114,14 @@ def test_source_download_is_bound_and_distinct_from_same_named_user_file(tmp_pat
         else:
             assert artifact.status_code == 503
             assert artifact.json()["reason_code"] == "artifact_unavailable"
-        source = client.get(url, params={"source": ref["path"]})
-        assert source.status_code == 200
+        source = client.get(url, params={"source": ref["path"]}, headers={"Accept-Encoding": "gzip"})
+        assert source.status_code == 200 and "content-encoding" not in source.headers
+        accepted = f"acceptance-{'a' * 64}.json"
+        with monkeypatch.context() as patch:  # a host acceptance record, the route's other stored source
+            patch.setattr(task_finalization, "host_acceptance_source", lambda *_a, **_k: ({}, record))
+            kept = client.get(f"/api/tasks/applied/artifacts/{accepted}", headers={"Accept-Encoding": "gzip"},
+                              params={"source": f"source_handles/context_checkpoints/{accepted}"})
+        assert kept.status_code == 200 and "content-encoding" not in kept.headers and kept.content == record
         assert hashlib.sha256(source.content).hexdigest() == ref["sha256"]
         assert len(json.loads(source.content)["actors"][0]["parsed"]["findings"]) == 80
         assert client.get(url, params={"source": "source_handles/context_checkpoints/not-published.json"}).status_code == 404
