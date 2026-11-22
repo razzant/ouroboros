@@ -181,10 +181,14 @@ def test_a_read_never_offers_a_phrase_and_the_send_offers_its_template_in_its_ow
     host_notice.view(row, drive_root=tmp_path, record_misses=True)
     assert offered == [(tmp_path, ["Skill review: `{skill}` — interrupted"])] * 2, "a refused offer is offered again"
     monkeypatch.setattr(i18n_memory, "record_missing", real)
+    from ouroboros import ui_translation
+    woke = []  # the generator's wake is recorded, not run: a live generator would drain the queue this test reads
+    monkeypatch.setattr(ui_translation, "on_language_event", lambda *event: woke.append(event))
     host_notice.view(row, drive_root=tmp_path, record_misses=True)
     host_notice.view(row, drive_root=tmp_path, record_misses=True)
     pending = json.loads(i18n_memory.pending_path(tmp_path, "ru").read_text(encoding="utf-8"))["items"]
     assert list(pending) == ["Skill review: `{skill}` — interrupted"] and pending[list(pending)[0]]["count"] == 1
+    assert woke == [("missing", tmp_path, "ru")], "an accepted offer wakes the generator once"
 
 
 def test_search_and_the_room_snapshot_carry_the_notice(tmp_path):
