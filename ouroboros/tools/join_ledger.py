@@ -262,8 +262,7 @@ def _record_child_result_disposition(
     payload: Dict[str, Any],
     rationale: str,
 ) -> str:
-    """Append the sole authoritative, exact-hash child disposition row."""
-
+    """Bind an exact-hash disposition under the physical child's scratch-acceptance lock."""
     # Aggregated diagnostics (W2): name EVERY violated constraint in ONE reply —
     # the old one-error-per-round shape cost a live parent 9 paid rounds. The
     # typed exact-hash authority is unchanged: no truncation on the caller's
@@ -295,91 +294,82 @@ def _record_child_result_disposition(
             f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} is not a direct child of this task; "
             "no disposition was recorded."
         )
-    data = load_effective_task_result(status_drive_root, tid) or {}
-    if not data:
-        return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ CHILD_RESULT_STALE: {tid} has no current result to bind.")))
-    actual = _child_result_sha256(data)
-    if actual != expected:
-        return (
-            _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ CHILD_RESULT_STALE: {tid} changed (expected {expected[:12]}, current "
-            f"{actual[:12]}); inspect it again and submit the current hash.")))
-        )
+    from ouroboros.task_custody import task_custody_lock
 
-    from ouroboros.tools.task_tree import tree_root_id
+    with task_custody_lock(status_drive_root, tid, timeout_sec=0) as locked:
+        if not locked:
+            return (
+                f"⚠️ CHILD_RESULT_DISPOSITION_BUSY: {tid}'s custody is held (scratch release "
+                "or copy-back); retry the same disposition once it is free. Nothing was recorded."
+            )
+        data = load_effective_task_result(status_drive_root, tid) or {}
+        if not data:
+            return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ CHILD_RESULT_STALE: {tid} has no current result to bind.")))
+        actual = _child_result_sha256(data)
+        if actual != expected:
+            return (
+                _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ CHILD_RESULT_STALE: {tid} changed (expected {expected[:12]}, current "
+                f"{actual[:12]}); inspect it again and submit the current hash.")))
+            )
 
-    root_task_id = tree_root_id(ctx)
-    parent_task_id = str(getattr(ctx, "task_id", "") or "").strip()
-    if _child_disposition_lineage(data) != (root_task_id, parent_task_id, tid):
-        return (
-            f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} does not carry the exact "
-            "root/parent lineage required for a tree-ledger disposition."
-        )
+        from ouroboros.tools.task_tree import tree_root_id
 
-    existing = child_result_disposition_row(
-        root_task_id,
-        parent_task_id,
-        tid,
-        expected,
-        data_root=status_drive_root,
-    )
-    if (
-        existing
-        and existing.get("payload") == normalized
-        and str(existing.get("text") or "") == reason_text
-    ):
-        return (
-            f"OK: child {tid} is already marked {disposition} for result "
-            f"{expected[:12]} (idempotent)."
-        )
+        root_task_id = tree_root_id(ctx)
+        parent_task_id = str(getattr(ctx, "task_id", "") or "").strip()
+        if _child_disposition_lineage(data) != (root_task_id, parent_task_id, tid):
+            return (
+                f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} does not carry the exact "
+                "root/parent lineage required for a tree-ledger disposition."
+            )
 
-    metadata = (
-        getattr(ctx, "task_metadata", {})
-        if isinstance(getattr(ctx, "task_metadata", {}), dict)
-        else {}
-    )
-    role = str(metadata.get("role") or getattr(ctx, "role", "") or "")
-    appended = tree_ledger_append(
-        root_task_id,
-        "decision",
-        reason_text,
-        task_id=parent_task_id,
-        role=role,
-        payload=normalized,
-        allow_child_result_disposition=True,
-        data_root=status_drive_root,
-    )
-    if not appended.startswith("OK:"):
-        return (
-            f"⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: failed to append the "
-            f"authoritative task-tree decision for {tid}."
-        )
+        def recorded() -> bool:
+            row = child_result_disposition_row(root_task_id, parent_task_id, tid, expected, data_root=status_drive_root)
+            return bool(row and row.get("payload") == normalized and str(row.get("text") or "") == reason_text)
 
-    current = load_effective_task_result(status_drive_root, tid) or {}
-    if _child_result_sha256(current) != expected:
-        return (
-            _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ CHILD_RESULT_STALE: {tid} changed while its disposition was recorded; "
-            "the old row remains audit evidence but does not close the new result.")))
+        if recorded():
+            return (
+                f"OK: child {tid} is already marked {disposition} for result "
+                f"{expected[:12]} (idempotent)."
+            )
+
+        metadata = (
+            getattr(ctx, "task_metadata", {})
+            if isinstance(getattr(ctx, "task_metadata", {}), dict)
+            else {}
         )
-    if _child_disposition_lineage(current) != (root_task_id, parent_task_id, tid):
-        return (
-            f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} lineage changed while its "
-            "disposition was recorded."
+        role = str(metadata.get("role") or getattr(ctx, "role", "") or "")
+        appended = tree_ledger_append(
+            root_task_id,
+            "decision",
+            reason_text,
+            task_id=parent_task_id,
+            role=role,
+            payload=normalized,
+            allow_child_result_disposition=True,
+            data_root=status_drive_root,
         )
-    authoritative = child_result_disposition_row(
-        root_task_id,
-        parent_task_id,
-        tid,
-        expected,
-        data_root=status_drive_root,
-    )
-    if (
-        authoritative.get("payload") != normalized
-        or str(authoritative.get("text") or "") != reason_text
-    ):
-        return (
-            f"⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: a later decision replaced "
-            f"the disposition for {tid}; this caller did not overwrite it."
-        )
+        if not appended.startswith("OK:"):
+            return (
+                f"⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: failed to append the "
+                f"authoritative task-tree decision for {tid}."
+            )
+
+        current = load_effective_task_result(status_drive_root, tid) or {}
+        if _child_result_sha256(current) != expected:
+            return (
+                _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ CHILD_RESULT_STALE: {tid} changed while its disposition was recorded; "
+                "the old row remains audit evidence but does not close the new result.")))
+            )
+        if _child_disposition_lineage(current) != (root_task_id, parent_task_id, tid):
+            return (
+                f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} lineage changed while its "
+                "disposition was recorded."
+            )
+        if not recorded():
+            return (
+                f"⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: a later decision replaced "
+                f"the disposition for {tid}; this caller did not overwrite it."
+            )
     return f"OK: child {tid} marked {disposition} for result {expected[:12]}."
 
 

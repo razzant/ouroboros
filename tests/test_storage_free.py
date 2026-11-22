@@ -329,6 +329,47 @@ def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_p
     assert run["removed"] + run["deleting"] == 1 and run["selected"] == 2
 
 
+def test_a_childs_work_folder_is_freed_while_the_trash_keeps_the_scratch_its_parent_waits_on(tmp_path, monkeypatch):
+    """The folder's own bytes are offered and freed; the session scratch its record names lies outside it and is
+    the trash pass's to keep, in an entry of its own, until the parent accepts the result
+    (``session_scratch.parent_hold``)."""
+    from ouroboros import session_scratch, test_environment
+    from ouroboros.task_status import load_effective_task_result
+    from ouroboros.task_tree_ledger import CHILD_RESULT_DISPOSITION_TYPE, tree_ledger_append
+    from ouroboros.tools.join_ledger import _child_result_sha256
+    from ouroboros.workspace_preflight import session_service_directories
+
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(test_environment, "session_scratch_parent", lambda: temp)  # keep scratch below this test
+    root = tmp_path / "data"
+    probes = _drives(root, [("child", "direct", "completed", OLD)])
+    _add(root, [document("child", "completed", ts=OLD, child_drive_root=str(root / "task_drives" / "child"),
+                         parent_task_id="lead", root_task_id="lead", delegation_role="subagent"),
+                document("lead", "running")])
+    (tmp_path / "copy").mkdir()
+    scratch = Path(session_service_directories(None, "full-route", access="full", mode="agent", data_root=root,
+                                               drive_root=root, task_id="child", key="snap-1",
+                                               execution_root=tmp_path / "copy").scratch)
+    (scratch / "snapshot.sqlite").write_bytes(b"frozen for one measurement")
+    _fake_sizer(monkeypatch)
+    owner = _owner(probes)
+
+    view = _preview(owner, root, tmp_path)
+    assert [item["id"] for item in _group(view, "work_folders")["items"]] == ["direct:child"]
+    run = _run(owner, root, tmp_path)["run"]
+    assert run["removed"] + run["deleting"] == 1 and not (root / "task_drives" / "child").exists()
+    trash = task_custody.remove_custody_trash(root)
+    held = [hold["class"] for hold in trash["holds"]]
+    assert (trash["removed"], held) == (1, [session_scratch.PARENT_DECISION_PENDING])
+    assert (scratch / "snapshot.sqlite").is_file()
+    digest = _child_result_sha256(load_effective_task_result(root, "child"))
+    assert not tree_ledger_append("lead", "decision", "consumed", task_id="lead", payload={
+        "type": CHILD_RESULT_DISPOSITION_TYPE, "child_task_id": "child", "disposition": "integrated",
+        "child_result_sha256": digest}, allow_child_result_disposition=True, data_root=root).startswith("⚠️")
+    assert task_custody.remove_custody_trash(root)["removed"] == 1 and not scratch.exists()
+
+
 @pytest.mark.parametrize("trash_deleted", [False, True])
 def test_a_folder_the_cadence_settled_first_counts_once_and_raises_nothing(tmp_path, monkeypatch, trash_deleted):
     root = tmp_path / "data"
@@ -625,7 +666,7 @@ def test_a_stuck_entry_removed_just_before_storebusy_still_gets_its_retirement_s
     sibling = root / "state" / "custody_trash" / "unread-0123456789ab"
     sibling.mkdir()
     # Its producer holds it. The name still enumerates; only its identity observation fails.
-    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda _root, _entry, owed=None: (True, []))
+    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda _root, _entry, owed=None, **kwargs: (True, []))
     _unreadable_trash_identity(monkeypatch, sibling)
     monkeypatch.setattr(maintenance_retirement, "schedule_in", schedule)
     assert task_custody.custody_trash_scan(root) == ([(sibling.name, None)], True)

@@ -13,9 +13,10 @@
 2. CLAIM on the predecessor before any effect (``claim_on_predecessor``): eligibility,
    complete owner sources, the author-stop money pre-check and binding (room from
    the predecessor's canonical Project binding, ``continuation_room``) precede the claim.
-   A failed write refuses with nothing done. The same nonce
-   resumes its own claim and frozen room; another nonce is answered with the
-   accepted successor.
+   The claim takes predecessor custody without waiting and re-reads the result there.
+   Scratch retirement holds that same lock while accepting release. A failed write refuses
+   with nothing done. The same nonce resumes its own claim and frozen room; another
+   nonce is answered with the accepted successor.
 3. ADMISSION through the existing reservation and durable enqueue (queue row
    under the queue lock, its snapshot published outside it, then the result row
    under the queue lock again, the row revalidated still queued). A

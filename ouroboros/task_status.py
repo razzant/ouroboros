@@ -303,6 +303,7 @@ def _resolved_root(root: str) -> pathlib.Path:
 
 def task_execution_observation(
     drive_root: Any, result: Dict[str, Any], *, queue_snapshot: Optional[Dict[str, Any]] = None,
+    reads: Any = None,
 ) -> Dict[str, Any]:
     """Recorded ownership and a separately dated positive live observation.
 
@@ -340,9 +341,11 @@ def task_execution_observation(
         return {**observation, "state": "terminal", "reason": "recorded_terminal"}
     if kind == "unknown":
         return observation
-    snapshot = queue_snapshot if queue_snapshot is not None else _load_queue_snapshot(root)
+    snapshot = queue_snapshot if queue_snapshot is not None else (
+        reads.queue_snapshot(drive_root) if reads is not None else _load_queue_snapshot(root))
     queue_seen = queue_snapshot_observation(snapshot)
-    queued, _task = _queue_task_status(snapshot, tid)
+    queued, _task = (reads.queue_task_status(drive_root, tid) if reads is not None and queue_snapshot is None
+                     else _queue_task_status(snapshot, tid))
     # The queue never owns a Presence turn's carried body: it runs in a conversation-lane carrier (or the
     # disclosed degraded executor), whose liveness is observed locally (below) or proven by its
     # controller, never by a snapshot row a dead carrier left published. A pooled or direct row keeps
@@ -423,19 +426,9 @@ def task_subtree_has_live_queue_rows(drive_root: pathlib.Path, task_id: str) -> 
 def _queue_task_status(snapshot: Dict[str, Any], task_id: str) -> tuple[str, Dict[str, Any]]:
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return "unknown", {}
-    for row in snapshot.get("running") or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("id") or row.get("task_id") or "") == task_id:
-            task = row.get("task") if isinstance(row.get("task"), dict) else {}
-            return STATUS_RUNNING, task
-    for row in snapshot.get("pending") or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("id") or row.get("task_id") or "") == task_id:
-            task = row.get("task") if isinstance(row.get("task"), dict) else {}
-            return STATUS_SCHEDULED, task
-    return "", {}
+    from ouroboros.task_reads import queue_task_rows
+
+    return next((fact for name, fact in queue_task_rows(snapshot) if name == task_id), ("", {}))
 
 
 def observe_cancellation_target(
@@ -1111,7 +1104,8 @@ def effective_task_result(
     if parent_status not in FINAL_STATUSES:
         queue_snapshot = (reads.queue_snapshot(drive_root) if reads is not None
                           else _load_queue_snapshot(pathlib.Path(drive_root)))
-        queue_status, queue_task = _queue_task_status(queue_snapshot, task_id)
+        queue_status, queue_task = (reads.queue_task_status(drive_root, task_id) if reads is not None
+                                   else _queue_task_status(queue_snapshot, task_id))
         # The queue never owns a Presence turn (its body runs in a conversation-lane carrier or the
         # disclosed degraded executor, admitted to a RUNNING snapshot row): a stale lane row a dead
         # carrier left behind must not read as live ownership and mask the turn's own end fact. Its
@@ -1180,7 +1174,8 @@ def effective_task_result(
     # A legacy ``cancel_requested`` status (old files awaiting boot migration)
     # projects the same pending state.
     _apply_cancel_state_projection(pathlib.Path(drive_root), task_id, merged, reads)
-    merged["execution_observation"] = task_execution_observation(drive_root, merged, queue_snapshot=queue_snapshot)
+    merged["execution_observation"] = task_execution_observation(
+        drive_root, merged, queue_snapshot=None if reads is not None else queue_snapshot, reads=reads)
     observed = merged["execution_observation"]
     if observed.get("reason") == "queue_ownership" and observed.get("status") == STATUS_SCHEDULED:
         held = (merged.get("current_stop") or {}).get("state")

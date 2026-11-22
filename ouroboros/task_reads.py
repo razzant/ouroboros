@@ -57,6 +57,17 @@ def _store_stamp(root: pathlib.Path) -> Optional[tuple]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, header[24:28], tuple(log) if log else None)
 
 
+def queue_task_rows(snapshot: Dict[str, Any]):
+    """Running takes precedence over pending, and the first row in each lane wins."""
+    from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED
+
+    for lane, status in (("running", STATUS_RUNNING), ("pending", STATUS_SCHEDULED)):
+        for row in snapshot.get(lane) or ():
+            if isinstance(row, dict):
+                task = row.get("task")
+                yield str(row.get("id") or row.get("task_id") or ""), (status, task if isinstance(task, dict) else {})
+
+
 class TaskReads:
     """The documents, queue snapshot and cancel intents one read of many tasks uses."""
 
@@ -65,6 +76,7 @@ class TaskReads:
         self._documents: Dict[Tuple[str, str], Optional[str]] = {}  # (root, task id) -> view text
         self._decoded: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}  # this read's own lookups, never handed out
         self._queue: Dict[str, Dict[str, Any]] = {}
+        self._queue_tasks: Dict[str, Dict[str, tuple]] = {}
         self._intents: Dict[str, Dict[str, Any]] = {}
         self._events: Any = None
         self._stamps: Dict[str, Optional[tuple]] = {}  # child store stamps, one stat per read
@@ -282,6 +294,19 @@ class TaskReads:
         if key not in self._queue:
             self._queue[key] = _load_queue_snapshot(pathlib.Path(root))
         return self._queue[key]
+
+    def queue_task_status(self, root: Any, task_id: str) -> tuple:
+        """The same first running/pending row as task_status, indexed once for this read only."""
+        key = str(pathlib.Path(root))
+        snapshot = self.queue_snapshot(root)
+        if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
+            return "unknown", {}
+        if key not in self._queue_tasks:
+            index = {}
+            for name, fact in queue_task_rows(snapshot):
+                index.setdefault(name, fact)
+            self._queue_tasks[key] = index
+        return self._queue_tasks[key].get(task_id, ("", {}))
 
     def cancel_intents(self, root: Any) -> Dict[str, Any]:
         from ouroboros.cancel_intents import active_intents

@@ -1540,13 +1540,14 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
     for one fact, while a direct caller keeps its own notification. LISTING, when given, is filled by this
     pass with ``initial`` (the whole enumeration before processing) and ``gone`` (the names already counted
     removed by this pass). A Stop ends processing, not the earlier enumeration. The report is unchanged."""
-    from ouroboros.session_scratch import aggregate_holds, release_trash_entry
+    from ouroboros.session_scratch import _trash_read_view, aggregate_holds, release_trash_entry
     from ouroboros.tools.kept_service_outputs import owed_declarations
 
     report: Dict[str, Any] = {"removed": 0, "stuck": {}, "holds": []}
     held: List[Any] = []
     root = pathlib.Path(canonical_root) / _TRASH_DIR
     owed = owed_declarations(canonical_root)  # one selection for the whole pass: every entry reads the same debts
+    reads, members, live = _trash_read_view(canonical_root)
     try:
         if root.is_symlink():
             raise OSError(f"custody trash listing denied: {root} is a symlink")
@@ -1567,7 +1568,7 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
             break
         holding, failed = False, ""
         try:  # the scratch release and every retained record's handoff are the conditions of the removal
-            holding, retained = release_trash_entry(canonical_root, entry, owed=owed)
+            holding, retained = release_trash_entry(canonical_root, entry, owed=owed, reads=reads, live=live, members=members)
         except Exception as exc:  # whatever failed, the entry and every record still in it wait
             failed = f"{entry.name}: {type(exc).__name__}"
             held += [(row["class"], row["example"], row["since"]) for row in getattr(exc, "retained", ())]
