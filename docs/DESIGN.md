@@ -3015,7 +3015,8 @@ host's identity check names the account, a QR of the skill's link with a one-tim
 @name, the skill's hint and note (Telegram: scan, press Start; finishing setup now is fine), the same link for this
 device and the skill's options (Telegram's «Send results and errors of work here», on for a new connection). On a phone
 the Check button sits under the field. The QR is drawn on the device by
-the vendored encoder, dark on a white square in both themes, and holds the link alone, never the token. A failed check
+the vendored encoder, dark on a white square in both themes, and holds the link alone, never the token; an edit of
+the checked token takes that QR and its words off at once, the field untouched. A failed check
 says only its own cause («Could not reach Telegram from here, so there is no QR code», «Telegram did not accept this
 token»; only the service's refusal says it did not accept), a draft that is no token (a space or line break inside,
 more than 512 characters) says so in the page's own words and is never checked, and none blocks Continue or Finish; a

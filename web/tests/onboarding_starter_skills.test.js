@@ -505,6 +505,37 @@ test('a code rides only with a QR the page painted: a check answering once the c
     }
 });
 
+test('a changed draft takes the shown check of the one before off the page at once, the field kept; going back shows it again', async () => {
+    const { step, host } = await cardStep(withCard(), () => ({ status: 'ok', username: 'former_bot' }));
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    paste(host, TOKEN);
+    await settle();
+    assert.match(host.innerHTML, /data-connection-link/);
+    let html = host.innerHTML;
+    let writes = 0;
+    Object.defineProperty(host, 'innerHTML', { get: () => html, set(value) { writes += 1; html = value; } });
+    const removed = [];
+    const typed = (value) => {
+        const node = { querySelectorAll: (selector) => selector.split(', ').map((one) => ({ remove: () => removed.push(one) })) };
+        const field = { value, closest: (selector) => ({ '[data-connection-token]': field, '[data-connection]': node })[selector] || null };
+        host.handlers.input({ target: field, inputType: 'insertText' });
+    };
+    typed(TOKEN);  // the checked token itself: nothing leaves
+    assert.deepEqual([removed, writes], [[], 0]);
+    typed(TOKEN + '8');
+    assert.deepEqual(removed, ['.skills-connection-pair', '[data-connection-status]'], 'the old QR, link and words leave at once');
+    assert.equal(writes, 0, 'nothing rewritten: the field being typed into stays, caret and all');
+    assert.deepEqual(step.payload().connections, { telegram: { fields: { botToken: `${TOKEN}8` } } }, 'an unchecked draft: no code');
+    typed(TOKEN + '89');
+    assert.deepEqual([removed.length, writes], [2, 0], 'nothing of the old check is left to take');
+    // Back to the token it checked: its QR shows again (the step writes anew), and its code rides.
+    typed(TOKEN);
+    assert.equal(writes, 1);
+    assert.match(html, /data-connection-link/);
+    const { code } = step.snapshot().connection;
+    assert.deepEqual(step.payload().connections, { telegram: { fields: { botToken: TOKEN }, code, options: { TELEGRAM_NOTIFY_TASKS: 'on' } } });
+});
+
 test('a draft that is no token is said here, never checked and never sent; the service’s words stay its own', async () => {
     for (const [draft, words] of [[`${TOKEN} more`, /^A token has no spaces or line breaks inside, so this one is not saved\.$/],
         [`${TOKEN}\nsecond line`, /^A token has no spaces or line breaks inside, so this one is not saved\.$/],

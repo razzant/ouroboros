@@ -109,7 +109,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             state.error = '';
             const declared = !connection && items().find((item) => normalizeConnection(item.connection));
             if (declared) {
-                connection = createConnectionCard(declared, normalizeConnection(declared.connection), { ...card, repaint: () => paint(),
+                connection = createConnectionCard(declared, normalizeConnection(declared.connection), { ...card, repaint: () => paint(), edited: () => { touched = true; },
                     ticked: () => state.ticked.has(declared.id), tick: () => { state.ticksChanged = true; state.ticked.add(declared.id); } });
             }
         } catch (error) {
@@ -248,16 +248,18 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
     // Chromium reports a focused field's unreported edit (`change`) from inside the rewrite that removes it; a repaint
     // the card's handler asks for then would rewrite the list under that rewrite, which throws. It follows instead.
     let painting = false;
+    let touched = false;  // the card changed its markup in place since the last write: the next paint writes anew
     function paint() {
         if (!host?.isConnected) return;
         if (painting) { queueMicrotask(paint); return; }
         const html = view === 'step' ? stepHtml(false) : view === 'row' ? rowHtml() : '';
-        if (html === painted) return;  // a read that changed nothing rewrites nothing
+        if (html === painted && !touched) return;  // a read that changed nothing rewrites nothing
         const arrive = view === 'step' && !arrived && state.status === 'ready' && items().length > 0;
         const restore = painted && view === 'step' ? readingPlace() : null;
         painting = true;
         try { host.innerHTML = arrive ? stepHtml(true) : html; } finally { painting = false; }
         painted = html;
+        touched = false;
         connection?.painted();  // a QR the page now shows is one the person could scan: only then may its code ride
         arrived ||= arrive;
         if (arrive) paceColumns();

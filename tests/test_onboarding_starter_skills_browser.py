@@ -448,6 +448,33 @@ def test_a_check_answering_after_the_step_was_left_arms_no_code_and_names_no_acc
     assert _completion(ui)[0]["connections"]["telegram"] == {"fields": {"botToken": TOKEN}}
 
 
+def test_editing_a_checked_token_takes_its_qr_off_at_once_and_keeps_the_field(subscription_ui):
+    """The old bot's QR and link leave as soon as the token changes, the field keeping its value, focus and caret; back
+    at the checked token its QR shows again (rv2 C6)."""
+    ui = subscription_ui
+    ui["page"].route("**/api/onboarding/connection/identity", lambda route: route.fulfill(
+        content_type="application/json", body=json.dumps({"ok": True, "username": "former_bot"})))
+    page = _skills_step(ui, answer=_with_card(), width=390)
+    card = page.locator(".skills-connection")
+    card.locator("[data-connection-toggle]").click()
+    field = card.locator("[data-connection-token]")
+    field.fill(TOKEN)
+    field.press("Enter")
+    card.locator(".skills-connection-qr svg").wait_for()
+    field.press("End")
+    field.press("8")
+    assert not card.locator("[data-connection-link], .skills-connection-qr").count()
+    field.press("9")
+    assert field.input_value() == TOKEN + "89"
+    assert page.evaluate("document.activeElement?.dataset.connectionToken") == "", "the field keeps focus"
+    field.press("Backspace")
+    field.press("Backspace")
+    card.locator(".skills-connection-qr svg").wait_for()
+    assert "@former_bot" in card.locator("[data-connection-link]").inner_text()
+    assert field.input_value() == TOKEN
+    assert page.evaluate("document.activeElement?.dataset.connectionToken") == "", "and through the repaint that shows it"
+
+
 def test_without_a_declared_card_the_skill_stays_a_row_and_nothing_rides(subscription_ui):
     ui = subscription_ui
     page = _skills_step(ui)

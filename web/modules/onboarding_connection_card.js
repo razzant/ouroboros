@@ -7,9 +7,11 @@
 // completion into Settings, and the code and the options ride with it only once the step painted the QR and the link
 // that carry the code for exactly this token (the host posts them to the skill once it runs): a code nobody saw would
 // leave the skill waiting for a scan nobody can make, so a check that answers once the card is hidden or the step is
-// left arms nothing, and nothing names the account as connected until that painting. A failed or unfinished check never blocks Continue or Finish; the token alone is saved then.
-// A draft no service takes (a space or line break inside, or longer than any token) is never checked or sent. Each
-// failure names only its own cause, and only the service's own refusal says it did not accept the token. The card's
+// left arms nothing, and nothing names the account as connected until that painting. A draft that changes takes the
+// shown check of the draft before it off the page at once (an old bot's QR is never left to scan), the field untouched.
+// A failed or unfinished check never blocks Continue or Finish; the token alone is saved then. A draft no service takes
+// (a space or line break inside, or longer than any token) is never checked or sent. Each failure names only its own
+// cause, and only the service's own refusal says it did not accept the token. The card's
 // declared words are a built-in skill's, the maintainers' as the catalog's are, so they go through the interface's
 // translation (owner 2026-11-21, v3.1 §5); words composed with a name go through `fmt`, and an account's @name, a
 // link and the token stay as they are.
@@ -70,9 +72,9 @@ export async function checkIdentity(skill, token, fetchImpl = apiFetch) {
     }
 }
 
-/** The card of one starter `item` from its normalized `declaration`. `repaint` redraws the step; `ticked()` and
- * `tick()` read and set the skill's starter box. */
-export function createConnectionCard(item, declaration, { check = checkIdentity, random, repaint = () => {}, ticked = () => true, tick = () => {}, encoder = qrEncoder } = {}) {
+/** The card of one starter `item` from its normalized `declaration`. `repaint` redraws the step, `edited` tells it the
+ * card changed its own markup in place; `ticked()` and `tick()` read and set the skill's starter box. */
+export function createConnectionCard(item, declaration, { check = checkIdentity, random, repaint = () => {}, edited = () => {}, ticked = () => true, tick = () => {}, encoder = qrEncoder } = {}) {
     const card = { open: false, token: '', code: '', check: null, drawn: '',
         options: Object.fromEntries(declaration.options.map((option) => [option.key, option.fresh])) };
     const service = text(item.title || item.name || declaration.skill);
@@ -83,7 +85,8 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
     const bareTitle = !declaration.title && !text(item.title);
     const authorPitch = !declaration.pitch && !text(item.pitch);
     let sent = 0;
-    let face = '';  // the token whose QR and link the card's last markup carried; `painted()` makes it `card.drawn`
+    let face = null;  // the check the card's last markup showed: {token, pair}; `painted()` makes a pair's `card.drawn`
+    let gone = '';  // the draft whose shown check an edit took off the page, until the page shows a check again
     const token = () => card.token.trim();
     // Where the token stands: a local flaw first (never checked), else the host's answer for exactly this token.
     const settled = () => (flaw(token()) ? { token: token(), status: flaw(token()) }
@@ -171,7 +174,8 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             const field = `connection-${escapeHtml(declaration.skill)}-token`;
             const shown = card.open ? null : standing();
             const [said, saidMark] = state && state.status !== 'ok' ? statusWords(state) : ['', ''];
-            face = card.open && state?.status === 'ok' ? state.token : '';
+            face = card.open && state ? { token: state.token, pair: state.status === 'ok' } : null;
+            if (face) gone = '';
             return `<div class="skills-connection" data-connection="${escapeHtml(declaration.skill)}" style="--arrive: ${order}">
                 <div class="skills-connection-head">
                     <label class="skills-starter-skill" data-starter-skill="${id}">
@@ -193,7 +197,7 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
         },
         /** The step wrote the card's last markup into the page: a QR and link it carried were seen, and leaving the card
          * or the step keeps that. Never from building markup alone: only a written page counts. */
-        painted() { if (face) card.drawn = face; },
+        painted() { if (face?.pair) card.drawn = face.token; },
         /** Handles the card's own controls; false for anything else. */
         click(target) {
             if (target.closest('[data-connection-toggle]')) {
@@ -213,6 +217,12 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             const field = event.target.closest?.('[data-connection-token]');
             if (!field) return false;
             card.token = field.value;
+            if (face && face.token !== token()) {  // the shown check is another draft's: off the page, the field kept
+                field.closest?.('[data-connection]')?.querySelectorAll?.('.skills-connection-pair, [data-connection-status]')
+                    .forEach((node) => node.remove());
+                [gone, face] = [face.token, null];
+                edited();
+            } else if (gone && gone === token()) repaint();  // back to the draft it checked: its answer shows again
             if (event.inputType === 'insertFromPaste') void run();
             return true;
         },
