@@ -787,6 +787,40 @@ def test_a_completed_sign_in_clears_a_sign_in_refusal_but_not_a_transport_failur
     assert (mcp_catalog.latest_call(cfg) is None) is cleared, mcp_catalog.latest_call(cfg)
 
 
+def test_a_completed_sign_in_answers_and_lists_even_when_its_call_record_cannot_be_removed(signin, monkeypatch):
+    from pathlib import Path
+
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from ouroboros import mcp_catalog
+    from ouroboros.gateway import mcp as gateway_mcp
+
+    _, manager, cfg, settings = signin()
+    assert _complete(cfg, _provider_return(cfg))["ok"] and manager.refresh_server(cfg.id)["ok"]
+    assert asyncio.run(mcp_oauth.sign_out(cfg))["ok"]
+    assert manager._call_tool_result("mcp_docs__echo", {"text": "signed out"}).code == "MCP_AUTH_REQUIRED"
+    assert mcp_catalog.latest_call(cfg)["code"] == "MCP_AUTH_REQUIRED"
+    monkeypatch.setattr(gateway_mcp, "load_settings", lambda: settings)
+    client = TestClient(Starlette(routes=gateway_mcp.mcp_routes()))
+    payload = {"action": "complete", **mcp_oauth.parse_return(_provider_return(cfg))}
+    held, unlink = mcp_catalog.calls_path(cfg.id), Path.unlink
+
+    def sharing_violation(path, *args, **kwargs):
+        if path == held:  # Windows: another process holds the file open
+            raise PermissionError("the call record is open in another process")
+        return unlink(path, *args, **kwargs)
+    with monkeypatch.context() as locked:
+        locked.setattr(Path, "unlink", sharing_violation)
+        answer = client.post("/api/mcp/sign-in", json=payload)
+    assert answer.status_code == 200 and answer.json()["ok"] and answer.json()["listing"]["ok"], answer.text
+    assert mcp_oauth.status(cfg)["state"] == "signed_in"
+    assert client.post("/api/mcp/sign-in", json=payload).json()["reason"] == "sign_in_superseded"  # consumed once
+    assert mcp_catalog.latest_call(cfg)["code"] == "MCP_AUTH_REQUIRED"  # kept, not reported removed
+    assert manager._call_tool_result("mcp_docs__echo", {"text": "signed in"}).status == "ok"
+    assert mcp_catalog.latest_call(cfg)["ok"] is True  # the next call replaces it
+
+
 def test_an_open_sign_in_requirement_written_before_starts_were_kept_reads_as_unknown_and_a_new_one_is_dated(
         monkeypatch, tmp_path):
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
