@@ -800,7 +800,7 @@ def test_an_unusable_saved_source_keeps_its_refusal_through_the_owners_resume(tm
 
     from ouroboros import working_checkpoint as wc
     from ouroboros.gateway.client_contracts import TaskResumeResponse
-    from ouroboros.work_stop import continuation_refusal
+    from ouroboros.work_stop import continuation_refusal, stop_presentation
     from supervisor import events_budget as eb
     from tests.test_resume_attempt_history import _events
 
@@ -839,16 +839,101 @@ def test_an_unusable_saved_source_keeps_its_refusal_through_the_owners_resume(tm
     assert offered == ("dispatch_outcome_unknown", "dispatch_outcome_unknown", False,
                        {ROOT: (True, True), CHOSEN: (False, False), OTHER: (False, False)}, []), offered
     assert continuation_refusal(rows[ROOT])["dispatch_unknown"] is True
+    assert event["refusal_basis"] == continuation_refusal(rows[ROOT])["refusal_basis"] == "saved_work_unverified"
+    words = "The saved work could not be verified for this attempt"
+    assert stop_presentation(rows[ROOT])["reason"]["text"] == words
     assert _model_selects(tmp_path, workers, q, CHOSEN, ROOT)["error"] == "root_resume_grant_missing"
     held = copy.deepcopy(rows[ROOT])
     again = q.resume_budget_paused_task(ROOT)
     assert (again["ok"], again["error"], again["action"]) == (False, "dispatch_outcome_unknown", "cancel_or_new_run")
+    assert again["refusal_basis"] == "saved_work_unverified" and again["message"] == "Resume refused: " + words
     assert rows[ROOT] == held, "this refusal authorizes no replay of the unusable source"
     # The owner's own choice of a child is still dispatched; the other child stays held.
     assert q.resume_budget_paused_task(CHOSEN)["ok"] is True
     workers.assign_tasks()
     assert _sent(system) == [CHOSEN]
     assert rows[OTHER] == children[OTHER] and eb.budget_hold_fact(rows[OTHER]) and rows[ROOT] in q.PENDING
+
+
+@pytest.mark.parametrize("rail", ["accept", "foreign", "delegated", "deadline", "live"])
+def test_owner_can_accept_a_local_unknown_without_restoring_an_unusable_source(tmp_path, monkeypatch, rail):
+    import asyncio
+    import json
+    import os
+    from types import SimpleNamespace
+
+    from ouroboros import owner_pause
+    from ouroboros.gateway.tasks import api_task_resume
+    from ouroboros.process_custody import current_custody_session_id
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_store import patch_document
+    from ouroboros.work_stop import continuation_refusal
+    from supervisor import events_budget as eb
+
+    system, rows = _update_aborted_tree(tmp_path, monkeypatch, freeze_fault=True)
+    q, workers = system.queue, system.workers
+    paused, _basis = _pause(q, tmp_path, ROOT)
+    # Durable fixture input: the old call returned, but its outside effect is unconfirmed.
+    # No external call is sent. The real census, Resume door and retirement writer run.
+    operation = "lost-local-receipt"
+    claim = {"task_id": ROOT, "root_task_id": ROOT, "tool": "call_mcp_tool", "state": "returned",
+             "external_pending": {"synthetic-effect": "mcp_transport"}}
+    patch_document(tmp_path, ROOT, lambda row: {**row, "launch_handoffs": {operation: claim}})
+    reason = "Go on without this result"
+
+    def resume(*ids):
+        async def body():
+            return {"accept_unknown": list(ids), "reason": reason} if ids else {}
+
+        response = asyncio.run(api_task_resume(SimpleNamespace(path_params={"task_id": ROOT}, json=body)))
+        return response.status_code, json.loads(response.body)
+
+    code, offer = resume()
+    assert (code, offer["error"], offer["acceptable_unknown"]) == (
+        409, "owner_pause_effects_unsettled", [operation]), offer
+    assert [(b["kind"], b["task_id"], b["reason"]) for b in offer["blockers"]] == [
+        ("tool_handoff", ROOT, "returned_effect_unconfirmed")]
+    choices = offer["acceptable_unknown"]
+    claims = {operation: claim}
+    if rail == "foreign":
+        choices = [*choices, "not-offered"]
+    elif rail == "delegated":
+        choices = [*choices, "delegate_start:foreign/foreign/lost"]
+    elif rail == "deadline":
+        monkeypatch.setitem(rows[ROOT], "deadline_at", "1970-01-01T00:00:00Z")
+    elif rail == "live":
+        # Only the test process exists. Its own recorded session gives positive liveness.
+        pid = os.getpid()
+        claims["live"] = {**claim, "state": "claimed", "external_pending": {},
+                          "local_owner": {"pid": pid, "process_birth": "fixture", "task_attempt": 1},
+                          "owner_proof": {"pid": pid, "session": current_custody_session_id()}}
+        patch_document(tmp_path, ROOT, lambda row: {**row, "launch_handoffs": claims})
+    code, resumed = resume(*choices)
+    if rail != "accept":
+        assert (code, resumed["error"]) == (409, {
+            "foreign": "selection_authority_changed", "delegated": "selection_authority_changed",
+            "deadline": "deadline_passed", "live": "owner_pause_effects_unsettled"}[rail]), resumed
+        assert not resumed.get("acceptable_unknown")
+        if rail == "live":
+            assert any(b["reason"] == "local_call_live" for b in resumed["blockers"])
+        stored = load_task_result(tmp_path, ROOT, strict=True)
+        assert stored["launch_handoffs"] == claims and not stored.get("retired_tool_invocations")
+        assert owner_pause.read_fence(tmp_path, ROOT) == paused
+        return
+    assert code == 200 and resumed["owner_pause_released"] and not resumed.get("accepted_start_risks"), resumed
+    stored = load_task_result(tmp_path, ROOT, strict=True)
+    assert not stored.get("launch_handoffs")
+    retired = stored["retired_tool_invocations"][operation]
+    assert (retired["effect_outcome"], retired["replay_authorized"]) == ("unknown_accepted", False)
+    assert (retired["accepted"]["actor"], retired["accepted"]["text"]) == ("owner", reason)
+    assert owner_pause.read_fence(tmp_path, ROOT)["state"] == "released"
+    assert continuation_refusal(rows[ROOT])["reason"] == "dispatch_outcome_unknown"
+    assert not eb.live_root_resume_grant(q, ROOT, tmp_path)
+    assert _model_selects(tmp_path, workers, q, CHOSEN, ROOT)["error"] == "root_resume_grant_missing"
+    again = resume()[1]
+    assert (again["error"], again["action"]) == ("dispatch_outcome_unknown", "cancel_or_new_run")
+    workers.assign_tasks()
+    assert _sent(system) == [] and rows[ROOT] in q.PENDING
 
 
 @pytest.mark.parametrize("failure", ["snapshot", "fence"])
@@ -907,3 +992,313 @@ def test_a_refused_continuation_is_never_returned_to_a_writer_wait(tmp_path, mon
     assert (outcome["ok"], "continuation_refused" in outcome, outcome.get("held"),
             continuation_refusal(rows[ROOT]).get("reason")) == (True, False, None, "dispatch_outcome_unknown"), outcome
     assert not writer_wait(rows[ROOT])
+
+
+# Globally budget-held, never-started members: model choice requires and binds to the owner's root grant.
+
+def _globally_held_children_tree(tmp_path, monkeypatch, *, owner_resumed_root=False):
+    from ouroboros import owner_pause
+    from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, write_task_result
+    from ouroboros.work_stop import selection_record
+    from supervisor import continuation_admission
+    from supervisor import events_budget as eb
+    from supervisor.budget_resume import resume_warm_owner_pause_root
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    money = [5.0]
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: money[0])
+    write_task_result(tmp_path, ROOT, STATUS_SCHEDULED, chat_id=0, root_task_id=ROOT)
+    q.PENDING.append({"id": ROOT, "type": "task", "chat_id": 0, "_attempt": 1, "text": ROOT,
+                      "root_task_id": ROOT, "admitted_dispatch": "none"})
+    sent = []
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert [t["id"] for t in sent] == [ROOT]
+    write_task_result(tmp_path, ROOT, STATUS_RUNNING, chat_id=0, root_task_id=ROOT)
+    if owner_resumed_root:
+        fence, _ = owner_pause.install_fence(tmp_path, ROOT, request_id="owner-warm")
+        eb._set_root_budget_pause_locked(ROOT, {**fence, "cause": "owner_pause"})
+        workers.RUNNING[ROOT]["owner_wait"] = {"state": "waiting", "reason": "owner_pause"}
+        monkeypatch.setattr(continuation_admission, "action_writers", lambda *a, **k: [])
+        assert resume_warm_owner_pause_root(ROOT)["ok"] is True
+        workers.RUNNING[ROOT].pop("owner_wait", None)
+    for tid in (CHOSEN, OTHER):
+        lineage = {"root_task_id": ROOT, "parent_task_id": ROOT}
+        write_task_result(tmp_path, tid, STATUS_SCHEDULED, chat_id=0, delegation_role="subagent", **lineage)
+        queued = q.enqueue_task({"id": tid, "type": "task", "chat_id": 0, "_attempt": 1, "text": tid,
+                                 "delegation_role": "subagent", **lineage})
+        assert not queued.get("_admission_blocked"), queued
+    money[0] = 0.0
+    sent.clear()
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert sent == []
+    money[0] = 5.0
+    rows = {t["id"]: t for t in q.PENDING}
+    assert {(rows[tid]["_budget_pause"]["scope"], rows[tid]["_budget_pause"]["status"],
+             eb.budget_hold_fact(rows[tid]), bool(selection_record(rows[tid])))
+            for tid in (CHOSEN, OTHER)} == {("global", "paused_before_dispatch", None, False)}
+    return q, workers, rows, money, sent
+
+
+@pytest.mark.parametrize("root_case", ["unresumed", "sleep_readiness", "self_root"])
+def test_globally_held_unstarted_member_refuses_model_without_owner_root_grant_and_preserves_owner_direct_control(
+        tmp_path, monkeypatch, root_case):
+    from ouroboros import budget_pause as bp
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from supervisor import events_budget as eb
+
+    q, workers, rows, money, sent = _globally_held_children_tree(tmp_path, monkeypatch, owner_resumed_root=False)
+    if root_case == "sleep_readiness":
+        live = workers.RUNNING[ROOT]["task"]
+        live["_budget_pause_resume"] = {"grant_id": "wake-1", "pause_id": "sleep-1", "grant_generation": 1,
+                                        "authority": "sleep_readiness", "selected_by": "sleep_wake"}
+        write_task_result(tmp_path, ROOT, STATUS_RUNNING, chat_id=0, root_task_id=ROOT, budget_pause={
+            "state": bp.STATE_RESUMED, "reason": "sleep", "pause_id": "sleep-1", "resume_generation": 1,
+            "grant": {"grant_id": "wake-1", "generation": 1, "authority": "sleep_readiness",
+                      "selected_by": "sleep_wake", "consumed_at": 1}})
+    elif root_case == "self_root":
+        root_task = workers.RUNNING.pop(ROOT)["task"]
+        q.PENDING.insert(0, {**root_task, "_attempt": 1, "admitted_dispatch": "none"})
+        money[0] = 0.0
+        _idle_worker(workers, sent)
+        workers.assign_tasks()
+        money[0] = 5.0
+        rows = {t["id"]: t for t in q.PENDING}
+        assert rows[ROOT]["_budget_pause"]["scope"] == "global"
+
+    assert eb.live_root_resume_grant(q, ROOT, tmp_path) == {}
+    target = ROOT if root_case == "self_root" else CHOSEN
+    expected_error = "not_a_budget_paused_descendant" if root_case == "self_root" else "root_resume_grant_missing"
+    before_target = copy.deepcopy(rows[target])
+    outcome = _model_selects(tmp_path, workers, q, target, ROOT)
+    assert outcome["ok"] is False and outcome["error"] == expected_error, outcome
+    direct_model = q.resume_budget_paused_task(target, selected_by=ROOT)
+    assert direct_model["ok"] is False and direct_model["error"] == expected_error, direct_model
+    assert rows[target] == before_target and eb.SELECTION_KEY not in rows[target]
+    sent.clear()
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert sent == []
+
+    # Owner's own direct control retains its existing grantless release behavior.
+    owner_out = q.resume_budget_paused_task(OTHER)
+    assert owner_out["ok"] is True and owner_out["same_generation"] is True and "selection" not in owner_out
+    assert "_budget_pause" not in rows[OTHER] and eb.SELECTION_KEY not in rows[OTHER]
+    assert rows[OTHER]["budget_resumed_at"]
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert [t["id"] for t in sent] == [OTHER]
+    assert rows[CHOSEN]["_budget_pause"]["scope"] == "global"
+
+
+@pytest.mark.parametrize("prior_selection", [False, True], ids=["clean", "prior_carrier"])
+def test_model_selection_of_globally_held_unstarted_member_uses_owner_root_grant_and_rolls_back_unpublished_snapshot(
+        tmp_path, monkeypatch, prior_selection):
+    from ouroboros.task_results import load_task_result
+    from ouroboros.work_stop import selection_record
+    from supervisor import events_budget as eb
+
+    q, workers, rows, _money, sent = _globally_held_children_tree(tmp_path, monkeypatch, owner_resumed_root=True)
+    grant = eb.live_root_resume_grant(q, ROOT, tmp_path)
+    assert grant.get("grant_id")
+    if prior_selection:
+        rows[CHOSEN][eb.SELECTION_KEY] = {
+            "selected_by": ROOT, "selected_at": "2026-01-01T00:00:00Z", "by": {"actor": "ouroboros"},
+            "root_grant_id": "obsolete-grant", "root_resume_generation": 1, "fence_id": ""}
+    assert selection_record(rows[CHOSEN]) == {}
+    before = copy.deepcopy(rows)
+    real_snapshot = q.persist_queue_snapshot
+
+    def fail_selected(*args, **kwargs):
+        return False if kwargs.get("reason") == "budget_hold_selected" else real_snapshot(*args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(q, "persist_queue_snapshot", fail_selected)
+        refused = _model_selects(tmp_path, workers, q, CHOSEN, ROOT)
+    assert refused["ok"] is False and refused["error"] == "snapshot_not_persisted", refused
+    assert rows == before
+    sent.clear()
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert sent == []
+
+    authority_reads, real_authority = [], eb._held_selection_authority
+    with monkeypatch.context() as count:
+        count.setattr(eb, "_held_selection_authority",
+                      lambda *a, **kw: authority_reads.append(q._queue_lock._is_owned()) or real_authority(*a, **kw))
+        outcome = _model_selects(tmp_path, workers, q, CHOSEN, ROOT)
+    assert authority_reads == [True, True], "two short snapshots under Q with observation between them"
+    assert outcome["ok"] is True and outcome["selection"] == "budget_hold_released", outcome
+    assert "_budget_pause" not in rows[CHOSEN]
+    selection = rows[CHOSEN][eb.SELECTION_KEY]
+    assert (selection["selected_by"], selection["root_grant_id"], selection["root_resume_generation"]) == (
+        ROOT, grant["grant_id"], grant["generation"])
+    assert selection["root_resume_basis"]
+    stored_limit = load_task_result(tmp_path, CHOSEN)["resource_limit"]
+    assert (stored_limit["status"], stored_limit["scope"], stored_limit["paused_at"]) == (
+        "resumed", "global", before[CHOSEN]["_budget_pause"]["paused_at"])
+    assert eb.budget_resume_dispatch_allowed(q, rows[CHOSEN]) is True
+    assert rows[OTHER] == before[OTHER], "selection never fans out to globally held siblings"
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert [t["id"] for t in sent] == [CHOSEN]
+    assert rows[OTHER] in q.PENDING and rows[OTHER]["_budget_pause"]["scope"] == "global"
+
+
+@pytest.mark.parametrize("change", [
+    "new_fence", "global_root_pause", "owner_pause", "unprojected_owner_pause", "newer_generation",
+])
+def test_globally_held_unstarted_member_selected_by_model_stays_bound_to_root_grant_at_dispatch(
+        tmp_path, monkeypatch, change):
+    from ouroboros import owner_pause
+    from supervisor import events_budget as eb
+    from supervisor.owner_pause_control import request_owner_pause
+    from supervisor.queue_transitions import budget_pause_fact
+
+    q, workers, rows, _money, sent = _globally_held_children_tree(tmp_path, monkeypatch, owner_resumed_root=True)
+    assert _model_selects(tmp_path, workers, q, CHOSEN, ROOT)["ok"] is True
+    assert eb.budget_resume_dispatch_allowed(q, rows[CHOSEN]) is True
+
+    if change == "new_fence":
+        eb._set_root_budget_pause_locked(ROOT, {"scope": "root", "root_task_id": ROOT, "fence_id": "new-fence"})
+    elif change == "global_root_pause":
+        ctx = _supervisor_ctx(tmp_path, workers, q, [], [])
+        ctx.persist_queue_snapshot = q.persist_queue_snapshot
+        eb._handle_budget_pause({
+            "type": "budget_pause", "task_id": ROOT, "worker_id": 0, "root_task_id": ROOT,
+            "resource_limit": {"status": "paused_before_dispatch", "scope": "global", "root_task_id": ROOT,
+                               "physical_calls": 0, "replay_safe": True, "auto_resume": False,
+                               "resume_policy": "manual_same_generation"},
+        }, ctx)
+    elif change == "owner_pause":
+        assert request_owner_pause(ROOT, request_id="owner-press-after-select")["ok"]
+    elif change == "unprojected_owner_pause":
+        monkeypatch.setattr(owner_pause, "read_fence", lambda *a, **k: {
+            "state": "paused", "fence_id": "owner-new", "root_task_id": ROOT})
+    else:
+        workers.RUNNING[ROOT]["task"][eb.SELECTION_KEY]["root_grant_id"] = "newer-explicit-root-grant"
+
+    if change in {"new_fence", "owner_pause"}:
+        assert eb.budget_hold_fact(rows[CHOSEN])["reason"] == eb.HOLD_ROOT_FENCE_LIFTED
+        assert eb.SELECTION_KEY not in rows[CHOSEN] and budget_pause_fact(rows[CHOSEN]) is not None
+    else:
+        assert eb.budget_resume_dispatch_allowed(q, rows[CHOSEN]) is False
+    sent.clear()
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert CHOSEN not in [t["id"] for t in sent]
+    assert OTHER not in [t["id"] for t in sent]
+    assert rows[CHOSEN] in q.PENDING
+    if change != "unprojected_owner_pause":
+        assert eb.budget_hold_fact(rows[CHOSEN]) and eb.SELECTION_KEY not in rows[CHOSEN]
+    assert rows[OTHER]["_budget_pause"]["scope"] == "global"
+
+
+def test_direct_owner_resume_after_second_global_stop_clears_stale_model_selection(tmp_path, monkeypatch):
+    from ouroboros.task_results import load_task_result
+    from supervisor import events_budget as eb
+
+    q, workers, rows, money, sent = _globally_held_children_tree(tmp_path, monkeypatch, owner_resumed_root=True)
+    assert _model_selects(tmp_path, workers, q, CHOSEN, ROOT)["ok"] is True
+
+    # Second global monetary stop before dispatch leaves _budget_pause beside the prior model selection.
+    money[0] = 0.0
+    sent.clear()
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert sent == []
+    second_paused_at = rows[CHOSEN]["_budget_pause"]["paused_at"]
+    assert rows[CHOSEN]["_budget_pause"]["scope"] == "global" and rows[CHOSEN][eb.SELECTION_KEY]["selected_by"] == ROOT
+
+    money[0] = 5.0
+    workers.RUNNING[ROOT]["task"][eb.SELECTION_KEY]["root_grant_id"] = "newer-explicit-root-grant"
+    resumed = q.resume_budget_paused_task(CHOSEN)
+    assert resumed["ok"] is True and resumed["same_generation"] is True and "selection" not in resumed
+    assert "_budget_pause" not in rows[CHOSEN] and eb.SELECTION_KEY not in rows[CHOSEN]
+    limit = load_task_result(tmp_path, CHOSEN)["resource_limit"]
+    assert (limit["status"], limit["scope"], limit["paused_at"]) == ("resumed", "global", second_paused_at)
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert [t["id"] for t in sent] == [CHOSEN]
+    assert rows[OTHER]["_budget_pause"]["scope"] == "global"
+
+
+@pytest.mark.parametrize("latch_after_stop", ["standing", "lifted"])
+@pytest.mark.parametrize("chooser", ["owner_unbound", "owner", "model"])
+def test_direct_owner_resume_after_second_global_stop_keeps_only_a_choice_its_root_latch_still_admits(
+        tmp_path, monkeypatch, chooser, latch_after_stop):
+    """A choice recorded against the root's latch that still stands survives the owner's direct Resume of the global
+    stop beside it: the helper returns on the first pass and the latch stays up for the rest. Once that latch is gone
+    the choice it admitted leaves with the stop, so dispatch's strict recheck holds nothing old."""
+    from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
+    from supervisor import events_budget as eb
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    money = [5.0]
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: money[0])
+    for tid in (ROOT, CHOSEN, OTHER):
+        lineage = {"root_task_id": ROOT} if tid == ROOT else {
+            "root_task_id": ROOT, "parent_task_id": ROOT, "delegation_role": "subagent"}
+        write_task_result(tmp_path, tid, STATUS_SCHEDULED, chat_id=0, **lineage)
+        q.PENDING.append({"id": tid, "type": "task", "chat_id": 0, "_attempt": 1, "text": tid,
+                          "admitted_dispatch": "none", **lineage})
+    rows = {t["id"]: t for t in q.PENDING}
+    latch = eb._set_root_budget_pause_locked(ROOT, {"scope": "root", "root_task_id": ROOT})
+    sent = []
+    _idle_worker(workers, sent)
+    if chooser != "owner_unbound":  # the root is selected against its latch and lends its grant (Q9)
+        assert q.resume_budget_paused_task(ROOT)["ok"] is True
+        workers.assign_tasks()
+        assert [t["id"] for t in sent] == [ROOT]
+    chosen = (_model_selects(tmp_path, workers, q, CHOSEN, ROOT) if chooser == "model"
+              else q.resume_budget_paused_task(CHOSEN))
+    assert chosen["ok"] is True and chosen["selection"] == "budget_hold_released", chosen
+    choice = copy.deepcopy(rows[CHOSEN][eb.SELECTION_KEY])
+    assert choice["fence_id"] == latch["fence_id"]
+    assert bool(choice.get("root_grant_id")) is (chooser != "owner_unbound")
+
+    money[0] = 0.0  # the second global monetary stop before dispatch parks it beside that choice
+    sent.clear()
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert sent == [] and rows[CHOSEN]["_budget_pause"]["scope"] == "global"
+    assert rows[CHOSEN][eb.SELECTION_KEY] == choice
+
+    money[0] = 5.0
+    standing = latch_after_stop == "standing"
+    if not standing:
+        q.BUDGET_ROOT_FENCES.pop(ROOT)  # members keep their choices when it lifts (hold_root_resume_descendants)
+    resumed = q.resume_budget_paused_task(CHOSEN)
+    assert resumed["ok"] is True and resumed["same_generation"] is True and "selection" not in resumed, resumed
+    assert "_budget_pause" not in rows[CHOSEN] and rows[CHOSEN].get(eb.SELECTION_KEY) == (choice if standing else None)
+    assert eb.budget_resume_dispatch_allowed(q, rows[CHOSEN]) is True
+    workers.assign_tasks()
+    assert [t["id"] for t in sent] == [CHOSEN]
+    assert (q.BUDGET_ROOT_FENCES.get(ROOT) or {}).get("fence_id") == (latch["fence_id"] if standing else None)
+    assert rows[OTHER] in q.PENDING and rows[OTHER]["_budget_pause"]["scope"] == "global"
+
+
+@pytest.mark.parametrize("dated", [True, False], ids=["dated", "undated"])
+def test_model_selected_global_pause_cancelled_before_dispatch_keeps_dated_earlier_stop(tmp_path, monkeypatch, dated):
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.outcomes import normalize_outcome_axes
+    from ouroboros.task_results import load_task_result
+
+    q, workers, rows, _money, _sent = _globally_held_children_tree(tmp_path, monkeypatch, owner_resumed_root=True)
+    paused_at = rows[CHOSEN]["_budget_pause"]["paused_at"] if dated else rows[CHOSEN]["_budget_pause"].pop("paused_at")
+    assert _model_selects(tmp_path, workers, q, CHOSEN, ROOT)["ok"] is True
+    request_cancel(tmp_path, CHOSEN, source="owner_restart", requested_stop_policy="immediate", reason="Owner restart")
+    assert workers._settle_terminalization_task(
+        {"id": CHOSEN, "_attempt": 1}, status="cancelled", reason="External cancellation",
+        trigger="worker_pool_kill", stop_source="owner_restart", reconcile_delegate_custody=False)
+    cancelled = load_task_result(tmp_path, CHOSEN, strict=True)
+    assert cancelled["resource_limit"]["scope"] == "global"
+    if dated:
+        assert cancelled["resource_limit"]["paused_at"] == paused_at
+        assert normalize_outcome_axes(cancelled)["execution"]["earlier_stop"] == "budget_exhausted"
+    else:
+        assert "paused_at" not in cancelled["resource_limit"]
+        assert "earlier_stop" not in normalize_outcome_axes(cancelled)["execution"]

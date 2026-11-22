@@ -143,7 +143,7 @@ def test_wait_card_move_names_the_owner_and_unchanged_primary_without_pending(so
     returned = leads.lead_fact(ctx)
     assert returned == {"model": A, "use_local": False, "basis": source}
     projected = leads.project_lead(returned)
-    assert (projected.get("pending") == {"model": C, "use_local": False}) is (source == "main")
+    assert (projected.get("pending") == {"model": C, "use_local": False, "basis": "main"}) is (source == "main")
 
 
 @pytest.mark.parametrize("action", ["return", "wait"])
@@ -204,7 +204,7 @@ def test_live_followers_show_pending_without_relabelling_their_last_call():
     fact = {"model": A, "use_local": False, "basis": "main"}
     assert leads.project_lead(fact) == fact
     save_owner({"OUROBOROS_MODEL": B, "USE_LOCAL_MAIN": True})
-    assert leads.project_lead(fact) == {**fact, "pending": {"model": B, "use_local": True}}
+    assert leads.project_lead(fact) == {**fact, "pending": {"model": B, "use_local": True, "basis": "main"}}
     assert "pending" not in fact
     assert "pending" not in leads.project_lead({**fact, "basis": "owner"})
     assert "pending" not in leads.project_lead({**fact, "basis": "fallback", "role": "fallback:0"})

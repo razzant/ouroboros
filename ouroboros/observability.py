@@ -1302,9 +1302,9 @@ def salvaged_output_note(
         return ""
     if not salvaged:
         return ""
-    # S3 honest naming: a raw fragment is the last persisted INTERMEDIATE model
-    # message — never presented as an "answer" (it bypassed review/finalization).
-    label = "Last persisted intermediate model message (salvaged best-effort, unreviewed"
+    # Selection is task-wide; the stopping attempt need not have written this text.
+    label = ("Last persisted intermediate model message for this task (salvaged best-effort, unreviewed; "
+             "may be from an earlier attempt; not a final answer")
     preview = truncate_review_artifact(salvaged, SALVAGED_OUTPUT_NOTE_LIMIT)
     if preview == salvaged:
         return f"\n\n{label}):\n" + salvaged

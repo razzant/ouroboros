@@ -50,11 +50,12 @@ def _history():
                      provider="claudexor")
     # Seats with a paid call whose sum is not all there stay unmeasured, whatever the catalog knew beforehand:
     # still open, closed without a sum (also in a record that names no ``kind``, which reads as an attempt), a known
-    # subtotal with an unpriced remainder, a subscription call closed administratively (its price is still unknown).
+    # subtotal with an unpriced remainder, an estimate, a subscription call closed administratively.
     abandoned = dict(cost=None, provider="claudexor", cost_final=False, settle_reason="abandoned")
     for offset, (wave, unsure) in enumerate((("w-open", dict(settled=False)), ("w-no-sum", dict(cost=None)),
                                              ("w-no-kind", dict(cost=None, kind=None)),
-                                             ("w-partial", dict(cost_partial=True)), ("w-abandoned", abandoned))):
+                                             ("w-partial", dict(cost_partial=True)), ("w-abandoned", abandoned),
+                                             ("w-estimated", dict(cost_final=False, cost_estimated=True)))):
         rows += _attempt(index + 4 + 2 * offset, wave=wave, row="critic", model=MODEL, cost=40.0)
         rows += _attempt(index + 5 + 2 * offset, wave=wave, row="critic", model=MODEL, **{"cost": 40.0, **unsure})
     # A row whose every call runs on a subscription: its review cost no API money. A seat that sent nothing has no cost.
@@ -64,6 +65,13 @@ def _history():
              task_id="t", provider="openrouter", model=MODEL, category=REVIEW_USAGE_CATEGORY, review_wave_id="w-unsent",
              review_slot_id="idle", reservation_upper_bound_usd=5.0, pricing_known=True, state="released",
              ts="2026-10-17T10:59:00Z")]
+    # A released reservation on another model beside this seat's settled call: only the
+    # model whose send was witnessed enters the seat's `models`.
+    rows += _attempt(index + 22, wave="w-mixed", row="mixed", model=MODEL, cost=0.60)
+    rows += [dict(attempt_id=f"a-{index + 23}", kind="attempt", root_task_id="r", task_id="t",
+             provider="openrouter", model="openrouter/reserved-only", category=REVIEW_USAGE_CATEGORY,
+             review_wave_id="w-mixed", review_slot_id="mixed", reservation_upper_bound_usd=5.0,
+             pricing_known=True, state="released", ts="2026-10-17T11:00:00Z")]
     return rows
 
 
@@ -85,24 +93,31 @@ def test_one_review_costs_the_median_of_its_measured_waves(root):  # noqa: F811
     assert review_price(root, "critic", "openrouter/never-used") is None
     assert review_price(root, "stranger", MODEL) is None
     assert review_price_text(None) == "cost unknown"
-    # One definition of «priced» with the money accounting: a seat is measured exactly when every attempt of it
-    # that was sent is a closed row the accounting prices and holds nothing unknown, or a subscription call.
+    # «Priced» for this view is stricter than landed spend: it accepts only final, non-partial sums and
+    # subscription calls that settled without a sum. The accounting ledger still books estimates.
     with usage_store.read(root) as txn:
-        seats = {seat["wave_id"]: bool(seat["priced"]) for seat in txn.review_seat_costs(REVIEW_USAGE_CATEGORY, limit=50)}
+        seat_rows = txn.review_seat_costs(REVIEW_USAGE_CATEGORY, limit=50)
+    seats = {seat["wave_id"]: bool(seat["priced"]) for seat in seat_rows}
+    mixed = next(seat for seat in seat_rows if seat["wave_id"] == "w-mixed")
     by_wave: dict = {}
     for row in ledger_rows(root):
         if row.get("category") == REVIEW_USAGE_CATEGORY and row.get("state") != "released":
             delta = summary_delta(row)
             by_wave.setdefault(row["review_wave_id"], []).append(row["state"] == "settled" and (
                 (row.get("provider") == "claudexor" and not is_abandoned_settlement(row))
-                or (bool(delta.priced) and not delta.unknown)))
+                or (bool(delta.priced) and not delta.unknown and row.get("cost_final") is True)))
     assert {wave: measured for wave, measured in seats.items() if wave != "w-unsent"} == {
         wave: all(flags) for wave, flags in by_wave.items()}
     assert {wave for wave, measured in seats.items() if not measured} == {
-        "w-open", "w-no-sum", "w-no-kind", "w-partial", "w-abandoned"}
+        "w-open", "w-no-sum", "w-no-kind", "w-partial", "w-abandoned", "w-estimated"}
     # A review made only of subscription calls cost no API money; a seat that sent nothing is not a review.
     assert review_price_text(review_price(root, "seated", MODEL)) == "no API cost per review"
     assert review_price(root, "idle", MODEL) is None
+    # A released reservation beside this seat's settled call: the send was never witnessed, so the
+    # seat's `models` names only the model that ran, and only that one carries the seat's price.
+    assert mixed["models"] == MODEL and mixed["priced"]
+    assert review_price(root, "mixed", "openrouter/reserved-only") is None
+    assert review_price(root, "mixed", MODEL).reviews == 1
 
 
 def test_a_plan_ask_has_its_own_price_and_never_moves_a_reviews(root):  # noqa: F811

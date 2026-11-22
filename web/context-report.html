@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-A9eEN/GLzr6taFlNRWX2LYqbyKsA3t/FlC3BrlN9hT4='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beautiful Context</title><style>
+/* An opaque frame inherits no host token. The host names its scheme in the frame's name (ouro-theme:light or
+   ouro-theme:dark) for the first paint, then tells it, one way, the theme and the --ouro-* colours of the card it lies
+   on, at load and at every change; without them the device's scheme and these fallbacks paint. Sizes, radii,
+   spacing and the neutral capsule on its rest shadow (ui.css .btn-default) are the design book's. */
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  --warn: #805000; --bad: #b52b3b; --focus: #bf2f40; --capsule: #ffffff; --capsule-hover: #f5f6f8;
+  --press: brightness(0.95); --rest: 0 1px 2px rgba(28, 33, 51, 0.05), 0 6px 18px rgba(28, 33, 51, 0.06); }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85;
+  --capsule: rgba(255, 255, 255, 0.09); --capsule-hover: rgba(255, 255, 255, 0.135); --press: brightness(1.12);
+  --rest: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) { --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85; --capsule: rgba(255, 255, 255, 0.09);
+    --capsule-hover: rgba(255, 255, 255, 0.135); --press: brightness(1.12);
+    --rest: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28); }
+}
+body { margin: 0; padding: 16px; color: var(--ouro-text, CanvasText); overflow-wrap: anywhere;
+  --meta: var(--ouro-text-meta, color-mix(in srgb, CanvasText 70%, Canvas));
+  --tray: var(--ouro-tray, color-mix(in srgb, CanvasText 6%, transparent)); }
+h1, h2, p, ol, dl, pre { margin: 0; }
+h1, h2 { font-size: 16px; line-height: 1.3; font-weight: 600; }
+h2 { margin-block: 24px 8px; }
+h2 small, .meta, dt, #report-help, .note { font-size: 12px; line-height: 1.35; font-weight: 400; color: var(--meta); }
+#lead { margin-block: 4px 12px; color: var(--meta); }
+.open { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.pick { position: relative; display: inline-flex; }
+.button { padding: 6px 16px; border-radius: 999px; background: var(--capsule); box-shadow: var(--rest); font-weight: 600; }
+.pick:hover .button { background: var(--capsule-hover); }
+.pick:active .button { filter: var(--press); }
+#report-file { position: absolute; z-index: 1; inset: 0; inline-size: 100%; block-size: 100%; opacity: 0; cursor: pointer; }
+#report-file:focus-visible + .button, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+#report-status[data-tone="bad"] { color: var(--ouro-error, var(--bad)); }
+#report-help { margin-block-start: 12px; }
+#report-help ol { padding-inline-start: 20px; }
+#report-help li { margin-block-start: 4px; }
+code, pre { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+summary { cursor: pointer; border-radius: 12px; }
+#report-result { margin-block-start: 24px; }
+#explain { margin-block: 4px 12px; }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; }
+dd { margin: 0; min-width: 0; }
+.callout { margin-block-start: 12px; padding: 12px 16px; border-radius: 12px; background: var(--tray); }
+.callout strong { font-weight: 600; color: var(--ouro-warn, var(--warn)); }
+.rows { display: grid; gap: 4px; }
+.row { border-radius: 12px; background: var(--tray); }
+.row > summary { display: grid; grid-template-columns: 0.75rem 1.5rem 5.5rem minmax(0, 1fr) max-content; gap: 8px;
+  align-items: baseline; padding: 8px 12px; list-style: none; }
+.rows[data-kind="tools"] > .row > summary, .rows[data-kind="functions"] > .row > summary {
+  grid-template-columns: 0.75rem 1.5rem minmax(0, 14rem) minmax(0, 1fr) max-content; }
+.row > summary::-webkit-details-marker { display: none; }
+.row > summary::before { content: "\203A"; color: var(--meta); }
+.row[open] > summary::before { transform: rotate(90deg); }
+.row > summary .what { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.row[open] > summary .what { color: var(--meta); }
+.role { min-width: 0; font-weight: 600; }
+.part { padding: 0 12px 12px; }
+.part > .meta { display: block; margin-block-end: 4px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.part > .said { font: inherit; }
+.more { margin-block-start: 8px; }
+.more > summary { padding-block: 8px; font-weight: 600; }
+.more > pre, .more > dl, .more > .note { padding-block-end: 8px; }
+@media (max-width: 34rem) {
+  .row > summary, .rows[data-kind] > .row > summary { grid-template-columns: 0.75rem 1.5rem minmax(0, 1fr) max-content; }
+  .row > summary .what { grid-area: 2 / 1 / 3 / -1; }
+  .row > summary .how { grid-area: 1 / 4; }
+}
+</style></head>
+<body><main><h1>Beautiful Context</h1>
+<p id="lead">Read one model request the way this computer recorded it. The file you open stays in this frame: nothing is uploaded or kept.</p>
+<div class="open"><span class="pick"><input type="file" id="report-file" accept=".json,application/json"><label class="button" for="report-file">Open local report</label></span>
+<span id="report-status" role="status"></span></div>
+<details id="report-help"><summary>How to make a report</summary><ol>
+<li>Take the task's full ID from Dashboard › Logs: open the task's entry, then one of its events. The record under the event shows it as <code>subagent_task_id</code> when the event has one, else as <code>task_id</code>. The ID beside a Logs entry is cut to 8 characters, and a Context Lens chart is named by a hash; neither is a full task ID.</li>
+<li>In a terminal, from a separate source checkout of this version (never the running one), list that task's attempts, newest first: <code>python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID</code>, where DATA is this installation's data folder.</li>
+<li>Write one attempt's report into a private folder that is not synced: <code>python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID --attempt ATTEMPT_ID --report &gt; report.json</code></li>
+<li>Open that file here. Each attempt has its own report, also when two attempts sent the same request.</li>
+</ol></details>
+<section id="report-result" hidden>
+<h2 id="headline"></h2>
+<p id="explain"></p>
+<dl id="attempt-facts"></dl>
+<p class="callout" id="privacy"><strong>Private text can remain.</strong> Only known secret patterns are masked, so names, messages and file paths stay readable. Keep this file on this computer; it is not meant to be forwarded automatically.</p>
+<div id="request"></div>
+<details class="more"><summary>Stored JSON</summary><p class="note" id="stored-note"></p><pre id="stored-body"></pre></details>
+<details class="more"><summary>Recorded source versions</summary><pre id="source-versions"></pre></details>
+<details class="more" id="record"><summary>All recorded facts of this attempt</summary><pre id="record-body"></pre></details>
+</section></main><script>
+'use strict';
+const byId = (id) => document.getElementById(id);
+const input = byId('report-file');
+const status = byId('report-status');
+const result = byId('report-result');
+const fields = byId('attempt-facts');
+const request = byId('request');
+const stored = byId('stored-body');
+const maxBytes = 48 * 1024 * 1024;
+const theme = /^ouro-theme:(light|dark)$/.exec(window.name);
+if (theme) document.documentElement.dataset.theme = theme[1];
+
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+// The host tells the painted palette one way (web/modules/context_report_host.js): the theme and the colours of the
+// card this frame lies on, at load and at every change. Only the embedding window is heard, only this shape is applied,
+// and nothing is ever posted back, so what the frame reads stays in it. The colours go to a rule of this page's own
+// stylesheet (CSSOM), never to a style attribute, which its policy refuses.
+const PALETTE = ['--ouro-text', '--ouro-text-meta', '--ouro-tray', '--ouro-warn', '--ouro-error'];
+const sheet = document.querySelector('style')?.sheet;
+const palette = sheet ? sheet.cssRules[sheet.insertRule(':root {}', sheet.cssRules.length)].style : null;
+window.addEventListener('message', (event) => {
+  const told = event.source === window.parent ? event.data : null;
+  if (!isRecord(told) || told.type !== 'ouro-context-report-theme' || !['light', 'dark'].includes(told.name)
+      || !isRecord(told.tokens)) return;
+  document.documentElement.dataset.theme = told.name;
+  for (const token of PALETTE) {
+    const value = told.tokens[token];
+    if (typeof value === 'string' && /^[^;{}<>]{1,200}$/.test(value)) palette?.setProperty(token, value);
+    else palette?.removeProperty(token);
+  }
+});
+const text = (value) => (typeof value === 'string' && value ? value : 'Not recorded');
+const count = (number) => number.toLocaleString('en-US');
+const size = (chars) => (chars < 1000 ? `${chars} chars` : `${count(Math.round(chars / 100) / 10)}k chars`);
+const bytes = (number) => (number < 1024 ? `${number} byte${number === 1 ? '' : 's'}`
+  : number < 1024 * 1024 ? `${count(Math.ceil(number / 1024))} KiB` : `${count(Math.ceil(number / 1024 / 102.4) / 10)} MiB`);
+const pretty = (value) => JSON.stringify(value, null, 2);
+function element(tag, className, content) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (content !== undefined) node.textContent = content;
+  return node;
+}
+function when(value) {
+  const date = new Date(typeof value === 'string' ? value : NaN);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'long' });
+}
+
+// The words of a report: what the host ledger recorded, never a claim about the provider's copy.
+const ABSENT = new Map([
+  ['not_linked', ['No saved request is linked to this attempt',
+    'Its ledger row links no saved request. Preparation may have ended before that link was written; a copy left on disk without it is not read.']],
+  ['not_recorded', ['This attempt has no readable request record',
+    'It was saved without a sealed redacted copy this reader understands, as attempts of older versions were.']],
+  ['unavailable', ['The saved request was not found',
+    'The attempt links a record whose file was not found in the data folder the reader was given. Retention may have removed it.']],
+  ['not_one_attempt', ['This ID names no single model request',
+    'Its ledger row accounts for a delegated session, a dispatch outside Ouroboros’s metering or imported history, which may stand for many requests, so no saved request belongs to it. List the task’s attempts and choose one of them.']],
+  ['evidence_unavailable', ['The saved request could not be located just now',
+    'Its record lies in a packed archive, and the index that says where could not answer. Nothing is known to be lost: run the reader again later.']],
+  ['receipt_only', ['This attempt was recorded from a usage report and has no saved request',
+    'The ledger wrote its row from usage reported once the work was under way, as it does for a live conversation’s responses and connected time. No request was saved for it, so there is none to show.']],
+]);
+// A ledger state is accounting. The report carries no money field, so these words name what the ledger
+// recorded about the attempt's record and never a price, a charge or a delivery.
+const STATES = new Map([
+  ['reserved', 'Reserved — the ledger opened this attempt; no dispatch is recorded'],
+  ['released', 'Released — the ledger closed this attempt as not dispatched'],
+  ['dispatched', 'Dispatched — the ledger marked this send as started; its accounting record is still open'],
+  ['settled', 'Settled — the ledger closed this attempt’s accounting record'],
+  ['unresolved', 'Unresolved — the ledger keeps this attempt’s accounting record open; a late receipt may still close it'],
+]);
+// Why a record was closed, in words for the reasons the ledger writes; any other reason is shown as recorded.
+const SETTLED = new Map([
+  ['abandoned', 'without a receipt (abandoned)'],
+  ['late_receipt', 'on a receipt that arrived late'],
+  ['pre_routing_rejection', 'as rejected before routing'],
+  ['tos_rejection', 'as rejected under the provider’s terms'],
+]);
+function stateWords(facts) {
+  const words = STATES.get(facts.ledger_state) || text(facts.ledger_state);
+  const reason = typeof facts.settle_reason === 'string' ? facts.settle_reason : '';
+  if (!reason) return words;
+  return `${words} ${(facts.ledger_state === 'settled' && SETTLED.get(reason)) || `(recorded reason: ${reason})`}`;
+}
+const TRANSPORT = new Map([
+  ['not_started', 'Not started at the last recorded state'],
+  ['ledger_released', 'Released in the host ledger; transport receipt not confirmed'],
+  ['ledger_dispatch_mark', 'Marked dispatched in the host ledger; transport receipt not confirmed'],
+  ['error_reply_recorded', 'Transport returned an error reply'],
+]);
+function failureWords(failure) {
+  if (!isRecord(failure)) return '';
+  const http = Number.isInteger(failure.provider_status_code) ? `HTTP ${failure.provider_status_code}` : '';
+  const kind = failure.stage === 'response_body_error' ? 'The reply carried an error'
+    : failure.stage === 'raised_exception' ? `The send raised ${text(failure.exception_type)}` : `Failure at ${text(failure.stage)}`;
+  return [kind, http, typeof failure.transport_cause_type === 'string' ? failure.transport_cause_type : '']
+    .filter(Boolean).join(' · ');
+}
+
+// Readable parts of one stored value, each a title (empty for plain text) and its whole text, or what draws that text
+// when the row opens: a closed row formats no JSON.
+function parts(content, out = [], under = '') {
+  const push = (title, value) => out.push([[under, title].filter(Boolean).join(' · '), value]);
+  if (typeof content === 'string') { if (content) push('', content); return out; }
+  if (content === null || content === undefined) return out;
+  if (!Array.isArray(content)) { push('Content', () => exactOf(content)); return out; }
+  content.forEach((part) => {
+    if (typeof part === 'string') push('', part);
+    else if (!isRecord(part)) push('Part', () => exactOf(part));
+    else if (part.type === 'tool_use') push(['Tool call', part.name, part.id].filter(Boolean).join(' · '), () => memberOf(part, 'input', {}));
+    else if (part.type === 'tool_result') parts(part.content, out, ['Tool result', part.tool_use_id].filter(Boolean).join(' · '));
+    else if (/image/.test(String(part.type))) push('Image', `${size(JSON.stringify(part).length)} of image data, kept in the stored JSON.`);
+    else if (typeof part.text === 'string') push(/^(input_|output_)?text$/.test(String(part.type)) ? '' : text(part.type), part.text);
+    else push(text(part.type), () => exactOf(part));
+  });
+  return out;
+}
+// Indents JSON text without parsing its values, so a number keeps every digit it was sent with.
+function indentJson(source) {
+  let out = '';
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  const line = () => `\n${'  '.repeat(depth)}`;
+  for (let at = 0; at < source.length; at += 1) {
+    const ch = source[at];
+    if (quoted) {
+      out += ch;
+      if (escaped) escaped = false; else if (ch === '\\') escaped = true; else if (ch === '"') quoted = false;
+    } else if (ch === '"') {
+      quoted = true;
+      out += ch;
+    } else if (ch === '{' || ch === '[') {
+      let next = at + 1;
+      while (next < source.length && /\s/.test(source[next])) next += 1;
+      if (source[next] === (ch === '{' ? '}' : ']')) { out += ch + source[next]; at = next; } else { depth += 1; out += ch + line(); }
+    } else if (ch === '}' || ch === ']') {
+      depth -= 1;
+      out += line() + ch;
+    } else if (ch === ',') out += ch + line();
+    else if (ch === ':') out += ': ';
+    else if (!/\s/.test(ch)) out += ch;
+  }
+  return out;
+}
+// Where each object and array of the stored JSON lies in its text, and each object's members, keyed by the value
+// JSON.parse built: an opened row shows that text, so a number keeps every digit JSON.parse rounds (9007199254740993).
+// One pass over the text, at most once.
+let spans = null;
+function sourceSpans() {
+  if (spans) return spans;
+  spans = new WeakMap();
+  let at = 0;
+  const token = /[^,\]}\s]*/y;
+  const blank = () => { while (at < source.length && ' \t\n\r'.includes(source[at])) at += 1; };
+  const string = () => {
+    let end = at;
+    for (let slashes = 1; slashes % 2;) {
+      end = source.indexOf('"', end + 1);
+      for (slashes = 0; source[end - 1 - slashes] === '\\';) slashes += 1;
+    }
+    const quoted = source.slice(at, end + 1);
+    at = end + 1;
+    return quoted;
+  };
+  const walk = (node) => {
+    const start = at;
+    const open = source[at];
+    if (open === '{' || open === '[') {
+      const members = open === '{' ? new Map() : null;  // an array's text is its own: no span per element
+      at += 1;
+      blank();
+      for (let index = 0; source[at] !== (open === '{' ? '}' : ']'); index += 1) {
+        const key = members ? JSON.parse(string()) : index;
+        if (members) { blank(); at += 1; blank(); }
+        const from = at;
+        walk(node !== null && typeof node === 'object' ? node[key] : undefined);
+        members?.set(key, [from, at]);
+        blank();
+        if (source[at] === ',') { at += 1; blank(); }
+      }
+      at += 1;
+      if (node !== null && typeof node === 'object') spans.set(node, { at: [start, at], members });
+    } else if (open === '"') string();
+    else { token.lastIndex = at; token.exec(source); at = token.lastIndex; }
+  };
+  try { blank(); walk(body); } catch { spans = new WeakMap(); }  // without spans a value is shown as parsed
+  return spans;
+}
+const rawMember = (holder, key) => {
+  const at = holder !== null && typeof holder === 'object' ? sourceSpans().get(holder)?.members?.get(key) : null;
+  return at ? source.slice(...at) : null;
+};
+const asRecorded = (raw, value) => (raw === null ? pretty(value) : /^[{[]/.test(raw) ? indentJson(raw) : raw);
+// A value as recorded: an object or array re-indented from its own text; a member, from its holder's.
+function exactOf(value) {
+  const at = value !== null && typeof value === 'object' ? sourceSpans().get(value)?.at : null;
+  return at ? indentJson(source.slice(...at)) : pretty(value);
+}
+const memberOf = (holder, key, absent) => (holder?.[key] === undefined && absent !== undefined ? pretty(absent)
+  : asRecorded(rawMember(holder, key), holder?.[key]));
+function exactRest(object, omit) {
+  const names = Object.keys(object).filter((name) => !omit.has(name));
+  const raws = names.map((name) => rawMember(object, name));
+  if (raws.includes(null)) return pretty(Object.fromEntries(names.map((name) => [name, object[name]])));
+  return indentJson(`{${names.map((name, index) => `${JSON.stringify(name)}:${raws[index]}`).join(',')}}`);
+}
+function argumentsText(holder, key) {
+  const value = holder?.[key];
+  if (typeof value !== 'string') return memberOf(holder, key, {});
+  try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? indentJson(value) : value; } catch { return value; }
+}
+// A message, an input item or a tool, whole: what no rule names is shown as indented JSON under "Other fields".
+function readable(item, key) {
+  if (!isRecord(item)) return parts(item);
+  const used = new Set(['role', 'tool_call_id', 'call_id']);
+  const out = [];
+  if (key === 'tools' || key === 'functions') {
+    const tool = isRecord(item.function) ? item.function : item;
+    if (typeof tool.description === 'string' && tool.description) out.push(['', tool.description]);
+    out.push(['Definition', () => exactRest(tool, new Set(['description']))]);
+    for (const name of isRecord(item.function) ? ['function', 'type'] : Object.keys(item)) used.add(name);
+  } else if (item.type === 'function_call') {
+    out.push([['Tool call', item.name, item.call_id].filter(Boolean).join(' · '), () => argumentsText(item, 'arguments')]);
+    for (const name of ['type', 'name', 'arguments']) used.add(name);
+  } else if (item.type === 'function_call_output') {
+    parts(item.output, out);
+    used.add('type').add('output');
+  } else if (item.content === undefined && typeof item.text === 'string') {
+    parts([item], out);
+    used.add('type').add('text');
+  } else {
+    parts(item.content, out);
+    for (const call of Array.isArray(item.tool_calls) ? item.tool_calls : []) {
+      const fn = isRecord(call) && isRecord(call.function) ? call.function : call;
+      out.push([['Tool call', fn && fn.name, call && call.id].filter(Boolean).join(' · '), () => argumentsText(fn, 'arguments')]);
+    }
+    used.add('content').add('tool_calls');
+  }
+  if (Object.keys(item).some((name) => !used.has(name))) out.push(['Other fields', () => exactRest(item, used)]);
+  return out;
+}
+function rowWords(item, key) {
+  if (!isRecord(item)) return [key, typeof item === 'string' ? item : JSON.stringify(item)];
+  const entries = readable(item, key);
+  if (key === 'tools' || key === 'functions') return [text((isRecord(item.function) ? item.function : item).name), entries[0][0] ? '' : entries[0][1]];
+  const plain = entries.find(([title, value]) => !title && typeof value === 'string' && value.trim());
+  const calls = entries.filter(([title]) => title.startsWith('Tool call')).map(([title]) => title.split(' · ')[1]);
+  const said = plain ? plain[1] : calls.length ? `calls ${calls.join(', ')}`
+    : entries.length ? (typeof entries[0][1] === 'string' ? entries[0][1] : entries[0][0]) : '';
+  const id = [item.tool_call_id, item.call_id].find((value) => typeof value === 'string' && value);
+  return [text(item.role || item.type), (id && !calls.length ? `result of ${id}: ` : '') + said.trim()];
+}
+
+let body = null;
+let source = '';
+function section(title, key, masked) {
+  const items = Array.isArray(body[key]) ? body[key] : [body[key]];
+  const heading = element('h2', '', `${title} `);
+  heading.append(element('small', '', String(items.length)));
+  const list = element('div', 'rows');
+  list.dataset.kind = key;
+  items.forEach((item, index) => {
+    const row = element('details', 'row');
+    const head = element('summary');
+    const [role, said] = rowWords(item, key);
+    const path = `$.${key}${Array.isArray(body[key]) ? `[${index}]` : ''}`;
+    const hidden = masked.has(path);
+    head.append(element('span', 'meta', String(index + 1)), element('span', 'role', role),
+      element('span', 'what', said.slice(0, 240).split('\n', 1)[0]),
+      element('span', 'meta how', size(JSON.stringify(item).length) + (hidden ? ' · secret masked' : '')));
+    row.append(head);
+    // A row's text is drawn while it is open and dropped when it closes: the overview never repeats the request.
+    row.addEventListener('toggle', () => {
+      row.querySelectorAll('.part').forEach((part) => part.remove());
+      if (!row.open) return;
+      for (const [label, value] of readable(item, key)) {
+        const part = element('div', 'part');
+        if (label) part.append(element('span', 'meta', label));
+        part.append(element('pre', label ? '' : 'said', typeof value === 'function' ? value() : value));
+        row.append(part);
+      }
+    });
+    list.append(row);
+  });
+  request.append(heading, list);
+}
+function clear() {
+  result.hidden = true;
+  body = null;
+  source = '';
+  spans = null;
+  for (const node of [fields, request, stored, byId('stored-note'), byId('source-versions'), byId('record-body')]) node.replaceChildren();
+  for (const node of result.querySelectorAll('details')) node.open = false;
+}
+function add(label, value) {
+  if (value) fields.append(element('dt', '', label), element('dd', '', value));
+}
+const SECTIONS = [['system', 'System'], ['instructions', 'Instructions'], ['messages', 'Messages'], ['input', 'Input'],
+  ['tools', 'Tools'], ['functions', 'Functions']];
+// The row of a request that an exclusion's path begins with: its section ("$.messages") and, in a list, the item's index.
+const ROW_OF = /^(\$\.\w+)(\[\d+\])?(?=$|[.[])/;
+// The reader's own command that writes a request this page cannot open to a file for another tool.
+// An ID from the opened file enters that command only as a plain word, never as shell syntax or an option.
+const word = (value, placeholder) => (typeof value === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(value) ? value : placeholder);
+const elsewhere = (task, attempt, admits) => 'Write the request itself to a file for another tool with the reader '
+  + `without --report: python -m ouroboros.context_attempt_reader --data-root DATA ${word(task, 'TASK_ID')} `
+  + `--attempt ${word(attempt, 'ATTEMPT_ID')} --max-bytes ${admits} > request.json`;
+// A gap's headline and explanation; one that something can admit says what does.
+function gapWords(facts) {
+  const recorded = Number.isInteger(facts.recorded_bytes) ? facts.recorded_bytes : 0;
+  const shown = recorded ? bytes(recorded) : 'larger';
+  const bound = (value) => (Number.isInteger(value) ? bytes(value) : 'less');
+  // The one allowance that admits the request and its sealed record (an earlier report names the size alone).
+  const allowance = (Number.isInteger(facts.retry_max_bytes) ? facts.retry_max_bytes : recorded) || 'N';
+  const again = `Run the reader again with --max-bytes ${allowance} to include it.`;
+  if (facts.body === 'over_limit') {
+    return ['The saved request is larger than this report’s limit', `It is ${shown}; this export allowed ${bound(facts.max_bytes)}. ${again}`];
+  }
+  if (facts.body === 'manifest_over_limit') {
+    return ['The attempt’s sealed record is larger than this report’s limit',
+      `The record that seals the request is ${shown}; this export read at most ${bound(facts.max_bytes)} of it. `
+      + `Run the reader again with --max-bytes ${allowance} to open it; if the request itself is larger, that run names the --max-bytes for it.`];
+  }
+  if (facts.body === 'over_page_limit') {
+    const report = Number.isInteger(facts.report_bytes) ? `its report would be ${bytes(facts.report_bytes)}`
+      : Number.isInteger(facts.report_bytes_at_least) ? `its report would be at least ${bytes(facts.report_bytes_at_least)}`
+        : 'its report would be larger';
+    return ['This request’s report is larger than this page opens', `The request is ${shown}; ${report}, and Beautiful Context `
+      + `opens reports of at most ${bound(facts.page_limit_bytes)}. ${elsewhere(facts.task_id, facts.attempt_id, allowance)}`];
+  }
+  return ABSENT.get(facts.body) || ['This report holds no request body', `The reader gave the reason "${text(facts.body)}".`];
+}
+function show(facts, name) {
+  const absent = body === null;
+  const [headline, why] = absent ? gapWords(facts)
+    : ['Request recorded for this attempt', 'This is the host’s historical copy, saved before sending with known secrets masked. It is not the provider’s receipt.'];
+  byId('headline').textContent = headline;
+  byId('explain').textContent = why;
+  add('Attempt', text(facts.attempt_id));
+  add('Task', text(facts.task_id));
+  if (facts.body === 'not_one_attempt') add('Ledger row', text(facts.ledger_kind));
+  else {
+    add('Requested model', [facts.model, facts.provider].filter((value) => typeof value === 'string' && value).join(' via ') || 'Not recorded');
+    add('Reserved', when(facts.ts_reserved));
+    add('Dispatched', when(facts.ts_dispatched));
+    add('Last state recorded', when(facts.ts_final));
+    add('Ledger state', stateWords(facts));
+    add('Transport', TRANSPORT.get(facts.transport_observation) || 'Transport receipt not confirmed');
+    add('Failure', failureWords(facts.failure));
+  }
+  byId('privacy').hidden = absent;
+  // The one whole copy of the request in this frame; a report of a gap names its gap here too.
+  stored.textContent = absent ? `Request body unavailable: ${text(facts.body)}` : source;
+  byId('stored-note').textContent = absent ? '' : `One line of ${count(source.length)} characters, exactly as recorded.`;
+  if (!absent) {
+    add('Stored request', `${Number.isInteger(facts.bytes) ? bytes(facts.bytes) : size(source.length)} of JSON`);
+    // The rows a masked secret lies in ("$.messages[3]", or "$.system" for one that is no list), indexed once for this
+    // report: a row asks the set, never the whole list of exclusions.
+    const masked = new Set();
+    for (const row of Array.isArray(facts.host_exclusions) ? facts.host_exclusions : []) {
+      const at = isRecord(row) && row.class === 'secret_redaction' && typeof row.path === 'string' ? ROW_OF.exec(row.path) : null;
+      if (at) { masked.add(at[1]); if (at[2]) masked.add(at[1] + at[2]); }
+    }
+    for (const [key, title] of SECTIONS) if (key in body) section(title, key, masked);
+    const rest = Object.entries(body).filter(([key]) => !SECTIONS.some(([known]) => known === key));
+    if (rest.length) {
+      const other = element('dl');
+      for (const [key, value] of rest) other.append(element('dt', '', key), element('dd', '', typeof value === 'string' ? value : rawMember(body, key) ?? JSON.stringify(value)));
+      request.append(element('h2', '', 'Other request fields'), other);
+    }
+  }
+  const trace = Array.isArray(facts.file_trace) ? facts.file_trace.filter((row) => row && typeof row === 'object'
+    && typeof row.source_path === 'string' && typeof row.source_sha256 === 'string') : [];
+  // The first reader wrote `not_recorded` beside `not_linked` without opening any record: as unknown as `not_read`.
+  const unread = facts.file_trace === 'not_read' || (facts.file_trace === 'not_recorded' && facts.body === 'not_linked');
+  byId('source-versions').textContent = trace.length ? trace.map((row) => [row.source_path, 'File SHA-256: ' + row.source_sha256,
+    'Contribution SHA-256: ' + text(row.text_sha256), 'Contribution: ' + text(row.contribution)].join('\n')).join('\n\n')
+    : unread ? 'Not read: this report did not open the attempt’s sealed record, so the source versions it recorded are unknown.'
+    : 'No supported source versions were recorded. Other files and offsets remain unknown.';
+  byId('record-body').textContent = pretty(facts);
+  status.textContent = `Showing ${name}.`;
+  result.hidden = false;
+}
+let generation = 0;
+function refuse(epoch, reason) {
+  if (epoch !== generation) return;
+  status.dataset.tone = 'bad';
+  status.textContent = `Cannot read this Beautiful Context JSON report: ${reason}`;
+}
+input.addEventListener('change', async () => {
+  const file = input.files[0];
+  input.value = '';
+  const epoch = ++generation;
+  clear();
+  delete status.dataset.tone;
+  if (!file) { status.textContent = 'No report selected.'; return; }
+  if (file.size > maxBytes) {
+    return refuse(epoch, `the file is ${bytes(file.size)}, more than the ${bytes(maxBytes)} this page opens. `
+      + `${elsewhere('TASK_ID', 'ATTEMPT_ID', file.size)}`);
+  }
+  if (!file.size) return refuse(epoch, 'the file is empty. A failed export leaves an empty file; run the reader again and read what it says in the terminal.');
+  status.textContent = 'Reading the selected file…';
+  let report;
+  try {
+    report = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+  } catch {
+    return refuse(epoch, 'the file is not UTF-8 text. Write it with a redirection that keeps its bytes (a POSIX shell or cmd.exe).');
+  }
+  try {
+    report = JSON.parse(report);
+  } catch {
+    return refuse(epoch, 'the file is not complete JSON. The export was cut short, or this is another kind of file.');
+  }
+  const facts = isRecord(report) ? report.facts : null;
+  if (!isRecord(report) || report.format !== 'ouroboros.context-report/1') return refuse(epoch, 'this JSON is another kind of document.');
+  let parsed = null;
+  try {
+    if (!isRecord(facts) || typeof facts.task_id !== 'string' || typeof facts.attempt_id !== 'string'
+        || (report.stored_json !== null && typeof report.stored_json !== 'string')) throw new Error('facts');
+    if (report.stored_json !== null && !isRecord(parsed = JSON.parse(report.stored_json))) throw new Error('body');
+  } catch {
+    return refuse(epoch, 'its attempt facts or its request body are damaged. Export it again.');
+  }
+  if (epoch !== generation) return;
+  body = parsed;
+  source = report.stored_json || '';
+  show(facts, file.name);
+});
+window.addEventListener('pagehide', () => { ++generation; input.value = ''; clear(); }, { once: true });
+</script></body></html>

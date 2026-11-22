@@ -35,6 +35,169 @@ def reserve(root, task, **kwargs):
                                     cause=kwargs.pop("cause", recovery.CAUSE_WORKER_CRASH), **kwargs)
 
 
+@pytest.mark.parametrize("door", ["startup", "worker"])
+@pytest.mark.parametrize("answer", ["queued", "running", "succeeded", "foreign", "unnamed", "no_state",
+                                    "foreign_store", "read_error", "unsaved", "terminal_unsaved"])
+def test_adoption_publishes_the_first_proved_state_of_an_accepted_start(tmp_path, monkeypatch, door, answer):
+    from ouroboros import delegate_custody_current as current
+    from ouroboros.owner_pause import read_fence
+    from ouroboros.task_results import write_task_result
+    from tests._delegated_transport_shared import Engine, _bind_without_state, _rows
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _pending
+
+    task, ctx = task_and_context(tmp_path)
+    write_task_result(tmp_path, "root", "running", root_task_id="root")
+    start = _pending(tmp_path, "root", "lost", tree="root", selected_subagent_id="actor",
+                     config_fingerprint="config", work_order_fingerprint="work",
+                     authority_fingerprint=recovery.authority_fingerprint_from_task(task))
+    assert _decide(tmp_path, start)
+    engine = Engine(tmp_path)
+    state = "succeeded" if answer == "terminal_unsaved" else answer if answer in {"queued", "succeeded"} else "running"
+    job = engine.accept("lost", REQUEST, state=state)
+    # A pending reservation may acquire its run identity between generations.
+    reserve(tmp_path, task, cause=recovery.CAUSE_PLANNED_SELF_RESTART, restart_transaction_id="tx")
+    recovery._write_restart_transaction(tmp_path, {"transaction_id": "tx", "status": "normal_exit_acknowledged",
+        "supervisor_pid": os.getpid(), "exit_code": 42, "task_ids": ["root"]})
+    with engine.gateway() as gateway:
+        run = _bind_without_state(tmp_path, gateway, engine, engine.commands[job]["run"])
+    monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway", engine.gateway)
+    monkeypatch.setattr("ouroboros.tools.delegate.exact_start", lambda *_a: pytest.fail("bound invocation replayed"))
+    detail = engine._detail(job)
+    if answer in {"foreign", "unnamed"}:
+        detail["summary"] = {"state": "running", **({"runId": "another-run"} if answer == "foreign" else {})}
+        monkeypatch.setattr(engine, "_detail", lambda _job: detail)
+    if answer == "no_state":
+        detail["summary"].pop("state")
+        monkeypatch.setattr(engine, "_detail", lambda _job: detail)
+    if answer == "foreign_store":
+        monkeypatch.setattr(engine, "_named", lambda _request: {"storeId": "replacement"})
+    if answer == "read_error":
+        def unavailable(_job):
+            raise OSError("run unreadable")
+        monkeypatch.setattr(engine, "_detail", unavailable)
+    if answer in {"unsaved", "terminal_unsaved"}:
+        emit = custody.emit
+        refused = custody.START_STATE_OBSERVED if answer == "unsaved" else custody.TERMINAL_OBSERVED
+        monkeypatch.setattr(custody, "emit", lambda root, kind, row, **kw:
+                            False if kind == refused else emit(root, kind, row, **kw))
+
+    proved = answer in {"queued", "running", "succeeded"}
+    if door == "startup":
+        assert recovery.pre_adopt_planned_handoffs(tmp_path, [task]) == {"root"}  # includes reserved for orphan protection
+        assert recovery.planned_handoff_resume_allowed(tmp_path, task) is proved
+        assert recovery._read(tmp_path, "root")["holders"][0]["status"] == ("pre_adopted" if proved else "deferred")
+    else:
+        receipt = recovery.adopt_handoff(ctx, task)
+        assert receipt["status"] == ("adopted" if proved else "recovery_required")
+        if not proved:
+            assert receipt["reason"] == "run_unobserved"
+        elif answer == "succeeded":
+            assert receipt["terminal_state"] == "succeeded"
+    observed = current.run(tmp_path, run.run_id)
+    assert observed.resume_start_state == (state if proved or answer == "terminal_unsaved" else "unknown")
+    fence = read_fence(tmp_path, "root")
+    if answer in {"queued", "running"}:
+        assert fence["active_delegated_start"]["run_id"] == run.run_id
+        assert fence["active_delegated_start"]["state"] == answer
+    else:
+        assert not fence
+    assert bool(observed.terminal_source) is (answer == "succeeded")
+    assert not _rows(tmp_path, custody.SETTLED) and not engine.creates and not engine.cancels
+    if answer == "succeeded":
+        from ouroboros.delegate_collection import collect_terminal, retained_payload
+        if door == "startup":
+            monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway",
+                                lambda: pytest.fail("successor reopened the engine after startup retained the terminal"))
+            with monkeypatch.context() as unavailable:
+                def unreadable(*_args):
+                    raise OSError("terminal source unavailable")
+                unavailable.setattr("ouroboros.delegate_collection._read_source", unreadable)
+                assert recovery.adopt_handoff(ctx, task)["status"] == "recovery_required"
+            assert recovery.adopt_handoff(ctx, task)["terminal_state"] == "succeeded"
+        with engine.gateway() as gateway:
+            monkeypatch.setattr(gateway, "get_run", lambda *_a, **_kw: pytest.fail("retained terminal queried again"))
+            collected = collect_terminal(tmp_path, run.run_id, gateway=gateway)
+        assert collected["settlement"]["settled"] and collected["output_retention"]["complete"]
+        assert retained_payload(tmp_path, current.run(tmp_path, run.run_id))["primary_output"]["text"] == engine.commands[job]["text"]
+
+
+def test_a_saved_ordinary_run_admits_past_one_failed_startup_probe_and_adopts_on_the_worker_recheck(
+        tmp_path, monkeypatch):
+    """Ordinary saved work (never an accepted unconfirmed start) is not left reserved for ever by
+    one failed liveness probe: the deferred holder keeps its orphan protection while the row admits
+    the successor, and the worker boot's own adoption re-probes the physical run. No new start,
+    money or Stop is issued."""
+    from ouroboros import delegate_custody_current as current
+    from ouroboros.task_results import write_task_result
+    from tests._delegated_transport_shared import _rows
+
+    task, ctx = task_and_context(tmp_path)
+    write_task_result(tmp_path, "root", "running", root_task_id="root")
+    add_holder(tmp_path, task, "live")
+    assert current.run(tmp_path, "live").resume_start_state is None  # ordinary: no accepted start risk
+    reserve(tmp_path, task, cause=recovery.CAUSE_PLANNED_SELF_RESTART, restart_transaction_id="tx")
+    recovery._write_restart_transaction(tmp_path, {"transaction_id": "tx", "status": "normal_exit_acknowledged",
+        "supervisor_pid": os.getpid(), "exit_code": 42, "task_ids": ["root"]})
+
+    def unreachable(*_a, **_kw):
+        raise OSError("engine unreachable during the startup probe")
+    monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway", unreachable)
+    assert recovery.pre_adopt_planned_handoffs(tmp_path, [task]) == {"root"}  # kept, for orphan protection
+    row = recovery._read(tmp_path, "root")
+    assert row["holders"][0]["status"] == "deferred" and row["holders"][0]["deferred_reason"] == "run_unobserved"
+    assert row["status"] == "pre_adopted", "admission is not the startup probe's hostage; the worker re-checks"
+    assert recovery.planned_handoff_resume_allowed(tmp_path, task)
+    # The subsequent success: the worker boot's own re-check reads the ordinary run live.
+    detail = {"summary": {"runId": "live", "jobId": "job-live", "state": "running", "effectiveAccess": "readonly"},
+              "lastSeq": 2, "pendingInteractions": []}
+    gateway = SimpleNamespace(store_identity="store-a", close=lambda: None, get_run=lambda *_a, **_kw: detail)
+    monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway", lambda: gateway)
+    receipt = recovery.adopt_handoff(ctx, task)
+    assert receipt["status"] == "adopted" and receipt["run_id"] == "live"
+    assert not _rows(tmp_path, custody.SETTLED) and not _rows(tmp_path, custody.START_STATE_OBSERVED)
+
+
+def test_a_recovered_start_gates_adoption_until_its_first_state_is_proved_then_admits(tmp_path, monkeypatch):
+    """An accepted unconfirmed start keeps the startup gate shut while its first state is unproved
+    (one failed probe included); a genuine later answer proves it and admits the successor."""
+    from ouroboros import delegate_custody_current as current
+    from ouroboros.task_results import write_task_result
+    from tests._delegated_transport_shared import Engine, _bind_without_state, _rows
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _pending
+
+    task, ctx = task_and_context(tmp_path)
+    write_task_result(tmp_path, "root", "running", root_task_id="root")
+    start = _pending(tmp_path, "root", "lost", tree="root", selected_subagent_id="actor",
+                     config_fingerprint="config", work_order_fingerprint="work",
+                     authority_fingerprint=recovery.authority_fingerprint_from_task(task))
+    assert _decide(tmp_path, start)
+    engine = Engine(tmp_path)
+    job = engine.accept("lost", REQUEST, state="running")
+    reserve(tmp_path, task, cause=recovery.CAUSE_PLANNED_SELF_RESTART, restart_transaction_id="tx")
+    recovery._write_restart_transaction(tmp_path, {"transaction_id": "tx", "status": "normal_exit_acknowledged",
+        "supervisor_pid": os.getpid(), "exit_code": 42, "task_ids": ["root"]})
+    with engine.gateway() as gateway:
+        run = _bind_without_state(tmp_path, gateway, engine, engine.commands[job]["run"])
+    assert run.resume_start_state == "unknown"
+
+    def unreachable(*_a, **_kw):
+        raise OSError("engine unreachable during the startup probe")
+    monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway", unreachable)
+    assert recovery.pre_adopt_planned_handoffs(tmp_path, [task]) == {"root"}  # kept, for orphan protection
+    row = recovery._read(tmp_path, "root")
+    assert row["holders"][0]["status"] == "deferred" and row["status"] == "reserved"
+    assert not recovery.planned_handoff_resume_allowed(tmp_path, task), "the startup gate stays shut"
+    # The genuine later answer proves the first state; the reserved row is re-checked and admits.
+    monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway", engine.gateway)
+    monkeypatch.setattr("ouroboros.tools.delegate.exact_start", lambda *_a: pytest.fail("bound invocation replayed"))
+    assert recovery.pre_adopt_planned_handoffs(tmp_path, [task]) == {"root"}
+    row = recovery._read(tmp_path, "root")
+    assert row["holders"][0]["status"] == "pre_adopted" and row["status"] == "pre_adopted"
+    assert recovery.planned_handoff_resume_allowed(tmp_path, task)
+    assert current.run(tmp_path, run.run_id).resume_start_state == "running"
+    assert not _rows(tmp_path, custody.SETTLED) and not engine.creates and not engine.cancels
+
+
 def test_root_recovers_live_pending_and_settled_wake_before_configured_return(tmp_path, monkeypatch):
     from ouroboros.subagent_bootstrap import bootstrap_before_context
 

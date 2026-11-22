@@ -159,6 +159,76 @@ def _history(rows):
                          "spans": {"chat": {**span, "to": len(rows)}, "progress": {**span, "to": 0}}}}
 
 
+def test_completed_card_files_distinguish_byte_names_after_reload(subscription_ui, tmp_path):
+    """Replay an ordinary result in the SPA; detail and the regular download use the real gateway."""
+    from playwright.sync_api import expect
+
+    from ouroboros.artifacts import task_artifacts_dir
+    from ouroboros.task_results import write_task_result
+    from tests._task_file_http import task_file_client
+
+    task_id = "result-byte-names"
+    data = tmp_path / "data"
+    directory = task_artifacts_dir(data, task_id)
+    payload = b"Verified browser result.\n"
+    (directory / "report.txt").write_bytes(payload)
+    # Synthetic records model the wire names even on filesystems that cannot create them.
+    names = [b"report-\xff.txt".decode("utf-8", "surrogateescape"),
+             b"report-\xfe.txt".decode("utf-8", "surrogateescape"), r"report-\xff.txt", "report.txt"]
+    write_task_result(data, task_id, "completed", result="The report is ready.", artifacts=[
+        {"kind": "task_artifact", "name": name, "relpath": name, "path": str(directory / name), "status": "ready"}
+        for name in names
+    ])
+    root_row = {"chat_id": 1, "task_id": task_id, "suggested_name": "Saved report"}
+    rows = [
+        {**root_row, "role": "assistant", "is_progress": True, "narration": True, "text": "Saving the report",
+         "ts": "2026-09-25T07:00:00Z", "history_id": f"progress-{task_id}"},
+        {**root_row, "role": "system", "system_type": "task_summary", "text": "Done", "status": "completed",
+         "task_terminal_status": "completed", "ts": "2026-09-25T07:01:00Z", "history_id": f"end-{task_id}"},
+    ]
+    ui, page = subscription_ui, subscription_ui["page"]
+    ui["backend"]["task_gateway"] = task_file_client(data)
+    detail_url = f"{ui['url']}/api/tasks/{task_id}"
+    # Let these two reads reach the fixture's loopback HTTP server, which delegates to the real task endpoints.
+    for url in (f"{detail_url}*", f"{detail_url}/artifacts/report.txt"):
+        page.route(url, lambda route: route.continue_())
+    page.route("**/api/chat/history*", lambda route: route.fulfill(json=_history(rows)))
+    card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{task_id}"]')
+    files = card.locator('[data-result-files]')
+    link = files.get_by_role("link", name="report.txt", exact=True)
+
+    for visit in ("first", "reload"):
+        with page.expect_response(lambda response: response.url.split("?", 1)[0] == detail_url) as detail:
+            if visit == "first":
+                page.goto(ui["url"])
+            else:
+                ui["errors"].watch(page)
+                page.reload()
+            expect(card).to_have_attribute("data-finished", "1")
+            expect(card.locator('[data-live-phase]')).to_have_text("Done")
+            door = card.locator(':scope > [data-live-summary-button] [data-live-disclosure]')
+            if door.get_attribute("aria-expanded") != "true":
+                door.click()
+            expect(files).to_be_visible()
+        assert detail.value.status == 200
+        expect(files).to_contain_text("4 files")
+        for label in (r"report-\xff.txt", r"report-\xfe.txt", r"report-\\xff.txt"):
+            row = files.locator('.md-li').filter(has_text=label)
+            expect(row).to_be_visible()
+            expect(row).to_contain_text("download unavailable")
+            expect(row.locator("a")).to_have_count(0)
+        expect(files.get_by_role("link")).to_have_count(1)
+        expect(link).to_be_visible()
+
+    with page.expect_download() as download:
+        link.click()
+    assert download.value.suggested_filename == "report.txt"
+    assert download.value.path().read_bytes() == payload
+    capture(page, "tz1-byte-names-reloaded")
+    if evidence_dir := os.environ.get("OUROBOROS_UI_EVIDENCE_DIR"):
+        download.value.save_as(Path(evidence_dir) / "tz1-byte-names-report.txt")
+
+
 def _start_world(ui, theme, width):
     """The production SPA over controlled boot snapshots; ``current`` is the /api/state answer, ``rows`` Main's history."""
     page = ui["page"]
@@ -447,6 +517,10 @@ def test_an_open_question_keeps_mains_amber_while_the_host_starts(subscription_u
     asked = {"activity": "idle", "transition": "none", "call": "", "amber": True, "mark": "none", "confirmed": True,
              "works": [], "turn": [{"kind": "open_question", "task_id": "m2-asked", "quiz_id": "m2-quiz"}]}
     current.update(rooms={"1": asked}, works_gaps=[], work_summary={"counts": {}, "turn": 1, "confirmed": True})
+    # A stable served SHA from the first read keeps this document across the reconnect (ws.js decide:
+    # a missing sha after a connection reloads as unknown, and a fresh page repaints the mark ink
+    # before the state reads restore the owner's amber). The outage tests above pin it the same way.
+    current["sha"] = "m2-question-amber"
     ui["errors"].watch(page)
     page.goto(ui["url"])
     trigger = page.locator(".chat-page-header .rw-trigger")

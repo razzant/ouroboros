@@ -613,3 +613,25 @@ def test_an_install_whose_saved_3_reads_as_not_set_hears_it_once(notice_world, m
     texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "model_cap_notice"]
     assert len(texts) == (1 if owed else 0) and ("model_cap_notified" in notice_world.state) is owed
     assert not owed or ("reads as not set" in texts[0] and "If 3 was your choice" in texts[0])
+
+
+@pytest.mark.parametrize("document, view, owed", [
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": ""}, True),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "6"}, {}, True),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6, "_subagent_cap_format": 1}, {}, False),  # the owner's own 6
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 64}, {}, False),  # any other saved number stays and is not news
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": ""}, {}, False),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 4}, False),
+    ({}, {}, False),  # a document that never saved the key
+    (None, {}, False),  # a fresh install
+])
+def test_an_install_whose_saved_6_helpers_read_as_no_number_hears_it_once(notice_world, monkeypatch, document, view,
+                                                                         owed):
+    """Owner 21.11.2026: the 6 every earlier release saved in "At once, for one task" reads as no number on existing
+    installs too, and the install hears one sentence about it once, in the same place as the model-limit notice."""
+    monkeypatch.setattr(notice_world.notices, "_raw_settings_document", lambda: document)
+    notice_world.notices.startup_upgrade_notices(view)
+    notice_world.notices.startup_upgrade_notices(view)
+    texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "subagent_cap_notice"]
+    assert len(texts) == (1 if owed else 0) and ("subagent_cap_notified" in notice_world.state) is owed
+    assert not owed or ("is lifted" in texts[0] and "At once, for one task." in texts[0])

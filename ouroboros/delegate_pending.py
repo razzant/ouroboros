@@ -138,10 +138,12 @@ def pending_invocations(
                     if isinstance(row.get("work_order_source_request"), dict) else {}
                 ),
             }
+        elif kind == c.START_RISK_ACCEPTED and invocation_id in found and invocation_id not in state:
+            found[invocation_id].setdefault("resume_decisions", {})[row["resuming_task_id"]] = row["decision"]
         elif kind == c.STARTED:
             state[invocation_id] = "started"
         elif (
-            kind == c.START_FAILED
+            kind in (c.START_UNSENT, c.START_FAILED)
             and row.get("definite") is True
             and state.get(invocation_id) != "started"
         ):
@@ -164,12 +166,15 @@ def pending_invocations(
 
 def current_rows(root, rows):
     """Typed open facts only. Legacy gaps keep their identity until the child backfills them."""
+    from ouroboros.delegate_invocation import decision_facts
+
     pending = []
     for facts in rows:
         projected = (copy.deepcopy(facts["pending"]) if "pending" in facts else
                      pending_invocations(root, [facts["request"]], materialize=False))
         source = facts["request"]
         for record in projected:
+            record.update(decision_facts(facts))
             record.update(store_facts(source), **head_references(source))  # a cached projection may predate a fact its row holds
             for key in ("processing", "row_processing"):
                 if key in source:

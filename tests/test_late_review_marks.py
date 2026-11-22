@@ -654,6 +654,49 @@ def test_a_late_pass_keeps_the_saved_candidate_remainder_and_cleanup_its_card_st
     assert late[2] == ["done", "Done", sentence, sentence], "the card's collapsed line is the cause"
 
 
+def test_a_resolved_pass_never_lets_the_older_review_status_copy_revive_the_pending_acceptance(tmp_path, monkeypatch):
+    """R6 (review-status precedence): the pipeline stores the review axis beside its outcome as the
+    record's top-level ``review_status`` (a delivery-time copy; test_agent_task_pipeline pins the copy
+    equal). A late PASS resolution rewrites the canonical ``outcome_axes.review`` to an explicit current
+    PASS and REMOVES the acceptance decision it supersedes, while the older copy still holds it. The
+    stored copy stays untouched audit detail; the wake/card readers read the resolved record exactly as
+    one without the stale copy."""
+    from copy import deepcopy
+
+    from ouroboros import review_ledger
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from ouroboros.outcomes import _objective_axis
+    from ouroboros.project_dialogue import _completion_verdict, outcome_phase
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rl-late", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    write_task_result(tmp_path, "task-1", "completed", reason_code="final_message",
+                      outcome_axes={"execution": {"status": "ok", "reason_code": "final_message"},
+                                    "review": review, "objective": _objective_axis(review)},
+                      review_status=deepcopy(review))  # the pipeline's delivery-time copy
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}, "ts": "t"})
+    assert resolve_pending_result_review(tmp_path, "task-1", "rl-late") is True
+    stored = load_task_result(tmp_path, "task-1")
+    assert stored["outcome_axes"]["review"]["status"] == "pass"
+    assert "acceptance_decision" not in stored["outcome_axes"]["review"]
+    assert stored["review_status"]["acceptance_decision"]["reason"] == "author_finish_pending"  # audit copy intact
+    assert outcome_phase(stored, {}) == "done"
+    control = {key: value for key, value in stored.items() if key != "review_status"}
+    assert _completion_verdict(stored, {}) == _completion_verdict(control, {}) == ""
+    assert "before the reviewers answered" not in _completion_verdict(stored, {})
+    assert _completion_verdict(stored, {}, include_review_details=False) == ""
+    # A complete current review axis owns its decision even when there was no review on this revision.
+    from ouroboros.outcomes import _review_axis
+
+    current = {**control, "outcome_axes": {"execution": {"status": "ok"}, "review": _review_axis({})}}
+    older = {"outcome_axes": {"review": deepcopy(review)}}
+    assert _completion_verdict(current, older) == ""
+
+
 _FAILED_PRE_BRANCH = [{"tool": "submit_skill_to_hub", "is_error": True, "status": "error", "skill_publish_attempt": {
     "ok": False, "skill": "weather", "completed_stage": "local_preflight", "snapshot_hash": "h"}}]
 _OVERLAYS = {  # producer: (trace facts, task the publication veto reads, the phase that must stand)

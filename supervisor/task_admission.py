@@ -646,7 +646,7 @@ def _working_source(task: dict, drive_root: Any) -> dict:
         return {}
 
 
-def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
+def _working_attempt_refusal(task: dict, stored: dict, source: dict) -> str:
     """An exact source permits its next attempt only before that attempt's handoff.
 
     New launchers stamp the attempt BEFORE put, including when the RUNNING
@@ -657,18 +657,26 @@ def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
     """
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
 
-    if (not source or stored.get("task_id") != task.get("id")
-            or not stored.get("status") or stored.get("admission_outcome") == "never_admitted"
-            or stored.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED}):
-        return False
+    if not source:
+        return "saved_work_unverified"
+    if stored.get("task_id") != task.get("id") or not stored.get("status"):
+        return "resume_evidence_unavailable"
+    if stored.get("admission_outcome") == "never_admitted":
+        return "never_admitted"
+    if stored.get("status") in _TRULY_TERMINAL_STATUSES:
+        return "task_terminal"
+    if stored.get("status") == STATUS_CANCEL_REQUESTED:
+        return "cancel_requested"
     target = task["_attempt"]  # the exact-source reader validated this integer
     marked = stored.get("admitted_dispatch_attempt")
     if "admitted_dispatch_attempt" in stored:
-        if type(marked) is not int or not 0 < marked < target:
-            return False
+        if type(marked) is not int or marked <= 0:
+            return "resume_evidence_unavailable"
+        if marked >= target:
+            return "dispatch_unconfirmed"
     elif (type(source.get("retained_work_dispatch_protocol")) is not int
           or source["retained_work_dispatch_protocol"] != 1):
-        return False
+        return "resume_evidence_unavailable"
     observed = stored.get("task_attempt")
     owner = stored.get("execution_owner")
     if (type(observed) is int and observed == 0 and target == 2 and source.get("task_attempt") == 1
@@ -676,17 +684,29 @@ def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
             and owner.get("kind") in {"direct", "presence"}
             and type(owner.get("task_attempt")) is int and owner["task_attempt"] == 0):
         observed = 1
-    return ("task_attempt" not in stored
-            or type(observed) is int and 0 < observed < target)
+    if "task_attempt" not in stored:
+        return ""
+    if type(observed) is not int or observed <= 0:
+        return "resume_evidence_unavailable"
+    return "" if observed < target else "dispatch_unconfirmed"
+
+
+def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
+    return not _working_attempt_refusal(task, stored, source)
+
+
+def working_resume_refusal(task: dict, drive_root: Any, *, existing: Optional[dict] = None) -> str:
+    """Which proof is missing for this attempt, or empty when both checks passed."""
+    source = _working_source(task, drive_root)
+    if not source:
+        return "saved_work_unverified"
+    stored = existing if existing is not None else load_task_result(
+        pathlib.Path(task.get("budget_drive_root") or drive_root), str(task.get("id") or ""), strict=True) or {}
+    return _working_attempt_refusal(task, stored, source)
 
 
 def _working_resume_granted(task: dict, drive_root: Any, *, existing: Optional[dict] = None) -> bool:
-    source = _working_source(task, drive_root)
-    if not source:
-        return False
-    stored = existing if existing is not None else load_task_result(
-        pathlib.Path(task.get("budget_drive_root") or drive_root), str(task.get("id") or ""), strict=True) or {}
-    return _working_attempt_unstarted(task, stored, source)
+    return not working_resume_refusal(task, drive_root, existing=existing)
 
 
 def _exact_resume_granted(task: dict, drive_root: Any, *, existing: Optional[dict] = None) -> bool:

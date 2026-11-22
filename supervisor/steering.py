@@ -155,13 +155,29 @@ def _refusal_row(ctx: Any, evt: Dict[str, Any], target: str, target_label: str, 
     if chat is None:
         return
     try:
+        first, quotes = _steer_quote_sources(ctx, evt)
+        if first:
+            reply = _routing_notice_reply(ctx, {**evt, "quotes": [quotes[first]]}, chat) if first[2] else {}
+            if reply.get("address") != first[2]:
+                reply = {}
+        else:
+            reply = _routing_notice_reply(ctx, evt, chat)
         ctx.send_with_budget(
             chat, f"{target_label or 'Task'} · {routing_refusal_cause('steer_task', status, reason, None)}",
             role="system", system_type="steer_not_delivered", task_id=target,
-            progress_meta={"routing_notice_carrier": "system", "reply_to": _routing_notice_reply(ctx, evt)},
+            progress_meta={"routing_notice_carrier": "system", "reply_to": reply},
         )
     except Exception:
         log.warning("steer refusal row failed for %s", target, exc_info=True)
+
+
+def _steer_quote_sources(ctx, evt):
+    from ouroboros.owner_relay import quoted_receipt_sources
+    from supervisor.events_project_routing import _receipt_room
+
+    primary = (_receipt_room(evt), str(evt.get("client_message_id") or ""))
+    quotes = quoted_receipt_sources(ctx.DRIVE_ROOT, {"quotes": evt.get("quotes")})
+    return next((key for key in quotes if key[:2] == primary), None), quotes
 
 
 def _steer_receipt(
@@ -175,22 +191,31 @@ def _steer_receipt(
     from supervisor.events_project_routing import _owner_message_receipt
 
     task_issued = _task_issued(evt)
+    first, quotes = _steer_quote_sources(ctx, evt)
+    quoted_event = {key: value for key, value in evt.items() if key not in {"owner_source", "source_ref"}}
+    unplaced = first is not None and not first[2]
+    primary_event = {**quoted_event, "chat_id": first[0]} if unplaced else evt
+    if first:
+        primary_event = {**primary_event, "quotes": [quotes.pop(first)]}
+    publish = (not task_issued and not _mind_note(evt)) or bool(_owner_message_receipt(evt.get("client_message_id")))
     receipt = _emit_routing_receipt(
-        ctx, evt, action="steer_task", target=target, target_label=target_label,
+        ctx, primary_event, action="steer_task", target=target, target_label=target_label,
         status=status, reason=reason, detail=detail,
+        source_row_address=first[2] if first else "",
         attachment_manifest=attachment_manifest,
         # The owner hears of an act that carries their words or their click; a task's act and the mind's own note
         # (``_mind_note``) keep their durable receipt and tell their refusal to the teller alone, except on the
         # owner message a task's relay keys its receipt on (that passes on no owner authority).
-        publish=(not task_issued and not _mind_note(evt)) or bool(_owner_message_receipt(evt.get("client_message_id"))),
+        publish=publish and not unplaced,
     )
-    for quote in evt.get("quotes") or []:
-        source = quote.get("source") or {}
-        if source.get("client_message_id") and source["client_message_id"] != evt.get("client_message_id"):
-            _emit_routing_receipt(ctx, {**evt, "client_message_id": source["client_message_id"],
-                                       "chat_id": source["chat_id"]},
-                                  action="steer_task", target=target, target_label=target_label,
-                                  status=status, reason=reason, detail=detail)
+    if unplaced and publish and receipt["fields"].get("cause"):
+        receipt["routing_notice_carrier"] = "system"
+    for (room, message, address, _store), quote in quotes.items():
+        if room is None:
+            continue
+        _emit_routing_receipt(ctx, {**quoted_event, "client_message_id": message, "chat_id": room, "quotes": [quote]},
+                              source_row_address=address, action="steer_task", target=target, target_label=target_label,
+                              status=status, reason=reason, detail=detail, publish=bool(address))
     if task_issued:
         # One typed Logs row per task-authored act: true author, target, outcome
         # (7A). The receiving task's own timeline gets ``task_message_injected``

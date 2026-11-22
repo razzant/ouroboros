@@ -10,6 +10,17 @@ import { formatBytes, number } from './storage_format.js';
 const RESULT_FILE_ROWS = 8;
 const FOLDER_TOOLTIP_PATHS = 20;
 
+// Display the original bytes as \xNN, not the renderer's replacement glyph.
+// Quote literal backslashes so a spelled-out escape can't look like the byte.
+export function artifactNameText(name) {
+    return name.replace(/[\\\uD800-\uDFFF]/gu, (char) => {
+        if (char === '\\') return '\\\\';
+        const code = char.charCodeAt(0);
+        return code >= 0xDC80 && code <= 0xDCFF
+            ? `\\x${(code - 0xDC00).toString(16)}` : `\\u${code.toString(16)}`;
+    });
+}
+
 function artifactBytes(value) {
     const bytes = Number(value);
     return value === null || value === undefined || value === '' || !Number.isFinite(bytes) || bytes < 0
@@ -51,13 +62,13 @@ export function projectResultArtifacts(taskId, records, archives = null, wrapUp 
     const files = [];
     const folders = new Map();
     for (const row of Array.isArray(records) ? records : []) {
-        if (!row || typeof row !== 'object') continue;
+        if (!row || typeof row !== 'object' || row.kind === 'service_output_version') continue;
         const parts = String(row.relpath || '').split('/').filter((part) => part && part !== '.');
         const size = Number(row.size);
         const bytes = row.size !== null && row.size !== '' && Number.isFinite(size) && size >= 0 ? size : null;
         const status = String(row.status || '').trim().toLowerCase();
         const serving = (status === '' || status === 'ready') && !(Array.isArray(row.errors) && row.errors.length)
-            && !row.copy_status;
+            && !row.copy_status && !row.released;  // released by the owner in Storage: no download is offered
         if (parts.length > 1) {
             const folder = folders.get(parts[0])
                 || { name: parts[0], fileCount: 0, bytes: 0, unavailableCount: 0, relpaths: [], archive: null };
@@ -68,12 +79,14 @@ export function projectResultArtifacts(taskId, records, archives = null, wrapUp 
             folders.set(parts[0], folder);
             continue;
         }
-        const name = String(row.name || parts[0] || '').trim();
+        const name = String(row.name || parts[0] || '');
         if (!name) continue;
+        const url = serving ? taskArtifactDownloadUrl(taskId, name) : '';
         files.push({
             name, bytes,
-            note: serving ? (row.measured === false ? 'unverified' : '') : (status || 'unavailable'),
-            url: serving ? taskArtifactDownloadUrl(taskId, name) : '',
+            note: url ? (row.measured === false ? 'unverified' : '')
+                : row.released ? 'released' : serving ? 'download unavailable' : (status || 'unavailable'),
+            url,
         });
     }
     const dirs = [...folders.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -115,7 +128,7 @@ const metaTail = (parts) => parts.filter(Boolean).map((part) => ` · ${escapeHtm
 function folderTooltip(folder) {
     const shown = folder.relpaths.slice(0, FOLDER_TOOLTIP_PATHS);
     const more = folder.relpaths.length - shown.length;
-    return shown.join('\n') + (more > 0 ? `\n… ${number(more)} more` : '');
+    return shown.map(artifactNameText).join('\n') + (more > 0 ? `\n… ${number(more)} more` : '');
 }
 
 // Rows use the markdown list markup (`md-li`, `md-link`) this body already styles. Saved work
@@ -128,16 +141,16 @@ function resultArtifactsHtml(view, limit = RESULT_FILE_ROWS) {
         ...view.files.map((file) => ({
             files: 1,
             html: (file.url
-                ? `<a class="md-link" href="${escapeHtmlAttr(file.url)}" download="${escapeHtmlAttr(file.name)}">${escapeHtml(file.name)}</a>`
-                : escapeHtml(file.name))
+                ? `<a class="md-link" href="${escapeHtmlAttr(file.url)}" download="${escapeHtmlAttr(file.name)}">${escapeHtml(artifactNameText(file.name))}</a>`
+                : escapeHtml(artifactNameText(file.name)))
                 + metaTail([artifactBytes(file.bytes), file.note]),
         })),
         ...view.folders.map((folder) => ({
             files: folder.fileCount,
             html: `<span title="${escapeHtmlAttr(folderTooltip(folder))}">`
                 + (folder.archive?.available
-                    ? `<a class="md-link" href="${escapeHtmlAttr(folder.archive.url)}" download="${escapeHtmlAttr(folder.archive.name)}">${escapeHtml(folder.name)}/</a>`
-                    : `${escapeHtml(folder.name)}/`)
+                    ? `<a class="md-link" href="${escapeHtmlAttr(folder.archive.url)}" download="${escapeHtmlAttr(folder.archive.name)}">${escapeHtml(artifactNameText(folder.name))}/</a>`
+                    : `${escapeHtml(artifactNameText(folder.name))}/`)
                 + metaTail(folder.archive?.available
                     ? ['folder', fileCountText(folder.archive.fileCount), artifactBytes(folder.archive.bytes),
                         folder.archive.excluded ? `${number(folder.archive.excluded)} not archived` : '']
@@ -175,19 +188,27 @@ export function syncQuestionMaterials(card, records, render = null) {
         if (!item?.task_id || !item.name || !item.sha256) continue;
         const url = taskArtifactDownloadUrl(item.task_id, item.name);
         if (!url) continue;
-        const label = item.label || item.name;
+        // `label` is the host's finished display text, its backslashes the host's own escapes: shown as stored, never
+        // quoted again. Only one still holding a raw surrogate (an older row) takes the file rows' spelling.
+        const text = String(item.label || item.name);
+        const label = /[\uD800-\uDFFF]/u.test(text) ? artifactNameText(text) : text;
         // Reuse the ordinary file reader and photo preview with only a canonical custody URL.
-        const extension = String(label).split('.').at(-1).toLowerCase();
+        const extension = String(item.name).split('.').at(-1).toLowerCase();
         const image = ({ png: 'png', jpg: 'jpeg', jpeg: 'jpeg', gif: 'gif', webp: 'webp', avif: 'avif' })[extension];
-        const rendered = render?.({ task_id: item.task_id, filename: label, size_bytes: item.size,
-            download_url: url, mime: image ? `image/${image}` : 'application/octet-stream' });
+        // The retained copy keeps its own name: `msg.filename` below is that name, whose extension selects the
+        // reader's type. `saveAs` is the only name offered to save under — the label when nothing in it was escaped
+        // or is a path, `item.name` for any other label; an ordinary question keeps the original filename.
+        const saveAs = item.label && label === text && !/[\\/\u0000-\u001f\u007f\uD800-\uDFFF]/u.test(text)
+            && text.trim() === text && text !== '.' && text !== '..' ? text : item.name;
+        const rendered = render?.({ task_id: item.task_id, filename: item.name, size_bytes: item.size,
+            download_url: url, mime: image ? `image/${image}` : 'application/octet-stream' }, { displayName: label, saveAs });
         const content = rendered?.querySelector('.message');
         if (content) { materials.append(content); continue; }
         const link = document.createElement('a');
         link.className = 'md-link';
-        link.textContent = item.label || item.name;
+        link.textContent = label;
         link.href = url;
-        link.download = item.label || item.name;
+        link.download = saveAs;
         materials.append(link);
     }
     if (materials.children.length) card.append(materials);

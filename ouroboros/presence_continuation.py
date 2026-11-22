@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import json_dumps_utf8, utc_now_iso
 from ouroboros.task_store import patch_document
 
 log = logging.getLogger(__name__)
@@ -552,7 +552,7 @@ def _row_fact(binding: ReviewWaitBinding, row: Mapping[str, Any]) -> str:
     turn = "this turn" if owner == binding.task_id else f"turn {owner}" if owner else "an unattributed turn"
     from ouroboros.dialogue_provenance import (dialogue_text, place_message_facts, reaction_action_words,
                                                reaction_fact, wordless_reaction)
-    text = json.dumps(str(row.get("text") or ""), ensure_ascii=False)  # their exact words, and only those
+    text = json_dumps_utf8(str(row.get("text") or ""), ensure_ascii=False)  # their exact words, and only those
     facts = place_message_facts(row)  # the connector's, beside the quoted words in their own labelled block
     text += "".join(f"\n  {line}" for line in facts.splitlines())
     reaction = reaction_fact((row.get("transport") or {}).get("message"))
@@ -701,13 +701,13 @@ def _queue_note(observation: dict, *, bounded: bool) -> str:
     if observation.get("status") != "available":
         return "\nTransport queue: unavailable (" + str(observation.get("reason") or "unknown") + ")."
     snapshot = observation["snapshot"]
-    lines = ["\nTransport queue observation: " + json.dumps({key: snapshot.get(key) for key in (
+    lines = ["\nTransport queue observation: " + json_dumps_utf8({key: snapshot.get(key) for key in (
         "source", "observed_at", "after_source_event_id", "pending_count")}, ensure_ascii=False),
         "These are transport-observed pending events; leased rows may already be in flight. "
         "They are not canonical chat or owner directives."]
     room, shown = _REENTRY_NOTE_CHARS, 0
     for event in snapshot["events"]:
-        fact = "- queued event: " + json.dumps(event, ensure_ascii=False, sort_keys=True)
+        fact = "- queued event: " + json_dumps_utf8(event, ensure_ascii=False, sort_keys=True)
         if bounded and len(fact) > room:
             break
         lines.append(fact)
@@ -738,7 +738,10 @@ def _retain_reentry(binding: ReviewWaitBinding, ctx: Any, rows: list, gaps: list
                 "cursor": binding.cursor, "rows": rows, "gaps": gaps,
                 "history": capture_reentry_history(binding.drive_root, binding.cursor),
                 "transport_queue": transport_queue}
-    raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    # json_dumps_utf8 keeps a raw POSIX name byte carried by any row (docs/PERSISTENCE.md
+    # "POSIX name bytes") encodable in the snapshot's own UTF-8 without changing the
+    # serialized bytes of ordinary content: old digests and hashes stay stable.
+    raw = json_dumps_utf8(snapshot, ensure_ascii=False, sort_keys=True).encode("utf-8")
     try:
         ref = store_actor_source_bytes(binding.drive_root, binding.task_id, category="context_checkpoints",
                                        source_id="presence-reentry", data=raw, extension="json")
@@ -856,7 +859,7 @@ def reentry_source_projection(root: Path, task_id: str, digest: str,
         history = snapshot.get("history") or {}
         if history_offset is not None:
             page = reentry_history_page(root, history, snapshot["conversation_key"], history_offset)
-            body = json.dumps(page, ensure_ascii=False, sort_keys=True)
+            body = json_dumps_utf8(page, ensure_ascii=False, sort_keys=True)
             if page["status"] != "ok" or (len(body) <= _REENTRY_NOTE_CHARS
                                             and start_char is None and end_char is None):
                 return {**page, "task_id": task_id, "source_ref": ref}

@@ -545,7 +545,7 @@ def parse_servers(
         log.warning("Invalid MCP server config: %s", message)
         if errors is not None:
             errors.append({"id": server_id, "enabled": any(e.get("enabled", False) for e in entries),
-                           "tool_count": 0, "last_error": message, "code": "MCP_ID_AMBIGUOUS"})
+                           "configured_count": len(entries), "tool_count": 0, "last_error": message, "code": "MCP_ID_AMBIGUOUS"})
     return out
 
 # Async transport.

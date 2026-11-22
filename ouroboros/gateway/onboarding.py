@@ -50,6 +50,7 @@ from ouroboros.configured_subagents import (
 )
 
 from ouroboros.gateway.owner_settings import (
+    BindingRefused,
     CommitBoundary,
     SettingsDocumentUnreadable,
     SettingsLockUnavailable,
@@ -662,9 +663,9 @@ def preset_saving(preset: SubscriptionInstallPreset, catalog: Mapping[str, Any])
 
 
 def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any]) -> Dict[str, Any]:
-    """Finishing without agent defaults while subscriptions are connected: every marked row runs
-    on Main, the count kept, keeping its identity and effort (a session's compound effort becomes the
-    row effort; a model-named Main keeps its name's level), with Main's pin and processing."""
+    """With subscriptions but no agent defaults, move each marked row to Main's model and pin. Keep its identity
+    and effort (compound session effort becomes row effort; a model-named Main keeps its level). Rows take Main's
+    tier unless it is Ultrafast, in which case they keep their own tier or use the global default."""
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, resolve_processing_preference
     from ouroboros.provider_models import provider_for_model
     from ouroboros.route_spec import ROUTE_KIND_AGENT_SESSION, RouteSpec, api_model_named_effort, compound_session_effort
@@ -684,9 +685,10 @@ def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any])
         effort = "" if main_named else (item.get("effort") or (compound_session_effort(RouteSpec(
             ROUTE_KIND_AGENT_SESSION, str(old.get("target_id") or ""))) if old.get("kind") == ROUTE_KIND_AGENT_SESSION else ""))
         kept = ("subagent_id", "recommended_use", "enabled", "review_eligible", "minted_from")
+        row_tier = item.get("processing_preference") if processing == "ultrafast" else processing
         return {**{key: item[key] for key in kept if key in item},
                 "route": {"kind": "api_model", "target_id": main, **({"credential_profile_id": profile} if profile else {})},
-                **({"effort": effort} if effort else {}), **({"processing_preference": processing} if processing else {})}
+                **({"effort": effort} if effort else {}), **({"processing_preference": row_tier} if row_tier else {})}
 
     return {**catalog, "items": [on_main(item) if item.get("review_eligible") is True else item
                                  for item in catalog.get("items") or []]}
@@ -949,13 +951,10 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
             if isinstance(exc, SettingsPreconditionFailed):
                 return unsaved_error(str(exc), 409, code="onboarding_state_changed")
             if isinstance(exc, SettingsLockUnavailable):
-                # NO `can_skip`. That flag means "there is a different button that
-                # WILL work", and the skip is the same request to the same endpoint,
-                # which takes the same lock — offering it under contention promises
-                # an escape that leads straight back here. `can_skip` belongs to the
-                # preset-verification failures, where finishing without agent
-                # defaults genuinely bypasses the thing that failed.
+                # Skipping presets still needs this lock; do not offer can_skip here.
                 return unsaved_error(str(exc), 503, code="settings_locked")
+            if isinstance(exc, BindingRefused):
+                return unsaved_error(str(exc), 400, code="invalid_onboarding_settings")
             if isinstance(exc, PermissionError):
                 from ouroboros.deployment_policy import DeploymentPolicyRefusal
                 from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
