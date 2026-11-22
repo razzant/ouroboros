@@ -3,7 +3,7 @@
 // Catalog arrival only enriches choices. It never authors an assignment.
 import { apiClient, fetchJson } from './api_client.js';
 import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
-import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
+import { API_PROVIDER_LABELS, sourcePresentation } from './harness_presentation.js';
 import { sourceMark } from './model_source_mark.js';
 import { bindSourcePickers } from './source_picker.js';
 import { createScopedModelCatalog, modelSlotCatalogQuery, catalogReadNote, invalidateModelCatalogReads, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
@@ -64,11 +64,11 @@ export function sourceFromChoice(choice) {
  *   `providers` is `configuredApiProviders()` output, `connections` `apiConnections()` output,
  *   `current` a stored row source.
  */
-export function modelSourceGroups({ sources = [], providers = [], connections = [], current = '', inheritLabel = 'Uses Main',
+export function modelSourceGroups({ sources = [], sourceDescriptors = sources, providers = [], connections = [], current = '', inheritLabel = 'Uses Main',
     catalogKnown = false, accountsKnown = false, providerProfiles = {}, hasConfiguredAccounts = false, offerInherit = false } = {}) {
     return [
         ...(current === 'inherit' || offerInherit ? [{ options: [{ value: 'inherit', label: inheritLabel }] }] : []),
-        ...routeChoiceGroups({ modelSources: sources, providers, connections, providerProfiles,
+        ...routeChoiceGroups({ modelSources: sources, sourceDescriptors, providers, connections, providerProfiles,
             currentChoice: current === 'inherit' ? '' : sourceChoice(current),
             catalogKnown, accountsKnown, hasConfiguredAccounts, includeSessions: false }),
     ];
@@ -136,7 +136,7 @@ export const MAIN_FOLLOW_NOTE = 'Running work that follows Main switches at its 
  *  `askUltrafast` is the question before Main's draft takes Ultrafast, which only Main's page offers. */
 export function createModelRolesEditor({ hostId, store = claudexorStatus,
     doc = () => document, onChange = () => {}, catalogFetch = fetchJson, supportsScopes, legacyCatalog = () => modelCatalog.catalog(), readApiCatalog = null, apiCatalogAllowed = () => true, showContext = true, mainNote = false, only = null,
-    tierStore = modelCatalog, askUltrafast = confirmMainUltrafast } = {}) {
+    tierStore = modelCatalog, askUltrafast = confirmMainUltrafast, localSlot = () => false } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     let slots = [];
     let offeredSlots = [];  // every slot in contract order; a `managed` one (a deployment's checker) is shown, never a row
@@ -287,7 +287,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     // A saved source whose key is gone stays selectable and labelled; discovery
     // only widens the list, it never rewrites the owner's assignment.
     function sourceGroupsFor(row, facts = {}) {
-        return modelSourceGroups({ sources: descriptors(), providers: apiProviders, connections, providerProfiles, current: row.source,
+        return modelSourceGroups({ sources: descriptors(), sourceDescriptors: sources?.sourceDescriptors,
+            providers: apiProviders, connections, providerProfiles, current: row.source,
             inheritLabel: `Uses ${inheritName(row)}`, offerInherit: Boolean(only) && !['main', 'fallback'].includes(row.slot.slot), ...facts });
     }
     // A saved API source that cannot send says why under its row; the select keeps it chosen.
@@ -578,8 +579,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 ? 'This core lists all models together. Press Read again in Models. '
                 : sources && ['failed', 'transport'].includes(sources.read_state) ? 'Subscription sources could not be read. ' : '';
             const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !sourceId(row) });
-            // A model stored with its ` (local)` label runs on the local lane, as the runtime reads it (slot_lane_label).
-            const local = row.local || / \(local\)$/.test(String(row.model || ''));
+            const local = row.local || localSlot(row.slot.slot) || usesLocalSuffix(row.slot.slot, responseModel(row));
             const choosing = !local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
@@ -991,39 +991,40 @@ export function roleBody(fresh, entry, index = 0, readFallbacks = '') {
 const slotsOf = (settings) => (Array.isArray(settings?._meta?.setup_contract?.modelSlots) ? settings._meta.setup_contract.modelSlots : []);
 const wordsOf = (id) => HAND_WRITTEN.find((row) => row.id === id) || { id, keys: [], name: id, meta: '' };
 const shortModel = (model) => String(model || '').slice(String(model || '').lastIndexOf('/') + 1);
+// Unlike chat slots, Vision and the Safety checker's model accept a labelled route at their input boundary.
+export const usesLocalSuffix = (slot, value) => (slot === 'vision' || slot === 'safety')
+    && / \(local\)$/.test(String(value || '').trim());
 
 /** A stored route in the owner's words: `{ name, source, mark, label }`; an empty one follows another role
- *  (`follows`). A subscription's name comes from the held catalogue's descriptor when one exists — the opaque
- *  source id is no readable name — and `label` is that name alone, so a caller can mark it authored
- *  (`data-i18n-authored`) while the interface words around it stay translatable. Without a descriptor the old
- *  generic label stands. No read starts here. */
+ *  (`follows`). A subscription's name is the one visual answer of its source
+ *  (harness_presentation.sourcePresentation): the held descriptor's when one exists, else the source's own known
+ *  name — and `label` is that name alone, so a caller can mark it authored (`data-i18n-authored`) while the
+ *  interface words around it stay translatable. No read starts here. */
 export function routeWords(value, { local = false, account = '', follows = 'Main', modelSources = [] } = {}) {
-    const { source, model } = parseModelSource(value);
     if (local) return { name: 'Local model', source: 'On this computer', mark: '', label: '' };
+    const { source, model } = parseModelSource(value);
     if (!String(value || '').trim()) return { name: `${follows} model`, source: '', mark: '', label: '', follows: true };
     const harness = source.startsWith('subscription:') ? source.slice(13) : '';
     const kind = source.split('@')[0];
     if (!harness) return { name: shortModel(model), mark: '', label: '',
         source: `${API_PROVIDER_LABELS[kind] || kind}${source.includes('@') ? ` (${source.split('@')[1]})` : ''} · by API key` };
-    // Only a descriptor names the credential harness; the opaque id itself never picks a brand (sourceMark's rule).
-    const label = (modelSources || []).find((entry) => entry?.id === harness)?.label || harnessPresentation(harness).label;
+    // The one visual answer of the source's name (harness_presentation.sourcePresentation); the id's spelling
+    // alone never picks a brand.
+    const label = sourcePresentation(harness, modelSources).label;
     return { name: shortModel(model), mark: harness, label,
         source: `${label} subscription · ${account ? `account ${account}` : 'your accounts in turn'}` };
 }
 
-// The mark of the source a route goes through: a subscription's own, a provider's own, else its initial; a local
-// model and an unset route have none. Never a generic glyph (a globe read as "the internet", owner 13.11).
+// The mark of the source a route goes through: a subscription's program's (harness_presentation.sourcePresentation:
+// its record, else its own exact mark entry), a provider's own, else the generic harness mark — never a letter
+// (owner 22.11) or a globe (read as "the internet", owner 13.11); a local model and an unset route have none.
 function routeMark(value, { local = false, modelSources = [] } = {}) {
     if (local || !String(value || '').trim()) return '';
     const { source } = parseModelSource(value);
     if (source.startsWith('subscription:')) {
-        const sourceId = source.slice(13);
-        const descriptor = (modelSources || []).find((entry) => entry?.id === sourceId);
-        const label = descriptor?.label || sourceId;
-        return sourceMark({ lane: 'subscription', credentialHarness: descriptor?.credentialHarness || '', label });
+        return sourceMark({ lane: 'subscription', harness: sourcePresentation(source.slice(13), modelSources).harnessId });
     }
-    const kind = source.split('@')[0];
-    return sourceMark({ kind, label: API_PROVIDER_LABELS[kind] || kind });
+    return sourceMark({ kind: source.split('@')[0] });
 }
 const CONTEXT_WORDS = { nano: 'Nano', low: 'Low', max: 'Max' };
 const SEARCH_SOURCES = [['auto', 'Auto'], ['openai', 'OpenAI'], ['openrouter', 'OpenRouter'], ['anthropic', 'Anthropic'],
@@ -1042,8 +1043,10 @@ function mountModels(container, { path, ctx }) {
     };
     // A subscription's name is an authored label (a product's or the owner's); the words around it are chrome.
     // Two elements, never one text beside a child: a translation may rewrite the words, never the name.
-    const sourceWordsHtml = (words) => (words.label
-        ? `<span data-i18n-authored>${escapeHtml(words.label)}</span><span>${escapeHtml(words.source.slice(words.label.length))}</span>`
+    // With `live`, the authored span carries the escaped source id and `paintCatalogMeta` fills its text so the
+    // surrounding row markup stays descriptor-independent.
+    const sourceWordsHtml = (words, { live = false } = {}) => (words.label
+        ? `<span data-i18n-authored${live && words.mark ? ` data-source-id="${escapeHtml(words.mark)}"` : ''}>${live && words.mark ? '' : escapeHtml(words.label)}</span><span>${escapeHtml(words.source.slice(words.label.length))}</span>`
         : escapeHtml(words.source));
     container.innerHTML = `<p class="settings-page-lead">Which model does which work.</p>
         <section class="ui-card settings-card" data-setting-row="models:main">
@@ -1099,25 +1102,30 @@ function mountModels(container, { path, ctx }) {
         const meta = container.querySelector(`[data-setting-row="${id}"]`)?.querySelector('[data-setting-meta]');
         if (text) meta?.setAttribute('data-tone', 'warn'); else meta?.removeAttribute('data-tone');
     };
-    // Main's two catalogue-decided slots: the mark of its source and the source line beside it. Only these change
-    // when a descriptor arrives late; an unchanged result writes nothing (and the card is never redrawn for it).
-    const mainMetaHtml = (value, account, local, note) => {
+    // Main's two catalogue-decided slots and each fallback's authored source name: only these change when a descriptor
+    // arrives late; an unchanged result writes nothing (and no row or focused button is redrawn for it).
+    const mainMetaHtml = (value, account, local, note, sources = heldSources()) => {
         if (note) return `<span>${escapeHtml(note)}</span>`;
-        const words = routeWords(value, { account, local, modelSources: heldSources() });
-        return `${routeMark(value, { local, modelSources: heldSources() })}<span>${sourceWordsHtml(words)}</span>`;
+        const words = routeWords(value, { account, local, modelSources: sources });
+        return `${routeMark(value, { local, modelSources: sources })}<span>${sourceWordsHtml(words)}</span>`;
     };
-    function paintMainMeta() {
-        if (!mainPainted) return;
-        const meta = container.querySelector('.models-main-meta');
-        if (!meta) return;
-        const html = mainMetaHtml(mainPainted.value, mainPainted.account, mainPainted.local, mainPainted.note);
-        if (html === mainMetaShown) return;
-        meta.innerHTML = mainMetaShown = html;
+    function paintCatalogMeta() {
+        const sources = heldSources();
+        if (mainPainted) {
+            const meta = container.querySelector('.models-main-meta');
+            const html = meta ? mainMetaHtml(mainPainted.value, mainPainted.account, mainPainted.local, mainPainted.note, sources) : null;
+            if (meta && html !== mainMetaShown) meta.innerHTML = mainMetaShown = html;
+        }
+        container.querySelector('[data-models-fallbacks]')?.querySelectorAll('[data-source-id]').forEach((node) => {
+            const label = sourcePresentation(node.dataset.sourceId, sources).label;
+            if (node.textContent !== label) node.textContent = label;
+        });
     }
     const paint = (settings) => {
         const slots = Object.fromEntries(slotsOf(settings).map((slot) => [slot.slot, slot]));
         const accounts = modelRoleMap(settings[MODEL_ACCOUNTS_KEY]);
-        const local = (slot) => Boolean(slots[slot]?.settingsToggleId) && truthy(settings[`USE_LOCAL_${slot.toUpperCase()}`]);
+        const local = (slot) => (Boolean(slots[slot]?.settingsToggleId) && truthy(settings[`USE_LOCAL_${slot.toUpperCase()}`]))
+            || usesLocalSuffix(slot, settings[slots[slot]?.settingKey]);
         const route = (slot, follows) => routeWords(settings[slots[slot]?.settingKey], { follows, account: accounts[slot],
             local: local(slot), modelSources: heldSources() });
         const profiles = settings._meta?.setup_contract?.providerProfiles || {};
@@ -1125,8 +1133,10 @@ function mountModels(container, { path, ctx }) {
             const problem = onLocal ? '' : routeKeyProblem(value, settings, profiles);
             return problem ? keyProblemLine(problem, apiProviderLabel(parseModelSource(value).source, profiles, apiConnections(settings, profiles))) : '';
         };
+        const mainValue = String(settings[slots.main?.settingKey] || '');
+        const mainLocal = local('main');
         // Several keys of Main's provider and no built-in one: Main waits for the owner's choice (#2969), said here too.
-        const choice = Array.isArray(settings._meta?.main_connection_choice) ? settings._meta.main_connection_choice : [];
+        const choice = !mainLocal && Array.isArray(settings._meta?.main_connection_choice) ? settings._meta.main_connection_choice : [];
         const labels = choice.length > 1 ? choice.map((id) => apiConnections(settings, profiles).find((entry) => entry.id === id)?.label || id) : [];
         const main = route('main');
         // An empty Safety Supervisor names what it checks with now: Light's model, else Main's, with the account and
@@ -1139,15 +1149,16 @@ function mountModels(container, { path, ctx }) {
             const entries = chain.map((slot) => ({ slot, set: Boolean(valueOf(slot)) }));
             const option = (key) => String(safetyChain(entries, (entry) => modelRoleMap(settings[key])[entry.slot]) || '');
             // Light's route, its box included; an empty Light's box over a cloud Main puts Main's model on the local model.
-            const onLocal = at === 1 ? local('light') : local('light') || local('main');
-            const words = routeWords(valueOf(chain[at]), { local: onLocal });
+            const targetValue = valueOf(chain[at]);
+            const onLocal = usesLocalSuffix('safety', targetValue) || local('light') || (at !== 1 && mainLocal);
+            const words = routeWords(targetValue, { local: onLocal });
             const [account, tier] = [option(MODEL_ACCOUNTS_KEY), option(MODEL_PROCESSING_PREFERENCES_KEY)];
-            return { follows: true, name: [words.name, account && !onLocal && parseModelSource(valueOf(chain[at])).source.startsWith('subscription:')
+            return { follows: true, name: [words.name, account && !onLocal && parseModelSource(targetValue).source.startsWith('subscription:')
                 ? `account ${account}` : '', tierNamed(tier) ? tierWord(tier) : '', at === 1 ? 'as Light' : 'as Main, via Light'].filter(Boolean).join(' · ') };
         };
         const mainNote = labels.length ? `Choose the key it uses: ${labels.slice(0, -1).join(', ')} or ${labels.at(-1)}.`
-            : keyWords(settings[slots.main?.settingKey], local('main'));
-        mainPainted = { value: String(settings[slots.main?.settingKey] || ''), account: accounts.main || '', local: local('main'), note: mainNote };
+            : keyWords(mainValue, local('main'));
+        mainPainted = { value: mainValue, account: accounts.main || '', local: local('main'), note: mainNote };
         mainMetaShown = mainMetaHtml(mainPainted.value, mainPainted.account, mainPainted.local, mainPainted.note);
         // The answer is one row: the model, under it the source with its own mark (or what is wrong with its key), and
         // the chevron of a row that opens a level. The role's name is the object's title above.
@@ -1159,16 +1170,17 @@ function mountModels(container, { path, ctx }) {
         shown = list.map((entry) => entry.value).join(',');
         const localFallback = truthy(settings.USE_LOCAL_FALLBACK);
         const fallbackHtml = list.map((entry, index) => {
-            const words = routeWords(entry.value, { account: entry.account, local: localFallback, modelSources: heldSources() });
             const note = keyWords(entry.value, localFallback);
+            const words = routeWords(entry.value, { account: entry.account, local: localFallback });
             return `<div class="ui-row settings-head" data-entry-id="fallback/${index + 1}" data-actions>
                 <span class="settings-head-glyph settings-head-order" aria-hidden="true">${index + 1}</span>
-                <button type="button" class="settings-head-open ui-hit-area" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta"${note ? ' data-tone="warn"' : ''}>${note ? escapeHtml(note) : sourceWordsHtml(words)}</span></button>
+                <button type="button" class="settings-head-open ui-hit-area" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta"${note ? ' data-tone="warn"' : ''}>${note ? escapeHtml(note) : sourceWordsHtml(words, { live: true })}</span></button>
                 <div class="ui-row-actions"><button type="button" class="btn btn-ghost btn-sm" data-fallback-move="-1" aria-label="Move fallback ${index + 1} up" ${index ? '' : 'disabled'}>↑</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-move="1" aria-label="Move fallback ${index + 1} down" ${index < list.length - 1 ? '' : 'disabled'}>↓</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-remove>Remove</button>${doorSign()}</div></div>`;
         }).join('') || '<p class="settings-card-lead">No fallback yet.</p>';
         if (fallbackHtml !== drawnFallbacks) container.querySelector('[data-models-fallbacks]').innerHTML = drawnFallbacks = fallbackHtml;
+        paintCatalogMeta();
         for (const slot of ROLE_ORDER) {
             const words = slot === 'safety' ? safetyWords() : route(slot, 'Main');
             say(`models:${slot}`, words.name, words.follows);
@@ -1225,10 +1237,10 @@ function mountModels(container, { path, ctx }) {
     const onSaved = (event) => { if (event.detail?.source === 'settings-row') void read(); };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     globalThis.window?.addEventListener('ouro:settings-updated', onSaved);
-    // A descriptor adopted after the row was drawn (a model sheet's read, Read again) brands the Main route it
-    // names: only that row's mark and source line change, and the route drawn from the same settings stays the one
-    // compared, so a different Main alone reaches this row through its own read.
-    const offCatalog = watchModelCatalog(paintMainMeta);
+    // A descriptor adopted after the rows were drawn (a model sheet's read, Read again) brands the Main and
+    // fallback routes it names in place: only those meta slots change, keeping buttons and focus intact, and the
+    // routes drawn from the same settings stay the ones compared, so settings changes still arrive through `read`.
+    const offCatalog = watchModelCatalog(paintCatalogMeta);
     void read();
     return { unmount() {
         container.removeEventListener('click', onClick);

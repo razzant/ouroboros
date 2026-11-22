@@ -19,6 +19,7 @@ import {
     harnessPresentation,
     joinMetaParts,
     planLabel,
+    sourcePresentation,
 } from '../modules/harness_presentation.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
@@ -109,6 +110,37 @@ test('direct API is a neutral channel presentation, never a harness identity', (
     assert.deepEqual({ kind: native.kind, harnessId: native.harnessId, label: native.label }, {
         kind: 'channel', harnessId: null, label: 'API · native tool rounds',
     });
+});
+
+test('a saved subscription source has one visual answer: the record\'s, else its own exact mark entry', () => {
+    // A held descriptor is the record: its label is authoritative and its binding names the program whose mark
+    // presents the source — an explicitly empty one names none, and an unbound source keeps its id as its name.
+    const bound = sourcePresentation('codex', [{ id: 'codex', label: 'Codex Live', credentialHarness: 'codex' }]);
+    assert.deepEqual([bound.label, bound.path, bound.generic], ['Codex Live', HARNESS_MARKS.codex.path, false]);
+    const unbound = sourcePresentation('claude', [{ id: 'claude', credentialHarness: '' }]);
+    assert.deepEqual([unbound.label, unbound.path, unbound.generic], ['claude', GENERIC_HARNESS_MARK.path, true]);
+    // No descriptor held (not read, late, or a read that no longer lists this saved source): the source keeps its
+    // own exact mark entry's name and vector; any other id the neutral mark beside its own name.
+    for (const sources of [[], undefined, [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }]]) {
+        const claude = sourcePresentation('claude', sources);
+        assert.deepEqual([claude.label, claude.path, claude.known], ['Claude Code', HARNESS_MARKS.claude.path, true],
+            'the saved source stays recognizable beside whatever the read lists');
+        const future = sourcePresentation('future', sources);
+        assert.deepEqual([future.label, future.path, future.generic], ['future', GENERIC_HARNESS_MARK.path, true]);
+    }
+    // The exact key is the whole rule: a case variant or a reserved channel word is a spelling, not a record. It keeps
+    // its own name and the neutral vector, and claims no program, so a consumer drawing the mark from `harnessId`
+    // (model_source_mark.ownSourceMark) cannot re-resolve it into one; a prototype property gains no mark either.
+    assert.equal(sourcePresentation('claude', []).harnessId, 'claude');
+    for (const id of ['CLAUDE', 'Claude', 'native', 'toString', 'constructor']) {
+        const shown = sourcePresentation(id, []);
+        assert.deepEqual([shown.label, shown.path, shown.generic, shown.harnessId],
+            [id, GENERIC_HARNESS_MARK.path, true, ''], `${id} stays itself, unbranded`);
+    }
+    // A bound record with no label of its own keeps the program's own name; one binding another program wears it.
+    assert.equal(sourcePresentation('opaque', [{ id: 'opaque', credentialHarness: 'agy' }]).label, 'Antigravity');
+    assert.equal(sourcePresentation('claude', [{ id: 'claude', label: 'Claude Code', credentialHarness: 'codex' }]).path,
+        HARNESS_MARKS.codex.path);
 });
 
 test('Chat renders the executor evidence chip through the shared identity SSOT', () => {

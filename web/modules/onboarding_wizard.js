@@ -15,7 +15,7 @@ import {
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindLanguageSettings, languageBlockHtml, saveLanguageChoice } from './settings_language.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './ui_helpers.js';
-import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
+import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, parseModelSource, usesLocalSuffix } from './model_roles.js';
 import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
     configuredApiProviders, apiProviderLabel, compatibleEndpoint, connectionDefaults, spendGapsWords } from './route_editor_primitives.js';
@@ -23,6 +23,7 @@ import { mergeModelCatalog, catalogReadState, summarizeReadErrors } from './sett
 import { bindCompatibleModelLoader, createOnboardingCatalog } from './onboarding_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
+import { sourcePresentation } from './harness_presentation.js';
 import { createStarterSkillsStep } from './onboarding_starter_skills.js';
 import { createConsciousnessStep } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
@@ -130,7 +131,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     const discovery = createOnboardingCatalog({ draftSettings, providerFields: PROVIDER_FIELDS, supportsScopes,
         onSources(data) {
             sourceRead = mergeModelCatalog(sourceRead, data);
-            adoptSources(); syncCurrentStepActionState();
+            adoptSources(); refreshSummary();
         },
         onFull(data) {
             adoptModelCatalog(data);
@@ -142,7 +143,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             modelRoles.resetCatalogs(); agentsStep?.resetCatalogs(); compatibleCatalogs = {};
             modelCatalog = {};
         }, changed: syncCurrentStepActionState });
-    const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles',
+    const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', localSlot,
         supportsScopes, legacyCatalog: () => modelCatalog, readApiCatalog: discovery.readApi, apiCatalogAllowed: discovery.allowed, onChange: (settings, { slot } = {}) => {
         delete proposedModels[MODEL_SLOTS.find((entry) => entry.slot === slot)?.stateKey];  // edited: the owner's now
         adoptModelSettings(settings);
@@ -221,7 +222,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     function adoptSources() {
         modelSources = (sourceRead.model_sources || []).filter(source => state.agentsConnected.includes(source.credentialHarness));
         clearFreshSubscriptionDefaults();
-        const filtered = { ...sourceRead, model_sources: modelSources };
+        const filtered = { ...sourceRead, model_sources: modelSources, sourceDescriptors: sourceRead.model_sources };
         modelRoles.adoptSources(filtered);
         agentsStep?.adoptSources(filtered);
     }
@@ -451,7 +452,12 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             ? modelSources.some((entry) => entry.id === source.slice(13) && state.agentsConnected.includes(entry.credentialHarness))
             : configuredApiProviders(draftSettings(), PROVIDER_PROFILES).some((entry) => entry.id === source);
         if (!supported && !(hasLocalModel() && state.localRoutingMode === 'all')) {
-            return `Main uses ${source.startsWith('subscription:') ? source.slice(13) : apiProviderLabel(source, PROVIDER_PROFILES)}, which has no configured access in this setup.`;
+            // The unsupported source is named by the one visual answer every summary row draws (sourcePresentation
+            // over the FULL sources read, held records included) — never its raw id's spelling.
+            const name = source.startsWith('subscription:')
+                ? sourcePresentation(source.slice(13), sourceRead.model_sources || []).label
+                : apiProviderLabel(source, PROVIDER_PROFILES);
+            return `Main uses ${name}, which has no configured access in this setup.`;
         }
         return state.currentStep === 'models' ? modelRoles.validate() : '';
     }
@@ -587,15 +593,19 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     function summaryRows() {
+        const usesSubscription = MODEL_SLOTS.some(({ slot, stateKey }) => !localSlot(slot)
+            && trim(state[stateKey]).split(',').some(value => !usesLocalSuffix(slot, value) && parseModelSource(trim(value)).source.startsWith('subscription:')));
         const rows = [
             ['Connected access', hasModelSubscription() && !hasApiAccess()
                 ? modelSources.filter((source) => state.agentsConnected.includes(source.credentialHarness))
-                    .map((source) => source.label || source.id).join(', ') + ' subscription · no API key'
+                    // The same one visual answer as the model rows below: a record that states no label is named by
+                    // the program it is reached with, never by the raw id's spelling.
+                    .map((source) => sourcePresentation(source.id, modelSources).label).join(', ') + ' subscription · no API key'
                 : profileLabel(activeProviderProfile())],
             ['Access level', runtimeModeLabel(state.runtimeMode)],
             ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
                 ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
-            ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => parseModelSource(value.trim()).source.startsWith('subscription:'))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription serves a slot
+            ...(usesSubscription ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),
             ...consciousness.summaryRows(),  // the step's choice; the model row below says what it is
             ...MODEL_SLOTS.map((slot) => [slot.slot === 'consciousness' ? 'Consciousness model' : slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
@@ -619,19 +629,27 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         return rows;
     }
 
+    function localSlot(slot) {
+        const index = ['main', 'light', 'consciousness', 'fallback'].indexOf(slot);
+        return hasLocalModel() && LOCAL_ROUTING_MODES.find((mode) => mode.value === state.localRoutingMode)?.flags?.[index] === true;
+    }
+
     function modelSummary(slot) {
         const values = trim(state[slot.stateKey]).split(',').map((value) => value.trim()).filter(Boolean);
         const inherited = !values.length && slot.slot !== 'fallback';
         const from = MODEL_SLOTS.find((entry) => entry.slot === inheritTargetOf(slot)) || { stateKey: 'mainModel', label: 'Main' };
         if (inherited) values.push(trim(state[from.stateKey] || '') || trim(state.mainModel));  // Safety: Light, then Main
-        const local = hasLocalModel() && LOCAL_ROUTING_MODES.find((mode) => mode.value === state.localRoutingMode)?.flags?.[['main', 'light', 'consciousness', 'fallback'].indexOf(inherited ? from.slot || 'main' : slot.slot)] === true;  // the local runtime serves it: say so, not the cloud source its id implies
+        const local = localSlot(slot.slot) || (inherited && (localSlot(from.slot || 'main') || (!trim(state[from.stateKey]) && localSlot('main'))));
         return values.map((value, index) => {
             const { source, model } = parseModelSource(value);
             const account = slot.slot === 'fallback' ? state.modelAccounts.fallback?.[index] : state.modelAccounts[slot.slot];
             const context = slot.slot === 'fallback' ? state.modelContextWindows.fallback?.[index] : state.modelContextWindows[slot.slot];
             const processing = slot.slot === 'fallback' ? state.modelProcessingPreferences?.fallback?.[index] : state.modelProcessingPreferences?.[slot.slot];
-            const assignment = source.startsWith('subscription:') ? `${modelSources.find((entry) => entry.id === source.slice(13))?.label || source.slice(13)} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}`
-                : `${local ? 'Local' : apiProviderLabel(source, PROVIDER_PROFILES)} · ${model}`;  // a source in words, never its id
+            // The route's effective lane decides; the full descriptor read names a saved subscription whether or not
+            // it can serve this setup. The same distinction is used in the model and agent editors.
+            const assignment = (local || usesLocalSuffix(slot.slot, value)) ? `Local · ${model}`
+                : source.startsWith('subscription:') ? `${sourcePresentation(source.slice(13), sourceRead.model_sources || []).label} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}`
+                : `${apiProviderLabel(source, PROVIDER_PROFILES)} · ${model}`;  // a source in words, never its id
             return `${inherited ? `Uses ${from.label.replace(/ Model$/, '')} · ` : ''}${assignment} · Processing: ${processingIntentLabel(processing, state.processingPreference)}${Number(context) > 0 ? ` · ${Number(context).toLocaleString('en-US')} tokens, set by you` : ''}`;
         }).join(' → ') || 'None';
     }

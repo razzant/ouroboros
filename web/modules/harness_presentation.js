@@ -99,6 +99,32 @@ export function harnessPresentation(harnessId, { label = '', channel = '' } = {}
     });
 }
 
+/** The presentation facts of a saved subscription model source (`claudexor::<source>=…`): the one visual answer of
+ *  its name and mark every consumer draws. A descriptor held for THIS source is the record — its label is
+ *  authoritative, and its `credentialHarness` names the program whose mark presents it, an explicitly empty one
+ *  naming none; with no label of its own, an unbound source keeps its id as its name. With no descriptor held (the
+ *  list not read or late, or a read that no longer lists this saved source) the drawing still describes the saved
+ *  source, never its right to call it: an id that exactly matches a HARNESS_MARKS entry wears that program's own
+ *  name and mark, any other id the neutral mark beside its own name — never a letter, a substring or an alias
+ *  guess. Such an id names no program (`harnessId` empty), so a consumer that draws the mark from it cannot read
+ *  the spelling back into one. Presentation only: access keeps the descriptor's binding
+ *  (route_editor_primitives.routeModelFields). */
+export function sourcePresentation(sourceId, modelSources = []) {
+    const id = String(sourceId ?? '').trim();
+    const descriptor = (Array.isArray(modelSources) ? modelSources : []).find((entry) => entry?.id === id);
+    if (descriptor) {
+        const binding = String(descriptor.credentialHarness ?? '');
+        return harnessPresentation(binding, { label: String(descriptor.label || '').trim() || (binding ? '' : id) });
+    }
+    // Without a descriptor the id is opaque, so only its OWN exact key may speak for a program: `harnessPresentation`
+    // folds case and reserves the API channel words for a genuinely identified program, so through it `CLAUDE` would
+    // borrow Claude's brand and `native` would be called API. An id no key of its own names keeps its own word beside
+    // the neutral mark and claims no program — the shape an explicitly unbound record already gives.
+    if (Object.prototype.hasOwnProperty.call(HARNESS_MARKS, id)) return harnessPresentation(id);
+    const known = Object.prototype.hasOwnProperty.call(GENERIC_LABELS, id) ? GENERIC_LABELS[id] : '';
+    return harnessPresentation('', { label: known || id });
+}
+
 /** Decorative currentColor mark plus adjacent, always-visible escaped text. */
 export function harnessIdentityMarkup(harnessId, {
     label = '', channel = '', className = '',

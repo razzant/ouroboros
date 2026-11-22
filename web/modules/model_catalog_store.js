@@ -488,14 +488,15 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
 export const modelCatalog = createModelCatalogStore();
 
 /**
- * The catalogue as it changes: the caller hears a new read outcome, not every pin press. A legacy
+ * The catalogue as it changes: the caller hears a new read outcome, not every pin press or tier. A legacy
  * core's prices are a view of this one full read, so a failed refresh must reach the caller at once
- * (hiding the price without losing the rows) and a new success must bring it back.
+ * (hiding the price without losing the rows) and a new success must bring it back. `store` is the caller's
+ * own store (the window's by default): a room that follows an injected one hears that one's changes.
  */
-export function watchModelCatalog(onChange) {
-    let last = modelCatalog.catalog();
-    return modelCatalog.subscribe(() => {
-        const catalog = modelCatalog.catalog();
+export function watchModelCatalog(onChange, store = modelCatalog) {
+    let last = store.catalog();
+    return store.subscribe(() => {
+        const catalog = store.catalog();
         if (catalog === last) return;
         last = catalog;
         onChange(catalog);

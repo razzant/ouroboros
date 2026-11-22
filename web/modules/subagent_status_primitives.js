@@ -6,6 +6,7 @@
 // claim.
 
 import { accountRows, familyLabel, nextUpAccount } from './claudexor_status_store.js';
+import { sourcePresentation } from './harness_presentation.js';
 import { translateString } from './i18n.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
@@ -37,15 +38,15 @@ import {
  */
 export function rowIdentity(row, state = {}) {
     const session = row?.route?.kind === ROUTE_KIND_AGENT_SESSION;
-    // `harness` is the session's own harness OR the subscription source's
-    // credential harness; a direct API route has neither and shows the channel
-    // mark. Never split the stored target here: only the model-sources catalog
-    // maps an opaque source id to a harness.
+    // A session's mark is its own harness, a subscription source's the program
+    // that presents it (sourcePresentation: its record, else its own exact
+    // mark entry); a direct API route has neither and shows the channel mark.
+    // Never split the stored target here: the id's spelling names no harness.
     const fields = routeModelFields(row?.route, state.modelSources, {
         providerProfiles: state.providerProfiles, connections: state.connections,
     });
     const options = {
-        modelSources: state.modelSources,
+        modelSources: state.sourceDescriptors ?? state.modelSources,
         providerProfiles: state.providerProfiles, connections: state.connections,
         harnesses: [{
             id: fields.harness,
@@ -57,11 +58,14 @@ export function rowIdentity(row, state = {}) {
     // A local row runs the local runtime: it has no seat and no brand, so its mark is the neutral channel one even
     // when its model text was written with a subscription's head.
     if (fields.local) return { harnessId: 'api', label, parts, channel: 'api' };
-    return session || fields.subscription
-        // A subscription source's opaque id is not evidence of a native program: only its descriptor's
-        // credential harness earns a branded mark. With none, a neutral mark beside the source's own label.
-        ? { harnessId: fields.harness, label, parts, channel: '' }
-        : { harnessId: 'api', label, parts, channel: 'api' };
+    if (session) return { harnessId: fields.harness, label, parts, channel: '' };
+    if (fields.subscription) {
+        // The one visual answer of the source's mark; a generic presentation names no program, so the identity
+        // stays '' (an unbound record, an id no mark entry reads) and the mark beside it is the neutral one.
+        const presented = sourcePresentation(fields.source, options.modelSources);
+        return { harnessId: presented.generic ? '' : presented.harnessId, label, parts, channel: '' };
+    }
+    return { harnessId: 'api', label, parts, channel: 'api' };
 }
 
 export function harnessMap(snapshot) {
