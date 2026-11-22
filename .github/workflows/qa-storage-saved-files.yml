@@ -1,0 +1,226 @@
+# Verification branch only. The product commit does not carry this file.
+name: QA storage saved files v1
+
+on:
+  push:
+    branches: [qa/storage-saved-files-v1]
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_SHA: 'b916f5eb4f2eeea483dfb6c5980f8875911b6036'
+  PRODUCT_TREE: '615e3bf20177adb997f4d369e2f547c022519d95'
+  MSYS_NO_PATHCONV: '1'
+  PYTHONUTF8: '1'
+
+jobs:
+  storage:
+    name: Storage saved files (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Identify and check out the exact product parent
+        run: |
+          set -euo pipefail
+          qa_file=.github/workflows/qa-storage-saved-files.yml
+          [[ "$(git rev-list --parents -n 1 HEAD)" == "$GITHUB_SHA $PRODUCT_SHA" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT_SHA" HEAD --)" == $(printf 'A\t%s' "$qa_file") ]]
+          git checkout --detach "$PRODUCT_SHA"
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          printf 'Product %s, tree %s\n' "$PRODUCT_SHA" "$PRODUCT_TREE"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+          interpreter: shipped
+      - name: Run exact saved-file safety scenarios on synthetic fixtures
+        env:
+          LEG: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          cases=(
+            'tests/test_payload_release.py::test_the_owners_exact_choice_moves_exactly_the_files_and_keeps_every_ref'
+            'tests/test_payload_release.py::test_a_keep_an_open_tree_or_a_live_task_after_the_preview_holds'
+            'tests/test_payload_release.py::test_a_failure_before_the_first_rename_moves_nothing_and_is_not_retried'
+            'tests/test_payload_release.py::test_a_partial_batch_counts_only_what_moved_and_leaves_the_rest'
+            'tests/test_payload_release.py::test_recovery_reconciles_the_same_free_result_and_wakes_trash'
+            'tests/test_payload_release.py::test_unreadable_staged_slot_is_retryable_not_accounted_missing'
+            'tests/test_payload_release.py::test_a_decision_whose_staging_never_appeared_is_accounted_as_nothing_moved'
+            'tests/test_payload_release.py::test_real_release_child_settlement_reader_download_chain'
+            'tests/test_payload_release_custody.py::test_real_keep_and_free_in_both_orders'
+            'tests/test_payload_release_custody.py::test_root_continue_and_child_saved_file_release'
+            'tests/test_payload_release_custody.py::test_keep_after_preview_applies_to_exactly_one_tasks_files'
+            'tests/test_payload_release_custody.py::test_an_approved_child_release_moves_under_its_own_and_its_roots_custody'
+            'tests/test_payload_release_custody.py::test_a_changed_line_read_at_acceptance_keeps_the_exact_selected_bytes'
+            'tests/test_payload_release_custody.py::test_recovery_publishes_only_decided_slots_and_keeps_an_unknown_sibling'
+            'tests/test_record_compression.py::test_evidence_files_ask_their_own_task_serial_and_the_other_planes_still_run'
+            'tests/test_storage_free_manual.py::test_a_producer_retained_handoff_is_sized_by_the_scratch_it_holds'
+            'tests/test_payload_release.py::test_handoff_waits_when_the_staged_metadata_read_is_refused'
+            'tests/test_payload_release.py::test_a_typed_custody_refusal_for_one_task_does_not_stop_the_next'
+          )
+          printf '%s\n' "${cases[@]}" > "$RUNNER_TEMP/storage-nodes.txt"
+          python -m pytest -o addopts='' -q --junitxml="$RUNNER_TEMP/storage-native.xml" "${cases[@]}"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          specs = [s.rsplit('::', 1) for s in (root / 'storage-nodes.txt').read_text().splitlines()]
+          expected = {(path[:-3].replace('/', '.'), name) for path, name in specs}
+          cases = list(ET.parse(root / 'storage-native.xml').iter('testcase'))
+          identities = {(c.get('classname'), c.get('name')) for c in cases}
+          found = {(module, name.split('[', 1)[0]) for module, name in identities}
+          if found != expected or len(identities) != len(cases) or any(list(c) for c in cases):
+              raise SystemExit(f'incomplete: {len(cases)=} {expected - found=} {found - expected=}')
+          print(f"QA_STORAGE_SAVED_FILES_LEG {os.environ['LEG']}: {len(cases)} passed, none skipped")
+          PY
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+
+      - name: Verify adjacent result and structural contracts on the exact Linux checkout
+        if: runner.os == 'Linux'
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: 'debc9790b92f958ec90d46504eacaffc0050fd7a'
+        run: |
+          set -euo pipefail
+          test ! -e /tmp/ledger
+          python -m pytest -o addopts='' -q \
+            tests/test_observability_outcomes_v2.py::test_artifact_bundle_and_large_verification_ledger_artifact \
+            tests/test_docs_sync.py tests/test_domain_manifest.py tests/test_architecture_facts.py \
+            tests/test_generated_inventories.py
+          python -m pytest -o addopts='' -q -m size_ratchet \
+            tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+
+  storage-browser:
+    name: Storage browser, four cases (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Identify and check out the exact product parent
+        run: |
+          set -euo pipefail
+          qa_file=.github/workflows/qa-storage-saved-files.yml
+          [[ "$(git rev-list --parents -n 1 HEAD)" == "$GITHUB_SHA $PRODUCT_SHA" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT_SHA" HEAD --)" == $(printf 'A\t%s' "$qa_file") ]]
+          git checkout --detach "$PRODUCT_SHA"
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          printf 'Product %s, tree %s\n' "$PRODUCT_SHA" "$PRODUCT_TREE"
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          install-project: 'false'   # candidate checks refuse an installed ouroboros
+          interpreter: shipped
+      - name: Install pinned Node, Chromium and WebKit
+        id: install_browsers
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        timeout-minutes: 40
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Run the four Storage browser cases
+        id: browser
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          set -euo pipefail
+          t=tests/test_storage_payloads_browser.py
+          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/storage-browser" \
+            -- python -m pytest \
+            "$t::test_payload_release_flow_in_a_real_browser[chromium]" \
+            "$t::test_payload_release_flow_in_a_real_browser[webkit]" \
+            "$t::test_owner_releases_one_saved_file_through_storage[chromium]" \
+            "$t::test_owner_releases_one_saved_file_through_storage[webkit]" \
+            -m ui_browser -q --tb=short \
+            --junitxml="${{ runner.temp }}/storage-browser.xml" \
+            --ci-evidence-dir="${{ runner.temp }}/ci-evidence/storage-browser"
+      - name: Reject skips and verify the four subject receipts
+        if: ${{ !cancelled() }}
+        env:
+          EVIDENCE: ${{ runner.temp }}/ci-evidence/storage-browser
+          JUNIT: ${{ runner.temp }}/storage-browser.xml
+          UPLOAD: ${{ runner.temp }}/qa-upload
+        run: |
+          set -euo pipefail
+          python -I - <<'PY'
+          import json, os, pathlib, shutil
+          import xml.etree.ElementTree as ET
+
+          flow, owner = 'test_payload_release_flow_in_a_real_browser', 'test_owner_releases_one_saved_file_through_storage'
+          expected = {f'{n}[{e}]' for n in (flow, owner) for e in ('chromium', 'webkit')}
+          cases = list(ET.parse(os.environ['JUNIT']).getroot().iter('testcase'))
+          names = [c.get('name') for c in cases]
+          bad = [(c.get('name'), [x.tag for x in c]) for c in cases if any(x.tag in ('skipped', 'failure', 'error') for x in c)]
+          if set(names) != expected or len(names) != 4 or bad:
+              raise SystemExit(f'not the exact four passing cases: {names=} {bad=}')
+          root = pathlib.Path(os.environ['EVIDENCE'])
+          receipts = {p.parent.name: json.loads(p.read_text('utf-8')) for p in root.glob('*/subject.json')}
+          if set(receipts) != expected:
+              raise SystemExit(f'subject receipts differ from the four cases: {sorted(receipts)}')
+          checked = {}
+          upload = pathlib.Path(os.environ['UPLOAD'])
+          for name, r in receipts.items():
+              engine = name[name.index('[') + 1:-1]
+              ok = (r.get('engine') == engine and r.get('candidate_identity') and r.get('browser_version')
+                    and '+candidate.' in str(r.get('runtime_version'))
+                    and r.get('health', {}).get('runtime_version') == r.get('runtime_version')
+                    and str(r.get('url', '')).startswith('http://127.0.0.1:') and r.get('sentinel_sha256'))
+              if not ok:
+                  raise SystemExit(f'incomplete subject receipt: {name}: {r}')
+              shots = {p.name for p in (root / name).glob('*.png')}
+              need = {'final.png'}
+              if name.startswith(flow):
+                  need |= {'payload-door.png', 'payload-dialog.png'} | {
+                      f'payload-list-{width}-{theme}.png' for width in (1232, 390) for theme in ('dark', 'light')}
+              if need - shots:
+                  raise SystemExit(f'missing screenshots for {name}: {sorted(need - shots)}')
+              destination = upload / name.replace('[', '-').removesuffix(']')
+              destination.mkdir(parents=True, exist_ok=False)
+              for filename in sorted(need):
+                  source = root / name / filename
+                  if source.is_symlink() or not source.is_file():
+                      raise SystemExit(f'invalid synthetic screenshot: {filename}')
+                  shutil.copyfile(source, destination / filename)
+              checked[name] = {k: r[k] for k in ('engine', 'runtime_version', 'browser_version', 'sentinel_sha256')}
+          (upload / 'subject.json').write_text(json.dumps({'product': os.environ['PRODUCT_SHA'],
+              'tree': os.environ['PRODUCT_TREE'], 'checks': checked}, indent=2), encoding='utf-8')
+          print('QA_STORAGE_BROWSER_EXACT: 4 passed, none skipped, 4 subject receipts')
+          PY
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+      - name: Upload synthetic screenshots and exact subject facts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-storage-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qa-upload/
+          retention-days: 14
+          if-no-files-found: error
