@@ -1253,9 +1253,10 @@ def refresh_compacted_review_context(ctx: Any, candidate: list, *, selection: An
 
     An unchanged current index stays at its exact position. A changed selection
     replaces that index in place before final measurement, openly changing the
-    prefix there. Unknown typed rows are not reinterpreted or removed. No copy before ``floor``
-    (the fold's note) is removed or replaced: when all are there and none is current, the
-    current index is appended and the stale ones leave at a departure.
+    prefix there (the caller passes no floor when the fold carries the mind's own review
+    selection). Unknown typed rows are not reinterpreted or removed. No copy before ``floor``
+    (an ordinary fold's note) is removed or replaced: when all are there and none is current,
+    the current index is appended and the stale ones leave at a departure.
     """
     families = dict(getattr(ctx, "_pending_review_context", {}) or {})
     for row in candidate:

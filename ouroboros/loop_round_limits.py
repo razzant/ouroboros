@@ -658,8 +658,12 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             try:
                 review_pointer, review_capsule, review_transfers, expected_selection = prepare_review_view(
                     tool_ctx, candidate, receipt, proposal.get("review_transfers") or [], proposal.get("review_notes") or [])
-                candidate = refresh_compacted_review_context(tool_ctx, candidate, floor=fold_note_position(
-                    candidate, receipt), **({"selection": review_pointer} if review_pointer else {}))
+                # The mind's own review selection (review_notes/transfers) replaces the index in place; an ordinary
+                # fold changes no index before its note.
+                floor = None if proposal.get("review_notes") or proposal.get("review_transfers") else fold_note_position(
+                    candidate, receipt)
+                candidate = refresh_compacted_review_context(tool_ctx, candidate, floor=floor, **(
+                    {"selection": review_pointer} if review_pointer else {}))
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 receipt.update(status="selection_failed", review_selection_error=f"{type(exc).__name__}: {exc}")
                 candidate = messages
