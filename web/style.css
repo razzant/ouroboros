@@ -121,11 +121,11 @@ html[data-layout="stack"] .shell-icon-control {
 
 /* The sidebar's zones (docs/DESIGN.md "Shell"; owner 12.11, the fifth round "Карточка и тихие разделы"): a pinned
    head (this Ouroboros's card, the Main Chat place), the Projects list as the ONE scroller, then at the bottom edge
-   the sections, three to a line on a desk, and the foot (the version and the update); free room, when the list is
-   short, lies between the list and the sections. Row
+   the foot's two cards (the sections; the system rows with the version and the update); free room, when the list is
+   short, lies between the list and the cards. Row
    heights follow the pointer: a finger gets the touch minimum, a mouse a quieter row, and a short window with a
    mouse compacts the rows first. A window too short even for that falls back to the whole column scrolling with
-   the head sticky and the foot still on the bottom edge. */
+   the head sticky and the foot still on the bottom edge; where those two would hide every row, they are its ends. */
 #primary-sidebar {
     --nav-row-h: 44px;       /* a place: Main Chat, Files … */
     --nav-item-h: 32px;      /* a Project row */
@@ -146,7 +146,7 @@ html[data-layout="stack"] .shell-icon-control {
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-width: thin;
-    container-type: inline-size;  /* a narrow column stands the tools two to a line */
+    container-type: inline-size;  /* a wide column turns the foot's cards to one line each */
 }
 /* One maximum for a drag, a restored width and a narrowing window; the adjacent room keeps its composer. */
 html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw - var(--room-min-width))); }
@@ -158,9 +158,10 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
 }
 /* A window too short for the zones (the head, three list rows and the foot no longer fit): the whole column is
    the ONE scroller with the head sticky, and the list shows every row in flow, so a finger or a wheel moves one
-   thing (the gate counts the sidebar's scrollers). Finger rows are 44px, so a touch column runs out of room
-   sooner (measured: 586px of zones with 30 Projects). The foot, the six sections with the version and the update
-   under them, stays on the bottom edge there too (owner 23.10; DESIGN "Navigation"): it sticks to the column and
+   thing (the gate counts the sidebar's scrollers). Measured with 30 Projects and the two foot cards (owner 21.11):
+   a mouse's zones need 496px, so a 1280 × 540 window keeps them; finger rows are 44px, so a touch column runs out of
+   room sooner (the phone drawer's zones need 631px). The foot, both cards with the version and the update, stays on
+   the bottom edge there too (owner 23.10; DESIGN "Navigation"): it sticks to the column and
    the Project rows pass between it and the head, so Settings and the chosen section stay in view however long the
    list. Its offset and negative margin reach through the column's bottom padding, which it takes as its own, so its
    text sits where a tall window puts it; with few Projects it still stands on the bottom edge (margin-top: auto).
@@ -168,16 +169,17 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
    them, so a row reached with Tab is never left under either bar, while a bar's own control (Main, a section, the
    update) leaves the column where it is (a scroll padding on the column would count the bars as covered and move
    it). A column too short even for the card, one Project row and the foot (layout.js sets data-bars-crowd; by the
-   bars' heights and the rows' clearance at both edges) lets
-   the card scroll away with the list instead: the sections and the version stay on the edge, the card is the
-   list's top, one scroll up, and the rows keep the room between; two pinned bars there would cover every row. */
-@media (max-height: 540px), (pointer: coarse) and (max-height: 600px) {
+   bars' heights and the rows' clearance at both edges) lets both go with the list instead: the card is its top, one
+   scroll up, and the cards its end, past the last row (a finger's two cards are about 300px: pinned, they covered
+   every row of a 500px drawer, and Find in a phone held sideways). Only their pinning, the rows' margin and the fade
+   leave there, never a box, so the heights that set the attribute read the same and it holds still at the edge. */
+@media (max-height: 499px), (pointer: coarse) and (max-height: 640px) {
     #primary-sidebar .nav-projects * {
         scroll-margin-block: calc(var(--sidebar-head-h, 0px) + var(--space-4))
             calc(var(--sidebar-foot-h, 0px) + var(--space-4));
     }
-    #primary-sidebar[data-bars-crowd] .nav-projects * { scroll-margin-block-start: 0px; }
-    #primary-sidebar[data-bars-crowd] .sidebar-head { position: static; }
+    #primary-sidebar[data-bars-crowd] .nav-projects * { scroll-margin-block: 0px; }
+    #primary-sidebar[data-bars-crowd] :is(.sidebar-head, .sidebar-foot) { position: static; }
     #primary-sidebar .nav-projects { flex: 0 0 auto; min-height: 0; }
     #primary-sidebar .nav-projects-list { flex: 0 0 auto; overflow-y: visible; }
     #primary-sidebar .sidebar-foot {
@@ -193,7 +195,7 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
        window's list fades at its edges: a row going on under the foot never reads as a broken one. A row brought
        into view keeps clear of the fade too (its scroll margin above). */
     #primary-sidebar[data-scroll-above]:not([data-bars-crowd]) .sidebar-head::after,
-    #primary-sidebar[data-scroll-below] .sidebar-foot::before {
+    #primary-sidebar[data-scroll-below]:not([data-bars-crowd]) .sidebar-foot::before {
         content: '';
         position: absolute;
         left: 0;
@@ -205,7 +207,7 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
         top: 100%;
         background: linear-gradient(var(--surface-side), transparent);
     }
-    #primary-sidebar[data-scroll-below] .sidebar-foot::before {
+    #primary-sidebar[data-scroll-below]:not([data-bars-crowd]) .sidebar-foot::before {
         bottom: 100%;
         background: linear-gradient(transparent, var(--surface-side));
     }
@@ -223,68 +225,166 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
     background: var(--surface-side);
 }
 
-/* The tools and the foot stand at the bottom edge whatever the list's length (owner 12.11): the Projects take the
-   free room above them. A window too short for the zones scrolls the whole column instead, and the foot sticks to
-   the bottom edge (the fallback above). */
+/* The foot stands at the bottom edge whatever the list's length (owner 12.11): the Projects take the free room above
+   it. It is two cards (owner 21.11): the sections (Circles, Files, Extensions, Widgets), then the system rows (Dashboard,
+   Settings) with the version row under a hairline. A window too short for the zones scrolls the whole column instead,
+   the foot on its bottom edge or, where it would hide every row, at its end (the fallback above). */
 .sidebar-foot {
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-}
-
-/* The sections, quiet items three to a line on a desk in three columns, each as wide as its widest item: the first
-   column starts where the Project names start, the last ends where the column ends, and within a column the items start
-   on one line, so the glyphs of the two rows stand under each other. The column's existing steps keep three at 328 px,
-   two at 226 px (and in the drawer), otherwise one. Longer names wrap within those columns: Navigation keeps their
-   names whole, never clipped or reduced to an unlabelled icon. The chosen one is the crimson capsule. */
-.nav-tools {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    justify-content: space-between;
-    gap: var(--space-1) 0;
+    gap: var(--space-2);
     padding-top: var(--space-3);
 }
-.nav-tools > .nav-row {
+.nav-card {
+    padding: var(--space-2) var(--space-1);
+    border-radius: var(--radius-object);
+    background: var(--surface-object);
+    box-shadow: var(--elev-rest);
+}
+/* Compact: the sections two to a line, the first of each line in a cell half the card wide and the second taking
+   the rest, so the glyphs of the two lines stand under each other; Dashboard and Settings a line each. A row is as
+   wide as its words and keeps them whole on one line: no syllable hyphenation, no clipping, no unlabelled icon. A
+   cell is as wide as its name (pages.js gives each section one), so a longer name takes the room it needs and the
+   next section moves to the next line, whole; no cell is wider than the card, so a name longer than the whole card,
+   like a longer translation of a system row, wraps at a space as the last resort, its lines inside the row's own
+   air. The row keeps its 8 px start, the glyph line the version's check sits on, and takes a 4 px end; with the
+   card's own 4 px sides that holds the longest Russian pair, «Расширения» and «Виджеты», two to a line at the
+   270 px sidebar floor with room to spare for wider fonts of other systems. The chosen one is the crimson
+   capsule. */
+.nav-sections {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) 0;
+}
+.nav-sections > .nav-cell { display: flex; width: max-content; max-width: 100%; }
+.nav-sections > .nav-cell:nth-child(odd) { flex: 0 0 auto; min-width: 50%; }
+.nav-sections > .nav-cell:nth-child(even) { flex: 1 0 auto; }
+.nav-system-rows {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1) 0;
+}
+.nav-card .nav-row {
+    justify-self: start;
     width: auto;
     min-width: 0;
-    max-width: 100%;  /* bound an unhyphenatable word so its last-resort break can fit the cell */
+    max-width: 100%;
     min-height: 32px;
-    gap: 6px;
-    padding: 0 var(--space-3);
+    gap: var(--space-1);
+    padding: var(--space-1);
+    padding-inline-start: var(--space-2);
     border-radius: var(--pill-radius);
     color: var(--text-primary);
     font-size: var(--type-body);
     font-weight: 400;
+    text-align: start;
 }
-.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; hyphens: auto; overflow-wrap: break-word; }
-.nav-tools > .nav-row:not(.active) > svg { color: var(--text-meta); }
-.nav-tools > .nav-row { justify-self: start; }
-@container (min-width: 226px) {
-    .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@container (min-width: 328px) {
-    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, minmax(0, max-content)); }
+.nav-card .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: break-word; }
+.nav-card .nav-row:not(.active) > svg { color: var(--text-meta); }
+/* Wide, from 475 px of sidebar (the column's content box less its 12 px insets and its hairline: 450 px), where the
+   four sections hold one line (measured with the Russian names and «Расширения» for Extensions, the longest translation
+   so far; the rows' kept 8 px start and 4 px end and their 8 px minimum gaps leave about 13 px to spare on the widest
+   fonts measured, and the half-wide cells keep it two to a line from the 270 px floor too,
+   tests/test_sidebar_short_window_browser.py): both cards turn to one line each at once, their first rows' left edges
+   on one line with the version, their last rows' right edges on another with the update capsule's, the room between
+   them shared evenly. */
+@container (min-width: 450px) {
+    .nav-sections,
+    .nav-system-rows { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-1) var(--space-2); }
+    .nav-sections > .nav-cell:nth-child(n) { flex: 0 0 auto; min-width: 0; }
+    .nav-card { padding-inline: var(--space-2); }
 }
 /* A finger's target in the docked layout too (a tablet, a touch laptop): the row is the touch minimum tall; a mouse
    keeps the quieter row. */
 @media (pointer: coarse) {
-    .nav-tools > .nav-row { min-height: var(--touch-target-min); }
+    .nav-card .nav-row { min-height: var(--touch-target-min); }
 }
-html[data-layout="stack"] .nav-tools > .nav-row { min-height: 44px; }
+html[data-layout="stack"] .nav-card .nav-row { min-height: 44px; }
 
-/* The foot: the version and the update capsule on one line where both fit; a capsule too long for the line beside the
-   version (a long outcome, a translation, a narrow column) takes a line of its own, and grows a line rather than
-   clipping its words. It keeps its height with no update, so nothing above it moves when one arrives. */
+/* The version row: the version on the rows' glyph line and the update capsule's right edge on the card's, one height in
+   every state (rest, a check, its answer, a capsule that fits), so nothing above it moves: under the hairline's pixel
+   its content box (39 px) holds the tallest of them, a small control or an answer wrapped to two meta lines (32.4 px),
+   and the row's own padding never eats into that. A capsule too long for the line beside the version (a long outcome,
+   a translation) takes a line of its own and grows a line rather than clipping its words; the plain version's line is
+   then a small control tall, so its words keep their air under the hairline. With no capsule the version itself is the check (owner 21.11, update_status.js): a quiet
+   control whose glyph appears at its end on hover and turns while it checks, its box always kept so the words never
+   move; the answer stands in the capsule's place. */
 .sidebar-foot-meta {
+    position: relative;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
+    justify-content: space-between;
     gap: var(--space-1) var(--space-2);
     min-height: 40px;
-    margin: var(--space-3) 0 var(--space-2);
-    padding: 0 var(--space-2) 0 calc(var(--space-3) + 1px);
+    margin-top: var(--space-1);
+    padding-top: 1px;  /* the hairline's pixel */
+    color: var(--text-meta);
 }
-.sidebar-foot-meta .update-notice { margin: 0; }
+.sidebar-foot-meta::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    inset-inline: var(--space-2);
+    height: 1px;
+    background: var(--divider);
+}
+html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; }
+@media (pointer: coarse) {
+    .sidebar-foot-meta { min-height: var(--touch-target-min); }
+}
+.sidebar-foot-meta > #nav-version {
+    display: flex;
+    align-items: center;
+    min-height: var(--control-h-sm);
+    padding-inline-start: calc(var(--space-2) + 1px);
+}
+.nav-version-check {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+    min-height: var(--control-h-sm);
+    padding-block: 0;
+    padding-inline: calc(var(--space-2) + 1px) var(--space-2);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: transparent;
+    color: var(--text-meta);
+    font: inherit;
+    cursor: pointer;
+}
+.nav-version-check[hidden] { display: none; }
+.nav-version-check > .nav-version-glyph { display: inline-flex; flex: none; opacity: 0; transition: opacity var(--motion-fade) ease; }
+.nav-version-check > .nav-version-glyph > svg { width: 14px; height: 14px; }
+.nav-version-check[aria-busy="true"] > .nav-version-glyph { opacity: 1; }
+.nav-version-check[aria-busy="true"] > .nav-version-glyph > svg { animation: nav-version-turn 0.9s linear infinite; }
+@keyframes nav-version-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .nav-version-check[aria-busy="true"] > .nav-version-glyph > svg { animation: none; }
+}
+@media (hover: hover) {
+    .nav-version-check:hover { background: var(--tone-quiet-hover); color: var(--text-primary); }
+    .nav-version-check:hover > .nav-version-glyph { opacity: 1; }
+}
+.nav-version-check:active { filter: var(--press); }
+.nav-version-check:focus { outline: none; }
+.nav-version-check:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* A check's answer in the capsule's place, its end on the capsule's: Up to date in the meta ink with its tick, for a
+   few seconds; a failure as the error status sentence, its reason the version's description and the note's tooltip,
+   until a check succeeds. It takes the room the version leaves and a longer translation wraps inside it at a space
+   (two meta lines fit the row's content box), never moving the row. */
+.nav-check-note {
+    flex: 1 1 0;
+    min-width: min-content;
+    text-align: end;
+}
+.nav-check-note[hidden] { display: none; }
+.nav-check-note:not([data-tone]) { color: var(--text-meta); }
+.nav-check-note > svg { width: 14px; height: 14px; margin-inline-end: var(--space-1); vertical-align: -3px; }
+.nav-check-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.sidebar-foot-meta .update-notice { margin: 0; margin-inline-start: auto; }  /* its end on the card's in either direction */
 .sidebar-foot-meta .update-notice > .update-pill {
     --control-h: auto;
     --control-pad-y: 5px;
@@ -294,7 +394,6 @@ html[data-layout="stack"] .nav-tools > .nav-row { min-height: 44px; }
     line-height: 16px;
     text-align: start;
 }
-html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--space-2) 0 0; }
 
 /* An older desktop page can also survive a source update with the pre-three-zone .sidebar-scroll wrapping the
    column's rows. As a box it left the list as tall as its rows: a scroller with nothing to scroll whose containment
@@ -378,12 +477,13 @@ body.resizing-panels { -webkit-user-select: none; user-select: none; }
 }
 html[data-layout="stack"] .resize-handle { display: none; }
 
-/* The version is a readable fact in the meta ink (owner Q6=A), beside the update capsule. */
+/* The version is a readable fact in the meta ink (owner Q6=A), beside the update capsule; its check's hover takes it
+   to the primary ink (the version row above). */
 #nav-version {
     display: block;
     font-size: var(--type-meta);
     line-height: var(--line-meta);
-    color: var(--text-meta);
+    color: inherit;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
@@ -7286,9 +7386,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 }
 
 /* P2: main-screen Update pill — a pointer to Dashboard -> Updates. */
-/* "An update is available" is a classification, not an alarm and not a
-   success: it is a pointer to Dashboard -> Updates, the shared neutral capsule
-   (.btn.btn-default.btn-sm, docs/DESIGN.md "Status and chips"). Uncommitted
+/* An update on offer is the word Update on the crimson primary capsule (.btn.btn-primary.btn-sm, the concept the
+   owner chose 21.11): a pointer to Dashboard -> Updates, never an apply; an attempt's words stand on the shared
+   neutral capsule (.btn.btn-default.btn-sm, docs/DESIGN.md "Status and chips"). Uncommitted
    local changes ARE a caveat about what an update would do, the owner's turn
    in the amber tone; a failed attempt takes the red tone and an unknown one
    stays neutral; a confirmed success has no capsule (owner 1B). A tone outranks
@@ -9214,7 +9314,7 @@ body.keyboard-open :is(#page-chat, .chat-instance-panel, .project-panel)[data-sh
     align-items: center;
     justify-content: center;
     height: 18px;
-    margin-left: calc(var(--space-3) + 1px);  /* the rows' icons: their 1px border, then --space-3 */
+    margin-left: calc(var(--space-3) + 1px);  /* the Project names' line: a row's 1px border, then --space-3 */
     color: var(--text-secondary);
     pointer-events: none;
 }
@@ -12380,7 +12480,6 @@ html[data-layout="stack"] .project-panel {
 }
 
 /* Light surfaces keep geometry and domain state semantics unchanged. */
-:root[data-theme="light"] #nav-version { opacity: 1; color: var(--text-meta); }
 :root[data-theme="light"] .files-preview-content { color: var(--text-primary); }
 :root[data-theme="light"] .files-preview-frame { background: var(--bg-secondary); }
 :root[data-theme="light"] .skill-review-summary-main { color: var(--system-text); }

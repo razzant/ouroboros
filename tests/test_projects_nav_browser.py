@@ -743,7 +743,6 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
         return {
             height: box(find).height, rowHeight: box(row).height, radius: parseFloat(style.borderTopLeftRadius),
             glyphX: box(find.querySelector('.nav-find-glyph')).left,
-            iconX: box(document.querySelector('#primary-sidebar [data-nav-page="circles"] > svg')).left,
             textX: box(input).left + parseFloat(getComputedStyle(input).paddingLeft),
             labelX: box(row.querySelector('.nav-row-label')).left,
                 above: box(find).top - box(document.querySelector('.nav-projects-header')).top,
@@ -758,7 +757,9 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
     # The find capsule keeps the compact control height; Project rows now spend their second line on the newest fact.
     assert geometry["rowHeight"] >= geometry["height"], geometry
     assert geometry["radius"] >= geometry["height"] / 2, geometry  # a capsule, as every one-line control
-    assert geometry["glyphX"] == pytest.approx(geometry["iconX"], abs=1), geometry
+    # The magnifier leads on the line where the names of the Projects it finds start (a row's 1px border, then
+    # --space-3); the foot's cards keep their own inset (owner 21.11), so their glyphs are not this field's line.
+    assert geometry["glyphX"] == pytest.approx(geometry["labelX"], abs=1), geometry
     # The field's words follow its magnifier; Project names have no leading glyph in the approved two-line rows.
     assert geometry["textX"] == pytest.approx(geometry["glyphX"] + 30, abs=1), geometry
     assert geometry["shadow"] != "none" and geometry["inputBorder"] == "0px", geometry
@@ -1029,12 +1030,12 @@ SHOWS = """(el) => {
 
 @pytest.mark.parametrize("how", ["escape", "clear-button", "clear-command"])
 def test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_focus(pins_ui, how):
-    """Real presses in a short window, where the whole column scrolls. The find begins with the field in view (a
-    click brings it there), so Escape, the field's × and Clear search put the row that was first in view back at its
-    place, and the keyboard stays in the field, which shows; nothing scrolls after that. Escape is pressed after the
-    owner scrolled the column on through the matches, the field gone from view."""
+    """Real presses in a short window, where the whole column scrolls (480 px: a desk's zones fit from 500). The find
+    begins with the field in view (a click brings it there), so Escape, the field's × and Clear search put the row
+    that was first in view back at its place, and the keyboard stays in the field, which shows; nothing scrolls after
+    that. Escape is pressed after the owner scrolled the column on through the matches, the field gone from view."""
     ui, page = pins_ui, pins_ui["page"]
-    page.set_viewport_size({"width": ui["width"], "height": 500})
+    page.set_viewport_size({"width": ui["width"], "height": 480})
     seed_archive(ui["root"])
     refresh(page)
     find = page.locator('#nav-projects .nav-find-input')

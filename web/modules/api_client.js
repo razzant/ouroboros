@@ -539,6 +539,11 @@ export function updateStrategyForPlan(plan = {}) {
 /** Storage actions may have started when the answer is cut: an unreadable OK body is an error, not a reply. */
 const STORAGE_READ = { requireBody: true };
 
+// One fetching check in flight per declared channel selection: callers that believe the same selection share a
+// running answer; another selection (the channel just changed) fetches its own, so no answer for an old selection is
+// attributed to the new one.
+const updateCheckInFlight = new Map();
+
 function hasUpdateStatus(body) {
     return typeof body?.available === 'boolean' || body?.managed === false || typeof body?.check_ok === 'boolean'
         || body?.update_tx?.active === true || body?.update_progress?.active === true;
@@ -808,8 +813,24 @@ export const apiClient = {
     cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}, STORAGE_READ),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
     updateStatus: (init = {}) => fetchJson('/api/update/status', { cache: 'no-store', ...init }, { requireBody: true }).then(readUpdateStatus),
-    /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
-    updateCheck: () => jsonPost('/api/update/check', {}, { requireBody: true }).then(readUpdateStatus),
+    /**
+     * One fetching check for every surface (Dashboard → Updates, the sidebar's version), coalesced per declared
+     * channel `selection` (the caller's latest status's `update_channel`, '' when it knows none): a call while one
+     * runs for the same selection shares its answer instead of fetching again; one for another selection fetches its
+     * own, so an answer for an old selection is never attributed to the new one.
+     * @param {string} [selection]
+     * @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>}
+     */
+    updateCheck: (selection = '') => {
+        const key = String(selection || '');
+        let pending = updateCheckInFlight.get(key);
+        if (!pending) {
+            pending = jsonPost('/api/update/check', {}, { requireBody: true })
+                .then(readUpdateStatus).finally(() => updateCheckInFlight.delete(key));
+            updateCheckInFlight.set(key, pending);
+        }
+        return pending;
+    },
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
     /**
