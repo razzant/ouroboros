@@ -10,7 +10,9 @@
 // the step, both columns at one pace, never on a repaint (DESIGN §7). A skill that declares a connection card (`connection`) stands first, as that card
 // (onboarding_connection_card.js). Nothing installs here: the one atomic Finish carries the ticked ids, the trust
 // choices and a card's values, and the host installs them in the background after start. Summary shows one row back
-// to the step. A list that cannot be read leaves the host's defaults in place and says so.
+// to the step. A list that cannot be read leaves the host's defaults in place and says so. Where the step is not
+// offered (a returning install), Summary's row says skills change in Extensions › Skills and keeps the hub's trust
+// sentence with its choices, which Finish still applies.
 import { skillSourcesApi } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { fmt } from './i18n.js';
@@ -63,8 +65,9 @@ const quote = (value) => String(value).replace(/["\\]/g, '\\$&');
 const layoutTop = (node) => { let top = 0; for (let at = node; at; at = at.offsetParent) top += at.offsetTop; return top; };
 const dataAttr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
 
-/** The step and its Summary row. `offered`: the bootstrap's `stepOrder` has the step (else it renders and sends
- * nothing and reads nothing); `open` returns to the step from Summary. `read()` defaults to GET
+/** The step and its Summary row. `offered`: the bootstrap's `stepOrder` has the step (else only Summary's row shows,
+ * with where skills change and the hub's trust choices, and only those ride Finish); `open` returns to the step from
+ * Summary. `read()` defaults to GET
  * /api/onboarding/starter-skills; `card` passes the connection card its check, randomness and encoder (tests). */
 export function createStarterSkillsStep({ offered = true, open = () => {}, keyLabels = {}, read = () => skillSourcesApi.starterSkills(), setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now, card = {} } = {}) {
     const state = { status: 'loading', groups: [], ticked: new Set(), trust: {}, rows: [], sources: [], more: 0, trustOpen: false, error: '', ticksChanged: false, untickNew: false };
@@ -118,7 +121,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         paint();
         if (deadline !== null && reading() && now() + 3000 <= deadline) timer = setTimer(refresh, 3000);
     }
-    const loading = offered ? Promise.resolve().then(refresh) : Promise.resolve();
+    const loading = Promise.resolve().then(refresh);
 
     function pendingText() {
         return [reading() ? 'Reading the Ouroboros hub…' : '',
@@ -131,6 +134,10 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
     const countText = () => fmt(COUNT, { n: tickedItems().length, total: items().length });
 
     function rowHtml() {
+        if (!offered) {  // no ticks Finish would ignore: where skills change, and the trust choices Finish still applies
+            return `<div class="summary-kv skills-starter-row"><strong>Skills</strong><span class="skills-starter-summary">
+                <span class="skills-starter-value">Add or remove them in Extensions › Skills</span></span></div>${state.status === 'ready' ? trustHtml() : ''}`;
+        }
         const count = tickedItems().length;
         const fixed = { loading: 'Reading the list…', error: 'The recommended set', empty: 'None offered' }[state.status]
             || (count ? '' : 'None will install');
@@ -310,7 +317,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         mount(node) {
             if (host === node) return;
             listen(host, false);
-            host = offered && node ? node : null;
+            host = node && (offered || node.dataset?.starterSkills === 'row') ? node : null;
             const next = !host ? '' : host.dataset?.starterSkills === 'step' ? 'step' : 'row';
             if (next === 'step' && view !== 'step') arrived = false;
             view = next;
@@ -323,10 +330,11 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             listen(host, true);
             paint();
         },
-        /** What the one atomic Finish carries; nothing when the step is not offered or the list could not be read. A
-         * connection card's values ride as `connections`, apart from the settings (DESIGN §7). */
+        /** What the one atomic Finish carries; nothing when the list could not be read, and only the trust choices when
+         * the step is not offered. A connection card's values ride as `connections`, apart from the settings (DESIGN §7). */
         payload() {
-            if (!offered || state.status !== 'ready') return {};
+            if (state.status !== 'ready') return {};
+            if (!offered) return { skill_source_trust: { ...state.trust } };
             const connections = connection?.payload();
             return {
                 ...(useDefaults() ? {} : { starter_skills: tickedItems().map((item) => item.id) }),

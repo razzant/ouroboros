@@ -2984,7 +2984,8 @@ model row Consciousness model, so it does not read as this choice.
 Skills is its own step after Consciousness (owner 2026-11-21: «показать что есть много крутых скилов анимированным
 списком, но юзер может поснимать галочки», which revises his 4A of 2026-10-17, a Summary row), offered only where Finish
 honors its ticks: a data root whose starter list never ran. Elsewhere the step is absent and Extensions › Skills is where
-skills change, so no tick is shown that Finish would ignore. It is a list, not cards (his «слишком крупные карточки»
+skills change, so no tick is shown that Finish would ignore: Summary's Skills row says «Add or remove them in Extensions
+› Skills» and keeps the hub's trust sentence with its choices per source, which Finish still applies. It is a list, not cards (his «слишком крупные карточки»
 of the same day): one row per skill with no surface of its own, its box, its human title and, muted on one line with
 it, what it gives (an author's longer description falls back there) and, quieter, what it lacks in a few words (the
 catalog's mark: «· Gemini key», else «· needs setup»), whose whole sentence a screen reader hears instead. The catalog's

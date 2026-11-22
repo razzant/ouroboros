@@ -201,16 +201,27 @@ test('an unreadable list leaves the host defaults and says so; the Finish payloa
     assert.deepEqual(empty.payload(), {});
 });
 
-test('a step the server does not offer reads nothing, paints nothing and sends nothing', async () => {
-    let reads = 0;
-    const step = createStarterSkillsStep({ offered: false, read: async () => { reads += 1; return STARTER; } });
+test('a step the server does not offer shows no ticks; Summary keeps where skills change and the hub trust choices', async () => {
+    const step = createStarterSkillsStep({ offered: false, read: async () => STARTER });
     await step.loading;
+    assert.equal(step.offered(), false);
+    const stepHost = fakeHost('step');
+    step.mount(stepHost);
+    assert.equal(stepHost.innerHTML, '', 'no step, so no tick Finish would ignore');
     const row = fakeHost('row');
     step.mount(row);
-    assert.equal(reads, 0);
-    assert.equal(row.innerHTML, '');
-    assert.equal(step.offered(), false);
-    assert.deepEqual(step.payload(), {});
+    assert.doesNotMatch(row.innerHTML, /data-starter-item|data-starter-change|will install/);
+    assert.match(text(row.innerHTML), /^Skills Add or remove them in Extensions › Skills Official skills from the Ouroboros hub install without a review; skills from the community are reviewed first\. Change$/);
+    // The trust choices stay editable and ride Finish alone: returning installs still honor them.
+    row.handlers.click({ target: target({ '[data-starter-trust-toggle]': {} }) });
+    row.handlers.click({ target: target({ '[data-starter-trust]': { dataset: { starterTrust: 'ouroboros-community', trust: 'trusted' } } }) });
+    assert.deepEqual(step.payload(), { skill_source_trust: { ouroboros: 'trusted', 'ouroboros-community': 'trusted' } });
+    // Offered, the row is the step's own again.
+    const offered = createStarterSkillsStep({ read: async () => STARTER });
+    await offered.loading;
+    const back = fakeHost('row');
+    offered.mount(back);
+    assert.match(text(back.innerHTML), /^Skills \d+ will install · Change/);
 });
 
 function pollingStep(read) {
