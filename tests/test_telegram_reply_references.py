@@ -802,7 +802,6 @@ _ROOT_ADDRESS = {"kind": "telegram", "conversation_id": "42", "bot_id": "123", "
 def _dispatch(chain, row, monkeypatch):
     """The accepted row through the owner router as server.py hands it over: the turns it started, its source."""
     from ouroboros import server_owner_routing as routing
-    from ouroboros.project_dialogue import build_owner_message_ref
 
     started = []
 
@@ -814,12 +813,12 @@ def _dispatch(chain, row, monkeypatch):
     monkeypatch.setattr(routing, "addressable_roots", lambda _ctx: SimpleNamespace(rows=lambda *_a: [], gap=None))
     monkeypatch.setattr(routing, "_decision_turn_metadata", lambda _ctx, _room, _cmid, meta, _roots, **_kw: meta)
     [incoming] = [item for item in chain.queued if item["client_message_id"] == row["client_message_id"]]
-    source = build_owner_message_ref(chat_id=42, client_message_id=row["client_message_id"], ts=row["ts"],
-                                     text=row["text"])
+    source = incoming["accepted_source_ref"]
     ctx = SimpleNamespace(DRIVE_ROOT=chain.data, handle_chat_direct=lambda *args, **kwargs: started.append((args, kwargs)))
     routing._route_owner_message(chain.bus, ctx, {
         "chat_id": 42, "text": row["text"], "log_text": row["text"], "image_caption": "", "image_data": None,
         "client_message_id": row["client_message_id"], "task_constraint": None, "origin_message_ref": source,
+        "accepted_source_row": incoming["accepted_source_row"],
         "task_metadata": {**(incoming.get("task_metadata") or {}), "_host_operation": True},
         "source": "skill:telegram", "received_at": row["ts"]})
     return started, source
