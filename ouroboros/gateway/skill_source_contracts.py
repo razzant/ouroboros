@@ -290,10 +290,11 @@ class SkillUninstallResponse(TypedDict, total=False):
 
 class StarterConnection(TypedDict, total=False):
     """A built-in skill's declared connection card, carried on its starter item (the skill manifest's
-    ``connection_card``; DESIGN §7). ``token`` and ``pairing.code`` name the skill's secret fields; ``pairing.link``
-    holds ``{username}`` and ``{code}``. ``title``, ``pitch``, ``steps`` ([{text, link, action}]), ``pairing.hint``, ``pairing.note`` and
-    ``options`` ([{key, label, on, off, new_connection}]) are the skill's own words. The card checks a token with
-    ``POST /api/onboarding/connection/identity`` and its values ride the completion as ``connections``."""
+    ``connection_card``; DESIGN §7). ``token`` names the skill's secret field for its token; ``pairing.link`` holds
+    ``{username}`` and ``{code}``. ``title``, ``pitch``, ``steps`` ([{text, link, action}]), ``pairing.hint``,
+    ``pairing.note`` and ``options`` ([{key, label, on, off, new_connection}]) are the skill's own words. The card
+    checks a token with ``POST /api/onboarding/connection/identity`` and its values ride the completion as
+    ``connections``."""
 
     skill: Required[str]
     token: Required[str]
@@ -322,10 +323,12 @@ class ConnectionIdentityResponse(TypedDict, total=False):
 
 
 class CompletionConnection(TypedDict):
-    """One skill's entry in the completion's ``connections`` ({skill: CompletionConnection}): its card's token and
-    code fields by their declared names, and its options by key (the declared on or off value)."""
+    """One skill's entry in the completion's ``connections`` ({skill: CompletionConnection}): its card's token by the
+    token field's declared name (saved to Settings), the one-time pairing code the page minted and its options by key
+    (the declared on or off value); the code and the options go to the skill's own settings, never the core's."""
 
     fields: Dict[str, str]
+    code: str
     options: Dict[str, str]
 
 

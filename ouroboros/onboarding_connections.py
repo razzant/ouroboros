@@ -1,20 +1,26 @@
 """A built-in skill's declared connection card in the setup wizard (DESIGN §7, CLIENT_CONTRACT §12).
 
 A skill shipped with the app may declare ``connection_card`` in its ``SKILL.md``: which of its ``secret_fields`` holds
-its token (``token``), a pairing link with a one-time code and the code's secret field (``pairing.link``,
-``pairing.code``), the stdlib-only function that names the account a token belongs to (``pairing.identity``,
-``path.py:function`` inside the skill), the card's own words and options the skill keeps in its own settings
-(``store: skill_settings``), posted to the skill's declared ``route``. Nothing here knows a service. The host:
+its token (``token``), a pairing link with a one-time code (``pairing.link``), where the skill keeps that code
+(``pairing.code``: ``{key, store: skill_settings, route}``: the skill's own settings, never the core's), the
+stdlib-only function that names the account a token belongs to (``pairing.identity``, ``path.py:function`` inside the
+skill), the card's own words and options the skill keeps in its own settings too. Nothing here knows a service. The
+host:
 
 - carries the card on the skill's starter item (``starter_connection``);
 - answers the card's token check by calling the declared function of a BUILT-IN skill only, never a hub skill's code
   before its review (``api_connection_identity``);
-- adds the token and the code to the completion's one settings write (``completion_settings``); the completion's
-  route (``guard_completion``) refuses them from the Telegram Mini App, since arming a code names the account's owner,
-  and once the write is saved records the owner's consent in the starter marker (``record_consent``);
-- once the skill is installed (after the starter run, at once where it already is, or at the next start), grants the
-  card's keys through the skill lifecycle (enable after grant) and posts its options once to the declared route on
-  loopback (``settle``, one run at a time). Every failure is recorded there; none blocks Start.
+- adds the token alone to the completion's one settings write (``completion_settings``); the completion's route
+  (``guard_completion``) refuses a card's values from the Telegram Mini App, since a code names the account's owner,
+  and once the write is saved records the owner's consent (the code and the options included) in the starter marker
+  (``record_consent``); the code is never written to Settings or a log;
+- grants the token key where reviewed skills are not granted automatically and makes ONE post of every skill-settings
+  value of the card (the code with the options) to the route they declare, from this server over loopback: the owner's
+  local session as the route's guard reads it, reachable only from that recorded consent (``settle``, one run at a
+  time). It runs on events that already happen, never on a timer: the starter install's end, a saved completion (a
+  skill already installed), the skill's extension finishing its load, and the next start. A route not serving yet
+  leaves the card waiting for the next of them. The code is dropped from the record once posted or refused. Every
+  outcome is recorded there; none blocks Start.
 """
 from __future__ import annotations
 
@@ -25,7 +31,6 @@ import logging
 import pathlib
 import re
 import threading
-import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -37,16 +42,16 @@ log = logging.getLogger(__name__)
 MINIAPP_HEADER = "X-Ouroboros-Telegram-MiniApp"  # the Mini App sidecar's mark (server_web.TELEGRAM_MINIAPP_HEADER)
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _KEY = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
-_CODE = re.compile(r"[A-Za-z0-9_-]{1,64}")  # what a deep link's start parameter carries
+_CODE = re.compile(r"[A-Za-z0-9_-]{22,64}")  # a minted pairing code (a start parameter holds up to 64)
 _ACCOUNT = re.compile(r"[A-Za-z0-9_]{1,64}")
 _FUNCTION = re.compile(r"((?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.py):([A-Za-z_][A-Za-z0-9_]*)")
 _ROUTE = re.compile(r"[a-z0-9_-]+(?:/[a-z0-9_-]+)*")
 _TEXT_MAX = 200
 _TOKEN_MAX = 512
 _IDENTITY_TIMEOUT = 8.0  # the declared function's own transport bound; the host waits a little longer
-_POST_TRIES = 12  # the option waits this many beats for the skill's route to answer once it is turned on
+_NOT_LIVE = (0, 404, 409, 502, 503)  # the skill's route is not serving yet (or its settings are busy): wait for an event
 _lock = threading.Lock()
-_SETTLE = threading.Lock()  # one settle at a time: the starter's run, a completion's and a start's never grant twice
+_SETTLE = threading.Lock()  # one settle at a time: the starter's run, a completion's and a start's never post twice
 
 
 def _text(value: Any, limit: int = _TEXT_MAX) -> str:
@@ -58,33 +63,40 @@ def _https(value: Any) -> str:
     return text if re.fullmatch(r"https://[^\s\"'<>]+", text) else ""
 
 
+def _skill_setting(raw: Any) -> Optional[Dict[str, str]]:
+    """A value the skill keeps in its own settings: ``{key, route}`` when ``store`` says so, else None."""
+    if not isinstance(raw, dict) or raw.get("store") != "skill_settings":
+        return None
+    key, route = _text(raw.get("key"), 64), _text(raw.get("route"), 64)
+    return {"key": key, "route": route} if _KEY.fullmatch(key) and _ROUTE.fullmatch(route) else None
+
+
 def _normalize(name: str, root: pathlib.Path, raw: Any, fields: Dict[str, str]) -> Optional[Dict[str, Any]]:
     """The declaration the host acts on, or None when any part it needs is missing or out of shape."""
     if not isinstance(raw, dict) or not isinstance(raw.get("pairing"), dict):
         return None
     pairing = raw["pairing"]
-    token, code, link = _text(raw.get("token"), 64), _text(pairing.get("code"), 64), _https(pairing.get("link"))
+    token, link, code = _text(raw.get("token"), 64), _https(pairing.get("link")), _skill_setting(pairing.get("code"))
     identity = _FUNCTION.fullmatch(_text(pairing.get("identity"), 200))
-    if token not in fields or code not in fields or token == code or "{username}" not in link or "{code}" not in link:
+    if token not in fields or code is None or "{username}" not in link or "{code}" not in link:
         return None
     if identity is None or ".." in identity.group(1).split("/"):
         return None
     options = []
     for option in raw.get("options") or []:
-        if not isinstance(option, dict):
+        stored = _skill_setting(option)
+        if stored is None:
             return None
-        key, route = _text(option.get("key"), 64), _text(option.get("route"), 64)
         on, off = _text(option.get("on"), 32), _text(option.get("off"), 32)
-        if (not _KEY.fullmatch(key) or not _ROUTE.fullmatch(route) or option.get("store") != "skill_settings"
-                or not on or not off or on == off or not _text(option.get("label"))):
+        if not on or not off or on == off or not _text(option.get("label")) or stored["key"] == code["key"]:
             return None
-        options.append({"key": key, "label": _text(option["label"]), "on": on, "off": off, "route": route,
+        options.append({**stored, "label": _text(option["label"]), "on": on, "off": off,
                         "new_connection": option.get("new_connection") is True})
     steps = [{"text": _text(step.get("text")), "link": _https(step.get("link")), "action": _text(step.get("action"), 40)}
              for step in raw.get("steps") or [] if isinstance(step, dict) and _text(step.get("text"))]
     return {
-        "skill": name, "token": token, "code": code, "token_key": fields[token], "code_key": fields[code],
-        "link": link, "identity": (root / identity.group(1), identity.group(2)),
+        "skill": name, "token": token, "token_key": fields[token], "code": code, "link": link,
+        "identity": (root / identity.group(1), identity.group(2)),
         "title": _text(raw.get("title")), "pitch": _text(raw.get("pitch")),
         "hint": _text(pairing.get("hint")), "note": _text(pairing.get("note")),
         "steps": steps[:8], "options": options[:4],
@@ -106,32 +118,30 @@ def declared_card(name: Any) -> Optional[Dict[str, Any]]:
         if "connection_card" not in text:
             return None
         manifest = parse_skill_manifest_text(text)
-        fields = declared_secret_fields(manifest)
-    except Exception:  # noqa: BLE001 — an unreadable or invalid manifest declares no card
+        return _normalize(name, root, (getattr(manifest, "raw_extra", None) or {}).get("connection_card"),
+                          declared_secret_fields(manifest))
+    except Exception:  # noqa: BLE001 — an unreadable or invalid manifest, or a card out of shape, declares no card
         return None
-    return _normalize(name, root, (getattr(manifest, "raw_extra", None) or {}).get("connection_card"), fields)
 
 
 def starter_connection(name: Any) -> Optional[Dict[str, Any]]:
     """What the setup's Skills step shows of a built-in skill's card (``StarterConnection``): never its function,
-    its settings keys or its routes."""
+    its keys or its routes."""
     card = declared_card(name)
     if card is None:
         return None
     return {
         "skill": card["skill"], "token": card["token"], "title": card["title"], "pitch": card["pitch"],
-        "steps": card["steps"], "pairing": {"code": card["code"], "link": card["link"], "hint": card["hint"],
-                                             "note": card["note"]},
+        "steps": card["steps"], "pairing": {"link": card["link"], "hint": card["hint"], "note": card["note"]},
         "options": [{key: option[key] for key in ("key", "label", "on", "off", "new_connection")}
                     for option in card["options"]],
     }
 
 
 def card_keys(name: Any) -> Tuple[str, ...]:
-    """The settings keys a built-in skill's card writes itself (its token and code), so a prerequisite list can
-    leave the code out."""
+    """The keys a built-in skill's card fills itself (its token, its code), which a prerequisite list leaves out."""
     card = declared_card(name)
-    return (card["token_key"], card["code_key"]) if card else ()
+    return (card["token_key"], card["code"]["key"]) if card else ()
 
 
 # -- the token check ---------------------------------------------------------------------------------------------
@@ -205,9 +215,9 @@ async def api_connection_identity(request: Any) -> Any:
 # -- the completion ----------------------------------------------------------------------------------------------
 
 def parse_connections(raw: Any) -> List[Tuple[Dict[str, Any], str, str, Dict[str, str]]]:
-    """The completion's ``connections`` ({skill: {fields: {token field, code field}, options: {key: value}}}) as
+    """The completion's ``connections`` ({skill: {fields: {token field: token}, code, options: {key: value}}}) as
     (card, token, code, options), each skill a built-in one that declares a card; raises ValueError on anything else
-    so the completion saves nothing."""
+    so the completion saves nothing. No message names a value."""
     if raw in (None, {}):
         return []
     if not isinstance(raw, dict) or len(raw) > 4:
@@ -219,13 +229,14 @@ def parse_connections(raw: Any) -> List[Tuple[Dict[str, Any], str, str, Dict[str
             raise ValueError(f"no built-in skill named {str(name)[:64]!r} declares a connection card.")
         fields = value.get("fields") if isinstance(value, dict) else None
         options = value.get("options", {}) if isinstance(value, dict) else None
-        if not isinstance(fields, dict) or set(fields) != {card["token"], card["code"]} or not isinstance(options, dict):
-            raise ValueError(f"connections.{card['skill']} must carry exactly its {card['token']} and {card['code']}.")
-        token, code = fields[card["token"]], fields[card["code"]]
+        code = value.get("code") if isinstance(value, dict) else None
+        if not isinstance(fields, dict) or set(fields) != {card["token"]} or not isinstance(options, dict):
+            raise ValueError(f"connections.{card['skill']} must carry exactly its {card['token']}.")
+        token = fields[card["token"]]
         if not isinstance(token, str) or not token.strip() or len(token) > _TOKEN_MAX or any(c.isspace() for c in token.strip()):
             raise ValueError(f"connections.{card['skill']}.{card['token']} must be a token.")
         if not isinstance(code, str) or not _CODE.fullmatch(code):
-            raise ValueError(f"connections.{card['skill']}.{card['code']} must be 1-64 letters, digits, _ or -.")
+            raise ValueError(f"connections.{card['skill']}.code must be a minted pairing code (22-64 letters, digits, _ or -).")
         declared = {option["key"]: option for option in card["options"]}
         if any(key not in declared or value not in (declared[key]["on"], declared[key]["off"])
                for key, value in options.items()):
@@ -235,10 +246,9 @@ def parse_connections(raw: Any) -> List[Tuple[Dict[str, Any], str, str, Dict[str
 
 
 def completion_settings(body: Dict[str, Any]) -> Dict[str, str]:
-    """The settings the completion's connection cards add to its one write: each card's token and code under the
-    keys its skill declares. The options stay out: they are the skill's own settings (``settle`` posts them)."""
-    return {key: value for card, token, code, _options in parse_connections(body.get("connections"))
-            for key, value in ((card["token_key"], token), (card["code_key"], code))}
+    """What a completion's connection cards add to its one settings write: each card's token, under the key its skill
+    declares. The code and the options are the skill's own settings (``settle`` posts them), never the core's."""
+    return {card["token_key"]: token for card, token, _code, _options in parse_connections(body.get("connections"))}
 
 
 def guard_completion(endpoint: Callable[[Any], Any]) -> Callable[[Any], Any]:
@@ -275,23 +285,24 @@ def _saved(response: Any) -> bool:
                                                                             getattr(response, "status_code", 0) == 200))
 
 
-# -- after the write: the owner's consent, the grant, the options --------------------------------------------------
+# -- after the write: the owner's consent, the grant, the one post -------------------------------------------------
 
 def record_consent(drive_root: pathlib.Path, raw: Any) -> List[Dict[str, Any]]:
-    """Note each card the completion saved in the starter marker (``connections``) for ``settle``; never raises."""
+    """Note each card the completion saved in the starter marker (``connections``) for ``settle``: the code and the
+    options it will post, until it has; never raises, never logs a value."""
     from ouroboros.skill_starter import read_marker, write_marker
 
     try:
-        records = [{"skill": card["skill"], "keys": [card["token_key"], card["code_key"]], "options": options,
-                    "at": utc_now_iso(), "grant": "pending", "options_state": "pending" if options else "none"}
-                   for card, _token, _code, options in parse_connections(raw)]
+        records = [{"skill": card["skill"], "token_key": card["token_key"], "code": code, "options": options,
+                    "at": utc_now_iso(), "grant": "pending", "post": "pending"}
+                   for card, _token, code, options in parse_connections(raw)]
         if records:
             kept = [old for old in read_marker(drive_root).get("connections") or []
                     if old.get("skill") not in {record["skill"] for record in records}]
             write_marker(drive_root, connections=kept + records)
         return records
-    except Exception:  # noqa: BLE001
-        log.warning("The setup's connection card consent could not be recorded", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("The setup's connection card consent could not be recorded (%s)", type(exc).__name__)
         return []
 
 
@@ -304,14 +315,19 @@ def _installed(drive_root: pathlib.Path, name: str) -> bool:
 
 
 def _grant(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path], record: Dict[str, Any]) -> str:
-    from ouroboros.config import REPO_DIR, get_skills_repo_path
+    """The token key granted through the lifecycle (enable after grant) where reviewed skills are not granted
+    automatically; where they are, the install's own grant covers it."""
+    from ouroboros.config import REPO_DIR, get_auto_grant_enabled, get_skills_repo_path
+
+    if get_auto_grant_enabled():
+        return "automatic"
     from ouroboros.gateway.extensions import _ApiReviewCtx
     from ouroboros.skill_lifecycle_actions import run_skill_action
 
     ctx = _ApiReviewCtx(pathlib.Path(drive_root), pathlib.Path(repo_dir or REPO_DIR))
     ctx.task_id = ""
     ctx._skill_owner_client_host = "setup"  # the owner's consent was given at the setup's Finish
-    result = run_skill_action(ctx, record["skill"], "grant", items=list(record["keys"]),
+    result = run_skill_action(ctx, record["skill"], "grant", items=[str(record["token_key"])],
                               repo_path=get_skills_repo_path(), _owner_actor="owner_ui", _enable_after_grant=True)
     return "granted" if not result.get("error") else f"failed: {str(result.get('error'))[:200]}"
 
@@ -330,30 +346,35 @@ def _server_port() -> int:
     return int(os.environ.get("OUROBOROS_SERVER_PORT") or AGENT_SERVER_PORT)
 
 
-def _post_options(record: Dict[str, Any], *, post: Optional[Callable[[str, Dict[str, str]], int]] = None,
-                  pause: Callable[[float], None] = time.sleep) -> str:
-    """The one POST of the card's options to the skill's declared route on loopback, waiting (bounded) for the route
-    to answer once the skill runs: «posted», or why not."""
+def _bodies(card: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    """Every skill-settings value of the card by the route it declares: the code and the chosen options together."""
+    bodies: Dict[str, Dict[str, str]] = {card["code"]["route"]: {card["code"]["key"]: str(record["code"])}}
+    for option in card["options"]:
+        if option["key"] in record.get("options", {}):
+            bodies.setdefault(option["route"], {})[option["key"]] = record["options"][option["key"]]
+    return bodies
+
+
+def _post(record: Dict[str, Any], *, post: Optional[Callable[[str, Dict[str, str]], int]] = None) -> str:
+    """ONE post per declared route of the card's skill-settings values: «posted», «waiting» (the route does not serve
+    yet: the next event tries again), or «failed: …» (the route refused it)."""
     card = declared_card(record["skill"])
     if card is None:
         return "failed: the skill no longer declares its card"
-    routes = {option["route"] for option in card["options"] if option["key"] in record["options"]}
-    if len(routes) != 1:
-        return "failed: the options do not share one declared route"
-    path = f"/api/extensions/{card['skill']}/{routes.pop()}"
     send = post or _loopback_post
-    status = 0
-    for attempt in range(_POST_TRIES):
-        status = send(path, dict(record["options"]))
-        if 200 <= status < 300:
-            return "posted"
-        if status not in (0, 404, 409, 502, 503):
-            break
-        pause(min(30.0, 2.0 * (attempt + 1)))
-    return f"failed: the route answered {status or 'nothing'}"
+    for route, body in _bodies(card, record).items():
+        status = send(f"/api/extensions/{card['skill']}/{route}", body)
+        if status in _NOT_LIVE:
+            return "waiting"
+        if not 200 <= status < 300:
+            return f"failed: the route answered {status}"
+    return "posted"
 
 
 def _loopback_post(path: str, body: Dict[str, str]) -> int:
+    """This server's own request to a skill route: from 127.0.0.1, with no Origin and no Mini App mark, so the route's
+    guard reads the owner's local session. Nothing reaches this but ``settle``, from a consent the owner gave at a
+    Finish the Mini App could not send; no route lets a caller choose what it posts."""
     request = urllib.request.Request(f"http://127.0.0.1:{_server_port()}{path}", data=json.dumps(body).encode("utf-8"),
                                      method="POST", headers={"Content-Type": "application/json"})
     try:
@@ -366,43 +387,44 @@ def _loopback_post(path: str, body: Dict[str, str]) -> int:
 
 
 def settle(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None, *,
-           post: Optional[Callable[[str, Dict[str, str]], int]] = None,
-           pause: Callable[[float], None] = time.sleep) -> List[Dict[str, Any]]:
-    """For each recorded card whose skill is installed: grant its keys (enable after grant), then post its options
-    once. Results land in the marker; a skill not installed yet waits for the next run. Never raises."""
+           post: Optional[Callable[[str, Dict[str, str]], int]] = None) -> List[Dict[str, Any]]:
+    """For each recorded card whose skill is installed: grant its token key where needed, then make its one post. The
+    outcome lands in the marker and the code leaves it once posted or refused; a skill not installed yet, or a route
+    not serving yet, waits for the next event. Never raises; call it off the server's event loop."""
     from ouroboros.skill_starter import read_marker, write_marker
 
     try:
         with _SETTLE:
-            return _settle_records(drive_root, repo_dir, read_marker, write_marker, post=post, pause=pause)
-    except Exception:  # noqa: BLE001
-        log.warning("The setup's connection cards could not be settled", exc_info=True)
+            return _settle_records(drive_root, repo_dir, read_marker, write_marker, post=post)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("The setup's connection cards could not be settled (%s)", type(exc).__name__)
         return []
 
 
 def _settle_records(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path], read_marker: Callable[..., Any],
-                    write_marker: Callable[..., Any], *, post: Optional[Callable[[str, Dict[str, str]], int]],
-                    pause: Callable[[float], None]) -> List[Dict[str, Any]]:
+                    write_marker: Callable[..., Any], *,
+                    post: Optional[Callable[[str, Dict[str, str]], int]]) -> List[Dict[str, Any]]:
     records = [dict(record) for record in read_marker(drive_root).get("connections") or [] if isinstance(record, dict)]
     for record in records:
-        if record.get("grant") != "pending" and record.get("options_state") != "pending":
-            continue
-        if not _installed(drive_root, str(record.get("skill") or "")):
+        if record.get("post") not in ("pending", "waiting") or not _installed(drive_root, str(record.get("skill") or "")):
             continue
         if record.get("grant") == "pending":
             record["grant"] = _grant(drive_root, repo_dir, record)
             write_marker(drive_root, connections=records)
-        if record.get("options_state") == "pending" and record["grant"] == "granted":
-            record["options_state"] = _post_options(record, post=post, pause=pause)
-            write_marker(drive_root, connections=records)
+        if record["grant"].startswith("failed"):
+            continue  # a skill whose token could not be granted does not run; its code waits for the owner's grant
+        record["post"] = _post(record, post=post)
+        if record["post"] != "waiting":
+            record.pop("code", None)  # posted, or refused by the route: the code leaves the host's record
+        write_marker(drive_root, connections=records)
     return records
 
 
 def settle_later(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None) -> None:
-    """``settle`` in its own background thread, when the marker holds a pending card."""
+    """``settle`` in its own background thread, when the marker holds a card still to post."""
     from ouroboros.skill_starter import read_marker
 
-    if any(isinstance(record, dict) and "pending" in (record.get("grant"), record.get("options_state"))
+    if any(isinstance(record, dict) and record.get("post") in ("pending", "waiting")
            for record in read_marker(drive_root).get("connections") or []):
         threading.Thread(target=settle, args=(drive_root, repo_dir), daemon=True, name="connection-cards").start()
 

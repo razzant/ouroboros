@@ -346,7 +346,7 @@ def test_the_cards_arrive_once_per_entry_and_not_under_reduced_motion(starter_ui
 
 CARD = {  # the Telegram skill's declared connection card as the host carries it on its starter item
     "skill": "telegram", "token": "botToken",
-    "pairing": {"code": "pairingCode", "link": "https://t.me/{username}?start={code}",
+    "pairing": {"link": "https://t.me/{username}?start={code}",
                 "hint": "Scan it with your phone\u2019s camera, then press Start in Telegram.",
                 "note": "You can finish setup now; the bot answers once Ouroboros starts."},
     "title": "Phone via Telegram", "pitch": "Write to Ouroboros and get its results on your phone",
@@ -402,7 +402,7 @@ def test_the_connection_card_checks_a_token_draws_its_qr_and_rides_the_completio
     field.press("Enter")
     card.locator(".skills-connection-qr svg").wait_for()
     link = card.locator("[data-connection-link]").get_attribute("href")
-    assert link.startswith("https://t.me/my_ouro_bot?start=") and len(link.split("start=")[1]) == 22, link
+    assert link.startswith("https://t.me/my_ouro_bot?start=") and len(link.split("start=")[1]) == 32, link
     assert card.locator("[data-connection-account]").inner_text() == "@my_ouro_bot"
     assert "You can finish setup now; the bot answers once Ouroboros starts." in card.inner_text()
     # The field fits its card at every width (the button moves under it on a phone); a long token ends in an ellipsis.
@@ -419,7 +419,7 @@ def test_the_connection_card_checks_a_token_draws_its_qr_and_rides_the_completio
     page.click("#next-btn")
     payload = _completion(ui)[0]
     code = link.split("start=")[1]
-    assert payload["connections"] == {"telegram": {"fields": {"botToken": TOKEN, "pairingCode": code},
+    assert payload["connections"] == {"telegram": {"fields": {"botToken": TOKEN}, "code": code,
                                                    "options": {"TELEGRAM_NOTIFY_TASKS": "on"}}}
     assert not any(key.startswith("TELEGRAM_") for key in payload), "nothing of the card in the settings part"
 

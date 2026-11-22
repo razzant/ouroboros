@@ -4,8 +4,8 @@
 // others, its box the skill's starter tick, with Connect. Open: the skill's own steps, its token field and, once the
 // host's identity check names the account, a QR of the skill's link with a one-time code made here, the account's
 // @name, the same link for this device and the skill's options. Nothing is saved here: the token, the code and the
-// options ride the one completion, and a failed check never blocks Continue or Finish. Each failure names only its
-// own cause.
+// options ride the one completion (the token into Settings; the code and options the host posts to the skill once it
+// runs), and a failed check never blocks Continue or Finish. Each failure names only its own cause.
 import { apiFetch } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { qrEncoder, qrSvg } from './qr_svg.js';
@@ -16,14 +16,14 @@ const text = (value) => String(value ?? '').trim();
 // A declared field name in words: `botToken` → "Bot token".
 const fieldWords = (name) => text(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().replace(/^./, (first) => first.toUpperCase());
 
-/** The declaration as the card reads it, or null when it lacks a skill, a token field, a code field or a link with
- * both of its places. Steps, a title, a pitch, a hint and a note beside the QR and options are the skill's own words. */
+/** The declaration as the card reads it, or null when it lacks a skill, a token field or a link with both of its
+ * places. Steps, a title, a pitch, a hint and a note beside the QR and options are the skill's own words. */
 export function normalizeConnection(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const pairing = raw.pairing && typeof raw.pairing === 'object' ? raw.pairing : {};
     const link = https(pairing.link);
-    const card = { skill: text(raw.skill), token: text(raw.token), code: text(pairing.code), link };
-    if (!card.skill || !card.token || !card.code || !link.includes('{username}') || !link.includes('{code}')) return null;
+    const card = { skill: text(raw.skill), token: text(raw.token), link };
+    if (!card.skill || !card.token || !link.includes('{username}') || !link.includes('{code}')) return null;
     return {
         ...card, title: text(raw.title), pitch: text(raw.pitch), hint: text(pairing.hint), note: text(pairing.note),
         steps: (Array.isArray(raw.steps) ? raw.steps : []).map((step) => ({ text: text(step?.text), link: https(step?.link), action: text(step?.action) }))
@@ -33,9 +33,9 @@ export function normalizeConnection(raw) {
     };
 }
 
-/** A one-time pairing code: 16 random bytes as base64url, 22 characters (a link's start code may hold 64). */
+/** A one-time pairing code as a skill mints it: 24 random bytes as base64url, 32 characters (a start code holds 64). */
 export function pairingCode(random = (bytes) => globalThis.crypto.getRandomValues(bytes)) {
-    const bytes = random(new Uint8Array(16));
+    const bytes = random(new Uint8Array(24));
     return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
@@ -188,11 +188,12 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             void run();
             return true;
         },
-        /** `{skill: {fields, options}}` for the one completion, or null: nothing typed, or a token the service refused. */
+        /** `{skill: {fields: {token}, code, options}}` for the one completion, or null: nothing typed, or a token the
+         * service refused. */
         payload() {
             if (!ticked() || !saved()) return null;
             return { [declaration.skill]: {
-                fields: { [declaration.token]: token(), [declaration.code]: card.code },
+                fields: { [declaration.token]: token() }, code: card.code,
                 options: Object.fromEntries(declaration.options.map((option) => [option.key, card.options[option.key] ? option.on : option.off])),
             } };
         },

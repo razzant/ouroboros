@@ -340,7 +340,7 @@ test('the polling window starts when the step (or Summary) first shows after a l
 // A skill's declared connection card (the agreed manifest shape, with the skill's own words) on its starter item.
 const CARD = {
     skill: 'telegram', token: 'botToken',
-    pairing: { code: 'pairingCode', link: 'https://t.me/{username}?start={code}', hint: 'Scan it with your phone’s camera, then press Start in Telegram.',
+    pairing: { link: 'https://t.me/{username}?start={code}', hint: 'Scan it with your phone’s camera, then press Start in Telegram.',
         note: 'You can finish setup now; the bot answers once Ouroboros starts.' },
     title: 'Phone via Telegram', pitch: 'Write to Ouroboros and get its results on your phone',
     steps: [{ text: 'Open @BotFather in Telegram', link: 'https://t.me/BotFather', action: 'Open @BotFather' }, { text: 'Send /newbot' },
@@ -390,7 +390,7 @@ test('Connect opens the skill’s steps and its token field; a checked token sho
     host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
     const code = step.snapshot().connection.code;
     assert.equal(code, pairingCode((bytes) => bytes.fill(7)));
-    assert.match(code, /^[A-Za-z0-9_-]{22}$/);
+    assert.match(code, /^[A-Za-z0-9_-]{32}$/, 'as the skill mints one: 24 random bytes');
     let card = cardOf(host.innerHTML);
     assert.match(text(card), /Phone via Telegram .* Hide Open @BotFather in Telegram Open @BotFather Send \/newbot Choose a name, then a username ending in “bot” BotFather replies with a token: paste it here and press Check Bot token Check$/);
     // The field stands under the skill's last step, which says what to paste; its own name is read out, not shown.
@@ -419,7 +419,7 @@ test('Connect opens the skill’s steps and its token field; a checked token sho
     // Its values ride the one completion apart from the settings, the option as the box says.
     host.handlers.change({ target: target({ '[data-connection-option]': { checked: false, dataset: { connectionOption: 'TELEGRAM_NOTIFY_TASKS' } } }) });
     const payload = step.payload();
-    assert.deepEqual(payload.connections, { telegram: { fields: { botToken: TOKEN, pairingCode: code }, options: { TELEGRAM_NOTIFY_TASKS: 'off' } } });
+    assert.deepEqual(payload.connections, { telegram: { fields: { botToken: TOKEN }, code, options: { TELEGRAM_NOTIFY_TASKS: 'off' } } });
     assert.ok(!Object.keys(payload).some((key) => key.startsWith('TELEGRAM_')), 'nothing of the card in the settings part');
     const row = fakeHost('row');
     step.mount(row);

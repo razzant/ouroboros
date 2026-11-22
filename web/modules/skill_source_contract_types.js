@@ -259,17 +259,19 @@
  */
 
 /**
- * One skill's entry in the completion's `connections`: its card's token and code fields by their declared names and
- * its options by key.
+ * One skill's entry in the completion's `connections`: its card's token by the token field's name (saved to
+ * Settings), the one-time code the page minted and its options by key (the code and options go to the skill's own
+ * settings, never the core's).
  * @typedef {Object} CompletionConnection
  * @property {Object} fields
+ * @property {string} code
  * @property {Object} options
  */
 
 /**
- * A built-in skill's declared connection card on its starter item (its manifest's `connection_card`): `token` and
- * `pairing.code` name its secret fields, `pairing.link` holds `{username}` and `{code}`; `title`, `pitch`, `steps`,
- * `pairing.hint`, `pairing.note` and `options` are the skill's own words.
+ * A built-in skill's declared connection card on its starter item (its manifest's `connection_card`): `token` names
+ * its token's secret field, `pairing.link` holds `{username}` and `{code}`; `title`, `pitch`, `steps`, `pairing.hint`,
+ * `pairing.note` and `options` are the skill's own words.
  * @typedef {Object} StarterConnection
  * @property {string} skill
  * @property {string} token
