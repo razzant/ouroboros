@@ -55,6 +55,7 @@ _ROUTE = re.compile(r"[a-z0-9_-]+(?:/[a-z0-9_-]+)*")
 _TEXT_MAX = 200
 _TOKEN_MAX = 512
 _IDENTITY_TIMEOUT = 8.0  # the declared function's own transport bound; the host waits a little longer
+_IDENTITY_WAIT = _IDENTITY_TIMEOUT + 4  # the host's watchdog over a whole check, its own worker's wait included
 _NOT_LIVE = (0, 404, 409, 502, 503)  # the skill's route is not serving yet (or its settings are busy): wait for an event
 _lock = threading.Lock()
 _SETTLE = threading.Lock()  # one settle at a time: the starter's run, a completion's and a start's never post twice
@@ -189,16 +190,17 @@ def _declared_function(card: Dict[str, Any], which: str = "identity") -> Callabl
     return getattr(module, card[which][1])
 
 
-def check_identity(card: Dict[str, Any], token: str, state_dir: Optional[pathlib.Path] = None) -> Dict[str, Any]:
+def check_identity(card: Dict[str, Any], token: str, state_dir: Optional[pathlib.Path] = None,
+                   asked: Optional[threading.Event] = None) -> Dict[str, Any]:
     """``{"ok": True, "username"}`` or ``{"ok": False, "cause": "refused" | "unreachable"}`` as the skill's declared
     function answers; raises on anything else (the caller answers that the check failed, naming nothing). A card that
     declares ``api_base`` names the server first, from the skill's state directory, and the check asks that one: a
-    reader that fails asks nobody."""
+    reader that fails asks nobody. ``asked`` is set just before the function may ask the service."""
     identity = _declared_function(card)
-    if card.get("api_base"):
-        answer = identity(token, _declared_function(card, "api_base")(state_dir), timeout=_IDENTITY_TIMEOUT)
-    else:
-        answer = identity(token, timeout=_IDENTITY_TIMEOUT)
+    base = (_declared_function(card, "api_base")(state_dir),) if card.get("api_base") else ()
+    if asked is not None:
+        asked.set()
+    answer = identity(token, *base, timeout=_IDENTITY_TIMEOUT)
     if isinstance(answer, dict) and answer.get("ok") is True and _ACCOUNT.fullmatch(str(answer.get("username") or "")):
         return {"ok": True, "username": str(answer["username"])}
     if isinstance(answer, dict) and answer.get("ok") is False and answer.get("cause") in ("refused", "unreachable"):
@@ -226,11 +228,15 @@ async def api_connection_identity(request: Any) -> Any:
         return JSONResponse({"ok": False, "error": f"a token is 1 to {_TOKEN_MAX} characters with no spaces inside"},
                             status_code=400)
     state_dir = skill_state_dir_path(request_drive_root(request), card["skill"])  # read, never made, by the reader
+    asked = threading.Event()
     try:
-        answer = await asyncio.wait_for(asyncio.to_thread(check_identity, card, token.strip(), state_dir),
-                                        _IDENTITY_TIMEOUT + 4)
+        answer = await asyncio.wait_for(asyncio.to_thread(check_identity, card, token.strip(), state_dir, asked),
+                                        _IDENTITY_WAIT)
     except asyncio.TimeoutError:
-        return JSONResponse({"ok": False, "cause": "unreachable"})
+        if asked.is_set():  # the service was asked and gave no answer in time
+            return JSONResponse({"ok": False, "cause": "unreachable"})
+        # Nothing shows the service was asked (this host's own worker never reached it): the check did not run.
+        return JSONResponse({"ok": False, "error": "the identity check did not start in time"}, status_code=503)
     except Exception:  # noqa: BLE001 — logged without the token or its exception text
         log.warning("The connection card's identity check of %s failed", card["skill"])
         return JSONResponse({"ok": False, "error": "the identity check failed"}, status_code=500)

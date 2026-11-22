@@ -271,7 +271,7 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest", query="provider_id",
         note="read-only; the model catalog of the access an unsaved setup draft names (its access fields alone)"),
     "POST /api/onboarding/connection/identity": Shape(
-        "200:ConnectionIdentityResponse 400,404,500:ConnectionIdentityResponse", "ConnectionIdentityRequest",
+        "200:ConnectionIdentityResponse 400,404,500,503:ConnectionIdentityResponse", "ConnectionIdentityRequest",
         note="writes nothing; the declared function of a built-in skill's connection card names the token's account"),
     "POST /api/onboarding/complete": Shape(
         "200:OnboardingCompleteResponse 400,403,409,500,503:SettingsWriteRefusal|OnboardingPresetFailureResponse",

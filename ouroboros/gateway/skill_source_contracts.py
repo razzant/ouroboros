@@ -316,7 +316,7 @@ class ConnectionIdentityRequest(TypedDict):
 
 class ConnectionIdentityResponse(TypedDict, total=False):
     """Which account the token names (``ok`` with ``username``), or why not: ``cause`` ``refused`` (the service
-    rejected it) or ``unreachable``; ``error`` when the check itself did not run (400, 404, 500). Never the token."""
+    rejected it) or ``unreachable``; ``error`` when the check itself did not run (400, 404, 500, 503). Never the token."""
 
     ok: Required[bool]
     username: str

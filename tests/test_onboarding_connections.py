@@ -168,6 +168,37 @@ def test_the_token_check_runs_the_declared_function_of_a_built_in_skill_and_name
     assert escaped.status_code == 500 and "username" not in escaped.text
 
 
+def test_a_watchdog_expiring_before_the_service_was_asked_is_no_answer_of_the_service(skills, monkeypatch):
+    """The host's watchdog covers its own worker's wait too: expiring before the declared function was reached (a busy
+    worker pool), the check did not run (503; the page says it could not be checked), never «could not reach» the
+    service; expiring while the function waits on the service is the service's silence (rv2 C7)."""
+    import asyncio
+    import time
+
+    module = cards._declared_function(cards.declared_card("demo")).__globals__
+    module["CALLS"].clear()
+    client = _client(Route("/check", endpoint=cards.api_connection_identity, methods=["POST"]))
+    monkeypatch.setattr(cards, "_IDENTITY_WAIT", 0.3)
+
+    async def pool_still_full(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(asyncio, "to_thread", pool_still_full)
+        held = client.post("/check", json={"skill": "demo", "token": "1:abc"})
+    assert held.status_code == 503 and "cause" not in held.json() and "1:abc" not in held.text
+    assert module["CALLS"] == []
+    real = module["check"]
+
+    def silent(token, api_base=None, *, timeout=8.0):
+        time.sleep(1.0)  # past the watchdog: the service never answers in time
+        return real(token, api_base, timeout=timeout)
+
+    monkeypatch.setitem(module, "check", silent)
+    answer = client.post("/check", json={"skill": "demo", "token": "1:abc"})
+    assert answer.status_code == 200 and answer.json() == {"ok": False, "cause": "unreachable"}
+
+
 def test_a_declared_reader_names_the_server_the_check_asks_and_a_failing_one_asks_nobody(skills, tmp_path):
     """``pairing.api_base`` is read like ``identity``: given the skill's state directory (read, never made), its answer
     is the check's second argument. Without it the check is called as before."""
