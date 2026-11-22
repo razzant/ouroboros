@@ -623,7 +623,7 @@ def _capture_block(entry: _RunCustody, cap_dir: pathlib.Path, manifest: Dict[str
     read_prefix = f"delegated_runs/{cap_dir.name}"
     unsaved = [str(row.get("path") or "") for row in manifest.get("untracked_excluded") or []
                if isinstance(row, dict) and row.get("reason") in UNSAVED_REASONS] if not evidence_only(entry) else []
-    checkout = ("the copy's checkout itself is released once the capture is saved" if not unsaved else
+    checkout = ("the checkout is eligible for release after capture and evidence retention; custody may defer cleanup" if not unsaved else
                 f"the copy's checkout is KEPT until then: {len(unsaved)} path(s) in it could not be saved in the "
                 f"result (Git repositories or checked-out submodules inside it, or folders Git could not open): "
                 f"{', '.join(unsaved[:8])}. A submodule's own commits live in its separate Git directory "

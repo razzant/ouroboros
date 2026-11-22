@@ -37,8 +37,8 @@ investigation and task copies, so shallow and partial clones work and a
 target edit during provisioning cannot reach or refuse the copy). `live` means
 that Claudexor works in that supplied execution root; it does not mean direct
 edits to the authoritative target. The host captures the result as a commit,
-releases the checkout once that capture and its named evidence are saved, and
-applies the result through its existing integration path. The exception is the
+can release the checkout after capture and named-evidence retention; native disposition
+defers cleanup to custody GC. The existing integration path applies the result. The exception is the
 starter's explicit `workspace: in_place` (Git writers only; owner 25.10): the
 supplied root is the starter's own write root, edits land as the run makes them,
 nothing is captured, applied or rejected, undo is through Git, the receipt and

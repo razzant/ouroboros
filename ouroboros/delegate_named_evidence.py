@@ -407,13 +407,13 @@ def _publish(root, entry, name, summary):
     entry.named_evidence = outcome
 
 
-def publish_saved(root, entry, summary, folder):
+def publish_saved(root, entry, summary, folder, *, custody_held=None):
     """Re-read the generation under task custody immediately before publishing its named refs."""
     from ouroboros.payload_release_state import publication_lock
     from ouroboros.task_custody import CustodyBusy
 
     try:
-        with publication_lock(folder) as locked:
+        with publication_lock(folder, custody_held=custody_held) as locked:
             if not locked:
                 raise CustodyBusy("custody_busy")
             view = said_released(summary, directory=folder)
@@ -441,7 +441,7 @@ def _selection(entry, area, whole):
     return {path.relative_to(prefix).as_posix() for path in paths if path.is_relative_to(prefix)}
 
 
-def retain_named(root, entry, *, whole=False, recapture=False, reread=False, publish=True):
+def retain_named(root, entry, *, whole=False, recapture=False, reread=False, publish=True, custody_held=None):
     """Observe inputs on an addressed request; reuse partial as well as complete receipts.
 
     No BodyRuntime tick calls the witness walker. A new terminal observation, explicit
@@ -462,7 +462,7 @@ def retain_named(root, entry, *, whole=False, recapture=False, reread=False, pub
             return {**known, "status": "partial", "reason": "released_generation_unreadable"}
         if (known.get("inputs") or {}).get("witness") != witness_now:
             return {**known, "status": "partial", "reason": "released_generation_changed"}
-        return publish_saved(root, entry, known, previous.parent) if publish else known
+        return publish_saved(root, entry, known, previous.parent, custody_held=custody_held) if publish else known
     source = {"policy": POLICY, "limit_bytes": None,
               "whole": whole, "baseline_sha": entry.baseline_sha,
               "terminal_sha": entry.terminal_source.get("sha256"), "invocation_id": entry.invocation_id,
@@ -475,7 +475,7 @@ def retain_named(root, entry, *, whole=False, recapture=False, reread=False, pub
     except Exception as exc:
         error = exc
     if not recapture and error is None and source["witness"] and known.get("inputs") == source:
-        return publish_saved(root, entry, known, previous.parent) if publish else known
+        return publish_saved(root, entry, known, previous.parent, custody_held=custody_held) if publish else known
     private_directory(home, root)
     prune_abandoned_generations(home)
     token = uuid.uuid4().hex
@@ -508,7 +508,7 @@ def retain_named(root, entry, *, whole=False, recapture=False, reread=False, pub
         summary_read={"root": "artifact_store", "path": f"delegated_runs/{home.name}/{name}/summary.json"})
     try:
         atomic_write_json(staging / "summary.json", summary)
-        with publication_lock(final) as locked:
+        with publication_lock(final, custody_held=custody_held) as locked:
             if not locked:
                 return {"status": "partial", "reason": "release_state_unavailable", "error": "custody_busy", "files": []}
             _, latest = saved_named_evidence(root, entry, observe=False)
@@ -525,7 +525,7 @@ def retain_named(root, entry, *, whole=False, recapture=False, reread=False, pub
             shutil.rmtree(staging, ignore_errors=True)
 
 
-def run_named_evidence(root, entry, *, recapture=False, publish=True):
+def run_named_evidence(root, entry, *, recapture=False, publish=True, custody_held=None):
     from ouroboros.delegate_directory import is_directory_run
     from ouroboros.delegate_registration_policy import candidate_apply_possible
 
@@ -533,4 +533,5 @@ def run_named_evidence(root, entry, *, recapture=False, publish=True):
             or entry.authority_source == "skill_payload"):
         return {}
     return retain_named(root, entry, whole=candidate_apply_possible(entry), recapture=recapture,
-                        reread=bool(entry.patch_disposed or entry.superseded_by), publish=publish)
+                        reread=bool(entry.patch_disposed or entry.superseded_by), publish=publish,
+                        custody_held=custody_held)

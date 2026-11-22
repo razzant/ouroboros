@@ -24,12 +24,21 @@ def late_native_case(case, *, original=False, run_id="late-run"):
     return folder, task, late_run(case, folder, run_id)
 
 
-def late_run(case, folder, run_id, path="late.txt", *, task_id="native", parent_id="parent", explicit_selection=False):
+def late_run(case, folder, run_id, path="late.txt", *, task_id="native", parent_id="parent", explicit_selection=False,
+             evidence=False, capture=True):
     from ouroboros import delegate_custody as custody
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
     data = case[2]
     handle = trees.provision_execution_snapshot(target_root=folder, task_id=task_id, snapshot_id=run_id)
-    (Path(handle.path) / path).write_bytes(b"late delegated edit\n")
+    if path is not None:
+        (Path(handle.path) / path).write_bytes(b"late delegated edit\n")
+    if evidence:
+        from ouroboros.review_checking import EVIDENCE_DIRNAME
+        report = Path(handle.path) / EVIDENCE_DIRNAME / "report.txt"
+        report.parent.mkdir()
+        report.write_bytes(b"independent evidence\n")
+        # A nested repository cannot enter the capture and legitimately keeps the source copy.
+        repo(Path(handle.path) / "vendor" / "kept", {"input.txt": b"retained input\n"})
     if explicit_selection:
         git(handle.path, "add", "-f", path)  # explicit selection by this fixture's original leaf author
     entry = custody.RunCustody(run_id=run_id, task_id=task_id, route_id="fake",
@@ -39,7 +48,8 @@ def late_run(case, folder, run_id, path="late.txt", *, task_id="native", parent_
     assert custody.record_started(data, entry)
     assert custody.emit(data, custody.SETTLED, {"run_id": run_id, "task_id": task_id})
     entry = custody.replay(data)[run_id]
-    assert capture_terminal_patch_for_drive(data, entry)["status"] == "ready_with_changes"
+    if capture:
+        assert capture_terminal_patch_for_drive(data, entry)["status"] == "ready_with_changes"
     return entry
 
 
@@ -78,6 +88,71 @@ def finish_native(case, task, status="completed"):
 
     write_task_result(Path(task.get("child_drive_root") or case[2]), "native", status, result="child finished")
     return headless.prepare_terminal_task_files(case[2], task)
+
+
+@pytest.mark.parametrize("decision", ["apply", "reject"])
+@pytest.mark.parametrize("evidence_state", ["saved", "changed", "uncaptured"])
+def test_native_disposition_retains_named_evidence_under_custody(case, decision, evidence_state):
+    from ouroboros import delegate_custody_current as current, headless
+    from ouroboros.delegate_named_evidence import saved_named_evidence
+    from ouroboros.review_checking import EVIDENCE_DIRNAME
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.subagent_integration import _integrate_delegated_patch
+
+    folder, task = admit(case, "native", "parent")
+    write_task_result(case[2], "native", "completed", **{k: v for k, v in task.items() if k != "id"})
+    headless.finalize_task_artifacts(case[2], task)
+    entry = late_run(case, folder, "evidence-run", evidence=True, capture=evidence_state != "uncaptured")
+    source = Path(entry.execution_root)
+    assert source.is_dir()
+    old_path, old = saved_named_evidence(case[2], entry)
+    assert old.get("status") == (None if evidence_state == "uncaptured" else "retained")
+    expected = b"changed evidence\n" if evidence_state == "changed" else b"independent evidence\n"
+    if evidence_state == "changed":
+        (source / EVIDENCE_DIRNAME / "report.txt").write_bytes(expected)
+    out = _integrate_delegated_patch(parent_context(case, task_id="orphan-disposer"), entry.run_id,
+                                     decision=decision, reason="consume checked capture")
+    if evidence_state == "uncaptured" and decision == "apply":
+        assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" in out and not (folder / "late.txt").exists(), out
+        out = _integrate_delegated_patch(parent_context(case, task_id="orphan-disposer"), entry.run_id,
+                                         decision=decision, reason="inspected new capture")
+    assert ("✅ Integrated" if decision == "apply" else "Rejected") in out, out
+    assert "snapshot cleanup deferred" in out and "private copy and pins are released" not in out
+    fresh = current.run(case[2], entry.run_id)
+    path, retained = saved_named_evidence(case[2], fresh)
+    assert retained["status"] == "retained"
+    assert (path.parent / "files" / EVIDENCE_DIRNAME / "report.txt").read_bytes() == expected
+    assert (path != old_path) == (evidence_state == "changed")
+    assert fresh.patch_disposed == ("applied" if decision == "apply" else "rejected")
+    assert (folder / "late.txt").exists() == (decision == "apply")
+    row = load_task_result(case[2], "native")
+    assert not row.get("native_capture_pending"), row
+    # Cleanup runs later, outside native custody, and still honors the owner's Keep.
+    write_task_result(case[2], "native", "completed", owner_keep={"at": "now", "scope": "task"})
+    assert not trees.remove_execution_snapshot(entry.snapshot_id)
+    assert source.is_dir()
+    write_task_result(case[2], "native", "completed", owner_keep=None)
+    assert trees.remove_execution_snapshot(entry.snapshot_id)
+    assert not source.exists() and (path.parent / "files" / EVIDENCE_DIRNAME / "report.txt").read_bytes() == expected
+    if decision == "apply":
+        result = _integrate_subagent_patch(parent_context(case), task_id="native")
+        assert "✅ Integrated" in result and (case[1] / "late.txt").read_bytes() == b"late delegated edit\n", result
+
+
+@pytest.mark.parametrize("decision", ["apply", "reject"])
+def test_native_first_capture_closes_an_empty_run_as_no_changes(case, decision):
+    from ouroboros import delegate_custody, delegate_custody_current as current
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.subagent_integration import _integrate_delegated_patch
+
+    folder, task = admit(case, "native", "parent")
+    write_task_result(case[2], "native", "completed", **{k: v for k, v in task.items() if k != "id"})
+    entry = late_run(case, folder, "empty-run", path=None, capture=False)
+    out = _integrate_delegated_patch(parent_context(case, task_id="orphan-disposer"), entry.run_id,
+                                     decision=decision)
+    assert "nothing to apply or reject" in out, out
+    assert current.run(case[2], entry.run_id).patch_disposed == delegate_custody.NO_CHANGES
+    assert Path(entry.execution_root).is_dir()  # retirement stays outside native custody
 
 
 @pytest.mark.parametrize("decision", ["apply", "reject"])

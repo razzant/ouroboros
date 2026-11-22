@@ -107,7 +107,7 @@ def prepared_capture_inspection(rid: str, decision: str, applies_changes: bool,
 
 
 def _capture_at_disposition(
-    drive: Any, entry: Any, rid: str, manifest_path: pathlib.Path, decision: str = "apply",
+    drive: Any, entry: Any, rid: str, manifest_path: pathlib.Path, decision: str = "apply", *, custody_held=None,
 ) -> str:
     """Capture-on-demand (C1-R2) for a run that settled without terminal proof.
 
@@ -137,11 +137,17 @@ def _capture_at_disposition(
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive, loss_refusal, result_loss
 
     try:
-        block = capture_terminal_patch_for_drive(drive, entry) or {}
+        # Native custody is already held: retain evidence with that identity and classify
+        # empty results normally, but leave physical retirement outside the custody scope.
+        block = capture_terminal_patch_for_drive(drive, entry, retain_investigation=custody_held is None) or {}
+        if custody_held is not None:
+            block = retain_run_evidence(drive, entry, block, custody_held=custody_held)
     except Exception as exc:
         log.warning("capture-at-disposition raised for run %s", rid, exc_info=True)
         block = {"status": "", "note": f"capture raised {type(exc).__name__}: {exc}"}
     cap_status, note = str(block.get("status") or ""), str(block.get("note") or "")
+    if block.get("disposition") == "no_changes":
+        return note  # capture closed it; an orphan is no longer an undisposed target to re-admit
     step = "A later call may capture it." if block.get("retry") == "transient" else ""
     if cap_status in _READY_CAPTURE_STATUSES:
         return ""
@@ -267,12 +273,13 @@ def _unwritten_disposition_text(rid: str, target_root: str, disposition: str,
 
 def _dispose_delegated(drive: Any, entry: Any, snapshot_key: str, reason: str,
                        disposition: str, cleanup: bool,
-                       disposed_by: str = "", **row: Any) -> tuple[bool, str]:
+                       disposed_by: str = "", defer_cleanup: bool = False, **row: Any) -> tuple[bool, str]:
     """Record a delegated disposition durably; clean up ONLY if the row landed.
     Releasing snapshot/patch on an UNWRITTEN row loses the record that the patch
     was handled (a restart could apply it twice). Shared by the Git and payload
     branches (``delegate_integration``) and an investigation's evidence retention;
-    ``row`` adds facts such as an engine receipt. Returns ``(recorded, note)``."""
+    ``defer_cleanup`` leaves retirement to custody GC when native custody is held: the
+    remover takes snapshot-record then task custody, never the reverse. ``row`` adds receipt facts."""
     from ouroboros import delegate_custody as custody
     from ouroboros.subagent_worktrees import remove_execution_snapshot
 
@@ -284,7 +291,7 @@ def _dispose_delegated(drive: Any, entry: Any, snapshot_key: str, reason: str,
     note = ""
     if cleanup:
         try:
-            removed = remove_execution_snapshot(snapshot_key)
+            removed = False if defer_cleanup else remove_execution_snapshot(snapshot_key)
         except Exception:
             removed = False
         note = "" if removed else (
@@ -293,21 +300,24 @@ def _dispose_delegated(drive: Any, entry: Any, snapshot_key: str, reason: str,
     return True, note
 
 
-def retain_run_evidence(drive: Any, entry: Any, block: Dict[str, Any], gateway: Any = None, *, recapture=False, named=None) -> Dict[str, Any]:
-    """Retention disposes investigations; a candidate's saved result releases its checkout and
-    awaits the owner's apply/reject, and an empty one closes itself."""
+def retain_run_evidence(drive: Any, entry: Any, block: Dict[str, Any], gateway: Any = None, *, recapture=False, named=None,
+                        custody_held=None) -> Dict[str, Any]:
+    """Retention disposes investigations; a saved candidate awaits apply/reject, an empty one
+    closes itself. Native custody defers physical retirement to the ordinary GC."""
     from ouroboros.delegate_registration_policy import candidate_apply_possible
 
     if not candidate_apply_possible(entry):
         return retain_investigation_evidence(drive, entry, block, gateway, recapture=recapture, named=named)
     if named is None:
-        named = run_named_evidence(drive, entry, recapture=recapture) if block.get("status") in _READY_CAPTURE_STATUSES else {}
-    return _settle_writer_capture(drive, entry, {**block, "named_evidence": named} if named else block, named)
+        named = (run_named_evidence(drive, entry, recapture=recapture, custody_held=custody_held)
+                 if block.get("status") in _READY_CAPTURE_STATUSES else {})
+    return _settle_writer_capture(drive, entry, {**block, "named_evidence": named} if named else block, named,
+                                  defer_cleanup=custody_held is not None)
 
 
-def _settle_writer_capture(drive: Any, entry: Any, block: Dict[str, Any], named: Dict[str, Any]) -> Dict[str, Any]:
+def _settle_writer_capture(drive: Any, entry: Any, block: Dict[str, Any], named: Dict[str, Any], *, defer_cleanup=False) -> Dict[str, Any]:
     """Once a writer's capture row and its named evidence are durably saved, the result
-    lives as the patch plus pinned commits B and C, so the checkout goes; an empty result
+    lives as the patch plus pinned commits B and C; an eligible checkout goes unless deferred. An empty result
     (C equals B, HEAD unmoved, nothing retained beside it) closes as no_changes. A pending
     continuation, a copy made before this update, a path the result could not hold (a Git
     repository or filled submodule inside the copy, a folder Git could not open) or anything still owed keeps it."""
@@ -331,10 +341,12 @@ def _settle_writer_capture(drive: Any, entry: Any, block: Dict[str, Any], named:
     if (block.get("status") == ARTIFACT_STATUS_READY_NO_CHANGES and not block.get("head_moved")
             and not block.get("file_outputs") and not (named or {}).get("files")):
         recorded, note = _dispose_delegated(drive, entry, entry.snapshot_id, "the run changed nothing",
-                                            custody.NO_CHANGES, True, disposed_by=entry.task_id)
+                                            custody.NO_CHANGES, True, disposed_by=entry.task_id, defer_cleanup=defer_cleanup)
         if recorded:
             return {**block, "disposition": custody.NO_CHANGES, "note": NO_CHANGES_NOTE + note}
         return block
+    if defer_cleanup:
+        return block  # preserve empty-result classification above, but never invert record/custody lock order
     try:
         released = release_snapshot_checkout(entry.snapshot_id)
     except Exception:
@@ -573,7 +585,8 @@ def _integrate_delegated_patch(
         from ouroboros.headless import native_capture_custody, refresh_native_capture
         with native_capture_custody(drive, entry) as owner:
             result = _integrate_delegated_patch_locked(ctx, rid, decision, reason, acknowledge_ambiguous, paths,
-                                                       captured_before=captured_before)
+                                                       captured_before=captured_before,
+                                                       custody_held=(drive, entry.task_id) if owner else None)
             note = ""
             if owner:
                 note = refresh_native_capture(drive, entry.task_id, locked=True,
@@ -610,6 +623,7 @@ def _integrate_delegated_patch_locked(
     acknowledge_ambiguous: bool = False,
     paths: List[str] | None = None,
     captured_before: bool | None = None,
+    custody_held=None,
 ) -> str:
     """The C1 explicit acceptance seam: apply or reject ONE delegated run's captured patch.
 
@@ -669,7 +683,8 @@ def _integrate_delegated_patch_locked(
     manifest_path = cap_dir / "workspace_patch.json"
     patch_path = cap_dir / "workspace.patch"
     prepared = not (captured_before and _manifest_capture_status(manifest_path) in _READY_CAPTURE_STATUSES)
-    capture_refusal = _si()._capture_at_disposition(drive, entry, rid, manifest_path, decision)
+    capture_refusal = _si()._capture_at_disposition(drive, entry, rid, manifest_path, decision,
+                                                  custody_held=custody_held)
     if capture_refusal:
         return capture_refusal
     if refusal := _current_disposition_refusal(ctx, rid):
@@ -697,10 +712,11 @@ def _integrate_delegated_patch_locked(
         return integrate_payload_patch(
             ctx, drive=drive, entry=entry, rid=rid, decision=decision,
             reason=reason, cap_dir=cap_dir, manifest=manifest, patch_path=patch_path) + (f"\n{orphan_note.rstrip()}" if orphan_note else "") + selection_note
-    return _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orphan_of) + selection_note
+    return _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orphan_of,
+                                  custody_held=custody_held) + selection_note
 
 
-def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orphan_of):
+def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orphan_of, *, custody_held=None):
     """Apply/dispose a Git capture after common run ownership and source admission.
 
     File postimages and the diagnostic patch share one target, lock and disposition.
@@ -722,7 +738,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
         return _capture_failed_refusal(rid, str(manifest.get("status") or ""), str(exc))
     touched = declared_capture_paths(manifest)
 
-    named = run_named_evidence(drive, entry)  # (#2070) evidence first: a gap keeps a surviving copy undisposed
+    named = run_named_evidence(drive, entry, custody_held=custody_held)  # evidence first; a gap keeps the copy
     if named.get("status") in ("partial", "capture_failed") and pathlib.Path(str(entry.execution_root)).is_dir():
         gaps = [str(gap.get("path") or "") for gap in named.get("gaps") or [] if isinstance(gap, dict)]
         return (f"⚠️ INTEGRATE_DELEGATED_EVIDENCE_UNRETAINED: run {rid}'s named evidence could not all be retained "
@@ -733,7 +749,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     def _dispose(disposition: str, cleanup: bool, **row: Any) -> tuple[bool, str]:
         return _dispose_delegated(
             drive, entry, snapshot_key, reason, disposition, cleanup,
-            disposed_by=str(getattr(ctx, "task_id", "") or ""), **row)
+            disposed_by=str(getattr(ctx, "task_id", "") or ""), defer_cleanup=custody_held is not None, **row)
 
     def _unwritten_disposition(disposition: str, applied: bool) -> str:
         return _unwritten_disposition_text(rid, str(entry.target_root), disposition, applied)
@@ -764,7 +780,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
                     f"unknown. Verdict: {verdict_path or '(unwritten)'}. Reason: {reason or '(none)'}.{note}")
         return (
             f"{orphan_note}🚫 Rejected delegated run {rid}'s captured patch ({len(touched)} file(s) not "
-            f"applied); its private copy and pins are released. Verdict: {verdict_path or '(unwritten)'}. "
+            f"applied); its disposition is recorded. Verdict: {verdict_path or '(unwritten)'}. "
             f"Reason: {reason or '(none)'}.{format_patch_exclusions(manifest, file_changes)}{note}"
         )
 
@@ -775,8 +791,8 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
                 return _unwritten_disposition("applied", applied=False)
             return (
                 f"OK: delegated run {rid} has no captured file changes to apply; "
-                f"its answer and external effects remain separate evidence; its private copy is released."
-                f"{format_patch_exclusions(manifest)}{note}"
+                f"its answer and external effects remain separate evidence; its disposition is recorded."
+                f"{format_patch_exclusions(manifest)}{note or ' its private copy is released.'}"
             )
         return (
             f"⚠️ INTEGRATE_DELEGATED_NO_CAPTURE: run {rid}'s capture status is "
@@ -990,6 +1006,6 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     return (
         f"{orphan_note}✅ Integrated delegated run {rid}'s patch into {target} ({staged}).{prot_note}{delivered}\n"
         f"{diffstat}{format_patch_exclusions(manifest, file_changes, 'applied', unindexed)}\n"
-        f"Verdict: {verdict_path or '(unwritten)'}. Its private copy and pins are released.\n"
+        f"Verdict: {verdict_path or '(unwritten)'}. Disposition recorded.\n"
         f"{closing} — review them yourself; you are the sole committer.{note}"
     )
