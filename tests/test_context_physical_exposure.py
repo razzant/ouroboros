@@ -80,6 +80,24 @@ def test_result_bytes_do_not_prove_the_wrong_call_received_them():
     assert cc.exposed_context_units(canonical, physical) == ()
 
 
+def test_ordered_assistant_parts_count_as_exposed_only_when_their_words_were_sent():
+    from ouroboros.llm import LLMClient
+
+    canonical = source("menu", "The shelf holds apples.")
+    parts = [{"type": "text", "text": "At the park.\n"}, {"type": "refusal", "refusal": "No picnic. 🧺\n"},
+             {"type": "text", "text": "Back home."}]
+    canonical[0]["content"] = copy.deepcopy(parts)
+    expected = (_ref(cc.context_units(canonical, scope="dialogue")[0]),)
+    physical = LLMClient._normalize_system_message_placement(canonical)
+    assert physical[0]["content"][1] == {"type": "text", "text": parts[1]["refusal"]}
+    for received in (canonical, physical):
+        assert cc.exposed_context_units(canonical, received) == expected
+        for wrong in ([received[0]["content"][0], received[0]["content"][2]],
+                      list(reversed(received[0]["content"]))):
+            assert cc.exposed_context_units(canonical, [dict(received[0], content=wrong), *received[1:]]) == ()
+    assert canonical[0]["content"] == parts
+
+
 @pytest.mark.parametrize("manifest_has_atoms", [True, False])
 def test_exposure_recognizes_a_sent_unit_whose_stored_projection_was_redacted(tmp_path, monkeypatch, manifest_has_atoms):
     """The sent bytes carried a credential; observability stores a redacted projection. The

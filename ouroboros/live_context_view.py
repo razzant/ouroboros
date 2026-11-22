@@ -83,12 +83,12 @@ async def drain_exposure(host):
         await joined(job)
 
 
-def serving_delivery_fits(host, rows, schemas):
-    room = serving_delivery_room(host, rows, schemas)
+def serving_delivery_fits(host, rows, schemas, *, explain=False):
+    room = serving_delivery_room(host, rows, schemas, explain=explain)
     return room is None or room >= 0
 
 
-def serving_delivery_room(host, rows, schemas):
+def serving_delivery_room(host, rows, schemas, *, explain=False):
     """Price the serving connection's held input plus undelivered canonical growth.
 
     Its delivered catalog is authoritative after a failed declaration refit. New
@@ -101,8 +101,9 @@ def serving_delivery_room(host, rows, schemas):
     from ouroboros.contracts.realtime import canonical_json
     facts = host.model.facts
     window, reserve = facts.conversation_window_tokens, facts.working_reserve_tokens or 0
-    if host._renewal_window is not None and host._renewal_facts == facts:
-        window, reserve = host._renewal_window.total_equivalent, host._renewal_window.reserve
+    renewal = host._renewal_window if getattr(host, '_renewal_facts', None) == facts else None
+    if renewal is not None:
+        window, reserve = renewal.total_equivalent, renewal.reserve
     if not window:
         return None  # no measured window has been declared
     density = getattr(host._physical_context, 'measurement_density', 1.0) if facts.basis == 'provider' else 1.0
@@ -129,7 +130,16 @@ def serving_delivery_room(host, rows, schemas):
     pending = math.ceil(max(0, estimate_context_prompt_tokens(current, schemas) - baseline) * density)
     # A canonical fold cannot free the serving socket: price the delivery itself too.
     pending = max(pending, math.ceil(estimate_context_prompt_tokens(rows) * density))
-    return window - held - pending - host._growth - reserve
+    input_tokens = held + pending + host._growth
+    room = window - input_tokens - reserve
+    if explain and room < 0:
+        from ouroboros.context_budget import context_capacity_detail
+        from ouroboros.contracts.realtime import RealtimeSetupError
+        limit = renewal.limiting if renewal is not None else None
+        raise RealtimeSetupError('context_capacity', context_capacity_detail(live_call=True,
+            limit_kind=limit.kind if limit else 'total', limit_tokens=limit.tokens if limit else window,
+            input_tokens=input_tokens, reserve_tokens=reserve))
+    return room
 
 
 def apply_context_view(host):

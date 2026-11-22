@@ -27,7 +27,7 @@ from ouroboros.client_surface import normalize_client_surface, normalize_timezon
 from ouroboros.llm import LLMClient
 from ouroboros.llm_attempt import _attempt_request, _canonical_candidate_bytes
 from ouroboros.loop_llm_call import call_llm_with_retry
-from tests.test_processing_transport import transport  # noqa: F401 - fixture
+from tests._processing_transport_fixture import physical_transport as physical_transport  # registers the `transport` fixture
 
 MOSCOW = sc.SendClockPolicy(zone="Europe/Moscow")
 T = dt.datetime(2026, 9, 26, 14, 23, 5, tzinfo=dt.timezone.utc)
@@ -631,7 +631,7 @@ def test_the_forced_final_is_admitted_on_the_fresh_requests_own_price(  # noqa: 
     """The lookahead is advice: the FRESH request — the bytes measured, priced, sealed and sent —
     is admitted against the same balances at its own price. Here its re-sampled clock costs
     1000 more estimated tokens at the same width; when that no longer fits, the send is refused
-    unsent and NOT handed to the drift rail's unpredicated resend."""
+    unsent and NOT handed to the drift rail's anchor-free resend."""
     from ouroboros import loop_forced_finalization as forced, task_pacing
     from ouroboros.llm_claudexor import cache_key_for_model
 
@@ -664,7 +664,7 @@ def test_the_forced_final_is_admitted_on_the_fresh_requests_own_price(  # noqa: 
         with pytest.raises(forced.ForcedCandidateUnaffordable):
             forced._send_admitted_forced_candidate(ctx, ctx.messages, lookahead, "budget_exhausted",
                                                    admission=admission)
-        assert sent == [] and drifts == []  # refused before a byte left; no unpredicated resend
+        assert sent == [] and drifts == []  # refused before a byte left; no drift-rail resend
         assert [row["state"] for row in _ledger(root)] == ["released"]
 
 
@@ -687,6 +687,150 @@ def test_a_refused_fresh_forced_candidate_lands_on_the_unaffordable_fallback(mon
     assert text == "Budget exhausted." and checkpoints == [{"checkpoint_kind": "forced_candidate_unaffordable",
                                                             "reason_code": "budget_exhausted"}]
     assert fallbacks[0][2]["source"] == "budget_wrapup_unaffordable"
+
+
+def _repair_sample_costs_more(monkeypatch):
+    """Equal width is not equal tokens: this estimator charges 1000 more for the REPAIR's sample.
+
+    Under ``ticking`` the sequence is fixed: the lookahead seals 14:23:05, the refused attempt
+    14:24:05 and the repair's fresh send 14:25:05 — so the repair's OWN price can exceed the
+    balances that admitted the lookahead, exactly like a re-sampled clock in production.
+    Wraps the real ``_attempt_request`` everywhere a candidate is measured (the OpenAI lane and
+    the wrap-up lookahead); identity facts stay the real ones."""
+    from dataclasses import replace
+
+    from ouroboros import llm, llm_fallback
+
+    real = llm_fallback._attempt_request
+
+    def measured(target, payload, **kwargs):
+        request = real(target, payload, **kwargs)
+        line = next((row.get("content") for row in reversed(payload.get("messages") or [])
+                     if isinstance(row, dict) and str(row.get("content") or "").startswith(sc.CLOCK_NOTE_PREFIX)), "")
+        return replace(request, prompt_tokens_estimate=request.prompt_tokens_estimate + (1000 if "14:25:05" in line else 0))
+
+    monkeypatch.setattr(llm_fallback, "_attempt_request", measured)
+    monkeypatch.setattr(llm, "_attempt_request", measured)
+    # One price per token for the fence and the admission alike (the same shared function).
+    monkeypatch.setattr(ua, "_reservation_cost", lambda request: round(request.prompt_tokens_estimate * 1e-4, 6))
+
+
+@pytest.mark.parametrize("room_usd,admitted", [(1.0, True), (0.05, False)])
+def test_the_one_drift_repair_re_admits_the_fresh_request_on_the_original_balances(  # noqa: F811
+        transport, monkeypatch, ticking, unstreamed, room_usd, admitted):  # noqa: F811
+    """The identity predicate refuses BEFORE a byte leaves (a transport-proven unsent) and the ONE
+    repair keeps the answer — without the byte anchor that just failed, never without the money:
+    the repair's own fresh physical request is priced against the ORIGINAL admitted balances. A
+    genuinely unaffordable repair is refused unsent; a healthy one is sent exactly once."""
+    from dataclasses import replace
+
+    from ouroboros import loop_forced_finalization as forced, task_pacing
+    from ouroboros.llm_claudexor import cache_key_for_model
+
+    root, client, sent = transport
+    _repair_sample_costs_more(monkeypatch)
+    model = "openai::gpt-test"
+    ctx, loop = _forced_ctx(client, root, model)
+    monkeypatch.setattr(loop, "_server_web_allowed_by_task", lambda _ctx: False)
+    (root / "logs").mkdir(exist_ok=True)
+    with sc.MainSendClock(sc.SendClockPolicy()).bound():  # as ``prepared_wrapup_candidate`` binds it
+        lookahead = task_pacing.prospective_wrapup_attempt_request(
+            llm=client, messages=ctx.messages, model=model, reasoning_effort="high", tools=None,
+            cache_affinity=cache_key_for_model(model))
+    admission = {"root_cap_usd": room_usd, "deciding_usd": 0.0, "global_remaining_usd": None}
+    assert task_pacing.wrapup_reservation_fits(request=lookahead, **admission) is True  # admitted on THESE balances
+    # The priced copy lost its clock-free anchor (the historical wire-growth incident): the first
+    # physical attempt is refused as drift before dispatch, never as unaffordable.
+    drifted = replace(lookahead, candidate_clock_free_sha256="0" * 64)
+    if admitted:
+        text = forced._send_admitted_forced_candidate(ctx, ctx.messages, drifted, "budget_exhausted",
+                                                      admission=admission)
+        assert text == "ok" and len(sent) == 1, "exactly one repair send: no double-send, no lost answer"
+        assert [row["state"] for row in _ledger(root)] == ["released", "settled"]
+    else:
+        with pytest.raises(forced.ForcedCandidateUnaffordable):
+            forced._send_admitted_forced_candidate(ctx, ctx.messages, drifted, "budget_exhausted",
+                                                   admission=admission)
+        assert sent == [], "the unaffordable repair was refused before a byte left"
+        assert [row["state"] for row in _ledger(root)] == ["released", "released"]
+    events = [json.loads(row) for row in (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    drift = [row for row in events if row.get("checkpoint_kind") == "forced_candidate_drift"]
+    assert len(drift) == 1 and drift[0]["reason_code"] == "budget_exhausted"
+    assert drift[0]["refused_attempt_id"] and drift[0]["admitted"]["candidate_raw_sha256"]
+
+
+def _reprepare_ctx_and_values():
+    values = {"model": "openai/gpt-test", "model_role": "main", "use_local": False,
+              "reasoning_effort": "high", "messages": [{"role": "user", "content": "wrap up"}],
+              "tools": None, "allow_server_web_search": False}
+    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=SimpleNamespace(context_fit_plan=None)),
+                          llm=None, messages=[dict(row) for row in values["messages"]],
+                          tool_schemas=[],  # the actor's resident list `_fit_route_tool_ceiling` reads
+                          active_model="openai/gpt-test", active_use_local=False,
+                          active_effort="high", deadline_ts=None)
+    return ctx, values
+
+
+@pytest.mark.parametrize("was_local", [False, True])
+def test_a_drift_repairs_reprepare_keeps_the_original_balances_and_never_a_byte_anchor(monkeypatch, was_local):
+    """A wait that rebinds the route DURING the authorized drift repair re-prices the re-prepared
+    request against the ORIGINAL balances — refreshing the global axis exactly as the priced path
+    does when the repair leaves the built-in — and the guard it returns is affordability-only: a
+    fitting request passes whatever its identity (the anchor that just failed is never
+    reinstalled), an unfit one raises before a byte leaves."""
+    from ouroboros import loop_forced_finalization as forced, loop_routes, task_pacing
+
+    ctx, values = _reprepare_ctx_and_values()
+    monkeypatch.setattr(loop_routes, "reprepare_source", lambda _ctx, _values: None)
+    monkeypatch.setattr(loop_routes, "reprepare_wire", lambda _ctx, _values, *, deadline_ts: None)
+    monkeypatch.setattr(forced, "_forced_physical_context", lambda _ctx, _messages: None)
+    monkeypatch.setattr("ouroboros.loop_budget._wrapup_global_remaining", lambda: 2.5)
+    built = []
+
+    def build(**kwargs):
+        built.append(kwargs)
+        return SimpleNamespace(prompt_tokens_estimate=100_000)
+
+    monkeypatch.setattr(task_pacing, "prospective_wrapup_attempt_request", build)
+    given = []
+
+    def fits(*, request, **balances):
+        given.append(balances)
+        return request.prompt_tokens_estimate <= 100_000
+
+    monkeypatch.setattr(task_pacing, "wrapup_reservation_fits", fits)
+    admission = {"root_cap_usd": 3.0, "deciding_usd": 2.0, "global_remaining_usd": None,
+                 "use_local": was_local}
+    preparation = task_pacing.reprepare_forced_candidate(ctx, values, priced=False, admission=admission)
+    assert len(built) == 1, "the re-prepared request was priced once, on the repair's own route"
+    normalized = {"root_cap_usd": 3.0, "deciding_usd": 2.0,
+                  "global_remaining_usd": 2.5 if was_local else None, "use_local": False}
+    assert given and all(row == normalized for row in given), "every check reads the ORIGINAL balances"
+    guard = preparation.candidate_predicate
+    assert guard is not None
+    with pytest.raises(forced.ForcedCandidateUnaffordable):
+        guard(SimpleNamespace(prompt_tokens_estimate=200_000))
+    foreign = SimpleNamespace(model="another-model", provider="another-provider", prompt_tokens_estimate=10)
+    assert guard(foreign) is True, "no byte anchor: a fitting request is admitted whatever its identity"
+    assert preparation.kwargs is values and preparation.physical_context is None
+
+
+def test_an_unpriced_reprepare_without_balances_keeps_the_inherited_guard(monkeypatch):
+    """No priced copy and no admission (a direct forced call's reprepare): nothing is priced here
+    and the inherited guard returns untouched — the absence of balances is never a new ban."""
+    from ouroboros import loop_forced_finalization as forced, loop_routes, task_pacing
+    from ouroboros import usage_accounting
+
+    ctx, values = _reprepare_ctx_and_values()
+    monkeypatch.setattr(loop_routes, "reprepare_source", lambda _ctx, _values: None)
+    monkeypatch.setattr(loop_routes, "reprepare_wire", lambda _ctx, _values, *, deadline_ts: None)
+    monkeypatch.setattr(forced, "_forced_physical_context", lambda _ctx, _messages: None)
+    inherited = object()
+    monkeypatch.setattr(usage_accounting, "current_physical_attempt_predicate", lambda: inherited)
+    built = []
+    monkeypatch.setattr(task_pacing, "prospective_wrapup_attempt_request", lambda **kwargs: built.append(kwargs))
+    preparation = task_pacing.reprepare_forced_candidate(ctx, values, priced=False, admission=None)
+    assert built == [] and preparation.candidate_predicate is inherited
 
 
 def _forced_predicate(forced, admitted):

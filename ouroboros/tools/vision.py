@@ -146,7 +146,7 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
                 kind="vlm",
                 task_attempt=getattr(ctx, "task_attempt", None),
             )
-        propagate_model_error(e)
+        propagate_model_error(e, single_request=True)
         log.warning("analyze_screenshot failed: %s", e, exc_info=True)
         return _vlm_failure(ctx, "VLM_ANALYSIS_FAILED", e, locals().get("vlm_model") or model,
                             [*locals().get("shot", ()), *locals().get("images", ())])
@@ -644,7 +644,7 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
                 kind="vlm",
                 task_attempt=getattr(ctx, "task_attempt", None),
             )
-        propagate_model_error(e)
+        propagate_model_error(e, single_request=True)
         log.warning("vlm_query failed: %s", e, exc_info=True)
         return _vlm_failure(ctx, "VLM_QUERY_FAILED", e, locals().get("vlm_model") or model, images)
 

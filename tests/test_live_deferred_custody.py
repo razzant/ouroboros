@@ -8,6 +8,7 @@ delivery has its own contract in ``test_live_delivery_owner.py``.
 """
 import asyncio
 import json
+import re
 import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -26,6 +27,9 @@ from tests.test_live_tool_continuity_stack import native_output
 
 READY = dict(input_rate=24000, output_rate=24000)
 MAIL = 'Room mail measured for this connection.'
+# The words a serving connection's refused delivery ends the call with (``guard_serving``), beside its typed code. A unit
+# no native write can deliver is refused in other words by ``release_serving``: ``test_live_fit_refused.py`` pins those.
+SERVING_REFUSAL_WORDS = 'The current voice connection could not accept this delivery. Continue by text or start a new call.'
 
 
 def pointers(session):
@@ -204,8 +208,9 @@ def test_a_refused_delivery_with_no_fallback_stays_terminal_on_its_own_conversat
             world.verdict = False
             await asyncio.wait_for(world.entered.wait(), 2)
             world.release.set()
-            with pytest.raises(RealtimeSetupError, match='window'):
+            with pytest.raises(RealtimeSetupError, match=re.escape(SERVING_REFUSAL_WORDS)) as refused:
                 await asyncio.wait_for(world.task, 2)
+            assert refused.value.code == 'context_capacity'
     asyncio.run(scenario())
 
 
@@ -338,8 +343,9 @@ def test_a_refusal_arriving_between_connections_counts_only_for_a_conversation_t
             second = world.host.sessions[1]
             second.emit('ready', **READY)
             if resumes:  # measured again for the conversation that continues, and refused
-                with pytest.raises(RealtimeSetupError, match='window'):
+                with pytest.raises(RealtimeSetupError, match=re.escape(SERVING_REFUSAL_WORDS)) as refused:
                     await asyncio.wait_for(world.task, 2)
+                assert refused.value.code == 'context_capacity'
                 assert not outputs(second)
                 return
             await until(lambda: pointers(second) == 1)

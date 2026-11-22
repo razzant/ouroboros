@@ -64,7 +64,7 @@ class ModelWaitInterrupted(RuntimeError):
         self.model_role = role
         self.previous_error = cause
         if cause is not None:
-            for name in ("physical_attempt_capture", "ledger_attempt_ids", "model_result", "usage",
+            for name in ("physical_attempt_capture", "ledger_attempt_ids", "model_result", "usage", "received_refusal", "received_main_reply",
                          "model_role_route", "operation_id", "route", "stream_incomplete", "stream_rejected"):
                 if hasattr(cause, name):
                     setattr(self, name, getattr(cause, name))
@@ -79,18 +79,19 @@ def propagate_model_control(error: Exception, *, role: str = "") -> None:
                                    cause=error) from error
 
 
-def model_wait_reason(error: Exception) -> str:
-    """Only confirmed resource causes authorize this live waiting contract.
+def model_wait_reason(error: Exception, *, caller_reason: bool = True) -> str:
+    """Wait admission reason, not proof of the owner's remedy.
 
-    The engine's typed mixed pool means auth plus quota, excluding unknown
+    ``caller_reason=False`` reads only typed transport codes. The engine's
+    mixed pool means auth plus quota, excluding unknown
     readiness, disabled accounts and model incompatibility. A dated generic pool
     refusal is ``unavailable`` for this request; its reset forecast proves neither
     quota exhaustion nor unavailability until that instant. An undated pool failure
     proves none of those facts and keeps its ordinary error path.
     """
     authored = getattr(error, "task_resource_wait_reason", "")
-    if authored in {"auth", "quota"}:
-        return authored  # confirmed by the registered caller's refusal classifier
+    if caller_reason and authored in {"auth", "quota"}:
+        return authored  # a caller can also explicitly wait on unclassified access
     code = getattr(error, "code", "")
     if code in {"auth_required", "subscription_window_exhausted"}:
         return "auth" if code == "auth_required" else "quota"
@@ -513,14 +514,15 @@ class ResourceDeferral:
         self._retained: tuple | None = None
 
     def retain(self, receiver: Any, error: Exception, values: dict) -> None:
-        self._retained = (receiver, error, values)
+        binding = (_REPREPARE.get() or {}).get(self.role)
+        self._retained = (receiver, error, values, bool(binding and binding[2]))
         self.fact = {"reason": model_wait_reason(error), "role": self.role, "model": str(values.get("model") or ""),
                      "reset_at": str(getattr(error, "reset_at", "") or ""),
                      "account_rotation": copy.deepcopy(getattr(error, "account_rotation", None))}
 
     def ask_owner(self, context: "TaskModelWait") -> dict:
-        receiver, error, values = self._retained
-        return context.wait(receiver, error, values)
+        receiver, error, values, owner_model_wake = self._retained
+        return context.wait(receiver, error, values, owner_model_wake=owner_model_wake)
 
     def terminal(self, *, fallbacks_tried: list, owner_wait: str) -> dict:
         """The typed temporary non-success when no route recovered it and no owner wait follows."""
@@ -930,16 +932,17 @@ class TaskModelWait:
             return {str(row.get("_slot_id") or "") for row in self.waits.values() if row.get("state") == "waiting"}
 
     def wait(self, llm: Any, error: Exception, kwargs: dict,
-             caller_cancel: threading.Event | None = None) -> dict:
+             caller_cancel: threading.Event | None = None, *, owner_model_wake: bool = False) -> dict:
         """Hold this call's live stack; metadata checks never generate an answer."""
         from ouroboros import config
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
+        from ouroboros.loop_llm_call import model_wait_access_reason
         from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
         from ouroboros.provider_models import parse_claudexor_model
 
         role = kwargs["model_role"]
         binding = (_REPREPARE.get() or {}).get(role)
-        owner_model_wake = bool(binding and binding[2])
+        owner_model_wake = owner_model_wake or bool(binding and binding[2])
         try:
             source, native_model = parse_claudexor_model(kwargs["model"])
         except ValueError:
@@ -954,14 +957,22 @@ class TaskModelWait:
         scope = current_usage_scope()
         slot_id = str(getattr(scope, "review_slot_id", "") or "")
         reason = model_wait_reason(error)
-        quota_wait = reason in {"quota", "auth_quota"}  # unavailable does not prove a quota window
+        access_reason = model_wait_access_reason(error)
+        # Admission reason and clock evidence stay separate facts: only a refusal whose confirmed
+        # evidence proves quota (access_reason quota/auth_quota/api_billing) pauses execution time
+        # (DESIGN "Subscription waits inside task cards"). A wait the owner explicitly chose on
+        # unconfirmed access — the fallback classification names the reason while access_reason
+        # stays empty — still waits, but consumes execution; "unavailable" proves no quota window.
+        quota_wait = (reason in {"quota", "auth_quota"}
+                      and access_reason in {"quota", "auth_quota", "api_billing"})
         row = {"wait_id": wait_id, "task_attempt": self.attempt, "role": role,
                "_slot_id": slot_id,
                "model": kwargs["model"], "source": source,
                # The tier this call captured before waiting, which its continuation pays (the picker's catalog price).
                "processing_preference": str(kwargs.get("processing_preference") or ""),
                "credential_profile_id":"" if reason == "auth_quota" else str(route.get("credentialProfileId") or problem_context.get("credentialProfileId") or account_intent or ""),
-               "credential_harness": "", "reason": reason, "reset_at": str(getattr(error, "reset_at", "") or ""),
+               "credential_harness": "", "reason": reason, "access_reason": access_reason,
+               "reset_at": str(getattr(error, "reset_at", "") or ""),
                "auto_continue": self.auto_continue.get(role, True) if observes_access else False, "state": "waiting",
                **({"availability_observation": "unavailable"} if not observes_access else {}),
                "worker_slot_held": self.worker_slot_held, "started_at": utc_now_iso()}
@@ -1359,7 +1370,10 @@ def model_waitable(function: Callable | None = None, *, client_parameter: str = 
 
     def can_wait(context, receiver, error, values):
         """Wait here, or raise; a deferring round first retains a quota refusal for its later routes."""
-        from ouroboros.llm_claudexor import ClaudexorModelError
+        from ouroboros.llm_claudexor import ClaudexorRefusalError, ClaudexorModelError
+
+        if isinstance(error, ClaudexorRefusalError):
+            return False
 
         capture = getattr(error, "physical_attempt_capture", None)
         binding = (_REPREPARE.get() or {}).get(values.get("model_role"))

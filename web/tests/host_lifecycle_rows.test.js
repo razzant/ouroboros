@@ -40,6 +40,7 @@ test('#931 every typed checkpoint kind names itself; only a kindless one is peri
         ['services_kept', 'Background services kept'],
         ['service_finalization_error', 'Background service cleanup unconfirmed'],
         ['forced_candidate_drift', 'Forced candidate drifted'],
+        ['forced_candidate_unaffordable', 'Forced candidate no longer fits its admitted budget'],
     ]) {
         assert.equal(taskCheckpointLabel({ checkpoint_kind: kind, round: 30 }), label);
         assert.equal(summarizeLogEvent({ type: 'task_checkpoint', checkpoint_kind: kind, round: 30 }).headline, label);

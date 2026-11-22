@@ -93,6 +93,33 @@ def test_prose_only_deliverable_buys_no_extra_round(monkeypatch):
         assert getattr(ctx, "_final_marker_nudged", False) is False
 
 
+REFUSAL_REPLIES = [  # (this reply's parts, whether it is still unmarked)
+    ([{"type": "text", "text": "Menu.\n"}, {"type": "refusal", "refusal": "no"},
+      {"type": "text", "text": "\nFINAL ANSWER: two salads"}], False),  # a whole marker inside one ordinary run
+    ([{"type": "text", "text": "FINAL ANS"}, {"type": "refusal", "refusal": ""},
+      {"type": "text", "text": "WER: 42"}], True),  # glued across an empty refusal: no marker
+    ([{"type": "text", "text": "Menu."}, {"type": "refusal", "refusal": "FINAL ANSWER: 42"}], True),  # refused words
+    ([{"type": "text", "text": "Menu."}, {"type": "refusal", "refusal": "no"},
+      {"type": "text", "text": "Enjoy."}], True),  # an earlier latched marker does not mark this markerless reply
+]
+
+
+def test_marker_nudge_reads_this_refusal_replys_own_marker_run_as_latch_and_selection_do(monkeypatch):
+    from ouroboros._usage_response import assistant_answer_text, refusal_display
+    from ouroboros.outcomes import authored_final_answer
+
+    for parts, unmarked in REFUSAL_REPLIES:
+        dr, ctx, tools = _ctx_tools(monkeypatch)
+        trace = {**_trace(), "best_valid_final_answer": "older", "best_valid_final_answer_tools": 1}
+        control = assistant_answer_text(parts)  # the candidate's ``refusal_control_text``
+        ctx._delivery_candidate = _t.SimpleNamespace(refusal_control_text=control)
+        fired = L._maybe_inject_finalization_nudges(tools, dr, "t", trace, refusal_display(parts), [], lambda *_: None)
+        assert fired is unmarked, parts
+        L._latch_final_answer_marker(trace, parts)
+        selected = authored_final_answer(control, trace)  # what the published candidate selects
+        assert (trace["best_valid_final_answer"], selected) == (("older", "older") if unmarked else ("two salads",) * 2)
+
+
 def test_marker_notice_states_the_protocol_without_commands(monkeypatch):
     dr, ctx, tools = _ctx_tools(monkeypatch)
     msgs: list = []

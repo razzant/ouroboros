@@ -20,6 +20,7 @@ from ouroboros.llm_stream import (
     AssembledResponse, IncompleteProviderStream, ProviderStreamError, RejectedProviderStream,
 )
 from ouroboros.loop_llm_call import classify_llm_exception
+from tests._stream_wire_fixtures import WireResponse, chunk, sse
 from tests._usage_store_testing import ledger_rows
 
 WIRE_CORPUS = pathlib.Path(__file__).parent / "fixtures" / "llm_wire"
@@ -46,56 +47,6 @@ def completion(**extra):
     return {"id": "gen-test", "object": "chat.completion", "model": "vendor/test-stream",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.25}, **extra}
-
-
-def chunk(delta=None, finish=None, *, index=0, **extra):
-    return {"id": "gen-test", "object": "chat.completion.chunk", "model": "vendor/test-stream",
-            "choices": [{"index": index, "delta": delta or {}, "finish_reason": finish}], **extra}
-
-
-def sse(*events, done=True):
-    wire = b""
-    for event in events:
-        if isinstance(event, tuple):
-            kind, body = event
-            wire += f"event: {kind}\r\n".encode()
-        else:
-            body = event
-        wire += ("data: " + json.dumps(body, ensure_ascii=False) + "\r\n\r\n").encode()
-    return wire + (b"data: [DONE]\r\n\r\n" if done else b"")
-
-
-class WireResponse:
-    status_code = 200
-    reason = "OK"
-    url = "https://provider.invalid/v1/messages"
-
-    def __init__(self, wire, *, failure=None, step=None, chunk_size=13):
-        self.wire, self.failure, self.step, self.chunk_size = wire, failure, step, chunk_size
-        self.headers = {"x-generation-id": "header-generation"}
-        self.closed = False
-
-    def iter_bytes(self):
-        # Fragment through UTF-8, CRLF and JSON boundaries (13 bytes by default).
-        for offset in range(0, len(self.wire), self.chunk_size):
-            if self.step:
-                self.step()
-            yield self.wire[offset:offset + self.chunk_size]
-        if self.failure:
-            raise self.failure
-
-    def iter_content(self, **kwargs):
-        return self.iter_bytes()
-
-    async def aiter_bytes(self):
-        for item in self.iter_bytes():
-            yield item
-
-    def close(self):
-        self.closed = True
-
-    async def aclose(self):
-        self.close()
 
 
 class Rejected(RuntimeError):

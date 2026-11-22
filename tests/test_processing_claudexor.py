@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import llm_claudexor as cx
+from tests._llm_claudexor_fixtures import processing_receipt as receipt, processing_refusal as refusal
 from tests.test_llm_claudexor import MODEL, ROUTE, ledger, result, setup as setup_fixture
 
 setup = setup_fixture
@@ -19,24 +20,6 @@ def source_view(monkeypatch):
     monkeypatch.setenv("OUROBOROS_MODEL_PROCESSING_PREFERENCES", "{}")
     monkeypatch.setattr(cx, "model_sources", lambda **kwargs: {
         "sources": [{"id": "codex", "processingPreferences": ["standard", "fast", "economy"]}]})
-
-
-def receipt(preference="standard", native="default", observed="standard"):
-    return {"requested": preference, "submitted": preference, "submittedNative": native,
-            "observed": observed, "observedNative": [native], "reason": None,
-            "source": "codex.service_tier"}
-
-
-def refusal(preference="economy", reason="capacity"):
-    # Engine9bd378ae fixture: response_received is the refusal envelope; these
-    # independent fields prove generation never started. Not raw HTTP inference.
-    native = "flex" if preference == "economy" else "priority"
-    return {**result(outcome="failed"), "message": None, "processing": receipt(preference, native, "unknown"),
-            "problem": {"code": "processing_unavailable", "message": "Engine refused processing",
-                "context": {"httpStatus": 429 if reason == "capacity" else 400,
-                    "vendorCode": "resource_unavailable" if reason == "capacity" else "unsupported_parameter",
-                    "parameter": "service_tier", "generationStarted": False,
-                    "processingFallback": "standard", "processingRefusal": reason}}}
 
 
 @pytest.mark.parametrize(("preference", "asynchronous"), [("standard", False), ("fast", True), ("economy", False)])
@@ -78,7 +61,7 @@ def test_response_received_with_proved_no_generation_reprepares_standard(setup, 
     assert finals[1]["processing"] == receipt()
 
 
-@pytest.mark.parametrize("axis", ["unknown_outcome", "exact_native", "standard"])
+@pytest.mark.parametrize("axis", ["unknown_outcome", "unknown_dispatch", "no_proof", "exact_native", "standard"])
 def test_only_explicit_no_start_advisory_proof_allows_retry(setup, axis):
     root, gateway, client = setup
     response = refusal()
@@ -101,6 +84,8 @@ def test_only_explicit_no_start_advisory_proof_allows_retry(setup, axis):
     assert len(gateway.accepted_operations) == 1
     if axis.startswith("unknown"):
         assert raised.value.code == "model_outcome_unknown" and ledger(root)[-1]["state"] == "unresolved"
+    elif axis == "no_proof":
+        assert ledger(root)[-1]["state"] == "settled"
     if axis == "exact_native":
         assert gateway.uploads[0][0]["options"]["serviceTier"] == "flex"
 

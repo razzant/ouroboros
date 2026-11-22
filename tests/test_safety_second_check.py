@@ -92,14 +92,18 @@ def _unknown():
 
 
 @pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline"), "too large",
-                                 "quota", "unknown"])
+                                 "quota", "unknown", "refusal"])
 def test_a_failed_second_check_keeps_the_first_verdict(supervisor, monkeypatch, bad):
     """A second check that answers nothing (unparseable, a SAFE without a reason, an error, an unknown outcome, its
     quota or sign-in refused, a bundle too large for it) leaves the first verdict standing: the call returns with the
     first reading, never as unread, in one attempt that never waits for resources."""
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = catalog()
-    bad = {"quota": _quota, "unknown": _unknown}[bad]() if bad in ("quota", "unknown") else bad
+    if bad == "refusal":
+        from ouroboros.llm_claudexor import ClaudexorContentRefused
+        bad = ClaudexorContentRefused({"code": "provider_content_refused", "message": ClaudexorContentRefused.notice})
+    elif bad in ("quota", "unknown"):
+        bad = _quota() if bad == "quota" else _unknown()
     h.replies.extend([{"status": "DANGEROUS", "reason": "first flag"}] + ([] if bad == "too large" else [bad]))
     if bad == "too large":  # the first bundle fits; the second, which carries it, does not
         first = h.module._safety_model_call

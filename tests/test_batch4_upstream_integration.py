@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
+from tests._processing_transport_fixture import physical_transport as physical_transport  # registers the `transport` fixture
 from tests.test_batch4_repair_compositions import _running
-from tests.test_processing_transport import transport  # noqa: F401 - fake physical transport
 from tests.test_restart_retention import _done_ids, _pool_events
 from tests.test_review_operation_lifetime import env  # noqa: F401 - isolated operation fixture
 from tests.test_send_clock import ticking  # noqa: F401 - deterministic clock samples

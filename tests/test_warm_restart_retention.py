@@ -30,7 +30,7 @@ def _park(root, workers, reason, *, direct=False, attempt=1):
                           "billing_group_limit_source": "initial_task_admission",
                           "billing_group_limit_revision": "original"})
     ctx, limit = _loop_ctx(root, tid, direct=direct, attempt=attempt)
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
     # Use the real loop's governance + initial-input shape, matching its fit plan.
     limit.messages[:1] = _plan().messages_for("max")
     extra = {}

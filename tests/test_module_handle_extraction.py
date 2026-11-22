@@ -336,6 +336,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_finalize_forced_services", "_finalize_task_services",
         "_plan_gate_disclosure", "_forced_fallback_result",
         "_forced_final_answer",
+        "_handle_direct_turn_hard_stop",
         "_live_delivery_candidate",
         "_loop_tree_accounting", "_merge_finalization_trace",
         "_prepare_forced_prompt", "_prepare_post_tool_budget_context",
@@ -380,7 +381,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         '_replace_delivery_candidate', '_resolve_forced_delivery_control_body', '_retire_main_reasoning',
         '_server_web_allowed_by_task', '_service_finalization_evidence',
         'call_llm_with_retry',
-        '_rebind_context_fit_plan',  # fit the forced candidate's acting route before pricing or sending
+        '_handle_provider_unavailable', '_refusal_terminal',
     })),
     "ouroboros/loop_messages.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_record_owner_directive",
@@ -400,7 +401,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "last_physical_attempt_capture", "seal_task_transcript",
     })),
     "ouroboros/loop_routes.py": ("ouroboros/loop.py", "_loop", frozenset({
-        "_apply_runtime_overrides", "_rebind_context_fit_plan",
+        "_apply_runtime_overrides", "_rebind_context_fit_plan", "_server_web_allowed_by_task",
     })),
     "ouroboros/loop_nudges.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_TREE_ACCOUNTING_MAX_STALE_SEC", "_append_or_merge_user_message",

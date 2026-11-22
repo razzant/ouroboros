@@ -95,6 +95,32 @@ def test_a_helper_the_host_could_not_start_says_why_in_words_on_its_card():
         assert _completion_verdict(_reaped(code), {}) == f"{TASK_CAUSE_PHRASES[code]}.", code
 
 
+def test_the_refusal_and_resource_no_resend_terminals_have_owner_sentences_in_both_twins():
+    """The no-resend terminals are minted beside their producers (``llm_claudexor.terminal_code``,
+    ``loop_llm_call.provider_no_call_source``, ``loop_round_limits._refusal_terminal``), outside the
+    import-based registries above: pin the producer→twins→fixture chain so a card never reads a raw
+    code for them, and the sentences promise no resend or Continue."""
+    import json
+
+    from ouroboros.llm_claudexor import ClaudexorContentRefused, ClaudexorRefusalError
+    from ouroboros.loop_llm_call import provider_no_call_source
+
+    codes = {ClaudexorContentRefused.terminal_code, ClaudexorRefusalError.terminal_code}
+    assert codes == {"provider_content_refused", "unexpected_refusal_content"}
+    resource, wall = provider_no_call_source({"resource_refusal": {"reason": "quota"}}, False)
+    assert (resource, wall) == ("resource_refusal_no_resend", True)
+    codes.add(resource)
+    twin = TWIN.read_text(encoding="utf-8")
+    fixture = json.loads((REPO / "web" / "tests" / "fixtures" / "outcome_phase_parity.json")
+                         .read_text(encoding="utf-8"))
+    for code in sorted(codes):
+        assert code in TASK_CAUSE_PHRASES, f"no owner sentence for typed reason {code!r}"
+        assert f'{code}: "{TASK_CAUSE_PHRASES[code]}",' in twin, f"the browser twin lacks {code!r}"
+        assert any(case["record"].get("reason_code") == code for case in fixture["cases"]), \
+            f"the parity fixture lost {code!r}"
+        assert _completion_verdict(_reaped(code), {}) == f"{TASK_CAUSE_PHRASES[code]}."
+
+
 def test_the_twins_carry_byte_identical_sentences_for_every_key():
     twin = TWIN.read_text(encoding="utf-8")
     for code, sentence in TASK_CAUSE_PHRASES.items():

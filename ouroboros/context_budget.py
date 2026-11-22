@@ -104,6 +104,36 @@ REQUIRED_BOOK_CHOICES = ("The choices are a route with a larger window, the owne
 #: A round's size refusal on a known window that holds the view without the required handbook (``context_renewal``).
 REQUIRED_BOOK_UNFIT_KEY = "_context_required_book_unfit"
 
+
+def context_capacity_detail(*, limit_kind: str = "", limit_tokens: Optional[int] = None,
+                            input_tokens: Optional[int] = None, reserve_tokens: int = 0,
+                            required_book_tokens: int = 0, live_call: bool = False) -> str:
+    """Host words for a refused context, never a limit reconstructed from the fitter's total-equivalent frame."""
+    text = ("The call's context could not fit the selected voice model." if live_call else
+            "This model's context window is too small to start this work.")
+    if limit_kind == "input" and limit_tokens is not None:
+        if input_tokens is not None:
+            text += f" The estimated input is {input_tokens:,} tokens."
+        text += f" The model's input limit here is {limit_tokens:,} tokens."
+        if input_tokens is not None and input_tokens <= limit_tokens:
+            text += " That estimate is within the limit, but the fit could not keep the required room for the reply and the work."
+    elif limit_kind == "total" and limit_tokens is not None:
+        if input_tokens is not None:
+            needs = ((input_tokens + reserve_tokens + 999) // 1000) * 1000
+            text += f" The request needs about {needs:,} tokens including room for the reply and the work."
+        text += f" The model's total window here is {limit_tokens:,} tokens."
+    else:
+        if input_tokens is not None:
+            text += f" The estimated input is {input_tokens:,} tokens."
+        text += " The limiting size was not available."
+    if required_book_tokens:
+        text += (f" This task directly requires the whole development handbook (~{required_book_tokens:,} tokens); "
+                 "without it the start fits.")
+    if live_call:
+        text += " Choose a voice model with a larger window in Calls (beta) settings and start a new call, or continue by text."
+    return text
+
+
 def start_room_levels(role: str, *, direct_chat: bool = False) -> int:
     """Roots (an integrating task that is not a direct chat turn) leave two eighths for their work; a wake
     (consciousness or a Presence focus), a direct chat turn, another Presence turn and a helper leave one.
@@ -216,6 +246,8 @@ CONTEXT_OVERFLOW_CODES = frozenset({
     "context_window_exceeded",
     "model_context_window_exceeded",
     "prompt_too_long",
+    "too_many_prompt_tokens",
+    "tokenization_token_limit_exceeded",
     "input_too_long",
     "string_above_max_length",
 })
@@ -506,7 +538,7 @@ WORLD_SECTION_BUDGET_CHARS = 16_000
 def estimate_message_chars(messages: Any) -> int:
     """Message chars with image blocks at the provider-billing proxy.
 
-    Serves the local-context compaction proxy (`llm.py`); the remote fit
+    Kept for the historical `llm` char-count interface. The fit
     estimator and the density witness measure on `context_fit`'s
     `estimate_context_prompt_tokens` basis instead, which serializes message
     dicts recursively. Image base64 never counts as text here.
@@ -521,7 +553,8 @@ def estimate_message_chars(messages: Any) -> int:
                 if str(block.get("type") or "") in ("image_url", "image"):
                     total += IMAGE_BLOCK_CHAR_EQUIVALENT
                     continue
-                total += len(str(block.get("text", "")))
+                key = "refusal" if block.get("type") == "refusal" and isinstance(block.get("refusal"), str) else "text"
+                total += len(str(block.get(key, "")))
         else:
             total += len(str(content or ""))
         # Reasoning kept on canonical assistant turns is replayed verbatim on

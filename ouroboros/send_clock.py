@@ -27,7 +27,7 @@ no response consumed is never kept. A priced lookahead (the forced final) carrie
 a line of its own sample, so it is advice only: equal width is not equal
 tokens. The final admission reads the FRESH request — its clock-free digest
 (``AttemptRequest.candidate_clock_free_sha256``) must match the lookahead's,
-and its OWN price must fit (``loop_forced_finalization._forced_admission_predicate``).
+and its OWN price must fit (``task_pacing.forced_admission_predicate``).
 """
 
 from __future__ import annotations

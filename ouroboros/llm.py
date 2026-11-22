@@ -115,7 +115,7 @@ from ouroboros.request_wire_recovery import (
     request_wire_scoped,
 )
 from ouroboros.request_wire_recovery import resolve_temperature_hint
-from ouroboros.transport_custody import is_loopback_base_url  # noqa: F401
+from ouroboros.transport_custody import require_observed_endpoint
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS  # noqa: F401 -- historical public import surface
 from ouroboros.usage_accounting import (
     AttemptRequest,  # noqa: F401
@@ -308,6 +308,8 @@ class LLMClient(
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
         chat_conversation_id: str = "",
+        accepts_typed_refusals: bool = False, observed_endpoint_sha256: Optional[str] = None,
+        _restored_native_processing: Optional[dict] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
 
@@ -330,16 +332,19 @@ class LLMClient(
         a confirmed quota/auth refusal to this caller without entering resource
         waiting; task overrides, controls and dispatched-operation custody remain.
         ``caller_dispatch_deadline_ts`` is a helper's send window, never a wait's end
-        (``deadline_utils.caller_deadline_scoped``). ``chat_conversation_id`` is
-        caller-owned wire affinity, separate from cache, role and billing scope;
+        (``deadline_utils.caller_deadline_scoped``). Set ``accepts_typed_refusals`` only
+        when the caller handles ordered assistant text/refusal blocks and independent tool calls.
+        ``chat_conversation_id`` is caller-owned wire affinity, separate from cache, role and billing scope;
         no identity is inherited by other calls."""
-        from ouroboros.llm_claudexor import turn_state_for_route
+        from ouroboros.llm_claudexor import RESTORED_PROCESSING_KEY, turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
         with capture_attempt_ids() as attempt_ids:
             if use_local:
                 turn_state_for_route(model_turn_state, "local")
                 local_kwargs = {"timeout": timeout}
+                if observed_endpoint_sha256:
+                    local_kwargs["observed_endpoint_sha256"] = observed_endpoint_sha256
                 if reasoning_effort is not None:
                     local_kwargs["reasoning_effort"] = reasoning_effort
                 if processing_preference is not None:
@@ -353,6 +358,9 @@ class LLMClient(
                 no_proxy = no_proxy or transport_no_proxy()
                 target = {**self._resolve_remote_target(model), "processing_preference": processing_preference,
                           "chat_conversation_id": chat_conversation_id}
+                if target.get("provider") == "claudexor" and _restored_native_processing:
+                    target[RESTORED_PROCESSING_KEY] = _restored_native_processing
+                require_observed_endpoint(observed_endpoint_sha256, target.get("base_url"))
                 temperature = resolve_temperature_hint(target, temperature, default_temperature)
                 message, usage = self._chat_remote(
                     target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
@@ -367,6 +375,7 @@ class LLMClient(
                     model_operation_observer=model_operation_observer,
                     model_account_override=model_account_override,
                     model_turn_state=turn_state_for_route(model_turn_state, target.get("provider")),
+                    **({"accepts_typed_refusals": True} if accepts_typed_refusals is True else {}),
                     **({"stream": True} if stream else {}),
                 )
             usage["ledger_attempt_ids"] = list(attempt_ids)
@@ -402,6 +411,7 @@ class LLMClient(
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
         chat_conversation_id: str = "",
+        accepts_typed_refusals: bool = False, observed_endpoint_sha256: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs.
 
@@ -418,6 +428,8 @@ class LLMClient(
             def local_call():
                 adopt_physical_attempt_capture(None)
                 local_kwargs = {"timeout": timeout}
+                if observed_endpoint_sha256:
+                    local_kwargs["observed_endpoint_sha256"] = observed_endpoint_sha256
                 if reasoning_effort is not None:
                     local_kwargs["reasoning_effort"] = reasoning_effort
                 if processing_preference is not None:
@@ -436,6 +448,7 @@ class LLMClient(
             return result
         target = {**self._resolve_remote_target(model), "processing_preference": processing_preference,
                   "chat_conversation_id": chat_conversation_id}
+        require_observed_endpoint(observed_endpoint_sha256, target.get("base_url"))
         temperature = resolve_temperature_hint(target, temperature, default_temperature)
         carried_turn_state = turn_state_for_route(model_turn_state, target.get("provider"))
         if target.get("provider") == "claudexor":
@@ -447,13 +460,14 @@ class LLMClient(
                     max_tokens=max_tokens, tool_choice=tool_choice, temperature=temperature,
                     timeout=timeout, allow_server_web_search=allow_server_web_search,
                     cache_affinity=cache_affinity, model_role=model_role,
+                    accepts_typed_refusals=accepts_typed_refusals,
                     model_poll_control=model_poll_control,
                     model_operation_observer=model_operation_observer,
                     model_account_override=model_account_override,
                     model_turn_state=carried_turn_state,
                 )
             result[1]["ledger_attempt_ids"] = list(attempt_ids)
-            return result
+            return _one_shot_result(result, tools)
         if target.get("provider") == "anthropic":
             with capture_attempt_ids() as attempt_ids:
                 result = await self._chat_anthropic_async(
@@ -494,7 +508,7 @@ class LLMClient(
                     )
                 result = self._normalize_remote_response(
                     _reply_dict(resp, target),
-                    target,
+                    target, wire_completion=resp,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
                 )
@@ -526,7 +540,7 @@ class LLMClient(
             )
         result = self._normalize_remote_response(
             _reply_dict(resp, target),
-            target,
+            target, wire_completion=resp,
             prompt_cache_ttl=prompt_cache_ttl,
         )
         result[1]["ledger_attempt_ids"] = list(attempt_ids)

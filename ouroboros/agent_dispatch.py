@@ -196,38 +196,59 @@ def _blocked_executor_terminal(cap_info: Dict[str, Any], task: Optional[Dict[str
     return text, usage, {"reasoning_notes": ["subagent_executor_unavailable"], "tool_calls": []}
 
 
-def _context_capacity_terminal(unfit: Any) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    """The named outcome of a known window that cannot hold a pooled task's start (``MinimumViewUnfit``).
+def _start_context_capacity_terminal(task, turn, unfit, drive_logs):
+    """Choose the already admitted start's terminal owner, never a retry.
+
+    A Presence turn owns its ordinary result even on a degraded or legacy thread.
+    Its call already has a hub, but no live host yet. An owner's inline call still
+    uses the carrier's closure and result publication, not a second final here.
+    """
+    from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED, carrier_executor, execution_kind, inline_execution
+
+    presence = bool(task.get("_presence_turn"))
+    if not presence and inline_execution(task) and (carrier_executor(task), execution_kind(task)) != (EXECUTOR_INLINE_DEGRADED, "direct"):
+        return None
+    # No model ran this attempt; there is nothing to synthesize. Earlier attempts keep their own evidence.
+    task["_skip_post_task_synthesis"] = True
+    if presence and turn is not None:
+        from ouroboros.realtime_setup import finish_call_preparation_refusal
+
+        text, usage, trace = finish_call_preparation_refusal(turn, task["id"], unfit, drive_logs)
+        usage["loop_evidence_unavailable"] = trace["loop_evidence_unavailable"] = True
+        return text, usage, trace
+    return _context_capacity_terminal(unfit, presence=presence)
+
+
+def _context_capacity_terminal(unfit: Any, *, presence: bool = False) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """The named outcome when a window cannot hold a text start (``MinimumViewUnfit``).
 
     In the reader's words: what the start needs against the route's limit, the step that changes it (for a
     directly required handbook, the choices that remain), then the measured parts; the host switches nothing. Money
     stays the ledger's answer, and an earlier attempt's or started run's effects stay theirs: this attempt's own
     loop evidence is absent, never a zero, so nothing here claims the task had no effect.
     """
-    from ouroboros.context_budget import REQUIRED_BOOK_CHOICES
+    from ouroboros.context_budget import REQUIRED_BOOK_CHOICES, context_capacity_detail
     from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
 
-    # The comparison the fitter refused on: input plus the reserve kept for the reply and the work, against the
-    # route's limit. The further room a start wants is no threshold (a start with less runs): named only as measured.
-    # The paths named are the ones every surface keeps: the room's model button, Settings › Models, Context Length.
-    # A window is a role's setting: a chat with its own model has none to correct, so only Main's is named.
-    limit, book = unfit.window_tokens, unfit.required_book_tokens
-    needs = -(-(unfit.estimated_input_tokens + unfit.response_reserve_tokens) // 1000) * 1000  # "about": rounded up
-    text = (f"⚠️ This model's context window is too small to start this work: the start needs about {needs:,} tokens "
-            f"(its input plus the room kept for the reply and the work), and the model's limit here is {limit:,}.")
+    limit, book = unfit.limiting, unfit.required_book_tokens
+    text = context_capacity_detail(limit_kind=limit.kind if limit else "", limit_tokens=limit.tokens if limit else None,
+        input_tokens=unfit.estimated_input_tokens, reserve_tokens=unfit.response_reserve_tokens, required_book_tokens=book)
     if book:
-        text += (f" This task directly requires the whole development handbook (~{book:,} tokens); without it the "
-                 "start fits. " + REQUIRED_BOOK_CHOICES.format("; a Continue keeps it"))  # a Continue cause
+        text += " " + REQUIRED_BOOK_CHOICES.format("; a Continue keeps it")  # a Continue cause
     else:
-        text += (" Choose a model with a larger window and send the request again: in the app, the model button under "
-                 "the message box sets it for this chat, and Settings › Models sets the default for chats that follow "
-                 "Main. For a local model, raise its Context Length in Settings and restart it. If this chat follows "
-                 "Main and the model's real limit is higher, set Main's window in Settings › Models.")
+        more_room = "a higher input limit" if limit and limit.kind == "input" else "a larger window"
+        if presence:
+            text += f" Choose a model with {more_room} for this conversation before the next event."
+        else:
+            text += (f" Choose a model with {more_room} and send the request again: in the app, the model button under "
+                     "the message box sets it for this chat, and Settings › Models sets the default for chats that follow "
+                     "Main. For a local model, raise its Context Length in Settings and restart it. If this chat follows "
+                     "Main and the model's real limit is higher, set Main's window in Settings › Models.")
     inside = [("core, request and tools", unfit.fixed_input_tokens - book), ("handbook", book),
               ("further memory", unfit.memory_view_tokens)]
     text += (f"\n\nMeasured, in tokens: input {unfit.estimated_input_tokens:,} ("
              + "; ".join(f"{name} {value:,}" for name, value in inside if value)
-             + f") · reserve for the reply and the work {unfit.response_reserve_tokens:,} · limit {limit:,}"
+             + f") · reserve for the reply and the work {unfit.response_reserve_tokens:,}"
              + (f" · further room the start wanted {unfit.work_room_tokens:,}" if unfit.work_room_tokens else "") + ".")
     usage = {"execution_status": "infra_failed", "reason_code": "context_capacity",
              "terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE, "loop_evidence_unavailable": True}

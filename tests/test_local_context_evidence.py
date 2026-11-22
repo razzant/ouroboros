@@ -8,7 +8,7 @@ import pytest
 
 from ouroboros import capability_evidence as ce, config, local_model
 from ouroboros.llm import LLMClient
-from ouroboros.llm_local import local_context_limits
+from ouroboros.llm_local import _endpoint_port, local_context_limits
 
 
 @pytest.fixture
@@ -19,6 +19,8 @@ def manager(monkeypatch, tmp_path):
     manager._status = "ready"
     monkeypatch.setattr(local_model, "get_manager", lambda: manager)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    # The capacity queue of the built-in server's counts, and every state file this manager reads, live here too.
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     return manager
 
 
@@ -173,11 +175,13 @@ def test_serving_measurement_keeps_input_and_instance_binding(manager, monkeypat
     manager._context_length = 131072
     manager._serving_context_length = 16384
     manager._measurement_route = True
+    # The count may open only toward the endpoint this lane dispatches to; this server is that endpoint here.
+    monkeypatch.setenv("LOCAL_MODEL_PORT", str(manager._port))
     payload = {"model": "local-model", "messages": [{"role": "user", "content": "source"}]}
     measured = {"supported": True, "input_is_exact": True, "input_tokens": 42,
                 "context_window": 16384, "process_id": 123,
                 "native_input_sha256": input_fingerprint(payload)}
-    response = Mock()
+    response = Mock(status_code=200)
     response.json.return_value = measured
     session_scope = MagicMock()
     session_scope.__enter__.return_value.post.return_value = response
@@ -187,6 +191,225 @@ def test_serving_measurement_keeps_input_and_instance_binding(manager, monkeypat
     assert manager.measure_prepared_input(changed_payload)["supported"] is False
     manager._proc = SimpleNamespace(pid=456, poll=lambda: None)
     assert manager.measure_prepared_input(payload)["supported"] is False
+
+
+@pytest.mark.parametrize(("dispatch_port", "counted"), [("8766", True), ("8767", False)],
+                         ids=["dispatches-to-this-server", "dispatches-to-another-endpoint"])
+def test_the_count_opens_no_connection_to_an_endpoint_this_lane_does_not_dispatch_to(
+        manager, monkeypatch, dispatch_port, counted):
+    """A count may open its connection only toward the endpoint the lane's send addresses.
+
+    ``_chat_local`` sends to ``local_dispatch_port()`` and holds that endpoint's queue (``measurement_slot``), while
+    this manager's count would post to the port ``start_server`` accepted. A server listening elsewhere is a
+    different one: its own slot is not the queue this process took, so counting there would open beside that
+    server's work — and, were another server answering the lane's address, the facts would describe a send that
+    never reaches them. There the count answers with its unsupported fact and opens nothing, so the candidate
+    keeps its own estimate; at the same endpoint the identical call still counts.
+    """
+    import requests
+    from ouroboros.local_model_server import input_fingerprint
+
+    manager._context_length = 131072
+    manager._serving_context_length = 16384
+    manager._measurement_route = True
+    manager._port = 8766
+    monkeypatch.setenv("LOCAL_MODEL_PORT", dispatch_port)
+    payload = {"model": "local-model", "messages": [{"role": "user", "content": "source"}]}
+    measured = {"supported": True, "input_is_exact": True, "input_tokens": 42,
+                "context_window": 16384, "process_id": 123,
+                "native_input_sha256": input_fingerprint(payload)}
+    response = Mock(status_code=200)
+    response.json.return_value = measured
+    session = MagicMock()
+    session.post.return_value = response
+    session_scope = MagicMock()
+    session_scope.__enter__.return_value = session
+    monkeypatch.setattr(requests, "Session", lambda: session_scope)
+    result = manager.measure_prepared_input(payload)
+    if counted:
+        assert result == measured
+        assert [call.args[0] for call in session.post.call_args_list] == ["http://127.0.0.1:8766/extras/measure_chat"]
+    else:
+        assert (result["supported"], result["input_is_exact"]) == (False, False)
+        assert result["reason"] == "measurement_endpoint_mismatch"
+        assert session.post.call_count == 0
+
+
+@pytest.mark.parametrize("scenario", ["serving", "wrong_pid", "wrong_port", "changed_pid", "reused_pid",
+                                      "unbound", "port_changed", "redirect", "expired"])
+def test_builtin_observation_binds_the_selected_listener(manager, monkeypatch, scenario):
+    import requests
+    from ouroboros.llm_probe import upstream_transport_reachable
+    from ouroboros.local_model_server import input_fingerprint
+
+    manager._serving_context_length, manager._measurement_route, manager._port = 8192, True, 9100
+    if scenario != "unbound":
+        manager._service_binding = {"host": "127.0.0.1", "port": 9100, "pid": 123,
+                                    "fingerprint": {"start_time": "old-birth"}}
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "9101" if scenario == "wrong_port" else "9100")
+    session = MagicMock()
+    def post(url, *, json, timeout, allow_redirects):
+        assert url == "http://127.0.0.1:9100/extras/measure_chat"
+        assert timeout == 3 and not allow_redirects and session.trust_env is False
+        if scenario == "port_changed":
+            monkeypatch.setenv("LOCAL_MODEL_PORT", "9101")
+        if scenario == "changed_pid":
+            manager._proc = SimpleNamespace(pid=456, poll=lambda: None)
+        if scenario == "reused_pid":
+            manager._service_binding["fingerprint"] = {"start_time": "new-birth"}
+        return Mock(status_code=302 if scenario == "redirect" else 200, json=lambda: {
+            "supported": False, "context_window": 8192, "process_id": 456 if scenario == "wrong_pid" else 123,
+            "native_input_sha256": input_fingerprint(json)})
+    session.post.side_effect = post
+    monkeypatch.setattr(requests, "Session", lambda: MagicMock(__enter__=Mock(return_value=session)))
+    observed = upstream_transport_reachable(None, "claudexor::codex=cloud", use_local=True,
+                                             timeout=0 if scenario == "expired" else 3)
+    assert bool(observed) == (scenario == "serving")
+    if observed:
+        assert (observed["kind"], observed["port"], observed["process_id"]) == ("local_server_http", 9100, 123)
+        assert len(observed["endpoint_sha256"]) == 64
+    assert session.post.call_count == (0 if scenario in {"wrong_port", "unbound", "expired"} else 1)
+
+
+def test_a_route_observation_declines_a_busy_slot_and_opens_no_connection(manager, monkeypatch, tmp_path):
+    """The count behind a route observation is advice like the lookahead's price: while a generation holds the built-in
+    server's one slot nothing reaches that server and the route stays unobserved; the freed slot admits the next
+    observation, which binds the same listener."""
+    import requests
+    from ouroboros import model_concurrency as mc
+    from ouroboros.llm_probe import upstream_transport_reachable
+    from ouroboros.local_model_server import input_fingerprint
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.delenv("OUROBOROS_MODEL_MAX_CONCURRENCY", raising=False)  # no number chosen: the server's one slot
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "9100")
+    manager._serving_context_length, manager._measurement_route, manager._port = 8192, True, 9100
+    manager._service_binding = {"host": "127.0.0.1", "port": 9100, "pid": 123, "fingerprint": {"start_time": "old-birth"}}
+    session = MagicMock()
+    session.post.side_effect = lambda url, *, json, timeout, allow_redirects: Mock(status_code=200, json=lambda: {
+        "supported": False, "context_window": 8192, "process_id": 123, "native_input_sha256": input_fingerprint(json)})
+    monkeypatch.setattr(requests, "Session", lambda: MagicMock(__enter__=Mock(return_value=session)))
+
+    with mc.model_call_slot("local-model", True, route={"provider": "local"}):  # a generation owns the one slot
+        assert upstream_transport_reachable(None, "claudexor::codex=cloud", use_local=True, timeout=3) == {}
+        assert session.post.call_count == 0
+    observed = upstream_transport_reachable(None, "claudexor::codex=cloud", use_local=True, timeout=3)
+    assert (observed.get("kind"), observed.get("process_id"), observed.get("port")) == ("local_server_http", 123, 9100)
+    assert session.post.call_count == 1
+
+
+@pytest.mark.parametrize("worker", [False, True])
+@pytest.mark.parametrize("change", ["none", "port", "process", "birth_after_queue", "external_loopback", "empty_after_dispatch"])
+def test_managed_local_recovery_rechecks_its_observed_listener(manager, monkeypatch, tmp_path, worker, change):
+    import httpx
+    import requests
+    from ouroboros import llm_local, loop_transport, usage_accounting as ua
+    from ouroboros.local_model_server import input_fingerprint
+    from ouroboros.loop_llm_call import call_llm_with_retry
+    from ouroboros.transport_custody import ObservedEndpointChanged
+    from tests._usage_store_testing import ledger_rows
+
+    def serve(port=9100, pid=123, birth="first"):
+        manager._port = port
+        manager._proc = SimpleNamespace(pid=pid, poll=lambda: None)
+        manager._service_binding = {"host": "127.0.0.1", "port": port, "pid": pid,
+                                    "fingerprint": {"start_time": birth}}
+        monkeypatch.setenv("LOCAL_MODEL_PORT", str(port))
+
+    manager._serving_context_length, manager._measurement_route = 8192, True
+    serve()
+    if worker:
+        monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")
+        monkeypatch.setattr("ouroboros.platform_layer.process_command", lambda pid: "server --n_ctx 8192")
+        monkeypatch.setattr("ouroboros.server_process.read_service_bindings", lambda root: {"local_model": manager._service_binding})
+        monkeypatch.setattr("ouroboros.server_process.service_binding_is_live", lambda binding: binding == manager._service_binding)
+
+    def measure(url, *, json, timeout, allow_redirects):
+        assert url == f"http://127.0.0.1:{manager._port}/extras/measure_chat" and not allow_redirects
+        return Mock(status_code=200, json=lambda: {"supported": False, "context_window": 8192,
+                    "process_id": manager._proc.pid, "native_input_sha256": input_fingerprint(json)})
+
+    probes = Mock(post=measure)
+    monkeypatch.setattr(requests, "Session", lambda: MagicMock(__enter__=Mock(return_value=probes)))
+    sent = []
+
+    def sdk_client(*, base_url, **_kwargs):
+        def generate(**payload):
+            sent.append((base_url, manager._proc.pid, payload))
+            if len(sent) == 1:
+                raise httpx.ReadError("original response lost")
+            answer = "answer"
+            if change == "empty_after_dispatch" and len(sent) == 2:
+                # The observed listener accepted this attempt. Replacing it after
+                # its empty response must not make the ordinary retry revoke a spent grant.
+                serve(port=9101, pid=456)
+                answer = ""
+            return SimpleNamespace(model_dump=lambda: {
+                "choices": [{"message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 1, "cost": 0.0}})
+        return SimpleNamespace(base_url=base_url + "/", chat=SimpleNamespace(completions=SimpleNamespace(create=generate)))
+
+    monkeypatch.setattr("openai.OpenAI", sdk_client)
+    monkeypatch.setattr("ouroboros.loop_llm_call._sleep_within_deadline", lambda *_a, **_kw: True)
+    llm = LLMClient()
+    model, task = "openai-compatible::fixture", "local-recovery"
+    monkeypatch.setattr(llm, "_resolve_remote_target", lambda _model: {"base_url": "http://127.0.0.1:9100/v1"})
+    monkeypatch.setattr(llm, "_chat_remote", lambda *_a, **_kw: pytest.fail("unobserved external generation"))
+    episode = loop_transport.TransportWaitEpisode(wait_cause="provider_outcome_unknown")
+    messages, usage = [{"role": "user", "content": "test message"}], {}
+    tools = SimpleNamespace(_ctx=SimpleNamespace(task_id=task, task_metadata={}))
+
+    def grant():
+        return loop_transport.continue_unknown_transport(episode, llm=llm, tools=tools, messages=messages,
+            accumulated_usage=usage, drive_logs=tmp_path / "logs", task_id=task, model=model, use_local=True,
+            emit_progress=lambda *_a, **_kw: None)
+
+    def generate(*, use_local=True):
+        return call_llm_with_retry(llm, messages, model, [], "none", 2, tmp_path / "logs", task, 1, None,
+                                   usage, use_local=use_local, initial_messages=messages)
+
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=task, root_task_id=task, global_limit_usd=10)):
+        with pytest.raises(httpx.ReadError):
+            llm.chat(messages, model, use_local=True)
+        original, = ledger_rows(tmp_path)
+        assert original["state"] == "unresolved"
+        previous = {"physical_attempt_id": original["attempt_id"], "outcome": "unknown"}
+        usage["_pending_transport_outcome"] = previous
+        assert grant() and len(sent) == 1
+        if change == "port":
+            serve(port=9101)
+        if change == "process":
+            serve(pid=456)
+        if change == "birth_after_queue":
+            # Substitute the listener only inside the wrapper that owns the
+            # physical slot, after accounting's candidate check has run.
+            wrap = llm_local.limit_physical_send
+            def after_queue(route, send):
+                def dispatched():
+                    assert ledger_rows(tmp_path)[-1]["state"] == "dispatched"
+                    serve(birth="second")
+                    return send()
+                return wrap(route, dispatched)
+            monkeypatch.setattr(llm_local, "limit_physical_send", after_queue)
+        if change not in {"none", "empty_after_dispatch"}:
+            with pytest.raises(ObservedEndpointChanged):
+                generate(use_local=change != "external_loopback")
+            loop_transport.revoke_endpoint_grant(usage, episode)
+            assert usage["_pending_transport_outcome"] == previous and not episode.continuation_granted
+            assert "_observed_transport_endpoint" not in usage and len(sent) == 1
+            if change != "external_loopback":
+                assert [row["state"] for row in ledger_rows(tmp_path)] == ["unresolved", "released"]
+            assert grant() and len(sent) == 1
+        assert generate()[0]["content"] == "answer"
+
+    rows = ledger_rows(tmp_path)
+    assert rows[0] == original and rows[-1]["state"] == "settled"
+    assert rows[-1]["attempt_id"] != original["attempt_id"]
+    first = ("http://127.0.0.1:9100/v1", 123)
+    assert [(url, pid) for url, pid, _ in sent] == [first] * (2 if change == "empty_after_dispatch" else 1) + [
+        (f"http://127.0.0.1:{manager._port}/v1", manager._proc.pid)]
+    assert "_observed_transport_endpoint" not in usage and "_pending_transport_outcome" not in usage
+    assert sum("NEW physical model attempt" in row["content"] for row in sent[-1][2]["messages"]) == 1
 
 
 @pytest.mark.parametrize("window", [0, 16384, 65536])
@@ -525,8 +748,8 @@ def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns
                 continue
             facts["threads"][thread.name] = "".join(traceback.format_stack(frame))
             while frame:
-                if frame.f_code.co_name == "_drain_stderr" and frame.f_locals.get("self") is offline_manager:
-                    facts["stderr_live_tail"] = frame.f_locals.get("buf", b"").decode("utf-8", errors="replace")
+                if frame.f_code.co_name in {"_drain_stderr", "_read_tail"} and "buf" in frame.f_locals:
+                    facts["stderr_live_tail"] = frame.f_locals["buf"].decode("utf-8", errors="replace")
                 frame = frame.f_back
         # Printed only on failure so short tracebacks retain the diagnostic, without environment values.
         print("LOCAL_MODEL_STARTUP_DIAGNOSTIC " + json.dumps(facts, ensure_ascii=False), flush=True)
@@ -730,3 +953,146 @@ def test_local_helper_keeps_the_plans_serving_instance(manager, monkeypatch, tmp
     target, payload = LLMClient.__new__(LLMClient)._build_local_candidate(
         [{'role':'user', 'content':'hi'}], None, 65536, 'auto')
     assert _helper_attempt_context(target, payload).capacity_total_tokens == 40000
+
+
+def test_ordinary_builtin_send_names_the_endpoint_its_sdk_client_reaches(manager, monkeypatch):
+    """The count and the queue of an ordinary send must describe the endpoint the SDK actually reaches.
+
+    ``_chat_local`` snapshots its client's base URL once; the environment the manager reads can name another
+    port afterwards (a settings/launch change). The candidate then carries the snapshotted base URL and its
+    serving facts stay uncertain instead of describing a different server, and the count is asked for that
+    same endpoint's port.
+    """
+    manager._port = 8766
+    manager._measurement_route = True
+    manager._serving_context_length = 16384
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "8766")
+    client = LLMClient(api_key="unused")
+    seen = {}
+
+    def prepared(*args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop after preparation")
+
+    monkeypatch.setattr(client, "_get_local_client",
+                        lambda: SimpleNamespace(base_url="http://127.0.0.1:8767/v1"))
+    monkeypatch.setattr(client, "_prepared_local_candidate", prepared)
+    with pytest.raises(RuntimeError, match="stop after preparation"):
+        client._chat_local([{"role": "user", "content": "hi"}], None, 64, "auto")
+    assert seen["base_url"] == "http://127.0.0.1:8767/v1"
+
+
+def test_a_bound_candidate_takes_its_serving_facts_from_the_named_endpoint(manager, monkeypatch):
+    """A candidate naming another port keeps its SDK address, but not the other listener's window."""
+    manager._port = 8766
+    manager._measurement_route = True
+    manager._serving_context_length = 16384
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "8766")
+    monkeypatch.setattr(manager, "serving_context_evidence",
+                        lambda bind_endpoint=False: {"confirmed": True, "context_window": 16384,
+                                                     "source": "owned_server_arguments", "port": 8766})
+    lane = LLMClient.__new__(LLMClient)
+    target, _payload = lane._build_local_candidate([{"role": "user", "content": "hi"}], None, 64, "auto",
+                                                   base_url="http://127.0.0.1:8767/v1")
+    assert target["base_url"] == "http://127.0.0.1:8767/v1"
+    assert target["context_window_tokens"] is None and target["context_window_confirmed"] is False
+    _target, _payload = lane._build_local_candidate([{"role": "user", "content": "hi"}], None, 64, "auto",
+                                                    base_url="http://127.0.0.1:8766/v1")
+    assert _target["context_window_tokens"] == 16384
+    assert _endpoint_port("http://127.0.0.1:8767/v1") == 8767
+
+
+def test_a_bound_count_accepts_the_owners_own_process_without_a_service_binding(manager, monkeypatch):
+    """The owner's own process is bound by its pid and port, not only by a service binding's digest.
+
+    ``serving_context_evidence(bind_endpoint=True)`` carries an ``endpoint_sha256`` only while a recorded
+    service binding matches the live process. A manager started in this process has no such binding, so the
+    count must still open toward the port it was asked to bind: the post-count re-read checks the same pid and
+    window, and a port other than the expected one is refused. A published worker's digest stays required.
+    """
+    import requests
+    from ouroboros.local_model_server import input_fingerprint
+
+    manager._port = 8766
+    manager._measurement_route = True
+    manager._serving_context_length = 16384
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "8766")
+    payload = {"model": "local-model", "messages": [{"role": "user", "content": "source"}]}
+    session = MagicMock()
+    session.post.return_value = Mock(status_code=200, json=lambda: {
+        "supported": True, "input_is_exact": True, "input_tokens": 42, "context_window": 16384,
+        "process_id": 123, "native_input_sha256": input_fingerprint(payload)})
+    monkeypatch.setattr(requests, "Session", lambda: MagicMock(__enter__=Mock(return_value=session)))
+
+    measured = manager.measure_prepared_input(payload, expected_port=8766, require_endpoint_digest=False)
+    assert measured["supported"] is True and "endpoint_sha256" not in measured
+    assert session.post.call_args.args[0] == "http://127.0.0.1:8766/extras/measure_chat"
+
+    session.post.reset_mock()
+    refused = manager.measure_prepared_input(payload, expected_port=8767, require_endpoint_digest=False)
+    assert (refused["supported"], refused["reason"]) == (False, "measurement_unavailable")
+    assert session.post.call_count == 0
+
+
+@pytest.mark.parametrize("require_endpoint_digest", [True, False])
+def test_a_bound_count_requires_a_published_workers_endpoint_digest(manager, monkeypatch, require_endpoint_digest):
+    """Neither a durable probe nor an ordinary send can waive a published worker's missing digest."""
+    import requests
+
+    manager._measurement_route = True
+    published = {"confirmed": True, "context_window": 16384, "source": "published_server_arguments",
+                 "process_id": 123, "port": 8766, "endpoint_sha256": ""}
+    monkeypatch.setattr(manager, "serving_context_evidence", lambda bind_endpoint=False: dict(published))
+    session = MagicMock()
+    monkeypatch.setattr(requests, "Session", lambda: MagicMock(__enter__=Mock(return_value=session)))
+
+    refused = manager.measure_prepared_input({"model": "local-model", "messages": []}, expected_port=8766,
+                                             require_endpoint_digest=require_endpoint_digest)
+    assert (refused["supported"], refused["reason"]) == (False, "measurement_unavailable")
+    assert session.post.call_count == 0
+
+
+def _lookahead_setup(manager, monkeypatch, tmp_path, served, named):
+    import requests
+    from ouroboros import llm_attempt
+
+    manager._port = served
+    manager._measurement_route = True
+    manager._serving_context_length = 16384
+    manager._service_binding = None  # the optional binding write failed; health stayed ready
+    monkeypatch.setenv("LOCAL_MODEL_PORT", str(named))
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.delenv("OUROBOROS_MODEL_MAX_CONCURRENCY", raising=False)
+    monkeypatch.setattr(llm_attempt, "require_physical_dispatch_window", lambda: None)
+    session = MagicMock()
+    monkeypatch.setattr(requests, "Session", lambda: MagicMock(__enter__=Mock(return_value=session)))
+    return session
+
+
+def test_the_advisory_lookahead_counts_under_the_endpoint_it_names(manager, monkeypatch, tmp_path):
+    """Same port: bound facts survive a missing service binding and the count opens on the named endpoint."""
+    from ouroboros.local_model_server import input_fingerprint
+    from ouroboros.model_concurrency import built_in_route
+
+    session = _lookahead_setup(manager, monkeypatch, tmp_path, 8766, 8766)
+    session.post.side_effect = lambda url, json, **_k: Mock(status_code=200, json=lambda: {
+        "supported": True, "input_is_exact": True, "input_tokens": 42, "context_window": 16384,
+        "process_id": 123, "native_input_sha256": input_fingerprint(json)})
+    target, _ = LLMClient.__new__(LLMClient)._prepared_local_candidate(
+        [{"role": "user", "content": "source"}], None, 64, "auto", None, "auto")
+    assert target["base_url"] == "http://127.0.0.1:8766/v1" == built_in_route(8766)["base_url"]
+    assert target["context_window_confirmed"] is True and target["context_window_tokens"] == 16384
+    assert target["local_input_measurement"]["input_tokens"] == 42
+    assert session.post.call_args.args[0] == "http://127.0.0.1:8766/extras/measure_chat"
+
+
+def test_the_advisory_lookahead_names_the_lane_endpoint_and_trusts_no_other(manager, monkeypatch, tmp_path):
+    """Different port: the queue still names the lane's canonical endpoint; a foreign manager yields no facts."""
+    from ouroboros.model_concurrency import built_in_route
+
+    session = _lookahead_setup(manager, monkeypatch, tmp_path, 8766, 8767)
+    target, _ = LLMClient.__new__(LLMClient)._prepared_local_candidate(
+        [{"role": "user", "content": "source"}], None, 64, "auto", None, "auto")
+    assert target["base_url"] == built_in_route(8767)["base_url"]
+    assert target["context_window_tokens"] is None and target["context_window_confirmed"] is False
+    assert "local_input_measurement" not in target and session.post.call_count == 0

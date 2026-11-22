@@ -90,7 +90,8 @@ class TestTheSourcePredicate:
         )
         assert trace["forced_finalization"]["source"] == "provider_outcome_unknown_no_resend"
         assert usage["reason_code"] == "provider_unavailable"
-        assert "1 earlier physical attempt(s) of the last dispatched round" in text
+        assert "permits no further retry or paid fallback" in text
+        assert "checkpoint records transport_unavailable" in text
         assert "context exceeded" not in text
 
 

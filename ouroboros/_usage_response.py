@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import json
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -105,6 +107,61 @@ def normalize_go_price(usage: Dict[str, Any]) -> Tuple[Optional[float], bool]:
 OUTPUT_LIMIT_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
 # A provider's own content refusal: OpenAI-family ``content_filter`` and Anthropic ``refusal``.
 CONTENT_REFUSAL_FINISH_REASONS = frozenset({"content_filter", "refusal"})
+
+
+def refusal_content_text(content: Any) -> Optional[str]:
+    """Visible words of an ordered text/refusal reply. An empty refusal still answered."""
+    if not isinstance(content, list):
+        return None
+    words, refused = [], False
+    for part in content:
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind in ("text", "refusal") and isinstance(part.get(kind), str):
+            words.append(part[kind])
+            refused |= kind == "refusal"
+    return "".join(words) if refused else None
+
+
+def refusal_display(content: Any) -> Optional[str]:
+    """A refusal reply's final words, byte-exact: none or only whitespace stays so. The host's explanation beside
+    such words is its own notice (``task_finalization.EMPTY_REFUSAL_NOTICE``), never these words."""
+    return refusal_content_text(content)
+
+
+def candidate_prose_row(messages, text: str) -> Optional[dict]:
+    """A recorded multipart assistant row needs no flattened copy beside it."""
+    if messages and messages[-1].get("role") == "assistant":
+        if refusal_display(messages[-1].get("content")) == text:
+            return None
+    return {"role": "assistant", "content": text}
+
+
+def append_candidate_prose(messages: list, text: str) -> Optional[dict]:
+    row = candidate_prose_row(messages, text)
+    if row is not None:
+        messages.append(row)
+    return row
+
+
+def assistant_answer_text(content: Any) -> str:
+    """Ordinary authored text for a string contract: the reply's one ordinary run, else the run that holds its last
+    whole FINAL ANSWER line (latch, nudge and selection read the same). A refusal block supplies no selection or
+    verdict, and no contract is read across one (an empty refusal included)."""
+    if isinstance(content, list):
+        from ouroboros.outcomes import FINAL_ANSWER_MARKER
+
+        runs = [""]
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                runs[-1] += part["text"]
+            elif runs[-1]:
+                runs.append("")  # never form a contract by stitching across a refusal
+        nonempty = [run for run in runs if run.strip()]
+        marked = [run for run in nonempty if any(line.strip().startswith(FINAL_ANSWER_MARKER) for line in run.splitlines())]
+        return nonempty[0] if len(nonempty) == 1 else marked[-1] if marked else ""
+    return content if isinstance(content, str) else ""
+
+
 # A reply that ended to call a tool: OpenAI-family ``tool_calls``/``function_call`` and Anthropic ``tool_use``.
 TOOL_CALL_FINISH_REASONS = frozenset({"tool_calls", "function_call", "tool_use"})
 # A completed reply its provider marked as intermediate progress, not an answer: Responses' last assistant
@@ -176,6 +233,67 @@ def response_finish_reason(usage: Any, msg: Any) -> Tuple[bool, Optional[str]]:
         if isinstance(source, dict) and key in source:
             return True, source[key]
     return False, None
+
+
+# Only the loop asks for wire presence. Bind the observation to the returned usage object
+# so a different result after a retry, or a legacy adapter, cannot inherit its evidence.
+_FINISH_OBSERVER = contextvars.ContextVar("finish_observer", default=None)
+_EVENT_FINISH_LABELS = (OUTPUT_LIMIT_FINISH_REASONS | CONTENT_REFUSAL_FINISH_REASONS | TOOL_CALL_FINISH_REASONS
+                        | INTERMEDIATE_FINISH_REASONS
+                        | {"stop", "end_turn", "stop_sequence", "pause_turn", "blacklist", "error",
+                           "incomplete", "max_messages", "steered"})
+
+
+@contextmanager
+def capture_finish_reason():
+    observation = {}
+    token = _FINISH_OBSERVER.set(observation)
+    try:
+        yield observation
+    finally:
+        _FINISH_OBSERVER.reset(token)
+
+
+def observe_finish_reason(usage, source, key="finish_reason", *, completion=None, computed=False):
+    """Read the body or the SDK choice's supplied fields. A full SDK dump may include defaults."""
+    observation = _FINISH_OBSERVER.get()
+    if observation is None:
+        return
+    from ouroboros.llm_stream import AssembledResponse
+    if isinstance(source, dict) and (completion is None or isinstance(completion, AssembledResponse)):
+        present, value = key in source, source.get(key)
+    else:
+        if completion is not None:
+            choices = getattr(completion, "choices", None)
+            source = choices[0] if isinstance(choices, (list, tuple)) and choices else None
+        fields = getattr(source, "model_fields_set", None)
+        if fields is None:  # GigaChat also supports Pydantic v1.
+            fields = getattr(source, "__fields_set__", None)
+        present = key in fields if isinstance(fields, (set, frozenset)) else None
+        value = getattr(source, key, None) if present else None
+    origin = "computed" if computed else "provider"
+    if present is not True:
+        origin = "missing" if present is False else "unknown"
+    observation.update(usage=usage, origin=origin, value=value)
+
+
+def finish_event_fields(observation, usage, msg):
+    """The recorded terminal or a labelled normalized fallback. Never copy arbitrary text into an event."""
+    if observation.get("usage") is usage:
+        origin, value = observation["origin"], observation["value"]
+        if origin in {"missing", "unknown"}:
+            return {"finish_reason_origin": origin}
+    else:
+        present, value = response_finish_reason(usage, msg)
+        origin = "unknown"
+        if not present:
+            return {"finish_reason_origin": origin}
+    if value is not None:
+        from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES
+
+        if not isinstance(value, str) or (value not in _EVENT_FINISH_LABELS and value not in CONTEXT_OVERFLOW_CODES):
+            return {"finish_reason_origin": "discarded"}
+    return {"finish_reason": value, **({"finish_reason_origin": origin} if origin != "provider" else {})}
 
 
 def reported_reasoning_tokens(usage: Any) -> Optional[int]:

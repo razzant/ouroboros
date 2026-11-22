@@ -43,3 +43,22 @@ def test_appended_notice_preserves_local_and_gigachat_tool_adjacency(monkeypatch
         assert [m["content"] for m in rows[-2:]] == ["follow-up", "notice"]
     # SDK shape validation only: no authentication, request, or model generation.
     assert len(Chat(model="GigaChat-test", messages=giga, max_tokens=64).messages) == len(messages)
+
+
+def test_local_assistant_history_preserves_ordered_text_and_refusal_bytes(monkeypatch):
+    monkeypatch.setattr("ouroboros.local_model.get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
+    history = [
+        {"role": "user", "content": [{"type": "text", "text": "First"}, {"type": "text", "text": "second"}]},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "  Ob"},
+            {"type": "refusal", "refusal": "servation"},
+            {"type": "text", "text": ".\nNext line.  "},
+        ]},
+    ]
+    canonical = copy.deepcopy(history)
+    _, payload = LLMClient()._build_local_candidate(history, None, 64, "auto")
+    assert payload["messages"] == [
+        {"role": "user", "content": "First\n\nsecond"},
+        {"role": "assistant", "content": "  Observation.\nNext line.  "},
+    ]
+    assert history == canonical

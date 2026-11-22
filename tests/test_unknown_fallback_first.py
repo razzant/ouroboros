@@ -172,6 +172,31 @@ def test_a_lost_answer_asks_the_acting_primary_once_before_the_configured_route(
     assert not any("connection restored after" in note for note in notes)
 
 
+def test_unsent_observed_primary_does_not_lend_its_endpoint_to_the_configured_route(data_root, tmp_path, monkeypatch):
+    from ouroboros.llm_attempt import ConnectionUnavailable
+
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
+    probes, _ = _observe(monkeypatch, {**REACHED, "endpoint_sha256": "first-endpoint"})
+    llm = _RouteLLM(data_root, **{PRIMARY: [_death]})
+    offered, chat = [], llm.chat
+
+    def send(**kwargs):
+        model, witness = kwargs["model"], kwargs.get("observed_endpoint_sha256")
+        offered.append((model, witness))
+        if model == PRIMARY and witness:
+            raise ConnectionUnavailable("fixture", "disabled")  # target resolution, no new attempt
+        return chat(**kwargs)
+
+    monkeypatch.setattr(llm, "chat", send)
+    text, usage, _, _ = _run(tmp_path, llm)
+    assert text == "answer from fb/one" and len(probes) == 1
+    assert offered == [(PRIMARY, None), (PRIMARY, "first-endpoint"), ("fb/one", None)]
+    old, new = _ledger(data_root)
+    assert old["state"] == "unresolved" and new["state"] == "settled"
+    assert old["attempt_id"] in _notices(llm.sent[-1][1])[0]
+    assert "_observed_transport_endpoint" not in usage
+
+
 def test_repeated_unknowns_move_on_through_the_configured_routes(data_root, tmp_path, monkeypatch):
     """An eligible unknown on a candidate moves on too; each new generation names the attempt it follows."""
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one,fb/two")
@@ -590,6 +615,7 @@ def test_a_refused_read_of_an_accepted_operation_keeps_its_custody(tmp_path, mon
     """A 404 is no proof of non-dispatch: ordinary direct and queued calls rejoin the same operation."""
     from ouroboros import llm_claudexor
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
 
     inv = llm_claudexor._ModelInvocation({"usage_model": "claudexor::codex=test"}, {}, {"timeout": 1})
     inv.operation_id, inv.invocation_id, inv.task_id, inv.root = "same-op", "same-attempt", "t", tmp_path
@@ -603,6 +629,8 @@ def test_a_refused_read_of_an_accepted_operation_keeps_its_custody(tmp_path, mon
         monotonic=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds)))
 
     class Gateway:
+        store_identity = "fixture-store"  # the owning store the original handle proved at create
+
         def get_model_operation(self, operation, **_kwargs):
             reads.append(operation)
             if len(reads) <= 2:
@@ -620,6 +648,7 @@ def test_a_refused_read_of_an_accepted_operation_keeps_its_custody(tmp_path, mon
             pass
 
     gateway = inv.gateway = Gateway()
+    inv.create_binding = model_rejoin_binding(gateway)  # the same store's proof; rejoin by the SAME handle
     monkeypatch.setattr(llm_claudexor, "read_owned_gateway", lambda: gateway)
     monkeypatch.setattr(inv, "retain", lambda _raw: None)
     assert inv.receive()["message"]["content"] == "same operation answer"

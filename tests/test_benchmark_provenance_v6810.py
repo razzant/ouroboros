@@ -22,6 +22,7 @@ import re
 from devtools.benchmarks.common.result_index import (
     RUNTIME_TRUNCATION_REASON_CODES,
 )
+from ouroboros.llm_claudexor import ClaudexorContentRefused, ClaudexorRefusalError
 from ouroboros.provider_models import (
     provider_credential_plan,
 )
@@ -175,6 +176,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         False,
         "tools/search.py recoverable ambiguous paid-call result returned to the LLM; the root task remains live",
     ),
+    "provider_content_refused": (False, "The provider returned a terminal refusal; no runtime budget or time limit ended the work."),
+    "unexpected_refusal_content": (False, "The caller could not accept a received response shape; this is not a runtime time or budget cut."),
     "query_limit": (
         False,
         "gateways/search_api.py a web_search query DeepSeek's documented contract refuses, returned to the LLM before "
@@ -193,9 +196,15 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         "retry the same arrival; place_intake's `arrival_effect_unknown:<task>` refusal is the same fact) returned to "
         "the LLM; the root task remains live",
     ),
+    "llm_empty_response": (
+        False,
+        "loop_output_exhaustion.py record_empty_cut: the settled empty reply that reached its output limit marks only "
+        "that call, while the informed chance, the source pass and the route walk can still recover it; a task that "
+        "ends on it ends as output_recovery_exhausted, decided above, so this code is never the root task's own terminal",
+    ),
     "finalize_control_pending": (
         False,
-        "loop_transport.wait_transport_repeat llm_not_dispatched event; the never-sent repeat was withdrawn, while the later task terminal carries owner_requested_finalization or its actual rail reason",
+        "Historical llm_not_dispatched event for a withdrawn transport repeat. The task's terminal records its actual reason.",
     ),
     "host_cancelled": (
         False,
@@ -437,12 +446,15 @@ def _runtime_reason_code_literals() -> dict[str, str]:
                             found.setdefault(code, f"{path.relative_to(root.parent)}:{node.lineno}")
     for code in WIRE_REASON_CODES:
         found.setdefault(code, "ouroboros/request_wire_contract.py:WIRE_REASON_CODES")
+    # A refusal ends its own request with the producer's code; the loop does not restate these as literals.
+    for error in (ClaudexorRefusalError, ClaudexorContentRefused):
+        found.setdefault(error.terminal_code, f"ouroboros/llm_claudexor.py:{error.__name__}")
     return found
 
 
 # Historical reason codes keep their recorded decision, truncating or not, after their producing rail is retired:
 # old records still carry them.
-_RETIRED_REASON_CODES = {"children_unabsorbed", "delegated_custody_unreconciled"}
+_RETIRED_REASON_CODES = {"children_unabsorbed", "delegated_custody_unreconciled", "finalize_control_pending"}
 
 
 def test_every_runtime_reason_code_has_a_recorded_truncation_decision():

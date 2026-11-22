@@ -42,6 +42,8 @@ def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
     if total.get("cost_partial") or total.get("cost_estimated") or usage.get("cost_final") is False:
         total["cost_final"] = False
     merge_request_wire_usage(total, usage)
+    if ids := usage.get("ledger_attempt_ids"):
+        total["ledger_attempt_ids"] = list(dict.fromkeys([*total.get("ledger_attempt_ids", []), *ids]))
 
 
 def openrouter_price_row(model: Dict[str, Any]) -> Optional[Tuple[Optional[float], ...]]:

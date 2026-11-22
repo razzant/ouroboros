@@ -207,6 +207,21 @@ def test_each_round_seals_the_newest_text_row_and_only_marker_lanes_render_it(mo
                 assert _wire(current)[:len(_wire(previous))] == _wire(previous), "byte-for-byte extension"
 
 
+def test_the_rolling_mark_counts_the_same_words_in_typed_and_plain_history():
+    from ouroboros.context_budget import estimate_message_chars
+
+    parts = [{"type": "text", "text": "One. "}, {"type": "refusal", "refusal": "No picnic today. " * 30},
+             {"type": "text", "text": "Two."}]
+    words = "One. " + "No picnic today. " * 30 + "Two."
+    for body in (parts, words):
+        rows = [{"role": "user", "content": "Task"}, {"role": "assistant", "content": body},
+                {"role": "user", "content": "Next"}]
+        assert estimate_message_chars(rows) == 8 + len(words)
+        seal_task_transcript(rows, min_prefix_tokens=100)
+        assert [i for i, row in enumerate(rows) if "cache_control" in row] == [2]
+        assert rows[1]["content"] == body
+
+
 def test_native_replay_stays_exact_and_unmarked_while_the_boundary_follows(monkeypatch):
     from ouroboros.anthropic_native_custody import anthropic_replay_scope
     from tests.test_anthropic_native_custody import _canonical_message, _raw_content, _target, _tool_results

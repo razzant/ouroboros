@@ -21,7 +21,7 @@ host = host_fixture
 
 
 def test_last_assistant_salvage_keeps_bytes_and_skips_empty_nonassistant_messages():
-    from ouroboros.loop_transport import last_assistant_text
+    from ouroboros.loop_messages import last_assistant_text
 
     raw = "  Retained intermediate work.  \n\n"
     empty = [{"role": "assistant", "content": value} for value in (None, "", " \n", [])]
@@ -99,7 +99,9 @@ def test_host_admitted_swarm_root_has_one_live_and_rebuilt_provider_disclosure(h
     assert separate is current
     for projection in (sent, rebuilt):
         all_text = "\n".join([projection["text"], *incidents])
-        assert all_text.count("no terminal provider outcome") == 1
+        # The checkpointed repeat's disclosure: the human sentence and the structured kind it records, once each.
+        assert all_text.count("An earlier request has no confirmed provider outcome") == 1
+        assert all_text.count("The checkpoint records provider_outcome_unknown.") == 1
         assert "Swarm reached the task-wide rail" not in all_text
     assert task["origin_message_ref"] == case.ref
     assert task["origin_message_text"] == case.incoming["text"]

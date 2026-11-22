@@ -39,6 +39,7 @@ from ouroboros.llm_attempt import (
     reasoning_strip_retry_allowed,
 )
 from ouroboros.deadline_utils import physical_dispatch_timeout
+from ouroboros._usage_response import observe_finish_reason
 from ouroboros.llm_stream import consume_stream
 from ouroboros.llm_capability_policy import normalize_reasoning_effort
 from ouroboros.provider_models import anthropic_thinking_off_type
@@ -453,6 +454,7 @@ class _AnthropicLaneMixin:
         stop_reason = resp_dict.get("stop_reason")
         if stop_reason:
             message["stop_reason"] = str(stop_reason)
+        observe_finish_reason(usage, resp_dict, "stop_reason")
         if isinstance(details := resp_dict.get("stop_details"), dict):  # a refusal's category and explanation: a call fact
             usage["stop_details"] = {key: details.get(key) for key in ("category", "explanation")}
         message = retain_native_assistant_content(message, content_blocks, target)

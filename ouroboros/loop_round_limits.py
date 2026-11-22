@@ -19,7 +19,7 @@ from ouroboros.context import build_incoming_user_content
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, WHOLE_CATEGORY
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.llm import LLMClient
-from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
+from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _account_received_error
 from ouroboros.loop_tool_execution import prune_reclaim_trace_refs, reclaim_trace_refs
 from ouroboros.loop_transport import TransportWaitEpisode, finalize_now_transport_terminal as _finalize_now_transport_terminal
 from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
@@ -139,6 +139,7 @@ def _drain_incoming_messages(
     owner_ctx: Any = None,
     defer_content_ack: bool = False,
     place_live_runs: bool = False,
+    reading: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Injects dialogue; returns typed controls.
 
@@ -150,6 +151,7 @@ def _drain_incoming_messages(
     close, a forced finalization or a live call): my human's rows the host's placement at receipt
     left are placed into the sessions it holds open (``place_rows_into_runs``), each once. The last row of my
     human's this drain delivers closes with the host's arrival lines (``arrival_notes.mark_arrival``).
+    ``reading``: an accepted operation this round only reads; what this drain delivered binds to it (``note_arrivals``).
     """
     controls: Dict[str, Any] = {}
     arrivals: List[int] = []  # positions of my human's rows this drain delivered (typed, never merged)
@@ -177,41 +179,30 @@ def _drain_incoming_messages(
             ack_saved(entry)
     if owner_ctx is not None and getattr(owner_ctx, "last_owner_delivery", None) is not None:
         owner_ctx.last_owner_delivery = None
-    before_rows, delivered = len(getattr(owner_ctx, "_owner_directives", None) or []), False
+    before_rows, before_messages, delivered = len(getattr(owner_ctx, "_owner_directives", None) or []), len(messages), False
     while not incoming_messages.empty():
         try:
             injected = incoming_messages.get_nowait()
-            if isinstance(injected, dict):
+            structured = isinstance(injected, dict)
+            row = injected if structured else {}
+            target, content = None, injected
+            if structured:
                 from ouroboros.owner_words import reply_target
-                target = reply_target(getattr(owner_ctx, "budget_drive_root", None) or drive_root, injected.get("reply_reference"))
+                target = reply_target(getattr(owner_ctx, "budget_drive_root", None) or drive_root, row.get("reply_reference"))
                 _append_reply_context(messages, target, owner_ctx)
-                owner_content = _owner_content(injected, drive_root, task_id)
-                _loop()._record_owner_directive(
-                    owner_ctx, source="direct_incoming", content=owner_content, origin=_arrival(injected), reply_to=target or None,
-                    msg_id=str(injected.get("client_message_id") or injected.get("msg_id") or ""),
-                )
-                _stamp_owner_delivery(
-                    owner_ctx,
-                    msg_id=str(injected.get("msg_id") or ""),
-                    client_message_id=str(injected.get("client_message_id") or ""),
-                    text=str(injected.get("text") or ""),
-                    ts=str(injected.get("ts") or ""),
-                )
-                _loop()._append_or_merge_user_content(
-                    messages, _loop()._owner_marked_content(owner_content), slot=owner_ctx, kind=OWNER_WORDS_KIND,
-                )
-                arrivals.append(len(messages) - 1)
-            else:
-                _loop()._record_owner_directive(
-                    owner_ctx, source="direct_incoming", content=injected, origin=_arrival(),
-                )
-                _stamp_owner_delivery(
-                    owner_ctx, msg_id="", client_message_id="", text=str(injected), ts="",
-                )
-                _loop()._append_or_merge_user_message(
-                    messages, _loop()._owner_marked_content(injected), slot=owner_ctx, kind=OWNER_WORDS_KIND,
-                )
-                arrivals.append(len(messages) - 1)
+                content = _owner_content(row, drive_root, task_id)
+            _loop()._record_owner_directive(
+                owner_ctx, source="direct_incoming", content=content, origin=_arrival(row), reply_to=target or None,
+                msg_id=str(row.get("client_message_id") or row.get("msg_id") or ""),
+            )
+            _stamp_owner_delivery(
+                owner_ctx, msg_id=str(row.get("msg_id") or ""), client_message_id=str(row.get("client_message_id") or ""),
+                text=str(row.get("text") or "") if structured else str(injected), ts=str(row.get("ts") or ""),
+            )
+            _loop()._append_or_merge_user_content(
+                messages, _loop()._owner_marked_content(content), slot=owner_ctx, kind=OWNER_WORDS_KIND,
+            )
+            arrivals.append(len(messages) - 1)
         except queue.Empty:
             break
 
@@ -422,6 +413,8 @@ def _drain_incoming_messages(
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
         carry_to_members(owner_ctx, delivered=delivered or grown)
+        from ouroboros.loop_output_exhaustion import note_arrivals  # bound to a pending read, if any
+        note_arrivals(reading, place=before_messages, owner_input=grown, carried=controls.get("owner_carried_addressed"))
         if place_live_runs:  # and the sessions this run holds open, each row once per run (and the host's facts)
             from ouroboros.delegate_interactions import place_rows_into_runs
             for line in place_rows_into_runs(owner_ctx):
@@ -808,9 +801,85 @@ class _RoundLimitContext:
     forced_service_evidence_fingerprint: str = ""
     # The round's exact tool envelope, so a forced wrap-up call keeps the same
     # provider prefix as the working round instead of rebuilding it tool-less.
-    # LAST field: existing positional construction (tests included) stays valid.
     tool_schemas: Optional[List[Dict[str, Any]]] = None
     emit_progress: Optional[Callable[..., None]] = None  # the room's progress: a forced answer shows what it displaced
+    forced_reason_code: str = ""  # the physical checkpoint must not resume a forced reply as an ordinary round
+
+
+def _merged_terminal(result: tuple, llm_trace: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """A rail's terminal as the loop returns it: its trace folded into the live one (``_merge_finalization_trace``)."""
+    text, usage, trace = result
+    _loop()._merge_finalization_trace(llm_trace, trace)
+    return text, usage, llm_trace
+
+
+def _terminal_before_round_mail(ctx: _RoundLimitContext, *, reading_operation: bool):
+    """A lost conversation ends immediately. The round cap applies when admitting new work."""
+    from ouroboros.presence_continuation import conversation_lost, lost_conversation_terminal
+
+    loop = _loop()
+    if lost := conversation_lost(ctx.tools._ctx):
+        result = lost_conversation_terminal(ctx, lost)
+    elif ctx.max_rounds is not None and ctx.round_idx > ctx.max_rounds and not reading_operation:
+        if loop._delegate_hold_close(ctx.tools, drive_logs=ctx.drive_logs, task_id=ctx.task_id, detail="round_limit") == "active":
+            # A delegate hold with no wake receipt cannot spend a round-limit call.
+            ctx.accumulated_usage["_last_llm_error_kind"] = "provider_outcome_unknown"
+            result = loop._handle_provider_unavailable(ctx, error_kind="provider_outcome_unknown")
+        else:
+            result = loop._handle_round_limit(ctx)
+    else:
+        return None
+    return _merged_terminal(result, ctx.llm_trace)
+
+
+def _read_accepted_round(ctx: _RoundLimitContext, pending: dict, read):
+    """Read through ordinary custody; a forced reply returns only through forced delivery, never tool dispatch."""
+    from ouroboros.loop_forced_finalization import _finish_forced_reply, _forced_reply_text
+    from ouroboros.loop_messages import owner_source_sha256
+    from ouroboros.loop_output_exhaustion import ordinary_read
+    from ouroboros.transport_custody import ProviderNotDispatched
+    from supervisor.owner_stop import presence_stop_now
+
+    reason = pending.get("forced_reason_code")
+    if not reason:  # ordinary recovery may re-admit an unsent round; a withdrawn Wrap up leaves the reply this read's
+        return ordinary_read(ctx, pending, read)
+    try:
+        msg = read(ctx, pending)[0]  # the reader counted the receipt; this terminal returns no cost of its own
+    except ProviderNotDispatched:
+        msg = None  # the forced rail's prior balances do not admit new work after restore
+
+    loop, owner = _loop(), ctx.tools._ctx
+    usage, trace = ctx.accumulated_usage, ctx.llm_trace
+    usage.update(execution_status="failed", reason_code=reason)
+    # Stop now is read as the live forced exit reads it (the direct turn's control this drain delivered, a Presence
+    # turn's open intent) and outranks what the recovered reply would say: only its own verified answer stays on the row.
+    stop_now = loop._drain_forced_owner_directives(ctx, trace, reading=pending) in ("stop", "stop_late") or presence_stop_now(owner)
+    source = pending.get("owner_source_sha256")  # a carried row any drain since the request bound here moves no hash
+    unseen = source != owner_source_sha256(owner) or bool(pending.get("owner_carried_addressed"))
+    if msg is not None and stop_now and unseen:
+        result = _handle_direct_turn_hard_stop(ctx)
+    elif msg is not None and source and unseen:
+        result = loop._forced_fallback_result(ctx, trace, "⚠️ The current owner input was not answered by "
+            "the interrupted wrap-up.", reason, source="late_owner_directive_requires_resume", host_words=True)
+    elif msg is not None and not source:
+        result = loop._forced_fallback_result(ctx, trace, "⚠️ The interrupted wrap-up reply was recovered, but "
+            "its owner input could not be verified. No new request was sent.", reason,
+            source="recovered_owner_source_unverified", host_words=True)
+    else:
+        meta = dict(getattr(owner, "_round_response_facts", None) or {}) if msg is not None else {}
+        result = _finish_forced_reply(ctx, trace, _forced_reply_text(ctx, msg, meta), meta, reason,
+            "⚠️ No usable answer was recovered from the interrupted wrap-up. No new request was sent.",
+            stop_now=stop_now, fallback_host_words=True)
+    return None, None, result
+
+
+def _finish_saved_tool_tail(ctx: _RoundLimitContext, wallet, ceiling):
+    """A completed batch can end on budget or delivery before admitting a new author round."""
+    loop = _loop()
+    budget = loop._finish_tool_round_budget(ctx, wallet, ceiling, ctx.active_model, ctx.active_use_local, ctx.active_effort)
+    if budget is not None:
+        return budget
+    return loop._finalize_loop_candidate(None, ctx, ctx.tools, ctx.emit_progress, after_tools=True)
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -869,8 +938,7 @@ def _handle_direct_turn_hard_stop(
     if tool_ctx is not None:
         tool_ctx._skip_post_task_synthesis = True
     _loop()._finalize_forced_services(ctx, llm_trace)
-    ctx.accumulated_usage["execution_status"] = "failed"
-    ctx.accumulated_usage["reason_code"] = REASON_OWNER_REQUESTED_FINALIZATION
+    ctx.accumulated_usage.update(execution_status="failed", reason_code=REASON_OWNER_REQUESTED_FINALIZATION)
     candidate = _loop()._current_delivery_candidate(ctx, llm_trace)
     if candidate is not None:
         return _loop()._forced_fallback_result(
@@ -894,8 +962,7 @@ def _handle_owner_stop_finalization(
     candidate = _loop()._current_delivery_candidate(ctx, llm_trace)
     if candidate is not None:
         _loop()._finalize_forced_services(ctx, llm_trace)
-        ctx.accumulated_usage["execution_status"] = "failed"
-        ctx.accumulated_usage["reason_code"] = REASON_OWNER_REQUESTED_FINALIZATION
+        ctx.accumulated_usage.update(execution_status="failed", reason_code=REASON_OWNER_REQUESTED_FINALIZATION)
         return _loop()._forced_fallback_result(
             ctx, llm_trace, candidate.full_text, REASON_OWNER_REQUESTED_FINALIZATION,
             retained_source="owner_stop_retained_candidate",
@@ -906,8 +973,7 @@ def _handle_owner_stop_finalization(
     )
     if _owner_stop_window_elapsed(ctx):
         _loop()._finalize_forced_services(ctx, llm_trace)
-        ctx.accumulated_usage["execution_status"] = "failed"
-        ctx.accumulated_usage["reason_code"] = REASON_OWNER_REQUESTED_FINALIZATION
+        ctx.accumulated_usage.update(execution_status="failed", reason_code=REASON_OWNER_REQUESTED_FINALIZATION)
         return _loop()._forced_fallback_result(
             ctx, llm_trace, fallback, REASON_OWNER_REQUESTED_FINALIZATION,
             source="owner_stop_window_elapsed",
@@ -936,6 +1002,7 @@ def _handle_provider_unavailable(
     output is ``host_salvage``, the host's own notice ``host_notice``, model
     candidates ``model_final``). Read the recognized control here so ordinary
     and delegated-hold terminal paths share the same cause."""
+    if error_kind == "provider_outcome_unknown": ctx.accumulated_usage["_last_llm_error_kind"] = error_kind  # the caller's own fact: no wrap-up is bought over it, whatever the record kept
     if control_reason is None:
         owner_ctx = getattr(ctx.tools, "_ctx", None)
         control_reason = str(getattr(owner_ctx, "_transport_repeat_control_reason", "") or "")
@@ -967,6 +1034,10 @@ def _loop_exit_after_exception(
     interruption those rails already routed once (the model-call handler re-raises
     Stop for the supervisor's settlement) and every other exception re-raise with
     their loop evidence attached."""
+    from ouroboros.llm_claudexor import ClaudexorRefusalError
+
+    if isinstance(exc, ClaudexorRefusalError) and ctx is not None:
+        return _refusal_terminal(ctx, exc, llm_trace)
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     from ouroboros.model_wait import ModelWaitInterrupted, propagate_model_control
 
@@ -981,9 +1052,19 @@ def _loop_exit_after_exception(
     if controlled is None:
         exit_ctx.attach_exception_evidence(exc)
         raise exc
-    text, accumulated_usage, forced_trace = controlled
-    _loop()._merge_finalization_trace(llm_trace, forced_trace)
-    return text, accumulated_usage, llm_trace
+    return _merged_terminal(controlled, llm_trace)
+
+
+def _refusal_terminal(ctx: Any, refusal: Any, llm_trace: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """The loop's own request's received refusal ends the loop on its notice: no model answer is selected and
+    nothing is sent again. Its model-call boundaries also read it beside a control (``received_refusal``) whose
+    rail would send again; a helper's request keeps its own (a caption memoizes it) and never reaches them."""
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
+
+    ctx.accumulated_usage.update(execution_status="failed", reason_code=refusal.code,
+                                 terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE)
+    llm_trace["refusal_reply_final_answer"] = ""
+    return refusal.notice, ctx.accumulated_usage, llm_trace
 
 
 def _handle_model_wait_control(
@@ -996,6 +1077,7 @@ def _handle_model_wait_control(
     remains the supervisor's death-then-settlement transaction.
     """
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
+    from ouroboros.loop_output_exhaustion import _received_deadline_answer
     from ouroboros.model_wait import OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait
     from ouroboros.transport_custody import outcome_unknown_on_chain
 
@@ -1080,10 +1162,10 @@ def _handle_model_wait_control(
         final.control_rails_seen = True
         raise final from error
 
-    controls = _drain_incoming_messages(
+    controls = error.drained_controls = _drain_incoming_messages(  # no reply read after it saw its rows: bound or kept
         ctx.messages, ctx.incoming_messages or queue.Queue(), ctx.drive_root,
         ctx.task_id, ctx.event_queue, ctx.owner_msg_seen if ctx.owner_msg_seen is not None else set(),
-        owner_ctx=getattr(ctx.tools, "_ctx", None), defer_content_ack=True,
+        owner_ctx=getattr(ctx.tools, "_ctx", None), defer_content_ack=True, reading=getattr(error, "read_operation", None),
     )
     capture = getattr(error, "physical_attempt_capture", None)
     unknown = outcome_unknown_on_chain(error)
@@ -1096,20 +1178,34 @@ def _handle_model_wait_control(
         ctx.accumulated_usage["_last_llm_error_kind"] = "provider_outcome_unknown"
     control_text = str(controls.get("finalize_now") or "")
     first_line = control_text.splitlines()[0].strip() if control_text else ""
+    recovered = getattr(error, "recovered_attempt_id", None)
     if hard_stop or first_line == REASON_OWNER_STOPPED_DIRECT_TURN:
+        # A reply this Main call already received stays counted on the Stop
+        # terminal: fold the settled receipt's cost and tokens here too, or the
+        # summary disagrees with the ledger once a restart reconciles the
+        # attempt. ``recovered`` receipts were folded where they were read.
+        if not recovered and getattr(error, "received_main_reply", None) is not None:
+            _account_received_error(ctx.accumulated_usage, error)
         return _handle_direct_turn_hard_stop(ctx)
     if reason == "cancelled":
         raise error
+    if (read := getattr(error, "read_operation", None) or {}).get("forced_reason_code"):
+        # A sent wrap-up's own read, once Stop ruled above: a refusal it received keeps that refusal's terminal (the
+        # loop's next step); else its forced parser ends it on the bytes the read already holds, never a new request.
+        if getattr(error, "received_refusal", None) is not None:
+            return None
+        from ouroboros.loop_output_exhaustion import forced_read_end  # the live forced rail ends the same way
+        return forced_read_end(ctx, read, error)
     if reason == "finalize_requested" and not control_text:
-        # A revoked control cannot stop a still-unstarted call. A provider
-        # already interrupted in flight keeps the ordinary unknown no-resend rail.
+        # A revoked control cannot stop a still-unstarted call, nor end a read: what it received is read once more, its own
+        # Pause rail first (``ordinary_read``). A provider already interrupted in flight keeps the unknown no-resend rail.
         return _handle_provider_unavailable(ctx, error_kind="provider_outcome_unknown") if unknown else None
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES
 
     previous = getattr(error, "previous_error", None)
     sent = getattr(capture, "state", None) in POSITIVE_PHYSICAL_ATTEMPT_STATES
-    if (reason == "finalize_requested" and first_line == REASON_OWNER_REQUESTED_FINALIZATION and not sent
+    if (reason == "finalize_requested" and first_line == REASON_OWNER_REQUESTED_FINALIZATION and not sent and not recovered
             and (previous is None or isinstance(previous, PhysicalDispatchInterrupted))):
         # A fresh Wrap up can arrive after this round's mailbox drain but before
         # the model call. Rejoin its existing bounded finalizer; no provider wait
@@ -1133,16 +1229,26 @@ def _handle_model_wait_control(
                    "deadline_local" if reason == "deadline" else "finalization_grace")
     trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
     _loop()._finalize_forced_services(ctx, trace)
+    if not recovered and getattr(error, "received_main_reply", None) is not None:
+        _account_received_error(ctx.accumulated_usage, error)
     ctx.accumulated_usage.update(execution_status=("infra_failed" if reason == "accounting_wait_expired" else "failed"),
                                  reason_code=reason_code)
-    fallback = _loop()._last_assistant_text(ctx.messages) or (
+    received, refusal_control = _received_deadline_answer(ctx, error, first_line, controls)
+    salvaged = received or _loop()._last_assistant_text(ctx.messages)
+    fallback = salvaged or (
         "⚠️ Accounting access did not recover within this turn’s wait window; no further model call was made."
         if reason == "accounting_wait_expired" else
         "⚠️ The model wait ended on the task's stop or deadline; no further model call was made."
     )
+    # The fallback's bytes type the terminal: a previous turn's ordinary text is
+    # salvaged model bytes (host_salvage), never the host's own words; only the
+    # ⚠️ phrase stays host_notice, and this call's proven reply stays model_final
+    # (the recorder's default would otherwise type every fallback host_notice).
     result = _loop()._forced_fallback_result(
-        ctx, trace, fallback, reason_code, source="model_wait_control",
+        ctx, trace, fallback, reason_code, source="model_wait_received_reply" if received else "model_wait_control",
         retained_source="model_wait_retained_candidate",
+        model_answer=bool(received), refusal_control_text=refusal_control,
+        host_words=None if received else not salvaged,
     )
     result[2].setdefault("forced_finalization", {}).update(
         control_reason=reason, operation_id=str(getattr(error, "operation_id", "") or ""),
@@ -1153,7 +1259,7 @@ def _handle_model_wait_control(
 
 def local_deadline_remaining(tool_ctx: Any, limit_ctx: Any = None) -> Optional[float]:
     """Seconds left on the task's explicit calendar ``deadline_at`` or API/CLI execution budget, whichever ends first;
-    ``None`` without either. A read deadline is also stamped on ``limit_ctx`` for the round's later rails."""
+    ``None`` without either. A read deadline also narrows ``limit_ctx``'s for later rails, never widening a grace."""
     from ouroboros.model_wait import explicit_execution_window_remaining
 
     meta = getattr(tool_ctx, "task_metadata", {})
@@ -1164,7 +1270,7 @@ def local_deadline_remaining(tool_ctx: Any, limit_ctx: Any = None) -> Optional[f
     if deadline is None and execution_left is None:
         return None
     if deadline is not None and limit_ctx is not None:
-        limit_ctx.deadline_ts = deadline.timestamp()
+        limit_ctx.deadline_ts = min(deadline.timestamp(), getattr(limit_ctx, "deadline_ts", None) or float("inf"))
     return min(value for value in ((deadline - _loop().utc_now()).total_seconds() if deadline else None,
                                    execution_left) if value is not None)
 
@@ -1216,8 +1322,11 @@ def _maybe_early_finalize(
     limit_ctx: _RoundLimitContext, tools: ToolRegistry, controls: Dict[str, Any],
     *, transport_episode: Optional[TransportWaitEpisode] = None,
     cost_ceiling: Optional[task_pacing.CostCeiling] = None,
+    reading_operation: Optional[Dict[str, Any]] = None,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-    """Consume supervisor grace, then local deadline, then the round's cost rail."""
+    """Consume supervisor grace, then local deadline, then the round's cost rail. ``reading_operation`` is the
+    accepted operation this round only reads (``loop_transport.ready_operation``): it buys no call, and a forced one is
+    read by ``_read_accepted_round``, which ends it by its recorded facts."""
     if (kept := _keep_final_over_routeless_round(limit_ctx, tools, controls)) is not None:
         return kept
     if controls.get("finalize_now"):
@@ -1227,6 +1336,12 @@ def _maybe_early_finalize(
         control_text = str(controls["finalize_now"])
         if control_text.strip() and control_text.splitlines()[0].strip() == REASON_OWNER_STOPPED_DIRECT_TURN:
             return _handle_direct_turn_hard_stop(limit_ctx)
+        if (grace_ts := controls.get("finalize_deadline_ts")) is not None:
+            _narrow_round_deadline(limit_ctx, grace_ts)  # a grace bounds a read as a wrap-up
+        if reading_operation:
+            if reading_operation.get("forced_reason_code"):
+                return None  # a wrap-up already sent: its own read, inside the grace, ends it by its facts, never a second send
+            return _handle_provider_unavailable(limit_ctx, error_kind="provider_outcome_unknown", control_reason=control_text)
         if transport_episode is not None:
             # Every other finalize_now flavor during an active outage takes the
             # honest no-resend terminal (rationale in the helper); control
@@ -1237,10 +1352,6 @@ def _maybe_early_finalize(
                 control_reason=control_text.splitlines()[0].strip(),
                 handle_provider_unavailable=functools.partial(
                     _handle_provider_unavailable, limit_ctx),
-            )
-        if controls.get("finalize_deadline_ts") is not None:
-            _narrow_round_deadline(
-                limit_ctx, controls["finalize_deadline_ts"],
             )
         return _loop()._handle_forced_finalization(limit_ctx, str(controls["finalize_now"]))
     # A completed-tool wait may expire without a mailbox control. Preserve
@@ -1258,6 +1369,11 @@ def _maybe_early_finalize(
 
     enter_owner_pause(limit_ctx)
     enter_cold_sleep(limit_ctx)  # the model's own cold sleep armed in the last tool batch
+    if reading_operation:  # Dispatch was committed. The remaining time can buy only a read of that attempt.
+        remaining = local_deadline_remaining(tools._ctx, limit_ctx)
+        if remaining is not None and remaining <= 0:
+            return _handle_model_wait_control(limit_ctx, ModelWaitInterrupted("deadline"))
+        return None
     # An active episode owns the deadline sliver: its last free redial +
     # no-resend terminal replace the paid deadline_local finalize call.
     if transport_episode is None:

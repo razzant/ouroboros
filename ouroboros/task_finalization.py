@@ -54,6 +54,8 @@ TERMINAL_ORIGIN_HOST_NOTICE = "host_notice"
 HOST_AUTHORED_TERMINAL_ORIGINS = frozenset({
     TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_HOST_NOTICE,
 })
+# The host's notice beside a completed refusal whose own words show nothing (``set_terminal_host_notice``).
+EMPTY_REFUSAL_NOTICE = "The provider returned an empty refusal."
 _STAMPED_TERMINAL_ORIGINS = frozenset({
     TERMINAL_ORIGIN_MODEL_FINAL, *HOST_AUTHORED_TERMINAL_ORIGINS,
 })

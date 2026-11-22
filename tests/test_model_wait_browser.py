@@ -365,23 +365,144 @@ def test_dated_unavailable_pool_waits_visibly_without_a_sign_in_prompt(waiting_u
     assert ui['logins'] == []
 
 
-def test_direct_api_wait_never_offers_subscription_login_or_auto_rotation(waiting_ui):
+@pytest.mark.parametrize("case,reason,access,label,signin,words", [
+    ("auth", "auth", "auth", "Sign-in required", True, ""),
+    ("quota", "quota", "quota", "Waiting for quota", False, "Quota reset time is not known."),
+    ("combined", "auth_quota", "auth_quota", "Waiting for access", False,
+     "Some accounts need sign-in; others are waiting for quota."),
+    ("unavailable", "unavailable", "unavailable", "Waiting for an account", False,
+     "No account can serve this model now."),
+    ("unconfirmed", "auth", "", "Waiting for provider access", False, ""),
+], ids=["auth", "quota", "combined", "unavailable", "unconfirmed"])
+def test_engine_wait_follows_the_access_its_refusal_proved_and_offers_sign_in_only_for_authentication(
+        waiting_ui, case, reason, access, label, signin, words):
+    """The live producer states what its confirmed refusal proved in ``access_reason``. The real card says it, live and
+    after a reload and on a phone, and offers the account's sign-in exactly when authentication is proven: the same
+    row without that proof (``reason`` auth, access ``""``) only says it waits for provider access."""
     ui, page = waiting_ui, waiting_ui['page']
-    ui['rows']['light-wait'].update(revision=2, reason='auth', model='openai::primary-test', source='',
-        credential_profile_id='', credential_harness='', auto_continue=False, availability_observation='unavailable')
+    pool = reason in ('auth_quota', 'unavailable')
+    ui['rows']['light-wait'].update(revision=2, reason=reason, access_reason=access,
+                                    credential_profile_id='' if pool else 'work',
+                                    reset_at='2026-09-07T01:00:00Z' if reason == 'unavailable' else None)
     ui['emit'](ui['rows']['light-wait'])
     card = page.locator('[data-wait-id="light-wait"]')
-    page.wait_for_function("() => document.querySelector('[data-wait-id=light-wait] [data-wait-reason]').textContent === 'Waiting for provider access'")
-    assert card.locator('[data-wait-login]').is_hidden() and card.locator('[data-wait-auto]').is_hidden()
-    assert 'Configured API access' in card.inner_text() and 'Auto rotation' not in card.inner_text()
-    assert 'Automatic access checks are unavailable.' in card.inner_text()
-    capture(page, 'waiting-direct-api-access')
-    page.set_viewport_size({'width': 390, 'height': 844})
-    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
-    capture(page, 'waiting-direct-api-access-narrow')
+    automatic = reason in ('quota', 'auth_quota', 'unavailable')
+
+    def check_card():
+        page.wait_for_function("label => document.querySelector('[data-wait-id=light-wait] [data-wait-reason]')"
+                               "?.textContent === label", arg=label)
+        assert card.locator('[data-wait-login]').is_visible() is signin
+        assert card.locator('[data-wait-auto]').is_visible() is automatic
+        if automatic:
+            assert card.locator('[data-wait-auto]').is_checked()
+        reset = card.locator('[data-wait-reset]').inner_text()
+        assert words in reset and ('Quota' not in reset or reason in ('quota', 'auth_quota'))
+        assert ('Auto rotation' in card.inner_text()) is pool and ('Account: work' in card.inner_text()) is not pool
+
+    check_card()
+    capture(page, f'waiting-access-{case}')
     ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="light-wait"]')
+    check_card()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    check_card()
+    capture(page, f'waiting-access-{case}-narrow')
+    assert ui['logins'] == []
+
+
+def test_an_unconfirmed_quota_wait_keeps_its_control_and_promises_no_quota(waiting_ui):
+    """A generic 402 on an explicit Wait names quota as its admission reason while its refusal proved nothing
+    (``access_reason`` ''). The real card says it waits for provider access, keeps the automatic continuation
+    the host polls worded for access, and promises neither quota nor a reset — live, after a reload, on a phone."""
+    ui, page = waiting_ui, waiting_ui['page']
+    ui['rows']['light-wait'].update(revision=2, reason='quota', access_reason='', reset_at='2026-09-07T01:00:00Z')
+    ui['emit'](ui['rows']['light-wait'])
+    card = page.locator('[data-wait-id="light-wait"]')
+
+    def check_card():
+        page.wait_for_function("() => document.querySelector('[data-wait-id=light-wait] [data-wait-reason]')"
+                               "?.textContent === 'Waiting for provider access'")
+        assert card.locator('[data-wait-auto]').is_visible() and card.locator('[data-wait-auto]').is_checked()
+        assert card.locator('[data-wait-auto-label]').inner_text() == 'Continue automatically when access is restored'
+        assert card.locator('[data-wait-reset]').inner_text() == ''
+        assert 'Quota' not in card.inner_text() and 'reset' not in card.inner_text().lower()
+        assert card.locator('[data-wait-login]').is_hidden()
+
+    check_card()
+    capture(page, 'waiting-access-quota-unconfirmed')
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
+    page.reload()
+    page.wait_for_selector('[data-wait-id="light-wait"]')
+    check_card()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    check_card()
+    capture(page, 'waiting-access-quota-unconfirmed-narrow')
+    assert ui['logins'] == []
+
+
+def test_proven_authentication_opens_the_exact_profiles_sign_in(waiting_ui):
+    """The explicit ``access_reason`` row reaches the same sign-in as a row from before the field."""
+    ui, page = waiting_ui, waiting_ui['page']
+    ui['rows']['light-wait'].update(revision=2, reason='auth', access_reason='auth', worker_slot_held=False)
+    ui['emit'](ui['rows']['light-wait'])
+    auth = page.locator('[data-wait-id="light-wait"]')
+    page.wait_for_function("() => document.querySelector('[data-wait-id=light-wait] [data-wait-reason]').textContent === 'Sign-in required'")
+    auth.locator('[data-wait-login]').click()
+    page.wait_for_selector('[data-login-card]')
+    page.wait_for_function("() => document.querySelector('[data-login-card]').textContent.includes('ABCD-1234')")
+    assert top_path(page) == 'accounts/codex', 'the sign-in card is on the provider\'s own page'
+    assert ui['logins'][0]['harness'] == 'codex' and ui['logins'][0]['profile_id'] == 'work'
+    capture(page, 'waiting-access-auth-accounts')
+
+
+@pytest.mark.parametrize("case,reason,access,label", [
+    ("key", "auth", "api_key", "Check the API key"),
+    ("billing", "quota", "api_billing", "Check API billing"),
+    ("unconfirmed", "auth", "", "Waiting for provider access"),
+    ("legacy", "auth", None, "Waiting for provider access"),
+], ids=["key", "billing", "unconfirmed", "legacy"])
+def test_direct_api_wait_never_offers_subscription_login_or_auto_rotation(waiting_ui, case, reason, access, label):
+    ui, page = waiting_ui, waiting_ui['page']
+    ui['rows']['main-wait'].update(revision=2, reason=reason, model='openai::primary-test', source='',
+        provider_message='private-upstream-sentence', requires_owner_action=True,
+        credential_profile_id='', credential_harness='', auto_continue=False, availability_observation='unavailable')
+    if access is not None:
+        ui['rows']['main-wait']['access_reason'] = access
+    ui['emit'](ui['rows']['main-wait'])
+    card = page.locator('[data-wait-id="main-wait"]')
+
+    def check_controls():
+        page.wait_for_function("label => document.querySelector('[data-wait-id=main-wait] [data-wait-reason]')?.textContent === label",
+                               arg=label)
+        for action in ('retry', 'change'):
+            button = card.locator(f'[data-wait-{action}]')
+            assert button.is_visible() and button.is_enabled()
+        assert 'private-upstream-sentence' not in card.inner_text()
+        task = page.locator(f'.chat-live-card[data-task-id="{TASK}"]')
+        controls = task.locator('[data-cancel-run]')
+        if not controls.is_visible() and task.get_attribute('data-expanded') == '0':
+            task.locator('[data-live-disclosure]').click()
+        controls.click()
+        stop = page.locator('body > .task-control-menu [data-task-control="stop_now"]')
+        assert stop.is_visible() and stop.is_enabled()
+        page.keyboard.press('Escape')
+
+    check_controls()
+    assert card.locator('[data-wait-login]').is_hidden() and card.locator('[data-wait-auto]').is_hidden()
+    assert ('Configured API access' in card.inner_text()) is bool(access)
+    assert 'Auto rotation' not in card.inner_text() and 'Sign in' not in card.inner_text()
+    assert 'Automatic access checks are unavailable.' in card.inner_text()
+    capture(page, f'waiting-direct-api-{case}')
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    capture(page, f'waiting-direct-api-{case}-narrow')
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
+    page.reload()
+    page.wait_for_selector('[data-wait-id="main-wait"]')
+    check_controls()
     assert card.locator('[data-wait-login]').is_hidden()
     assert ui['logins'] == []
 

@@ -755,12 +755,12 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
 
     def create_model_operation(self, request_ref: Dict[str, Any], *,
                                idempotency_key: str, capture_failure_evidence: bool = False,
-                               capture_effort_evidence: bool = False) -> Dict[str, Any]:
+                               capture_effort_evidence: bool = False, typed_refusals: bool = False) -> Dict[str, Any]:
         """Create or rejoin exactly one caller-identified generation; never mint a retry key."""
         key = _model_idempotency_key(idempotency_key)
         query = "&".join(f"{name}=true" for name, enabled in (
             ("captureFailureEvidence", capture_failure_evidence),
-            ("captureEffortEvidence", capture_effort_evidence)) if enabled)
+            ("captureEffortEvidence", capture_effort_evidence), ("typedRefusals", typed_refusals)) if enabled)
         path = "/v2/model-operations" + (f"?{query}" if query else "")
         return _model_operation(self._request(
             "POST", path, json_body={"request": _model_payload_ref(request_ref)},

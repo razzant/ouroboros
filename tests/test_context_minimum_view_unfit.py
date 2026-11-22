@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import context_fit as fit, memory_view
+from ouroboros.context_window import WindowLimit, WindowRecord
 from ouroboros.contracts.realtime import RouteFacts
 from tests import _memory_view_synthetic as syn
 
@@ -15,7 +16,7 @@ FACTS = RouteFacts(conversation_window_tokens=92_000, working_reserve_tokens=10_
                    source="synthetic retention measurement")
 
 
-def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None):
+def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None, input_cap=False):
     """Real common fit over synthetic protected words; no provider or owner data."""
     words = {**syn.spoken(1, "human", 340_000 if shape == "memory" else 100),
              "owner_side": True, "immune": True}
@@ -29,8 +30,13 @@ def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None):
     monkeypatch.setattr(fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
     evidence = SimpleNamespace(route_fp="synthetic-account", status="confirmed", stale=False,
                                window_tokens=92_000, route_facts=asdict(FACTS), source=FACTS.source)
+    if input_cap:
+        # T limits Low (104,000 - 16,384 < 92,000), I limits the last Nano frame
+        # (104,000 - 10,000 > 92,000). The refusal must carry THAT frame's witness.
+        evidence.window_record = WindowRecord(evidence.route_fp, declared=(
+            WindowLimit(92_000, "input", FACTS.source), WindowLimit(104_000, "total", FACTS.source)))
     return fit.build_context_fit_plan(SimpleNamespace(drive_root=root), core,
-        task or {"id": "minimum-view", "_is_direct_chat": True}, preferred_mode="nano", tool_schemas=[],
+        task or {"id": "minimum-view", "_is_direct_chat": True}, preferred_mode="low" if input_cap else "nano", tool_schemas=[],
         route_resolver=lambda *_a, **_kw: ({"provider": "synthetic", "model": "synthetic"}, evidence))
 
 
@@ -45,6 +51,7 @@ def test_both_raise_sites_name_their_measured_input_reserve_window_and_deficit(t
     assert error.estimated_input_tokens == error.fixed_input_tokens + error.memory_view_tokens
     assert error.estimated_input_tokens == math.ceil(error.raw_input_tokens * ratio)
     assert error.response_reserve_tokens == 10_000 and error.window_tokens == 92_000
+    assert (error.limiting.kind, error.limiting.tokens) == ("total", 92_000)
     assert error.deficit_tokens == error.estimated_input_tokens + 10_000 - 92_000 > 0
     for label, value in (("fixed input", error.fixed_input_tokens), ("memory view", error.memory_view_tokens),
                          ("reply/working reserve", 10_000), ("window", 92_000), ("deficit", error.deficit_tokens)):
@@ -65,7 +72,7 @@ def test_the_refusal_a_person_reads_says_need_limit_and_next_step_without_intern
     threshold = error.estimated_input_tokens + error.response_reserve_tokens
     assert threshold > error.window_tokens, "the refusal's own comparison"
     needs = math.ceil(threshold / 1000) * 1000
-    assert f"needs about {needs:,} tokens" in text and f"the model's limit here is {error.window_tokens:,}" in text
+    assert f"needs about {needs:,} tokens" in text and "total window here is 92,000 tokens" in text
     assert "larger window" in text and "send the request again" in text and "Context Length" in text
     # A room's own model outlives the default: the room's control is named first, the default as what it is.
     assert text.index("model button under the message box") < text.index("default for chats that follow Main")
@@ -76,11 +83,48 @@ def test_the_refusal_a_person_reads_says_need_limit_and_next_step_without_intern
     assert str(error) not in text and "=" not in text and "cannot fit" not in text
     measured = text.split("Measured", 1)[1]
     for part in (error.estimated_input_tokens, error.fixed_input_tokens, error.memory_view_tokens,
-                 error.response_reserve_tokens, error.window_tokens):
+                 error.response_reserve_tokens):
         assert f"{part:,}" in measured
     # The room the fitter also wanted is no threshold: named only when it was counted, never added to the need.
     assert ("further room the start wanted" in measured) is bool(error.work_room_tokens)
     assert usage["reason_code"] == "context_capacity" and usage["execution_status"] == "infra_failed"
+
+
+def test_refusal_reports_the_input_limiter_of_the_last_frame_not_its_total_equivalent(tmp_path, monkeypatch):
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path, monkeypatch, "fixed", input_cap=True)
+    error = raised.value
+    assert (error.limiting.kind, error.limiting.tokens) == ("input", 92_000)
+    assert (error.window_tokens, error.response_reserve_tokens) == (102_000, 10_000)
+    text, usage, _trace = _context_capacity_terminal(error)
+    assert f"estimated input is {error.estimated_input_tokens:,} tokens" in text
+    assert "input limit here is 92,000 tokens" in text and "102,000" not in text and "104,000" not in text
+    assert usage["reason_code"] == "context_capacity"
+
+
+def test_legacy_fit_frame_without_limit_evidence_does_not_invent_a_limit():
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+
+    error = fit.MinimumViewUnfit("synthetic", fixed_tokens=280_000, memory_tokens=0,
+        reserve_tokens=24_576, window_tokens=296_576, ratio=1.0)
+    text, usage, _trace = _context_capacity_terminal(error)
+    assert "estimated input is 280,000 tokens" in text and "limiting size was not available" in text
+    assert "296,576" not in text and "send the request again" in text
+    assert usage["reason_code"] == "context_capacity"
+
+
+def test_reply_shortfall_below_an_input_limit_does_not_claim_input_overflow():
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+
+    error = fit.MinimumViewUnfit("synthetic handbook case", fixed_tokens=270_000, memory_tokens=0,
+        reserve_tokens=65_536, window_tokens=280_192, ratio=1.0, required_book_tokens=50_000,
+        limiting=WindowLimit(272_000, "input", "fixture"))
+    assert error.deficit_tokens > 0
+    text, _usage, _trace = _context_capacity_terminal(error)
+    assert "estimated input is 270,000 tokens" in text and "input limit here is 272,000 tokens" in text
+    assert "estimate is within the limit" in text and "required room for the reply" in text
 
 
 def test_a_work_room_only_shortfall_starts_with_the_existing_notice(tmp_path, monkeypatch):

@@ -14,6 +14,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros._usage_response import observe_finish_reason
 from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.model_concurrency import limit_physical_send
 
@@ -274,26 +275,8 @@ class _GigaChatLaneMixin:
 
         return out
 
-    def _chat_gigachat(
-        self,
-        target: Dict[str, Any],
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]],
-        reasoning_effort: str,
-        max_tokens: int,
-        tool_choice: str,
-        temperature: Optional[float] = None,
-        no_proxy: bool = False,
-        timeout: Optional[float] = None,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        # The gigachat library owns its own httpx transport and proxy handling;
-        # no_proxy (a macOS fork-safety flag for the OpenAI/requests paths) does
-        # not apply here.
-        del no_proxy
+    def _prepared_gigachat_candidate(self, target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature):
         target["requested_reasoning_effort"] = reasoning_effort
-
-        client = self._get_gigachat_client(target, timeout=timeout)
-
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
             "messages": self._gigachat_messages(messages),
@@ -319,7 +302,17 @@ class _GigaChatLaneMixin:
         # before measurement and sealing. The library's transport retries are off
         # (``_get_gigachat_client``); its one re-send after a 401 repeats these
         # sealed bytes inside the same attempt and claims no fresher clock.
-        candidate = bound_reply_allowance(target, _physical_candidate(stamp_clock_note(payload)))
+        return bound_reply_allowance(target, _physical_candidate(stamp_clock_note(payload)))
+
+    def _chat_gigachat(
+        self, target: Dict[str, Any], messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
+        reasoning_effort: str, max_tokens: int, tool_choice: str, temperature: Optional[float] = None,
+        no_proxy: bool = False, timeout: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        # The native library owns its httpx transport and proxy handling.
+        client = self._get_gigachat_client(target, timeout=timeout)
+        candidate = self._prepared_gigachat_candidate(target, messages, tools, reasoning_effort, max_tokens,
+                                                      tool_choice, temperature)
         request = _attempt_request(target, candidate, source="llm.gigachat")
 
         def send():
@@ -394,6 +387,7 @@ class _GigaChatLaneMixin:
         }
         # The provider's cut marker survives normalization: consolidation refuses
         # a clipped correction by usage.response_finish_reason on every lane.
+        observe_finish_reason(usage, first)
         finish_reason = getattr(first, "finish_reason", None) if first is not None else None
         if isinstance(finish_reason, str) and finish_reason.strip():
             usage["response_finish_reason"] = finish_reason.strip()[:64]

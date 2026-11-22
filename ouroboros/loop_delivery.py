@@ -25,17 +25,22 @@ import queue
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import working_checkpoint
+from ouroboros._usage_response import append_candidate_prose, assistant_answer_text, refusal_display
 from ouroboros.config import get_context_mode
 from ouroboros.conversation_lease import follow_loop_admission
-from ouroboros.delivery_facts import FACTS_NOTED_CONTROL, note_delivery_facts as _note_delivery_facts
-from ouroboros.delivery_facts import noted, note_shown_review, show_replaced_answer
+from ouroboros.delivery_facts import (
+    FACTS_NOTED_CONTROL, note_delivery_facts as _note_delivery_facts, noted, note_shown_review,
+    resolve_completion_answer, select_answer, selected_completion_text, show_replaced_answer,
+    selection_refusal_text as selection_refusal_text,
+)
 from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros.loop_nudges import accept_handover_selection
 from ouroboros.observability import timed_phase
-from ouroboros.outcomes import reviewable_effect_projection
+from ouroboros.outcomes import authored_final_answer, reviewable_effect_projection
 from ouroboros.task_finalization import set_terminal_host_notice, set_terminal_plan_review_open
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.task_carrier import execution_kind
+from ouroboros.utils import sha256_text
 
 
 from typing import TYPE_CHECKING
@@ -83,6 +88,7 @@ class DeliveryCandidate:
     material_tool_indices: tuple[int, ...] = ()
     owner_source_sha256: str = ""
     quiet: bool = False  # bytes of a wake's silent selection: replaced, never published, by other prose
+    refusal_control_text: Optional[str] = None  # only ordinary text can carry a protocol marker
 
     def stale(self, evidence_revision: int, evidence_fingerprint: str) -> bool:
         """Whether this answer was bound to other evidence than ``(evidence_revision, evidence_fingerprint)``."""
@@ -207,7 +213,7 @@ def delivery_subject_projection(
     candidate = getattr(tool_ctx, "_delivery_candidate", None)
     text = full_answer if full_answer is not None else getattr(candidate, "full_text", "")
     return {
-        "candidate_sha256": hashlib.sha256(str(text).encode("utf-8")).hexdigest(),
+        "candidate_sha256": sha256_text(str(text)),
         "effective_criteria": _effective_delivery_criteria(tool_ctx),
         "material_evidence_fingerprint": delivery_evidence_fingerprint(tool_ctx, llm_trace),
     }
@@ -393,6 +399,8 @@ def _publish_delivery_candidate(
         except Exception:  # the host's own subject computation failed: published as unavailable, never as approved
             log.debug("delivery subject unavailable for the retained answer", exc_info=True)
     llm_trace["delivery_candidate"] = {
+        **({"refusal_final_answer": authored_final_answer(candidate.refusal_control_text, llm_trace)}
+           if candidate.refusal_control_text is not None else {}),
         "content_sha256": candidate.content_sha256,
         "revision": candidate.revision,
         "evidence_revision": candidate.evidence_revision,
@@ -420,6 +428,7 @@ def _replace_delivery_candidate(
     *,
     control: str,
     model_text: Optional[str] = None,
+    refusal_control_text: Optional[str] = None,
 ) -> DeliveryCandidate:
     # The answer's own bytes: its sha256 is the identity selection, result review
     # and delivery name. Redaction belongs to derived log and UI projections.
@@ -435,6 +444,7 @@ def _replace_delivery_candidate(
             _effective_delivery_criteria(tools._ctx), ensure_ascii=False, default=str,
         ))
     if (isinstance(previous_candidate, _loop().DeliveryCandidate) and previous_candidate.full_text == full_text
+            and previous_candidate.refusal_control_text == refusal_control_text
             # An unchanged repeat under the same (known or UNKNOWN) evidence stays that candidate.
             and _loop()._current_delivery_candidate(ctx, llm_trace) is previous_candidate):
         previous_candidate.finalization_control = control
@@ -443,7 +453,7 @@ def _replace_delivery_candidate(
         return previous_candidate
     # Retention never waits on the evidence read (#1224): unknown evidence keeps the answer.
     evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, ctx, llm_trace)
-    content_hash = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
+    content_hash = sha256_text(full_text)
     revision = int(getattr(tools._ctx, "_delivery_candidate_revision", 0) or 0) + 1
     tools._ctx._delivery_candidate_revision = revision
     candidate = _loop().DeliveryCandidate(
@@ -454,7 +464,7 @@ def _replace_delivery_candidate(
         evidence_fingerprint=evidence_fingerprint,
         acceptance_binding=_unaccepted_delivery_binding(tools, content_hash),
         finalization_control=control,
-        model_text=model_text,
+        model_text=model_text, refusal_control_text=refusal_control_text,
         control_episode_seen=bool(
             getattr(previous_candidate, "control_episode_seen", False)
         ),
@@ -495,17 +505,11 @@ def _forced_unaccepted_binding(
 ) -> Dict[str, Any]:
     """Bind a newly generated forced answer without borrowing an older verdict."""
 
-    binding = _unaccepted_delivery_binding(tools, candidate.content_sha256)
-    binding.update({
-        "acceptance_status": "unaccepted",
-        "authoritative": False,
+    return {
+        **_unaccepted_delivery_binding(tools, candidate.content_sha256),
         "degraded": True,
         "degraded_reason": reason_code,
-        "panel_id": "",
-        "binding_hash": "",
-    })
-    binding.pop("review_evidence_revision", None)
-    return binding
+    }
 
 
 def _live_delivery_candidate(ctx: _RoundLimitContext) -> Optional[DeliveryCandidate]:
@@ -589,21 +593,31 @@ def _delivery_control_prompt(candidate: DeliveryCandidate, *, pending_review_cho
                if pending_review_choice else ""))
 
 
+def _completion_words(content: Any) -> tuple[str, str | None]:
+    """Keep the exact display bytes and, for a typed refusal, the text eligible for protocol parsing."""
+    display = refusal_display(content)
+    if display is not None:
+        return display, assistant_answer_text(content)
+    return _loop()._extract_plain_text_from_content(content), None
+
+
 def hold_completion_response(content: Any, tools: ToolRegistry, ctx: Any, trace: dict,
-                             *, response_start: int | None = None, selected: bool = False) -> None:
+                             *, response_start: int | None = None, selected: bool = False, resumed: bool = False) -> None:
     """Keep each complete model row followed by host input, even on unchanged facts."""
-    raw = _loop()._extract_plain_text_from_content(content)
+    raw, control = _completion_words(content)
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
-    parsed, duplicate, embedded = _parse_delivery_control_body(raw)
+    if (selected or resumed) and isinstance(content, str) and content == getattr(candidate, "full_text", None):
+        control = getattr(candidate, "refusal_control_text", None)  # this is the candidate's display string
+    parsed, duplicate, embedded = _parse_delivery_control_body(raw if control is None else control)
     private = bool(candidate and candidate.control_episode_seen and
                    (duplicate or embedded or isinstance(parsed, dict) and "delivery_control" in parsed))
-    row = {"role": "assistant", "content": raw}
+    row = {"role": "assistant", "content": content if control is not None else raw}
     # Older gates may already have recorded this response before their host notice.
     # Never deduplicate against an earlier model round with identical answer bytes.
-    recorded = row in ctx.messages[response_start:] if response_start is not None else ctx.messages[-1:] == [row]
-    if not recorded:
+    recent = ctx.messages[response_start:] if response_start is not None else ctx.messages[-1:]
+    if not any(item.get("role") == "assistant" and item.get("content") == row["content"] for item in recent):
         ctx.messages.append(row)
-    tools._ctx._completion_held_sha256 = "" if private else hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    tools._ctx._completion_held_sha256 = "" if private else sha256_text(raw)
     door = completion_schema(tools, getattr(ctx, "tool_schemas", None))
     notice = ("[SYSTEM NOTICE] " + ("Selected completion was held. Use " if selected else "No completion selection was made. Use ") + door +
               " to finish or stop, or continue work. Retained answer_sha256=" +
@@ -659,23 +673,6 @@ def completion_observation(ctx: Any, trace: dict) -> dict:
             "model": (getattr(ctx, "_completion_observation", None) or {}).get("model"),  # until another reply answers
             "tool_count": len(trace.get("tool_calls") or []),
             "owner_source_sha256": owner_source_sha256(ctx)}
-
-
-def selected_completion_text(request: dict, candidate: Any, messages: list,
-                             held_sha256: str = "") -> tuple[str | None, str]:
-    """Only complete explicit bytes and the two currently offered identities resolve."""
-    if "answer" in request:
-        text = request["answer"]
-        return (text, "") if isinstance(text, str) and (text.strip() or request.get("allow_empty")) else (None, "answer_unavailable")
-    selector = request.get("answer_sha256")
-    if candidate is not None and selector == candidate.content_sha256:
-        return candidate.full_text, ""
-    if selector and selector == held_sha256:
-        for row in reversed(messages):
-            text = row.get("content")
-            if row.get("role") == "assistant" and isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == selector:
-                return text, ""
-    return None, "selection_unavailable: select the current retained/whole held answer or supply complete bytes"
 
 
 def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *, tool_ctx: Any = None,
@@ -761,13 +758,17 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     request = getattr(tool_ctx, "_completion_request", None)
     if not isinstance(request, dict):
         return False
+    reply_control = None
     if request.get("reply_later"):
         if content is None:
             return False
-        request = {**request, "answer": _loop()._extract_plain_text_from_content(content), "reply_later": False}
+        text, reply_control = _completion_words(content)
+        request = {**request, "answer": text, "reply_later": False}
     observation = request.get("observation") or {}
     candidate = getattr(tool_ctx, "_delivery_candidate", None)
-    text, error = selected_completion_text(request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""))
+    text, control, error = resolve_completion_answer(
+        request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""),
+        refusal_control_text=reply_control)
     from ouroboros.place_reply import records_only_now, riding_sends
     if (request.get("wake_silent") or records_only_now(tool_ctx)) and owner_reply_owed(tool_ctx):
         error = OWNER_REPLY_OWED_REFUSAL
@@ -795,9 +796,9 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
         finally:
             tool_ctx._acceptance_observation = previous
     if text is not None and not error:
-        from ouroboros.delivery_facts import select_answer
-        candidate = select_answer(tools, ctx, trace, text, request, emit_progress)
-        _loop()._latch_final_answer_marker(trace, "" if candidate.quiet else text)  # quiet words latch no fallback
+        candidate = select_answer(tools, ctx, trace, text, request, emit_progress, refusal_control_text=control)
+        marker_text = text if control is None else control
+        _loop()._latch_final_answer_marker(trace, "" if candidate.quiet else marker_text)  # quiet words latch no fallback
     if not error and request["action"] == "finish" and unseen:
         error = "unobserved_tool_results: read the completed results before finishing: " + ", ".join(str(c.get("tool")) for c in unseen)
     tool_ctx._completion_request, tool_ctx._completion_conflict = None, False
@@ -992,7 +993,8 @@ def _resolve_forced_delivery_control_body(
     raw: str,
     candidate: Optional[DeliveryCandidate],
     *,
-    armed: bool, envelope_keys: Tuple[str, ...] = (), messages: list | None = None, held_sha256: str = "",
+    armed: bool, prose: str | None = None, envelope_keys: Tuple[str, ...] = (),
+    messages: list | None = None, held_sha256: str = "",
     tool_ctx: Any = None, native: bool = False,
 ) -> Tuple[str, bool, bool, bool, bool]:
     """Return text plus retained/degraded/consumed/replaced facts. ``native`` marks ``raw`` as the
@@ -1022,7 +1024,7 @@ def _resolve_forced_delivery_control_body(
         and control_kind in {"keep", "replace", "invalid", "embedded"}
     )
     if not armed and not historical:
-        return raw, False, False, False, False
+        return raw if prose is None else prose, False, False, False, False
     if control_kind in {"keep", "replace", "invalid", "embedded"}:
         # Read old protocol privately; it no longer selects bytes or authorizes delivery.
         return (candidate.full_text if candidate else "", candidate is not None,
@@ -1038,7 +1040,7 @@ def _resolve_forced_delivery_control_body(
     if not protocol_intent:
         # Ordinary prose under an armed latch stands (a control object quoted
         # MID-prose is the disclosed residual).
-        return raw, False, False, True, False
+        return raw if prose is None else prose, False, False, True, False
     retained = candidate is not None
     return candidate.full_text if retained else "", retained, True, True, False
 
@@ -1094,21 +1096,17 @@ def _parse_delivery_control_body(
 
 def _resolve_delivery_control(content: Any, tools: ToolRegistry, ctx: Any, llm_trace: dict) -> tuple[str, str]:
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
-    raw = _loop()._extract_plain_text_from_content(content)
-    if candidate is None:
-        return "fresh", raw
-    required = bool(getattr(tools._ctx, "_delivery_control_required", False) or candidate.control_episode_seen
-                    or candidate.finalization_control in _DELIVERY_HOLD_CONTROLS
-                    or _delivery_replace_required(candidate))
-    if not required:
+    if candidate is not None:
+        if (getattr(tools._ctx, "_delivery_control_required", False) or candidate.control_episode_seen
+                or candidate.finalization_control in _DELIVERY_HOLD_CONTROLS or _delivery_replace_required(candidate)):
+            hold_completion_response(content, tools, ctx, llm_trace)
+            return "retry", candidate.full_text
         if candidate.finalization_control == "owner_revision_required":
             from ouroboros.loop_messages import acknowledge_acceptance_observation
             observed = getattr(tools._ctx, "_acceptance_observation", {})
             if observed.get("owner_source_sha256"):
                 acknowledge_acceptance_observation(tools._ctx, observed["owner_source_sha256"])
-        return "fresh", raw
-    hold_completion_response(content, tools, ctx, llm_trace)
-    return "retry", candidate.full_text
+    return "fresh", refusal_display(content) or _loop()._extract_plain_text_from_content(content)
 
 
 def _compose_delivery_suffix(full_text: str, suffix: str) -> str:
@@ -1201,6 +1199,7 @@ def resume_delivery_candidate(tools: ToolRegistry, working: dict, schemas: list)
 def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: Any, llm_trace: dict,
                                 *, explicit: bool, resumed: bool) -> tuple[bool, Any]:
     """Select/save prose before gates; recovery retains its old evidence binding."""
+    parts = content if refusal_display(content) is not None else None
     if resumed or explicit:
         control, content = ("retained" if resumed else "fresh"), content
     else:
@@ -1213,9 +1212,10 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
     keep_quiet = quiet_held and noted(held)  # prose after one-shot facts inherits a silent selection (delivery_facts)
     if resumed and quiet_held:
         return False, content  # a quiet selection lost with its execution id is chosen again
-    fresh = control == "fresh" and (explicit or str(content or "").strip() or quiet_held)
+    fresh = control == "fresh" and (explicit or parts is not None or str(content or "").strip() or quiet_held)
     candidate = held if not fresh or (explicit and held is not None) else _loop()._replace_delivery_candidate(
-        tools, limit_ctx, llm_trace, str(content or ""), control="candidate")
+        tools, limit_ctx, llm_trace, str(content or ""), control="candidate",
+        refusal_control_text=assistant_answer_text(parts) if parts is not None else None)
     if isinstance(candidate, DeliveryCandidate):
         if fresh:
             candidate.finalization_control = "candidate"
@@ -1273,7 +1273,7 @@ def _no_tool_final_answer(
                 notice = _loop()._claim_pre_delivery_notice(tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace)
                 handoff_msg = f"{handoff_msg}\n\n{notice}" if notice else handoff_msg
                 if ready and content and content.strip():
-                    messages.append({"role": "assistant", "content": content})
+                    append_candidate_prose(messages, content)
                 _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
                 note = "Subagent handoff status refreshed before final response." + (
                     " Pre-delivery facts shown with it." if notice else "")
@@ -1289,7 +1289,7 @@ def _no_tool_final_answer(
                 _unread_review_updates(tools._ctx, messages, selected=explicit_candidate))
             if review_rows or review_present:
                 if content and content.strip() and not explicit_candidate:  # a selection is already its own row
-                    messages.append({"role": "assistant", "content": content})
+                    append_candidate_prose(messages, content)
                 messages.extend(review_rows)
                 emit_progress("Review answers that arrived before delivery were shown first.")
                 _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
@@ -1330,7 +1330,7 @@ def _no_tool_final_answer(
             if (isinstance(candidate, _loop().DeliveryCandidate)
                     and candidate.stale(evidence_revision, evidence_fingerprint)):
                 if content and str(content).strip():
-                    messages.append({"role": "assistant", "content": str(content)})
+                    append_candidate_prose(messages, str(content))
                 llm_trace["reasoning_notes"].append(
                     "Task services were finalized before delivery; the complete answer must bind the resulting evidence."
                 )
@@ -1364,7 +1364,7 @@ def _no_tool_final_answer(
     def _hold_for_review(text: str) -> None:
         shown_review.append(text)
         if content and str(content).strip():
-            messages.append({"role": "assistant", "content": str(content)})
+            append_candidate_prose(messages, str(content))
         _loop()._append_or_merge_user_message(messages, text)
         emit_progress("Result review outcome shown before delivery.")
         llm_trace["reasoning_notes"].append("Result review outcome shown before delivery.")
@@ -1397,9 +1397,7 @@ def _no_tool_final_answer(
     if admission_lock is not None and admission_agent is not None:
         before_directives = len(getattr(tools._ctx, "_owner_directives", []) or [])
         sealed = bool(getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None))
-        provisional_assistant = {"role": "assistant", "content": content} if content else None
-        if provisional_assistant is not None:
-            messages.append(provisional_assistant)
+        provisional_assistant = append_candidate_prose(messages, content) if content else None
         with timed_phase("admission_wait") as acquired, admission_lock:
             acquired()
             with timed_phase("admission_close"):
@@ -1461,7 +1459,7 @@ def _no_tool_final_answer(
     if (not stopping and isinstance(candidate, _loop().DeliveryCandidate)
             and candidate.stale(evidence_revision, evidence_fingerprint)):
         if candidate.full_text:
-            messages.append({"role": "assistant", "content": candidate.full_text})
+            append_candidate_prose(messages, candidate.full_text)
         llm_trace["reasoning_notes"].append(
             "Delivery evidence changed after the answer was retained; a complete replacement answer is required."
             if evidence_fingerprint else
@@ -1495,6 +1493,8 @@ def _no_tool_final_answer(
         tools._ctx._presence_completion_accepted = True
         limit_ctx.accumulated_usage["presence_completion_outcome"] = tools._ctx._presence_completion["outcome"]
         limit_ctx.accumulated_usage["terminal_origin"] = _loop().TERMINAL_ORIGIN_MODEL_FINAL
+    if getattr(candidate, "refusal_control_text", None) is not None:
+        limit_ctx.accumulated_usage["terminal_origin"] = _loop().TERMINAL_ORIGIN_MODEL_FINAL
     if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or records-only finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary
@@ -1515,7 +1515,7 @@ def _show_routeless_note(tools: ToolRegistry, limit_ctx: Any, trace: dict, candi
     ctx, messages, state, start = tools._ctx, limit_ctx.messages, trace[NO_SEND_KEY], len(limit_ctx.messages)
     fields = ("_delivery_control_required", "_completion_selected", "_presence_completion")
     before = (candidate.finalization_control, *(getattr(ctx, name, None) for name in fields))
-    messages.extend(note_rows(content, note, origin))  # the exact rows the money check priced
+    messages.extend(note_rows(content, note, origin, messages))  # the exact rows the money check priced
     state["noted"], candidate.finalization_control = True, ROUTELESS_NOTED_CONTROL
     ctx._delivery_control_required, ctx._completion_selected, ctx._presence_completion = candidate.control_episode_seen, None, None
     _loop()._publish_delivery_candidate(tools, candidate, trace)

@@ -37,3 +37,23 @@ def task_entry_agent(drive_root, body, *, emit_log=None):
 
     agent._handle_task_scoped = scoped
     return agent
+
+
+def body_agent(drive_root, monkeypatch, messages):
+    """The real agent, entry and task body (loop, empty-final rule, terminal pipeline) for a test that replaces the
+    model at its generation seam. Only boot side effects, authority sources, start settings and the system-context
+    assembly (``_prepare_task_context`` returns these ``messages``) are replaced."""
+    import os
+
+    from ouroboros import agent as agent_module
+    from ouroboros.settings_integrity import task_settings_snapshot
+
+    monkeypatch.setattr(agent_module.OuroborosAgent, "_log_worker_boot_once", lambda *_a: None)
+    monkeypatch.setattr(agent_module.OuroborosAgent, "_start_task_heartbeat_loop", lambda *_a: None)
+    monkeypatch.setattr(agent_module, "validate_task_authority_sources", lambda *_a: None)
+    monkeypatch.setattr(agent_module.subagent_runtime, "apply_task_start_settings_or_disclose",
+                        lambda *_a: task_settings_snapshot({}, os.environ))
+    agent = agent_module.OuroborosAgent(agent_module.Env(repo_dir=drive_root, drive_root=drive_root))
+    agent.llm = SimpleNamespace(default_model=lambda: "test-model")
+    monkeypatch.setattr(agent, "_prepare_task_context", lambda *_a: (agent.tools._ctx, list(messages), {}))
+    return agent

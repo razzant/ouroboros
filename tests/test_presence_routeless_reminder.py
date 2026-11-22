@@ -80,7 +80,7 @@ def run_root(room, monkeypatch, responses, *, metadata=None, root_id="routeless-
                                                   "schedule_occurrence": dict(SCHEDULED)}
     open_door(monkeypatch)
     from ouroboros import context
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
 
     registry = ToolRegistry(repo_dir=room.h.repo, drive_root=room.data)
     ctx = registry._ctx

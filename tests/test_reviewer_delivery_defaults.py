@@ -612,7 +612,7 @@ def test_an_install_whose_saved_3_reads_as_not_set_hears_it_once(notice_world, m
     notice_world.notices.startup_upgrade_notices(view)
     texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "model_cap_notice"]
     assert len(texts) == (1 if owed else 0) and ("model_cap_notified" in notice_world.state) is owed
-    assert not owed or ("reads as not set" in texts[0] and "If 3 was your choice" in texts[0])
+    assert not owed or ("reads as not set" in texts[0] and "takes one request at a time" in texts[0] and "If 3 was your choice" in texts[0])
 
 
 @pytest.mark.parametrize("document, view, owed", [

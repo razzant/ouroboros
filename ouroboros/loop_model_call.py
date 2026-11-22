@@ -19,6 +19,7 @@ import queue
 import time
 
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import task_pacing
@@ -28,6 +29,7 @@ from ouroboros.context_anchor import (CONTEXT_REFUSAL_ROUND_KEY, _restore_contex
                                       refused_request_density, reservation_refusal)
 from ouroboros.context_budget import WHOLE_CATEGORY
 from ouroboros.context_view_facts import SIZE_REFUSAL_KEY, remember_size_refusal
+from ouroboros.lead_fact import observe_prepared_wait_switch
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
@@ -174,8 +176,16 @@ def _route_candidates(tool_ctx: Any, active_model: str, active_use_local: bool, 
     return candidates
 
 
-def _run_cross_model_fallback_chain(
-    *, llm, ctx, tools, messages, active_model, active_use_local, tool_schemas,
+def _run_cross_model_fallback_chain(**values) -> tuple:
+    from ouroboros.loop_routes import fallback_round_view
+
+    with fallback_round_view(values["tools"]._ctx, values["messages"], values["tool_schemas"],
+                             values["accumulated_usage"]) as restore_round:
+        return _try_fallback_routes(restore_round=restore_round, **values)
+
+
+def _try_fallback_routes(
+    *, restore_round, llm, ctx, tools, messages, active_model, active_use_local, tool_schemas,
     active_effort, max_retries, drive_logs, task_id, round_idx, event_queue,
     accumulated_usage, task_type, emit_progress, context_fit_plan,
     active_context_mode,
@@ -205,6 +215,24 @@ def _run_cross_model_fallback_chain(
         return (not recovering_output and task_type != "presence" and deferred is not None and not own_wait
                 and waiter is not None and waiter.waits_allowed)
 
+    def _restore(shared: bool, told: Any = None, resident: Any = None) -> None:
+        """The round's own view after a call that did not become its route: the transcript without that attempt's
+        notice, the plan, mode, view and fit facts, and the tool list a copied candidate fitted (its notice left with
+        its copy; a same-family candidate wrote its notice into the shared transcript, so its fit stays)."""
+        if told is not None and shared:
+            messages[:] = [row for row in messages if row != told]
+        tools._ctx.context_fit_plan, tools._ctx.messages, tools._ctx.active_context_mode = (
+            context_fit_plan, messages, active_context_mode)
+        if context_fit_plan is not None:  # a same-family candidate (the primary row's resumed view too) rebound it
+            if shared:
+                messages[:] = context_fit_plan.reproject_transcript(messages, active_context_mode)
+                rewrite_view(tools._ctx, task_id, "fallback_view_restored")
+            _adopt_view_facts(tools._ctx, context_fit_plan, active_context_mode)
+        _restore_context_fit_usage(accumulated_usage, primary_context_usage)
+        if resident is not None and resident[0] is not None and resident[0] != tool_schemas and not shared:
+            tool_schemas[:], tools._ctx._route_left_out_tool_names = resident
+            rewrite_view(tools._ctx, task_id, "fallback_tools_restored", scope="tools")
+
     waiter = current_model_wait()
     _cooled(active_model, active_use_local, str(getattr(context_fit_plan, "model_role", "") or "main"))
     primary_context_usage = _snapshot_context_fit_usage(accumulated_usage)
@@ -219,7 +247,7 @@ def _run_cross_model_fallback_chain(
     # A primary resource refusal returned here, not waited: the configured routes come
     # first, and the owner question is that refusal's own wait, asked after them.
     deferred, tools._ctx._deferred_resource_refusal = getattr(tools._ctx, "_deferred_resource_refusal", None), None
-    deferred_candidate = None  # The route that actually refused; never replay an unrelated primary.
+    deferred_candidate, deferred_facts, deferred_is_primary = None, "", None
     rows = _route_candidates(tools._ctx, active_model, active_use_local,
                              str(getattr(context_fit_plan, "model_role", "") or ""), waiter)
     tried = []
@@ -308,7 +336,7 @@ def _run_cross_model_fallback_chain(
             # erase evidence that an allowed route refused before generation.
             deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
             if deferred is not None:
-                deferred_candidate = candidate_call
+                deferred_candidate, deferred_facts, deferred_is_primary = candidate_call, facts, is_primary
         if msg is not None or (not recovering_output and accumulated_usage.get("_last_llm_error_kind") == output_recovery.KIND
                                and not accumulated_usage.get("_pending_transport_outcome")):
             (active_model, active_use_local, context_fit_plan, active_context_mode) = _adopt_fallback_route(
@@ -330,33 +358,16 @@ def _run_cross_model_fallback_chain(
                 round_idx=round_idx, answered=msg is not None, own_call=own_call)
             from ouroboros.lead_fact import adopt_fallback
             adopt_fallback(tools._ctx, is_primary, entry_failure, fallback_role)
-            if not is_primary:
-                tools._ctx.route_wait_on_primary = False  # a declared wait belonged to the primary route
             adopted = True
             emit_progress(fallback_adoption_text(tools._ctx, active_model, active_use_local, fallback_role, waiter,
                                                  accumulated_usage, answered=msg is not None, own_call=own_call, fresh=fresh))
             break
-        if told is not None and fallback_messages is messages:  # a failed candidate leaves no row in a shared transcript
-            messages[:] = [row for row in messages if row != told]
         facts = failed_attempt_facts(accumulated_usage, previous_model, previous_use_local, fresh=fresh)  # before its fit facts leave
-        tools._ctx.context_fit_plan = context_fit_plan
-        tools._ctx.messages = messages
-        tools._ctx.active_context_mode = active_context_mode
-        if context_fit_plan is not None:  # a failed candidate's view leaves with it (the primary row's resumed one too)
-            if fallback_messages is messages:  # a same-family candidate rebound the shared transcript
-                messages[:] = context_fit_plan.reproject_transcript(messages, active_context_mode)
-                rewrite_view(tools._ctx, task_id, "fallback_view_restored")
-            _adopt_view_facts(tools._ctx, context_fit_plan, active_context_mode)
-        _restore_context_fit_usage(accumulated_usage, primary_context_usage)
-        if (resident[0] is not None and resident[0] != tool_schemas and fallback_messages is not messages
-                and deferred_candidate is not candidate_call):
-            # Its ceiling fit left with its transcript copy, notice included; the next route gets the list it had.
-            # (A same-family candidate wrote its notice into the shared transcript, so its fit stays with it.)
-            tool_schemas[:], tools._ctx._route_left_out_tool_names = resident
-            rewrite_view(tools._ctx, task_id, "fallback_tools_restored", scope="tools")
+        # The wait's later retry starts from the round's canonical view.
+        _restore(fallback_messages is messages, told, resident)
         if _walk_fenced(tools._ctx, accumulated_usage) or (not recovering_output and str(
                 accumulated_usage.get("_last_llm_error_kind") or "") == "llm_output_exhausted"):
-            break  # an exhausted candidate replied unusably: its outcome is the round's, no further route is dialed
+            break  # an exhausted or a rejected (accepted, unusable) candidate reply is the round's: no further route is dialed
         _cooled(fallback_model, fallback_use_local, fallback_role)
     if tried and not adopted:  # this last attempt's own result, before any wait or re-aim; each earlier one opened the next attempt's row
         emit_progress(f"⚡ Fallback: the last attempt, on {previous_model}{' (local)' if previous_use_local else ''}"
@@ -372,6 +383,7 @@ def _run_cross_model_fallback_chain(
     if msg is None and _asks_owner() and not fenced:
         # Only the refused route is eligible to re-send after the owner wait;
         # the primary might have failed permanently before a fallback's quota refusal.
+        restore_round()
         deferred.ask_owner(waiter)
         retry_call = deferred_candidate or _loop()._RoundModelCallContext(
             llm=llm, messages=messages, tools=tools, context_fit_plan=context_fit_plan,
@@ -380,40 +392,50 @@ def _run_cross_model_fallback_chain(
             event_queue=event_queue, accumulated_usage=accumulated_usage, task_type=task_type,
             active_use_local=active_use_local, active_context_mode=active_context_mode,
             drive_root=pathlib.Path(drive_logs).parent, emit_progress=emit_progress, defer_resource_wait=False)
-        retry_call.defer_resource_wait = False
         if deferred_candidate is not None:
             tools._ctx._pending_handover_reason = "owner_wait"
-        _disclose_unknown(retry_call.messages, "The previous attempt ended without a usable answer; "
-                                               "the host is preparing another request after the owner's answer.")
-        # An owner may select a DIFFERENT account on either the primary or a
-        # fallback model. Rebind the retained call before measurement and physical
-        # send; the pre-wait account's fingerprint/capacity is not evidence for B.
+        # The owner may have changed model, locality or account. Refit the original
+        # transcript and resident catalog for that choice, including when it is a Retry.
         role, account = task_model_binding(
             {"model_role": retry_call.model_role,
              "task_metadata": getattr(tools._ctx, "task_metadata", {})},
             context_fit_plan=retry_call.context_fit_plan, overrides=waiter.overrides)
+        choice = waiter.overrides.get(role, {})
+        retry_call.active_model = choice.get("model", retry_call.active_model)
+        retry_call.active_use_local = choice.get("use_local", retry_call.active_use_local)
+        retry_call.messages = LLMClient.sanitize_reasoning_on_model_switch(messages, active_model, retry_call.active_model)
+        retry_call.tool_schemas, retry_call.defer_resource_wait = tool_schemas, False
+        if deferred_facts:
+            tell_failed_attempt(retry_call.messages, deferred_facts, fallback_route_words(
+                tools._ctx, retry_call.active_model, retry_call.active_use_local, role, waiter, pin_note=True))
+        _disclose_unknown(retry_call.messages, "The previous attempt ended without a usable answer; "
+                                               "the host is preparing another request after the owner's answer.")
         retry_call.context_fit_plan, retry_call.active_context_mode = _loop()._rebind_context_fit_plan(
-            retry_call.context_fit_plan, tools, retry_call.messages,
+            context_fit_plan, tools, retry_call.messages,
             model=retry_call.active_model, use_local=retry_call.active_use_local,
-            start_mode=retry_call.active_context_mode, tool_schemas=tool_schemas,
+            start_mode=active_context_mode, tool_schemas=tool_schemas,
             model_role=role, model_route={}, credential_profile_id=account)
         meta_before = accumulated_usage.get("_last_llm_call_meta")
-        msg, _cost, active_context_mode = _loop()._call_round_model(retry_call)
-        if msg is not None and deferred_candidate is not None:
-            own_call = own_call_record(accumulated_usage, True, meta_before, None)
+        msg, _cost, retry_mode = _loop()._call_round_model(retry_call)
+        if msg is not None:
             active_model, active_use_local, context_fit_plan, active_context_mode = _adopt_fallback_route(
                 ctx, tools, retry_call.active_model, retry_call.active_use_local,
-                messages, retry_call.messages, retry_call.context_fit_plan, active_context_mode,
+                messages, retry_call.messages, retry_call.context_fit_plan, retry_mode,
                 tool_schemas, accumulated_usage)
+            from ouroboros.lead_fact import adopt_after_resource_wait
+            adopt_after_resource_wait(tools._ctx, role, waiter.overrides, deferred_is_primary, entry_failure)
+        else:
+            restore_round()
+        if msg is not None and deferred_candidate is not None:
+            own_call = own_call_record(accumulated_usage, True, meta_before, None)
             tools._ctx._route_facts_pending = route_facts_text(
                 tools._ctx, model=active_model, use_local=active_use_local, role=role, failed_model=entry_model,
                 failure=entry_failure, waiter=waiter, usage=accumulated_usage, round_idx=round_idx, own_call=own_call)
             emit_progress(fallback_adoption_text(tools._ctx, active_model, active_use_local, role, waiter,
                                                  accumulated_usage, answered=True, own_call=own_call))
-        else:
-            active_model, active_use_local = retry_call.active_model, retry_call.active_use_local
-            context_fit_plan = retry_call.context_fit_plan
-    elif msg is None and deferred is not None and not own_wait:  # the refused primary buys no forced final either
+    elif msg is None and deferred is not None and not own_wait and not (
+            accumulated_usage.get("_last_llm_failure") or {}).get("rejected_receipt"):
+        # A settled unusable reply already owns the terminal; otherwise the refused primary buys no forced final.
         accumulated_usage[RESOURCE_REFUSAL_KEY] = deferred.terminal(
             fallbacks_tried=tried, owner_wait="not_asked" if _asks_owner() else "not_allowed")
     return (
@@ -429,21 +451,23 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
                           context_fit_plan: Any, active_context_mode: str, emit_progress: Callable[..., None]) -> tuple:
     """The recovery order of one round's outcome.
 
-    Each observed failure can use configured alternatives, including during an existing
-    outage. That episode keeps its elapsed clock, backoff and prior custody; a failed
-    alternative never resets those bounds. An acting primary's first lost answer opens its
-    wait instead, so its own continuation precedes the walk (``fallback_chain_allowed``).
+    A failed alternative keeps the episode's clock, backoff and prior custody. An acting
+    primary's first lost answer opens its wait before the walk (``fallback_chain_allowed``).
     Returns ``(msg, model, use_local, plan, mode, episode)``.
     """
     from ouroboros.model_wait import current_model_wait
+    from ouroboros.loop_transport import revoke_endpoint_grant
 
     usage, ctx = limit_ctx.accumulated_usage, tools._ctx
     model, use_local = limit_ctx.active_model, limit_ctx.active_use_local
+    if msg is None and usage.get("_observed_transport_endpoint"):
+        # A route walk is a separate policy, not an extension of an unused probe grant.
+        revoke_endpoint_grant(usage, episode, keep_latest_failure=True)
 
     def reconcile(current: Any, after_walk: bool = False) -> Any:  # past the walk, only a configured route answers
         return _loop()._reconcile_transport_wait(
             current, ctx, msg_present=msg is not None, error_kind=str(usage.get("_last_llm_error_kind") or ""),
-            drive_logs=limit_ctx.drive_logs, task_id=limit_ctx.task_id, model=model, emit_progress=emit_progress,
+            drive_logs=limit_ctx.drive_logs, task_id=limit_ctx.task_id, model=model, use_local=use_local, emit_progress=emit_progress,
             by_configured_route=after_walk and msg is not None)
 
     if episode is not None:
@@ -481,12 +505,17 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
 
 
 def _walk_fenced(tool_ctx: Any, usage: Dict[str, Any]) -> bool:
-    """A spent deadline, or an unknown outcome that permits no new generation, ends the walk."""
+    """One terminal decision for the walk, deferred wait and acting-failure restore.
+
+    A spent deadline, an unknown outcome that permits no new generation, or
+    an accepted operation whose reply the host proved unusable ends the walk.
+    """
     from ouroboros.loop_transport import new_generation_after_unknown
 
     kind = str(usage.get("_last_llm_error_kind") or "")
     return kind == "deadline_exhausted" or (
-        kind == "provider_outcome_unknown" and not new_generation_after_unknown(tool_ctx, usage))
+        kind == "provider_outcome_unknown" and not new_generation_after_unknown(tool_ctx, usage)) or bool(
+        (usage.get("_last_llm_failure") or {}).get("rejected_receipt"))
 
 
 from ouroboros.loop_routes import _apply_round_route_overrides  # noqa: E402, F401 -- loop facade
@@ -864,8 +893,7 @@ def _dispatch_round_model(
 ) -> Tuple[Any, float]:
     from ouroboros.model_wait import current_model_wait
     from ouroboros.loop_messages import _pending_owner_input_kinds
-    from ouroboros.loop_transport import emit_model_substitution, transport_repeat_stop_requested
-    from ouroboros.owner_mailbox import OwnerMailboxPeek
+    from ouroboros.loop_transport import emit_model_substitution
     from ouroboros.send_clock import main_clock_policy
     from ouroboros.subagent_bootstrap import is_configured_api_child
     from ouroboros.loop_messages import append_context_facts
@@ -874,7 +902,6 @@ def _dispatch_round_model(
     if append_context_facts(ctx):
         disposition = _loop()._measure_round_main_fit(
             ctx, automatic_pass_used=bool(getattr(disposition, "automatic_pass_used", False)))
-    mailbox_peek = OwnerMailboxPeek()
     ctx.tools._ctx._transport_repeat_control_reason = ""
 
     waiter = current_model_wait()
@@ -900,11 +927,24 @@ def _dispatch_round_model(
     with contextlib.ExitStack() as binding, _presend_context_fit(ctx, admitted) as admit:
         deferral = None
         if waiter is not None:
-            from ouroboros.loop_llm_call import classify_llm_exception
-            resource_reason = (lambda error: {"auth_error": "auth", "quota_exhausted": "quota"}.get(
-                classify_llm_exception(error).kind, "")) if getattr(ctx.tools._ctx, "route_wait_on_primary", False) else None
+            from ouroboros.loop_llm_call import classify_llm_exception, confirmed_api_resource_refusal
+            # A declared wait keeps every auth/quota refusal on the primary. Otherwise an API key's confirmed refusal
+            # opens the same owner wait after the configured routes (#3132); an inline Presence turn and an exact actor
+            # a parent chose keep their own refusal.
+            declared = getattr(ctx.tools._ctx, "route_wait_on_primary", False)
+            key_wait = waiter.waits_allowed and ctx.task_type != "presence" and not getattr(ctx.tools._ctx, "exact_model_route", False)
+
+            def resource_reason(error):  # one name in this scope: the size inventory keys a function by its qualname
+                if declared:
+                    return {"auth_error": "auth", "quota_exhausted": "quota"}.get(classify_llm_exception(error).kind, "")
+                if TRANSPORT_DEATHS_KEY in ctx.accumulated_usage or TIMEOUT_REPEAT_KEY in ctx.accumulated_usage:
+                    return ""  # the round's existing no-resend fence also governs a key/billing wait
+                return confirmed_api_resource_refusal(error)
+            prepare = partial(_reprepare_waiting_main, ctx)
+            if primary:  # a provisional fallback cannot publish before it is adopted
+                prepare = observe_prepared_wait_switch(ctx.tools._ctx, role, waiter.overrides, prepare)
             binding.enter_context(waiter.register_reprepare(
-                role, lambda kwargs: _reprepare_waiting_main(ctx, kwargs), resource_reason=resource_reason, owner_model_wake=True))
+                role, prepare, resource_reason=resource_reason if declared or key_wait else None, owner_model_wake=True))
             if ((not waiter.waits_allowed or _fallback_route_follows(ctx)) if primary else ctx.defer_resource_wait):
                 deferral = binding.enter_context(waiter.defer_resource_wait(role))
         result = _loop().call_llm_with_retry(
@@ -915,7 +955,6 @@ def _dispatch_round_model(
             deadline_ts=_loop()._task_deadline_epoch(ctx.tools),
             transport_reserve_sec=task_pacing.get_finalization_grace_sec(),
             attempt_cap=attempt_cap,
-            stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx, mailbox_peek=mailbox_peek)) if attempt_cap is None else None,
             owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
             allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
             physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage) if disposition is not None else None),
@@ -929,6 +968,7 @@ def _dispatch_round_model(
                 getattr(ctx.tools._ctx, "task_metadata", {}), task_type=ctx.task_type),
             configured_api_child=is_configured_api_child(ctx.tools._ctx),
             physical_send_claim=ctx.physical_send_claim, response_meta_out=output_recovery.response_facts(ctx.tools._ctx),
+            checkpoint_call=ctx,
             **({"max_tokens": int(max_tokens)} if max_tokens else {}),
         )
     ctx.accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, None)  # consumed by the call's later attempts, if any
@@ -980,25 +1020,16 @@ def _dispatch_round_model(
 def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     """Rebuild from the same immutable core; never replay completed tools/review."""
     from ouroboros.model_wait import PreparedModelCall, current_model_wait
-    from ouroboros.usage_accounting import current_physical_attempt_predicate, bind_physical_attempt_context
+    from ouroboros.usage_accounting import current_physical_attempt_predicate
 
+    if not ctx.accumulated_usage.get("_observed_transport_endpoint"):
+        kwargs.pop("observed_endpoint_sha256", None)
     model, use_local = kwargs["model"], kwargs.get("use_local", False)
     previous_model = str(ctx.active_model or "")
     role = kwargs["model_role"]
-    observed = kwargs.pop("_model_observed_route", None)
-    native_reset = bool(observed and observed.pop("_native_reset", False))
-    # Waiting kwargs can contain a caption/off projection. Keep the canonical
-    # images, then build the newly selected route's physical view below.
-    prepared = LLMClient.sanitize_reasoning_on_model_switch(ctx.messages, ctx.active_model, model)
-    if native_reset:
-        from ouroboros.llm_messages import drop_source_native_messages, reset_native_messages
+    from ouroboros.loop_routes import reprepare_source, reprepare_wire
 
-        prepared, changed = reset_native_messages(
-            prepared, observed, source=observed.get("source"), model=observed.get("model"))
-        if not changed:
-            prepared, _ = drop_source_native_messages(
-                prepared, source=str(observed.get("source") or ""))
-    ctx.messages[:] = prepared
+    observed = reprepare_source(ctx, kwargs)
     ctx.context_fit_plan, ctx.active_context_mode = _loop()._rebind_context_fit_plan(
         ctx.context_fit_plan, ctx.tools, ctx.messages, model=model, use_local=use_local,
         start_mode=ctx.active_context_mode, tool_schemas=ctx.tool_schemas,
@@ -1022,30 +1053,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     _loop()._retire_main_reasoning(ctx)
     append_context_facts(ctx)
     disposition = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
-    from ouroboros.send_clock import MainSendClock
-    from ouroboros.loop_llm_call import _prepare_main_messages
-    from ouroboros.llm_attempt import single_physical_send, track_physical_attempts
-
-    # Any vision work belongs to this actual reprepare, outside both the Main
-    # fit probe and the failed attempt's physical precondition/measurement —
-    # and outside Main's clock and send claim: a helper is not a Main request.
-    with bind_physical_attempt_context(None), MainSendClock(None).bound(), single_physical_send(None), track_physical_attempts(None):
-        kwargs["messages"] = _prepare_main_messages(
-            ctx.messages, model=model, model_role=role,
-            model_account_override=kwargs.get("model_account_override"),
-            llm=ctx.llm, accumulated_usage=ctx.accumulated_usage,
-            drive_root=ctx.drive_root or ctx.drive_logs.parent, task_id=ctx.task_id,
-            event_queue=ctx.event_queue, use_local=use_local,
-            task_attempt=ctx.accumulated_usage.get("_task_attempt"),
-            deadline_ts=_loop()._task_deadline_epoch(ctx.tools),
-        )
-    from ouroboros.llm_claudexor import cache_key_for_model
-    from ouroboros.provider_models import provider_for_model
-    kwargs["cache_affinity"] = "" if use_local else cache_key_for_model(model)
-    kwargs["allow_server_web_search"] = (_loop()._server_web_allowed_by_task(ctx.tools._ctx)
-                                         and not use_local and provider_for_model(model) != "claudexor")
-    if provider_for_model(model) == "claudexor":
-        kwargs["bypass_response_cache"] = False
+    reprepare_wire(ctx, kwargs, deadline_ts=_loop()._task_deadline_epoch(ctx.tools))
     physical = with_attempt_prefix(_physical_context_for_fit(disposition, ctx.context_fit_plan), ctx.accumulated_usage) if disposition else None
     if physical is not None:  # the remaining attempts of this call send under the new route's measurement
         ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = physical
@@ -1357,8 +1365,9 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     # Snapshot immediately: a reclaim summarizer is itself physically receipted
     # and would otherwise replace the failed Main candidate in the ContextVar.
     # A refusal before dispatch left no capture: compare with the refused candidate, never an earlier round's.
+    # A restored attempt's request (``restored``) is no package this round measured: its size stays what its own record states.
     failed_capture = _refused_candidate(refused) if refused else _loop().last_physical_attempt_capture()
-    remember_size_refusal(ctx, failed_capture, measured=disposition is not None)  # whole, before any early return
+    remember_size_refusal(ctx, failed_capture, measured=disposition is not None and not getattr(failed_capture, "restored", False))  # whole, before any early return
     if disposition is None:
         return msg, cost, ctx.active_context_mode
     if isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):

@@ -242,7 +242,8 @@ pressed. Both carry `cited: {text, clipped}` with the first 1,024 Unicode charac
 only if more remain. The durable lead keeps the whole citation. The cite sits on `lead` on the primary and
 `lead.primary` while away, including an accepted primary awaiting application. It never governs the work.
 A fallback names its chain row in `role` (`fallback:<index>`); equal models on different accounts remain distinct.
-`primary` appears only away from the primary; `since` and `cause` date fallback, mind and wait-card departures.
+`primary` appears only away from the primary; `since` and `cause` date and explain departures. A fallback's
+`cause` uses the failed call's proven `access_reason` when present, otherwise its own failure code.
 A wait-card switch has basis `owner` and cause `wait_card`: the owner moved the acting route without changing
 the work's primary. It carries no fallback amber and no `pending` route unless a later act will actually move it.
 A requested return stays fallback until the primary answers. Queued roots use their admitted carrier;
@@ -402,6 +403,9 @@ In a Main or Project response, `window.latest_message` names the latest eligible
 - **Rows that are not messages.** Do not show these as bubbles:
   - Replay evidence (`system_type` `quiz_answer`, `quiz_closed`, `task_evidence`, or `summary_kind` with `historical_terminal`) can serve cards on other pages; it carries recorded `suggested_name`, `wake_summary` and `schedule_name`. Answers and closures carry the recorded `quiz` with its question's current `question_delivery`. A parent's own row, live state or in-room `task_evidence` (even with zero calls) establishes its card; a child's `parent_task_id` alone cannot. Show the child independently until its parent can be placed. A terminal carrier may name `task_terminal_status` and `task_attempt`. `current_outcome` is the stored result's ending under its own `task_attempt`. It revises its row only if both name one attempt or neither names any; otherwise the row keeps its published facts and the outcome is separate, taking no status, words, metrics or clock from the row or another attempt's receipt. Its `terminal_time` is the host's validated fact, else that time is unknown. An older ending cannot settle a reopened attempt. On a revised outcome, `terminal_delivery.scope: "task"` means the affected answer is unknown; a null `preserved_path` means the copy could not be verified for this answer. Routing refusals, question pointers, answers and closures only reference a task; they never conclude it.
   - `system_type: "task_model_wait"`: a model wait's latest state, in `model_waits`, for the task's card.
+    `access_reason` describes the refused call: `api_key`, `api_billing`, `auth`, `quota`, `auth_quota`,
+    `unavailable`, `connection_unavailable`, or `""` for unconfirmed access. It grants no action; `reason`
+    still governs the wait. Older rows may omit it; an unavailable observer is not evidence of a key or billing fault.
 - **A rebuilt row:** `lifecycle_virtual: true` describes the skill operation running now, rebuilt with a fresh `ts` on every read and without `history_id`: replace it rather than merge it.
 - **Derived and synthesized rows:** in Main a Project question appears as `system_type: "project_question_pointer"` (with `quiz_id`), carrying the question row's `history_id`. A Project's start message rebuilt from its binding (`origin_projected: true`) and a synthesized `origin_omission` System notice (further archived origins were not rendered) have no stored `history_id`.
 

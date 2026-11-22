@@ -71,8 +71,10 @@ def test_a_refused_fit_for_a_batch_from_an_earlier_conversation_ends_typed_and_t
         task, first = await started(host)
         second = await fresh_while_it_runs(host, task, first)
         gate.set()
-        with pytest.raises(RealtimeSetupError, match='context_capacity'):
+        with pytest.raises(RealtimeSetupError, match='context_capacity') as refused:
             await asyncio.wait_for(task, 5)
+        assert 'cannot receive the completed tool result' in str(refused.value)
+        assert 'tokens' not in str(refused.value)
         assert len(attempts) == 1 and len(host.sessions) == 2
         assert not pointers(second) and not outputs(second), 'neither a pointer to a fit that never was, nor an orphan output'
     asyncio.run(scenario())

@@ -313,10 +313,11 @@ def test_a_closing_helper_holds_its_final_once_for_an_addressed_row_and_not_for_
 
 
 @pytest.mark.parametrize("rail", ["one_turn", "two_turns", "provider_outcome_unknown"])
-def test_the_forced_rail_never_replaces_a_helpers_final_with_the_fallback_for_a_carried_row(tmp_path, monkeypatch, rail):
-    """A carried row read after the forced call is no directive: a one-turn rail keeps the forced final, a two-turn
-    rail asks once more with the row in view, and a two-turn rail whose forced call left the provider outcome
-    unknown keeps its draft; none buys the resume or the no-resend fallback, and the corpus does not grow."""
+def test_a_carried_row_never_buys_the_forced_rail_a_second_send(tmp_path, monkeypatch, rail):
+    """A row carried to this work and read after the forced call moves no corpus, yet that call's reply never read it:
+    a two-turn rail asks once more with the row in view, a one-turn rail ends on its late-arrival terminal instead of
+    delivering that reply, and a forced call that left the provider outcome unknown keeps its no-resend terminal; none
+    buys a second send it does not own, and the corpus does not grow (the restored read's own rule, ``keep_unseen_reply``)."""
     from tests.test_delivery_forced_finalization import _forced_test_context
     incoming = queue.Queue()
     loop, registry, ctx, _trace = _forced_test_context(tmp_path, incoming=incoming)
@@ -342,10 +343,15 @@ def test_the_forced_rail_never_replaces_a_helpers_final_with_the_fallback_for_a_
     text, _usage, returned_trace = loop._forced_final_answer(
         ctx, prompt="finalize", fallback_text="fallback", reason_code="round_limit",
         single_semantic_turn=rail == "one_turn")
-    assert calls == (2 if rail == "two_turns" else 1) and text == f"forced draft {calls}"
-    assert "Resume the task" not in text and "blind resend" not in text
-    assert returned_trace["forced_finalization"].get("source") not in {"late_owner_directive_requires_resume",
-                                                                        "provider_outcome_unknown_no_resend"}
+    assert calls == (2 if rail == "two_turns" else 1)
+    source = returned_trace["forced_finalization"].get("source")
+    if rail == "two_turns":  # the refreshed reply read the row: it answers
+        assert text == "forced draft 2" and source not in {"late_owner_directive_requires_resume",
+                                                           "provider_outcome_unknown_no_resend"}
+    elif rail == "one_turn":  # no turn is left to read it: the reply that never did is not delivered as the final
+        assert "forced draft" not in text and "Resume the task" in text and source == "late_owner_directive_requires_resume"
+    else:  # an unknown outcome buys no refresh: its no-resend terminal, the row retained for a resume
+        assert "forced draft" not in text and "blind resend" in text and source == "provider_outcome_unknown_no_resend"
     assert owner_source_sha256(registry._ctx) == corpus and not getattr(registry._ctx, "_owner_directives", None)
     assert held_owner_messages(registry._ctx)[address]["carried"]["went_to"] == ""
 

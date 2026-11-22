@@ -125,8 +125,41 @@ def adopt_fallback(ctx: Any, is_primary: bool, failure: Mapping, role: str) -> N
     ctx.route_choice = route_choice.after_fallback(ctx, is_primary)
     ctx._lead_return_from = None
     ctx._lead_role = role
-    ctx._lead_cause = str(failure.get("failure_code") or "configured fallback")
+    ctx._lead_cause = str(failure.get("access_reason") or failure.get("failure_code") or "configured fallback")
+    if not is_primary:
+        ctx.route_wait_on_primary = False  # the declared wait belonged to the primary
     publish_lead(ctx, role=role)
+
+
+def publish_wait_switch(ctx: Any, role: str) -> None:
+    """Paint an applied owner choice, even without another round; it is not a return receipt."""
+    ctx._lead_return_from = None
+    publish_lead(ctx, role=role)
+
+
+def adopt_after_resource_wait(ctx: Any, role: str, overrides: Mapping, is_primary: bool | None, failure: Mapping) -> None:
+    """A repaired deferred attempt wins its configured route unless the card chose the route."""
+    if overrides.get(role):
+        ctx.route_choice = route_choice.explicit("wait_card")
+        publish_wait_switch(ctx, role)
+    elif is_primary is not None:
+        adopt_fallback(ctx, is_primary, failure, role)
+
+
+def observe_prepared_wait_switch(ctx: Any, role: str, overrides: Mapping, prepare):
+    """Report the acting role's new override after reprepare, before send; Retry is not a switch."""
+    previous = overrides.get(role)
+
+    def reprepare(kwargs):
+        nonlocal previous
+        prepared = prepare(kwargs)
+        choice = overrides.get(role)
+        if choice and choice is not previous:  # the wait replaces the entry only on an applied Switch
+            publish_wait_switch(ctx, role)
+        previous = choice
+        return prepared
+
+    return reprepare
 
 
 def requested_return(ctx: Any) -> None:

@@ -10,10 +10,14 @@ import pytest
 
 from ouroboros import server_maintenance as maintenance
 from ouroboros import usage_accounting as usage
+from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
 from ouroboros.observability import persist_call
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.usage_ledger import is_abandoned_settlement
 from tests._usage_store_testing import ledger_rows
+
+
+FIXTURE_STORE = "fixture-model-store"
 
 
 @pytest.fixture
@@ -177,7 +181,8 @@ def test_cost_refresh_rechecks_post_task_ownership_under_the_result_lock(env, mo
 def _remote_request(env, reservation, operation_id):
     persist_call(env.root, task_id="child", call_id=f"{reservation.attempt_id}_model_request",
                  call_type="llm_claudexor_request", payload={}, keep_raw=True,
-                 manifest={"invocation_id": reservation.attempt_id, "operation_id": operation_id})
+                 manifest={"invocation_id": reservation.attempt_id, "operation_id": operation_id,
+                           "model_store_binding": model_rejoin_binding(SimpleNamespace(store_identity=FIXTURE_STORE))})
 
 
 def _remote_receipt(env, reservation, operation_id):
@@ -202,6 +207,8 @@ def test_late_remote_receipt_after_ended_custody_is_not_searched_but_settles_onc
     calls = []
 
     class Gateway:
+        store_identity = FIXTURE_STORE
+
         def get_model_operation(self, operation_id, **kwargs):
             assert env.lock_depth[0] == 0
             calls.append(operation_id)
@@ -255,6 +262,8 @@ def test_terminal_received_chat_receipt_without_result_bytes_reads_them_once(env
     calls = []
 
     class Gateway:
+        store_identity = FIXTURE_STORE
+
         def get_model_operation(self, operation_id, **_kw):
             calls.append(("read", operation_id))
             return {"id": operation_id, "state": "succeeded", "dispatch": {"state": "response_received"},
@@ -297,6 +306,8 @@ def test_daemon_failure_stops_remote_reads_for_one_pass_but_native_work_continue
     fail = [True]
 
     class Gateway:
+        store_identity = FIXTURE_STORE
+
         def get_model_operation(self, operation_id, **kwargs):
             assert env.lock_depth[0] == 0
             calls.append(operation_id)
@@ -326,6 +337,7 @@ def test_reserved_and_remote_never_started_release_while_unknown_price_stays_unk
     remote = _attempt(env, provider="claudexor")
     _remote_request(env, remote, "not-started")
     gateway = SimpleNamespace(
+        store_identity=FIXTURE_STORE,
         get_model_operation=lambda *_a, **_kw: {"state": "failed", "dispatch": {"state": "not_started"}},
         close=lambda: None,
     )
@@ -355,7 +367,7 @@ def test_a_daemon_failure_never_starves_a_later_retained_local_receipt(env, monk
         calls.append(operation_id)
         raise ClaudexorUnavailable("daemon_unreachable", "offline")
 
-    gateway = SimpleNamespace(get_model_operation=unavailable, close=lambda: calls.append("closed"))
+    gateway = SimpleNamespace(store_identity=FIXTURE_STORE, get_model_operation=unavailable, close=lambda: calls.append("closed"))
     monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda: calls.append("attached") or gateway)
     maintenance._reconcile_abandoned_usage(env.root)
     assert _final(env, ready)["state"] == "settled"

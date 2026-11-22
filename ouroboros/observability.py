@@ -1129,7 +1129,7 @@ def persist_physical_candidate(
     )
 
 
-def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
+def latest_llm_response_text(drive_root: pathlib.Path, task_id: str, *, include_parts: bool = True) -> str:
     """Best-effort salvage of the last persisted assistant text for a task.
 
     Used by the supervisor kill path: when a worker is hard-killed at the
@@ -1140,7 +1140,8 @@ def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
     VALUES masked; cognitive/answer text preserved per P1), or raw under
     OUROBOROS_OBSERVABILITY_KEEP_RAW. A response whose bytes cannot be located now
     (``EvidenceUnavailable``) ends the search with "": it may hold the latest text, and an
-    older one is never passed off as the last.
+    older one is never passed off as the last. A consumer that cannot keep display and
+    answer selection separate opts out of flattening structured replies.
     """
     safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id or "")).strip("_")
     if not safe_task:
@@ -1170,25 +1171,40 @@ def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
                 continue
             message = payload.get("message") if isinstance(payload, dict) else None
             content = message.get("content") if isinstance(message, dict) else None
-            text = str(content or "").strip()
-            if not text or _is_delivery_control_payload(text):
-                continue
-            # Lockstep with the loop's trailing-object parse: a body of prose
-            # plus one TRAILING protocol object salvages the prose only — the
-            # machine directive must never reach the owner's terminal result.
-            # (A whole-body protocol object stays suppressed above; an object
-            # with prose AFTER it is quoted material and passes through.)
-            prose, parsed, duplicate_key = extract_trailing_json_object(
-                text, duplicate_flag_keys=("delivery_control", "full_answer"),
-            )
-            if duplicate_key or (isinstance(parsed, dict) and "delivery_control" in parsed):
-                if prose.strip():
-                    return prose.rstrip()
-                continue
-            return text
+            if (include_parts or isinstance(content, str)) and (text := _salvage_reply_text(content)).strip():
+                return text
         except Exception:
             continue
     return ""
+
+
+def _salvage_reply_text(content: Any) -> str:
+    """Project ordered visible words; only ordinary text can end in a protocol object."""
+    if isinstance(content, str):
+        return _salvage_ordinary_text(content.strip())
+    if not isinstance(content, list):
+        return ""
+    visible, tail = [], []
+    for part in content:
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind == "text" and isinstance(part.get("text"), str):
+            tail.append(part["text"])
+            continue
+        visible.extend(tail)
+        tail.clear()  # even an empty refusal breaks a run of ordinary text
+        if kind == "refusal" and isinstance(part.get("refusal"), str):
+            visible.append(part["refusal"])
+    return "".join(visible) + _salvage_ordinary_text("".join(tail))
+
+
+def _salvage_ordinary_text(text: str) -> str:
+    """Suppress whole or trailing delivery controls, never protocol examples followed by prose."""
+    if _is_delivery_control_payload(text):
+        return ""
+    prose, parsed, duplicate_key = extract_trailing_json_object(
+        text, duplicate_flag_keys=("delivery_control", "full_answer"),
+    )
+    return prose.rstrip() if duplicate_key or (isinstance(parsed, dict) and "delivery_control" in parsed) else text
 
 
 def strip_protocol_fence(text: str) -> str:

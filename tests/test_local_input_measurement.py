@@ -97,13 +97,14 @@ def test_count_waits_for_generation_without_using_its_interrupt_lock(native_mode
         app.dependency_overrides[server.authenticate] = lambda: None
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
             await inner.acquire()
-            request = asyncio.create_task(client.post("/extras/measure_chat", json={
-                "model": "local-model", "messages": [{"role": "user", "content": "exact"}]}))
+            payload = {"model": "local-model", "messages": [{"role": "user", "content": "exact"}], "tool_choice": "none"}
+            request = asyncio.create_task(client.post("/extras/measure_chat", json=payload))
             await asyncio.sleep(0.02)
             assert not request.done() and not outer.locked() and not native_model.seen
             inner.release()
             result = await request
             assert result.status_code == 200
+            assert result.json()["native_input_sha256"] == input_fingerprint(payload)
             assert result.json()["input_tokens"] == 60826 and result.json()["process_id"] == os.getpid()
             assert not inner.locked() and not outer.locked()
 

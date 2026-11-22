@@ -997,9 +997,9 @@ def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> Non
     if admitted.get("realtime_turn") is not None:
         from supervisor.inline_carrier import _close_failed_call, _report_call_context_refusal
 
-        refusal = _close_failed_call(admitted, e)
-        if refusal is not None:
-            _report_call_context_refusal(admitted, e, refusal)
+        terminal = _close_failed_call(admitted, e)
+        if terminal is not None:
+            _report_call_context_refusal(admitted, terminal)
             return
     stopped = (getattr(e, "before_task_start", False)
                and getattr(e, "control_reason", "") in {"cancelled", "finalize_requested"})

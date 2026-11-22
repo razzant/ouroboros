@@ -196,6 +196,11 @@ def test_responses_status_reaches_the_projection_and_never_outlives_its_attempt(
     assert seen == [{}, {"finish_reason_present": True, "finish_reason": None, "tool_call_count": 0,
                          "response_status": "incomplete"}]
     assert response_meta == {"finish_reason_present": True, "finish_reason": "stop", "tool_call_count": 0}
+    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    incomplete_event, = [row for row in events if row["type"] == "provider_incomplete_response"]
+    accepted_event, = [row for row in events if row["type"] == "llm_round"]
+    assert incomplete_event["finish_reason"] is None and incomplete_event["finish_reason_origin"] == "computed"
+    assert accepted_event["finish_reason"] == "stop" and "finish_reason_origin" not in accepted_event
 
 
 class _OverflowStoppedLLM:
@@ -913,6 +918,23 @@ def test_the_final_status_sets_the_family_and_size_is_read_from_every_layer_of_a
     assert classified.status_code == status and classified.retry_same_request is (kind == "provider_transient")
 
 
+@pytest.mark.parametrize("code,field,outer_code", [
+    ("too_many_prompt_tokens", "type", "400"),
+    ("tokenization_token_limit_exceeded", "code", "tokenization_token_limit_exceeded"),
+])
+def test_gateway_typed_input_limit_needs_no_guessed_window(code, field, outer_code):
+    from ouroboros.size_refusal import from_exception
+
+    body = {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_error_code": outer_code, "raw": json.dumps({"error": {field: code, "message": "Input refused"}})}}
+    error = _refused(400, body)
+    result = classify_llm_exception(error)
+    assert (result.kind, result.basis, result.provider_code) == ("context_overflow", "typed", code)
+    assert from_exception(error).has_numbers is False
+    assert classify_llm_exception(_refused(429, {**body, "code": 429})).kind == "provider_transient"
+    assert classify_llm_exception(_refused(400, {"code": 400, "message": f"Diagnostic mentions {code}"})).kind == "bad_request"
+
+
 def test_an_http_200_error_body_is_a_refusal_under_the_status_its_code_names(tmp_path, monkeypatch):
     """OpenRouter passes an upstream refusal through an HTTP 200 body. Its integer ``error.code`` is the status, and
     size is read on the whole object before the transient heuristic: OpenAI's typed size refusal says "try again"
@@ -984,10 +1006,7 @@ def test_the_owner_line_quotes_the_sentence_that_carried_the_cause_with_its_spea
 
 
 def test_dispatched_unknown_outcome_is_not_retried(tmp_path):
-    """A dispatched request with no terminal provider outcome whose failure is
-    NOT a typed transport death (here: a bare timeout — "we gave up", the
-    provider may still be working) is never resent, even by the primary
-    dispatch that carries the bounded transport-death budget."""
+    """The provider may still be working after a bare timeout. This invocation sends only once."""
     usage = {}
 
     class _AmbiguousLLM:
@@ -1006,7 +1025,7 @@ def test_dispatched_unknown_outcome_is_not_retried(tmp_path):
     msg, _cost = call_llm_with_retry(
         llm, [{"role": "user", "content": "hi"}], "openai/gpt-5.5",
         None, "medium", 3, tmp_path, "task-unknown", 1, None, usage,
-        "task", False, transport_death_retries=2,
+        "task", False,
     )
 
     assert msg is None

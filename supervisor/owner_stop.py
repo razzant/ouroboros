@@ -543,6 +543,14 @@ def presence_stop_now(owner_ctx: Any) -> bool:
     return bool(isinstance(task, dict) and task.get("_presence_turn") and in_process_stop_now(owner_ctx))
 
 
+def stop_now_drained(controls: Any) -> bool:
+    """Whether a drain's ``controls`` carry a direct turn's Stop now: custody's ``finalize_now`` control, by its
+    first line. The drain that read it is the turn's only reader of that mail, so an exit holding a reply (a forced
+    final, live or restored) takes it from that drain's result instead of letting it end there."""
+    lines = str((controls.get("finalize_now") if isinstance(controls, dict) else "") or "").splitlines()
+    return bool(lines) and lines[0].strip() == REASON_OWNER_STOPPED_DIRECT_TURN
+
+
 def _mark_owner_stop_control_drained(
     owner_ctx: Any, drive_root: Optional[pathlib.Path], task_id: str,
 ) -> bool:

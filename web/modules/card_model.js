@@ -49,10 +49,10 @@ const BASIS_WORDS = Object.freeze({
     place: ['model.basis.place', 'its place\'s model'],
     circle: ['model.basis.circle', 'its circle\'s model'],
 });
-// A fallback's cause is the failed call's code (lead_fact.adopt_fallback). The codes whose condition the wait card
-// already names are said in its words (model_wait.js); any other code is shown as the server gave it.
-const CAUSE_WAIT_REASONS = Object.freeze({ subscription_window_exhausted: 'quota', quota_exhausted: 'quota',
-    auth_error: 'auth', auth_required: 'auth', connection_unavailable: 'connection_unavailable' });
+// Legacy failure codes: an engine's typed reason keeps its wait card's words; the coarse auth/quota classifications
+// proved neither, and the work acts on a fallback here, so they never say "Waiting": nothing is waited for (DESIGN).
+// They show as their own code — the exact cause the popover may name (DESIGN "A work's model on its card").
+const LEGACY_ACCESS_CAUSES = new Map([['subscription_window_exhausted', 'quota'], ['auth_required', 'auth']]);
 // The two causes the fact's own words already say: a fallback with no failure code, and the mind's own switch.
 const CAUSES_SAID = new Set(['configured fallback', 'switch_model']);
 // A refused act by the server's `reason_code`. The last three are 503s: the decision is saved and only its delivery
@@ -79,8 +79,8 @@ let openPopover = null;  // one sheet in the window: opening another closes it
 export function causeWords(cause) {
     const code = String(cause || '').trim();
     if (!code || CAUSES_SAID.has(code)) return '';
-    const reason = CAUSE_WAIT_REASONS[code];
-    return reason ? translateString(modelWaitReasonLabel(reason)) : code;
+    const words = modelWaitReasonLabel(LEGACY_ACCESS_CAUSES.get(code) ?? code);
+    return words ? translateString(words) : code;
 }
 
 /**

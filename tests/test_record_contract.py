@@ -54,6 +54,10 @@ def test_round_and_error_rows_keep_only_known_scope_lineage(tmp_path, monkeypatc
     [row] = [item for item in rows if item.get("type") == kind]
     assert {key: row[key] for key in ("root_task_id", "parent_task_id") if key in row} == (lineage or {})
     _assert_row(row)
+    if not fails:
+        # A minimal provider supplies no terminal label. Only its provenance is reportable.
+        assert {"finish_reason", "finish_reason_origin"} <= rc.ANCHOR_BY_TYPE["llm_round"].optional
+        assert "finish_reason" not in row and row["finish_reason_origin"] in {"unknown", "missing"}
     if fails:
         assert json.loads((owner / "logs" / "events.jsonl").read_text(encoding="utf-8")) == row
         assert [event for event in live if event.get("type") == kind] == [row]

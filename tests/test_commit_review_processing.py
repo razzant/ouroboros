@@ -101,7 +101,7 @@ def test_local_candidate_keeps_captured_processing_or_inherits_when_unspecified(
     class CandidateBuilt(BaseException):
         """Stop after real construction, before measurement or physical dispatch."""
 
-    def finalized(_client, target, payload):
+    def finalized(_client, target, payload, **_kwargs):
         seen.append((target, payload))
         raise CandidateBuilt()
 

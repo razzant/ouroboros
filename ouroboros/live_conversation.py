@@ -601,11 +601,11 @@ class ConversationHost:
     def fitted_frame_rows(self):
         return getattr(self, '_fitted_frame_rows', ())
 
-    async def delivery_fits(self, rows, schemas):
+    async def delivery_fits(self, rows, schemas, *, explain=False):
         from ouroboros.live_context_view import serving_delivery_fits
         snapshot = copy.copy(self)
         snapshot.messages = copy.deepcopy(self.messages)
-        return await asyncio.to_thread(serving_delivery_fits, snapshot, rows, schemas)
+        return await asyncio.to_thread(serving_delivery_fits, snapshot, rows, schemas, explain=explain)
 
     def tool_results_delivered(self, rows):
         from ouroboros.live_context_view import delivered_call_tool_results

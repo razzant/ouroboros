@@ -510,9 +510,13 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
             add("result", *call, result_content(body))
             continue
         blocks = body if isinstance(body, list) else [{"type": "text", "text": body}]
-        text = "".join(str(block.get("text") or "") for block in blocks if isinstance(block, Mapping))
-        if role == "assistant" and text:
-            add("text", text)
+        if role == "assistant":
+            # A stateless send represents refusal words as text; a native send may keep the block.
+            # Match what the recipient actually saw, in order, without rewriting the canonical row.
+            text = "".join(block["refusal"] if block.get("type") == "refusal" and isinstance(block.get("refusal"), str)
+                           else str(block.get("text") or "") for block in blocks if isinstance(block, Mapping))
+            if text:
+                add("text", text)
         for block in blocks:
             if not isinstance(block, Mapping):
                 continue

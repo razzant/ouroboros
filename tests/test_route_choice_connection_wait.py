@@ -79,7 +79,7 @@ def test_a_gone_connection_walks_the_chain_then_waits_for_the_owner_instead_of_f
     saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL=PRIMARY, OUROBOROS_MODEL_FALLBACKS=FALLBACK, OPENAI_API_KEY="key")
     asked = []
 
-    def owner_switches(self, llm, error, kwargs, caller_cancel=None):
+    def owner_switches(self, llm, error, kwargs, caller_cancel=None, *, owner_model_wake=False):
         asked.append((model_wait.model_wait_reason(error), kwargs["model"], kwargs["model_role"], getattr(error, "reason", "")))
         before_card.extend(notes)
         self.overrides[kwargs["model_role"]] = {"model": HEALTHY, "use_local": False, "model_account_override": ""}

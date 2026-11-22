@@ -353,6 +353,8 @@ def _retire(root: pathlib.Path, path: pathlib.Path, kind: str, info, *, task_id:
             "retired_at": _iso(time.time()), "window_days": days, "call_records": sources,
             **({"packed": packed} if packed else {}), "rebuild": rebuild})
         recorded.add(key)
+    if kind == "working_rolling":  # its native-send binding names only this state (``working_checkpoint.read_working``)
+        path.with_suffix(".operation.json").unlink(missing_ok=True)
     path.unlink()
 
 

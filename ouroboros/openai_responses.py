@@ -119,8 +119,14 @@ def _assistant_text(content: Any) -> str:
 def _assistant_items(message: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """A canonical assistant turn without item ids or phase: Chat-era, other-route, folded or edited history."""
     items: List[Dict[str, Any]] = []
-    text = _assistant_text(message.get("content"))
-    if text:
+    from ouroboros._usage_response import refusal_content_text
+
+    content = message.get("content")
+    visible = refusal_content_text(content)
+    text = visible if visible is not None else _assistant_text(content)
+    if isinstance(message.get("refusal"), str):
+        text += message["refusal"]
+    if text or visible is not None:
         items.append({"role": "assistant", "content": text})
     for call in message.get("tool_calls") or ():
         function = call.get("function") if isinstance(call, Mapping) else None

@@ -342,8 +342,8 @@ class LiveHost(Protocol):
         """Canonical image rows still sent as pixels by this fit; older hosts return none."""
         return ()
 
-    async def delivery_fits(self, rows, schemas) -> bool:
-        """Whether held input plus pending delivery fits this connection; unknown declines fallback."""
+    async def delivery_fits(self, rows, schemas, *, explain=False) -> bool:
+        """Check pending delivery. With explain=True a measured refusal may raise context_capacity."""
         return False
 
     def tool_results_delivered(self, rows) -> None:

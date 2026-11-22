@@ -91,7 +91,7 @@ def cold_start_density_probe(
         raise
     except Exception as exc:
         from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(exc)
+        propagate_model_error(exc, single_request=True)
         log.warning("Token-density probe failed (%s): %s", call_type, exc, exc_info=True)
         emit_progress(f"Density probe failed ({type(exc).__name__}); the cold input cap stands.")
         return "failed"

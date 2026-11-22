@@ -38,27 +38,13 @@ from ouroboros.openai_responses_custody import (
 )
 from ouroboros.request_wire_contract import canonical_sha256
 from ouroboros.usage_accounting import PhysicalAttemptCapture
-
-MODEL = "gpt-6.1-terra"
-
-
-def _target(**overrides):
-    return {"provider": "openai", "resolved_model": MODEL, "usage_model": f"openai/{MODEL}",
-            "base_url": "https://api.openai.com/v1", "default_headers": {}, "api_surface": "responses",
-            "connection": "", "supports_openrouter_extensions": False, "supports_generation_cost": False,
-            **overrides}
+from tests._openai_responses_fixtures import MODEL, USAGE, _body, _message, _target
 
 
 def _tool(name="read_file", **function):
     return {"type": "function", "function": {"name": name, "description": "Read one file.",
                                              "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
                                              **function}}
-
-
-def _message(text, phase=None, status="completed", ident="msg_1"):
-    item = {"id": ident, "type": "message", "role": "assistant", "status": status,
-            "content": [{"type": "output_text", "text": text, "annotations": []}]}
-    return {**item, **({"phase": phase} if phase else {})}
 
 
 def _call(call_id="call_1", name="read_file", arguments='{"path":"a"}', status="completed"):
@@ -69,16 +55,6 @@ def _call(call_id="call_1", name="read_file", arguments='{"path":"a"}', status="
 REASONING = {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "OPAQUE-ENCRYPTED"}
 REFUSAL = {"id": "msg_r", "type": "message", "role": "assistant", "status": "completed",
            "content": [{"type": "refusal", "refusal": "I can't help with that request."}]}
-USAGE = {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 0},
-         "output_tokens": 50, "output_tokens_details": {"reasoning_tokens": 30}, "total_tokens": 1050}
-
-
-def _body(*items, status="completed", reason=None, usage=USAGE, **extra):
-    body = {"id": "resp_1", "object": "response", "status": status, "model": MODEL, "output": list(items),
-            "usage": copy.deepcopy(usage) if usage is not None else None, **extra}
-    if status == "incomplete":
-        body["incomplete_details"] = {"reason": reason} if reason else {}
-    return body
 
 
 class _Response:
@@ -557,3 +533,8 @@ def test_public_async_call_sends_responses_and_keeps_the_one_shot_rule(tmp_path,
     assert captured[0]["store"] is False and "messages" not in captured[0]
     assert message["tool_calls"][0]["id"] == "call_1" and RESPONSES_RECEIPT_KEY in message
     assert len(usage["ledger_attempt_ids"]) == 1 and usage["response_status"] == "completed"
+
+
+def test_assistant_history_preserves_both_content_and_refusal():
+    assert input_items({}, [{"role": "assistant", "content": "Before. ", "refusal": "Declined."}]) == [
+        {"role": "assistant", "content": "Before. Declined."}]

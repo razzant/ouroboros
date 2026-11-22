@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+from traceback import extract_stack
 from types import SimpleNamespace
 
 import pytest
@@ -47,7 +48,14 @@ def author(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros._usage_wait.ABANDON_POLL_SEC", 0.02)
     write_task_result(tmp_path, "t-wait", "running", root_task_id="t-wait")
     registry = _registry(tmp_path, monkeypatch, "t-wait", 1)
-    monkeypatch.setattr(loop, "_forced_fallback_result", lambda *_a, **_k: pytest.fail("Pause published a fallback final"))
+
+    def no_fallback(*args, **kwargs):
+        reason = kwargs.get("reason_code") or (args[3] if len(args) >= 4 else "")
+        caller = extract_stack(limit=2)[0]
+        pytest.fail(f"Pause published a fallback final: reason={reason!r} "
+                    f"source={kwargs.get('source', 'host_fallback')!r} caller={caller.name}:{caller.lineno}")
+
+    monkeypatch.setattr(loop, "_forced_fallback_result", no_fallback)
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *_a, **_k: pytest.fail("no provider"))
     monkeypatch.setattr("ouroboros.pricing.estimate_cost_optional",
                         lambda *_a, **_k: pytest.fail("fake chat must return known usage without pricing fallback"))

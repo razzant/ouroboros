@@ -41,7 +41,6 @@ from ouroboros.task_carrier import (
 from ouroboros.utils import utc_now_iso
 from supervisor.log_addressing import TurnEventQueue as _TurnEventQueue
 from supervisor.queue import _queue_lock
-from supervisor.state import append_jsonl
 
 log = logging.getLogger(__name__)
 
@@ -415,65 +414,45 @@ def run_inline_turn(
 def _inline_failure(admitted: Dict[str, Any], error: BaseException) -> bool:
     """A live call's failure inside the inline body: close its hub and answer its refusal as the
     turn's terminal (claimed: no exception terminal follows); every other failure takes the body's own path."""
-    refusal = _close_failed_call(admitted, error)
-    if refusal is None:
+    terminal = _close_failed_call(admitted, error)
+    if terminal is None:
         return False
-    _report_call_context_refusal(admitted, error, refusal)
+    _report_call_context_refusal(admitted, terminal)
     return True
 
 
 def _close_failed_call(admitted: Dict[str, Any], e: BaseException):
-    """Notify the admitted call independently of result-store recovery."""
+    """Notify the admitted call before result-store recovery; only a known fit refusal builds a terminal."""
     if admitted.get("realtime_turn") is not None:
         from ouroboros.call_peers import close_hub
         from ouroboros.context_fit import MinimumViewUnfit
-        from ouroboros.contracts.realtime import RealtimeSetupError
         from ouroboros.live_conversation import LiveConversationTurn
-        from ouroboros.realtime_setup import CONTEXT_CAPACITY_DETAIL
         from ouroboros.store import StoreBusy
 
         turn = admitted["realtime_turn"]
         if isinstance(turn, LiveConversationTurn):
             # The live run normally closes its hub. Preparation can fail before it owns that duty.
-            # Close before logging too: a busy store must not strand the admitted call.
             if isinstance(e, MinimumViewUnfit):
-                with turn._lock:
-                    already_closed, turn._closed = turn._closed, True
-                close_hub(turn.spec.call_id, "context_capacity", detail=CONTEXT_CAPACITY_DETAIL)
-                if not already_closed:
-                    turn.publish({"type": "conversation_finished", "chat_id": turn.spec.chat_id,
-                                  "call_id": turn.spec.call_id, "task_id": admitted["task"]["id"],
-                                  "reason": "context_capacity"})
-                return RealtimeSetupError("context_capacity", CONTEXT_CAPACITY_DETAIL)
+                from ouroboros.realtime_setup import finish_call_preparation_refusal
+
+                return finish_call_preparation_refusal(turn, admitted["task"]["id"], e,
+                                                       admitted["agent"].env.drive_root / "logs")
             busy = isinstance(e, StoreBusy) or isinstance(e.__cause__, StoreBusy)
             close_hub(turn.spec.call_id, "store_busy" if busy else "call_start_failed",
                       detail=("The local store is busy. Please try the call again." if busy else
                               "The call could not start. Please try again."))
 
 
-def _report_call_context_refusal(admitted, unfit, refusal) -> None:
-    """Finish an admitted call whose ordinary context build failed before the host existed."""
-    from dataclasses import asdict
+def _report_call_context_refusal(admitted, terminal) -> None:
+    """Publish an owner's inline call terminal through the ordinary worker bus."""
     from ouroboros.agent_task_pipeline import emit_task_results
 
-    task, agent, turn = admitted["task"], admitted["agent"], admitted["realtime_turn"]
-    measurement = {key: getattr(unfit, key) for key in (
-        "fixed_input_tokens", "memory_view_tokens", "estimated_input_tokens", "raw_input_tokens",
-        "measurement_density", "response_reserve_tokens", "work_room_tokens", "work_room_deficit_tokens")}
-    measurement.update(capacity_total_tokens=unfit.window_tokens, capacity_deficit_tokens=unfit.deficit_tokens)
-    event = {"type": "call.fit_refused", "ts": utc_now_iso(), "task_id": task["id"],
-             "call_id": turn.spec.call_id, "reason": refusal.code, "stage": "task_preparation",
-             "fit": {"measurement": measurement}, "physical": unfit.physical,
-             "deficit_tokens": unfit.deficit_tokens, "route_facts": asdict(turn.catalog_model.facts),
-             "units": turn.catalog_model.facts.basis}
-    append_jsonl(agent.env.drive_root / "logs" / "events.jsonl", event)
+    task, agent = admitted["task"], admitted["agent"]
     events = []
     event_queue = _TurnEventQueue(_pool().get_event_q(), task["id"], admitted["chat_id"],
                                 initiator=str((admitted.get("task_metadata") or {}).get("initiator") or ""))
     emit_task_results(
-        agent.env, agent.memory, agent.llm, events, task, str(refusal),
-        {"terminal_origin": "host_notice", "execution_status": "infra_failed", "reason_code": refusal.code},
-        {"reasoning_notes": [], "tool_calls": [], "fit_refusal": event},
+        agent.env, agent.memory, agent.llm, events, task, *terminal,
         getattr(agent, "_task_started_ts", time.time()), agent.env.drive_root / "logs",
         ctx=getattr(agent.tools, "_ctx", None), event_queue=event_queue)
     for event in events:

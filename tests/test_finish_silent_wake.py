@@ -765,7 +765,7 @@ def _park_after_selection(wake, monkeypatch, responses):
 def _resume_in_new_process(wake, monkeypatch, wait):
     from ouroboros import context
     from ouroboros.owner_wait import set_owner_wait
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
 
     set_owner_wait(wake.root, TASK_ID, {**wait, "state": "waiting"})
     fresh = ToolRegistry(repo_dir=wake.root, drive_root=wake.root)

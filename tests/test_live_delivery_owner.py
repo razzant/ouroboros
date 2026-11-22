@@ -20,6 +20,8 @@ from tests.test_live_deferred_custody import (MAIL, READY, answer, attach, held_
 from tests.test_live_tool_continuity import Adapter, RECEIPT, look_call
 
 ROOM_POINTER = 'New room context'
+# The serving connection's own refusal (``guard_serving``): the delivery, not a tool result with no native lane.
+SERVING_REFUSED = 'context_capacity: The current voice connection could not accept this delivery'
 
 
 class Socket(Adapter):
@@ -430,8 +432,9 @@ def test_failed_fit_mail_goes_through_the_serving_measure(fits):
                 assert len(mail_updates(world.first)) == 1
                 assert position(world.first, MAIL) < position(world.first, ROOM_POINTER)
             else:
-                with pytest.raises(RealtimeSetupError, match='window'):
+                with pytest.raises(RealtimeSetupError, match=SERVING_REFUSED) as refused:
                     await asyncio.wait_for(world.task, 2)
+                assert refused.value.code == 'context_capacity', 'the typed reason, not only its words'
                 assert not mail_updates(world.first) and world.call.pending_context_rows
     asyncio.run(scenario())
 
@@ -583,8 +586,9 @@ def test_a_refusal_while_a_fresh_fit_is_on_its_way_waits_for_that_fit(item):
             assert not world.task.done() and (call.deferred_tool_outputs or call.pending_context_rows)
             assert not outputs(first) and not mail_updates(first)
             prepared.set()
-            with pytest.raises(RealtimeSetupError, match='window'):
+            with pytest.raises(RealtimeSetupError, match=SERVING_REFUSED) as refused:
                 await asyncio.wait_for(world.task, 2)
+            assert refused.value.code == 'context_capacity', 'the typed reason, not only its words'
             assert not outputs(first) and not mail_updates(first)
             assert call.deferred_tool_outputs or call.pending_context_rows, 'custody is retained through a typed end'
     asyncio.run(scenario())

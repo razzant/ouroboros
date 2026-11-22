@@ -25,6 +25,7 @@ from ouroboros.llm_messages import project_declared_system_prefix
 from ouroboros.openai_responses import (
     REPLY_FACT_KEYS, attach_reply_facts, completion_view, responses_payload, responses_route,
 )
+from ouroboros._usage_response import observe_finish_reason
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 from ouroboros.opencode_go import go_chat_headers, is_go_chat_route
@@ -512,6 +513,8 @@ class _OpenAICompatibleLaneMixin:
             usage["response_finish_reason"] = _bounded_response_metadata_label(
                 first_choice.get("finish_reason"),
             )
+        observe_finish_reason(usage, first_choice, completion=wire_completion if responses_facts is None else None,
+                              computed=responses_facts is not None)
         response_provider = _bounded_response_metadata_label(resp_dict.get("provider"))
         if response_provider is not None:
             # This optional upstream serving label never replaces the accounting

@@ -1,7 +1,6 @@
 """Cooperative Stop preserves physical custody during paced unknown recovery."""
 
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -127,32 +126,14 @@ def test_stale_owner_grace_control_cannot_cancel_a_repeat(tmp_path):
     assert not loop_transport.transport_repeat_stop_requested(ctx)
 
 
-def test_deadline_refusal_is_not_misattributed_to_an_unchecked_control(tmp_path):
-    def forbidden():
-        raise AssertionError("deadline already refused this wait")
-    usage = {"_last_llm_error_kind": "provider_outcome_unknown", "_last_llm_retry_same_request": True,
-             loop_llm_call.TRANSPORT_DEATHS_KEY: {"round_id": "r", "count": 1, "backoff_sec": 4.0}}
-    ctx = loop_llm_call._LlmErrorContext(task_id="t-death", task_type="task", execution_id="e",
-        round_id="r", llm_call_id="old-call", round_idx=1, attempt=0, model="fixture",
-        request_ref=None, drive_logs=tmp_path, event_queue=None, accumulated_usage=usage,
-        deadline_ts=time.time() + 1, stop_retry_check=forbidden)
-    assert loop_llm_call._stop_after_llm_error(ctx)
-    assert not _events(tmp_path, "llm_not_dispatched")
-    assert len(_events(tmp_path, "llm_retry_deadline_exhausted")) == 1
-    assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
-    assert loop_llm_call.TRANSPORT_DEATHS_KEY not in usage
-
-
 @pytest.mark.parametrize("empty", [False, True])
-def test_control_callback_does_not_change_other_transient_or_empty_retry_contracts(tmp_path, monkeypatch, empty):
-    def forbidden():
-        raise AssertionError("only a paid transport-death repeat opts into this stop check")
+def test_ordinary_transient_or_empty_response_keeps_its_retry(tmp_path, monkeypatch, empty):
     def sleep(_seconds, _deadline, **options):
         assert options == {}
         return True
     monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", sleep)
     llm = _ScriptedLLM(EMPTY_RESPONSE if empty else lambda: _status_failure(503))
-    message, _cost = _primary_call(llm, tmp_path, {}, stop_retry_check=forbidden)
+    message, _cost = _primary_call(llm, tmp_path, {})
     assert message["content"] == "done" and llm.calls == 2
 
 

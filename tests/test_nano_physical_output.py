@@ -17,9 +17,7 @@ from ouroboros import llm_attempt, usage_accounting as ua
 from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS, OWNER_NANO_TARGET_TOKENS, reply_allowance_tokens
 from ouroboros.context_fit import bounded_prompt_tokens_for_payload
 from ouroboros.request_wire_recovery import current_wire_candidate
-from tests.test_processing_transport import transport as _transport
-
-transport = _transport
+from tests._processing_transport_fixture import physical_transport as physical_transport  # registers the `transport` fixture
 C = 65_536
 INCIDENT_DENSITY = 0.835284798376117
 TOOL = {"type": "function", "function": {

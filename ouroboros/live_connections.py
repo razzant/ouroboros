@@ -178,6 +178,14 @@ class PreparedConnection:
         view._view_session_factory, view._view_session_options = self.provider['session'], self.options
         view._prepared_view = evidence, receipt['manifest_ref']
 
+    def _check_fit(self):
+        from ouroboros.llm_attempt import main_context_fit_refusal
+        from ouroboros.realtime_setup import _session_capacity_error
+
+        if refusal := main_context_fit_refusal(self.request):
+            evidence, _ = self.view._prepared_view
+            raise _session_capacity_error(refusal, evidence['fit']['measurement']['window'])
+
     async def _adopt(self):
         from ouroboros.live_context_view import record_session_view
         from ouroboros.realtime_setup import measure_session_wire, text_input_estimate, rows_for_engine
@@ -251,11 +259,9 @@ class PreparedConnection:
 
     async def _owned_lifetime(self, scope):
         from ouroboros.extension_registry_state import extension_work_scope
-        from ouroboros.loop_model_call import _presend_context_fit
         from ouroboros.realtime_credentials import capture_session_credentials
         from ouroboros.realtime_setup import loaded_provider, _LoopWork
         from ouroboros.response_limits import positive_limit, resolve_response_limit
-        from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
         host = self.host
         self.session = self.reader = None
         try:
@@ -296,48 +302,45 @@ class PreparedConnection:
                 self.ready.set_result(None)
                 self.result.set_result(None)
                 return
-            with _presend_context_fit() as admit:
-                if not admit(self.request):
-                    raise PhysicalAttemptPreconditionFailed('context_capacity')
+            self._check_fit()
+            await host.check()
+            latest = capture_session_credentials(host.turn, self.provider)
+            if latest.scope != credentials.scope:
+                await joined(self.session.close())
+                credentials = latest
+                await self._fit(credentials, rebound=True)
+                self._check_fit()
                 await host.check()
-                latest = capture_session_credentials(host.turn, self.provider)
-                if latest.scope != credentials.scope:
-                    await joined(self.session.close())
-                    credentials = latest
-                    await self._fit(credentials, rebound=True)
-                    if not admit(self.request):
-                        raise PhysicalAttemptPreconditionFailed('context_capacity')
-                    await host.check()
-                view._connection_quote = copy.deepcopy(host.quote)
-                view._connection_accounting = True
-                self.credentials = credentials
-                with credentials.activate():
-                    await self.session.open()
-                self.connection['open_at'] = time.time()
-                host.timing.setdefault('session_open_at', self.connection['open_at'])
-                if self.ahead:
-                    host.timing_event('prepared_ready')
-                    self.reader = WaitingReader(self)
-                self.ready.set_result(self)
-                if self.reader is not None:
-                    await asyncio.wait([self.activate, self.reader.task], return_when=asyncio.FIRST_COMPLETED)
-                    if self.reader.task.done():
-                        await self.reader.task  # failure closes and settles immediately, even while waiting for quiet
-                consume = await self.activate
-                await host.check()
-                try:
-                    await self._adopt()
-                except (OSError, ConnectionClosed) as exc:
-                    from ouroboros.realtime_session import transport_loss
-                    if self.ahead and transport_loss(exc):
-                        raise RealtimeSetupError('prepared_stale', 'prepared transport closed before handoff') from exc
-                    raise
-                token = CURRENT.set(view)
-                try:
-                    result = await consume(self.session)
-                finally:
-                    CURRENT.reset(token)
-                self.result.set_result(result)
+            view._connection_quote = copy.deepcopy(host.quote)
+            view._connection_accounting = True
+            self.credentials = credentials
+            with credentials.activate():
+                await self.session.open()
+            self.connection['open_at'] = time.time()
+            host.timing.setdefault('session_open_at', self.connection['open_at'])
+            if self.ahead:
+                host.timing_event('prepared_ready')
+                self.reader = WaitingReader(self)
+            self.ready.set_result(self)
+            if self.reader is not None:
+                await asyncio.wait([self.activate, self.reader.task], return_when=asyncio.FIRST_COMPLETED)
+                if self.reader.task.done():
+                    await self.reader.task  # failure closes and settles immediately, even while waiting for quiet
+            consume = await self.activate
+            await host.check()
+            try:
+                await self._adopt()
+            except (OSError, ConnectionClosed) as exc:
+                from ouroboros.realtime_session import transport_loss
+                if self.ahead and transport_loss(exc):
+                    raise RealtimeSetupError('prepared_stale', 'prepared transport closed before handoff') from exc
+                raise
+            token = CURRENT.set(view)
+            try:
+                result = await consume(self.session)
+            finally:
+                CURRENT.reset(token)
+            self.result.set_result(result)
         except BaseException as exc:
             if isinstance(exc, RealtimeSetupError) and exc.code == 'context_capacity':
                 exc.source_revision = getattr(self, 'source_revision', None)

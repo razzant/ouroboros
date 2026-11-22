@@ -260,7 +260,7 @@ def test_retirement_reads_the_exact_park_before_discarding_working_fallback(tmp_
 def test_ready_checkpoint_holds_actual_compacted_transcript_and_inline_attachment(tmp_path, monkeypatch):
     import base64
     from ouroboros import loop
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
     from tests.test_live_image_delivery import pixels
 
     image_base64 = base64.b64encode(pixels()).decode()

@@ -214,7 +214,7 @@ def _call_consolidation_llm(
         from ouroboros.loop_llm_call import classify_llm_exception
         from ouroboros.transport_custody import outcome_unknown_on_chain
         from ouroboros.usage_accounting import BudgetExceeded
-        propagate_model_error(error)
+        propagate_model_error(error, single_request=True)
         if getattr(error, "route", None):
             # A refusal belongs to the actual account, which can differ from
             # catalog discovery. Rebind its facts without masking the refusal

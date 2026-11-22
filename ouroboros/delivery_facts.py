@@ -1,4 +1,4 @@
-"""One-shot facts at the finish door and the answer they returned (leaf of ``loop_delivery``).
+"""One-shot facts at the finish door and selection of the complete answer (leaf of ``loop_delivery``).
 
 The pre-delivery notice, a red check, children's results and a non-blocking result review's outcome each return an
 answer once. Like the routeless note they leave the next answer fresh: prose after them is delivered as written,
@@ -20,6 +20,9 @@ before.
 from __future__ import annotations
 
 from typing import Any, Dict
+
+from ouroboros._usage_response import assistant_answer_text, refusal_display
+from ouroboros.utils import sha256_text
 
 FACTS_NOTED_CONTROL = "delivery_facts_noted"
 FACTS_NOTED_LINE = "Your next answer is delivered as written, so make it the whole answer."
@@ -67,7 +70,53 @@ def show_replaced_answer(prior: Any, was_noted: bool, current: Any, emit_progres
     _loop()._emit_round_progress(text, {"content": text}, emit_progress, llm_trace)
 
 
-def select_answer(tools: Any, ctx: Any, trace: dict, text: str, request: dict, emit_progress: Any) -> Any:
+def _answer_by_hash(selector: str, candidate: Any, held_rows: list) -> tuple[str | None, str | None]:
+    """Read visible bytes and their protocol text from the same candidate or whole assistant row."""
+    if candidate is not None and selector == candidate.content_sha256:
+        return candidate.full_text, getattr(candidate, "refusal_control_text", None)
+    for row in reversed(held_rows):
+        if row.get("role") != "assistant":
+            continue
+        content = row.get("content")
+        visible = refusal_display(content)
+        text = content if visible is None else visible
+        if isinstance(text, str) and sha256_text(text) == selector:
+            return text, assistant_answer_text(content) if visible is not None else None
+    return None, None
+
+
+def resolve_completion_answer(request: dict, candidate: Any, messages: list, held_sha256: str,
+                              *, refusal_control_text: str | None = None) -> tuple[str | None, str | None, str]:
+    """Return (visible text, optional refusal-control text, error) for explicit bytes or an offered hash."""
+    if "answer" in request:
+        text = request["answer"]
+        if isinstance(text, str) and (text.strip() or request.get("allow_empty")):
+            return text, refusal_control_text, ""
+        return None, None, "answer_unavailable"
+    selector = request.get("answer_sha256")
+    if selector:
+        text, control = _answer_by_hash(selector, candidate, messages if selector == held_sha256 else [])
+        if text is not None:
+            return text, control, ""
+    return None, None, "selection_unavailable: select the current retained/whole held answer or supply complete bytes"
+
+
+def selected_completion_text(request: dict, candidate: Any, messages: list,
+                             held_sha256: str = "") -> tuple[str | None, str]:
+    text, _, error = resolve_completion_answer(request, candidate, messages, held_sha256)
+    return text, error
+
+
+def selection_refusal_text(request: dict, candidate: Any, messages: list, content: Any = None) -> str | None:
+    """Read provenance after selection. A hash names its source; a staged reply supplies its own blocks."""
+    selector = request.get("answer_sha256")
+    if selector:
+        return _answer_by_hash(selector, candidate, messages)[1]
+    return assistant_answer_text(content) if refusal_display(content) is not None else None
+
+
+def select_answer(tools: Any, ctx: Any, trace: dict, text: str, request: dict, emit_progress: Any,
+                  *, refusal_control_text: str | None = None) -> Any:
     """Retain an explicit choice and show the facts' displaced answer before it is forgotten."""
     prior = getattr(tools._ctx, "_delivery_candidate", None)
     was_noted = noted(prior)
@@ -78,7 +127,8 @@ def select_answer(tools: Any, ctx: Any, trace: dict, text: str, request: dict, e
         candidate.finalization_control = "selected"
         tools._ctx._delivery_control_required = False
     else:  # full bytes, or a repeated selection after the changed evidence was shown
-        candidate = _loop()._replace_delivery_candidate(tools, ctx, trace, text, control="selected")
+        candidate = _loop()._replace_delivery_candidate(
+            tools, ctx, trace, text, control="selected", refusal_control_text=refusal_control_text)
     candidate.quiet = bool(request.get("wake_silent"))
     _loop()._publish_delivery_candidate(tools, candidate, trace)
     if emit_progress is not None:

@@ -152,7 +152,7 @@ ANCHOR_ROWS: tuple[AnchorRow, ...] = (
         nullable=_fields("prompt_tokens completion_tokens cached_tokens cache_write_tokens duration_ms physical_attempt_id"),
         optional=_fields("root_task_id parent_task_id delegation_role reasoning_effort source model_category prompt_cache_ttl cache_hit_rate cache_cold_restart "
                          "gap_since_prev_round_sec cost_usd request_ref response_ref effort effort_resolution "
-                         "request_wire claudexor first_request_at first_answer_at " + _CONTEXT_FIT),
+                         "request_wire claudexor first_request_at first_answer_at finish_reason finish_reason_origin " + _CONTEXT_FIT),
         content=_fields("claudexor"), natural_key=("llm_call_id",),
     ),
     AnchorRow(
@@ -335,7 +335,7 @@ COVERAGE_GAPS = (
     "tools rows carry no chat_id. Optional lineage appears only when the producer knows it; readers must "
     "not infer missing root_task_id from task_id on historical task rows.",
     "Neighbours of llm_api_error (local_context_overflow, remote_context_overflow, "
-    "llm_non_retryable_same_request, provider_incomplete_response, llm_empty_response, provider_body_error, "
+    "llm_non_retryable_same_request, provider_incomplete_response, provider_content_refusal, llm_empty_response, provider_body_error, "
     "llm_retry_deadline_exhausted, llm_not_dispatched), worker_event_handler_error and worker_crash_task_dump "
     "are recorded but are not anchors: their fields carry no guarantee.",
     "Uncaught thread and main-thread exceptions are stdlib logging records, not JSONL rows.",

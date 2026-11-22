@@ -122,11 +122,17 @@ def test_only_a_released_typed_auth_change_is_asked_again(setup, monkeypatch, as
 
 
 def test_a_pause_after_the_refusal_sends_nothing_more(setup):
-    _root, gateway, client = setup
+    root, gateway, client = setup
     gateway.results, gateway.dispatch = [auth_refusal(), result()], ["not_started", "response_received"]
+
+    def pause_after_release():
+        # Acceptance of a control command is earlier than its settled no-start receipt.
+        return "owner_pause" if any(row["state"] == "released" for row in ledger(root)) else None
+
     with pytest.raises(transport.ClaudexorModelNotDispatched) as raised:
-        send(client, False, model_poll_control=lambda: "owner_paused" if gateway.accepted_operations else None)
-    assert raised.value.control_reason == "owner_paused" and len(gateway.accepted_operations) == 1
+        send(client, False, model_poll_control=pause_after_release)
+    assert raised.value.control_reason == "owner_pause" and len(gateway.accepted_operations) == 1
+    assert ledger(root)[0]["state"] == "released" and not gateway.cancels
 
 
 @pytest.mark.parametrize("order", [("auth", "native"), ("native", "auth"), ("processing", "native", "auth")])

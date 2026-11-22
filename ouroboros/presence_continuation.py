@@ -191,7 +191,8 @@ def note_place_delivery(ctx: Any, entry: Mapping[str, Any], controls: dict) -> N
 
 
 def covered_send(ctx: Any, send: Callable[[], tuple]) -> tuple:
-    """One model send of a round (``loop_model_call._call_round_model``, fallbacks included).
+    """One model send of a round (``loop_model_call._call_round_model``, fallbacks included, and the
+    recovery ladder's smaller send ``loop_output_exhaustion._send_smaller``).
 
     Only a usable response covers the place arrivals delivered before the send: one refused
     before dispatch, or answered by nothing, leaves coverage where the last answered send put it.

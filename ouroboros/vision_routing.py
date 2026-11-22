@@ -650,6 +650,9 @@ def _caption_for_block(
     """Return (caption, failure), both empty without a route. Each candidate's
     prepared-byte identity governs its refusal and memo lookup."""
     memo = accumulated_usage.setdefault("_vision_caption_memo", {})
+    refused_key = f"{_image_digest(block)}|refused"  # a received refusal answers this image's caption for the task
+    if memo.get(refused_key):
+        return "", str(memo[refused_key])
     model, url, url_digest, preparation_note, failure = prepare_caption_image(block, ctx, llm, accumulated_usage)
     # Completed captions remain reusable after their generating account is unavailable.
     key = f"{url_digest}|{model}|v1"
@@ -674,12 +677,8 @@ def _caption_for_block(
     if drive_root is not None:
         try:
             prompt_ref = persist_call(
-                drive_root,
-                task_id=task_id,
-                call_id=f"{call_id}_request",
-                call_type="vision_caption_request",
-                payload={"prompt": _CAPTION_PROMPT, "image_url": url, "model": model},
-                manifest={"model": model},
+                drive_root, task_id=task_id, call_id=f"{call_id}_request", call_type="vision_caption_request",
+                payload={"prompt": _CAPTION_PROMPT, "image_url": url, "model": model}, manifest={"model": model},
             )
         except Exception:
             log.warning("vision caption request receipt failed", exc_info=True)
@@ -701,16 +700,21 @@ def _caption_for_block(
                if isinstance(deadline_ts, (int, float)) and not isinstance(deadline_ts, bool) else {}),
         )
     except Exception as exc:
-        from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(exc)
+        from ouroboros.llm_claudexor import ClaudexorRefusalError, propagate_model_error
+        refused = exc if isinstance(exc, ClaudexorRefusalError) else getattr(exc, "received_refusal", None)
+        failure = f"{type(refused or exc).__name__}: {refused or exc}"
+        if refused is not None:  # its own received answer, kept before a control leaves with it; never Main's
+            memo[refused_key], exc.received_refusal = failure, None
+        propagate_model_error(exc, single_request=True)
         operation("failed")
-        # NOT memoized: a memoized failure used to block every retry for this
-        # image for the rest of the task. A completed refusal only takes this
-        # route out of this image's caption candidates.
+        if refused is not None:  # unavailable for the task: neither this model nor another asks
+            return "", failure
+        # NOT memoized: a memoized failure used to block every retry for this image for the rest of the task.
+        # A completed refusal only takes this route out of this image's caption candidates.
         model, refusal, digests = refusal_identity(exc, model, lambda _route: [url_digest])
         if refusal is not None:
             record_image_refusal(accumulated_usage, model, digests, {**refusal, "via": "caption", "model": model})
-        return "", f"{type(exc).__name__}: {exc}"
+        return "", failure
     model, key, preparation_note = sent_caption_identity(usage, model, key, preparation_note)
     try:
         from ouroboros.llm import add_usage
@@ -730,14 +734,9 @@ def _caption_for_block(
         caption = preparation_note + " " + caption
     if drive_root is not None:
         try:
-            persist_call(
-                drive_root,
-                task_id=task_id,
-                call_id=f"{call_id}_response",
-                call_type="vision_caption_response",
-                payload={"caption": caption, "usage": usage, "prompt_ref": prompt_ref},
-                manifest={"model": model},
-            )
+            persist_call(drive_root, task_id=task_id, call_id=f"{call_id}_response",
+                         call_type="vision_caption_response", manifest={"model": model},
+                         payload={"caption": caption, "usage": usage, "prompt_ref": prompt_ref})
         except Exception:
             log.warning("vision caption response receipt failed", exc_info=True)
     operation("finished")

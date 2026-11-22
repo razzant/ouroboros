@@ -147,5 +147,5 @@ def find_semantic_duplicate_id(
         return dup_id if dup_id in valid_ids else None
     except Exception as exc:
         from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(exc)
+        propagate_model_error(exc, single_request=True)
         return None

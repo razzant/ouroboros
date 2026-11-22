@@ -829,7 +829,7 @@ def test_manual_reviewer_sizing_does_not_change_scope_authority(tmp_path, monkey
 def test_main_input_reserve_and_account_capacity_remain_distinct(tmp_path, monkeypatch, catalog):
     from ouroboros import config
     from ouroboros.context_fit import measure_main_fit
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     evidence = _probe(tmp_path)

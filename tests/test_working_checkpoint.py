@@ -18,6 +18,7 @@ from ouroboros import budget_pause, working_checkpoint as wc
 from ouroboros.task_results import write_task_result
 from tests._budget_pause_exact_helpers import _loop_ctx
 from tests._store_shared import read_result
+from tests._working_checkpoint import checkpoint_registry as _registry
 
 
 def _file(root, task_id="pause-task", attempt=1):
@@ -197,52 +198,48 @@ def test_a_retained_wait_parks_only_while_the_pause_that_retained_it_is_live(tmp
     assert wc.live_park(tmp_path, "pause-task", 1) == "budget_pause"
 
 
-def test_a_sourceless_pausing_seed_is_completed_from_the_same_attempts_working_state(tmp_path):
+@pytest.mark.parametrize("boundary", ["pre_effect", "ready", "stale"])
+def test_a_sourceless_pausing_seed_is_completed_from_the_same_attempts_working_state(tmp_path, boundary):
     from ouroboros.artifacts import read_actor_source_bytes
 
     _ctx, limit_ctx = _loop_ctx(tmp_path)
     write_task_result(tmp_path, "pause-task", "running")
     wc.save_round(limit_ctx, "pre_effect")
+    if boundary != "pre_effect":
+        limit_ctx.messages.append({"role": "tool", "tool_call_id": "call_b", "content": "done b"})
+        limit_ctx.budget_tail = "no_tool"
+        assert wc.save_round(limit_ctx, "ready")
+    locator = {"round": limit_ctx.round_idx, "seq": 1 if boundary == "stale" else _ctx._working_checkpoint_seq,
+               "physical_attempt_id": "fixture-attempt", "model_role": "main"}
+    sidecar = _file(tmp_path).with_suffix(".operation.json")
+    sidecar.write_text(json.dumps(locator), encoding="utf-8")
     seed = {"pause_id": "p1", "state": budget_pause.STATE_PAUSING, "reason": "budget", "rail": "global_exhausted",
             "pause_generation": 1, "scope": "global", "task_attempt": 1, "source_ref": None}
     budget_pause.set_budget_pause(tmp_path, "pause-task", seed)
     row = wc.complete_pause_from_working(tmp_path, "pause-task", seed, 1)
-    assert row["source_ref"] and row["exact_continuation"] and row["resume_point"]["unanswered_tool_call_ids"] == ["call_b"]
+    assert row["source_ref"] and row["exact_continuation"]
+    assert row["resume_point"]["unanswered_tool_call_ids"] == (["call_b"] if boundary == "pre_effect" else [])
     state = json.loads(read_actor_source_bytes(tmp_path, "pause-task", row["source_ref"]))
     assert state["pause_id"] == "p1" and state["messages"] == limit_ctx.messages
     assert budget_pause.budget_pause_row(tmp_path, "pause-task")["source_ref"] == row["source_ref"]
+    assert state["working"].get("native_attempt") == (locator if boundary == "ready" else None)
+    wc.discard(tmp_path, "pause-task")
+    assert not _file(tmp_path).exists() and not sidecar.exists()
+    _, next_limit = _loop_ctx(tmp_path, attempt=2)
+    wc.save_resumed(next_limit.tools, state, state["messages"], {}, state["usage"], set())
+    _, resumed = wc.read_working(tmp_path, "pause-task", 2)
+    assert resumed["working"]["boundary"] == wc.RESUMED
+    expected = {**locator, "seq": resumed["working"]["seq"]} if boundary == "ready" else None
+    assert resumed["working"].get("native_attempt") == expected
 
 
 # --- the real loop continues a frozen state ----------------------------------------------
-
-def _registry(tmp_path, monkeypatch, task_id, attempt):
-    from ouroboros import context, task_pacing
-    from ouroboros.tools.registry import ToolRegistry
-    from tests.test_context_fit_v664 import _plan
-    from types import SimpleNamespace
-
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    ctx = registry._ctx
-    ctx.task_id, ctx.task_attempt = task_id, attempt
-    ctx.active_model, ctx.active_effort = "same-model", "high"
-    ctx.active_use_local, ctx.active_context_mode = False, "max"
-    ctx._cost_ceiling = task_pacing.CostCeiling(state="disabled")
-    ctx.owner_wait_callback = lambda *_: None
-    ctx.context_fit_plan = _plan(window=500_000, known=True)
-    monkeypatch.setattr(context, "_context_fit_route", lambda task, **_: (
-        {"model": task["model"], "provider": "openai", "use_local": False},
-        SimpleNamespace(status="confirmed", stale=False, window_tokens=500_000, route_fp="route-a"),
-    ))
-    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
-    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    return registry
-
 
 def _saved_working_state(tmp_path, monkeypatch, task_id):
     """The dead attempt 1: a batch accepted, one call answered, one not."""
     from types import SimpleNamespace
 
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
 
     write_task_result(tmp_path, task_id, "running")
     registry = _registry(tmp_path, monkeypatch, task_id, 1)
@@ -343,7 +340,7 @@ def test_a_held_question_wait_continues_through_its_own_reader_after_quit_and_re
     from ouroboros.owner_wait import checkpoint_owner_wait, set_owner_wait
     from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
     from tests._budget_pause_exact_helpers import _install_queue
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
     from tests.test_loop_transport_wait import _loop_kwargs
     from tests.test_restart_retention import _pool_events
 
@@ -409,7 +406,7 @@ def test_s3_integration_pin_working_recovery_restores_its_saved_cost_ceiling(tmp
 
     if not hasattr(task_pacing, "restore_cost_ceiling"):
         pytest.skip("S3 task_pacing.restore_cost_ceiling is not in this baseline: wire it at integration")
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
 
     write_task_result(tmp_path, "t-wait", "running")
     dead = _registry(tmp_path, monkeypatch, "t-wait", 1)

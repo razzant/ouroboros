@@ -121,9 +121,6 @@ def text_input_estimate(messages, tools):
     return estimate_context_prompt_tokens(rows, tools)
 
 
-CONTEXT_CAPACITY_DETAIL = "This room's context and working reserve do not fit this engine's window."
-
-
 def _renewal_window(record, facts):
     """Cache session growth room separately from physical response admission.
 
@@ -290,6 +287,55 @@ def _accept_session_candidate(host, plan, rows, options, physical_window, raw):
     host.ctx.active_context_mode = plan.initial_mode
 
 
+def _session_capacity_error(refusal, window):
+    """The measured candidate's own numbers through the existing realtime code/detail contract."""
+    from ouroboros.context_budget import context_capacity_detail
+
+    return RealtimeSetupError("context_capacity", context_capacity_detail(live_call=True,
+        limit_kind=window["kind"], limit_tokens=window["tokens"],
+        input_tokens=refusal.get("input_tokens", refusal.get("estimated_input_tokens")),
+        reserve_tokens=refusal["response_reserve_tokens"]))
+
+
+def finish_call_preparation_refusal(turn, task_id, unfit, drive_logs):
+    """Close an admitted hub before a live host exists; return its ordinary task terminal.
+
+    The direct carrier and the Presence body deliver through their own result paths.
+    No provider session (or raw fit exception text) belongs to this refusal.
+    """
+    from dataclasses import asdict
+    from ouroboros.call_peers import close_hub
+    from ouroboros.context_budget import context_capacity_detail
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
+    from ouroboros.utils import append_jsonl, utc_now_iso
+
+    limit = unfit.limiting
+    detail = context_capacity_detail(live_call=True, limit_kind=limit.kind if limit else "",
+        limit_tokens=limit.tokens if limit else None, input_tokens=unfit.estimated_input_tokens,
+        reserve_tokens=unfit.response_reserve_tokens, required_book_tokens=unfit.required_book_tokens)
+    # Close before logging too: a busy store must not strand the admitted call.
+    with turn._lock:
+        already_closed, turn._closed = turn._closed, True
+    close_hub(turn.spec.call_id, "context_capacity", detail=detail)
+    if not already_closed:
+        turn.publish({"type": "conversation_finished", "chat_id": turn.spec.chat_id,
+                      "call_id": turn.spec.call_id, "task_id": task_id, "reason": "context_capacity"})
+
+    measurement = {key: getattr(unfit, key) for key in (
+        "fixed_input_tokens", "memory_view_tokens", "estimated_input_tokens", "raw_input_tokens",
+        "measurement_density", "response_reserve_tokens", "work_room_tokens", "work_room_deficit_tokens")}
+    measurement.update(capacity_total_tokens=unfit.window_tokens, capacity_deficit_tokens=unfit.deficit_tokens)
+    if limit is not None:  # the frame's total equivalent is not necessarily the physical limiter
+        measurement.update(limit_kind=limit.kind, limit_tokens=limit.tokens)
+    event = {"type": "call.fit_refused", "ts": utc_now_iso(), "task_id": task_id, "call_id": turn.spec.call_id,
+             "reason": "context_capacity", "stage": "task_preparation", "fit": {"measurement": measurement},
+             "physical": unfit.physical, "deficit_tokens": unfit.deficit_tokens,
+             "route_facts": asdict(turn.catalog_model.facts), "units": turn.catalog_model.facts.basis}
+    append_jsonl(drive_logs / "events.jsonl", event)
+    return detail, {"terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE, "execution_status": "infra_failed",
+                    "reason_code": "context_capacity"}, {"reasoning_notes": [], "tool_calls": [], "fit_refusal": event}
+
+
 def session_candidate(host, factory, options, *, observation_fp=None):
     """Refit current canonical rows through the ordinary window ladder, then seal.
 
@@ -446,4 +492,4 @@ def session_candidate(host, factory, options, *, observation_fp=None):
         event = {"type": "call.fit_refused", **evidence, "manifest_ref": receipt["manifest_ref"]}
         host.trace["fit_refusal"] = event
         host.observe("host", canonical_json(event))
-        raise RealtimeSetupError("context_capacity", CONTEXT_CAPACITY_DETAIL)
+        raise _session_capacity_error(refusal, measurement["window"])
