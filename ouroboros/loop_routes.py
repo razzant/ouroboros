@@ -42,7 +42,7 @@ def fallback_round_view(owner, messages, schemas, usage):
     missing = object()
     fields = {key: getattr(owner, key, missing) for key in (
         "active_model", "active_use_local", "active_context_mode", "context_fit_plan",
-        "_route_left_out_tool_names", "_pending_model_wait_handover", "_route_facts_pending",
+        "_route_left_out_tool_names", "_pending_handover_reason", "_route_facts_pending",
         "_authored_memory_plan", "route_choice", "memory_view_facts", *OBSERVER_STATE_ATTRS)}
     route_usage = {key: usage.get(key, missing) for key in ("_model_route", REBOUND_PHYSICAL_CONTEXT_KEY, ATTEMPT_PREFIX_KEY)}
     primary_fit = _snapshot_context_fit_usage(usage)

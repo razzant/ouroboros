@@ -626,6 +626,7 @@ def test_fallback_choice_and_first_request_from_its_saved_round(main_call, monke
     actor.primary_route = {"model": MODEL, "use_local": False, "role": "main"}
     primary = deepcopy(ctx.messages)
     original_plan = ctx.context_fit_plan
+    original_handover_reason = getattr(actor, "_pending_handover_reason", None)
     original_route = deepcopy(ROUTE)
     ctx.accumulated_usage.update(_model_route=deepcopy(ROUTE), _context_route_fp=original_plan.route_fp,
                                  _last_llm_error_kind="bad_request")
@@ -666,7 +667,7 @@ def test_fallback_choice_and_first_request_from_its_saved_round(main_call, monke
         assert actor.active_model == MODEL and actor.active_use_local is False
         assert ctx.accumulated_usage["_context_route_fp"] == original_plan.route_fp
         assert ctx.accumulated_usage["_model_route"] == original_route
-        assert not getattr(actor, "_pending_model_wait_handover", None)
+        assert getattr(actor, "_pending_handover_reason", None) == original_handover_reason
 
     polls = []
 
@@ -697,7 +698,7 @@ def test_fallback_choice_and_first_request_from_its_saved_round(main_call, monke
                     _reprepare_waiting_main(call, {"model": "local-fixture", "model_role": call.model_role,
                                                   "use_local": True, "tools": call.tool_schemas})
                     assert actor.active_use_local and actor.active_model == "local-fixture"
-                    assert actor._pending_model_wait_handover
+                    assert actor._pending_handover_reason == "model_wait"
             else:
                 assert call.tool_schemas == catalog
                 assert call.active_model == MODEL and call.context_fit_plan.route_fp == "capacity-account-c"
