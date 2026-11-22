@@ -272,3 +272,48 @@ def test_an_extension_whose_load_state_cannot_be_read_is_not_ready_and_an_instru
     assert rows["guide"]["live_reason"] == "not_extension" and skill_status(rows["guide"])["ready"] is True
     card = _section(tmp_path).full_text.split("\n- mail ", 1)[1].split("\n- ", 1)[0]
     assert "Status: not ready — load_state_unreadable: the host could not read whether this extension is loaded" in card
+
+
+def _script(drive: pathlib.Path, name: str, *, mcp: bool = False, enabled: bool = True,
+            script_file: bool = True) -> None:
+    folder = drive / "skills" / "external" / name
+    (folder / "scripts").mkdir(parents=True)
+    if script_file:
+        (folder / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+    (folder / "server.py").write_text("print('serve')\n", encoding="utf-8")
+    servers = "mcp_servers: [{id: tools, runtime: agent_python, entry: server.py}]\n" if mcp else ""
+    (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Purpose of {name}.\nversion: '1'\ntype: script\n"
+                                     f"runtime: python3\nscripts:\n  - name: run.py\n{servers}---\nBody.\n",
+                                     encoding="utf-8")
+    (drive / "state" / "skills" / name).mkdir(parents=True)
+    save_enabled(drive, name, enabled, actor="owner_ui")
+    [loaded] = [skill for skill in discover_skills(drive) if skill.name == name]
+    (drive / "state" / "skills" / name / "review.json").write_text(
+        json.dumps({"status": "pass", "content_hash": loaded.content_hash}), encoding="utf-8")
+
+
+def test_a_missing_interpreter_is_named_and_scoped_to_skill_exec_when_the_skill_brings_mcp_servers(
+        tmp_path, monkeypatch):
+    _script(tmp_path, "mixed", mcp=True)
+    _script(tmp_path, "plain")
+    monkeypatch.setattr("ouroboros.tools.skill_exec._resolve_runtime_binary", lambda _runtime: (None, "not on PATH"))
+    rows = {row["name"]: row for row in summarize_skills(tmp_path)["skills"]}
+    missing = "no interpreter for runtime 'python3': not on PATH"
+    assert skill_status(rows["mixed"]) == {"ready": True, "reasons": [], "notes": [
+        f"skill_exec unavailable: {missing}; its MCP tools are separate"]}
+    assert skill_status(rows["plain"]) == {"ready": False, "reasons": [f"entry_unavailable: {missing}"], "notes": []}
+    section = _section(tmp_path)
+    for text in (section.full_text, section.operative_view):
+        cards = {block.split(" ", 1)[0]: block for block in text.split("\n- ")[1:]}
+        assert f"  Note: skill_exec unavailable: {missing}; its MCP tools are separate" in cards["mixed"]
+        assert "Status:" not in cards["mixed"] and f"  Status: not ready — entry_unavailable: {missing}" in cards["plain"]
+
+
+def test_a_missing_entry_file_is_its_own_reason_after_the_lifecycle_ones(tmp_path):
+    _script(tmp_path, "off-and-broken", enabled=False, script_file=False)  # reviewed as it is: no entry file
+    [row] = [row for row in summarize_skills(tmp_path)["skills"] if row["name"] == "off-and-broken"]
+    assert skill_status(row)["reasons"] == ["skill_disabled",
+                                            "entry_unavailable: no declared script file exists (scripts/run.py)"]
+    _script(tmp_path, "off-but-whole", enabled=False)
+    [whole] = [row for row in summarize_skills(tmp_path)["skills"] if row["name"] == "off-but-whole"]
+    assert skill_status(whole)["reasons"] == ["skill_disabled"]

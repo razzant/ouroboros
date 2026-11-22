@@ -243,23 +243,26 @@ def skill_status(row: Any) -> dict:
     """Whether one ``summarize_skills`` row can run now: ``{"ready", "reasons", "notes"}``.
 
     The one ordered answer every reader that shows the mind a skill's state uses (the Installed Skills section,
-    ``list_skills``): readiness's blockers in their order, then what runs the files: a script's interpreter and
-    declared entry file (``runnable_via_skill_exec``), an extension's load gate as configuration decides it
+    ``list_skills``): readiness's blockers in their order, then what runs the files, each found on its own: a
+    script's interpreter and declared entry file (``entry_gap``; a note instead when the skill brings its own MCP
+    servers, which run apart from ``skill_exec``), an extension's load gate as configuration decides it
     (``desired_live``). Configuration only (installed set, switch, grants, review, dependencies, manifest), never
-    whether a process holds it now. ``notes`` are readiness's non-blocking remarks."""
+    whether a process holds it now. ``notes`` are readiness's non-blocking remarks, then that script note."""
     if row.get("collision_row_id"):
         return {"ready": False, "reasons": [str(row.get("load_error") or "skill name collision")], "notes": []}
     readiness = row.get("readiness") if isinstance(row.get("readiness"), dict) else {}
     reasons = [str(item) for item in readiness.get("blockers") or [] if str(item).strip()]
-    if row.get("type") == "script" and not row.get("runnable_via_skill_exec") and not reasons:
-        reasons.append("entry_unavailable: its runtime's interpreter or a declared script file is missing")
+    notes = [str(item) for item in readiness.get("notes") or [] if str(item).strip()]
+    if row.get("type") == "script" and (gap := str(row.get("entry_gap") or "")):
+        (notes if row.get("declares_mcp") else reasons).append(
+            f"skill_exec unavailable: {gap}; its MCP tools are separate" if row.get("declares_mcp")
+            else f"entry_unavailable: {gap}")
     gate = str(row.get("live_reason") or "")
     if row.get("type") == "extension" and not row.get("desired_live") and gate and gate != "not_extension" and (
             not reasons or gate in _GATE_ONLY_REASONS):
         words = _GATE_WORDS.get(gate) or (str(row.get("load_error") or "")
                                           if gate in _GATE_ONLY_REASONS or gate.startswith("deps_") else "")
         reasons.append(f"{gate}: {words}" if words else gate)
-    notes = [str(item) for item in readiness.get("notes") or [] if str(item).strip()]
     return {"ready": not reasons, "reasons": reasons, "notes": notes}
 
 

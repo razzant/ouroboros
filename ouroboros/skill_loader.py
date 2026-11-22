@@ -154,35 +154,26 @@ class LoadedSkill:
 
     @property
     def available_for_execution(self) -> bool:
-        """True when an enabled script skill has a fresh executable review."""
-        if self.load_error:
-            return False
-        if not self.enabled:
-            return False
-        if not self.manifest.is_script():
-            # instruction has no payload; extension runs through PluginAPI.
-            return False
-        if not self.review.gate_for(self.content_hash)["executable_review"]:
-            return False
+        """True when an enabled script skill has a fresh executable review and nothing in ``entry_gap``."""
+        if self.load_error or not self.enabled or not self.manifest.is_script():
+            return False  # an instruction has no payload; an extension runs through PluginAPI
+        return bool(self.review.gate_for(self.content_hash)["executable_review"]) and not self.entry_gap
+
+    @property
+    def entry_gap(self) -> str:
+        """What ``skill_exec`` lacks to start this script, whatever its switch and review: its runtime's interpreter
+        (with the resolver's reason) or every declared script file; ``""`` when it can start one."""
         from ouroboros.tools.skill_exec import _resolve_runtime_binary, _resolve_script_path
 
         runtime = (self.manifest.runtime or "").strip().lower()
-        if _resolve_runtime_binary(runtime)[0] is None:
-            return False
-        for entry in self.manifest.scripts or []:
-            if not isinstance(entry, dict):
-                continue
-            declared_name = str(entry.get("name") or "").strip()
-            if not declared_name:
-                continue
-            relpath = (
-                declared_name
-                if "/" in declared_name or declared_name.startswith(".")
-                else f"scripts/{declared_name}"
-            )
-            if _resolve_script_path(self.skill_dir, relpath) is not None:
-                return True
-        return False
+        binary, why = _resolve_runtime_binary(runtime)
+        if binary is None:
+            return f"no interpreter for runtime {runtime!r}" + (f": {why}" if why else "")
+        names = [str(entry.get("name") or "").strip() for entry in self.manifest.scripts or [] if isinstance(entry, dict)]
+        paths = [name if "/" in name or name.startswith(".") else f"scripts/{name}" for name in names if name]
+        if any(_resolve_script_path(self.skill_dir, relpath) is not None for relpath in paths):
+            return ""
+        return "no declared script file exists" + (f" ({', '.join(paths)})" if paths else "")
 
 
 @dataclass(frozen=True)
@@ -1513,6 +1504,8 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
             "executable_review": gate["executable_review"],
             "available_for_execution": runnable,
             "runnable_via_skill_exec": s.available_for_execution,
+            "entry_gap": s.entry_gap if s.manifest.is_script() and not s.identity_collision else "",
+            "declares_mcp": bool(s.manifest.mcp_servers),  # its own servers run apart from skill_exec
             "tool_surfaces": tool_surfaces_by_skill.get(s.name, []),
             "static_ready": runnable,
             "blocked_by_grants": not grants_usable,
