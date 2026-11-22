@@ -1,0 +1,89 @@
+name: QA service export records (isolated check)
+
+on:
+  push:
+    branches:
+      - 'qa/3970-export-records'
+
+concurrency:
+  group: qa-3970-export-records-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  process-tests:
+    name: Process checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ runner.os == 'Windows' && 'setup-python' || 'shipped' }}
+          install-project: 'false'
+      - name: Run targeted service-stop process checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          test -x "$PY" || { echo "Missing .venv Python at $PY"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/ci-private"
+          "$PY" -I -S scripts/safe_test.py -- "$PY" -m pytest \
+            tests/test_docker_declared_outputs.py::test_automatic_docker_service_outputs_and_custody \
+            tests/test_services_tool_v2.py::test_service_outputs_register_artifacts_on_stop \
+            tests/test_services_tool_v2.py::test_two_demo_launches_keep_exact_stop_results \
+            -q --tb=short -rs --junitxml="$RUNNER_TEMP/ci-private/process-${{ runner.os }}.xml"
+          "$PY" -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k, f, e = [int(s.get(key, 0)) for key in ('tests', 'skipped', 'failures', 'errors')]; print(f'{n} ran, {k} skipped, {f} failed, {e} errors'); sys.exit(0 if n > k and f == e == 0 else 1)" "$RUNNER_TEMP/ci-private/process-${{ runner.os }}.xml"
+      - name: Upload executed process cases
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: process-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-private/process-${{ runner.os }}.xml
+          if-no-files-found: error
+
+  structure-checks:
+    name: Structure checks (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Run the size-ratchet lane
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=".venv/bin/python"
+          "$PY" -I -S scripts/safe_test.py -- "$PY" -c 'import os,sys,pytest; os.environ["OURO_SIZE_RATCHET_BASE_REF"]=sys.argv[1]; sys.exit(pytest.main(sys.argv[2:]))' 97d6dcafeb0a8c2dbf68725937c98692e9203343 -o addopts="" tests/test_smoke.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py -m size_ratchet -q -rs --tb=short
+      - name: Project release lint on changed Python sources
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --name-only -z --diff-filter=ACMR 97d6dcafeb0a8c2dbf68725937c98692e9203343 HEAD^ -- '*.py' | xargs -0 -r .venv/bin/python -m ruff check --select F
