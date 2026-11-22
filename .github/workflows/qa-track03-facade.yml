@@ -1,0 +1,87 @@
+# QA-only branch for one generated inventory correction. Do not merge this file.
+name: QA track03 — inventory regeneration
+on:
+  push:
+    branches: ['qa/track03-facade-*']
+permissions:
+  contents: read
+env:
+  QA_PRODUCT_COMMIT: 33b9ed194d7f5b3a108d8589f439577fa304422b
+  QA_PRODUCT_TREE: 460a372e7342cf8eaafb8d71f5bf77a8d206861c
+  QA_CARRIER_PATH: .github/workflows/qa-track03-facade.yml
+  QA_EXPECTED_SHA256: 0c1b9654f251a020f4bedde79b397ea648175b87deb01a312cc4d10b2d64e12a
+jobs:
+  regenerate:
+    name: facade inventory (${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: linux}
+          - {os: windows-latest, leg: windows}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 18
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0          # the product commit is this ref's parent; the assertion reads it
+          persist-credentials: false
+
+      # ── The subject binding. Nothing runs until all five facts hold. ──────────────────
+      - name: Prove the subject (carrier adds only this file; parent is the pinned product commit)
+        id: subject
+        run: |
+          set -euo pipefail
+          git cat-file -e "${QA_PRODUCT_COMMIT}^{commit}" || {
+            echo "::error::${QA_PRODUCT_COMMIT} is not in this repository — the ref was cut from the wrong history."
+            exit 1; }
+          parent=$(git rev-parse "HEAD^1")
+          tree=$(git rev-parse "${QA_PRODUCT_COMMIT}^{tree}")
+          ahead=$(git rev-list --count "${QA_PRODUCT_COMMIT}..HEAD")
+          touched=$(git diff --no-renames --name-only "${QA_PRODUCT_COMMIT}" HEAD)
+          added_only=$(git diff --no-renames --diff-filter=A --name-only "${QA_PRODUCT_COMMIT}" HEAD)
+          not_added=$(git diff --no-renames --diff-filter=DMRTC --name-only "${QA_PRODUCT_COMMIT}" HEAD)
+          [ "$parent" = "$QA_PRODUCT_COMMIT" ] || {
+            echo "::error::This ref's parent is $parent, not the pinned product commit $QA_PRODUCT_COMMIT."
+            exit 1; }
+          [ "$tree" = "$QA_PRODUCT_TREE" ] || {
+            echo "::error::Product tree is $tree, not the pinned $QA_PRODUCT_TREE."
+            exit 1; }
+          [ "$ahead" = "1" ] || {
+            echo "::error::This ref is $ahead commits past the product commit; it must be exactly one carrier commit."
+            exit 1; }
+          [ "$touched" = "$QA_CARRIER_PATH" ] || {
+            echo "::error::The carrier commit is not exactly this one workflow file added:"
+            printf '%s\n' "$touched"
+            exit 1; }
+          [ "$added_only" = "$QA_CARRIER_PATH" ] || {
+            echo "::error::The carrier file is not a pure addition: $added_only"
+            exit 1; }
+          [ -z "$not_added" ] || {
+            echo "::error::The carrier commit also deletes or modifies product paths:"
+            printf '%s\n' "$not_added"
+            exit 1; }
+          # Leave the carrier tree behind: everything after this step is the product tree itself.
+          git checkout --detach "${QA_PRODUCT_COMMIT}"
+          head_now=$(git rev-parse HEAD)
+          tree_now=$(git rev-parse "HEAD^{tree}")
+          dirty=$(git status --porcelain --untracked-files=no)
+          [ "$head_now" = "$QA_PRODUCT_COMMIT" ] || { echo "::error::Not on the product commit: $head_now"; exit 1; }
+          [ "$tree_now" = "$QA_PRODUCT_TREE" ] || { echo "::error::Worked tree is $tree_now, not $QA_PRODUCT_TREE"; exit 1; }
+          [ -z "$dirty" ] || { echo "::error::Tracked files differ from the product tree:"; printf '%s\n' "$dirty"; exit 1; }
+          [ -f .github/actions/setup-python-env/action.yml ] || {
+            echo "::error::The product tree has no setup-python-env action to use."
+            exit 1; }
+          echo "subject=$QA_PRODUCT_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "tree=$QA_PRODUCT_TREE" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-python-env
+      - name: Verify the checked-in bytes equal all generated inventories
+        run: |
+          set -euo pipefail
+          python scripts/regenerate_inventories.py --check
+          python -c "import hashlib, os, pathlib; p=pathlib.Path('docs/inventories/FACADE_INVENTORY.md'); h=hashlib.sha256(p.read_bytes()).hexdigest(); assert h == os.environ['QA_EXPECTED_SHA256']; print('FACADE_INVENTORY_EXACT', h)"
+          git diff --exit-code
