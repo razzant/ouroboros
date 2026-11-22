@@ -110,7 +110,21 @@ REACH = """() => [...document.querySelectorAll('#primary-sidebar .sidebar-foot :
     .filter((el) => el.getClientRects().length).map((el) => { const r = el.getBoundingClientRect();
         const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
         return [el.dataset.navPage || el.id, Boolean(at && el.contains(at))]; })"""
-AT_END = "() => { const s = document.getElementById('primary-sidebar'); return s.scrollHeight - s.clientHeight - s.scrollTop <= 1; }"
+# The end and the position in ONE look: a wheel's own scroll is animated (WebKit), so a turn already under way can
+# finish between two reads — the wheel that follows would then find nothing left to move and never report a change.
+AT_EDGE = """() => { const s = document.getElementById('primary-sidebar');
+    return [s.scrollHeight - s.clientHeight - s.scrollTop <= 1, s.scrollTop]; }"""
+# After a wheel: the column moved, or the wheel found it already standing at its end (nothing left to move).
+MOVED_OR_END = """t => { const s = document.getElementById('primary-sidebar');
+    return s.scrollTop !== t || s.scrollHeight - s.clientHeight - s.scrollTop <= 1; }"""
+# A turn that moved nothing: the wheel's own point and the column's box, so a column that does not scroll and a wheel
+# that never reached it are told apart.
+STALLED = """(t) => { const s = document.getElementById('primary-sidebar'), r = s.getBoundingClientRect();
+    const at = document.elementFromPoint(r.left + Math.min(r.width / 2, 120), r.top + r.height / 2);
+    return {turn: t, top: s.scrollTop, remaining: s.scrollHeight - s.clientHeight - s.scrollTop,
+            scrollHeight: s.scrollHeight, clientHeight: s.clientHeight, overflowY: getComputedStyle(s).overflowY,
+            hit: at ? (at.id || at.className || at.tagName) : null, hitInSidebar: Boolean(at && s.contains(at)),
+            rows: s.querySelectorAll('#nav-projects-list .nav-project-row').length}; }"""
 
 
 def wheel_to_end(page):
@@ -118,11 +132,17 @@ def wheel_to_end(page):
     box = page.locator('#primary-sidebar').bounding_box()
     page.mouse.move(box['x'] + min(box['width'] / 2, 120), box['y'] + box['height'] / 2)
     for turn in range(80):
-        if page.evaluate(AT_END):
+        at_end, before = page.evaluate(AT_EDGE)
+        if at_end:
             return turn
-        before = page.evaluate("document.getElementById('primary-sidebar').scrollTop")
         page.mouse.wheel(0, 500)
-        page.wait_for_function("t => document.getElementById('primary-sidebar').scrollTop !== t", arg=before)
+        for _ in range(40):  # a real wheel moves the column within a frame or two
+            if page.evaluate(MOVED_OR_END, before):
+                break
+            page.wait_for_timeout(50)
+        else:
+            # The column stood still away from its end: it does not scroll here, and the wheel's own target says why.
+            raise AssertionError(f'the wheel moved nothing over the column: {page.evaluate(STALLED, turn)}')
     return None
 
 
