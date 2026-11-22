@@ -109,8 +109,8 @@ def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
         reason, message = str(outcome.get("reason") or ""), str(outcome.get("message") or "")
         cause = reasons.get(reason) or ("" if reason or message else "the app stopped before changing versions")
         raw = "" if reason in reasons else "; ".join(part for part in (reason, message) if part)
-        if len(lines := raw.splitlines()) > 1:  # Git's whole output stays in the receipt: its headline and address
-            raw = f"{' '.join(lines[0].split())} (whole message: {RECEIPT_REL})"
+        if len(lines := raw.splitlines()) > 1:  # Git's whole output stays in this outcome's own record, never overwritten
+            raw = f"{' '.join(lines[0].split())} (whole message: {PROGRESS_REL}, outcome at {outcome.get('at') or 'unknown'})"
         msg = f"{door} did not happen{': ' + cause if cause else ''}. The app is running the current version."
         from ouroboros.host_notice import fields
 
