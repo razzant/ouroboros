@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests._skills_page_harness import URL, capture, no_overflow, open_skills, skills_browser as _skills_browser
+from tests._skills_page_harness import URL, capture, no_overflow, open_skills, open_view, skills_browser as _skills_browser
 
 pytestmark = pytest.mark.ui_browser
 skills_browser = _skills_browser
@@ -83,16 +83,16 @@ def test_skills_is_real_owner_surface_for_page_module_fault_and_hold(skills_brow
             page.keyboard.press("Enter")
             panic_notice.wait_for(state="detached")
             assert "Reload this page to restore it" in card.inner_text()
-            page.get_by_role("tab", name="Browse", exact=True).click()
+            open_view(page, "browse")
             browse.wait_for()
             assert "needs you" in browse.inner_text()
-            page.get_by_role("tab", name="Installed", exact=True).click()
+            open_view(page, "installed")
         else:
-            # Close the overlay before using the tab it covers on a phone.
-            page.get_by_role("tab", name="Browse", exact=True).click()
+            # Extensions opens Browse and Skills as pages of its list (#3921), at every width.
+            open_view(page, "browse")
             browse.wait_for()
             assert "needs you" in browse.inner_text()
-            page.get_by_role("tab", name="Installed", exact=True).click()
+            open_view(page, "installed")
             if mode == "host_fail":
                 assert "Its page module stopped in this window" in card.inner_text()
                 assert card.locator('[data-skill-action="start_host_module"]').count() == 0
@@ -108,10 +108,10 @@ def test_skills_is_real_owner_surface_for_page_module_fault_and_hold(skills_brow
                 assert card.is_visible()
                 assert "Held in this window" not in card.inner_text()
                 assert card.locator('.skills-toggle').is_checked()
-                page.get_by_role("tab", name="Browse", exact=True).click()
+                open_view(page, "browse")
                 assert "On" in browse.inner_text()
                 assert "needs you" not in browse.inner_text()
-                page.get_by_role("tab", name="Installed", exact=True).click()
+                open_view(page, "installed")
 
         assert no_overflow(page)
         assert not skills.posts, "local dismiss/recovery and offline Panic send no backend mutation"
