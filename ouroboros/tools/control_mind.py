@@ -106,8 +106,17 @@ def _list_schema(schema: dict) -> dict:
                        "request, exactly as if named alone, and each mails its own outcome. A list is never "
                        "all-or-nothing and nothing waits for the whole: count the outcomes as they arrive, each "
                        "marked with this call's list_call, and treat a root whose outcome did not arrive as unknown. "
-                       "An element that is not a valid task id refuses the whole call before anything is sent. "
-                       "Consciousness and places are not works and are not listed."}
+                       "An element that is not a valid task id refuses the whole call before anything is sent "
+                       "(invalid_task_id names it; invalid_task_ids: both task_id and task_ids given, or an empty or "
+                       "non-list task_ids). Consciousness and places are not works and are not listed. "
+                       "Besides each door's own answers, a list row can refuse: sender_stopped (you, the sender, "
+                       "were stopped after the call: nothing was done for this root, do not retry it); "
+                       "sender_state_unreadable (whether you were stopped could not be read: nothing was done; "
+                       "retry later or name the root alone); root_unverified or task_result_unreadable (the root's "
+                       "own record could not be read or bound: nothing was done; retry later or look at it first); "
+                       "not_a_root_task (a child: its root chooses its children, or name it alone if the owner's word "
+                       "names it); owner_paused_by_name or pause_author_unknown (a Resume found a Pause Ouroboros "
+                       "did not place: it stays; name that root alone by task_id when the owner's word names it)."}
     schema["parameters"]["required"] = ["reason"]
     return schema
 
