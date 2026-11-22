@@ -21,7 +21,10 @@ def boot(monkeypatch, tmp_path):
 
     store = {"owner_chat_id": None, "owner_id": None, meeting.FIRST_MEETING_KEY: meeting.owed(PRESSED)}
     admitted, answers, exchange = [], [], {"value": (False, False)}
+    modes = {"chosen": "advanced", "process": "advanced"}  # the access level Finish saved, and the one this process runs
     monkeypatch.setattr(state, "load_state", lambda: json.loads(json.dumps(store)))
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda *a, **k: {"OUROBOROS_RUNTIME_MODE": modes["chosen"]})
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: modes["process"])
 
     def update_state(mutator, **_kwargs):
         mutator(store)
@@ -46,7 +49,7 @@ def boot(monkeypatch, tmp_path):
         path = tmp_path / "logs" / "events.jsonl"
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
-    yield type("Boot", (), {"store": store, "admitted": admitted, "answers": answers, "exchange": exchange,
+    yield type("Boot", (), {"store": store, "admitted": admitted, "answers": answers, "exchange": exchange, "modes": modes,
                             "root": tmp_path, "rows": staticmethod(rows),
                             "start": staticmethod(lambda: meeting.admit_first_meeting(tmp_path))})
 
@@ -77,6 +80,18 @@ def test_the_press_s_root_goes_to_main_whatever_owner_chat_is_bound_or_unread(bo
     boot.store.update({meeting.FIRST_MEETING_KEY: meeting.owed(PRESSED), "_recovery": {"unconfirmed": ["owner_chat_id"]}})
     assert boot.start() == "admitted" and boot.admitted[-1]["chat_id"] == WEB_UI_CHAT_ID and len(boot.admitted) == 2
     assert boot.store[meeting.FIRST_MEETING_KEY]["chat_id"] == WEB_UI_CHAT_ID
+
+
+def test_a_restart_into_the_chosen_access_level_comes_first_and_the_meeting_waits_for_it(boot):
+    """Setup chose an access level this process does not run (it applies from the next start: ``restart_required``):
+    nothing is admitted here, the meeting stays owed, and the restarted process running that level admits it, so it
+    never runs under a level my human did not choose and a desktop restart never consumes it."""
+    boot.modes.update(chosen="light", process="advanced")
+    assert boot.start() == "deferred" and boot.admitted == []
+    assert boot.store[meeting.FIRST_MEETING_KEY] == meeting.owed(PRESSED)
+    assert boot.rows()[-1]["reason"] == "a restart into the chosen access level (light) comes first"
+    boot.modes["process"] = "light"  # the restarted process
+    assert boot.start() == "admitted" and len(boot.admitted) == 1
 
 
 def test_nothing_is_owed_without_a_press_and_an_existing_message_of_mine_settles_it(boot):

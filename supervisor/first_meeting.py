@@ -14,7 +14,10 @@ Order: the key moves ``owed`` -> ``admitting`` with the root's id BEFORE the adm
 that finds ``admitting`` admits the same id again, and the queue refuses an id it holds or has a result for
 (``_require_unique_task_id``; the admission writes its durable scheduled receipt in the same transaction), so the
 meeting is admitted at most once, and a crash between the write and the admission leaves the record that retries it.
-A refused admission stays ``admitting`` with its reason for the next start. A message of mine to my human that already
+A refused admission stays ``admitting`` with its reason for the next start. While setup's chosen access level waits
+for a restart (this process still runs its boot level: ``restart_required``), nothing is admitted: the meeting stays
+owed for the restarted process, so it never runs under a level my human did not choose and a desktop restart never
+consumes it. A message of mine to my human that already
 exists (``dialogue_store.owner_exchange``) settles it as ``not_needed``; a dialogue or state that cannot be read leaves
 it as it was. Every attempt writes one ``first_meeting`` row to ``logs/events.jsonl``.
 """
@@ -73,11 +76,15 @@ def admit_first_meeting(drive_root: Any) -> str:
 
 def _admit(drive_root: Any, meeting: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     from ouroboros import dialogue_store
+    from ouroboros.config import get_runtime_mode, load_settings, normalize_runtime_mode
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from ouroboros.store import StoreError
     from supervisor.queue import enqueue_with_admission_receipt, persist_queue_snapshot
     from supervisor.state import StateUnavailable, update_state
 
+    chosen = normalize_runtime_mode(load_settings().get("OUROBOROS_RUNTIME_MODE"))  # what Finish saved (policy applied)
+    if chosen != get_runtime_mode():
+        return "deferred", {"reason": f"a restart into the chosen access level ({chosen}) comes first"}
     try:
         _theirs, mine = dialogue_store.owner_exchange(drive_root)
     except StoreError as exc:
