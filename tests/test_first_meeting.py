@@ -1,5 +1,5 @@
-"""My human's press of Start opens one first meeting (``supervisor.first_meeting``): admitted once, in Main while
-no owner chat is bound, as the host's prompt for the press; never twice across starts, never without a record, and
+"""My human's press of Start opens one first meeting (``supervisor.first_meeting``): admitted once, in Main whatever
+owner chat is bound, as the host's prompt for the press; never twice across starts, never without a record, and
 not at all when nothing is owed or a message of mine to my human already exists."""
 
 from __future__ import annotations
@@ -67,13 +67,16 @@ def test_a_fresh_setup_opens_one_meeting_in_main_and_a_second_start_none(boot):
     assert [row["outcome"] for row in boot.rows()] == ["admitted"]
 
 
-def test_a_bound_owner_chat_is_where_it_opens_and_an_unknown_one_waits_without_a_guess(boot):
+def test_the_press_s_root_goes_to_main_whatever_owner_chat_is_bound_or_unread(boot):
+    """Owner item 1: the press was made in setup, so its work is in Main, never an external chat bound in between,
+    and a binding that cannot be read does not hold back work whose room the owner already chose."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+
     boot.store["owner_chat_id"] = 4242  # my human's first message arrived before this start (a Telegram chat)
-    assert boot.start() == "admitted" and boot.admitted[-1]["chat_id"] == 4242
+    assert boot.start() == "admitted" and boot.admitted[-1]["chat_id"] == WEB_UI_CHAT_ID != 4242
     boot.store.update({meeting.FIRST_MEETING_KEY: meeting.owed(PRESSED), "_recovery": {"unconfirmed": ["owner_chat_id"]}})
-    assert boot.start() == "deferred" and len(boot.admitted) == 1
-    assert boot.store[meeting.FIRST_MEETING_KEY] == meeting.owed(PRESSED)  # still owed: the next start reads again
-    assert boot.rows()[-1]["reason"] == "owner chat unknown: the owner chat binding is not confirmed"
+    assert boot.start() == "admitted" and boot.admitted[-1]["chat_id"] == WEB_UI_CHAT_ID and len(boot.admitted) == 2
+    assert boot.store[meeting.FIRST_MEETING_KEY]["chat_id"] == WEB_UI_CHAT_ID
 
 
 def test_nothing_is_owed_without_a_press_and_an_existing_message_of_mine_settles_it(boot):

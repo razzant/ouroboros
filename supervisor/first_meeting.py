@@ -5,8 +5,8 @@ and the first state minted after it is born owing the meeting (``state_initializ
 under ``FIRST_MEETING_KEY``). Only such a state owes one: a state minted before a setup, an install without one (Colab,
 headless, env-only) and every state an earlier release minted do not. ``admit_first_meeting`` runs at each supervisor
 start (``server._run_supervisor``) and, whatever the consciousness switch says, admits ONE ordinary root the way
-``gateway.control._admit_description_task`` admits a press's work: in Main while the owner binding is KNOWN empty, in
-the bound chat otherwise; a binding that cannot be read waits for the next start, never a guess. Its objective is the
+``gateway.control._admit_description_task`` admits a press's work: in Main, where the press was made (owner item 1),
+never in an owner chat bound since (a Telegram chat whose first message arrived before this start). Its objective is the
 host's prompt for my human's press of ``setup_start`` (``objective_author`` ``ui_control``): when the press happened,
 nothing else. What to say or do is the mind's, from its context (the Runtime ``setup`` facts, ``context_first_hour``).
 
@@ -73,11 +73,10 @@ def admit_first_meeting(drive_root: Any) -> str:
 
 def _admit(drive_root: Any, meeting: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     from ouroboros import dialogue_store
-    from ouroboros.consciousness import owner_chat_of
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from ouroboros.store import StoreError
     from supervisor.queue import enqueue_with_admission_receipt, persist_queue_snapshot
-    from supervisor.state import StateUnavailable, load_state, update_state
+    from supervisor.state import StateUnavailable, update_state
 
     try:
         _theirs, mine = dialogue_store.owner_exchange(drive_root)
@@ -87,11 +86,7 @@ def _admit(drive_root: Any, meeting: Dict[str, Any]) -> Tuple[str, Dict[str, Any
         held = str(meeting.get("task_id") or "")
         update_state(lambda live: _settle(live, "not_needed", held))
         return "not_needed", {"reason": "a message of mine to my human exists", **({"task_id": held} if held else {})}
-    try:
-        bound = owner_chat_of(load_state())
-    except LookupError as exc:
-        return "deferred", {"reason": f"owner chat unknown: {exc}"}
-    chat_id = WEB_UI_CHAT_ID if bound is None else bound
+    chat_id = WEB_UI_CHAT_ID  # the press's own room, whatever owner chat is bound or unread
     task_id = str(meeting.get("task_id") or "") or uuid.uuid4().hex[:8]
     try:
         update_state(lambda live: _claim(live, task_id, chat_id))
