@@ -146,8 +146,8 @@ def test_spawn_sites_are_custodied_or_allowlisted():
 # function: a second start inside a listed function, a new caller of a listed wrapper (ProcessContainer.spawn, as
 # process_lifeline.py's guardian is) and children a library starts (MCP stdio servers, the Playwright driver, the
 # forkserver) pass unseen. An entry is "<routine>: <name>", a stop the door's routine calls, hands to Panic's attempt
-# or, at worker exit, names in a (module, method) row whose module defines it (checked; that the stop works stays
-# with its owner's tests), or "<fate>: <why>" where no door routine stops it:
+# or, at worker exit, names as "module.method" in a dispatcher row whose module defines it (checked; that the stop
+# works stays with its owner's tests), or "<fate>: <why>" where no door routine stops it:
 # survives (a recorded decision keeps it), lifeline (it ends with its parent: a POSIX lifeline, the Windows Job),
 # waited (its starter's call or context waits for and ends it), exits (the process ends itself at this door), next
 # start (the next start's custody sweep reaps its row), outside (no server generation starts it).
@@ -295,13 +295,14 @@ _STOPPERS = {
     "task service": {
         "quit": ("teardown: stop_owned_work", "owned stop: kill_all_services"),
         "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work"),
-        "panic": ("panic: kill_all_services", "worker exit: kill_all_services"),
+        "panic": ("panic: kill_all_services", "worker exit: ouroboros.tools.services.kill_all_services"),
         "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
     },
     "executor process": {
         "quit": ("teardown: stop_owned_work",),
         "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work"),
-        "panic": ("panic: kill_all_foreground", "panic: kill_all_services", "worker exit: kill_all_foreground"),
+        "panic": ("panic: kill_all_foreground", "panic: kill_all_services",
+                  "worker exit: ouroboros.workspace_executor.kill_all_foreground"),
         "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
     },
     "data query": {  # a worker's task tool, in its own group; its env keeps no scope marker for the Panic census
@@ -330,7 +331,8 @@ _STOPPERS = {
     "tracked command": {
         "quit": ("teardown: stop_owned_work", "owned stop: kill_all_tracked_subprocesses", "teardown: kill_workers"),
         "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work", "cleanup: kill_workers"),
-        "panic": ("panic: kill_all_tracked_subprocesses", "worker exit: kill_all_tracked_subprocesses"),
+        "panic": ("panic: kill_all_tracked_subprocesses",
+                  "worker exit: ouroboros.tools.shell_process.kill_all_tracked_subprocesses"),
         "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
     },
     "waited helper": ("waited: its call waits for it and kills it on a timeout or a failure",),
@@ -399,8 +401,9 @@ def _defines(root: pathlib.Path, module: str) -> set:
 
 def _door_calls(root: pathlib.Path, ref: str):
     """What a door routine (``file::qualname``; ``:finally``, the finally around a lifespan's ``yield``) calls, the
-    callables it hands to Panic's ``attempt`` and, for the worker's dispatcher alone, the method of each literal
-    (module, method, ...) row whose module defines that method; None when the routine, or that finally, is gone."""
+    callables it hands to Panic's ``attempt`` and, for the worker's dispatcher alone, ``module.method`` of each
+    literal (module, method, ...) row whose module defines that method; None when the routine, or that finally,
+    is gone."""
     file, _, qualname = ref.partition("::")
     qualname, _, part = qualname.partition(":")
     try:
@@ -424,7 +427,7 @@ def _door_calls(root: pathlib.Path, ref: str):
             for row in sub.iter.elts:
                 module, method, *_ = [getattr(item, "value", None) for item in getattr(row, "elts", ())] + [None, None]
                 if isinstance(module, str) and isinstance(method, str) and method in _defines(root, module):
-                    calls.add(method)
+                    calls.add(f"{module}.{method}")  # the pair: two owners may share a name
     return calls
 
 
@@ -459,7 +462,7 @@ def test_every_process_kind_names_who_stops_it_at_each_door(tmp_path):
     """The real tree agrees with the table, and the gate reports each way a table and a tree part: a start with no
     kind, a start gone, a kind with no row, a row no start names, a door left out, an unknown fate, a routine at a
     door it does not run in, a stop its routine only mentions, logs from a tuple or calls outside the teardown, a
-    worker row naming a module without that method, a teardown gone."""
+    worker row naming a module without that method or another real owner of the same name, a teardown gone."""
     assert _stopper_problems(REPO_ROOT, _PROCESS_KINDS, _STOPPERS) == []
     (tmp_path / "ouroboros").mkdir()
     (tmp_path / "supervisor").mkdir()
@@ -484,8 +487,10 @@ def test_every_process_kind_names_who_stops_it_at_each_door(tmp_path):
              "ouroboros/tool.py::start_new": "rowless", "ouroboros/tool.py::start_more": "half",
              "ouroboros/pool.py::start_pool": "half"}
     stoppers = {"thing": {"quit": ("teardown: thing.halt",),
-                          "panic": ("teardown: thing.halt", "worker exit: stop_all", "worker exit: stop_rest"),
-                          "restart": ("teardown: thing.stop", "cleanup: thing.stop", "cleanup: stop_all"),
+                          "panic": ("teardown: thing.halt", "worker exit: ouroboros.owner.stop_all",
+                                    "worker exit: ouroboros.tool.stop_rest"),
+                          "restart": ("teardown: thing.stop", "cleanup: thing.stop",
+                                      "cleanup: ouroboros.owner.stop_all"),
                           "fault": ("magic: x",)},
                 "half": dict.fromkeys(("quit", "restart", "fault"), ("survives: x",)),
                 "spare": ("survives: no start",)}
@@ -497,15 +502,28 @@ def test_every_process_kind_names_who_stops_it_at_each_door(tmp_path):
         "half at panic: '' is no stop of this door's routines and no fate",
         "thing at fault: 'magic: x' is no stop of this door's routines and no fate",
         "thing at panic: 'teardown: thing.halt' is no stop of this door's routines and no fate",
-        "thing at panic: supervisor/worker_process.py::request_worker_owned_stops does not call stop_rest",
+        "thing at panic: supervisor/worker_process.py::request_worker_owned_stops does not call "
+        "ouroboros.tool.stop_rest",
         "thing at restart: server.py::lifespan:finally does not call thing.stop",
         "thing at restart: server.py::_emergency_process_cleanup does not call thing.stop",
-        "thing at restart: server.py::_emergency_process_cleanup does not call stop_all",
+        "thing at restart: server.py::_emergency_process_cleanup does not call ouroboros.owner.stop_all",
     ]
     (tmp_path / "server.py").write_text("async def lifespan(app):\n    thing.halt()\n    yield\n", encoding="utf-8")
     quit_only = {door: ("teardown: thing.halt",) if door == "quit" else ("survives: x",) for door in _DOORS}
     assert _stopper_problems(tmp_path, dict.fromkeys(_process_starts(tmp_path), "thing"), {"thing": quit_only}) == [
         "thing at quit: server.py::lifespan:finally is gone"]  # never the whole lifespan, boot side included
+    worker = (REPO_ROOT / "supervisor" / "worker_process.py").read_text(encoding="utf-8")
+    row = '("ouroboros.tools.services", "kill_all_services", False)'  # its own registry and the executor's
+    assert worker.count(row) == 1
+    for rel in ("ouroboros/tools/services.py", "ouroboros/workspace_executor.py"):
+        (tmp_path / "real" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "real" / rel).write_text((REPO_ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "real" / "supervisor").mkdir()
+    (tmp_path / "real" / "supervisor" / "worker_process.py").write_text(
+        worker.replace(row, row.replace("tools.services", "workspace_executor")), encoding="utf-8")
+    calls = _door_calls(tmp_path / "real", _DOOR_ROUTINES["worker exit"])  # the executor's registry alone
+    assert "ouroboros.workspace_executor.kill_all_services" in calls
+    assert "ouroboros.tools.services.kill_all_services" not in calls, "a same-named owner passed for the task one"
 
 
 @_POSIX_ONLY

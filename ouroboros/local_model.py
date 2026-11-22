@@ -277,6 +277,10 @@ class LocalModelManager:
                     pass
                 self._install_proc = None
                 self._runtime_status = "missing"
+                if proc.stdout:  # this thread sees the exit and lets the child go: no later Stop or Panic is needed
+                    _read_tail(proc.stdout, 4096)
+                proc.wait()
+                self._stopping.discard(proc)
                 return
             output_bytes = _read_tail(proc.stdout, 4096) if proc.stdout else b""
             proc.wait()
@@ -644,8 +648,8 @@ class LocalModelManager:
 
         self._panic_requested = True
         self._install_cancelled.set()
-        children = (self._proc, self._install_proc, *self._stopping.copy())  # copy(): one call, no discard cuts in
-        requests = [request_process_tree_kill(proc) for proc in children
+        children = dict.fromkeys((self._proc, self._install_proc, *self._stopping.copy()))  # one key per child
+        requests = [request_process_tree_kill(proc) for proc in children  # a snapshot: each asked once
                     if proc is not None and not self._forget_settled(proc)]  # poll() only: no wait, no lock
         if not request_only:
             self.stop_server()

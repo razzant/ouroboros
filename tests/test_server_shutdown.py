@@ -1142,18 +1142,21 @@ def test_an_install_that_exits_after_its_stop_leaves_the_model_manager(tmp_path,
         owner.join(10)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="a child that ignores SIGTERM is a POSIX case")
-def test_an_install_a_stop_overtook_during_its_launch_stays_where_panic_reaches_it(tmp_path, monkeypatch):
+@pytest.mark.skipif(os.name == "nt", reason="TERM dispositions are a POSIX case")
+@pytest.mark.parametrize("disposition", ["SIG_IGN", "SIG_DFL"])
+def test_an_install_a_stop_overtook_during_its_launch_stays_reachable_until_its_thread_reaps_it(
+        tmp_path, monkeypatch, disposition):
     """A stop that lands while the installer is still being launched finds no handle and only cancels; the install
-    thread then sends TERM to the child it got and returns. One that ignores TERM stays where Panic's request reaches
-    it until its exit is seen, and the next Stop lets it go once it has exited."""
+    thread then sends TERM to the child it got and waits for it. One that ignores TERM stays where Panic's request
+    reaches it; once the child has exited, by that TERM or by the request, the install thread reaps it and lets it go
+    with no further Stop or Panic, so no exited process or open pipe stays in the manager."""
     import signal
     import sys
 
     from ouroboros import local_model
 
-    ready, children = tmp_path / "ready", []
-    code = ("import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    ready, children, termed = tmp_path / "ready", [], threading.Event()
+    code = (f"import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.{disposition}); "
             "pathlib.Path(sys.argv[1]).touch(); time.sleep(60)")
     monkeypatch.setattr(local_model, "_get_install_command", lambda: [sys.executable, "-c", code, str(ready)])
     monkeypatch.setattr(local_model, "_get_install_env", lambda: dict(os.environ))
@@ -1164,28 +1167,50 @@ def test_an_install_a_stop_overtook_during_its_launch_stays_where_panic_reaches_
         manager.stop_server()  # past the install's first check, before it holds a handle
         return launch_kwargs(kwargs)
 
-    def terminate_once_ignored(child):
+    def terminate_once_disposed(child):
         children.append(child)
         deadline = time.monotonic() + 10
-        while not ready.is_file() and time.monotonic() < deadline:  # TERM is ignored from here on
+        while not ready.is_file() and time.monotonic() < deadline:  # the child's TERM disposition is set from here
             time.sleep(0.01)
-        return terminate(child)
+        try:
+            return terminate(child)
+        finally:
+            termed.set()
 
     monkeypatch.setattr(local_model, "_with_hidden_subprocess", stop_during_the_launch)
-    monkeypatch.setattr(local_model, "terminate_process_tree", terminate_once_ignored)
+    monkeypatch.setattr(local_model, "terminate_process_tree", terminate_once_disposed)
     owner = threading.Thread(target=manager._run_install, daemon=True)
     owner.start()
-    owner.join(10)
-    assert not owner.is_alive() and len(children) == 1 and manager._install_proc is None
+    assert termed.wait(10) and len(children) == 1, "the install never sent its TERM"
     child = children[0]
     try:
-        assert child.poll() is None and child in manager._stopping, "a live install escaped Panic's request"
-        assert [receipt["pid"] for receipt in manager.panic_stop(request_only=True)] == [child.pid]
-        assert child.wait(timeout=10) == -signal.SIGKILL
-        manager.stop_server()
-        assert child not in manager._stopping and manager.panic_stop(request_only=True) == []
+        if disposition == "SIG_IGN":
+            assert child.poll() is None and child in manager._stopping, "a live install escaped Panic's request"
+            assert [receipt["pid"] for receipt in manager.panic_stop(request_only=True)] == [child.pid]
+        owner.join(10)
+        assert not owner.is_alive(), "the install thread never saw its child exit"
+        assert child.returncode == -(signal.SIGKILL if disposition == "SIG_IGN" else signal.SIGTERM)
+        assert child not in manager._stopping and manager._install_proc is None, "an exited install stayed behind"
+        assert manager.panic_stop(request_only=True) == []
     finally:
         _end(child)
+        owner.join(10)
+
+
+def test_panic_asks_each_model_child_once_however_many_places_hold_it():
+    """While an overtaken install's thread sends its TERM the child is in the install slot and among the stopping
+    children at once: Panic asks it once, and still asks every other child."""
+    from ouroboros import local_model
+
+    manager = local_model.LocalModelManager()
+    install, server = _model_child(), _model_child()
+    try:
+        manager._install_proc, manager._proc = install, server
+        manager._stopping.add(install)
+        receipts = manager.panic_stop(request_only=True)
+        assert sorted(receipt["pid"] for receipt in receipts) == sorted((install.pid, server.pid))
+    finally:
+        _end(install, server)
 
 
 def test_a_model_child_that_exits_after_its_stop_goes_at_the_next_stop_or_panic():
