@@ -699,11 +699,15 @@ class BackgroundConsciousness:
                 return "Consciousness is already on." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""
             # The clock did not advance while disabled: never announce a wake in the past. A named time still ahead
-            # (one stored while off, ``set_next_wakeup(at)``) comes first, no sooner than MIN after the last wake or boot.
-            now = time.time()
-            due, named = max(self._next_wake_at, now), target_ts(self._read_state().get(WAKE_TARGET_STATE_KEY))
+            # (one stored while off, ``set_next_wakeup(at)``) comes first, no sooner than MIN after the last wake, boot
+            # or skip (the tool's contract).
+            now, stored = time.time(), self._read_state()
+            due, named = max(self._next_wake_at, now), target_ts(stored.get(WAKE_TARGET_STATE_KEY))
             if named is not None and named > now:
-                due = min(due, max(named, self._last_wake_at + self.floor, self._booted_at + self.floor))
+                skip = stored.get(LAST_SKIP_STATE_KEY)
+                skipped = parse_deadline_ts(skip.get("at")) if isinstance(skip, dict) else None
+                last = max(self._last_wake_at, self._booted_at, skipped.timestamp() if skipped is not None else 0.0)
+                due = min(due, max(named, last + self.floor))
             self._set_next_wake(due, appointment=True)
             at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
         from ouroboros.consciousness_view import on_sentence

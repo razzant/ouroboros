@@ -13,7 +13,7 @@ import pytest
 from ouroboros import consciousness as clock_module
 from ouroboros.consciousness import INTERVAL_STATE_KEY, LAST_WAKE_STATE_KEY, NEXT_WAKE_STATE_KEY, BackgroundConsciousness
 from ouroboros.consciousness_clock import WAKE_TARGET_STATE_KEY
-from tests.test_consciousness import CEILING, DEFAULT, FLOOR, T0, _iso, _launched
+from tests.test_consciousness import AVAILABLE, CEILING, DEFAULT, FLOOR, T0, _iso, _launched
 from tests.test_consciousness import clock as clock  # the alarm over an in-memory state: the fixture these tests share
 
 
@@ -164,6 +164,24 @@ def test_turning_consciousness_on_comes_first_at_a_time_named_while_it_was_off(c
     turned_on(end + 1500)
     _wake(clock, monkeypatch, "wake0002", start=end + 1500, end=end + 1560)
     assert WAKE_TARGET_STATE_KEY not in clock.store, "the wake it appointed consumes it"
+
+
+def test_turning_consciousness_on_keeps_min_after_the_last_skip(clock, monkeypatch):
+    """The tool's contract: no wake-up starts sooner than MIN after the last wake-up, boot or skip. A skip (here an
+    exhausted allowance waiting for its reset) floors a time named while off; one later than every floor keeps it."""
+    start = T0 + FLOOR + 1
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60)
+    skipped = clock.clock.next_wake_at
+    resets = skipped + 6 * 3600
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_read: {
+        **AVAILABLE, "status": "exhausted", "remaining_usd": 0.0, "resets_at": _iso(resets)})
+    assert clock.clock.tick(skipped) == "skipped:allowance_exhausted" and clock.clock.next_wake_at == resets
+    for named, due in ((skipped + 120, skipped + FLOOR), (skipped + FLOOR + 600, skipped + FLOOR + 600)):
+        clock.clock.stop(source=clock_module.OWNER_STOP)
+        clock.clock._next_wake_at = resets  # the attempt the skip stored, each time
+        _call_clock_tool(monkeypatch, now=skipped + 60, at=named)
+        clock.clock.start()
+        assert clock.clock.next_wake_at == due, (named, due)
 
 
 def test_a_restart_keeps_the_named_time_and_the_appointment_that_stood_when_it_was_stored(clock, monkeypatch):
