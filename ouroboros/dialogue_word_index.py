@@ -193,7 +193,8 @@ def _segments(conn: sqlite3.Connection) -> List[Tuple[int, int, int]]:
 
 def due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
     """Read-only and cheap: no install, archive walk or tokenization. Owed while FTS5 exists and nothing is
-    installed, the generation is not sound, a completed segment is unbuilt or the live unit has unposted rows."""
+    installed, the generation is not sound, a completed segment is unbuilt (the import counter), or at least one
+    whole chunk of the live unit's rows is unposted: fewer cost the reader only their re-read."""
     from ouroboros import dialogue_store as ds
 
     if row.get("state") == "failed":
@@ -211,7 +212,8 @@ def due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: b
             if live is None:
                 return False
             mark = conn.execute("SELECT next_ord FROM dw_mark WHERE segment=?", (live[0],)).fetchone()
-            return (int(mark[0]) if mark else 0) < int(live[1])
+            # A handful of new rows does not start the child: the reader re-reads them anyway.
+            return int(live[1]) - (int(mark[0]) if mark else 0) >= CHUNK_ROWS
     except Exception:
         log.debug("word postings facts unreadable; the next look asks again", exc_info=True)
         return False

@@ -86,7 +86,7 @@ def test_a_scan_only_read_installs_nothing_and_an_append_writes_no_posting(tmp_p
         assert _all(conn, "SELECT next_ord FROM dw_mark") == before
     fresh = _read(tmp_path, words=["fresh"])
     assert "total=1" in fresh and "1 not yet posted" in fresh  # findable at once: the uncovered row is read
-    assert dwi.due(tmp_path, {}, {}, False)
+    assert not dwi.due(tmp_path, {}, {}, False)  # one row starts no child: the reader re-reads it
 
 
 @needs_fts5
@@ -307,8 +307,11 @@ def test_the_maintenance_duty_works_then_rests_and_wakes_on_new_rows(tmp_path):
     _corpus(tmp_path)
     assert maintenance.run_job(tmp_path, "dialogue_words")["state"] == "done"
     assert maintenance.run_job(tmp_path, "dialogue_words") is None  # at rest
-    _say(tmp_path, "2026-11-07T00:00:00Z", "new row")
-    assert maintenance.run_job(tmp_path, "dialogue_words")["state"] == "done"
+    for n in range(dwi.CHUNK_ROWS - 1):
+        _say(tmp_path, "2026-11-07T00:00:00Z", f"new row {n}")
+    assert maintenance.run_job(tmp_path, "dialogue_words") is None  # less than a chunk: at rest
+    _say(tmp_path, "2026-11-07T00:00:00Z", "the chunk's last row")
+    assert maintenance.run_job(tmp_path, "dialogue_words")["state"] == "done"  # a whole chunk: work
 
 
 @needs_fts5
