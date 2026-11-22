@@ -1245,7 +1245,8 @@ def test_real_schedule_supervisor_stamps_copy_metadata(case, monkeypatch):
 ])
 def test_the_copy_door_reads_the_dispatchers_protected_rule(tmp_path, monkeypatch, mode, grant, capped, admitted):
     """The third integration door (an isolated copy's result into the Ouroboros body) asks the same
-    ``protected_write_admitted`` as the dispatcher and the two patch doors; ordinary paths stay admitted."""
+    ``protected_write_admitted`` as the dispatcher and the two patch doors, refuses in their words (the mode
+    that refuses, or the applying task's missing grant), and keeps ordinary paths admitted."""
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools.registry import ToolContext
     from ouroboros.workspace_copies import protected_write_admitted
@@ -1265,6 +1266,11 @@ def test_the_copy_door_reads_the_dispatchers_protected_rule(tmp_path, monkeypatc
     assert (refusal == "") is admitted, refusal
     if not admitted:
         assert refusal.startswith("LIGHT_MODE_BLOCKED" if capped else "CORE_PROTECTION_BLOCKED"), refusal
+    if not admitted and not capped:
+        assert "ouroboros/safety.py" in refusal and f"runtime_mode={mode!r}" in refusal, refusal
+        # Pro without the grant names the grant; a mode that refuses names the mode to switch to.
+        assert ("protected_paths_grant" in refusal) is (mode == "pro"), refusal
+        assert ("Switch to runtime_mode" in refusal) is (mode != "pro"), refusal
     if not capped:
         assert copy_apply_refusal(ctx, body, ["README.md"]) == ""
     effective = "light" if capped else mode

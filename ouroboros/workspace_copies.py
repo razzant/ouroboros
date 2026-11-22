@@ -134,9 +134,11 @@ def copy_apply_refusal(ctx: Any, target: Path, touched: list[str]) -> str:
                 return "LIGHT_MODE_BLOCKED: the parent's current mode forbids writing the Ouroboros body."
             constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
             acting = bool(constraint and constraint.mode == "acting_subagent")
-            if protected_paths_in(touched) and not protected_write_admitted(
-                    mode, acting=acting, grant=bool(constraint and constraint.protected_paths_grant)):
-                return "CORE_PROTECTION_BLOCKED: the parent's current authority excludes these protected body paths."
+            grant = bool(constraint and constraint.protected_paths_grant)
+            if (protected := protected_paths_in(touched)) and not protected_write_admitted(mode, acting=acting, grant=grant):
+                # The patch doors' own words: the mode that refuses, or the applying task's missing grant.
+                return protected_apply_refusal(path=protected[0].path, runtime_mode=mode, grant_ok=not acting or grant,
+                                               action="apply an isolated copy's result to").removeprefix("⚠️ ")
     except (OSError, ValueError, TypeError, RuntimeError) as exc:
         return f"INTEGRATE_TARGET_FORBIDDEN: {exc}"
     return ""
