@@ -198,11 +198,11 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                                       root / "task_results" / "artifacts" / task_id / WIRE_JOURNAL) if os.path.lexists(path)]
     unknown: List[str] = []
     pins: Dict[str, str] = {}
-    saved: set = set()
+    from ouroboros.saved_state_retirement import worked_copies_in, worked_copy
+
     try:  # the folders whose saved states for exact return ``saved_state_retirement.prune_worked_copies`` would retire
-        from ouroboros.saved_state_retirement import worked_copies_in
-        saved = {str(path) for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)}
-        places += sorted({SAVED_STATES_PLACE + str(pathlib.Path(path).parent) for path in saved})
+        places += sorted({SAVED_STATES_PLACE + str(path.parent)
+                          for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)})
     except OSError:
         unknown.append("saved_states")
     from ouroboros.artifacts import iter_artifact_tree
@@ -217,8 +217,9 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
         if canonical is not None:
             if canonical.resolve(strict=False) != canonical:
                 raise OSError("canonical artifact store reached through a link")
-            places += [str(path) for path in iter_artifact_tree(canonical)  # a saved state is named by its folder
-                       if path.is_file() and not path.is_symlink() and str(path) not in saved]
+            handles = canonical / "source_handles"  # a saved state is named by its folder, never per file
+            places += [str(path) for path in iter_artifact_tree(canonical) if path.is_file() and not path.is_symlink()
+                       and not (path.parent.parent == handles and worked_copy(path.parent.name, path.name))]
     except OSError:
         unknown.append("canonical_payloads")
     read = read_records(root)

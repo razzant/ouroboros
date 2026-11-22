@@ -263,6 +263,30 @@ def test_keep_on_a_work_whose_only_material_left_is_its_saved_states_is_saved(ro
     assert _prune(root)["held"] == {"owner_keep": len(copies)}
 
 
+@pytest.mark.parametrize("walk", ["missed", "raised"])
+def test_keep_names_a_saved_state_by_what_it_is_even_when_the_folder_walk_misses_it(root, monkeypatch, walk):
+    """Keep's per-file listing leaves a saved state out by its folder and its writer's name, not by the earlier walk:
+    one that lands after that walk, or a walk that raises, still never appears per file. Sources beside it and an
+    ordinary stored file that merely shares a saved state's name are listed."""
+    from ouroboros import saved_state_retirement
+    from ouroboros.owner_keep import inventory
+
+    handles = _task(root, "late")
+    copies, sources = _copies(handles), _sources(handles)
+    namesake = _file(handles.parent / "exports" / "working" / "working_checkpoint-a1.json")
+    if walk == "missed":
+        monkeypatch.setattr(saved_state_retirement, "worked_copies_in", lambda _folder: [])
+    else:
+        def unreadable(_folder):
+            raise PermissionError("folder not searchable")
+
+        monkeypatch.setattr(saved_state_retirement, "worked_copies_in", unreadable)
+    places, unknown, _pins = inventory(root, "late", {})
+    assert not {str(path) for path in copies} & set(places), places
+    assert {str(path) for path in sources} | {str(namesake)} <= set(places), places
+    assert ("saved_states" in unknown) == (walk == "raised")
+
+
 def test_a_carrier_kept_in_the_shared_table_still_lends_its_source(root):
     from ouroboros.utils import atomic_write_json
 
