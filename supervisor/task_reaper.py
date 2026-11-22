@@ -901,7 +901,8 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                                         + _stop_detail(ceiling_reached, deadline_reached)))
                 send_with_budget(
                     incident_chat_id, text, is_progress=True, task_id=task_id,
-                    progress_meta={"task_incident": "task_reaper_stopped", "toast_once": incident_toast_once, **said},
+                    progress_meta={"task_incident": "task_reaper_stopped", "toast_once": incident_toast_once,
+                                   "notice": said["notice"]},
                     role="system", system_type="task_reaper_notice")
             except Exception:
                 log.debug("Reaper: failed to send owner notification for %s", task_id, exc_info=True)
