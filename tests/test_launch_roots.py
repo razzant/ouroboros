@@ -28,6 +28,7 @@ import pytest
 
 from ouroboros import launch_roots
 from supervisor import state_initialization as witness
+from tests._workspace_git import git_repository
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 LEAVES = (("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "subagent_worktrees"),
@@ -480,9 +481,7 @@ def _git(cwd, *args):
 
 
 def _source_repo(tmp_path):
-    repo = tmp_path / "source"
-    repo.mkdir()
-    _git(repo, "init")
+    repo = git_repository(tmp_path / "source", unborn=True)
     (repo / "f.txt").write_text("one\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed")

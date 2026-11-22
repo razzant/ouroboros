@@ -520,10 +520,14 @@ def mcp_gateway_arguments(value: Any) -> Optional[dict]:
 
 
 def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
-    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
-    asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
+    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns, and any namespace
+    ``list_available_tools`` was asked to list by name (the connections map points there for complete MCP
+    descriptions), are forms the mind asked for; a call through the MCP gateway asks for the view its inner
+    arguments name."""
     if name == "enable_tools":
         return (None, None)
+    if name == "list_available_tools" and isinstance(tool_args, dict) and str(tool_args.get("namespace") or "").strip():
+        return requested_result_view(tool_args) or (None, None)
     if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
         tool_args = mcp_gateway_arguments(tool_args.get("arguments"))
     return requested_result_view(tool_args)

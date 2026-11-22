@@ -23,6 +23,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
+
 
 def _keynote_shaped_bytes() -> bytes:
     """A few KB of real zip container, the shape a .key deck actually has."""
@@ -41,15 +44,15 @@ PEM_PRIVATE_KEY = (
 )
 
 
-def _init_repo(path: pathlib.Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+def _lay_repo(folder: pathlib.Path) -> None:
+    path = git_repository(folder / "repo", unborn=True)
     (path / "README.md").write_text("x\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@local", "commit", "-qm", "init"],
-        cwd=str(path), check=True,
-    )
+    world_git(path, "add", "-A")
+    world_git(path, "-c", "user.name=t", "-c", "user.email=t@local", "commit", "-qm", "init")
+
+
+def _init_repo(path: pathlib.Path) -> None:
+    clone_repository(world("owner-file-name-gates-readme", _lay_repo) / "repo", path)
 
 
 # --- (a) ingress: the owner attaches their own files -------------------------

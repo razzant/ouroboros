@@ -118,7 +118,8 @@ def test_a_native_child_receives_and_reads_the_retained_copies_through_the_real_
                              input_files=SELECTION)
     assert event["configured_subagent"]["route"]["kind"] == "api_model"
     rows = event["prepared_input_files"]
-    assert [row["status"] for row in rows] == ["prepared", "prepared"] and '"status": "prepared"' in reply
+    assert [row["status"] for row in rows] == ["prepared", "prepared"]
+    assert f"prepared: inputs: 2 files, {len(BRIEF) + len(BINARY)} bytes, retained before queueing (prepared is not read)" in reply
     home = rt.drive / "task_results" / "artifacts" / "parent" / "source_handles" / "delegated_readonly_inputs"
     assert all(pathlib.Path(row["local"]).parents[3] == home / f"scheduled-{event['task_id']}" for row in rows)
 
@@ -160,12 +161,16 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
         parent.task_metadata["resource_intent"] = {"kind": "explicit_none"}
     reply, event = _schedule(chain, sid, input_sources="declared", input_files=SELECTION[:1])
     if folderless:
-        assert "agent_session selected source: folderless selected files" in reply
+        assert "folder: none, folderless selected files (scope or checking copy: known after start)" in reply
+        assert "Selected input_files replace automatic folderless lineage copies" in reply
+        assert "outside the session's folder" not in reply, "a folderless start restages the copies inside its scope"
     else:
-        assert "agent_session selected source: inherited repository/folder" in reply
-    assert "supervisor: child capabilities — profile=" in reply
+        assert "folder: inherited repository/folder (scope or checking copy: known after start)" in reply
+        assert "1 retained input copy lies outside the session's folder; reading it is not confirmed" in reply
+    assert "supervisor access: profile=" in reply and "supervisor read roots are not a leaf-access guarantee" in reply
+    assert "native/nanny tools are not automatically leaf session tools" in reply
     assert "Prompt-only paths are not prepared" in reply
-    assert "preparation is not a read" in reply
+    assert "(prepared is not read)" in reply
     [row] = event["prepared_input_files"]
     digest = hashlib.sha256(BRIEF).hexdigest()
     assert row["sha256"] == digest
@@ -229,7 +234,7 @@ def test_a_session_workspace_root_preserves_explicit_resource_and_leaf_scope(cha
     requested = load_task_result(rt.drive, event["task_id"])
     assert requested["status"] == "requested"
     assert requested["resource_intent"] == event["resource_intent"]
-    assert "agent_session selected source: workspace_root=" in reply
+    assert f"folder: workspace_root={rt.repo}, one directory" in reply
     assert "Prompt-only paths are not prepared" in reply
     assert "supervisor read roots are not a leaf-access guarantee" in reply
     assert event["resource_intent"] == {"kind": "explicit_resource", "root": str(rt.repo)}
@@ -281,7 +286,7 @@ def test_losing_resource_intent_reproduces_a_folderless_leaf_scope_mismatch(chai
     monkeypatch.setattr(subagents, "SUBAGENT_INTENT_FIELDS",
                         tuple(key for key in subagents.SUBAGENT_INTENT_FIELDS if key != "resource_intent"))
     reply, event = _schedule(chain, sid, input_sources="declared", input_files=SELECTION[:1])
-    assert "selected source: folderless" in reply
+    assert "folder: none, folderless" in reply
     task = _admit(rt, event)
     assert not task["metadata"].get("resource_intent")
     _, wake = _session_first_start(chain, monkeypatch, _restore(rt))
@@ -342,7 +347,7 @@ def test_an_explicit_empty_selection_reports_an_empty_receipt_and_changes_nothin
     omitted_reply, omitted = _schedule(chain, sid)
     assert "input_files" not in omitted_reply and "prepared_input_files" not in omitted
     empty_reply, empty = _schedule(chain, sid, input_files=[])
-    assert "input_files (retained before queueing; prepared is not read): []" in empty_reply
+    assert "inputs: none selected ([]), retained before queueing (prepared is not read)" in empty_reply
     assert empty["prepared_input_files"] == []
     null_reply, null = _schedule(chain, sid, input_files=None)  # a harness's spelling of omission
     assert "input_files" not in null_reply and "prepared_input_files" not in null
@@ -444,10 +449,13 @@ def test_frozen_range_reaches_the_reader_after_refs_move(chain, monkeypatch, tmp
     expected = _expected_range(repo, commits, literal)
     child_folder = rt.repo / "child"
     child_folder.mkdir()
-    _, event = _schedule(chain, _api_row(monkeypatch) if consumer == "api" else sid,
-                         workspace_root=str(child_folder), input_sources="declared", input_files=[
-                             {"git_range": {"root": "system_repo", "repository": "source",
-                                            "base": "before", "head": "after", "path": literal}}])
+    reply, event = _schedule(chain, _api_row(monkeypatch) if consumer == "api" else sid,
+                             workspace_root=str(child_folder), input_sources="declared", input_files=[
+                                 {"git_range": {"root": "system_repo", "repository": "source",
+                                                "base": "before", "head": "after", "path": literal}}])
+    # c50-5: the receipt names the frozen range by its commits, changed files and raw patch size (range.json).
+    assert (f"range {commits['base'][:12]}..{commits['head'][:12]} {literal}: 1 changed file, "
+            f"patch {len(expected)} bytes, retained before queueing (prepared is not read)") in reply
     subprocess.run(["git", "update-ref", "refs/heads/after", commits["base"]], cwd=repo, check=True)
     _admit(rt, event)
     payload = _restore(rt)
@@ -477,6 +485,14 @@ def test_frozen_range_reaches_the_reader_after_refs_move(chain, monkeypatch, tmp
         recovered = pathlib.Path(paths["range.patch"]).read_bytes()
     assert manifest["commits"] == commits and manifest["changes"] == [{"path": literal, "status": "M"}]
     assert recovered == expected and manifest["patch"]["sha256"] == hashlib.sha256(expected).hexdigest()
+    # c50-5: a retained range.json that no longer matches its recorded digest gives no count: unknown, never 0.
+    from ouroboros.helper_receipt import inputs_text
+
+    retained = next(row for row in event["prepared_input_files"] if row["path"] == "range.json")
+    assert "1 changed file" in inputs_text(event["prepared_input_files"])
+    original = pathlib.Path(retained["retained"]).read_bytes()
+    pathlib.Path(retained["retained"]).write_bytes(original.split(b"\n", 1)[0] + b"\n")
+    assert "changed files unknown" in inputs_text(event["prepared_input_files"])
 
 
 def test_historic_entry_with_static_user_files_root_uses_normal_dispatch(chain):  # noqa: F811
