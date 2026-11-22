@@ -924,7 +924,7 @@ def _capture_context_core(
         semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable", ctx=ctx))
     from ouroboros.skill_catalogue import always_in_context_section, discover_context_skills
     skills = [] if declared else timed("installed_skills", discover_context_skills, canonical_root)  # and the catalog below
-    if always_on := always_in_context_section(skills):
+    if always_on := always_in_context_section(skills or []):  # a failure (empty, or None) is no skills here
         semi_stable_parts.append(always_on)
     from ouroboros.safety_config import owner_rules_section
     semi_stable_parts.append(owner_rules_section())  # the Supervisor's read, for every focus and child
@@ -984,7 +984,11 @@ def _capture_context_core(
     registry = "" if declared else _build_registry_section(context_env)
     if registry:
         dynamic_parts.append(registry)
-    installed_skills = "" if declared else _build_installed_skills_section(context_env, skills=skills)
+    from ouroboros.contracts.task_constraint import normalize_task_constraint
+
+    bound = normalize_task_constraint(task.get("task_constraint") or getattr(ctx, "task_constraint", None))
+    installed_skills = "" if declared else _build_installed_skills_section(
+        context_env, skills=skills, selected_skill=bound.skill_name if bound and bound.has_selected_skill else "")
     if installed_skills:
         dynamic_parts.append(installed_skills)
     dynamic_parts.extend([
