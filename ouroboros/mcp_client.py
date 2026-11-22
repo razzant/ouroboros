@@ -1412,13 +1412,6 @@ class MCPManager:
         with self._lock:
             return self._resolve_locked(prefixed_name)[0]
 
-    def _note_call(self, cfg: MCPServerConfig, method: str, *, ok: bool, code: str = "") -> None:
-        """Date a change of whether ``cfg``'s server answers calls against the adopted envelope's mark."""
-        with self._lock:
-            runtime = self._servers.get(cfg.id)
-            current = (runtime.catalog or {}).get("latest_call") if runtime is not None else None
-        mcp_catalog.note_call(cfg, current, ok=ok, code=code, method=method)
-
     def _task_session_live(self, cfg: MCPServerConfig, register: Optional[Callable[[], None]] = None) -> bool:
         """Whether ``cfg`` is still this manager's task-session configuration; ``register`` runs under the lock
         ``reconfigure`` retires sessions under, so every later retirement sees what it registers."""
@@ -1487,11 +1480,11 @@ class MCPManager:
                    "and remote cancellation is not confirmed. Use the server-specific status/read "
                    "tool, if available, to reconcile the operation before retrying.")
             ) + server_stderr_note(exc)
-            self._note_call(cfg, tool.raw_name, ok=False, code="MCP_TIMEOUT")  # no answer, sent or not
+            mcp_catalog.note_call(cfg, ok=False, code="MCP_TIMEOUT", method=tool.raw_name)  # no answer, sent or not
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
                               meta={"mcp_call_not_sent": not_sent or closing})
         except mcp_oauth.MCPAuthRequired as exc:  # the server ran nothing: no grant, refused refresh or token
-            self._note_call(cfg, tool.raw_name, ok=False, code="MCP_AUTH_REQUIRED")
+            mcp_catalog.note_call(cfg, ok=False, code="MCP_AUTH_REQUIRED", method=tool.raw_name)
             return ToolResult(status="unavailable", code="MCP_AUTH_REQUIRED", text=f"⚠️ {exc}",
                               meta={"dynamic_provider": True, "mcp_call_not_sent": True, "sign_in_reason": exc.reason})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
@@ -1505,12 +1498,12 @@ class MCPManager:
                 return _replace_tool_result(launch_refusal_result(exc),
                                             meta_updates={"mcp_call_not_sent": True})
             if not (not_sent and isinstance(exc, (ModelWaitInterrupted, UsageAccountingError))):
-                self._note_call(cfg, tool.raw_name, ok=False, code="MCP_ERROR")  # a local refusal says nothing of it
+                mcp_catalog.note_call(cfg, ok=False, code="MCP_ERROR", method=tool.raw_name)  # a local refusal says nothing of it
             body = f"⚠️ MCP_TOOL_ERROR: {_exception_text(exc, cfg)}"
             return ToolResult(status="error", code="MCP_ERROR", text=_model_facing_result(cfg, tool.raw_name, body),
                               meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent})
         # The remote call is complete here; projecting it never turns it into a failure.
-        self._note_call(cfg, tool.raw_name, ok=True)  # the server answered (an isError answer is an answer)
+        mcp_catalog.note_call(cfg, ok=True, method=tool.raw_name)  # the server answered (an isError answer is an answer)
         if result.status == "ok" and getattr(ctx, "drive_root", None):  # a post I made as an account: never my human's
             from ouroboros.own_sends import record_result
             from ouroboros.tool_access import canonical_data_root

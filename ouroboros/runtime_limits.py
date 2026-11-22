@@ -102,9 +102,6 @@ MCP_STDIO_STDERR_NOTE_BYTES = 2 * 1024  # the last words a failure shows; the lo
 # its server's lock for one such request, so a second process waits at most LOCK_WAIT before it is told.
 MCP_OAUTH_HTTP_TIMEOUT_SEC = 30.0
 MCP_OAUTH_LOCK_WAIT_SEC = 45.0
-# A catalog file's lock (mcp_catalog) is held for one local read and one atomic replace: a listing publication
-# waits this long for a concurrent call mark; a call mark never waits (the next changed call writes it).
-MCP_CATALOG_LOCK_WAIT_SEC = 5.0
 
 
 # Worker-pool spawn bounds (structural constants, not env knobs). Grace after a full-pool spawn before the crash

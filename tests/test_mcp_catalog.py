@@ -675,6 +675,11 @@ def envelope_now():
     return json.loads(mcp_catalog.catalog_path("demo").read_text(encoding="utf-8"))
 
 
+def call_now():
+    path = mcp_catalog.calls_path("demo")
+    return json.loads(path.read_text(encoding="utf-8"))["latest_call"] if path.exists() else None
+
+
 def call_with(manager, outcome):
     """One call of ``mcp_demo__ping`` whose transport returns ``outcome`` or raises it."""
     async def call(cfg, name, arguments, timeout):
@@ -712,25 +717,26 @@ def test_a_call_failure_opens_a_dated_series_a_repeat_keeps_it_and_an_answer_clo
     from ouroboros.tools.tool_result import ToolResult
 
     manager = publisher()
-    assert manager.refresh_server("demo")["published"] and "latest_call" not in envelope_now()
+    assert manager.refresh_server("demo")["published"] and call_now() is None
     assert call_with(manager, TimeoutError("slow")).code == "MCP_TIMEOUT"
-    opened = envelope_now()["latest_call"]
+    opened = call_now()
     assert opened == {"ok": False, "code": "MCP_TIMEOUT", "method": "ping", "at": opened["at"], "since": opened["at"]}
-    stamp = mcp_catalog.catalog_path("demo").stat().st_mtime_ns
+    assert mcp_catalog.latest_call(manager.server_config("demo")) == opened
+    stamp = mcp_catalog.calls_path("demo").stat().st_mtime_ns
     call_with(manager, TimeoutError("slow"))  # the same failure again: nothing is written
-    assert envelope_now()["latest_call"] == opened and mcp_catalog.catalog_path("demo").stat().st_mtime_ns == stamp
+    assert call_now() == opened and mcp_catalog.calls_path("demo").stat().st_mtime_ns == stamp
     refused = mcp_oauth.MCPAuthRequired("demo", "token_rejected")
     refused.mcp_unsent_joined = True
     assert call_with(manager, refused).code == "MCP_AUTH_REQUIRED"
-    changed = envelope_now()["latest_call"]
+    changed = call_now()
     assert changed["code"] == "MCP_AUTH_REQUIRED" and changed["since"] == opened["since"]  # still no answer since
     answered = ToolResult(status="error", code="MCP_ERROR", text="bad argument", meta={"mcp_is_error": True})
     assert call_with(manager, answered).code == "MCP_ERROR"  # an isError answer is an answer
-    closed = envelope_now()["latest_call"]
+    closed = call_now()
     assert closed["ok"] is True and closed["code"] == "" and "since" not in closed and closed["at"] >= changed["at"]
-    stamp = mcp_catalog.catalog_path("demo").stat().st_mtime_ns
+    stamp = mcp_catalog.calls_path("demo").stat().st_mtime_ns
     assert call_with(manager, ToolResult(status="ok", code="OK", text="pong")).status == "ok"
-    assert envelope_now()["latest_call"] == closed and mcp_catalog.catalog_path("demo").stat().st_mtime_ns == stamp
+    assert call_now() == closed and mcp_catalog.calls_path("demo").stat().st_mtime_ns == stamp
 
 
 def test_a_local_refusal_before_sending_is_not_a_server_failure_but_a_timeout_is():
@@ -741,25 +747,35 @@ def test_a_local_refusal_before_sending_is_not_a_server_failure_but_a_timeout_is
     for local in (owner_pause.OwnerPauseRefused("owner_pause"), store.StoreBusy("store busy", reason="contention")):
         local.mcp_unsent_joined = True
         assert call_with(manager, local).meta.get("control_reason")
-        assert "latest_call" not in envelope_now()
+        assert call_now() is None
     assert call_with(manager, TimeoutError("slow")).code == "MCP_TIMEOUT"
-    opened = envelope_now()["latest_call"]
+    opened = call_now()
     assert opened["ok"] is False
     paused = owner_pause.OwnerPauseRefused("owner_pause")
     paused.mcp_unsent_joined = True
     call_with(manager, paused)  # an owner pause neither closes nor restarts the open series
-    assert envelope_now()["latest_call"] == opened
+    assert call_now() == opened
 
 
-def test_a_listing_publication_never_drops_a_call_mark_written_meanwhile():
-    writer = publisher()
-    assert writer.refresh_server("demo")["published"]
+def test_a_call_mark_never_rewrites_the_published_catalog_and_a_new_listing_keeps_the_mark():
+    manager = publisher()
+    assert manager.refresh_server("demo")["published"]
+    catalog = mcp_catalog.catalog_path("demo")
+    published = catalog.stat().st_mtime_ns, catalog.read_bytes()
+    assert call_with(manager, TimeoutError("slow")).code == "MCP_TIMEOUT"
+    mark = call_now()
+    assert mark["ok"] is False  # the call is dated...
+    assert (catalog.stat().st_mtime_ns, catalog.read_bytes()) == published  # ...and the server's listing is untouched
+    assert manager.refresh_server("demo")["published"] and catalog.read_bytes() != published[1]
+    assert call_now() == mark  # a new listing does not erase it
 
-    async def list_while_a_worker_marks(cfg, timeout):  # another process marks a call during this listing
-        assert mcp_catalog.record_call(cfg, ok=False, code="MCP_ERROR", method="ping", at="2026-11-21T10:00:00+00:00")
-        return listing("ping")
-    writer._async_list_tools = list_while_a_worker_marks
-    assert writer.refresh_server("demo")["published"]
-    assert envelope_now()["latest_call"] == {"ok": False, "code": "MCP_ERROR", "method": "ping",
-                                             "at": "2026-11-21T10:00:00+00:00", "since": "2026-11-21T10:00:00+00:00"}
-    assert envelope_now()["latest_attempt"]["ok"] is True
+
+def test_a_call_record_goes_with_its_server_at_a_configuration_event():
+    manager = publisher()
+    assert manager.refresh_server("demo")["published"]
+    call_with(manager, TimeoutError("slow"))
+    mcp_catalog.prune_catalogs([manager.server_config("demo")])  # still configured: both stay
+    assert mcp_catalog.calls_path("demo").exists() and mcp_catalog.catalog_path("demo").exists()
+    changed = publisher(settings(url="https://moved.example.test/mcp"))  # another identity of the same id
+    mcp_catalog.prune_catalogs([changed.server_config("demo")])
+    assert not mcp_catalog.calls_path("demo").exists() and not mcp_catalog.catalog_path("demo").exists()

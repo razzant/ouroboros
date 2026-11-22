@@ -1021,7 +1021,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``tools/services._preserve_service_log``); its own row. The local filename owner in ``launch_custody``
 # now spells one host and one executor family (plain and launch-bound stems share the same suffixes).
 # 480 -> 481: staged session scratch records its source task in handoff.json.
-EXPECTED_SCAN_PATHS = 481
+# 481 -> 483: the MCP call record ``state/mcp/calls/server-*.json`` and its directory (``ouroboros/mcp_catalog.py``,
+# ``record_call`` and the configuration-event remover ``prune_catalogs``); its own row beside the catalogs row.
+EXPECTED_SCAN_PATHS = 483
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
