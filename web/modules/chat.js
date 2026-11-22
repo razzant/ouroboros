@@ -65,7 +65,7 @@ import {
     requestStop,
 } from './task_control_menu.js';
 import { composerMarkup, createComposer } from './composer.js';
-import { syncShortRoom } from './composer_fold.js';
+import { composerHeightAtRest, syncShortRoom } from './composer_fold.js';
 import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import { createChatReplies } from './chat_reply.js';
@@ -2704,24 +2704,6 @@ export function createChatInstance({
     }
     const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
 
-    // The composer's height once its reply strip moved (chat_reply.js `data-motion`): opening, the full strip
-    // (`--reply-h`) plus the wrap's gap; leaving, none. One reserve move per motion, never per frame: each write
-    // restyles the whole room (~90 ms on a 34k-element WebKit Main; four in a row stuttered the close).
-    function composerHeightAtRest() {
-        const strips = inputArea.querySelectorAll('.chat-quote--composer[data-motion]');
-        if (!strips.length) return inputArea.offsetHeight || 0;
-        // Mid-motion heights are fractional: whole pixels would differ by one from frame to frame and write again.
-        let height = inputArea.getBoundingClientRect().height;
-        for (const strip of strips) {
-            // The room a strip takes is its box and its margins (style.css): opening it ends at --reply-room, shut at none.
-            const { marginTop, marginBottom } = getComputedStyle(strip);
-            const now = strip.getBoundingClientRect().height + (parseFloat(marginTop) || 0) + (parseFloat(marginBottom) || 0);
-            const end = strip.dataset.motion === 'open' ? (parseFloat(strip.style.getPropertyValue('--reply-room')) || 0) : 0;
-            height += end - now;
-        }
-        return height;
-    }
-
     function updateMessagesPadding(preserveStickiness = true) {
         // A room not displayed (Main behind a page) measures its bars as 0: it keeps the reserves it was laid out
         // with, or it would come back with its newest message under the composer.
@@ -2739,7 +2721,7 @@ export function createChatInstance({
             setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`);
         }
         if (inputArea && messagesDiv) {
-            setProperty('--chat-composer-height', `${Math.ceil(composerHeightAtRest())}px`);
+            setProperty('--chat-composer-height', `${composerHeightAtRest(inputArea)}px`);
             // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
             const box = el => el.getBoundingClientRect();
             if (document.body.classList.contains('keyboard-open') && !inputArea.querySelector('[data-motion]')) {
@@ -2790,6 +2772,8 @@ export function createChatInstance({
         if (inputArea) chatResizeObserver.observe(inputArea);
     }
 
+    const syncComposerReserve = () => updateMessagesPadding();
+    inputArea?.addEventListener('ouro:composer-reserve', syncComposerReserve);
     installChatResizeObservers();
 
     // An open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners (style.css): a
@@ -3572,6 +3556,7 @@ export function createChatInstance({
             header?.destroy();
             focusPanel?.removeEventListener('pointerdown', quietFocus);
             focusPanel?.removeEventListener('keydown', showFocus);
+            inputArea?.removeEventListener('ouro:composer-reserve', syncComposerReserve);
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
             historyResyncScheduler.cancel();

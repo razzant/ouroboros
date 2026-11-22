@@ -266,7 +266,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         const style = typeof getComputedStyle === 'function' ? getComputedStyle(node) : null;
         const margins = style ? (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0) : 0;
         node.style.setProperty('--reply-h', `${node.offsetHeight}px`);
-        node.style.setProperty('--reply-room', `${node.offsetHeight + margins}px`);
+        node.style.setProperty('--reply-room', `${(node.getBoundingClientRect?.().height || node.offsetHeight) + margins}px`);
         if (to === 'open' && typeof requestAnimationFrame === 'function') {
             node.dataset.hold = '';
             node.dataset.motion = 'open';
@@ -290,7 +290,11 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             main.id = `${input.id}-reply`;
             // The field announces what it answers whenever it takes focus.
             input.setAttribute('aria-describedby', main.id);
-            if (before?.isConnected && before.dataset.motion !== 'shut') { before.replaceWith(strip); return; }
+            if (before?.isConnected && before.dataset.motion !== 'shut') {
+                before.replaceWith(strip);
+                if (animate) composerArea?.dispatchEvent?.(new Event('ouro:composer-reserve'));
+                return;
+            }
             textRow.before(strip);
             const opened = strip;
             // A reply the room kept comes with the room; one staged now opens.
@@ -300,6 +304,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             before.inert = true;  // leaving, its controls take no press
             void run(before, 'shut').then(() => before.remove());
         }
+        if (animate) composerArea?.dispatchEvent?.(new Event('ouro:composer-reserve'));
     }
 
     /**

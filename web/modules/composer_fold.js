@@ -52,6 +52,21 @@ export const syncShortRoom = (room) => {
     return true;
 };
 
+// The composer's rounded rest height across a reply strip's open/close motion (chat_reply.js `data-motion`), so the
+// room's reserve moves once at the start of the motion and matches `offsetHeight` when the motion ends.
+export function composerHeightAtRest(inputArea) {
+    const strips = inputArea?.querySelectorAll?.('.chat-quote--composer[data-motion]');
+    if (!strips?.length) return inputArea?.offsetHeight || 0;
+    let height = inputArea.getBoundingClientRect().height;
+    for (const strip of strips) {
+        const { marginTop, marginBottom } = getComputedStyle(strip);
+        const now = strip.getBoundingClientRect().height + (parseFloat(marginTop) || 0) + (parseFloat(marginBottom) || 0);
+        const end = strip.dataset.motion === 'open' ? (parseFloat(strip.style.getPropertyValue('--reply-room')) || 0) : 0;
+        height += end - now;
+    }
+    return Math.round(height);
+}
+
 export function createComposerFold({ feed, wrap, row, win = globalThis.window, doc = globalThis.document,
     isStack = () => isStackLayout(), onLayout = (sync) => onLayoutChange(() => sync(), { w: win }),
     readingBack = () => true, short = () => shortRoom(wrap) } = {}) {

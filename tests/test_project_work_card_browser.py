@@ -376,6 +376,7 @@ def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(p
 
     def hold_and_lift():
         """The finger held past the long press, then lifted; the engine's own clicks since the last lift."""
+        page.evaluate("() => { window.engineClicks.length = 0; }")
         if real:
             touch(page, point["x"], point["y"], 600)
             page.wait_for_function("() => window.engineClicks.length > 0", timeout=2000)
