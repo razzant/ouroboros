@@ -436,6 +436,22 @@ def test_a_fold_receipt_counts_its_notes_and_bodies_and_keeps_their_lists_at_its
     assert ctx._context_view_receipt["status"] == "applied" and "Long exact evidence" in json.dumps(restored)
     assert again["at_source"] == {"notes_kept": 2} and len(ctx._context_view_receipt["notes_kept"]) == 2
 
+    from ouroboros import artifacts  # other direction: the receipt cannot be stored, so its row carries the lists
+    store = artifacts.store_actor_source_bytes
+
+    def refuse_the_receipt(*args, data=b"", **kwargs):
+        if b'"candidate_materialization"' in data:
+            raise OSError("disk full")
+        return store(*args, data=data, **kwargs)
+
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", refuse_the_receipt)
+    record_context_view(ctx, messages, [])
+    _compact_context(ctx, working_note="The read confirms the goal.", keep_unit_ids=[])
+    inline, _ = _receipt(_run_round_compaction(copy.deepcopy(messages), _context(tmp_path, ctx, [], monkeypatch)))
+    assert inline["receipt_source"] == "unavailable" and "at_source" not in inline
+    assert inline["bodies_removed"] == stored["bodies_removed"] and len(inline["notes_kept"]) == 2
+    assert set(inline["restore_checkpoint"]) == {"kind", "root", "path", "size", "sha256"}
+
 
 def test_a_full_folds_receipt_row_is_one_size_class_for_five_bodies_and_a_hundred(tmp_path, monkeypatch):
     """The scale invariant: the receipt row of a full fold that removed 100 bodies is the size of one that removed 5

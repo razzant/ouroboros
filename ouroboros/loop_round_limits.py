@@ -551,8 +551,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
 
     Two ``at_source`` counts point at the candidate receipt's address (``receipt_source``): the ``context_view`` event
     counts each structure equal to the retained receipt's (keys or elements) instead of repeating it; the receipt row
-    of an applied fold counts ``bodies_removed`` and ``notes_kept``, whose lists (and ``restore_checkpoint``) only
-    the stored receipt carries."""
+    of an applied fold counts ``bodies_removed`` and ``notes_kept``, whose lists (and ``restore_checkpoint``) the
+    stored receipt carries; when that receipt could not be stored, the row carries them itself."""
     from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
     from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
     from ouroboros.tool_policy import request_tool_schema_selection, select_tool_schemas
@@ -714,13 +714,14 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         if memory_price:
             notice["memory_view"] = memory_price
         if receipt["status"] == "applied":  # what the fold freed and kept; the next request's count measures its re-read
-            from ouroboros.tools.compact_context import residue_by_kind
-            # Counts only: the lists of notes and removed bodies (and their restore checkpoint) are at the address.
+            from ouroboros.tools.compact_context import FOLD_FACT_KEYS, residue_by_kind
+            # Counts only beside the receipt's address (its lists and restore checkpoint are there); without one, inline.
             at_source = {key: len(receipt[key]) for key in ("bodies_removed", "notes_kept") if receipt.get(key)}
+            facts = (((key, receipt.get(key)) for key in FOLD_FACT_KEYS) if notice["receipt_source"] == "unavailable"
+                     else (("replaced_notes", receipt.get("replaced_notes")), ("at_source", at_source)))
             notice.update(reclaimed_tokens=receipt.get("reclaimed_tokens"), residue=residue_by_kind(candidate),
                           resulting_input_tokens=(receipt.get("fit") or {}).get("estimated_input_tokens"),
-                          basis="host estimates", **{key: value for key, value in (
-                              ("replaced_notes", receipt.get("replaced_notes")), ("at_source", at_source)) if value})
+                          basis="host estimates", **{key: value for key, value in facts if value})
         exceptions = receipt.get("request_exceptions") or []
         if receipt.get("inherited_selections_unapplied"):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
@@ -729,10 +730,12 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n" + json.dumps(notice, ensure_ascii=False)}]
         try:
             final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
-            if final_fit.get("accepted") is not True and "request_exceptions" in notice:
-                # Optional detail must not undo an otherwise fitting view; the
-                # counted omission still points to the whole retained receipt.
-                notice["request_exceptions_omitted"] = len(notice.pop("request_exceptions"))
+            for detail in ("request_exceptions", "bodies_removed", "notes_kept"):
+                if final_fit.get("accepted") is True or detail not in notice:
+                    continue  # optional detail must not undo a fitting view; the counted omission names the receipt
+                notice[f"{detail}_omitted"] = len(notice.pop(detail))  # an inline list (no address); notes stay in view
+                if detail == "bodies_removed":
+                    notice.pop("restore_checkpoint", None)
                 with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n"
                     + json.dumps(notice, ensure_ascii=False)}]
                 final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
