@@ -153,6 +153,26 @@ def _git_workspace_start(tmp_path, monkeypatch, case, **options):
     return payload, engine
 
 
+@pytest.mark.parametrize("kind", ["investigation", "readonly", "writer"])
+def test_only_an_investigation_start_says_its_copy_is_evidence_only(tmp_path, monkeypatch, kind):
+    """Nothing an investigation's private copy holds can land, so its start's receipt says so in place of a write
+    root; a writing start keeps its write root and a plain read-only start says neither."""
+    from tests.test_investigation_start_roots import _consumer, _project
+
+    if kind == "writer":
+        note = _git_workspace_start(tmp_path, monkeypatch, "omit")[0]["note"]
+    else:
+        _root, folder = _project(tmp_path)
+        started = _consumer(tmp_path, monkeypatch, "workspace_write" if kind == "investigation" else "readonly",
+                            workspace=folder)[2]()
+        assert started["status"] == "started", started
+        note = started["note"]
+    said = ("investigation: evidence-only investigation in a private copy (execution_root) of authority_target_root: "
+            "its captured changes are kept as evidence and never applied") in note
+    assert said is (kind == "investigation"), note
+    assert ("write root: private snapshot" in note) is (kind == "writer"), note
+
+
 def test_a_git_workspace_treats_the_named_default_as_omission_and_still_refuses_real_geometry(
     tmp_path, monkeypatch,
 ):
@@ -171,7 +191,11 @@ def test_a_git_workspace_treats_the_named_default_as_omission_and_still_refuses_
     per_case = ("root", "execution_root", "snapshot_id", "baseline_sha", "baseline_id",
                 "baseline_manifest_read", "run_id", "invocation_id", "authority_target_root",
                 "snapshot")  # the receipt's provisioning facts carry wall-clock seconds (#1241)
-    compared = lambda payload: {key: ("<per-case identity>" if key in per_case else value)
+    import re
+
+    # The note's receipt measures the host text sent, which names each case's own folder: only that count varies.
+    compared = lambda payload: {key: ("<per-case identity>" if key in per_case else re.sub(
+        r"host instructions \d+ chars", "host instructions N chars", value) if key == "note" else value)
                                 for key, value in payload.items()}
     omitted, omitted_engine = _git_workspace_start(tmp_path, monkeypatch, "omit")
     assert omitted["status"] == "started" and omitted["baseline_id"], omitted

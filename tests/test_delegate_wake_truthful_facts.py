@@ -363,7 +363,8 @@ def test_both_spilled_envelopes_carry_the_question_facts(tmp_path, oversize):
     payload = {"status": "no_progress", "run_id": "run-a", "state": "running", "last_seq": 1,
                "waiting_on_user": True, "async_questions_only": True, "supervision_wake_id": "wake-1",
                "continuation": "same_session", "previous_model_response": {
-                   "finished_at": "2026-11-17T14:00:00+00:00", "request_cache_ttl": "5m"}}
+                   "finished_at": "2026-11-17T14:00:00+00:00", "request_cache_ttl": "5m"},
+               "receipt": "access applied readonly, requested workspace_write [observed]"}
     if oversize == "wake_events":
         payload["wake_events"] = [{"type": "addressed", "msg_id": f"m{i}", "text": "x" * 4000} for i in range(12)]
     else:
@@ -372,3 +373,4 @@ def test_both_spilled_envelopes_carry_the_question_facts(tmp_path, oversize):
     assert shown["wake_delivery"]["complete"] is False
     assert shown["waiting_on_user"] is True and shown["async_questions_only"] is True
     assert shown["previous_model_response"] == payload["previous_model_response"]
+    assert shown["receipt"] == payload["receipt"], "each shortening keeps the cache facts AND the helper receipt"

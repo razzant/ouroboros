@@ -37,6 +37,7 @@ from tests.test_review_thread_retention import (
     C,
     R,
     _held_run,
+    _keep,
     _own_thread,
     _publish_queue,
     _row,
@@ -204,7 +205,7 @@ def test_a_typed_export_answer_survives_the_maintenance_caller_and_reaches_keep(
     revision = _revision(real.root)
     retirement.run(real.root, lambda: False)
     assert _revision(real.root) == revision and len(_events(real.root)) == count
-    answered = owner_keep.set_owner_keep(real.root, R, keep=True, source=KEEP)
+    answered = _keep(real.root, R, keep=True, source=KEEP)
     assert answered["releases"] == {f"review_thread:{THREAD}": state}
     assert answered["retired" if state == "purged" else "unknown"] == ([f"review_thread:{THREAD}"] if state == "purged"
                                                                      else ["review_threads"])

@@ -957,7 +957,8 @@ def test_a_store_before_the_chat_step_reads_bodies_and_upgrades_without_a_body_d
         patch.setattr(store.Txn, "body_text", lambda *_: pytest.fail("the schema step decoded a body"))
         upgrade_current_schema(tmp_path)
     with store.open_store(tmp_path, write=False) as txn:
-        assert txn.meta("schema_version") == store.SCHEMA_VERSION == hot.CHAT_VERSION
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION  # the upgrade reached the newest step
+        assert hot.CHAT_VERSION <= store.SCHEMA_VERSION  # ...which includes the chat step (later steps may follow)
         assert txn.row("legacy", "chat_id") is None and txn.meta("job:" + hot.JOB)["state"] == "pending"
     assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}  # underived: its body
     assert maintenance.run_job(tmp_path, "hot_facts")["state"] == "done"

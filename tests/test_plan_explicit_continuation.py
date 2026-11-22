@@ -26,7 +26,8 @@ from tests._review_session_route_shared import FakeGateway, _owned_gateway_uses_
 from tests._review_session_route_shared import _terminal_detail, fake_route as _fake_route
 from tests.test_plan_task_tool import CLEAN, _call, _write
 from tests.test_plan_task_tool import harness as _harness
-from tests.test_review_thread_retention import KEEP, Engine, _publish_queue, _route_keep, _row, _tool_keep
+from tests._owner_keep_answer import outside_store
+from tests.test_review_thread_retention import KEEP, Engine, _keep, _publish_queue, _route_keep, _row, _tool_keep
 
 harness, fake_route = _harness, _fake_route
 RESUMABLE = {"cause": "vendor_limit", "carriers": ["native"], "resetsAt": None, "session": None,
@@ -531,7 +532,7 @@ def test_a_stopped_seat_thread_reaches_the_archive_and_keep_and_stays_a_failed_s
     assert (now["status"], now["review_thread_id"], now["operation_id"]) == ("failed", "", stopped["operation_id"])
     seat = load_record(h.drive, ask["record_id"])["rows"][0]
     assert seat["status"] != "responded" and "thread_export" in [ref["role"] for ref in seat["historical_source_refs"]]
-    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+    answer = _keep(h.drive, "task-1", keep=False, source=KEEP)
     assert PLACE in answer["retired"] and answer["releases"] == {PLACE: "accepted_pending_removal"}
 
 
@@ -551,7 +552,7 @@ def test_a_stopped_seat_thread_whose_export_is_not_whole_keeps_its_originals(pla
     assert report["holds"] == {code: 1} and report["accepted"] == 0, report
     assert not [kind for kind, _ in engine.calls if kind in ("item", "retire")] and not engine.purged
     assert _release(h)["state"] == "held" and _release(h)["holds"] == [code]
-    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+    answer = _keep(h.drive, "task-1", keep=False, source=KEEP)
     assert PLACE in answer["retained"] and answer["releases"] == {PLACE: "held"}
 
 
@@ -561,11 +562,11 @@ def test_a_keep_before_any_pass_names_a_stopped_seat_thread_and_wins(plan_sessio
     assert _retention(h, engine) == {"activated": True}
     _stop(h, h.make_ctx())
     _row(h.drive, "task-1", "completed", tree="task-1")
-    told = json.loads(_tool_keep(h.drive, task="task-1"))
+    told = outside_store(json.loads(_tool_keep(h.drive, task="task-1")), h.drive, "task-1")
     assert told["keep"] is True and PLACE in told["retained"] and told["releases"] == {PLACE: "unrecorded"}, told
     report = _retention(h, engine)
     assert report["holds"] == {"owner_keep": 1} and engine.calls == [] and not _release(h), report
-    route = _route_keep(h.drive, monkeypatch, keep=False, task="task-1")
+    route = outside_store(_route_keep(h.drive, monkeypatch, keep=False, task="task-1"), h.drive, "task-1")
     assert route["status"] == "released" and PLACE in route["retained"], route
     assert _retention(h, engine)["accepted"] == 1 and _release(h)["state"] == "accepted"
 
@@ -587,7 +588,7 @@ def test_a_stopped_seat_thread_from_before_activation_stays_in_the_engine_and_ke
     report = _retention(h, engine)
     assert report["holds"] == {"predates_activation": 1} and report["waiting"] == 0, report
     assert engine.calls == [] and not _release(h) and not engine.purged
-    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+    answer = _keep(h.drive, "task-1", keep=False, source=KEEP)
     assert PLACE in answer["retained"] and answer["releases"] == {PLACE: "unrecorded"}
 
 
@@ -626,7 +627,7 @@ def test_a_seat_still_pending_keeps_nobody_waiting_until_its_settlement_names_th
     _row(h.drive, "task-1", "completed", tree="task-1")
     report = _retention(h, engine)
     assert (report["waiting"], report["holds"], report["errors"], engine.calls) == (0, {}, [], []), report
-    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+    answer = _keep(h.drive, "task-1", keep=False, source=KEEP)
     assert PLACE in answer["retained"] and answer["releases"] == {PLACE: "unrecorded"}
     assert rt.seat_threads(h.drive, read_document(h.drive, "task-1"), settled_only=True) == ({}, True)
     plan_record.update_participant(h.drive, "task-1", ask_id=ask["ask_id"], seat_id="s2", facts={
@@ -697,7 +698,7 @@ def test_a_start_that_cannot_be_read_is_unknown_never_gone_or_retained(plan_sess
     report = _retention(h, engine)
     assert report["holds"] == {"thread_start_unreadable": 1} and report["waiting"] == 0, report
     assert engine.calls == [] and not _release(h)
-    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=True, source=KEEP)
+    answer = _keep(h.drive, "task-1", keep=True, source=KEEP)
     assert answer["unknown"] == ["review_threads"] and answer["keep"] is True and answer["releases"] == {}, answer
     owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
 
