@@ -46,7 +46,6 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     worker_failure: ['❌ Task failed after '],
     // Progress rows: a task card's timeline line (`log_events.summarizeChatLiveEvent`).
     task_scheduled: ['🗓️ Scheduled subagent ', '🗓️ Scheduled task '],
-    finalization_notice: ['▶️ Task '],
     skill_review: ['✅ Skill review round ', '⚠️ Skill review round ', '❌ Skill review round ', '⏳ Skill review round '],
     host_progress: ['🌐 Connection restored ', '🌐 The new attempt could not reach the provider ',
         '🌐 Provider connection ', '🌐 The primary provider temporarily refused ', '🌐 No local model slot was free',
@@ -76,7 +75,7 @@ export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
     task_reaper_notice: ['⚠️ A timed-out worker (task '],
     worker_readiness_notice: ['⚠️ Worker checkout sampled after initialization ', '⚠️ Worker slot '],
     task_error: ['⚠️ Error: '],
-    finalization_notice: ['⏳ Task '],
+    finalization_notice: ['⏳ Task ', '▶️ Task '],
     attachment_notice: ['📎 Attachment staging report for ', '⚠️ Task not started: every attachment was rejected.',
         '⚠️ Some declared attachments could not be staged; '],
     cancellation_notice: ['❌ cancel '],
