@@ -93,9 +93,10 @@ class PendingWakeKeepsItsTime(Exception):
 def store_choice(*, interval: Optional[int], at: str, target: Optional[_dt.datetime], now: float) -> Dict[str, Any]:
     """Store the rhythm and/or the named time in one state write and return what the receipt names: whether
     consciousness is known on, a running wake, the pending appointment and the next attempt the clock last stored.
-    Raises ``PendingWakeKeepsItsTime`` (nothing written) or ``StateUnavailable``."""
+    Raises ``PendingWakeKeepsItsTime`` or ``StateUnavailable`` when nothing was written; when only the state's backup
+    copy failed (``primary_written``) the choice stands, and ``unsaved`` is the receipt's note saying so."""
     from ouroboros.consciousness import APPOINTMENT_STATE_KEY, INTERVAL_STATE_KEY, NEXT_WAKE_STATE_KEY, OWN_WAKE_STATE_KEY
-    from supervisor.state import control_value, update_state
+    from supervisor.state import StateUnavailable, control_value, update_state
 
     seen: Dict[str, Any] = {}
 
@@ -114,7 +115,14 @@ def store_choice(*, interval: Optional[int], at: str, target: Optional[_dt.datet
                     appointment=appointment, next_attempt=_seconds(st.get(NEXT_WAKE_STATE_KEY)) if on else 0.0,
                     record=st.get(WAKE_TARGET_STATE_KEY))
 
-    update_state(write)
+    try:
+        update_state(write)
+    except StateUnavailable as exc:
+        if not exc.primary_written:
+            raise
+        from ouroboros.consciousness import _BACKUP_UNSAVED  # the words Start and Stop say for the same partial write
+
+        seen["unsaved"] = _BACKUP_UNSAVED.format(exc.reason)
     return seen
 
 

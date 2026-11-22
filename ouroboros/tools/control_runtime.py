@@ -842,7 +842,8 @@ def _set_next_wakeup(ctx: ToolContext, seconds: int | None = None, at: str | Non
     Any turn may call it (a wake-up picks its own rhythm; a Main turn may adjust it); with consciousness off both are
     stored, not refused. The alarm clock (``consciousness.py``) reads them when a wake-up ends, so a wake-up already
     pending keeps its time: with consciousness on, a named time at or before it is refused. The receipt names only
-    what the write set, so a Main turn is not promised a wake it did not move (astra scope, round 7).
+    what the write set, so a Main turn is not promised a wake it did not move (astra scope, round 7), and a backup
+    copy that failed beside a written primary, where the choice stands.
     """
     import time
 
@@ -878,8 +879,8 @@ def _set_next_wakeup(ctx: ToolContext, seconds: int | None = None, at: str | Non
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=(
             f"⚠️ CAPABILITY_UNAVAILABLE: nothing was stored: runtime state is unavailable ({exc.reason}).")))
     clamp_note = f" (requested {requested} s, clamped into {low}-{high} s)" if interval != requested else ""
-    return consciousness_clock.choice_receipt(seen, interval=interval, clamp_note=clamp_note,
-                                              at=str(at or "").strip(), target=target, low=low, high=high, now=now)
+    return consciousness_clock.choice_receipt(seen, interval=interval, clamp_note=clamp_note, at=str(at or "").strip(),
+                                              target=target, low=low, high=high, now=now) + seen.get("unsaved", "")
 
 
 def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "",

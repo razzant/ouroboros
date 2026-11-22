@@ -642,6 +642,44 @@ def test_set_next_wakeup_names_a_time_with_its_offset_and_the_pending_wake_keeps
         assert "still stands" not in passed and stored()[1]["at"] == iso(now + 600)
 
 
+def test_set_next_wakeup_says_a_choice_stands_when_only_the_states_backup_copy_failed(tmp_path, monkeypatch):
+    """The primary copy holds the choice and only its backup failed (``StateUnavailable.primary_written``): the
+    receipt names what was stored and the backup that was not written, never "nothing was stored"; a failed primary
+    write stores nothing and says so."""
+    from ouroboros.consciousness_clock import WAKE_TARGET_STATE_KEY
+    from ouroboros.tools import control
+    from supervisor import state
+
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "locks").mkdir(parents=True)
+    state.init(tmp_path)
+    state.save_state({})
+    real, ctx, at = state.atomic_write_text, SimpleNamespace(task_id="m1"), "2030-03-18T09:00:00+03:00"
+
+    def failing(copy):
+        def write(path, content):
+            if path == copy:
+                raise OSError("unwritable")
+            return real(path, content)
+        return write
+
+    with mock.patch.dict(os.environ, {"OUROBOROS_BG_WAKEUP_MIN": "300", "OUROBOROS_BG_WAKEUP_MAX": "3600"}):
+        monkeypatch.setattr(state, "atomic_write_text", failing(state.STATE_PATH))
+        lost = control._set_next_wakeup(ctx, seconds=1800, at=at)
+        monkeypatch.setattr(state, "atomic_write_text", real)
+        assert lost == ("⚠️ CAPABILITY_UNAVAILABLE: nothing was stored: runtime state is unavailable "
+                        "(primary_write_failed).")
+        assert WAKE_TARGET_STATE_KEY not in state.load_state()
+        monkeypatch.setattr(state, "atomic_write_text", failing(state.STATE_LAST_GOOD_PATH))
+        kept = control._set_next_wakeup(ctx, seconds=1800, at=at)
+        monkeypatch.setattr(state, "atomic_write_text", real)
+    assert kept.startswith(f"OK: the named next wake-up time is now {at} (2030-03-18T06:00:00Z). Consciousness is off")
+    assert kept.endswith(" The wake-up interval is now 1800 s. Saved, but the state's backup copy was not written "
+                         "(backup_write_failed).")
+    live = state.load_state()
+    assert live["consciousness_next_interval_sec"] == 1800 and live[WAKE_TARGET_STATE_KEY]["at"] == at
+
+
 def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_facts(tmp_path, monkeypatch):
     """#1324: status is a read for the caller, never a line in the owner's chat;
     in-memory clock facts are named as not read, not guessed. The newest skip is a
