@@ -289,7 +289,8 @@ def _merge_objective_warning(objective: Dict[str, Any], code: str) -> None:
 def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
     """Whether nothing examined this result since it last changed: the turn has reviewable effects
     and, after the last of them, no executed check ran (``verify_and_record`` of a run kind, any
-    verdict: its author saw the outcome) and no result review was asked for or bound. A reviewed
+    verdict: its author saw the outcome) and no result review was asked for (a call the ceiling or a
+    continuation refused at $0 asks for nothing) or bound. A reviewed
     commit as the last effect passed its change review. The finish-door notice and the
     ``receipt_absent`` record read this one fact (P7; audit 11.11, item 18). Typed calls only,
     never message content (P5)."""
@@ -307,7 +308,17 @@ def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
         if tool == "verify_and_record" and str(args.get("contract_kind") or "") in _EXAMINING_VERIFY_KINDS:
             return False
         if tool == "review_change" and str(args.get("subject") or "") == "result":
-            return False
+            meta = call.get("tool_result_meta") if isinstance(call.get("tool_result_meta"), dict) else {}
+            receipt = meta.get("review_delivery") if isinstance(meta.get("review_delivery"), dict) else {}
+            record_id = str(receipt.get("record_id") or "")
+            run = next((row for row in llm_trace.get("review_runs") or [] if isinstance(row, dict)
+                        and str(row.get("record_id") or "") == record_id), None) if record_id else None
+            # A typed $0 refusal, or this call's exact run refused or superseded (#3304), examined nothing: the
+            # bound-run check below decides. A call without typed linkage stays counted as asked for (legacy).
+            if not (isinstance(meta.get("result_review_refusal"), dict)
+                    or (run is not None and (run.get("aggregate") == "NOT_DISPATCHED"
+                                             or run.get("superseded_by_revision")))):
+                return False
     # Only a current bound review speaks for this result: every new delivery candidate supersedes the runs bound
     # so far (``review_result.supersede_result_runs``), a run of an earlier version stands beside the delivered
     # bytes as that version's, and a $0 refusal examined nothing.

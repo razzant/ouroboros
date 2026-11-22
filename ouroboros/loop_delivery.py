@@ -226,8 +226,9 @@ def delivery_subject_hash(
 def apply_delivery_subject_decision(
     tools: ToolRegistry, ctx: _RoundLimitContext, llm_trace: Dict[str, Any], subject: Dict[str, Any],
 ) -> tuple[bool, str]:
-    """Apply Main's source-addressed criteria/evidence choice atomically."""
+    """Apply Main's source-addressed criteria/evidence choice atomically; changed material supersedes earlier result runs."""
     from ouroboros.loop_messages import acknowledge_acceptance_observation
+    from ouroboros.tools.review_result import supersede_result_runs
 
     if not isinstance(subject, dict) or getattr(subject, "duplicate_keys", set()) or set(subject) - {
         "owner_source_sha256", "effective_criteria", "material_tool_indices",
@@ -241,8 +242,7 @@ def apply_delivery_subject_decision(
     count = min(len(llm_trace.get("tool_calls") or []), int(observed.get("tool_count") or 0))
     if not isinstance(indices, (list, tuple)) or any(type(i) is not int or not 0 <= i < count for i in indices):
         return False, "material_tool_indices must address tool results available to this Main turn"
-    source = subject.get("owner_source_sha256")
-    if not isinstance(source, str):
+    if not isinstance(source := subject.get("owner_source_sha256"), str):
         return False, "acceptance_subject.owner_source_sha256 must be the observed selector's sha256 string"
     ack = acknowledge_acceptance_observation(tools._ctx, source)
     if not ack:
@@ -253,8 +253,9 @@ def apply_delivery_subject_decision(
     revision, fingerprint = _loop()._delivery_evidence_state(tools, ctx, llm_trace)
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if isinstance(candidate, DeliveryCandidate):
-        candidate.effective_criteria = tools._ctx._delivery_effective_criteria
-        candidate.material_tool_indices = tools._ctx._delivery_material_tool_indices
+        if candidate.evidence_fingerprint and fingerprint and candidate.evidence_fingerprint != fingerprint:
+            supersede_result_runs(llm_trace, f"subject-{fingerprint[:16]}")  # changed material is a new review subject (#3304)
+        candidate.effective_criteria, candidate.material_tool_indices = tools._ctx._delivery_effective_criteria, tools._ctx._delivery_material_tool_indices
         candidate.owner_source_sha256 = source
         candidate.evidence_revision, candidate.evidence_fingerprint = revision, fingerprint
         # Main may keep the complete answer while nominating a new review subject.

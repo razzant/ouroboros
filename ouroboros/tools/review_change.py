@@ -1278,6 +1278,8 @@ def _handle_new_review_change(
                 _resolved_binding=_resolved_binding, _preflight_execution=exhibit if exhibit.get("status") == "passed" or exhibit.get("observed") else None,
                 _public_execution=True)
     except ContinuationRefused as exc:  # a choice recorded on this round that could not be sent now
+        if str(subject or "").strip() == "result":  # a typed $0 refusal of this result review (#3304)
+            return _publish_result_refusal_fact(ctx, json.dumps(exc.payload(), ensure_ascii=False, indent=2, default=str), exc.reason)
         return json.dumps(exc.payload(), ensure_ascii=False, indent=2, default=str)
     except ValueError as exc:
         return argument_refusal(ctx, "TOOL_ARG_ERROR (review_change)", [str(exc)], effect="No reviewer was dispatched.")
@@ -1303,6 +1305,16 @@ def left_wave_terms(*, commit: bool = False) -> str:
             + ("this task's or its recorded Continue successor's." if commit else "this task's alone."))
 
 
+def _publish_result_refusal_fact(ctx: ToolContext, text: str, reason: str) -> str:
+    """Publish the typed $0 refusal fact beside the refusal text (#3304): the Finish door reads it from this
+    call's ``tool_result_meta`` and no longer counts the refused call as an examination, while the bound
+    NOT_DISPATCHED run keeps its own exclusion. Status stays the call's own ``ok`` — nothing else changes."""
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text,
+                                                meta={"result_review_refusal": {"reason": str(reason)}}))
+
+
 def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, continue_seats: Any = None,
                           _resolved_binding: Any = None, **args: Any) -> str:
     from ouroboros.review_continuation import ContinuationRefused
@@ -1320,6 +1332,10 @@ def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, con
             payload = json.loads(text[text.index("{"):])
         except (ValueError, TypeError):
             return text
+        if payload.get("dispatch_refusal") and str((payload.get("review_reference") or {}).get("surface") or "") == "result":
+            # A $0 refusal sent nothing: the typed fact lets the Finish door and the record agree this call
+            # examined nothing (#3304), while the bound NOT_DISPATCHED run keeps its own exclusion.
+            text = _publish_result_refusal_fact(ctx, text, str(payload["dispatch_refusal"].get("kind") or "refused"))
     else:
         try:
             if args:
