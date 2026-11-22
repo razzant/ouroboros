@@ -991,6 +991,44 @@ def test_an_http_404_to_the_calls_post_is_no_answer_though_the_sdk_raises_an_err
     assert call_now()["ok"] is False
 
 
+@pytest.mark.parametrize("status, key", [(307, False), (307, True), (308, True)])
+def test_an_http_404_at_the_end_of_a_same_origin_redirect_is_no_answer_either(loopback, status, key):  # noqa: F811
+    header = {"X-Api-Key": "synthetic-alias-key"} if key else {}
+    expired, reached = threading.Event(), []
+
+    def alias(app):
+        async def route(scope, receive, send):
+            if scope.get("type") == "http" and scope["path"] == "/alias":  # the configured address moved, same origin
+                await send({"type": "http.response.start", "status": status, "headers": [(b"location", b"/mcp")]})
+                await send({"type": "http.response.body", "body": b""})
+                return
+            if not expired.is_set() or scope.get("type") != "http" or scope.get("method") != "POST":
+                return await app(scope, receive, send)
+            events = []
+            while not events or events[-1].get("more_body"):
+                events.append(await receive())
+            if json.loads(b"".join(event.get("body", b"") for event in events)).get("method") == "tools/call":
+                reached.append((scope["path"], dict(scope["headers"]).get(b"x-api-key")))
+                await send({"type": "http.response.start", "status": 404, "headers": []})
+                await send({"type": "http.response.body", "body": b"session expired"})
+                return
+
+            async def replay():
+                return events.pop(0) if events else await receive()
+            return await app(scope, replay, send)
+        return route
+
+    _app, url = loopback("http", header, wrap=alias)
+    manager = mcp_client.MCPManager()
+    manager.reconfigure(settings(url=url.rsplit("/", 1)[0] + "/alias", transport="streamable_http", headers=header))
+    assert manager.refresh_server("demo")["ok"]
+    assert manager._call_tool_result("mcp_demo__echo", {"text": "live"}).status == "ok" and call_now()["ok"] is True
+    expired.set()
+    lost = manager._call_tool_result("mcp_demo__echo", {"text": "expired"})
+    assert reached == [("/mcp", b"synthetic-alias-key" if key else None)]  # the redirected POST, its header as sent
+    assert lost.code == "MCP_ERROR" and "Session terminated" in lost.text and call_now()["ok"] is False
+
+
 def test_an_answer_received_before_its_session_failed_to_close_is_an_answer(loopback, monkeypatch, tmp_path):  # noqa: F811
     import asyncio
 
