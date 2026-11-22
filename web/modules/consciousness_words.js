@@ -192,7 +192,7 @@ export function placeScopeText(place) {
 /** A dollar amount as Costs writes it (grouped); an absent amount is the dash, never $0.00. */
 export const usdText = formatUsd;
 
-/** The money line of the chip's Shade and the Dashboard's headline card: «$2 of $20 in the last 24 hours», in the
+/** The money line of the chip's Shade and the Dashboard's headline card: «$2 of $15 in the last 24 hours», in the
  *  limit's money; what it leaves out (calls without a known price, calls in progress) said after it, or "so far" while
  *  only calls in progress may add more; '' when either amount is unknown. */
 export function allowanceText(snapshot) {

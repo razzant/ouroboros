@@ -1485,7 +1485,7 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 
 /* ---- The Skills step (owner 2026-11-21; «слишком крупные карточки»: rows, not boxes): one categorized list, one row
    per skill with no surface of its own, two columns where a row keeps its words on about one line (one below, and on
-   a phone). The box says a skill is ticked. A group's head is its name and count. The page scrolls under the pinned
+   a phone). The box says a skill is ticked. A group's head is its name only. The page scrolls under the pinned
    footer like any tall step, the list's end clear of it. Under the list one small sentence says where the hub's
    skills come from and how they install. Summary keeps one row back to the step. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
@@ -1543,7 +1543,7 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 /* A skill's declared connection card leads the step: closed, one row like the others with its action; open, the
    skill's numbered steps, its token field and, once checked, the QR beside the account, its link and its options. A
    hairline under it sets it apart from the list, no box. The QR keeps its own white square (qr_svg.js). */
-.skills-connection { display: grid; gap: var(--space-2); padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); }
+.skills-connection { display: grid; gap: var(--space-2); padding-bottom: var(--space-2); border-bottom: 1px solid var(--divider); }
 .skills-connection-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .skills-connection-head .skills-starter-skill { flex: 1 1 auto; }
 .skills-connection-head .btn { flex: none; }
