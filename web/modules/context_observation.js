@@ -132,6 +132,9 @@ const said = (mode) => translateString(CONTEXT_LABELS[mode] || '');
 const listed = (modes) => (modes.length > 1
     ? fmt('{first} and {second}', { first: modes.slice(0, -1).map(said).join(', '), second: said(modes.at(-1)) }) : said(modes[0]));
 
+// The recorded causes of a send that ran below the mode its work held at send (`causeOf` names each).
+const LOWERING = ['memory', 'request', 'route', 'window', 'after_start'];
+
 // Why the request ran below the mode its work held at send (`cause`), else that the owner's choice changed since. The
 // task card's start row says its recorded reason in these same words (`task_checkpoints.js`). A start the window took
 // from the owner's Max names the work's state (Low for now) apart from that choice, by its cause.
@@ -193,9 +196,13 @@ export function contextShown(observation, preferred) {
     const when = { word: fmt(obs.state === 'now' ? '{mode} now' : '{mode} last', { mode: said(mode) }),
         time: time ? fmt('Request at {time}.', { time }) : '' };
     // Agreement is today's closed capsule: its own words name it (as the overlay translated them); open, it is dated.
+    // A send made under another mode keeps its own reason before the time (a Low the window took from Max, Low chosen
+    // since): a temporary Low never reads as the owner's own.
     const note = obs.partial ? incomplete() : '';
     if (mode === preferred) {
-        const text = [when.time, note].filter(Boolean).join(' ');
+        const sent = obs.latest?.preferred_at_send;
+        const why = sent && sent !== mode && LOWERING.includes(obs.latest.cause) ? causeOf(obs.latest, preferred) : '';
+        const text = [why, when.time, note].filter(Boolean).join(' ');
         return { actual: mode, word, lit: [mode], differs: false, label: '', fact: text ? { word: when.word, text } : null };
     }
     const why = causeOf(obs.latest, preferred);

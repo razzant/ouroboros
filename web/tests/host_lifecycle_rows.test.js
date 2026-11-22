@@ -163,10 +163,16 @@ test('a start the window took from Max is Low for now beside the owner\'s Max, o
     const old = row({ books: undefined, cause: 'memory' });
     assert.equal(taskCheckpointLabel(old),
         `Context starts in a smaller mode. ${causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'memory' }, 'max')}`);
-    // Low chosen meanwhile: the observation agrees with the choice, and the closed capsule is today's.
+    // Low chosen meanwhile: the observation agrees with the choice, and the closed capsule is today's; open, it keeps
+    // the send's own reason before the time (Astra 10), which a Low chosen at send never has.
     const agreed = contextShown(observeContext(null, census('max', 'memory'), 1), 'low');
     assert.equal(agreed.differs, false);
     assert.equal(agreed.label, '');
+    const reason = causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'memory' }, 'low');
+    assert.ok(agreed.fact.text.startsWith(`${reason} Request at `), agreed.fact.text);
+    const chosen = contextShown({ state: 'now', modes: ['low'], latest: { applied: 'low', books: 'maps',
+        preferred_at_send: 'low', cause: '', observed_at: at } }, 'low');
+    assert.ok(chosen.fact.text.startsWith('Request at '), chosen.fact.text);
     // Whole books in Max add nothing to today's closed capsule.
     const whole = contextShown({ state: 'now', modes: ['max'],
         latest: { applied: 'max', books: 'whole', preferred_at_send: 'max', observed_at: at } }, 'max');

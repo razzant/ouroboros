@@ -638,12 +638,12 @@ test('closed, Context says the mode this room\'s latest request was sent in; the
     assert.equal(m.seg('max').getAttribute('aria-checked'), 'true', 'open, the strip marks the saved mode');
     assert.deepEqual(['word', 'text'].map((part) => m.contextHint.querySelector(`.ui-hint-${part}`).textContent), ['Max', 'The full context window.']);
     // Choosing the observed mode makes them agree: today's closed capsule, no dot, the head's own words; open, the hint
-    // still dates the observation (no cause: nothing differs).
+    // dates the observation and keeps the reason of a send made under Max (Astra 10): a temporary Low is not the choice.
     await m.choose('low');
     const agreed = closed(m);
     assert.deepEqual({ ...agreed, fact: null }, { value: 'Low', actual: 'low', lit: ['low'], dot: null, label: '', fact: null });
     assert.equal(agreed.fact[0], 'Low now');
-    assert.match(agreed.fact[1], /^Request at .+\.$/);
+    assert.match(agreed.fact[1], /^Low for now, not Max: the whole books do not fit beside the history\. Request at .+\.$/);
     // A choice changes the dot, never the word: the next request will try Nano, the last one was sent in Low.
     await m.choose('nano');
     assert.deepEqual([closed(m).value, closed(m).lit, closed(m).dot], ['Low', ['low'], ['26.22', '115.94']]);
