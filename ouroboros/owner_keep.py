@@ -398,7 +398,14 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             unknown.append("managed_imports")
         places = sorted(set(places) | set(documents))
         releases.update(documents)
-        payloads = keep_places(base, task_id, row, places)  # fresh canonical facts under the same custody lock
+        try:  # fresh canonical facts under the same custody lock as the owner's keep
+            payloads = keep_places(base, task_id, row, places)
+        except OSError:
+            if not keep:
+                raise
+            payloads = {}
+            if "canonical_payloads" not in unknown:
+                unknown.append("canonical_payloads")
         places = sorted(set(places) | set(payloads))
         releases.update({place: state for place, (state, _present_now) in payloads.items()})
         releasing = [place for place, state in releases.items() if state == RELEASE_UNCONFIRMED]
