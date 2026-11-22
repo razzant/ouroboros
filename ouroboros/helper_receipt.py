@@ -117,11 +117,32 @@ def owner_words_text(task: Mapping[str, Any], *, session: bool) -> str:
     return told + ("" if session else "; room, origin and marked rows read at its start")
 
 
+def note_gaps(named: Any) -> List[str]:
+    """Each named knowledge note a start could not read (``subagent_work_order.named_notes_section``'s facts)."""
+    gaps = named.get("gaps") if isinstance(named, Mapping) else None
+    return [f"knowledge note {gap.get('topic')} ({gap.get('scope')}) named, not readable at this start "
+            f"({gap.get('reason')}); not sent [{PREPARED}]" for gap in gaps or () if isinstance(gap, Mapping)]
+
+
+def _notes_text(named: Mapping[str, Any]) -> tuple:
+    """The named notes' line: at scheduling the addresses and who reads them, at a start what was sent."""
+    if "sent" in named or "gaps" in named:
+        return PREPARED, "knowledge notes sent: " + (", ".join(
+            f"{row['topic']} ({row['scope']})@{str(row['revision'])[:12]} {row['chars']} chars"
+            for row in named.get("sent") or ()) or "none")
+    labels = ", ".join(f"{row['topic']} ({row['scope']})" for row in named.get("named") or ())
+    if named.get("session"):
+        return REQUESTED, f"knowledge notes: {labels} (read whole at each session start)"
+    calls = ", ".join(f"knowledge_read(topic={row['topic']!r}, scope={row['scope']!r})" for row in named["named"])
+    return REQUESTED, f"knowledge notes: {labels} named; this child reads them itself: {calls}; no text sent"
+
+
 def build(facts: Mapping[str, Any]) -> Receipt:
     """The one receipt builder, from facts the caller already holds (each optional): ``access_ignored``
     (``(requested, row)``: an API child's ignored ``access``), ``access_lowering`` (``(asked, row)``: a session
     row's access a call could not widen), ``inputs_map``, ``session`` (whose work order carries the words),
-    ``folder``, ``write_root``, ``access`` (``(subject, text, applied)`` grants; ``applied`` None is not known
+    ``folder``, ``write_root``, ``knowledge_notes`` (``{named, session}`` at scheduling, a start's sent facts and
+    gaps), ``access`` (``(subject, text, applied)`` grants; ``applied`` None is not known
     yet, False says nothing about it), ``inputs`` (prepared rows; None: nothing selected), ``inputs_outside``
     (how many of them lie outside a session's folder), ``inputs_when``, ``inputs_note``, ``lineage`` (automatic
     copies: ``(count, bytes)``), ``memory_view`` (``view``, ``role``, ``session_leaf``), ``owner_words`` (the
@@ -137,6 +158,8 @@ def build(facts: Mapping[str, Any]) -> Receipt:
     if rows and facts.get("inputs_outside"):
         differences.append(_outside(int(facts["inputs_outside"])))
     view = facts.get("memory_view") or {}
+    named = facts.get("knowledge_notes") or {}
+    differences += note_gaps(named)
     if view:
         differences += memory_view_differences(view.get("view"), view["role"],
                                                session_leaf=bool(view.get("session_leaf")))
@@ -157,6 +180,8 @@ def build(facts: Mapping[str, Any]) -> Receipt:
     if lineage := facts.get("lineage"):
         counted = NO_RECORD if isinstance(lineage, str) else f"{_plural(lineage[0], 'file')}, {lineage[1]} bytes"
         summary.append((PREPARED, "inputs: automatic lineage, " + counted))
+    if named.get("named") or named.get("sent") or named.get("gaps"):
+        summary.append(_notes_text(named))
     if view:
         summary.append((REQUESTED, "memory view: " + _memory_text(view.get("view"), view["role"])))
     if "owner_words" in facts:
@@ -179,7 +204,7 @@ def render(receipt: Receipt) -> str:
                                for stage in stages)])
 
 
-def start_facts(request: Mapping[str, Any], lineage: Any = None) -> Dict[str, Any]:
+def start_facts(request: Mapping[str, Any], lineage: Any = None, named: Any = None) -> Dict[str, Any]:
     """What one ``delegate_start`` sent (the prompt and host instructions it measured) and the automatic lineage
     copies its read-only scope received (``ReadonlyInputs.lineage``: count and bytes as the copies were made;
     ``NO_RECORD`` for a replay that holds no such fact). My human's rows the host appends are not counted here:
@@ -189,6 +214,8 @@ def start_facts(request: Mapping[str, Any], lineage: Any = None) -> Dict[str, An
                                             PREPARED, "sent")}
     if lineage:
         facts["lineage"] = lineage
+    if named:  # the named knowledge notes this start sent and could not read (``ctx._session_named_notes``)
+        facts["knowledge_notes"] = named
     return facts
 
 
@@ -226,9 +253,10 @@ def task_result_line(data: Mapping[str, Any]) -> str:
 def run_result_line(ctx: Any, entry: Any, access_evidence: Optional[Mapping[str, Any]], *,
                     looked_up: bool = True) -> str:
     """The repeat on a finished run's terminal ``delegate_wait`` payload, from that run's custody rows: the applied
-    access against what THIS run's own recorded request asked, copies outside its folder, and my human's later
-    words whose last outcome is not ``delivered`` (``accepted`` is taken by the engine, not read). ``looked_up``
-    False: the custody lookup itself failed, which proves nothing about the record."""
+    access against what THIS run's own recorded request asked, copies outside its folder, named knowledge notes its
+    start could not read, and my human's later words whose last outcome is not ``delivered`` (``accepted`` is taken by
+    the engine, not read). ``looked_up`` False: the custody lookup itself failed, which proves nothing about the
+    record."""
     if entry is None:
         return f"no custody record of this run [{OBSERVED}]" if looked_up else (
             f"this run's custody record was unavailable at this read [{OBSERVED}]")
@@ -250,6 +278,7 @@ def run_result_line(ctx: Any, entry: Any, access_evidence: Optional[Mapping[str,
     rows = (getattr(entry, "request_event", None) or {}).get("input_files") or []
     if outside := sum(1 for row in rows if isinstance(row, Mapping) and row.get("carrier") == "outside_scope_path"):
         differences.append(_outside(outside, past=True))
+    differences += note_gaps((getattr(entry, "request_event", None) or {}).get("named_notes"))
     try:
         from ouroboros.delegate_message_store import placed_words
 

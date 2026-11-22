@@ -15,6 +15,7 @@ import uuid
 from typing import Any, Dict, Optional
 from ouroboros.config import MAX_ACTIVE_SUBAGENTS_HARD_CAP
 from ouroboros.delegate_readonly_inputs import native_selection_block
+from ouroboros.subagent_work_order import named_notes_block
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
 from supervisor.events_chat_delivery import _bound_project_chat_id
@@ -249,6 +250,8 @@ def _compose_subagent_text(
     task_constraint=None,
     delegation_budget=None,
     selected_inputs=None,
+    named_notes=None,
+    session: bool = False,
 ) -> str:
     role = str(role or "").strip()
     parts = ["[SUBAGENT ROLE]", role, ""] if role else []
@@ -269,6 +272,8 @@ def _compose_subagent_text(
             "[END_PARENT_CONTEXT]",
         ])
     if block := native_selection_block(selected_inputs):  # host-retained copies, outside the parent's reference text
+        parts.extend(["", block])
+    if block := named_notes_block(named_notes, session=session):  # addresses only; the parent's choice, no text
         parts.extend(["", block])
     parts.extend([
         "",

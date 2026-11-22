@@ -666,6 +666,9 @@ SUBAGENT_INTENT_FIELDS: tuple[str, ...] = (
     ORIGINAL_INPUTS_FACT,
     # A parent's widening of its child's memory view by field (``schedule_subagent(memory_view=…)``); the child's start checks it.
     "memory_view",
+    # The knowledge notes a parent names (``schedule_subagent(knowledge_notes=…)``), by resolved address; every
+    # session start of the work reads them, an API child's first input names them.
+    "knowledge_notes",
     # The parent's resolved resource intent is required to preserve folderless scratch versus an explicit folder
     # through schedule admission; it is an authority fact, not a dispatch-derived decision.
     "resource_intent",

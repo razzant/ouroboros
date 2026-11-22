@@ -33,6 +33,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
     from ouroboros.delegate_documents import attachment_parameters
     from ouroboros.delegate_readonly_inputs import input_files_parameter
     from ouroboros.settings_scales import EFFORT_SCALE
+    from ouroboros.subagent_work_order import knowledge_notes_parameter
 
     return {
         "mode": {"type": "string", "enum": ["ask", "plan", "agent"], "description":
@@ -62,7 +63,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "objective": {"type": "string", "description": "Focused OUTCOME and scope, not a step-by-step script. A harness-dispatched child forwards work to its delegated run; a scripted objective can read as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
         "role": {"type": "string", "description": "Optional freeform lineage/UI role, e.g. architecture-reviewer; omission assigns no role."},
-        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks, the knowledge outline and, unless declared, the heads of the notes that claim its room and of the notes their heads link, but none of my other memory, so put recipes/details here, not in objective."},
+        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks, the knowledge outline and, unless declared, the heads of the notes that claim its room and of the notes their heads link, and the notes knowledge_notes names, but none of my other memory, so put recipes/details here, not in objective."},
         "input_sources": {
             "type": "string", "enum": ["shared", "declared"],
             "description": (
@@ -136,6 +137,9 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "Omit write_surface or use read_only. Checked for caller and child before queueing; [] reports an empty "
             "receipt. API children read each copy with read_file. The first session start verifies retained bytes "
             "unless it explicitly replaces the selection."),
+        **knowledge_notes_parameter(
+            "checked before queueing. An agent_session child's session start carries each whole at its revision then; "
+            "an API child is told the addresses and reads them itself."),
         "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree, directly or by applying its own children's patches. Pro runtime mode needs it, Cyber Pro does not, lower modes refuse either way; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {
@@ -335,6 +339,15 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
             import uuid
 
             directory_options["document_import_intent"] = uuid.uuid4().hex
+    if params.get("knowledge_notes") is not None:  # resolved as the caller's knowledge_read resolves them
+        from ouroboros.subagent_work_order import NamedNoteError, resolve_named_notes
+
+        try:
+            named, directory_options["knowledge_notes_feedback"] = resolve_named_notes(ctx, params["knowledge_notes"])
+        except NamedNoteError as exc:
+            return {"reason": exc.code}, one_refusal([f"{exc.code}: {exc.detail}. The child was not queued"])
+        if named:
+            directory_options["knowledge_notes"] = named
     if "input_files" in selections:  # permission and copying happen with the queued child's identity
         directory_options["input_files"] = selections["input_files"]
         if directory_options["input_files"] and str(params.get("write_surface") or "").strip().lower() not in {"", "read_only"}:

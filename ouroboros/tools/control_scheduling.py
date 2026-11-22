@@ -289,6 +289,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         f"{worker_note}{pool_note}{legacy_note}\n{render(build(_schedule_receipt_facts(emission, route_kind, selected_name)))}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
         f"{emission.get('held_note') or ''}"
+        + "".join(f"\n{note}" for note in emission.get("knowledge_notes_feedback") or ())
     )
 
 
@@ -350,6 +351,8 @@ def _schedule_receipt_facts(emission: Dict[str, Any], route_kind: str, selected_
         facts["inputs_outside"] = 0 if folderless else len(selected or ())
         facts["inputs_note"] = ("Prompt-only paths are not prepared"
                                 + (". Selected input_files replace automatic folderless lineage copies" if selected and folderless else ""))
+    if emission.get("knowledge_notes"):
+        facts["knowledge_notes"] = {"named": emission["knowledge_notes"], "session": session}
     facts["memory_view"] = {"view": emission.get("memory_view"), "role": "nanny" if session else "child",
                             "session_leaf": session}
     asked = [str(emission.get(key) or "") for key in ("objective", "expected_output", "context", "constraints")]
@@ -1000,8 +1003,9 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "requested_effort": fields["requested_effort"],
         "configured_subagent": configured_subagent,
         "parent_cognitive_route": parent_cognitive_route,
-        **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace", "attachment_paths",
-                                        "attachment_import", "document_import_intent", "prepared_input_files", "memory_view") if key in fields},
+        **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace",
+                                        "attachment_paths", "attachment_import", "document_import_intent",
+                                        "prepared_input_files", "memory_view", "knowledge_notes") if key in fields},
         **({ORIGINAL_INPUTS_FACT: True} if fields.get("prepared_input_files") else {}),
         "resource_intent": resource_intent,
     }
@@ -1100,6 +1104,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "requested_access": params.get("access"),
         "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"), "held_note": held_note,
         "memory_view": fields.get("memory_view"), "owner_task": {**owner_origin, "task_contract": child_contract},
+        **{key: fields.get(key) for key in ("knowledge_notes", "knowledge_notes_feedback")},
         "delegated_mode": fields.get("delegated_mode"),
         **{"expected_output": expected_output, "context": context, "constraints": constraints},
         "write_root": (task_constraint.get("write_root") or "", "caller" if str(params.get("write_root") or "").strip()
