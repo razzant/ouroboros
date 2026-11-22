@@ -290,10 +290,18 @@ def test_three_causes_name_what_took_the_whole_books(monkeypatch):
     route = _start(_core(pages=1, page_chars=100, books=900_000), 200_000, monkeypatch)
     roomy = _fact(_wide_start(2_000_000, monkeypatch))  # two eighths of work room: the request band's middle
     request = _wide_start((4 * (roomy["floor_need"] - roomy["work"]) + 2 * roomy["schemas"]) // 3, monkeypatch)
+    from ouroboros.context_view_facts import mode_words
     for plan, cause in ((memory, "memory"), (request, "request"), (route, "route")):
         fact = _fact(plan)
         assert plan.start == ("low", cause) and mf.start_cause(plan.low_projection.memory_facts) == cause
         assert mf.lowered_cause(fact) == cause and fact["telling_need"] > fact["window"]
+        # Review round 1 (Astra 5, Carbon 2): the facts row's shortfall names its basis, and only beside its own cause:
+        # a cold restore's capture that lost the books for another cause than the recorded one names none.
+        basis = {"memory": "", "request": " with no memory", "route": " with no memory and no tool schemas"}[cause]
+        said = f"low, temporarily, for the window (my human's mode: max); cause {cause}"
+        assert mode_words(plan, "low") == f"{said}; short {mf.lowered_need(fact)[1] - fact['window']:,}{basis}"
+        other = "memory" if cause == "route" else "route"
+        assert mode_words(dataclasses.replace(plan, start=("low", other)), "low") == said.replace(cause, other)
     fact = _fact(request)
     assert fact["floor_need"] <= fact["window"] < fact["zero_need"]
     assert (f"With no memory, whole books, what the request itself carries and the work's room need {fact['zero_need']:,}; "
@@ -335,6 +343,9 @@ def test_a_start_without_a_known_window_asks_once_more_and_is_never_a_held_max(m
     # A window learned later (a rebind, a refusal) keeps the start's record but is a measured Max in the facts row.
     rebound = dataclasses.replace(plan, window_record=learned.window_record, window_tokens=learned.window_tokens)
     assert rebound.start == ("max", "unmeasured") and mode_words(rebound, "max") == "max"
+    # Max on a window the plan does not know is not measured, whatever its start: a held start moved onto it too.
+    moved = dataclasses.replace(learned, window_record=plan.window_record, window_tokens=plan.window_tokens)
+    assert moved.start == ("max", "") and mode_words(moved, "max") == "max (window not known: Max not measured)"
     # A second ask that fails keeps the first answer: its route and evidence, never the failed read's.
     kept, asked = build(unknown, RuntimeError("route read failed"))
     assert asked == 2 and kept.start == ("max", "unmeasured") and kept.route_fp == "r" and kept.model == "test"

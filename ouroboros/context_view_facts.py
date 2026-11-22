@@ -108,22 +108,27 @@ def held_heads_fact(plan, receipt):
     return f"; held note heads: {tokens:,} tokens stand whole" if tokens else ""
 
 
+_SHORT_BASIS = {"request": " with no memory", "route": " with no memory and no tool schemas"}  # ``lowered_need``
+
+
 def mode_words(plan, mode):
     """The facts row's mode: a Low the window took from my human's Max named so beside that choice, with its recorded
-    cause (``context_measurement.mode_cause``) and, for a start's own cause, its shortfall (``memory_floor.lowered_need``);
-    a Max start whose route named no window says Max was not measured (``ContextFitPlan.start``) while the plan's window
-    is still unknown; a window learned later (a rebind, a refusal) is a measured Max."""
+    cause (``context_measurement.mode_cause``) and, where this capture's Max room lost its books to that same cause
+    (a cold restore's capture may have lowered for another), its shortfall on that cause's basis
+    (``memory_floor.lowered_need``); Max on a window the plan does not know says Max is not measured, whatever its
+    start, and a window learned later (a rebind, a refusal) is a measured Max."""
     preferred = str(getattr(plan, "preferred_mode", "") or "")
     if mode == "low" and preferred == "max":
         from ouroboros.context_measurement import mode_cause
 
         cause = mode_cause(plan, mode)
         room = (plan.projection(mode).memory_facts or {}).get("max_room") if cause in floor.LOWERED_CAUSES else None
-        short = floor.lowered_need(room)[1] - room["window"] if isinstance(room, dict) else 0
+        same = isinstance(room, dict) and room.get("cause") in ("crowded", "route") and floor.lowered_cause(room) == cause
+        short = floor.lowered_need(room)[1] - room["window"] if same else 0
         return (f"{floor.TEMPORARY_LOW.lower()} (my human's mode: max)" + (f"; cause {cause}" if cause else "")
-                + (f"; short {short:,}" if short > 0 else ""))
-    if (mode == "max" and tuple(getattr(plan, "start", None) or ()) == ("max", "unmeasured")
-            and getattr(getattr(plan, "window_record", None), "usable", None) is None):
+                + (f"; short {short:,}{_SHORT_BASIS.get(cause, '')}" if short > 0 else ""))
+    record = getattr(plan, "window_record", None)
+    if mode == "max" and record is not None and getattr(record, "usable", None) is None:
         return "max (window not known: Max not measured)"
     return mode
 
