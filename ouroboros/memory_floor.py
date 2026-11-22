@@ -61,6 +61,11 @@ def view_tokens(text: str) -> int:
     return tokens_of(mv.json_chars(str(text))) if text else 0
 
 
+def memory_tokens(view: Any) -> int:
+    """A priced view's two memory texts, story and room, in tokens, as a start's Max room counts them."""
+    return tokens_of(view.story_chars) + tokens_of(view.room_chars)
+
+
 class ViewFit:
     """One frame's memory view: ``level``, its receipt ``note`` and ``facts``, priced from the snapshot's pieces. Its
     whole texts are drawn only when read, so a frame the fit walks away from is only priced, piece by piece."""
@@ -189,22 +194,32 @@ def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Opt
 
 
 def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: int, fixed: int,
-                  schemas: int, window: int, reserve: int, work: int, ratio: float,
-                  allowance: Optional[int]) -> Optional[Dict[str, Any]]:
+                  schemas: int, window: int, reserve: int, work: int, ratio: float, allowance: Optional[int],
+                  addressed: Optional[Mapping[str, str]] = None) -> Optional[Dict[str, Any]]:
     """The Max room of one start, the host's measure in the owner's Max frame with whole books.
 
-    ``story`` is its tokens. ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact). ``floor_need``
-    is the books, core, knowledge with scratchpad and runtime facts (``dynamic_head_text`` and ``dynamic_text``:
-    Health, recent activity, skills, drive state too), the connections map Max shows, assignment, reply reserve and work
-    room; ``zero_need`` adds the tool schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing cut):
-    ``story`` (``unfolded``: its pages no part or account holds yet) and ``room``. Measures only: the start
-    alone chooses the mode, and the mind judges what to fold.
+    ``story`` is its tokens. ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact).
+    ``floor_need`` is the books, core, my knowledge index, source registry and scratchpad, runtime facts (Health, recent
+    activity, drive state too), the skills and subagents lines, the connections map Max shows, assignment, reply
+    reserve and work room; ``zero_need`` adds the tool schemas, ``need`` my memory in its ordinary forms (task lines
+    collapsed, nothing cut): ``story`` (``unfolded``: its pages no part or account holds yet) and ``room``. ``parts``
+    read the host's sections by id as the request carries them (``addressed``: those sent in a shorter form), each part
+    by whose it is (``WHOSE``). Measures only: the start alone chooses the mode, and the mind judges what to fold.
     """
     if allowance is None:
         return None
+    addressed = addressed or {}
+
+    def sent(sections, *ids):  # these host sections as the request carries them
+        return sum(view_tokens(addressed.get(part.section_id, part.full_text)) for part in sections if part.section_id in ids)
     base = view_tokens(core.base_prompt) + view_tokens(core.bible_md)
-    parts = {"books": max(0, sum(map(view_tokens, books)) - base), "core": base + view_tokens(core.semi_stable_text),
-             "knowledge, scratchpad and runtime facts": view_tokens(core.dynamic_head_text) + view_tokens(core.dynamic_text),
+    subagents, skills = sent(core.semi_stable_sections, "subagents"), sent(core.dynamic_sections, "installed_skills")
+    mine = {"knowledge index": view_tokens(core.dynamic_head_text), "source registry": sent(core.dynamic_sections, "registry"),
+            "scratchpad": sent(core.dynamic_sections, "scratchpad")}
+    parts = {"books": max(0, sum(map(view_tokens, books)) - base),
+             "core": max(0, base + view_tokens(core.semi_stable_text) - subagents),
+             "runtime facts": max(0, view_tokens(core.dynamic_text) - mine["source registry"] - mine["scratchpad"] - skills),
+             **{name: tokens for name, tokens in {**mine, "skills and subagents": subagents + skills}.items() if tokens},
              **({"connections": view_tokens(core.connections[0])} if core.connections[0] else {})}  # Max's map (``_system_blocks``)
     parts["assignment"] = max(0, fixed - schemas - sum(parts.values()))  # the task's messages and their framing
     ordinary = ordinary_level(snapshot) if snapshot else mv.FULL_VIEW
@@ -237,7 +252,8 @@ def with_max_room(facts: Mapping[str, Any], fact: Optional[Mapping[str, Any]], m
     steps = dict((facts.get("floor") or {}).get("steps") or {})
     cause = "held" if mode == "max" else "route" if fact["floor_need"] > fact["window"] else "crowded"
     if mode == "max" and required_book:
-        fact = {**fact, **{key: fact[key] + required_book for key in ("floor_need", "zero_need", "need")},
+        fact = {**fact, **{key: fact[key] + required_book for key in ("floor_need", "zero_need", "need", "telling_need")
+                           if key in fact},
                 "parts": [*fact["parts"], ["directly required handbook", required_book]]}
     gap = fact["window"] - fact["need"]
     return {**facts, "max_room": {**fact, "cause": cause, **({"headroom": gap} if gap >= 0 else {"short": -gap}),
@@ -253,31 +269,50 @@ def crowded_by_memory(fact: Optional[Mapping[str, Any]]) -> bool:
 
 
 REQUIRED_BOOK_WHOLE = " (this task's directly required handbook stays whole)"
-# An owner's Max that the window took to the compact book form stays Max by name (owner 15.11.2026, 4A); its
-# rendered key is ``low``, the books' chapter-map form, never the owner's Low.
-MAPS = "Max with chapter maps, for the window"
+# An owner's Max whose whole books did not fit runs in Low, temporarily, for the window, and is named Low wherever its
+# mode is shown, while my human's choice stays Max (owner 21.11.2026). Its rendered key is ``low`` and its profile
+# ``task_local_low``; the owner's own Low has ``preferred_mode`` low.
+TEMPORARY_LOW = "Low, temporarily, for the window"
 # What the owner's Low target may take (``render_view_for_mode``, owner 15.11.2026, 3A): other conversations and my
 # story down to my telling; this room and my human's words not at all. The rest only the window's own start bound takes.
 TARGET_FLOOR, TARGET_KEEPS = TELLING_STAGES, ROOM_STEPS
-ROUTE_FACT = ("its window cannot hold the books beside my core, assignment, reply reserve and the work's room (needs "
-              "{need:,} > {window:,}: {parts}); folding memory or dropping tool schemas cannot make room here.")
+LOWERED_CAUSES = ("memory", "request", "route")  # ``lowered_cause``
+# Whose each part of a start's measure is (``measure_text``): core, the assignment and any other part stand alone.
+WHOSE = (("mine", ("knowledge index", "source registry", "scratchpad")),
+         ("what the request itself carries", ("connections", "runtime facts", "skills and subagents")),
+         ("my human's", ("books",)))
 
 
-def floor_parts(fact: Mapping[str, Any]) -> str:
-    """``books B, core C, …, reply reserve V, work room K``: what the floor need is made of, largest first."""
-    named = ", ".join(f"{name} {tokens:,}" for name, tokens in fact["parts"])
-    return f"{named}, reply reserve {fact['reserve']:,}, work room {fact['work']:,}"
+def gate_need(fact: Mapping[str, Any]) -> int:
+    """What the books gate weighed (``max_room_lost``): whole books, my memory at the gate's level (my shortest telling
+    of the whole horizon, ``telling_level``), the work's room and the reply reserve; the ordinary need where no telling
+    was priced, the gate then weighing that."""
+    return fact.get("telling_need", fact["need"])
+
+
+def lowered_cause(fact: Mapping[str, Any]) -> str:
+    """Why a Max room lost its whole books, by its own numbers: ``route`` when the books, core, assignment, reply reserve
+    and work room exceed the window with no memory and no tool schemas (``floor_need``), ``request`` when what the request
+    itself carries tips that over (``zero_need``), else ``memory``. A measure, not blame."""
+    return ("route" if fact["floor_need"] > fact["window"] else "request" if fact["zero_need"] > fact["window"]
+            else "memory")
+
+
+def lowered_need(fact: Mapping[str, Any]) -> Tuple[str, int]:
+    """``(cause, need)``: the need a lowered start's cause names against the window (``lowered_cause``)."""
+    cause = lowered_cause(fact)
+    return cause, gate_need(fact) if cause == "memory" else fact["zero_need" if cause == "request" else "floor_need"]
 
 
 def start_cause(facts: Optional[Mapping[str, Any]]) -> str:
     """Why a start fit's own projection (its ``memory_facts``) is below the owner's mode: ``""`` without a mode
-    switch (``floor.mode_switch``); ``memory`` when memory crowded the Max room (``crowded_by_memory``), ``route``
-    when the window cannot hold the books and core, else ``window``."""
+    switch (``floor.mode_switch``); for an owner's Max whose whole books did not fit, its Max room's ``memory``,
+    ``request`` or ``route`` (``lowered_cause``); any other narrowing by the window (Low to Nano) is ``window``."""
     facts = facts or {}
     if not (facts.get("floor") or {}).get("mode_switch"):
         return ""
     room = facts.get("max_room")
-    return "memory" if crowded_by_memory(room) else "route" if (room or {}).get("cause") == "route" else "window"
+    return lowered_cause(room) if isinstance(room, Mapping) and room.get("cause") in ("crowded", "route") else "window"
 
 
 def drawn_tokens(entry: Mapping[str, Any]) -> int:
@@ -326,15 +361,33 @@ def addressed_text(steps: Mapping[str, Any]) -> str:
 
 
 def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optional[Mapping[str, Any]] = None) -> str:
-    """The host's measure of one start in the provable parts; the mind judges what they mean. ``pages``
-    (``unfolded_pages`` of the same snapshot) names how many unfolded pages there are and where they pile up."""
-    zero = fact["window"] - fact["zero_need"]
+    """The host's measure of one start in the provable parts; the mind judges what they mean: the gate's need
+    (``gate_need``: whole books, my memory at the gate's level, the work's room, the reply reserve) against the window,
+    the ordinary need (my memory with no shortened form) under that name and the need with no memory; with ``parts``
+    the measure by whose part it is (``WHOSE``). ``pages`` (``unfolded_pages`` of the same snapshot) names how many
+    unfolded pages there are and where they pile up."""
+    window, gate = fact["window"], gate_need(fact)
     unfolded = pages_text(pages) if pages is not None else f"pages no part or account holds yet {fact['unfolded']:,}"
-    return (f"window {fact['window']:,}; books, core, knowledge, scratchpad, runtime facts, connections, assignment, reply reserve and work room "
-            f"{fact['floor_need']:,}{f' ({floor_parts(fact)})' if parts else ''}; tool schemas {fact['schemas']:,}; with "
-            f"no memory shown {'headroom' if zero >= 0 else 'over by'} {abs(zero):,}; my memory "
-            f"{fact['story'] + fact['room']:,} = story {fact['story']:,} ({unfolded}) + rooms {fact['room']:,}, "
-            f"beside a Max room of {fact['allowance']:,}")
+    text = (f"window {window:,}; the gate's need {gate:,}, {'headroom' if gate <= window else 'short by'} "
+            f"{abs(window - gate):,}; the ordinary need {fact['need']:,}; with no memory {fact['zero_need']:,}")
+    if parts:
+        named, grouped = dict(fact["parts"]), {name for _whose, names in WHOSE for name in names}
+        listed = {"mine": [f"my memory at the gate's level {fact.get('telling', fact['story'] + fact['room']):,}"],
+                  "what the request itself carries": [f"tool schemas {fact['schemas']:,}"], "my human's": []}
+        for whose, names in WHOSE:
+            listed[whose] += [f"{name} {named[name]:,}" for name in names if name in named]
+        listed["my human's"] += [f"reply reserve {fact['reserve']:,}", f"work room {fact['work']:,}"]
+        alone = sorted((part for part in fact["parts"] if part[0] not in grouped),  # core, assignment, then the rest
+                       key=lambda part: ("core", "assignment").index(part[0]) if part[0] in ("core", "assignment") else 2)
+        text += "; " + "; ".join([f"{whose}: {', '.join(items)}" for whose, items in listed.items()]
+                                 + [f"{name} {tokens:,}" for name, tokens in alone])
+    return (f"{text}; my story {fact['story']:,} ({unfolded}) + rooms {fact['room']:,} in ordinary forms, beside a "
+            f"Max room of {fact['allowance']:,}")
+
+
+_LOWERED_WORDS = {"memory": "Whole books, my memory at the gate's level and the work's room need",
+                  "request": "With no memory, whole books, what the request itself carries and the work's room need",
+                  "route": "With no memory and no tool schemas, whole books beside my core and the work's room need"}
 
 
 def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]] = None) -> str:
@@ -342,14 +395,16 @@ def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]]
     if mode != "low":
         return (f"The window cannot hold {lowered_from.capitalize()} with even the shortest view of my memory; "
                 f"this task runs in {mode.capitalize()}.")
+    head = f"{TEMPORARY_LOW}; my human's mode is {lowered_from.capitalize()}."
     if not fact:
-        return f"{MAPS}: the books did not fit beside my memory and the work room."
-    if fact["floor_need"] > fact["window"]:
-        return f"{MAPS}, a disclosed fact of this route: " + ROUTE_FACT.format(
-            need=fact["floor_need"], window=fact["window"], parts=floor_parts(fact))
-    said = ": my memory, even in its shortest tellings, does not fit beside the whole books and the work's room" if (
-        fact["zero_need"] <= fact["window"]) else ""  # tool schemas that tip the start alone are measured, not memory
-    return f"{MAPS}{said}. The host's measure of this start: {measure_text(fact, parts=True)}."
+        return f"{head} The whole books did not fit beside my memory and the work's room."
+    cause, need = lowered_need(fact)
+    short = need - fact["window"]
+    route = (", a disclosed fact of this route: folding my memory or dropping tool schemas cannot make room here"
+             if cause == "route" else "")
+    return (f"{head} {_LOWERED_WORDS[cause]} {need:,}; the window holds {fact['window']:,}"
+            + (f"; short by {short:,}" if short > 0 else "") + f"{route}. Only the window cuts my memory here; Low's own "
+            f"target does not bind. The host's measure of this start: {measure_text(fact, parts=True)}.")
 
 
 def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], work: int) -> str:
@@ -681,7 +736,7 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
     path = memory_read_path(names) if mode == "nano" else ""
     if not asked and not lowered_from and not holding:
         return f"### Memory check\nAddresses this view shows read with memory_read.\n{path}" if path else ""
-    lines, name = ["### Physical floor"], "Max" if lowered_from == "max" and mode == "low" else mode.capitalize()
+    lines, name = ["### Physical floor"], mode.capitalize()  # a Low the window took from Max is Low (21.11)
     if asked:
         bounds = ([f"the window ({window_tokens} tokens)"]
                   if window_tokens is not None else []) + (
@@ -1101,7 +1156,7 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
     frame = {"core": plan.core_sha256[:12], "preferred": plan.preferred_mode, "window": record.total_equivalent,
              "known": record.usable is not None, "reserve": plan.output_reserve_tokens, "ratio": ratio,
              "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode,  # the start's own mode
-             # an owner's Max the start took to chapter maps carries its cause (``start_cause``), whatever is chosen now
+             # an owner's Max the window took to Low, temporarily, carries its cause (``start_cause``), whatever is chosen now
              "maps": (plan.start[0] or plan.initial_mode) == "low" and bool(
                  plan.start[1] if plan.start[0] else start_cause(plan.projection(plan.initial_mode).memory_facts))}
     return {"measured": True, "frame": frame, "arms": arms}
@@ -1130,7 +1185,7 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
     if not fit.get("measured"):
         return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
     f = fit["frame"]
-    started = "Max with chapter maps" if f.get("maps") else f["started"]
+    started = TEMPORARY_LOW if f.get("maps") else f["started"]
     lines = ["", head, (
         f"frame: core {f['core']}, owner mode {f['preferred']}, window {f['window']:,}"
         f"{'' if f['known'] else ' (not known: no window bound applies)'}, reply reserve {f['reserve']:,}, density "
@@ -1147,8 +1202,8 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
         room = arm["max_room"]
         steps = ", ".join(f"{step} {count}" for step, count in arm["steps"].items()) or "none"
         host = ", ".join(f"{section} ~{saved:,}" for section, saved in arm["host"])
-        maps = arm["mode"] == "low" and f["preferred"] == "max"  # the owner's Max with chapter maps, for the window
-        lines.append(f"- {name}: starts {'Max with chapter maps' if maps else arm['mode'].capitalize()}"
+        maps = arm["mode"] == "low" and f["preferred"] == "max"  # Low, temporarily, for the window: my human's Max
+        lines.append(f"- {name}: starts {TEMPORARY_LOW if maps else arm['mode'].capitalize()}"
                      + (" on the input this start rescued" if arm.get("input") == "rescued" else "")
                      + (f"; Max room {room['cause']}: {measure_text(room)}" if room else "; no Max room measured")
                      + f"; floor steps {steps}"

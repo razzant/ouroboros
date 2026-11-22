@@ -313,9 +313,9 @@ def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_pa
 
 
 def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path, monkeypatch):
-    """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks; Nano walks once, then at
-    each of its next three host forms re-prices that level, misses the window (even its shortest view does not fit) and
-    walks again."""
+    """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks (Max prices its ordinary
+    memory and, for the gate's need it prints, its shortest telling); Nano walks once, then at each of its next three
+    host forms re-prices that level, misses the window (even its shortest view does not fit) and walks again."""
     render, probes = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
@@ -325,7 +325,7 @@ def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert probes == [('re-price', 'max'), ('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
+    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
 
 
 @pytest.mark.parametrize("step, target, outlined", [
@@ -421,8 +421,8 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
     assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {shown['max_room']['cause']}: " in text
     assert f"This task started in {plan.initial_mode} (its start projection, a separate fact" in text
     # The start is named by its own cause, never by the mode chosen now: a Low start resumed under the owner's Max stays
-    # Low; a Max start the window took to chapter maps (a cause recorded) is Max with chapter maps (4A).
-    for start, said in ((('low', ''), 'low'), (('low', 'memory'), 'Max with chapter maps')):
+    # Low; a Max start the window took to Low (a cause recorded) is Low, temporarily, for the window (21.11).
+    for start, said in ((('low', ''), 'low'), (('low', 'memory'), 'Low, temporarily, for the window')):
         frame = mf.counterfactual_starts(dataclasses.replace(plan, start=start, preferred_mode='max'), {'as captured': captured})
         assert f"This task started in {said} (its start projection" in '\n'.join(mf.counterfactual_lines(frame))
     # Without the inputs the frame needs, the fit is named as not measured, never guessed.

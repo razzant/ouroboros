@@ -7,11 +7,11 @@ from ouroboros.live_context_view import record_session_view
 from tests.test_memory_low_start import _plan, _room, sent as sent
 
 
-@pytest.mark.parametrize('room,expected', [
-    (_room(), 1), (_room('route'), 0), (_room('held'), 0),
-    (_room(zero_need=1_100_000), 0), (None, 0),
+@pytest.mark.parametrize('room,expected', [  # every cause opens an episode (22.11.2026); a held Max or none does not
+    (_room(), 1), (_room('route'), 1), (_room('held'), 0),
+    (_room(zero_need=1_100_000, floor_need=950_000), 1), (None, 0),
 ])
-def test_adopted_call_reports_a_memory_lowered_start_once(tmp_path, sent, room, expected):
+def test_adopted_call_reports_a_lowered_start_once(tmp_path, sent, room, expected):
     plan = _plan(room)
     ctx = SimpleNamespace(drive_root=tmp_path, task_metadata={}, task_id='call-low', task_attempt=2,
                           context_fit_plan=plan, active_context_mode='low', emit_progress_fn=None)
@@ -24,7 +24,7 @@ def test_adopted_call_reports_a_memory_lowered_start_once(tmp_path, sent, room, 
         root, event = sent[0]
         assert root == tmp_path and event['chat_id'] == 7 and event['task_id'] == ''
         assert event['delivery_id'] == 'low_start:call-low:2'
-        assert event['system_type'] == 'low_start_notice' and 'started in Max with chapter maps' in event['text']
+        assert event['system_type'] == 'low_start_notice' and 'runs in Low for now, not in your Max' in event['text']
     # Even if later fits are crowded, renewals never invent another start notice.
     host.plan = ctx.context_fit_plan = _plan(_room())
     for n in range(3):

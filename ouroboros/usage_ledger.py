@@ -170,7 +170,7 @@ def _validate_candidate_facts(row: Dict[str, Any], sequence: int) -> None:
         if not all(isinstance(context.get(key), str) for key in ("route_fp", "round_id")):
             raise UsageLedgerCorrupt(f"invalid physical_context identity in usage row seq={sequence}")
         if context.get("preferred_mode", "") not in {"", "max", "low", "nano"} or context.get("mode_cause", "") not in {
-                "", "memory", "route", "window", "after_start"}:  # both absent on rows written before they existed
+                "", "memory", "request", "route", "window", "after_start"}:  # both absent on rows written before they existed
             raise UsageLedgerCorrupt(f"invalid physical_context preferred mode/cause in usage row seq={sequence}")
         density = context.get("measurement_density")  # absent on rows written before the field existed
         if density is not None and (isinstance(density, bool) or not isinstance(density, (int, float))

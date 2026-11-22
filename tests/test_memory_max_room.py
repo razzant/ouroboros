@@ -3,6 +3,8 @@ import dataclasses
 import json
 import math
 
+from types import SimpleNamespace
+
 import pytest
 
 from ouroboros import capability_evidence as ce, context_fit as cf, memory_floor as mf, memory_view as mv
@@ -43,11 +45,13 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
     assert fact["headroom"] == fact["window"] - fact["need"] > 0 and "short" not in fact
     assert fact["levels"] == 2 and fact["window"] == 2_000_000 and fact["floor_need"] <= fact["zero_need"] < fact["need"]
     assert fact["unfolded"] and fact["unfolded"] <= fact["story"]  # 40 pages, none in a part or account yet
-    assert dict(fact["parts"])["books"] > dict(fact["parts"])["knowledge, scratchpad and runtime facts"] and "tool schemas" not in dict(fact["parts"])
+    assert dict(fact["parts"])["books"] > dict(fact["parts"])["runtime facts"] and "tool schemas" not in dict(fact["parts"])
     line = memory_facts(plan, "max")  # every start, Max held too: the measure part by part, no advice
-    assert line.startswith("Max room in this captured build: window 2,000,000; books, core, knowledge, scratchpad, runtime facts, "
-                           "connections, assignment, reply reserve and work room")
-    assert f"(books {dict(fact['parts'])['books']:,}, " in line and f"tool schemas {fact['schemas']:,}; " in line
+    assert line.startswith(f"Max room in this captured build: window 2,000,000; the gate's need {fact['need']:,}, headroom "
+                           f"{2_000_000 - fact['need']:,}; the ordinary need {fact['need']:,}; with no memory ")  # no telling priced
+    assert (f"; mine: my memory at the gate's level {fact['story'] + fact['room']:,}; what the request itself carries: tool "
+            f"schemas {fact['schemas']:,}, runtime facts {dict(fact['parts'])['runtime facts']:,}; my human's: books "
+            f"{dict(fact['parts'])['books']:,}, reply reserve {fact['reserve']:,}, work room {fact['work']:,}; core ") in line
     assert f"story {fact['story']:,} (40 pages no part or account holds yet, {fact['unfolded']:,} tokens, most in " in line
     assert f"beside a Max room of {fact['allowance']:,}; Max held;" in line
     assert "; marks in view 0" in line and "drafts awaiting" not in line and "shown only by address" not in line
@@ -60,14 +64,23 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(
     fact = _fact(plan)
     assert plan.initial_mode == "low" and fact["cause"] == "crowded" and fact["cuts"] == []
     assert fact["floor_need"] <= fact["window"] and fact["short"] == fact["need"] - fact["window"] > 0
+    gate = fact["telling_need"]  # the gate's need, printed beside the ordinary one (owner 21.11.2026)
+    assert fact["zero_need"] <= fact["window"] < gate <= fact["need"] and 0 < fact["telling"] <= fact["story"] + fact["room"]
     shown = plan.low_projection.system_content_json
-    assert ("Max with chapter maps, for the window: my memory, even in its shortest tellings, does not fit beside the whole "
-            "books and the work's room. The host's measure of this start: window ") in shown and "b" * 40_000 not in shown
-    assert not any(words in shown for words in ("may bring the books back", "Folding memory"))
+    assert (f"Low, temporarily, for the window; my human's mode is Max. Whole books, my memory at the gate's level and the "
+            f"work's room need {gate:,}; the window holds {fact['window']:,}; short by {gate - fact['window']:,}. Only the "
+            "window cuts my memory here; Low's own target does not bind. The host's measure of this start: window "
+            f"{fact['window']:,}; the gate's need {gate:,}, short by ") in shown and "b" * 40_000 not in shown
+    assert f"; the ordinary need {fact['need']:,}; with no memory {fact['zero_need']:,}; mine: " in shown
+    assert f"; mine: my memory at the gate's level {fact['telling']:,}; what the request itself carries: " in shown
+    assert not any(words in shown for words in ("may bring the books back", "Folding memory", "Max with chapter maps"))
     assert f"(pages no part or account holds yet {fact['unfolded']:,})" in shown
     assert not any(words in shown for words in ("failure", "crowds the books out", "cannot make room", "did not fit beside", "Low with"))
     line = memory_facts(plan, "low")
-    assert f"beside a Max room of {fact['allowance']:,}; Max with chapter maps, for the window; " in line
+    assert f"beside a Max room of {fact['allowance']:,}; Low, temporarily, for the window, cause memory; " in line
+    from ouroboros.context_view_facts import mode_words
+    assert mode_words(plan, "low") == ("low, temporarily, for the window (my human's mode: max); cause memory; "
+                                       f"short {gate - fact['window']:,}")
     assert not any(words in line for words in ("may bring", "Folding", "failure"))
     # The fact rides in the receipt the task trace keeps, and a selection keeps the start's frame.
     assert mf.trace_facts(plan.low_projection.memory_facts)["max_room"] == fact
@@ -94,13 +107,17 @@ def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(mo
     fact = _fact(plan)
     assert plan.initial_mode == "low" and fact["cause"] == "route" and fact["floor_need"] > fact["window"]
     assert fact["parts"][0][0] == "books"  # largest first
+    assert fact["telling_need"] >= fact["zero_need"] >= fact["floor_need"]  # the gate's need is printed for every cause
     shown = plan.low_projection.system_content_json
-    assert ("Max with chapter maps, for the window, a disclosed fact of this route: its window cannot hold the books beside my core, "
-            f"assignment, reply reserve and the work's room (needs {fact['floor_need']:,} > 200,000: books ") in shown
-    assert "folding memory or dropping tool schemas cannot make room here." in shown and "may bring" not in shown
+    assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, whole books beside "
+            f"my core and the work's room need {fact['floor_need']:,}; the window holds 200,000; short by "
+            f"{fact['floor_need'] - 200_000:,}, a disclosed fact of this route: folding my memory or dropping tool schemas "
+            "cannot make room here.") in shown and "may bring" not in shown
     line = memory_facts(plan, "low")
-    assert ("; Max with chapter maps, for the window, a disclosed fact of this route: folding memory or dropping tool schemas "
-            "cannot make room here") in line
+    assert ("; Low, temporarily, for the window, cause route, a disclosed fact of this route: folding memory or dropping "
+            "tool schemas cannot make room here") in line
+    from ouroboros.context_view_facts import mode_words
+    assert mode_words(plan, "low").startswith("low, temporarily, for the window (my human's mode: max); cause route; short ")
 
 
 def test_a_directly_required_book_at_the_max_boundary_never_lowers_the_start(monkeypatch):
@@ -221,5 +238,59 @@ def test_the_settled_fact_names_cause_cuts_and_gap(mode, floor_need, cause):
     assert not mf.crowded_by_memory(settled) and not mf.crowded_by_memory(None)
     assert mf.crowded_by_memory({**settled, "zero_need": 1_000}) is (cause == "crowded")
     words = mf.lowered_line("low", "max", fact) + mf.measure_text(fact, parts=True)
-    assert "with no memory shown over by 100" in words
+    assert mf.lowered_cause(fact) == ("route" if floor_need > fact["window"] else "request")  # by its numbers alone
+    assert ("the window holds 1,000; short by 1" if floor_need > 1_000 else "need 1,100; the window holds 1,000; short by 100") in words
+    assert "; the ordinary need 1,230; with no memory 1,100; mine: my memory at the gate's level 130; " in words
     assert not any(word in words for word in ("must", "should", "please", "failure", "may bring"))  # measures only
+
+
+def test_three_causes_name_what_took_the_whole_books(monkeypatch):
+    """Owner 21.11.2026 and the consilium of 22.11 (P7): a measure, not blame. ``memory`` when the request would fit
+    with no memory, ``request`` when the books fit without the tool schemas but not with them (F1 #7-#9), ``route``
+    when even that does not fit; each start records its own, and ``window`` stays for other narrowings."""
+    core = _core()
+    memory = _start(core, _crowded_window(_fact(_start(core, 2_000_000, monkeypatch))), monkeypatch)
+    route = _start(_core(pages=1, page_chars=100, books=900_000), 200_000, monkeypatch)
+    roomy = _fact(_wide_start(2_000_000, monkeypatch))  # two eighths of work room: the request band's middle
+    request = _wide_start((4 * (roomy["floor_need"] - roomy["work"]) + 2 * roomy["schemas"]) // 3, monkeypatch)
+    for plan, cause in ((memory, "memory"), (request, "request"), (route, "route")):
+        fact = _fact(plan)
+        assert plan.start == ("low", cause) and mf.start_cause(plan.low_projection.memory_facts) == cause
+        assert mf.lowered_cause(fact) == cause and fact["telling_need"] > fact["window"]
+    fact = _fact(request)
+    assert fact["floor_need"] <= fact["window"] < fact["zero_need"]
+    assert (f"With no memory, whole books, what the request itself carries and the work's room need {fact['zero_need']:,}; "
+            f"the window holds {fact['window']:,}; short by {fact['zero_need'] - fact['window']:,}.") in (
+        request.low_projection.system_content_json)
+    assert cf.carried_start(["low", "request"]) == ("low", "request") and cf.carried_start(["max", "unmeasured"]) == (
+        "max", "unmeasured")
+
+
+def test_a_start_without_a_known_window_asks_once_more_and_is_never_a_held_max(monkeypatch):
+    """F1 #10: a start whose route named no window was recorded as a held Max. Before its first send it asks the
+    route's window evidence once more; a window then known is walked like any answer, and one still unknown is a Max
+    not measured, never held. No bound is guessed and the Low episode is left alone (no Max room)."""
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    unknown = SimpleNamespace(route_fp="r", status="failed", stale=True, window_tokens=0)
+    known = ce.CapabilityEvidence(2_000_000, "confirmed", "metadata", "room-route")
+
+    def build(*answers):
+        asked = []
+
+        def resolver(*_a, **_kw):
+            asked.append(1)
+            return {"provider": "test", "model": "test"}, answers[min(len(asked), len(answers)) - 1]
+        plan = cf.build_context_fit_plan(None, _core(), {"id": "room01", "usage_category": "consciousness"},
+                                         preferred_mode="max", route_resolver=resolver)
+        return plan, len(asked)
+
+    plan, asked = build(unknown)
+    assert asked == 2 and plan.initial_mode == "max" and plan.start == ("max", "unmeasured")
+    assert "max_room" not in plan.max_projection.memory_facts
+    from ouroboros.context_view_facts import mode_words
+    assert mode_words(plan, "max") == "max (window not known: Max not measured)"
+    learned, asked = build(unknown, known)
+    assert asked == 2 and learned.start == ("max", "") and _fact(learned)["cause"] == "held"
+    assert mode_words(learned, "max") == "max"
+    held, asked = build(known)
+    assert asked == 1 and held.start == ("max", "")  # a known window is asked once

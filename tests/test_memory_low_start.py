@@ -1,10 +1,10 @@
-"""One host line in Main per Low episode of fresh starts that memory lowered to Low (owner A, 07.11.2026, which
-replaced the line per start of 1B, 29.10).
+"""One host line in Main per Low episode of fresh starts that the window took from whole books in my human's Max
+(owner A, 07.11.2026, which replaced the line per start of 1B, 29.10; every cause since 22.11.2026).
 
-The start's own Max room decides (``memory_floor.crowded_by_memory``); the line, without numbers, goes through the
-terminal outbox under one id per task attempt when no episode is open; a start that holds Max closes the episode
-silently; a route, tool schemas that tip a start alone, a delegated child or nanny, the owner's Low or Nano and an
-unknown window neither send nor touch the episode.
+The start's own Max room decides (``memory_floor.lowered_cause``: memory, what the request itself carries, the route);
+the line, without numbers, goes through the terminal outbox under one id per task attempt when no episode is open; a
+start of the opener's kind (its room and work room) that holds Max closes the episode silently; a delegated child or
+nanny, the owner's Low or Nano and an unknown window neither send nor touch the episode.
 """
 import json
 from types import SimpleNamespace
@@ -17,16 +17,19 @@ from supervisor import schedule_notes, terminal_delivery as outbox
 from tests.test_memory_max_room import _core, _crowded_window, _fact, _start
 
 
-def _room(cause="crowded", *, window=1_000_000, zero_need=900_000, levels=1):
-    return {"cause": cause, "window": window, "allowance": 40_000, "floor_need": zero_need - 70_000,
-            "schemas": 70_000, "zero_need": zero_need, "need": zero_need + 150_000, "story": 110_000,
+def _room(cause="crowded", *, window=1_000_000, zero_need=900_000, floor_need=None, levels=1, room_id=None):
+    if cause == "route" and floor_need is None:  # the books, core and work room alone exceed this route's window
+        floor_need, zero_need = window + 10_000, window + 80_000
+    floor_need = zero_need - 70_000 if floor_need is None else floor_need
+    return {"cause": cause, "window": window, "allowance": 40_000, "floor_need": floor_need,
+            "schemas": zero_need - floor_need, "zero_need": zero_need, "need": zero_need + 150_000, "story": 110_000,
             "unfolded": 60_000, "room": 40_000, "reserve": 65_536, "work": 125_000 * levels, "levels": levels,
-            "parts": [["books", 400_000], ["core", 30_000]]}
+            "room_id": room_id, "parts": [["books", 400_000], ["core", 30_000]]}
 
 
-def _plan(room, *, role="integrator"):
+def _plan(room, *, role="integrator", model=""):
     facts = {"role": role, **({"max_room": room} if room else {})}
-    return SimpleNamespace(projection=lambda _mode: SimpleNamespace(memory_facts=facts))
+    return SimpleNamespace(projection=lambda _mode: SimpleNamespace(memory_facts=facts), model=model)
 
 
 @pytest.fixture
@@ -40,19 +43,32 @@ def sent(monkeypatch):
 
 def test_a_start_memory_lowered_to_low_says_so_without_numbers_or_advice():
     line = low_start_line(_plan(_room()), "low", "rootA")
-    assert line == ("Task rootA started in Max with chapter maps: my memory, even in its shortest tellings, did not fit "
-                    "beside the whole books.")
+    assert line == ("Task rootA runs in Low for now, not in your Max: the whole books did not fit beside my memory even "
+                    "in its shortest tellings. Your setting stays Max.")
     assert not any(char.isdigit() for char in line) and len(line.splitlines()) == 1  # numbers stay in the task's facts
     assert not any(word in line for word in ("may bring", "should", "must", "fold", "episode", "again"))
     # A start that protected words took past the maps frame to Nano is named Nano, never Max (``context_fit``)
     assert low_start_line(_plan(_room()), "nano", "rootA") == (
-        "Task rootA started in Nano: my memory, even in its shortest tellings, did not fit beside the books, even as "
-        "chapter maps.")
+        "Task rootA runs in Nano for now, not in your Max: the whole books did not fit beside my memory even in its "
+        "shortest tellings; even the chapter maps did not fit. Your setting stays Max.")
+
+
+def test_what_the_request_carries_and_the_route_send_their_own_lines():
+    """Consilium of 22.11.2026 (P6, P7): the opening line goes for every cause, each in its own words, no numbers."""
+    request = _room(zero_need=1_100_000, floor_need=950_000)  # the books fit without the tool schemas, not with them
+    assert low_start_line(_plan(request), "low", "rootA") == (
+        "Task rootA runs in Low for now, not in your Max: even with no memory, what the request itself carries tips "
+        "this start over the window. Your setting stays Max.")
+    assert low_start_line(_plan(_room("route"), model="opus"), "low", "rootA") == (
+        "Task rootA runs in Low for now, not in your Max: on opus the window cannot hold the whole books beside my core "
+        "and the work's room even with no memory; folding my memory cannot change that. Your setting stays Max.")
+    assert "on this route the window" in low_start_line(_plan(_room("route")), "low", "rootA")  # no model named
 
 
 @pytest.mark.parametrize("plan", [
-    _plan(_room("route")),                             # the books cannot fit this route: its task's facts say so
+    _plan(_room("held")),                              # Max held
     _plan(None),                                       # the owner's Low or Nano, or an unknown window: no Max room
+    _plan(_room(), role="child"),                      # a delegated child
     None,
 ])
 def test_every_other_start_gets_no_line(plan):
@@ -64,14 +80,14 @@ def test_a_measured_crowded_start_gets_its_line(monkeypatch):
     held = _fact(_start(core, 2_000_000, monkeypatch))
     plan = _start(core, _crowded_window(held), monkeypatch)
     assert plan.initial_mode == "low" and _fact(plan)["cause"] == "crowded"
-    assert low_start_line(plan, plan.initial_mode, "wake").startswith("Task wake started in Max with chapter maps:")
+    assert low_start_line(plan, plan.initial_mode, "wake").startswith("Task wake runs in Low for now, not in your Max:")
     assert low_start_line(_start(core, 2_000_000, monkeypatch), "max", "wake") == ""
 
 
 def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
-    """Low, Low: one line; Max closes the episode silently; Low again: a new line. A delegated child or nanny, the
-    owner's Low or Nano, an unknown window, a route and tool schemas that tip a start alone send nothing and leave the
-    episode as it is, open or closed."""
+    """Low, Low: one line; Max closes the episode silently; Low again: a new line. While it is open, a route or tool
+    schemas that tip a start alone add nothing; a delegated child or nanny, the owner's Low or Nano and an unknown
+    window send nothing and leave the episode as it is, open or closed."""
     ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
                           task_attempt=None)
     bit = tmp_path.resolve() / "state" / "low_start_episode.json"
@@ -84,7 +100,7 @@ def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
     [(root, event)] = sent
     assert root == tmp_path.resolve() and event["chat_id"] == 7 and event["task_id"] == ""
     assert event["role"] == "system" and event["system_type"] == "low_start_notice" and event["type"] == "send_message"
-    assert event["delivery_id"] == "low_start:rootA:1" and event["text"].startswith("Task rootA started in Max with chapter maps")
+    assert event["delivery_id"] == "low_start:rootA:1" and event["text"].startswith("Task rootA runs in Low for now")
     opened = start("rootB", _room())
     assert opened["task"] == "rootA" and len(sent) == 1  # Low holds: no second line
     for task, room, mode, plan in (("kid", _room(), "low", {"role": "child"}), ("nan", _room("held"), "max", {"role": "nanny"}),
@@ -114,6 +130,23 @@ def test_only_a_start_with_the_opening_work_room_that_holds_max_closes_the_episo
         "low_start:rootA:1", "low_start:rootD:1", "low_start:turnB:1", "low_start:turnD:1"]
     bit = json.loads((tmp_path.resolve() / "state" / "low_start_episode.json").read_text(encoding="utf-8"))
     assert (bit["task"], bit["levels"]) == ("turnD", 1)
+
+
+def test_only_a_held_start_of_the_openers_room_and_work_room_closes_the_episode(tmp_path, sent):
+    """Fable's seat, 22.11.2026: a Max held in another room, or beside another work room, proves nothing of the room
+    whose start went to Low; the episode stays open, so lines never alternate as the owner moves between rooms."""
+    ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
+                          task_attempt=None)
+    starts = (("rootA", "crowded", 1, "1"), ("turnB", "held", 1, "nova"), ("rootC", "crowded", 1, "1"),  # another room
+              ("rootD", "held", 2, "1"), ("rootE", "route", 1, "1"),  # another work room's Max: still open
+              ("rootF", "held", 1, "1"), ("rootG", "route", 1, "1"))  # the opener's room and work room: closed
+    for task, cause, levels, room in starts:
+        loop._note_low_start(ctx, _plan(_room(cause, levels=levels, room_id=room)), "max" if cause == "held" else "low",
+                             task, None)
+    assert [event["delivery_id"] for _root, event in sent] == ["low_start:rootA:1", "low_start:rootG:1"]
+    assert "on this route the window cannot hold" in sent[-1][1]["text"]
+    bit = json.loads((tmp_path.resolve() / "state" / "low_start_episode.json").read_text(encoding="utf-8"))
+    assert (bit["task"], bit["room"], bit["levels"]) == ("rootG", "1", 1)
 
 
 def test_a_failing_outbox_never_fails_the_start_and_keeps_the_episode_closed(tmp_path, monkeypatch, sent):

@@ -261,7 +261,7 @@ def _no_memory_tokens(plan: Any, rendered_mode: str) -> Optional[int]:
 def mode_cause(plan: Any, rendered_mode: str) -> str:
     """Why a candidate renders below the plan's owner mode, from the plan's own facts: ``""`` when it does not; the
     start's own mode carries the start's cause (``ContextFitPlan.start``, ``memory_floor.start_cause``: ``memory``,
-    ``route`` or ``window``), which no reprojection or route rebind replaces; any other lower mode, or a start
+    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces; any other lower mode, or a start
     lowered by no mode switch, is ``after_start`` (taken by the task after its start). A restored task whose start
     was not carried (``context_fit.UNKNOWN_START``) names no cause: ``""`` beside a lower mode is unknown."""
     from ouroboros.memory_floor import start_cause

@@ -1073,14 +1073,14 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         ordinary_measures[mode, level_of] = minimum, math.ceil(price * ratio) + reserve + work()
         return ordinary_measures[mode, level_of]
     minimum, need = ordinary_need() if (kept is None or start_work) and mode == "max" else (floor.NO_VIEW, 0)
-    room_fact = floor.max_room_fact(snapshot, rendered_texts(core, section_views(sections[mode], receipts)),
-        render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(minimum.story_chars),
+    room_fact = floor.max_room_fact(snapshot, rendered_texts(core, forms := section_views(sections[mode], receipts)),
+        render_governance(governance[form[mode]], forms), story=floor.tokens_of(minimum.story_chars), addressed=forms,
         fixed=fixed, ratio=ratio, schemas=tool_schema_tokens(list(sent.schemas), provider=provider, reasoning_effort=reasoning_effort),
         window=window, reserve=reserve, work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
-    if room_fact:
-        room_fact.update(need=need, story=floor.tokens_of(minimum.story_chars), room=floor.tokens_of(minimum.room_chars))
-        if need > window and room_fact["zero_need"] <= window:  # only then can my shortest telling keep the books
-            room_fact["telling_need"] = ordinary_need(floor.telling_level)[1]
+    if room_fact:  # the gate weighs my shortest telling: its need and that memory are printed for every cause
+        told, telling_need = ordinary_need(floor.telling_level) if need > window else (None, 0)
+        room_fact.update(need=need, story=floor.tokens_of(minimum.story_chars), room=floor.tokens_of(minimum.room_chars),
+                         **({"telling_need": telling_need, "telling": floor.memory_tokens(told)} if told else {}))
     running_max_needs_maps = (mode == "max" and form[mode] == "max" and known_window and snapshot
                               and kept is not None and not start_work and held_heads
                               and not telling_fits(mode, sent, section_views(sections[mode], receipts),
@@ -1201,7 +1201,8 @@ def _held_request_cost(core, mode, schemas, current_messages, *, provider, reaso
     return (size + memory + 3) // 4
 
 
-START_CAUSES = ("", "memory", "route", "window")  # ``memory_floor.start_cause``
+# ``memory_floor.start_cause``; ``unmeasured``: a Max start whose route named no window, never a held Max (F1 #10)
+START_CAUSES = ("", "memory", "request", "route", "window", "unmeasured")
 UNKNOWN_START = ("unknown", "")  # a restored task's start its continuation did not carry: never the restore's fit
 
 
@@ -1328,12 +1329,15 @@ def build_context_fit_plan(
         if not (early and route_resolver.early):
             raise
         refused, contents, initial_mode, delivered = unfit, {}, "", {}
-    if early and route_resolver.early and (refused or narrowed_by_window(contents, initial_mode, preferred, state, delivered)):
+    if (early and route_resolver.early and (refused or narrowed_by_window(contents, initial_mode, preferred, state, delivered))
+            or not state.known_window):
         # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view, or none,
         # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
-        # the same frame is not repeated unless it was refused.
+        # the same frame is not repeated unless it was refused. A start whose route named no window asks it once more
+        # before its first send (F1 #10): a window then known is walked like any answer; no bound is guessed.
         with another_pass():  # a repeat by design, not work done again (``context_health`` names only the latter)
-            late = frame(*answer(lambda: route_resolver.again(task)))
+            late = frame(*answer(lambda: route_resolver.again(task) if early else timed(
+                "fit.route", route_resolver, task, allow_fetch=True)))
             if refused is not None or late.walked != state.walked:
                 contents, initial_mode, delivered = walk(late)
         state = late
@@ -1426,7 +1430,8 @@ def build_context_fit_plan(
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
         start_nano_base=nano_base,
         start_reasoning_effort=reasoning_effort,
-        start=(initial_mode, "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
+        start=(initial_mode, "unmeasured" if initial_mode == "max" and not known_window
+               else "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
     )
 
 
