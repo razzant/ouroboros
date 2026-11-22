@@ -1,7 +1,7 @@
 """``GET /api/recall``: the neighbour door over the conversation (``ouroboros/gateway/recall.py``).
 
-The door projects the words reader (``dialogue_recall.collect``) outward and reopens one row through the shared row
-resolver: admitted dialogue rows of every room and nothing else, each a closed ``RecallRow``; every printed reader is
+The door projects the words reader (``dialogue_recall.search``) outward and reopens one row through the shared row
+resolver: dialogue rows of the rooms a person reads (Main, Projects, places) and nothing else, each a closed ``RecallRow``; every printed reader is
 the door's own; no model turn; one content-free event per admitted call. Who may call (the raw loopback peer) is
 pinned in ``tests/test_browser_boundary.py``.
 """
@@ -96,7 +96,10 @@ def test_an_unadmitted_row_is_not_found_even_by_its_known_address(tmp_path):
     synthetic = next(entry.row for entry in ds.iter_rows(tmp_path, "chat") if entry.row["chat_id"] == -3)
     admitted = _search(tmp_path, "archive")["rows"][0]["address"]
     assert _ok(tmp_path, ("row", admitted))["row"]["fields"][0]["text"] == "archive admitted"
-    hidden = _refused(tmp_path, ("row", recall._full_address(synthetic)))
+    from ouroboros.chat_chain import row_address
+
+    address = row_address(synthetic)
+    hidden = _refused(tmp_path, ("row", f"row:{address['chat_id']}@{address['ts']}#{address['row_sha256']}"))
     missing = _refused(tmp_path, ("row", "row:1@2026-11-01T10:00:00Z#" + "0" * 64))
     assert hidden == missing == (404, {"error": recall._NOT_FOUND, "code": "recall_row_not_found"})
 
@@ -283,14 +286,12 @@ def test_no_runnable_next_while_the_capture_is_unstable_and_dash_values_round_tr
     assert cli.build_parser().parse_args(stable["next"]["cli"]).words == ["-rf"]
     with pytest.raises(SystemExit):  # the plain two-argument form would be read as an option
         cli.build_parser().parse_args(["recall", "--words", "-rf"])
-    capture = dialogue_recall.collect
+    capture = dialogue_recall.search
 
     def unstable(*args, **kwargs):
-        found = capture(*args, **kwargs)
-        found["coverage"] = {**found["coverage"], "snapshot_stable": False}
-        return found
+        return {**capture(*args, **kwargs), "snapshot": None}  # the reader's answer when the capture is unstable
 
-    monkeypatch.setattr(dialogue_recall, "collect", unstable)
+    monkeypatch.setattr(dialogue_recall, "search", unstable)
     shaky = _search(tmp_path, "-rf", count=1)
     assert shaky["next"] is None and shaky["snapshot"] is None and shaky["more"] == 2 and shaky["observed"] == 3
     assert shaky["notes"] == ["no continuation: the capture did not stabilize (part of the conversation is still "
@@ -324,3 +325,46 @@ def test_unreadable_owner_accounts_are_noted_on_search_and_reopen(tmp_path, monk
     monkeypatch.setattr(ouroboros.places, "place_owner_accounts", broken)
     assert _search(tmp_path, "archive")["notes"] == [recall.OWNER_ACCOUNTS_NOTE]
     assert _ok(tmp_path, ("row", address))["notes"] == [f"{recall.OWNER_ACCOUNTS_NOTE} (OSError)"]
+
+
+def test_the_door_serves_the_rooms_not_hidden_work_and_the_mind_still_reads_everything(tmp_path):
+    """The world of ``tests/test_chat_history_source_recovery.py``: Main, a Project's own row, a Main task bound to
+    the Project, hidden work (chat 0) alone and bound, and synthetic A2A. The door answers what a room shows."""
+    from ouroboros.memory import Memory
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    project = create_project(tmp_path, "room", name="Room")
+    bind_task_to_project(tmp_path, "bound", project["id"], origin={"absent": "system"})
+    bind_task_to_project(tmp_path, "hidden-bound", project["id"], origin={"absent": "system"})
+    for minute, (text, chat, task) in enumerate([
+            ("archive main", 1, ""), ("archive direct", project["chat_id"], ""), ("archive bound", 1, "bound"),
+            ("archive hidden", 0, "hidden"), ("archive hidden bound", 0, "hidden-bound"), ("archive a2a", -100, "")]):
+        _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", text, chat_id=chat, direction="out",
+             **({"task_id": task} if task else {}))
+    found = _search(tmp_path, "archive", order="oldest")
+    texts = [row["fields"][0]["text"] for row in found["rows"]]
+    assert texts == ["archive main", "archive direct", "archive bound", "archive hidden bound"]
+    assert found["total"] == 4 and found["observed"] == 4
+    by_text = {row["fields"][0]["text"]: row for row in found["rows"]}
+    assert by_text["archive bound"]["rooms"] == [str(project["chat_id"])]  # it shows in the Project now
+    assert by_text["archive hidden bound"]["room_id"] == str(project["chat_id"])
+    assert all("0" not in row["rooms"] for row in found["rows"])
+    for row in found["rows"]:
+        assert _ok(tmp_path, *_run(row["reopen"]))["row"]["address"] == row["address"]
+    hidden = next(entry.row for entry in ds.iter_rows(tmp_path, "chat") if entry.row["text"] == "archive hidden")
+    from ouroboros.chat_chain import row_address
+
+    address = row_address(hidden)
+    full = f"row:{address['chat_id']}@{address['ts']}#{address['row_sha256']}"
+    assert _refused(tmp_path, ("row", full)) == _refused(tmp_path, ("row", "row:0@2026-11-01T10:03:00Z#" + "0" * 64))
+    mind = dialogue_recall.words_history(Memory(drive_root=tmp_path), dialogue_recall.parse(["archive hidden"]),
+                                         room=None, filters={})
+    assert "archive hidden" in mind and "total=2" in mind  # the mind's own reader keeps every row
+
+
+def test_voice_owner_at_the_door_finds_a_card_the_owner_answered_by_its_question(tmp_path):
+    _answered_card(tmp_path)
+    _say(tmp_path, "2026-11-01T12:01:00Z", "When do we archive? asked by Ouroboros", direction="out")
+    owner = _search(tmp_path, "when do we archive", voice="owner")
+    assert [row["matched"] for row in owner["rows"]] == [["question"]]
+    assert _search(tmp_path, "when do we archive")["total"] == 2

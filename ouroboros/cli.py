@@ -651,8 +651,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     recall = subparsers.add_parser(
         "recall", help="find dialogue rows by words or reopen one row (no model turn)",
-        description="Find dialogue rows by words, or reopen one row, without a model turn. A search of every room "
-                    "reads the whole conversation and can take a minute or more on a large one; --room-id narrows it.")
+        description="Find dialogue rows by words, or reopen one row, without a model turn. With the word index "
+                    "built a search of every room answers in under a second; until it is built, or without FTS5, it "
+                    "reads the whole conversation and can take a minute or more; --room-id narrows that.")
     form = recall.add_mutually_exclusive_group(required=True)
     form.add_argument("--words", action="append", help="word prefixes that must all occur in one field of one row "
                       "(quote a part for an exact word or phrase); repeat for alternatives")

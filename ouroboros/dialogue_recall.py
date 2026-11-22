@@ -338,7 +338,8 @@ def _reader(room: Optional[int], row: Mapping[str, Any], address: str) -> str:
 
 
 def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "", order: str = "",
-           count: int = 100, offset: int = 0, snapshot: str = "", filters: Mapping[str, str]) -> Dict[str, Any]:
+           count: int = 100, offset: int = 0, snapshot: str = "", filters: Mapping[str, str],
+           visible_only: bool = False) -> Dict[str, Any]:
     """One page of a words read as data, for the two faces that print it (``words_history`` here, the door).
 
     Keys: ``refused`` (a snapshot sentence, else ``None``); ``hits`` (each: ``row``, ``seq``, ``sha256``,
@@ -347,7 +348,9 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
     ``text``, ``speaker`` (``author|asker|owner|closer|host``), ``label``), ``seals`` (``[(room, page)]``));
     ``total`` (exact, else ``None``) and ``observed``; ``offset``, ``more``; ``gaps``, ``notes``, ``seal_gap``;
     ``snapshot`` (this page's token, ``None`` when the capture did not stabilize), ``beyond`` (the token of
-    the next re-check window, else ``None``); ``span`` (the examined range of a windowed read); ``path``."""
+    the next re-check window, else ``None``); ``span`` (the examined range of a windowed read); ``path``.
+    ``visible_only`` (the neighbour door) keeps only rows a visible room shows now (a positive room id: Main, a
+    Project, a place), resolved by the room rule before counting and paging; the mind's reads keep every row."""
     from ouroboros.chat_chain import format_address, row_address, source_row_id
     from ouroboros.dialogue_provenance import owner_speech, row_author
     from ouroboros.memory import chat_history_filter, normalized_chat_history_query
@@ -392,11 +395,16 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         if identity not in seen:  # one source row, whatever its fields or physical copies
             seen.add(identity)
             hits_all.append((seq, row))
+    if visible_only:  # the hidden partition (0) and synthetic traffic are no room a person reads
+        shown, rooms_gap = _showing(root, hits_all)
+        hits_all = [(seq, row) for seq, row in hits_all if any(chat > 0 for chat in shown[seq])]
+        notes.extend([rooms_gap] if rooms_gap else [])
     stable = bool(coverage.get("snapshot_stable")) and _text_revision(root) == revision
     windowed = read["bounded"] or bool(start)
     normalized = {**normalized_chat_history_query(filters, ""), "words": list(query.items),
                   "room_id": "" if room is None else str(room), "voice": voice, "order": order or "newest",
-                  "chat_text_revision": revision, "plan": read["plan"] if windowed else ""}
+                  "chat_text_revision": revision, "plan": read["plan"] if windowed else "",
+                  **({"visible_only": True} if visible_only else {})}
     current = _snapshot(coverage, normalized)
     result: Dict[str, Any] = {"refused": None, "path": read["path"], "span": "", "beyond": None}
     if requested and (not stable or requested != current):

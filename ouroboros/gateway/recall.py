@@ -4,7 +4,8 @@ A program on this computer (Claude Code, Codex, Cursor) finds the original rows 
 words and reopens one row, without waking Ouroboros: no model turn, no dispatch, no reply. Two exclusive forms:
 ``words`` (repeatable: alternatives) with ``room_id``, ``voice``, ``order``, ``date_from``, ``date_to``,
 ``count``, ``offset`` and ``snapshot``; or one ``row`` address. The search is the words reader's own
-(``dialogue_recall.collect``) over every room it admits; this module only projects it outward.
+(``dialogue_recall.search``) over the rooms a person reads (Main, Projects, places: never the hidden partition
+or synthetic traffic, by search or by address); this module only projects it outward.
 
 Who may call is decided before this handler on the raw transport peer (``server_auth.recall_serving_app``); the
 handler requires that admission again, so no other assembly of the app opens the door. Dialogue only: each row is
@@ -59,14 +60,12 @@ def _reader(params: Sequence[Tuple[str, str]]) -> Dict[str, Any]:
             "cli": ["recall", *cli]}
 
 
-def _full_address(row: Mapping[str, Any]) -> str:
-    from ouroboros.chat_chain import row_address
-
-    address = row_address(row)  # a SourceProjection keeps its source body's identity
-    return f"row:{address['chat_id']}@{address['ts']}#{address['row_sha256']}"
+def _outward(text: str) -> str:
+    """A sentence of the words reader in the door's voice: its reader is another program, not Ouroboros."""
+    return str(text).replace("my human's", "the owner's").replace("my human", "the owner")
 
 
-def _speaker_label(row: Mapping[str, Any], author: Mapping[str, Any]) -> str:
+def _speaker_label(row: Mapping[str, Any], author: Mapping[str, Any], api_door: bool) -> str:
     from ouroboros.dialogue_provenance import dialogue_provenance
     from ouroboros.dialogue_recall import API_DOOR_NOTE
 
@@ -74,36 +73,49 @@ def _speaker_label(row: Mapping[str, Any], author: Mapping[str, Any]) -> str:
     provenance = dialogue_provenance(row)
     if provenance and provenance not in who:
         who += f" [{provenance}]"
-    surface = row.get("client_surface") if isinstance(row.get("client_surface"), Mapping) else {}
-    return who + (f"; {API_DOOR_NOTE}" if surface.get("channel") == "api_command" else "")
+    return who + (f"; {API_DOOR_NOTE}" if api_door else "")
 
 
-def row_view(root: pathlib.Path, row: Mapping[str, Any], *, author: Mapping[str, Any], fields: Sequence[Any],
-             matched: Sequence[str], rooms: Any, shown_in: Optional[int] = None, query: Any = None) -> Dict[str, Any]:
-    """The closed outward projection of one row. With ``query`` (a search answer) a plain message shows its matched
-    field as an excerpt and a card every field; without it (a reopened row) every field whole."""
-    from ouroboros.dialogue_recall import _excerpt, _speaker  # shared names once the words reader publishes them
-    from ouroboros.room_appearances import frame_rooms
+def row_view(hit: Mapping[str, Any], *, labels: Any, query: Any = None) -> Dict[str, Any]:
+    """The closed outward projection of one hit in ``dialogue_recall.search``'s shape. Only the visible rooms that
+    show the row are named (the caller admitted it by them). With ``query`` (a search answer) a plain message shows
+    its matched field as an excerpt and a card every field; without it (a reopened row) every field whole."""
+    from ouroboros.dialogue_recall import EXCERPT_CHARS
+    from ouroboros.dialogue_words import excerpt
 
-    address = _full_address(row)
-    own = address[len("row:"):].split("@", 1)[0]
-    shown = [own]
-    for room in (shown_in, *(frame_rooms(root, row, stamped_only=True).get("also_rooms") or [])):
-        if room is not None and str(room) not in shown:
-            shown.append(str(room))
-    card = len(fields) > 1 or bool(fields and fields[0].name != "text")
-    listed = fields if query is None or card else [field for field in fields if field.name in matched]
+    row, written = hit["row"], int(hit["written_chat"])
+    address = f"row:{written}@{row.get('ts') or ''}#{hit['sha256']}"  # the full digest: no short-prefix collision
+    visible = [chat for chat in hit["rooms"] if chat > 0]
+    own = written if written in visible else visible[0]
+    fields = hit["fields"]
+    card = len(fields) > 1 or bool(fields and fields[0]["name"] != "text")
+    listed = fields if query is None or card else [field for field in fields if field["name"] in hit["matched"]]
     view: Dict[str, Any] = {
-        "address": address, "room_id": own, "room": rooms.label(row), "rooms": shown,
-        "ts": str(row.get("ts") or ""), "speaker": _speaker_label(row, author), "matched": list(matched),
-        "fields": [{"name": field.name, "speaker": _FIELD_SPEAKERS.get(field.speaker) or _speaker(field, row, author),
-                    "text": field.text if query is None else _excerpt(field.text, query)} for field in listed],
+        "address": address, "room_id": str(own), "room": labels.label({"chat_id": own}),
+        "rooms": [str(own), *(str(chat) for chat in visible if chat != own)],
+        "ts": str(row.get("ts") or ""), "speaker": _speaker_label(row, hit["author"], hit["api_door"]),
+        "matched": list(hit["matched"]),
+        "fields": [{"name": field["name"], "speaker": _FIELD_SPEAKERS.get(field["speaker"]) or field["label"],
+                    "text": field["text"] if query is None else excerpt(query, field["text"], EXCERPT_CHARS)}
+                   for field in listed],
         "reopen": _reader([("row", address)])}
-    reply = row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}
-    if str(reply.get("address") or ""):
-        view["reply_to"] = str(reply["address"])
-        view["reply_unresolved"] = bool(reply.get("unresolved"))
+    if hit["reply_to"]:
+        view["reply_to"] = hit["reply_to"]
+        view["reply_unresolved"] = bool(hit["reply_unresolved"])
     return view
+
+
+def _showing(root: pathlib.Path, row: Mapping[str, Any], written: int) -> Tuple[List[int], str]:
+    """The rooms that show ``row`` now by the room rule (``room_membership.row_rooms``), as the words reader
+    resolves its hits; with the registry unreadable, the chat it was written in, said."""
+    from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
+    from ouroboros.room_membership import row_rooms
+
+    try:
+        projects, rooms = frozenset(reserved_project_chat_ids(root, strict=True)), RoomResolver(root, strict=True)
+        return sorted(row_rooms(written, row, projects, rooms)), ""
+    except Exception as exc:
+        return [written], f"rooms_unreadable ({type(exc).__name__}): the row names the chat it was written in"
 
 
 def _owner_accounts(root: pathlib.Path) -> Tuple[Optional[Mapping[str, Any]], str]:
@@ -126,7 +138,7 @@ def _integer(values: Mapping[str, str], name: str, default: int, low: int, high:
 
 
 def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> Dict[str, Any]:
-    """One ``RecallSearchResponse`` page from the words reader (``dialogue_recall.collect``)."""
+    """One ``RecallSearchResponse`` page from the words reader (``dialogue_recall.search``), visible rooms only."""
     from ouroboros import dialogue_recall
     from ouroboros.dialogue_provenance import RoomLabelResolver
     from ouroboros.memory import Memory
@@ -142,39 +154,39 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
                                                       filters=filters)
     except ValueError as exc:
         raise Refusal(400, "recall_bad_request", str(exc)) from None
-    found = dialogue_recall.collect(Memory(drive_root=root), query, room=room, voice=voice, order=order,
-                                    filters=filters)
-    rows, coverage, current = found["rows"], found["coverage"], found["snapshot"]
-    requested = str(values.get("snapshot", "") or "").strip().lower()
-    if requested and (not coverage.get("snapshot_stable") or requested != current):
+    found = dialogue_recall.search(Memory(drive_root=root), query, room=room, voice=voice, order=order, count=count,
+                                   offset=offset, snapshot=str(values.get("snapshot", "") or ""), filters=filters,
+                                   visible_only=True)
+    if found["refused"]:
         raise Refusal(409, "recall_snapshot_changed", "the conversation or the query changed since this snapshot; "
                       "no mixed page was returned: start again without snapshot and offset")
-    page = rows[offset:offset + count]
-    more = max(0, len(rows) - offset - len(page))
-    stable = bool(coverage.get("snapshot_stable"))
     same = [("words", item) for item in words] + [(key, text) for key, text in (
         ("room_id", room_text), ("voice", voice), ("order", order), *((key, filters[key]) for key in filters))
         if text]
-    following = [*same, ("count", str(count)), ("offset", str(offset + len(page)))] + (
-        [("snapshot", current)] if stable else [])
-    labels = RoomLabelResolver(root)
-    # the words reader's note in its own voice becomes the door's; under voice=owner it is already a gap
-    notes = [OWNER_ACCOUNTS_NOTE] if found.get("said") and voice != "owner" else []
-    if more and not stable:
+    current, hits, more = found["snapshot"], found["hits"], found["more"]
+    following = None
+    if current and more:  # the next page of this capture
+        following = [*same, ("count", str(count)), ("offset", str(offset + len(hits))), ("snapshot", current)]
+    elif current and found["beyond"]:  # the next re-check window of a bounded read
+        following = [*same, ("count", str(count)), ("snapshot", found["beyond"])]
+    notes = [_outward(note) for note in found["notes"]]
+    if current is None and (more or found["beyond"]):
         notes.append("no continuation: the capture did not stabilize (part of the conversation is still importing); "
                      "ask again from offset 0 when the import has finished")
+    labels = RoomLabelResolver(root)
     return {"mode": "search", "words": list(words), "room_id": room_text, "voice": voice, "order": order or "newest",
-            "total": None if found["gaps"] else len(rows), "observed": len(rows), "offset": offset, "more": more,
-            "snapshot": current if stable else None, "next": _reader(following) if more and stable else None,
-            "gaps": list(found["gaps"]), "notes": notes,
-            "rows": [row_view(root, row, **found["hits"][id(row)], rooms=labels, shown_in=room, query=query)
-                     for row in page]}
+            "total": found["total"], "observed": found["observed"], "offset": found["offset"], "more": more,
+            "snapshot": current, "next": _reader(following) if following else None,
+            "gaps": [_outward(gap) for gap in found["gaps"]], "notes": notes,
+            "rows": [row_view(hit, labels=labels, query=query) for hit in hits]}
 
 
 def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
-    """One ``RecallRowResponse``: the admitted row at ``text`` whole, through the shared row resolver."""
-    from ouroboros.chat_chain import parse_address, resolve_row
+    """One ``RecallRowResponse``: the row at ``text`` whole, through the shared row resolver, when a visible room
+    shows it; a hidden-only or synthetic row answers exactly as a missing one."""
+    from ouroboros.chat_chain import parse_address, resolve_row, row_address, source_row_id
     from ouroboros.dialogue_provenance import RoomLabelResolver, row_author
+    from ouroboros.dialogue_recall import field_speaker
     from ouroboros.dialogue_words import fields_of
 
     try:
@@ -195,10 +207,21 @@ def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
                                                        "address can be neither found nor ruled out")
     if row is None or is_a2a_chat_id(row.get("chat_id")):
         raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
+    written = int(row_address(row)["chat_id"])
+    rooms, rooms_note = _showing(root, row, written)
+    if not any(chat > 0 for chat in rooms):  # the hidden partition is no room a person reads
+        raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
     accounts, note = _owner_accounts(root)
     author = row_author(row, owner_accounts=accounts)
-    return {"mode": "row", "row": row_view(root, row, author=author, fields=fields_of(row), matched=[],
-                                           rooms=RoomLabelResolver(root)), "notes": [note] if note else []}
+    surface = row.get("client_surface") if isinstance(row.get("client_surface"), Mapping) else {}
+    reply = row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}
+    hit = {"row": row, "written_chat": written, "sha256": source_row_id(row), "rooms": rooms, "author": author,
+           "api_door": surface.get("channel") == "api_command", "matched": [],
+           "reply_to": str(reply.get("address") or ""), "reply_unresolved": bool(reply.get("unresolved")),
+           "fields": [{"name": field.name, "text": field.text, "speaker": field.speaker,
+                       "label": field_speaker(field, row, author)} for field in fields_of(row)]}
+    return {"mode": "row", "row": row_view(hit, labels=RoomLabelResolver(root)),
+            "notes": [item for item in (note, rooms_note) if item]}
 
 
 def _chat_id(text: str) -> bool:

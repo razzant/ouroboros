@@ -3,8 +3,8 @@
 ``GET /api/chat/history`` projects the dialogue store's stored chat and progress rows
 (``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``); ``GET /api/chat/search``
 reads a room's saved messages for a word search (``gateway/chat_search.py``); ``GET /api/recall`` is the
-neighbour door over the words reader (``gateway/recall.py``). The JSDoc twin is
-``web/modules/client_contract_types.js``.
+neighbour door over the words reader (``gateway/recall.py``; its JSDoc twins are
+``web/modules/recall_contract_types.js``). The JSDoc twin of the rest is ``web/modules/client_contract_types.js``.
 """
 
 from __future__ import annotations
@@ -474,8 +474,8 @@ class RecallRow(TypedDict, total=False):
 
 
 class RecallSearchResponse(TypedDict):
-    """``GET /api/recall?words=…``: one page of admitted dialogue rows of every room (or ``room_id``) whose words
-    match, in the caller's ``order`` of time, never ranked. ``total`` is exact when the read was complete, else
+    """``GET /api/recall?words=…``: one page of the dialogue rows that the rooms a person reads show (or one
+    ``room_id``) whose words match, in the caller's ``order`` of time, never ranked. ``total`` is exact when the read was complete, else
     null with ``observed`` and the named ``gaps``; ``next`` continues the same capture (``snapshot``) and is null
     when the capture did not stabilize (``notes`` says so). ``notes`` qualify labels without touching the count."""
 
