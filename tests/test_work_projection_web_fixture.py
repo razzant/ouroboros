@@ -144,23 +144,34 @@ CASES = {
                                                                "any_mail": True}}}}, {}, {},
     ),
     # Owner 21.11.2026 («5A»): a queued root says behind which listed work it stands, by that work's name, as the
-    # chooser recorded it (``project_lease.note_lane_wait``): its Project's lane, or a folder's another Project holds.
+    # census reads the queue now (``dispatch_choice.lane_waits``): its Project's lane, or a folder another Project keeps.
     "queued_behind_project": (
         [_row("qh", suggested_name="Add Ollama support"), _row("qp", "queued", started_at=90.0)],
         {"qh": {**_RUNNING, "suggested_name": "Add Ollama support"},
          "qp": {"suggested_name": "Check CI after the merge",
-                "_lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+                "lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
     ),
     "queued_behind_folder": (
         [_row("qh", suggested_name="Add Ollama support"), _row("qf", "queued", started_at=90.0)],
         {"qh": {**_RUNNING, "suggested_name": "Add Ollama support"},
-         "qf": {"_lane_wait": {"lane": "folder", "task_id": "qh", "project_id": "nano", "folder": "/work/shared"}}},
+         "qf": {"lane_wait": {"lane": "folder", "task_id": "qh", "project_id": "nano", "folder": "/work/shared"}}},
         {}, {},
     ),
-    # The holder the note names is not a work the census lists: nothing is claimed.
+    # A retried holder (its row is the retry, the wait names its tree) and one whose queue row holds no name of its own
+    # (the census row's derived name) are named as their work reads.
+    "queued_behind_retry": (
+        [_row("qh-r2", original_task_id="qh", root_task_id="qh"), _row("qr", "queued", started_at=90.0)],
+        {"qh-r2": {**_RUNNING, "original_task_id": "qh", "root_task_id": "qh", "suggested_name": "Add Ollama support"},
+         "qr": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    "queued_behind_derived_name": (
+        [_row("qh", suggested_name="Add Ollama support"), _row("qd", "queued", started_at=90.0)],
+        {"qh": _RUNNING, "qd": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    # The holder the wait names is not a work the list holds: nothing is claimed.
     "queued_behind_unlisted": (
         [_row("qu", "queued", started_at=90.0)],
-        {"qu": {"_lane_wait": {"lane": "project", "task_id": "gone", "project_id": "nano"}}}, {}, {},
+        {"qu": {"lane_wait": {"lane": "project", "task_id": "gone", "project_id": "nano"}}}, {}, {},
     ),
     "unknown": ([_row("u", "unknown")], {}, {}, {}),
     "ended_with_runs": ([], {}, {"r": {"task_id": "r", "status": "done", "chat_id": 42}}, {"r": ["run-1", "run-2"]}),

@@ -106,7 +106,7 @@ def _in(project, tid, folder="", *, role="", root="", **fields):
 
 def test_one_recorded_folder_is_one_lane_whichever_room_starts_work_in_it():
     """Owner 15.11.2026: independent pooled work in one external folder waits its turn across rooms."""
-    from ouroboros.project_lease import lane_holders, note_lane_wait
+    from ouroboros.project_lease import lane_holders, lane_wait
 
     shared = "/work/shared"
     writer = _in("p", "p1", shared)
@@ -128,45 +128,36 @@ def test_one_recorded_folder_is_one_lane_whichever_room_starts_work_in_it():
     moving = _in("r", "r2", "/work/old", _placement_folder=shared)
     assert not candidate_is_leasable(moving, leased, holders=holders)
     assert candidate_is_leasable({**moving, "_placement_folder": ""}, leased, holders=holders)
-    # The mind's roster names the holder and its room; a free folder clears it.
-    assert note_lane_wait(newcomer, running, [newcomer], holders)
-    assert newcomer["_lane_wait"] == {"lane": "folder", "task_id": "p1", "project_id": "p", "folder": shared}
-    assert not note_lane_wait(newcomer, running, [newcomer], holders), "unchanged: nothing to publish"
-    assert note_lane_wait(newcomer, [], [newcomer], lane_holders([], [newcomer])) and "_lane_wait" not in newcomer
+    # The wait names the holder and its room; a free folder names nobody. Nothing is written on the row.
+    before = dict(newcomer)
+    assert lane_wait(newcomer, running + [newcomer], holders) == {"lane": "folder", "task_id": "p1", "project_id": "p",
+                                                                  "folder": shared}
+    assert lane_wait(newcomer, [newcomer], lane_holders([], [newcomer])) == {} and newcomer == before
 
 
 def test_a_queued_root_names_the_tree_keeping_its_projects_lane_first_and_nothing_else_ever():
-    """Owner 21.11.2026 («5A»): the queue stays as it is, and the waiting root records behind which work it stands.
-    The Project's lane is the nearer cause; the folder's names a holder of another Project. Never a helper, a
-    conversation turn, unscoped work, nor a row the walk itself picked (``waits``: who holds a lane now)."""
-    from ouroboros.project_lease import lane_holders, note_lane_wait
+    """Owner 21.11.2026 («5A»): the queue stays as it is, and a waiting root says behind which work it stands now.
+    The Project's lane is the nearer cause; the folder's names a holder of another Project. Never a helper, unscoped
+    work or the row's own tree (``project_lease.lane_wait``, pure: it changes no row)."""
+    from ouroboros.project_lease import lane_holders, lane_wait
 
     shared = "/work/shared"
     writer, sibling = _in("p", "p1", shared), _in("p", "p2", shared)
     running = [_meta(writer)]
     holders = lane_holders(running, [sibling])
     assert not candidate_is_leasable(sibling, running_project_ids(running), holders=holders)
-    assert note_lane_wait(sibling, running, [sibling], holders)
-    assert sibling["_lane_wait"] == {"lane": "project", "task_id": "p1", "project_id": "p"}, "its Project's lane first"
-    without_folder = _in("p", "p3")
-    assert note_lane_wait(without_folder, running, [without_folder], holders)
-    assert without_folder["_lane_wait"] == {"lane": "project", "task_id": "p1", "project_id": "p"}
-    # Several holders: the first in sorted order.
-    assert note_lane_wait(without_folder, [], [without_folder], {"p": {"zz", "aa", "p3"}})
-    assert without_folder["_lane_wait"]["task_id"] == "aa"
-    # The holder leaves: the note goes.
-    assert note_lane_wait(sibling, [], [sibling], lane_holders([], [sibling])) and "_lane_wait" not in sibling
-    # Never noted, whatever holds the lane: a helper, unscoped work, its own tree's lane.
+    rows = running + [sibling]
+    assert lane_wait(sibling, rows, holders) == {"lane": "project", "task_id": "p1", "project_id": "p"}, \
+        "its Project's lane first"
+    assert lane_wait(_in("p", "p3"), rows, holders) == {"lane": "project", "task_id": "p1", "project_id": "p"}
+    assert lane_wait(_in("p", "p3"), [], {"p": {"zz", "aa", "p3"}})["task_id"] == "aa", "the first in sorted order"
+    assert lane_wait(sibling, [sibling], lane_holders([], [sibling])) == {}, "the holder left: nobody"
     for row in (_in("p", "kid", shared, role="subagent", root="q9"), _in("", "plain", shared),
                 _in("p", "p1-retry", root="p1")):
-        assert not note_lane_wait(row, running, [row], holders) and "_lane_wait" not in row, row["id"]
-    # A conversation turn holds no lane, so a row behind it names nobody; a row the walk picked is never named.
+        assert lane_wait(row, rows, holders) == {}, row["id"]
     turn = [{**_meta(writer), "lane": "conversation"}]
-    assert not note_lane_wait(sibling, turn, [sibling], lane_holders(turn, [sibling]))
-    picked = [{"task": _in("p", "picked")}]
-    assert not note_lane_wait(sibling, picked, [sibling], lane_holders([], [sibling])), "waits: not the walk's pick"
-    assert not candidate_is_leasable(sibling, running_project_ids(picked), holders=lane_holders(picked, [sibling]))
-
+    assert lane_wait(sibling, turn + [sibling], lane_holders(turn, [sibling])) == {}, "a conversation turn holds none"
+    assert "_lane_wait" not in sibling and "lane_wait" not in sibling
 
 def test_earlier_holders_of_one_folder_never_lock_each_other_and_a_newcomer_waits_for_all():
     """Two trees that already held one folder (cold: asleep beside a live helper) take turns; a new one waits."""

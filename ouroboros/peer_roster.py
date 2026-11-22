@@ -19,7 +19,7 @@ pause; an unrecognized reason stays ``unknown`` with that reason) -- for a root
 that waits, its ``tails`` (what of its tree still runs, typed and worded as the
 owner's card says it, ``gateway/work_status.py``) -- for a queued root another
 tree keeps out of its Project's or its folder's lane and nothing holds or pauses, that holder, the lane and
-its Project as the chooser last saw them (``lane_wait``, ``project_lease.note_lane_wait``) -- and the dated authored
+its Project as its published queue row says (``lane_wait``, ``dispatch_choice.lane_waits``) -- and the dated authored
 focus of any root that has not settled.  The task result is read per row; the
 open delegated runs are one custody read per roster.  A source a row's read could not
 open is named on that row (``unavailable``): the facts it holds are unknown at
@@ -488,11 +488,11 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str,
         waiting += _queue_hold_facts(task, stored, waiting)
     from ouroboros.work_stop import stop_presentation
     view = stop_presentation({**stored, **task}, {"owner": stored.get("owner_pause") or {}})
-    # Who keeps its lane, as the chooser last noted it on a pass that reached the row's lane; its hold, pause and
-    # sleep gates come first, so a row stopped, refused, asleep or held since waits for that, not for that holder.
-    if (not settled and status == "pending" and isinstance(task.get("_lane_wait"), dict)
+    # Who keeps its lane, as the queue published it beside the row; its hold, pause and sleep come first, so a row
+    # stopped, refused, asleep or held waits for that, not for that holder.
+    if (not settled and status == "pending" and isinstance(queue_row.get("lane_wait"), dict)
             and not (view["stop"] or view["refusal"] or view["waiting"] or row.get("project_admission_hold"))):
-        row["lane_wait"] = dict(task["_lane_wait"])
+        row["lane_wait"] = dict(queue_row["lane_wait"])
     if view["stop"] or view["refusal"]:
         row.update(stop=view["stop"], release=view["release"], refusal=view["refusal"])
     if waiting:

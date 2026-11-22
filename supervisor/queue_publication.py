@@ -378,6 +378,9 @@ def _capture(reason: str, *, census: Optional[str] = None,
         log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
         _STATE["kept"] = _custody_key()
         return None
+    from supervisor.dispatch_choice import lane_waits
+
+    waits = lane_waits()  # derived beside the row (who keeps its lane now), never part of its task
     pending_rows = []
     for t in pending_items:
         pending_rows.append({
@@ -390,6 +393,7 @@ def _capture(reason: str, *, census: Optional[str] = None,
                                                         'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec',
                                                         '_execution_owner',  # its carrier: a returned turn keeps its lane
                                                         ) if key in t}}),
+            **({"lane_wait": waits[str(t.get("id") or "")]} if str(t.get("id") or "") in waits else {}),
         })
     running_rows = []
     for task_id, meta in running_items:

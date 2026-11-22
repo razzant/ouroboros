@@ -629,10 +629,15 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
     unconfirmed: List[str] = []  # tasks whose action address the measurement could not prove
     # The census rows' own names: what a sleep waits for is said by them, never by an id or a new read.
     names = {task_id: _first_name(facts) for task_id, facts in raw.items()}
+    # The work a queued root stands behind is named as that tree's work reads in this list, else by its census row.
+    shown = {tid: _first_name(raw.get(tid) or {}, row) for tid, row in rows.items()}
+    for entry in groups.values():
+        work_name = entry["name"] or next(filter(None, (_first_name(facts) for _row, facts, _ in entry["rows"])), "")
+        shown.update((root, work_name) for root in entry["roots"] if work_name)
     for work_id, entry in groups.items():
         members, live_roots, owners_by_root, paused_roots = [], [], {}, {}
         for row, facts, root_id in entry["rows"]:
-            member = ws.classify_member(row, _member_raw(row, facts, obs, root_id), names)
+            member = ws.classify_member(row, _member_raw(row, facts, obs, root_id), names, shown)
             members.append(member)
             owners_by_root.setdefault(root_id, []).append(member)
             if _episode_row(row, facts, root_id):

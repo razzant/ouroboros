@@ -2563,7 +2563,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -2644,7 +2645,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        }
       }
      },
@@ -2729,7 +2731,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -2812,7 +2815,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        }
       }
      },
@@ -2846,6 +2850,347 @@
      "works": [
       "qh",
       "qf"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_retry": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "Add Ollama support",
+     "episode": {
+      "task_id": "qh-r2",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh-r2"
+      ],
+      "states": {
+       "qh-r2": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": [],
+        "mark": "moving"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh-r2"
+      },
+      {
+       "action": "hurry",
+       "target": "qh-r2"
+      },
+      {
+       "action": "pause",
+       "target": "qh-r2"
+      },
+      {
+       "action": "stop",
+       "target": "qh-r2",
+       "scope": "cascade"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qr",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qr",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Add Ollama support”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "project",
+        "name": "Add Ollama support"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qr"
+      ],
+      "states": {
+       "qr": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Add Ollama support”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "project",
+           "name": "Add Ollama support"
+          }
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qr"
+      },
+      {
+       "action": "stop",
+       "target": "qr",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qr"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_derived_name": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qh",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh"
+      ],
+      "states": {
+       "qh": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": [],
+        "mark": "moving"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh"
+      },
+      {
+       "action": "hurry",
+       "target": "qh"
+      },
+      {
+       "action": "pause",
+       "target": "qh"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qd",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qd",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Add Ollama support”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "project",
+        "name": "Add Ollama support"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qd"
+      ],
+      "states": {
+       "qd": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Add Ollama support”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "project",
+           "name": "Add Ollama support"
+          }
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qd"
+      },
+      {
+       "action": "stop",
+       "target": "qd",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qd"
      ]
     }
    },
@@ -2907,7 +3252,8 @@
           "text": ""
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        }
       }
      },

@@ -326,8 +326,7 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
     """Under Q: up to ``limit`` rows of ``lane`` the memory gates (then their few stat reads) admit, in queue order,
     each seen by the lanes and child limits of the rows before it and of the rows an earlier walk of this pass chose
     for growth (``carried``), and every row of ``lane`` it passes whose selection C2 must decide (not yet this pass,
-    ``decided``, and no admission kept); None when a malformed depth could not be terminalized. A folder wait it
-    notes names work that holds the lane now (``waits``), never a row a walk picked that its store gates may refuse."""
+    ``decided``, and no admission kept); None when a malformed depth could not be terminalized."""
     from ouroboros.project_lease import lane_holders, running_project_ids
     from supervisor.conversation_lane import resumes_on_lane
 
@@ -339,7 +338,6 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
         started = wa._started_projection()
         running, chosen = started + [{"task": row} for row in carried], set()
         leased, holders = running_project_ids(running), lane_holders(running, _pool().PENDING)
-        waits = lane_holders(started, _pool().PENDING) if carried else holders  # who holds a lane now
         index, memo = None, {}
         for row in list(_pool().PENDING):
             if len(picked) >= limit:
@@ -352,7 +350,7 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
                 if not _kept(queue, row, index, memo):
                     undecided.append(row)
             if wa._candidate_ineligible(queue, row, remaining, running, selected=chosen, refused=excluded,
-                                        holders=holders, waits=waits, leased=leased,
+                                        holders=holders, leased=leased,
                                         unresolved_invalid_id_set=invalid_ids):
                 continue
             depth_error = _pool()._normalize_pending_task_depth(row)
@@ -369,6 +367,28 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
             running.append({"task": row})
             leased, holders = running_project_ids(running), lane_holders(running, _pool().PENDING)
     return picked, undecided, plans
+
+
+def lane_waits() -> Dict[str, Dict[str, Any]]:
+    """Under Q: each queued row another tree keeps out of its Project's or folder's lane now, by task id, as
+    ``project_lease.lane_wait`` names the holder. Who holds a lane is what the walk counts before it picks
+    (RUNNING with its carriers, plus launches claimed); a returned turn takes no lane and a moved row whose own
+    resource is unread has no folder lane yet, so neither is said. Pure over memory: the queue snapshot and the
+    status census publish it, nothing stores it on a task; a display fact, so a failure says none, never raises."""
+    from ouroboros.project_lease import lane_holders, lane_wait
+    from ouroboros.project_placement import pending_resource
+    from supervisor.conversation_lane import resumes_on_lane
+
+    try:
+        started, pending = _assignment()._started_projection(), list(_pool().PENDING)
+        holders = lane_holders(started, pending)
+        rows = started + pending if holders else []
+        waits = {_tid(row): lane_wait(row, rows, holders) for row in pending
+                 if holders and not resumes_on_lane(row) and pending_resource(row) is None}
+    except Exception:
+        log.debug("Lane waits unavailable", exc_info=True)
+        return {}
+    return {task_id: wait for task_id, wait in waits.items() if wait}
 
 
 def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, Any]], screened: Dict[str, Any],

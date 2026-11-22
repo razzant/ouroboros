@@ -154,30 +154,23 @@ def candidate_is_leasable(candidate: Dict[str, Any], running_ids: Set[str], *,
     return not _is_lane_occupant(candidate) or project not in running_ids
 
 
-def note_lane_wait(candidate: Dict[str, Any], running: Iterable[Any], pending: Iterable[Any],
-                   holders: Dict[Any, Set[str]]) -> bool:
-    """Name on a lane occupant the tree that keeps it out, as ``_lane_wait`` ``{lane, task_id, project_id}``
-    (``lane`` ``"project"`` or ``"folder"``, the latter with its ``folder``), or clear it; whether it changed.
-    Its Project's lane first, the nearer cause; the first blocker in sorted order. The queue snapshot carries it
-    to the roster the mind reads (``peer_roster``) and to the owner's card (``gateway/work_status``)."""
-    wait: Dict[str, Any] = {}
-    if _is_lane_occupant(candidate):
-        project, folder = _task_project_id(candidate), lane_folder(candidate)
-        blockers = sorted(holders.get(project, set()) - {_tree(candidate)})
-        if blockers:
-            wait = {"lane": "project", "task_id": blockers[0], "project_id": project}
-        elif blockers := sorted(_folder_holders(candidate, holders)):
-            rows = [_as_task(item) for item in [*(running or ()), *(pending or ())]]
-            holder_project = next((_task_project_id(row) for row in rows if _tree(row) == blockers[0]
-                                   and lane_folder(row) == folder), "")
-            wait = {"lane": "folder", "task_id": blockers[0], "project_id": holder_project, "folder": folder}
-    if (candidate.get("_lane_wait") or {}) == wait:
-        return False
-    if wait:
-        candidate["_lane_wait"] = wait
-    else:
-        candidate.pop("_lane_wait", None)
-    return True
+def lane_wait(candidate: Dict[str, Any], rows: Iterable[Any], holders: Dict[Any, Set[str]]) -> Dict[str, Any]:
+    """The tree that keeps lane occupant ``candidate`` out now, ``{lane, task_id, project_id}`` (``lane``
+    ``"project"`` or ``"folder"``, the latter with its ``folder``), else ``{}``; reads and changes nothing. Its
+    Project's lane first, the nearer cause; the first blocker in sorted order. ``rows`` are the queue's rows
+    (RUNNING metas or tasks) a folder holder's Project is found among."""
+    if not _is_lane_occupant(candidate):
+        return {}
+    project, folder = _task_project_id(candidate), lane_folder(candidate)
+    blockers = sorted(holders.get(project, set()) - {_tree(candidate)})
+    if blockers:
+        return {"lane": "project", "task_id": blockers[0], "project_id": project}
+    blockers = sorted(_folder_holders(candidate, holders))
+    if not blockers:
+        return {}
+    holder_project = next((_task_project_id(row) for row in (_as_task(item) for item in rows or ())
+                           if _tree(row) == blockers[0] and lane_folder(row) == folder), "")
+    return {"lane": "folder", "task_id": blockers[0], "project_id": holder_project, "folder": folder}
 
 
 def task_lane_project_state(running: Any, pending: Any, tid: Any) -> dict:
@@ -246,8 +239,8 @@ __all__ = [
     "candidate_is_leasable",
     "lane_folder",
     "lane_holders",
+    "lane_wait",
     "mark_task_project",
-    "note_lane_wait",
     "running_project_ids",
     "task_lane_project_state",
 ]

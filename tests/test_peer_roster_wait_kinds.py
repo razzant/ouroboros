@@ -214,8 +214,8 @@ def test_a_restart_retained_warm_sleep_keeps_its_warm_mode_and_says_it_was_retai
 
 def test_a_queued_root_names_the_work_that_keeps_its_projects_or_its_folders_lane(tmp_path):
     """Owner 15.11.2026, one queue per recorded folder, and 21.11.2026 («5A»), the same for a Project's own lane: the
-    chooser's ``_lane_wait`` reaches the roster the mind reads, naming the holder, its lane and its room; a running
-    root and a queued one without it say nothing of a lane."""
+    ``lane_wait`` the queue publishes beside a row reaches the roster the mind reads, naming the holder, its lane and
+    its room; a running root, a queued one without it and an older build's wait saved inside a task say nothing."""
     from ouroboros.peer_roster import independent_roots, roster_fingerprint
 
     wait = {"lane": "folder", "task_id": "holder", "project_id": "room-a", "folder": "/work/shared"}
@@ -225,31 +225,36 @@ def test_a_queued_root_names_the_work_that_keeps_its_projects_or_its_folders_lan
         "running": [{"id": "holder", "attempt": 1, "task": {"id": "holder", "title": "Weekly review", "_attempt": 1,
                                                             "project_id": "room-a"}}],
         "pending": [{"id": "waiting", "attempt": 1, "task": {"id": "waiting", "title": "Reading notes", "_attempt": 1,
-                                                             "project_id": "room-b", "_lane_wait": wait}},
+                                                             "project_id": "room-b"}, "lane_wait": wait},
                     {"id": "sibling", "attempt": 1, "task": {"id": "sibling", "title": "Check CI", "_attempt": 1,
-                                                             "project_id": "room-a", "_lane_wait": behind}},
-                    {"id": "free", "attempt": 1, "task": {"id": "free", "title": "Other", "_attempt": 1}}],
+                                                             "project_id": "room-a"}, "lane_wait": behind},
+                    {"id": "free", "attempt": 1, "task": {"id": "free", "title": "Other", "_attempt": 1}},
+                    {"id": "old", "attempt": 1, "task": {"id": "old", "title": "Saved before", "_attempt": 1,
+                                                         "project_id": "room-a", "_folder_wait": wait,
+                                                         "_lane_wait": behind}}],
     })
     rows = {row["task_id"]: row for row in independent_roots(tmp_path)["roots"]}
     assert rows["waiting"]["lane_wait"] == wait and rows["sibling"]["lane_wait"] == behind
-    assert "lane_wait" not in rows["free"] | rows["holder"]
+    assert "lane_wait" not in rows["free"] | rows["holder"] | rows["old"]
     note = _note(tmp_path)
     assert ('  lane_wait={"folder": "/work/shared", "lane": "folder", "project_id": "room-a", "task_id": "holder"}'
             in note)
     assert '  lane_wait={"lane": "project", "project_id": "room-a", "task_id": "holder"}' in note
     roster = independent_roots(tmp_path)
     freed = {**roster, "roots": [{**row, "lane_wait": {}} for row in roster["roots"]]}
-    assert roster_fingerprint(roster) != roster_fingerprint(freed), "a change of holder is a roster change"
+    assert roster_fingerprint(roster) != roster_fingerprint(freed), "a wait that ends is a roster change"
+    moved = {**roster, "roots": [{**row, "lane_wait": {**row["lane_wait"], "task_id": "other"}} if row.get("lane_wait")
+                                 else row for row in roster["roots"]]}
+    assert roster_fingerprint(roster) != roster_fingerprint(moved), "a change of holder is a roster change"
 
 
 @pytest.mark.parametrize("wait", [{"lane": "folder", "task_id": "holder", "project_id": "room-a",
                                    "folder": "/work/shared"},
-                                  {"lane": "project", "task_id": "holder", "project_id": "room-b"}])
+                                  {"lane": "project", "task_id": "holder-b", "project_id": "room-b"}])
 def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_lane(tmp_path, wait):
-    """Opus 15.11.2026: the chooser notes ``_lane_wait`` only on a pass that reaches the row's lane, after its hold
-    and pause gates (``worker_assignment._candidate_ineligible``), and the snapshot keeps that note. A row paused,
-    asleep or held since then waits for that, not for a holder that may long have finished: the roster names its
-    hold and no lane. The same row, eligible again, names its lane wait as the chooser last noted it."""
+    """Opus 15.11.2026: a row's own pause, sleep or hold comes first: a row the queue publishes a ``lane_wait``
+    beside that is paused, asleep or held waits for that, so the roster names its hold and no lane. The same row,
+    eligible again, names its lane wait as the queue publishes it."""
     from ouroboros.peer_roster import independent_roots
 
     write_task_result(tmp_path, "paused", "scheduled", reason_code="budget_paused", budget_pause={
@@ -270,7 +275,7 @@ def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_lane(tmp_path, w
             "running": [{"id": "holder", "attempt": 1, "task": {"id": "holder", "title": "Weekly review", "_attempt": 1,
                                                                 "project_id": "room-a"}}],
             "pending": [{"id": task_id, "attempt": 1, "task": {"id": task_id, "title": task_id, "_attempt": 1,
-                                                               "project_id": "room-b", "_lane_wait": wait, **extra}}
+                                                               "project_id": "room-b", **extra}, "lane_wait": wait}
                         for task_id, extra in marked.items()],
         })
         return {row["task_id"]: row for row in independent_roots(tmp_path)["roots"]}

@@ -246,3 +246,42 @@ def test_schedule_worker_uses_stamp_instead_of_structural_age(published, monkeyp
     stamp["generation"] = "different-generation"
     atomic_write_json(root / "state/queue.alive", stamp)
     assert queue_schedules._schedule_running_or_queued("schedule", root) is None
+
+
+def test_a_pending_rows_lane_wait_is_published_beside_its_task_and_never_restored_into_one(published, monkeypatch):
+    """Owner 21.11.2026 («5A»): the snapshot and the status census say who keeps a queued root's lane now
+    (``dispatch_choice.lane_waits``, computed under Q), beside the row, never inside its task; when the holder pauses
+    the next capture and census say nothing. A restored row, even an older build's with a wait saved in its task,
+    carries none, and the mind's list reads only the published one."""
+    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from ouroboros.peer_roster import independent_roots
+    from supervisor import workers
+
+    root, _now = published
+    monkeypatch.setattr(workers, "PENDING", queue.PENDING)
+    monkeypatch.setattr(workers, "RUNNING", queue.RUNNING)
+    behind = {"lane": "project", "task_id": "x", "project_id": "p"}
+    holder = {"id": "x", "type": "task", "project_id": "p", "root_task_id": "x", "title": "Add Ollama support"}
+    queue.RUNNING["x"] = {"task": holder, "worker_id": 0, "started_at": 1.0}
+    queue.PENDING.extend([{"id": "q", "type": "task", "project_id": "p", "root_task_id": "q", "title": "Check CI",
+                           "_folder_wait": {"task_id": "gone"}},
+                          {"id": "free", "type": "task", "title": "Other"}])
+    assert queue.persist_queue_snapshot(reason="test")
+    rows = {row["id"]: row for row in _read(root, "queue_snapshot.json")["pending"]}
+    assert rows["q"]["lane_wait"] == behind and "lane_wait" not in rows["free"]
+    assert not {"lane_wait", "_lane_wait", "_folder_wait"} & set(rows["q"]["task"]), "a derived fact, never the task's"
+    facts = {}
+    _chat_activities_snapshot_safe(root, {}, direct_turns=[], work_facts=facts)
+    assert facts["q"]["lane_wait"] == behind and "lane_wait" not in facts.get("free", {})
+    assert [row["lane_wait"] for row in independent_roots(root)["roots"] if row["task_id"] == "q"] == [behind]
+    restored = queue_snapshot._saved_pending_task(rows["q"])
+    assert "lane_wait" not in restored and "_lane_wait" not in restored
+    # The holder pauses: its lane is free at once, whatever any walk saw.
+    del queue.RUNNING["x"]
+    queue.PENDING.insert(0, {**holder, "_budget_pause": {"reason": "owner"}})
+    assert queue.persist_queue_snapshot(reason="test")
+    assert "lane_wait" not in {row["id"]: row for row in _read(root, "queue_snapshot.json")["pending"]}["q"]
+    facts = {}
+    _chat_activities_snapshot_safe(root, {}, direct_turns=[], work_facts=facts)
+    assert "lane_wait" not in facts["q"]
+    assert all("lane_wait" not in row for row in independent_roots(root)["roots"])

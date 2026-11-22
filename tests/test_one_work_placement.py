@@ -160,11 +160,15 @@ def test_a_move_into_a_folder_another_room_holds_waits_before_selection_and_chan
     workers.RUNNING["other"] = {"task": holder, "worker_id": 0}
     assert dispatch_choice.choose(queue, 5.0, ()) == [], "the chooser leaves it queued"
     assert work["_placement_folder"] == str(shared) and work["workspace_root"] == str(old)
-    assert dispatch_choice.choose(queue, 5.0, ()) == [], "and its next pass names who keeps the folder"
-    assert work["_lane_wait"] == {"lane": "folder", "task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    assert dispatch_choice.choose(queue, 5.0, ()) == [], "and its next pass leaves it queued"
+    with queue._queue_lock:  # the queue says who keeps the folder now; the chooser wrote nothing on the row
+        assert dispatch_choice.lane_waits() == {"one": {"lane": "folder", "task_id": "other", "project_id": "elsewhere",
+                                                        "folder": str(shared)}}
+    assert "_lane_wait" not in work and "lane_wait" not in work
     del workers.RUNNING["other"]
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {}
     assert dispatch_choice.choose(queue, 5.0, ()) == [work], "nothing else held it"
-    assert "_lane_wait" not in work
     claimed = [{"task": holder}]  # that work's launch is claimed on the admission lane and not RUNNING yet
     assert not readmit_placement(data, work, repo_dir=repo, running=claimed, pending=workers.PENDING)
     assert work["workspace_root"] == str(old) and "placement_applied_at" not in work, "a refusal changes nothing"
@@ -251,7 +255,9 @@ def test_the_chooser_reads_a_moved_works_copy_records_once_and_its_launch_reads_
         assert not readmit_placement(data, work, repo_dir=repo, running=workers.RUNNING, pending=workers.PENDING)
     assert reads == [False, True] and (work["workspace_root"], work["_placement_folder"]) == ("", str(shared))
     assert [dispatch_choice.choose(queue, 100.0, ()) for _ in range(3)] == [[]] * 3 and len(reads) == 2
-    assert work["_lane_wait"] == {"lane": "folder", "task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {"one": {"lane": "folder", "task_id": "other", "project_id": "elsewhere",
+                                                        "folder": str(shared)}}
 
 
 def test_bind_failure_never_changes_pending_or_running(runtime, monkeypatch):
@@ -377,9 +383,9 @@ def test_restore_of_old_execution_scope_readmits_committed_move(host, tmp_path, 
 
 def test_a_lane_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_picked(tmp_path, monkeypatch):
     """Opus 16.11.2026: two rooms share one recorded folder and a store gate (here a schedule's control) refuses both
-    rows every pass. The row a walk picks holds the folder only for the rest of that walk and may never start, so the
-    later row's wait never names it and a pass marks nothing (``dispatch_choice._collect``'s ``waits``). Work that
-    does hold the folder is named once and stays named."""
+    rows every pass. The row a walk picks holds the folder only for the rest of that walk and may never start, so no
+    wait names it (``dispatch_choice.lane_waits`` counts what runs or is claimed). Work that does hold the folder is
+    named for both rows; the chooser writes nothing on a row and persists nothing for a wait."""
     from supervisor import dispatch_choice, evolution_lifecycle, state
     from tests._budget_pause_exact_helpers import _install_queue
 
@@ -405,15 +411,17 @@ def test_a_lane_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_p
 
     for _ in range(3):
         one_pass()
-    assert marks.count("lane_wait") == 0 and "_lane_wait" not in second, marks
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {}, "a walk's pick holds no lane"
     workers.RUNNING["other"] = {"task": {"id": "other", "type": "task", "project_id": "elsewhere",
                                          "root_task_id": "other", "workspace_root": str(shared),
                                          "workspace_mode": "external"}, "worker_id": 0}
     one_pass()
     one_pass()
     wait = {"lane": "folder", "task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
-    assert first["_lane_wait"] == second["_lane_wait"] == wait
-    assert marks.count("lane_wait") == 2, "each named once, then unchanged"
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {"first": wait, "second": wait}
+    assert not {"_lane_wait", "lane_wait"} & (set(first) | set(second)) and "lane_wait" not in marks, marks
 
 
 def test_a_moved_rows_unreadable_own_resource_is_said_once_a_move_and_the_row_waits(tmp_path, monkeypatch, caplog):
@@ -452,3 +460,58 @@ def test_a_moved_rows_unreadable_own_resource_is_said_once_a_move_and_the_row_wa
     assert project_placement.pending_resource(work) is not None, "it still waits for its own resource"
     said = [record.levelno for record in caplog.records if "Own resource of moved one" in record.getMessage()]
     assert said == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+
+
+def test_a_queued_roots_lane_wait_is_what_holds_its_lane_now_whatever_the_chooser_saw(tmp_path, monkeypatch):
+    """Owner 21.11.2026 («5A») and review round 1 (a note the chooser stored went stale and was never written on a full
+    pool): the wait is computed under Q from the live rows by the lanes scheduling uses (``dispatch_choice.lane_waits``),
+    with no walk at all, so it holds on a full pool and ends the moment the holder lets the lane go."""
+    from ouroboros.project_placement import _OWN
+    from supervisor import conversation_lane, dispatch_choice
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    shared = str((tmp_path / "shared").resolve())
+
+    def root(tid, project="p", **fields):
+        return {"id": tid, "type": "task", "chat_id": 0, "_attempt": 1, "project_id": project, "root_task_id": tid,
+                "metadata": {}, **fields}
+
+    def waits(running=(), pending=()):
+        workers.RUNNING.clear()
+        workers.RUNNING.update({meta["task"]["id"]: {"worker_id": 0, **meta} for meta in running})
+        workers.PENDING[:] = list(pending)
+        with queue._queue_lock:
+            return dispatch_choice.lane_waits()
+
+    queued, holder = root("q"), root("x")
+    behind_x = {"lane": "project", "task_id": "x", "project_id": "p"}
+    assert waits([{"task": holder}], [queued]) == {"q": behind_x}, "the pool is full and nothing walked: it is said"
+    for reason in ("owner", "budget"):  # the owner's Pause or the spending limit gives the lane back
+        assert waits([], [root("x", _budget_pause={"reason": reason}), queued]) == {}, reason
+    assert waits([], [queued]) == {}, "the holder finished"
+    asleep = root("x", _budget_pause={"reason": "sleep"})
+    assert waits([], [asleep, queued]) == {}, "a solitary cold sleep releases its lane"
+    member = {"task": root("x-kid", delegation_role="subagent", root_task_id="x")}
+    assert waits([member], [asleep, queued]) == {"q": behind_x}, "a sleeping tree with a running member keeps it"
+    assert waits([{"task": holder, "lane": "conversation"}], [queued]) == {}, "a conversation turn holds no lane"
+    assert waits([], [root("x", _launch_claim={"token": "t"}), queued]) == {"q": behind_x}, "a claimed launch holds"
+    unread = root("q", **{_OWN: {"bound_at": "2026-11-21T00:00:00Z", "kind": "move"}})
+    for row in (root("q-kid", delegation_role="subagent", root_task_id="y"), root("q", project=""), unread):
+        assert waits([{"task": holder}], [row]) == {}, row
+    monkeypatch.setattr(conversation_lane, "resumes_on_lane", lambda row: row.get("id") == "q")
+    assert waits([{"task": holder}], [queued]) == {}, "a returned turn takes no project lane"
+    monkeypatch.undo()
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    # Folder lane: another Project's tree in the recorded folder; the Project's lane wins when both hold.
+    folder = {"workspace_root": shared, "workspace_mode": "external"}
+    other = {"task": root("o", project="other", **folder)}
+    assert waits([other], [root("q", **folder)]) == {"q": {"lane": "folder", "task_id": "o", "project_id": "other",
+                                                           "folder": shared}}
+    assert waits([other, {"task": root("x", **folder)}], [root("q", **folder)]) == {"q": behind_x}
+    # A sleeper returning to a folder it already holds waits only for those acting in it.
+    sleeper = root("s", project="s", _budget_pause={"reason": "sleep"}, **folder)
+    kid = {"task": root("s-kid", project="s", delegation_role="subagent", root_task_id="s")}
+    assert waits([kid, other], [sleeper]) == {"s": {"lane": "folder", "task_id": "o", "project_id": "other",
+                                                    "folder": shared}}
+    assert waits([kid], [sleeper]) == {}
