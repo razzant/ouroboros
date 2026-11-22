@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.review_records import recorded_author_stop
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE
+from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE, schedule_report_run
 from ouroboros import dialogue_store
 from ouroboros.utils import iter_jsonl_objects, jsonl_append_lock_path, replace_atomic, strip_markdown, utc_now_iso
 
@@ -1112,12 +1112,12 @@ def _completion_excerpt(result: Dict[str, Any], *, chat_id: Any = None,
     the row's destination: only there can the stop receipt already have
     published the same text, and only there does the label stand alone.
 
-    ``salvage_only`` is how the durable rows ask for that ONE excerpt and
-    nothing else: a cut of the model's own answer is already in the room the
-    row lives in, while salvaged bytes exist nowhere else.
+    Durable rows ask for ``salvage_only`` because the normal answer is already
+    in the room, but salvaged bytes are not. A legacy schedule's report stays
+    in its own result regardless of origin; neither a room nor a mirror quotes it.
     """
     salvaged = str(result.get("terminal_origin") or "") == TERMINAL_ORIGIN_HOST_SALVAGE
-    if salvage_only and not salvaged:
+    if schedule_report_run(result) or (salvage_only and not salvaged):
         return ""
     body = ""
     for key in ("summary", "result", "error"):

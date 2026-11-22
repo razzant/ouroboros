@@ -889,7 +889,7 @@ async function revealQuotedSource(address, chatId, isCurrent, locate = null) {
             .catch((error) => { if (current()) previewsRefused(error); throw error; });
         if (!current()) return null;
         if (page?.anchor?.state !== 'found') return page?.anchor || { state: 'unknown' };
-        const matches = address.startsWith('task:') ? chatId === 1 && page.anchor.task_id === address.slice(5)
+        const matches = address.startsWith('task:') ? page.anchor.task_id === address.slice(5)
             : page.anchor.row_address === address && page.anchor.chat_id === chatId;
         if (!matches) return { state: 'unknown' };
         if (project) return openProjectPanel(project, { openOnly: true, sourceReveal: { address, page, current: isCurrent, locate } });
@@ -900,9 +900,11 @@ async function revealQuotedSource(address, chatId, isCurrent, locate = null) {
 }
 
 window.addEventListener('ouro:open-task', async ({ detail }) => {
-    if (!detail?.task_id || detail.chat_id !== 1 || !await showPage('chat', { reveal: true })) return;
+    if (!detail?.task_id || !Number.isSafeInteger(detail.chat_id) || detail.chat_id < 1) return;
+    if (detail.chat_id === 1 && !await showPage('chat', { reveal: true })) return;
     try {
-        const result = await revealQuotedSource(`task:${detail.task_id}`, detail.chat_id, () => state.activePage === 'chat');
+        const result = await revealQuotedSource(`task:${detail.task_id}`, detail.chat_id,
+            () => detail.chat_id !== 1 || state.activePage === 'chat');
         if (result && result.state !== 'found') showToast(tr('consciousness.task_unavailable', 'This task is unavailable.'), 'warn');
     } catch { showToast(tr('consciousness.task_unavailable', 'This task is unavailable.'), 'warn'); }
 });

@@ -1,4 +1,5 @@
 import { escapeHtmlAttr, isoMicros } from './utils.js';
+import { tr } from './i18n.js';
 import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
 import { clearReloadParams } from './layers.js';
@@ -706,8 +707,7 @@ export function createChatInstance({
         return true;
     }
 
-    // DESIGN's activity-block predicate rechecks facts on each mutation;
-    // completion notes and receipts are not content, and visibility is not sticky.
+    // DESIGN / 16.09: visibility and chrome follow work.
     function blockVisible(record) {
         if (!record || record.isSubagent) return true;
         // A moved work's portal never leaves Main (one work, one card).
@@ -717,14 +717,12 @@ export function createChatInstance({
             || (record.finished && record.phaseEl?.dataset?.phase !== 'done');
     }
 
-    // Work chooses card chrome (owner 16.09): title and Main conversion, whatever the lane; attention-only or non-Done
-    // endings have neither. Bare outcome/receipts are not work; _is_direct_chat keeps its host duties.
     function blockHasWork(record) {
         const id = record.groupId;
-        // Visibility depends on work, never the lane.
         return record.reviewController?.groups.size > 0
             || [...subagentChildParents.values()].some((info) => info.parentId === id)
-            || record.items.some((item) => !item.receipt && !String(item.dedupeKey || '').startsWith('task_done|'))
+            || record.items.some((item) => !item.receipt && (item.fullField === 'schedule_report'
+                || !String(item.dedupeKey || '').startsWith('task_done|')))
             || record.toolErrors > 0;
     }
 
@@ -1530,7 +1528,6 @@ export function createChatInstance({
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Beyond the 4000-char preview: fetch/cache on expansion, bounded scroll, render while expanded.
     async function fetchFullLineOutput(item, record) {
         const basis = item.childCause;
         item._fetchingFull = true;
@@ -1543,6 +1540,9 @@ export function createChatInstance({
             if (item.fullField === 'candidate_remainder') {
                 full = readCandidateRemainder(item, data, resp?.ok !== false);
                 changed = true;
+            } else if (item.fullField === 'schedule_report') {
+                full = resp?.ok !== false && typeof data?.result === 'string' ? data.result : '';
+                if (!full) throw new Error('saved report unavailable');
             } else if (data?.result || data?.trace_summary) {
                 const view = summarizeSubagentCardFrame({ ...childCauseFacts(data), subagent_event: data.status,
                     result: data.result, trace_summary: data.trace_summary, error: data.error }, item.fullRef);
@@ -1557,9 +1557,11 @@ export function createChatInstance({
                 changed = true;
             }
         } catch {
-            // best-effort: leave the capped preview on failure
             if (item.fullField === 'candidate_remainder') {
                 readCandidateRemainder(item, null, false);
+                changed = true;
+            } else if (item.fullField === 'schedule_report') {
+                item.fullReadError = tr('schedule.report_unavailable', 'The saved report is unavailable.');
                 changed = true;
             }
         } finally {

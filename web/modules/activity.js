@@ -30,6 +30,7 @@ import {
     taskControlTriggerLabel,
 } from './task_control_menu.js';
 import { markView, statusMarkHtml } from './status_mark.js';
+import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { whenLabel } from './storage_format.js';
 import { showToast } from './toast.js';
 import { normalizeConsciousness } from './consciousness_api.js';
@@ -236,7 +237,10 @@ function scheduleRunHtml(s, timeZone) {
         const state = quiet && outcome.state === 'completed' ? tr('schedule.outcome.quiet', 'ran · no message') : outcome.state;
         // The line is the host's notice, else the run's own words (its sentence, or the end of its answer).
         const line = outcome.line ? ` · ${outcome.notice ? `notice: ${esc(outcome.line)}` : `<span data-i18n-authored>${esc(outcome.line)}</span>`}` : '';
-        parts.push(`last run: ${esc(state)}${outcome.ended_at ? ` · ${scheduleInstantHtml(outcome.ended_at, { timeZone, includeYear: true })}` : ''}${line}`);
+        // The settled run's room, not the schedule's editable destination, owns its card.
+        const reference = outcome.chat_id == null ? '' : taskReferenceHtml(outcome.task_id, outcome.chat_id);
+        const door = reference ? ` ${reference}` : '';
+        parts.push(`last run: ${esc(state)}${outcome.ended_at ? ` · ${scheduleInstantHtml(outcome.ended_at, { timeZone, includeYear: true })}` : ''}${line}${door}`);
     }
     // Why the row did not do its job, as stored (a note whose chat write was not confirmed is consumed and never
     // retried, so this is the only place it says so) — once: a run whose own line already says it is not repeated.
@@ -704,6 +708,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     }
 
     mount.addEventListener('click', async (event) => {
+        if (openTaskReference(event)) return;
         const btn = event.target.closest('[data-act]');
         if (!btn || busy || btn.dataset.act === 'schedule-text') return;
         const act = btn.dataset.act;

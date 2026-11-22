@@ -298,6 +298,8 @@ def row_rooms(entry_chat: int, row: Mapping[str, Any], project_chat_ids, rooms: 
     if private_main_row(dict(row)):
         return frozenset({1, bound_room_chat(rooms, row)} & {1, *project_chat_ids})
     kind = row.get("type")
+    if entry_chat == 1 and kind == "task_summary" and row.get("schedule_report_only") is True:
+        return frozenset({1})  # a schedule's local terminal card is not a Place reply
     if row_provenance(row) == "place":  # a place's rows stay its room's; its work's Done row is its Project's too
         work = bound_room_chat(rooms, row) if kind == "task_summary" else 0
         return frozenset(({entry_chat} if entry_chat != 1 else set()) | ({work} if work in project_chat_ids else set()))

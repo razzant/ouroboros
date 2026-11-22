@@ -82,7 +82,7 @@ from ouroboros.task_finalization import (
     model_execution_projection,
     build_swarm_efficiency as _build_swarm_efficiency,  # moved (module ceiling); tests import it here
     deliver_final_message_live, prepare_terminal_send_event, register_final_answer_owed,
-    stamp_root_final_phase,
+    stamp_root_final_phase, schedule_report_run,
     sealed_final_prompt_section, terminal_result_fields, terminal_notice_text,  # noqa: F401 -- the pipeline module keeps its historical import surface for the synthesis leaf
 )
 from ouroboros.dialogue_provenance import is_presence_task, presence_provenance_fields  # noqa: F401 -- the pipeline module keeps its historical import surface for the synthesis leaf
@@ -859,10 +859,17 @@ def emit_task_results(
     loop_outcome = _derive_host_bound_loop_outcome(env, task, text, usage, llm_trace)
     # A silent run's words stay internal. Clean, it publishes nothing (no chat row, owed outbox
     # row, live send or delivery subject); otherwise only a host notice of its outcome.
-    notice = _wake_outcome_notice(text, loop_outcome, custody_audit) if usage.get("wake_silent") is True else ""
+    legacy_schedule = schedule_report_run(task)
+    if legacy_schedule:
+        # Its report is a record on every exit, forced ones before any selection included: keep the quiet fact
+        # stored, and explain a non-clean end with the host's own notice (unless the refused door already did).
+        usage["wake_silent"] = True
+    notice = (_wake_outcome_notice(text, loop_outcome, custody_audit)
+              if usage.get("wake_silent") is True
+              and not (legacy_schedule and (llm_trace or {}).get("schedule_report_refused")) else "")
     if notice:
         set_terminal_host_notice(usage, str(usage.get("terminal_host_notice") or ""), notice)
-    quiet, published = usage.get("wake_silent") is True and not notice, notice or text
+    quiet, published = legacy_schedule or (usage.get("wake_silent") is True and not notice), notice or text
     receipt_root = pathlib.Path(str(getattr(env, "drive_root", None) or "."))
     verification_receipts = task_verification_receipts(ctx, receipt_root, task)
     # Apply FR3 once so events and the durable result share the same flagged outcome.
@@ -918,7 +925,7 @@ def emit_task_results(
         # Final frames carry their own durable identity; replay must not depend
         # on a nearby progress row that may age out independently.
         send_event["progress_meta"] = dict(_message_meta)
-    send_event = prepare_terminal_send_event(env.drive_root, task, published, usage, send_event,
+    send_event = prepare_terminal_send_event(env.drive_root, task, text if legacy_schedule else published, usage, send_event,
                                              presence=not (_ordinary or _room_owed), custody_audit=custody_audit)
     if notice:  # the host's words, never the model's: a System row with its own delivery identity
         from supervisor.terminal_delivery import project_terminal_result_event

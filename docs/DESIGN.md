@@ -750,22 +750,17 @@ needed restart stays until the row's next result, an edit or leaving its page. A
 is shown; a retained record (Updates, history, `Input saved`) lives with its record, with
 no timer. Toasts and statuses older than this rule are checked against it when touched.
 
-Activity schedule rows use the same factual status rule: `active`, `disabled`,
-`consumed once · history`, `withdrawn` and `deletion pending · work in flight`
-describe lifecycle state, while the adjacent Disable/Enable, Restore and Delete
-controls state the owner action. Lifecycle and the last run's outcome are
-separate facts: the outcome line says the settled word as stored (`completed`,
-`failed`, `cancelled`), `ran · no message` for a quiet run, or `outcome not
-observed yet` until the scheduler has read the settled result, then the run's
-line: a host notice, else the sentence the run wrote for its human (whole),
-else the end of its answer; it never says running, and only the host's own
-observation writes `previous run still open`.
-A consumed one-shot is history whether its task succeeded or failed; the status
-never implies a result. A row is headed by its name; the instruction stays
-readable and expands by touch, and a waiting row says why inline, never in a
-hover-only tooltip. Retained rows (consumed and withdrawn) collapse into one
-disclosure named for what it holds (Finished, Withdrawn) rather than padding the standing list or
-disappearing: history the owner can still open, read and act on. A withdrawn
+Activity rows separate schedule lifecycle (`active`, `disabled`, `consumed once ·
+history`, `withdrawn`, `deletion pending · work in flight`) from actions
+(Disable/Enable, Restore, Delete) and the last run's outcome. The run shows its
+stored `completed`, `failed` or `cancelled`, `ran · no message` if quiet, or
+`outcome not observed yet` until read. Its line is the host notice, else the
+whole authored sentence or answer's end. A legacy report has no excerpt; the
+door opens that run's card in its actual room, and Details reads the saved
+report on demand without posting it. Only the host's observation says
+`previous run still open`. One-shot history implies no result. The row's name
+heads a readable, touch-expandable instruction; waits explain why inline.
+Consumed and withdrawn rows remain actionable under Finished and Withdrawn. A withdrawn
 row says who withdrew it, when and why, and keeps Restore through the retention
 window once no hold remains on it; Restore cancels the withdrawal and brings
 the row back enabled, even if it was paused before, but never re-arms a one-shot
@@ -1117,9 +1112,8 @@ this Project" came to be drawn six ways. The rule is therefore about intents.
   place that is not such a reference (`Load older messages`, `Open widgets`).
   Tabs, toggles, menus and the navigation list keep their own roles; a status
   chip states a fact and is not a destination.
-- A **Main task** is opened by its door, `Open in Main ↗`: words inside the sentence that names the
-  task (`.consciousness-inline-link`). `task_reference.js` builds it and alone raises `ouro:open-task`;
-  its landing is §5 "Dashboard › Consciousness".
+- A **task** has an inline door (`.consciousness-inline-link`): `Open in Main ↗`, or `Open run ↗`
+  for a known Project. `task_reference.js` alone raises `ouro:open-task`; landing uses that room's history.
 - An intent that will be drawn in a second place gets its door first (siblings:
   `docs/inventories/UI_CONTROL_TEXT_INVENTORY.md`).
 
@@ -2392,9 +2386,9 @@ unconditionally (a Presence turn and a consciousness wake-up are direct turns
 and follow the same rules as any other); open owner attention (a model wait, a
 pending stop, a host-attested Stop the record still offers — the same reading
 the control uses, so a block never stands on a Stop it hides); a child card; a
-review group; a content row; a terminal outcome other than Done. The completion note is not content:
-a turn that ran no tool and finished Done leaves no block — live, after a
-reload and after a reconnect.
+review group; a content row (including a saved schedule report reached via `Details` → `Show full`);
+a terminal outcome other than Done. A bare completion note is not content: a turn without activity
+that finishes Done leaves no block, live, on reload or on reconnect.
 
 Narration leads; routine execution evidence stays compact; exceptions keep their
 explanation and controls. The block's title, collapsed activity line and

@@ -48,19 +48,58 @@ def test_terminal_flags_round_trip_through_room_history(tmp_path, silent, notice
     assert "Private retained words" not in json.dumps(response)
 
 
-@pytest.mark.parametrize("flags", [{}, {"wake_silent": True}, {"wake_silent": False, "quiet_effective": False}])
+@pytest.mark.parametrize("with_progress", [False, True], ids=["terminal-only", "with-progress"])
+@pytest.mark.parametrize("reopened", [False, True], ids=["legacy-attempt", "later-attempt"])
+def test_legacy_schedule_report_reference_survives_project_history(tmp_path, with_progress, reopened):
+    from tests.test_schedule_report_door import ceiling, run_metadata
+
+    project = create_project(tmp_path, "checks", name="Scheduled checks")
+    chat_id, task_id = project["chat_id"], "legacy-schedule-report"
+    bind_task_to_project(tmp_path, task_id, project["id"], chat_id, origin={"absent": "system"})
+    report = "Private reference report."
+    current_report = "Private retried report." if reopened else report
+    stored = write_task_result(tmp_path, task_id, "completed", chat_id=chat_id, project_id=project["id"],
+                               result=current_report, wake_summary=current_report, terminal_origin="model_final",
+                               **({"task_attempt": 2} if reopened else {}),
+                               metadata=run_metadata(task_id), task_contract={"capability_ceiling": ceiling()})
+    # A publication from the earlier attempt's own snapshot can arrive after the next attempt ended.
+    earlier = {**stored, "task_attempt": 1, "result": report, "wake_summary": report} if reopened else stored
+    terminal = _project_row(task_id, earlier, {}, {"chat_id": chat_id})
+    if with_progress:
+        dialogue_store.append(tmp_path, "progress", {"task_id": task_id, "chat_id": chat_id, "ts": terminal["ts"],
+                                                     "role": "assistant", "content": "Checking sample entries."})
+    dialogue_store.append(tmp_path, "chat", terminal)
+    response = json.loads(_assemble_history_response(tmp_path, chat_id, 50, 200, around=f"task:{task_id}"))
+    rows = [row for row in response["messages"] if row.get("task_id") == task_id]
+    assert any(row.get("is_progress") for row in rows) is with_progress
+    [summary] = [row for row in rows if row.get("system_type") == "task_summary" and row.get("text")]
+    assert summary["schedule_report_only"] is True
+    assert summary["quiet_effective"] is True and summary["text"] == "Done · no message"
+    assert report not in json.dumps(response)
+    if reopened:
+        current = summary["current_outcome"]
+        assert summary["task_attempt"] == 1 and current["task_attempt"] == 2
+        assert current["schedule_report_only"] is True and current["quiet_effective"] is True
+        assert "Private retried report." not in json.dumps(response)
+
+
+@pytest.mark.parametrize("flags", [{}, {"wake_silent": True}, {"wake_silent": False, "quiet_effective": False},
+                                   {"schedule_report_only": False}, {"schedule_report_only": "true"}])
 def test_legacy_summary_flags_stay_present_or_absent_as_recorded(tmp_path, flags):
     entry = {"type": "task_summary", "direction": "system", "chat_id": 1,
              "task_id": "legacy", "text": "Recorded terminal", "ts": "2026-10-21T12:00:00Z", **flags}
     dialogue_store.append(tmp_path, "chat", entry)
     rows = json.loads(_assemble_history_response(tmp_path, 1, 50, 200))["messages"]
     summary = next(row for row in rows if row.get("system_type") == "task_summary")
-    assert {key: summary[key] for key in ("wake_silent", "quiet_effective") if key in summary} == flags
+    assert {key: summary[key] for key in ("wake_silent", "quiet_effective", "schedule_report_only") if key in summary} == {
+        key: value for key, value in flags.items() if type(value) is bool
+    }
 
 
 def test_non_summary_rows_do_not_acquire_terminal_flags():
     projected = {}
-    _copy_task_summary_metadata(projected, {"type": "message", "wake_silent": True, "quiet_effective": True})
+    _copy_task_summary_metadata(projected, {"type": "message", "wake_silent": True, "quiet_effective": True,
+                                           "schedule_report_only": True})
     assert projected == {}
 
 
@@ -115,10 +154,12 @@ def test_terminal_copy_carries_both_authored_title_fields_only_on_summaries(kind
     assert {key: projected[key] for key in words if key in projected} == (words if kind == "task_summary" else {})
 
 
-def test_a_page_without_the_terminal_row_still_carries_the_runs_sentence_and_origin(tmp_path, isolated_runtime):  # noqa: F811
+@pytest.mark.parametrize("report_only", [False, True], ids=["ordinary-schedule", "legacy-schedule-report"])
+def test_a_page_without_the_terminal_row_carries_the_runs_origin_without_a_private_report(tmp_path, isolated_runtime, report_only):  # noqa: F811
     """A long run's terminal row can lie beyond the page a work-card quote opens: the retained result's terminal
     truth, stamped on the window's last progress row, carries the authored name, the sentence and the schedule."""
     from datetime import datetime, timedelta, timezone
+    from tests.test_schedule_report_door import ceiling, run_metadata
 
     tid, start = "scheduled-long-check", datetime(2026, 10, 28, tzinfo=timezone.utc)
     at = lambda seconds: (start + timedelta(seconds=seconds)).isoformat()  # noqa: E731
@@ -128,9 +169,10 @@ def test_a_page_without_the_terminal_row_still_carries_the_runs_sentence_and_ori
         if index % 3 == 0:
             dialogue_store.append(tmp_path, "chat", {"direction": "in", "chat_id": 1, "ts": at(index * 120 + 1),
                                                      "text": f"Other conversation {index}"})
+    metadata = run_metadata(tid) if report_only else {"schedule_occurrence": {"schedule_id": "daily", "token": "t1"}}
     stored = write_task_result(tmp_path, tid, "completed", chat_id=1, root_task_id=tid, delegation_role="root",
                                title="Daily check", suggested_name="Daily check", schedule_name="Daily check",
-                               metadata={"schedule_occurrence": {"schedule_id": "daily", "token": "t1"}},
+                               metadata=metadata, **({"task_contract": {"capability_ceiling": ceiling()}} if report_only else {}),
                                wake_summary="The run found no faults.", wake_silent=True, result="PRIVATE NOTE",
                                terminal_origin="model_final", _terminal_observed=True)
     terminal = _project_row(tid, stored, {}, {"chat_id": 1})
@@ -141,7 +183,11 @@ def test_a_page_without_the_terminal_row_still_carries_the_runs_sentence_and_ori
     assert rows and not any(row.get("summary_kind") or row.get("historical_terminal") for row in rows), "the terminal row lies beyond this page"
     settled = [row for row in rows if row.get("task_terminal_status") == "completed"]
     assert settled and all(row["suggested_name"] == "Daily check" for row in settled)
-    assert any(row.get("wake_summary") == "The run found no faults." and row.get("schedule_name") == "Daily check" for row in settled)
+    assert any(row.get("schedule_name") == "Daily check" for row in settled)
+    if report_only:
+        assert "The run found no faults." not in json.dumps(response)
+    else:
+        assert any(row.get("wake_summary") == "The run found no faults." for row in settled)
     assert "PRIVATE NOTE" not in json.dumps(response, ensure_ascii=False)
 
 

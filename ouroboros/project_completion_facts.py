@@ -4,6 +4,7 @@ from __future__ import annotations
 from ouroboros.chat_references import origin_reply
 from ouroboros.cost_projection import carry_cost_meta
 from ouroboros.outcomes import _merge_objective_warning, normalize_outcome_axes
+from ouroboros.task_finalization import schedule_report_run
 
 
 def completion_facts(root, task_id: str, task: dict, result: dict, event: dict) -> dict:
@@ -201,6 +202,9 @@ def same_attempt_ending(result: dict, current: dict, offer, *, final: bool) -> d
     if isinstance(result.get("body_adoptions"), list):  # its settled adoptions, read beside its Reviews
         ending["body_adoptions"] = [dict(row) for row in result["body_adoptions"] if isinstance(row, dict)]
     ending.update({key: str(result[key]) for key in ("wake_summary", "schedule_name", "terminal_origin") if result.get(key)})
+    if schedule_report_run(result):
+        ending.pop("wake_summary", None)
+        ending["schedule_report_only"] = True
     if isinstance(result.get("delegated_runs_unreconciled"), list):  # the current debt (#1583)
         ending["delegated_runs_unreconciled"] = list(result["delegated_runs_unreconciled"])
     retention = retention_summary(result)
@@ -220,10 +224,14 @@ def same_attempt_ending(result: dict, current: dict, offer, *, final: bool) -> d
 
 def recorded_ending_labels(row: dict) -> dict:
     """The names, place and quiet flags that survive on both a summary and its compact replay row."""
-    labels = {key: str(row[key]) for key in ("wake_summary", "suggested_name", "schedule_name") if row.get(key)}
+    report_only = row.get("schedule_report_only") is True or schedule_report_run(row)
+    labels = {key: str(row[key]) for key in ("wake_summary", "suggested_name", "schedule_name")
+              if row.get(key) and (key != "wake_summary" or not report_only)}
+    if report_only:
+        labels["schedule_report_only"] = True
     if isinstance(row.get("place_origin"), dict):
         labels["place_origin"] = dict(row["place_origin"])
-    for key in ("wake_silent", "quiet_effective"):
+    for key in ("wake_silent", "quiet_effective", "schedule_report_only"):
         if type(row.get(key)) is bool:
             labels[key] = row[key]
     return labels
