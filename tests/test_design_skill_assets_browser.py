@@ -157,6 +157,78 @@ def test_compare_page_swaps_in_place_with_the_subject_anchored(engine, tmp_path)
 
 
 @pytest.mark.parametrize("engine", ENGINES)
+def test_compare_keeps_the_latest_variant_and_scroll_after_a_late_frame(engine, tmp_path):
+    with browser(engine) as instance:
+        page = open_page(instance, sample_page(tmp_path).as_uri())
+        wait_shown(page, "now", "draft")
+        page.locator(".q .opt").first.click()
+        history_length = page.evaluate("history.length")
+        anchor = page.evaluate("""() => {
+            const late = document.querySelector('iframe[data-key="a/draft"]');
+            const ready = late.ready;
+            let release;
+            late.ready = new Promise(resolve => { release = resolve; });
+            const pending = compare.show({variant: 'a', clean: true});
+            window.finishLate = () => { late.ready = ready; release(); return pending; };
+            const doc = document.querySelector('iframe:not([data-off])').contentDocument;
+            doc.querySelector('#list').scrollTop = 165;
+            return doc.querySelector('.subject').getBoundingClientRect().top;
+        }""")
+        page.keyboard.press("3")
+        wait_shown(page, "b", "draft")
+        latest = page.locator('iframe[data-key="b/draft"]')
+        top = latest.evaluate("f => f.contentDocument.querySelector('.subject').getBoundingClientRect().top")
+        assert top == pytest.approx(anchor, abs=1)
+        latest.evaluate("f => { f.contentDocument.querySelector('#list').scrollTop = 370; }")
+        page.evaluate("window.finishLate()")
+        assert page.locator("#stage iframe:not([data-off])").get_attribute("data-key") == "b/draft"
+        assert latest.evaluate("f => f.contentDocument.querySelector('#list').scrollTop") == 370
+        assert page.locator('[data-variant="b"]').get_attribute("aria-pressed") == "true"
+        assert page.evaluate("location.hash") == "#scene=draft&v=3&clean=1"
+        assert page.evaluate("history.length") == history_length
+        assert page.locator(".q .opt").first.get_attribute("aria-pressed") == "true"
+        assert_nothing_fetched(page)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("next_side", [False, True], ids=["single", "side"])
+def test_compare_side_by_side_settle_cannot_repaint_a_newer_choice(engine, tmp_path, next_side):
+    with browser(engine) as instance:
+        page = open_page(instance, sample_page(tmp_path).as_uri())
+        wait_shown(page, "now", "draft")
+        during_load = page.evaluate("""async nextSide => {
+            const stage = document.getElementById('stage');
+            const visible = new Promise(resolve => {
+                const observer = new MutationObserver(() => {
+                    if (stage.classList.contains('side')) { observer.disconnect(); resolve(); }
+                });
+                observer.observe(stage, {attributes: true, attributeFilter: ['class']});
+            });
+            const side = compare.show({side: true, clean: true});
+            await visible;  // frames are on screen, their second paint is still pending
+            const next = stage.querySelector('iframe[data-key="a/draft"]');
+            const ready = next.ready;
+            let release;
+            next.ready = new Promise(resolve => { release = resolve; });
+            const latest = compare.show({variant: 'a', side: nextSide});
+            window.dispatchEvent(new Event('resize'));
+            await side;
+            const captions = [...stage.querySelectorAll('.cap')].map(el => el.textContent);
+            const hash = location.hash;
+            next.ready = ready;
+            release();
+            await latest;
+            return {captions, hash};
+        }""", next_side)
+        assert during_load == {"captions": ["1", "2", "3"], "hash": "#scene=draft&v=1&side=1&clean=1"}
+        shown = page.locator("#stage iframe:not([data-off])").evaluate_all("frames => frames.map(f => f.dataset.key)")
+        assert shown == (["now/draft", "a/draft", "b/draft"] if next_side else ["a/draft"])
+        assert page.locator("#stage .cap").count() == (3 if next_side else 0)
+        assert page.locator("#side").get_attribute("aria-pressed") == str(next_side).lower()
+        assert page.evaluate("location.hash") == "#scene=draft&v=a" + ("&side=1" if next_side else "")
+
+
+@pytest.mark.parametrize("engine", ENGINES)
 def test_compare_page_questions_offer_none_and_compose_the_answer(engine, tmp_path):
     path = sample_page(tmp_path)
     with browser(engine) as instance:

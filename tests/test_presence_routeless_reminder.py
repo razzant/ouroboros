@@ -745,10 +745,41 @@ def test_a_funded_explicit_profile_restores_the_note_and_requests_it(room, monke
     second = run_root(room, monkeypatch, [finish(silent=True, answer=NOTE), finish(answer=FINAL)], metadata=first.meta,
                       root_id=retry_id, attempt=2, recovery=_recover(room, "explicit-root"))
     assert len(second.inputs) == 1 and json.dumps(second.inputs[0], ensure_ascii=False).count(MARK) == 1
-    priced = prices["seen"][-1]  # the restored transcript: the note, then the host's continuation notice
+    # The note's own request, found by what it is (the restored transcript: the note, then the host's continuation
+    # notice), never by position: a budget probe prices this transcript under a [BUDGET LIMIT] prompt, and is not it.
+    [priced] = [rows for rows in prices["seen"] if "continued from its working checkpoint" in str(rows[-1]["content"])
+                and "[BUDGET LIMIT]" not in str(rows[-1]["content"])]
     assert [str(row.get("content")).startswith(MARK) for row in priced].count(True) == 1, "priced with its note"
-    assert "continued from its working checkpoint" in priced[-1]["content"]
+    assert [row["content"] for row in priced if str(row.get("content")).startswith(MARK)] == notes(second), (
+        "the request priced is the request sent")
+    assert "forced_finalization" not in second.trace and not second.stored.get("budget_pause")
     assert second.stored["metadata"]["presence_outcome"] == "silent" and second.sent == []
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["ready", "held"])
+def test_a_ready_finish_outranks_the_last_fit_margin_and_a_held_one_meets_it(room, monkeypatch, held):
+    """A strict last fit (one reservation fits, two do not, no owner relaxation) is a margin for work still to buy.
+    A finish selected in a batch is ready: it ends the task as it is, with no wrap-up request, pause or forced
+    finalization bought over it. A finish its own gate holds is unfinished work again: the same margin stops the next
+    send with the last-fit pause, priced as the stop's own request, before any second model call."""
+    from ouroboros.budget_pause import RAIL_WRAPUP_LAST_FIT, BudgetPauseRequested
+
+    prices, presence, script = _prices(monkeypatch, two=False), carrier(room), [finish(silent=True, answer=NOTE)] * 2
+    if held:  # after the carrier's own turn: the hold stands for any delivery hold of this root's selected finish
+        answers, sent = iter([True]), []
+        monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery",
+                            lambda *_a, **_k: next(answers, False))
+        with pytest.raises(BudgetPauseRequested, match=RAIL_WRAPUP_LAST_FIT):
+            run_root(room, monkeypatch, [lambda rows: sent.append(rows) or script[0], script[1]],
+                     setup=_explicit_profile, presence=presence)
+        assert len(sent) == 1, "the margin stopped the round the held finish would have bought"
+        assert any("[BUDGET LIMIT]" in str(rows[-1]["content"]) for rows in prices["seen"])
+        return
+    run = run_root(room, monkeypatch, script, setup=_explicit_profile, presence=presence)
+    assert len(run.inputs) == 1, "no model call after the finish"
+    assert "forced_finalization" not in run.trace and not run.stored.get("budget_pause")
+    assert not any("[BUDGET LIMIT]" in json.dumps(rows, ensure_ascii=False) for rows in prices["seen"] + run.inputs)
+    assert run.stored["result"] == NOTE and run.stored["metadata"]["presence_outcome"] == "silent" and run.sent == []
 
 
 @pytest.mark.parametrize("authority", ["explicit", "producer"])

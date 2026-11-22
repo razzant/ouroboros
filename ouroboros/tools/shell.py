@@ -21,6 +21,7 @@ import uuid
 from typing import Dict, List  # noqa: F401
 
 from ouroboros.owner_pause import OwnerPauseRefused
+from ouroboros.store import StoreError
 from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
 from ouroboros.tools.tool_result import ToolResult, launch_refusal_result, _publish_tool_result, _published_tool_result
 from ouroboros.platform_layer import bootstrap_process_path
@@ -266,13 +267,7 @@ def _literal_argv_notes(cmd: List[str]) -> str:
     return "".join(notes)
 
 
-def _pre_spawn_refusal(ctx: ToolContext, text: str, *, tool: str = "run_command") -> str:
-    """This producer refused before submission; arbitrary errors carry no such fact."""
-    from ouroboros.tools.tool_result import LegacyTextResultAdapter, _replace_tool_result
-
-    result = LegacyTextResultAdapter.from_text(tool, text)
-    return _publish_tool_result(ctx, _replace_tool_result(
-        result, meta_updates={"operation_outcome": "completed_no_effect"}))
+from ouroboros.tools.shell_effects import _pre_spawn_refusal  # the leaf owns it; the process leaf refuses through it too
 
 
 @process_environment_tool
@@ -411,7 +406,7 @@ def _run_shell(
     stop = turn_stop_reader(ctx)
     try:
         if output_context is not None or _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
-            res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec, stop=stop,
+            res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec, stop=stop, memory=True,
                                    env_overlay=interpreter_path_overlay(node_resolution),
                                    **({"executor": output_context.executor} if output_context else {}),
                                    **({"target_env": selected_env} if selected_env else {}))
@@ -419,7 +414,7 @@ def _run_shell(
             res = _tracked_subprocess_run(
                 cmd, cwd=str(work_dir),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=timeout_sec, stop=stop,
+                text=True, timeout=timeout_sec, stop=stop, memory=True,
                 **({"env": run_env} if run_env is not None else {}),
             )
         process_meta = {"operation_outcome": getattr(res, "operation_outcome", "completed")}
@@ -438,7 +433,7 @@ def _run_shell(
             artifact_note, _, artifact_registered = _register_process_outputs(
                 ctx, outputs, pathlib.Path(work_dir), cwd_root=cwd_root, changed_paths=set(_status_snapshot(repo_root) or []),
                 before_outputs=before_outputs, binding=binding, output_context=output_context, changed_only=True)
-            text = autocorrect_note + f"⚠️ SHELL_EXIT_ERROR: command exited with {_describe_returncode(res.returncode, cwd=work_dir, binding=binding, lived_ms=_lived_ms, resolved_runtime=_active_resolved_runtime(ctx))}.\n\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{executor_note}"
+            text = autocorrect_note + f"⚠️ SHELL_EXIT_ERROR: command exited with {_describe_returncode(res.returncode, cwd=work_dir, binding=binding, lived_ms=_lived_ms, resolved_runtime=_active_resolved_runtime(ctx), memory_oom=getattr(res, 'memory_oom', None))}.\n\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{executor_note}"
             return _publish_process_result(ctx, "SHELL_EXIT_ERROR", text, exit_code=res.returncode, artifact_registered=artifact_registered, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta)
         after_changed = _status_snapshot(repo_root)
         if after_changed != before_changed:
@@ -520,11 +515,13 @@ def _run_shell(
     except (CommandStopped, subprocess.TimeoutExpired) as ended:
         stopped = isinstance(ended, CommandStopped)
         _publish_unfinished_process_facts(ctx, _command_start_ts, timed_out=not stopped,
-                                          killed=stopped and ended.exit_observed)
+                                          killed=stopped and ended.exit_observed, memory_oom=getattr(ended, "memory_oom", None))
         # Timeout- or Stop-created scratch still needs its exclusion fingerprint.
         _record_scratch_fingerprints(ctx, scratch_abs)
         return unfinished_command_result(ctx, ended, timeout_sec, kwargs.get("_tool"), root=binding.root, cwd=work_dir)
     except Exception as e:
+        if isinstance(e, StoreError) and getattr(e, "invocation_not_started", None) is True:
+            raise  # the registry's typed TOOL_ADMISSION_UNAVAILABLE, not a spawn error
         if res is None:
             _publish_unfinished_process_facts(ctx, _command_start_ts, spawn_error=e)
         _record_scratch_fingerprints(ctx, scratch_abs)

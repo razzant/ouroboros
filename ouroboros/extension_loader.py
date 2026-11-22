@@ -695,7 +695,8 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
     if grant_status.get("blocked"):
         from ouroboros.skill_grant_scope import blocking_items
 
-        return f"skill {skill.name!r} is missing owner grants for {blocking_items(grant_status)}. Grant access from the Skills tab."
+        return (f"skill {skill.name!r} is missing owner grants for {blocking_items(grant_status)}. "
+                "Grant access on its card in Extensions → Skills.")
     granted_core = list(grant_status.get("granted_keys") or [])
     if not _force_in_process:
         try:

@@ -24,7 +24,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 ROOT = "root0001"
 TS = "2026-09-30T05:41:45+00:00"
 # How every reader's set shows a press without words: the host's record of the act, its card on the next row.
-PRESSED = "(host record: my human pressed «{}» and wrote no words; the label is the asking task's text)"
+PRESSED = "(host record: my human pressed «{}» and wrote no words; the label is the text of task asker)"
 MIND = {"kind": "mind", "task_id": ROOT, "focus": {"role": "root", "task_id": ROOT}}
 
 
@@ -173,7 +173,7 @@ def test_schedule_never_reads_dialogue_and_a_render_reads_the_room_once(tmp_path
     import ouroboros.project_dialogue as project_dialogue
 
     refuse = _raising(AssertionError("the dialogue store was read"))
-    for module, name in ((ds, "iter_probes"), (project_dialogue, "resolve_owner_message_source"),
+    for module, name in ((ds, "iter_probes"), (ds, "annotation_sources"), (project_dialogue, "resolve_owner_message_source"),
                          (chat_chain, "room_rows"), (project_dialogue, "project_origin_rows")):
         monkeypatch.setattr(module, name, refuse)
     room = _project(tmp_path)
@@ -183,7 +183,7 @@ def test_schedule_never_reads_dialogue_and_a_render_reads_the_room_once(tmp_path
     assert _texts(ow.governing_words_for_schedule(ctx)[ow.FIELD]) == ["Go", "On"]
     reads: list = []
     monkeypatch.setattr(chat_chain, "room_rows", lambda root, room_id, **_kw: reads.append(int(room_id)) or iter(()))
-    monkeypatch.setattr(project_dialogue, "project_origin_rows", lambda root, chat: reads.append(int(chat)) or [])
+    monkeypatch.setattr(project_dialogue, "project_origin_rows", lambda root, chat, **kw: reads.append(int(chat)) or [])
     assert "\nGo\n" in ow.owner_words_text(ctx) and reads == [room, room]
     # The substitution is live: the history resolver does read the store, and trips it.
     _annotate(tmp_path, "msg-9")
@@ -203,7 +203,7 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     from ouroboros.owner_relay import inject_relay, stamped_refs, words_unseen_in
 
     origin = build_owner_message_ref(chat_id=1, client_message_id="msg-o", ts=_at(0), text="Start the Quotas project")
-    room = _project(tmp_path, origin={"ref": origin, "text": "Start the Quotas project"})
+    room = _project(tmp_path, origin={"ref": origin, "text": "Start the Quotas project", "snapshot": {"projectable": True}})
     file = {"upload": "u1", "name": "quota.png", "mime": "image/png", "kind": "image", "size": 1234, "sha256": "ab" * 32}
     _chat(tmp_path, _in_row("да", "cm-d1", ts=_at(1), chat_id=room), _in_row("да", "cm-d2", ts=_at(2), chat_id=room),
           _in_row("See the file", "cm-f", ts=_at(3), chat_id=room, attachments=[file]),
@@ -700,3 +700,83 @@ def test_live_speech_is_citable_but_not_an_owner_source(tmp_path):
     ctx._owner_directives[0]["source"] = "owner_mailbox"
     assert _owner_yes(ctx, subject) == "spoken"
     assert owner_reply_owed(ctx)
+
+
+def test_a_helper_birth_copies_its_base_rows_and_names_only_a_corpus_only_displaced_row(tmp_path):
+    """A Project helper still receives the files of the Project's origin row, a room row and a marked row, as
+    before. A message its root's start displaced that is also a row of the helper's room is copied as that room row;
+    one that reaches the helper only as its root's carried context stays named with the host's mark, uncopied."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros import memory_view as mv
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.chat_chain import row_address
+    from ouroboros.chat_uploads import store_upload
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.owner_relay import NOT_GIVEN, mark_context_files, task_words_text
+
+    def upload(name, data):
+        return store_upload(data, name, data_dir=tmp_path)[1]
+
+    origin = build_owner_message_ref(chat_id=1, client_message_id="msg-o", ts=_at(0), text="Start the Quotas project")
+    room = _project(tmp_path, origin={"ref": origin, "text": "Start the Quotas project", "snapshot": {
+        "projectable": True, "attachments": [upload("origin.csv", b"origin")]}})
+    overlap = upload("overlap.csv", b"overlap")
+    _chat(tmp_path, _in_row("See the room file", "cm-room", ts=_at(1), chat_id=room, attachments=[upload("room.csv", b"room")]),
+          _in_row("An earlier request", "cm-a", ts=_at(2), chat_id=room, attachments=[overlap]),
+          _in_row("Main room words", "cm-main", ts=_at(3), attachments=[upload("marked.csv", b"marked")]))
+    marked = dict(ds.accepted_row(tmp_path, 1, "cm-main").row)
+    assert ChronicleStore(tmp_path).mark(row_address(marked), "keep this in view", MIND, room_id=str(room)).ok
+    carried = [ow._row("An earlier request", source="origin_message", carrier="ctx", task_id=ROOT, ts=_at(2),
+                       ref=f"chat {room} / cm-a", attachments=[overlap]),
+               ow._row("Another earlier request", source="origin_message", carrier="ctx", task_id=ROOT, ts=_at(4),
+                       ref="chat 1 / cm-x", attachments=[upload("only-carried.csv", b"only carried")])]
+    mark_context_files([({"client_message_id": "cm-a", "chat_id": str(room)}, carried[0]),
+                        ({"client_message_id": "cm-x", "chat_id": "1"}, carried[1])],
+                       {"client_message_id": "cm-door", "chat_id": str(room)})
+    assert all(row["attachments"][0]["staged"].startswith(NOT_GIVEN) for row in carried)
+    child = {"id": "birth-child", "parent_task_id": ROOT, "root_task_id": ROOT, "drive_root": str(tmp_path),
+             "metadata": {"delegation_role": "subagent", ow.FIELD: carried}}
+    text = task_words_text(tmp_path, child, indent=mv.INDENT, stage=True)
+    store = task_artifact_dir_path(tmp_path, "birth-child") / "attachments"
+    assert sorted(path.read_bytes() for path in store.iterdir()) == [b"marked", b"origin", b"overlap", b"room"]
+    assert text.count("An earlier request") == 1 and text.count("read_file(root='artifact_store', path='attachments/") == 4
+    assert text.count(NOT_GIVEN) == 1 and "only-carried.csv (" in text.split("Another earlier request")[1]
+
+
+@pytest.mark.parametrize("exact_carrier_held", [True, False])
+def test_a_displaced_row_with_a_full_identity_never_takes_another_rows_files_by_reference(tmp_path, exact_carrier_held):
+    """A displaced source row that names its physical row keeps its own file line when the helper holds that very row
+    without files, or does not hold it: a second message under the same room and client id never lends it a file. The
+    other direction: a displaced row whose own physical row is held with its file is copied as that held row."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.chat_uploads import store_upload
+    from ouroboros.owner_relay import NOT_GIVEN, mark_context_files, owner_row_address, owner_row_identity, task_words_text
+
+    def upload(name, data):
+        return store_upload(data, name, data_dir=tmp_path)[1]
+
+    def displaced(row, files):
+        digest = owner_row_identity(row)["row_sha256"]
+        found = ow._row(row["text"], source="origin_message", carrier="ctx", task_id=ROOT, ts=row["ts"],
+                        ref=f"chat 1 / {row['client_message_id']}", attachments=files, row_sha256=digest)
+        mark_context_files([({"client_message_id": row["client_message_id"], "chat_id": "1", "ts": row["ts"],
+                              "row_sha256": digest}, found)], {"client_message_id": "cm-door", "chat_id": "1"})
+        assert found["attachments"][0]["staged"].startswith(NOT_GIVEN)
+        return found
+
+    first = _in_row("Use the first table", "cm-a", ts=_at(1))
+    second = _in_row("Use the second table", "cm-a", ts=_at(2), attachments=[upload("other.csv", b"other")])
+    third = _in_row("Use the third table", "cm-c", ts=_at(3), attachments=[upload("third.csv", b"third")])
+    held = {owner_row_address(row): row for row in ([first] * exact_carrier_held + [second, third])}
+    carried = [displaced(first, [upload("independent.csv", b"independent")]),
+               displaced(third, [dict(third["attachments"][0])])]
+    child = {"id": "birth-exact", "parent_task_id": ROOT, "root_task_id": ROOT, "drive_root": str(tmp_path),
+             "held_owner_messages": held, "metadata": {"delegation_role": "subagent", ow.FIELD: carried}}
+    text = task_words_text(tmp_path, child, stage=True)
+    own, other = text.split("Use the second table")
+    assert text.count("Use the first table") == 1 and "independent.csv (" in own.split("Use the first table")[1]
+    assert NOT_GIVEN in own and "other.csv" not in own and text.count(NOT_GIVEN) == 1
+    assert "other.csv (" in other and text.count("Use the third table") == 1
+    assert text.count("read_file(root='artifact_store', path='attachments/") == 2
+    store = task_artifact_dir_path(tmp_path, "birth-exact") / "attachments"
+    assert sorted(path.read_bytes() for path in store.iterdir()) == [b"other", b"third"]

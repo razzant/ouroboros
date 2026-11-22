@@ -53,9 +53,10 @@ COMMAND_TIMEOUT_NOTICE_KEY = "command_timeout_notified"
 REVIEW_ENFORCEMENT_NOTICE_KEY = "review_enforcement_notified"
 LIGHT_LOCAL_NOTICE_KEY = "light_local_box_notified"
 MODEL_CAP_NOTICE_KEY = "model_cap_notified"
+SUBAGENT_CAP_NOTICE_KEY = "subagent_cap_notified"
 BORN_SETTLED_NOTICE_KEYS = (COMMAND_TIMEOUT_NOTICE_KEY, LIGHT_LOCAL_NOTICE_KEY)
 JUDGED_BY_FACTS_NOTICE_KEYS = (OPTIONAL_BOUNDS_NOTICE_KEY, REVIEW_ENFORCEMENT_NOTICE_KEY, MODEL_CAP_NOTICE_KEY,
-                               LEGACY_MEMORY_NOTICE_KEY)
+                               SUBAGENT_CAP_NOTICE_KEY, LEGACY_MEMORY_NOTICE_KEY)
 _CALL_CEILING_KEY = "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC"
 _REVIEW_ENFORCEMENT_KEY = "OUROBOROS_REVIEW_ENFORCEMENT"
 # The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
@@ -223,7 +224,25 @@ def model_cap_notice(document: Optional[Mapping[str, Any]], settings: Mapping[st
         return ""
     return ('⚙️ "Requests at once per model" held 3 on this install, the number earlier versions saved by themselves. '
             "It now reads as not set: Ouroboros no longer limits API models (the provider's own limits still apply), "
-            "and the built-in local model keeps 3. If 3 was your choice, enter it again in Settings → Models → More.")
+            "and the built-in local model takes one request at a time. If 3 was your choice, enter it again in Settings → Models → More.")
+
+
+def subagent_cap_notice(document: Optional[Mapping[str, Any]], settings: Mapping[str, Any]) -> str:
+    """The owner-facing sentence that a saved 6 in "At once, for one task" reads as no number (owner 21.11.2026).
+
+    The rule of ``model_cap_notice``: owed while the document still shows the 6 the read seam blanks
+    (``settings_scales.unchosen_saved_document``) and the startup view reads no number; a blank shows no 6."""
+    from ouroboros.settings_scales import SUBAGENT_CAP_KEY, optional_bound_value, unchosen_saved_document
+
+    if not isinstance(document, Mapping) or document.get(SUBAGENT_CAP_KEY) in (None, ""):
+        return ""
+    if (unchosen_saved_document(document).get(SUBAGENT_CAP_KEY) != ""
+            or optional_bound_value(SUBAGENT_CAP_KEY, settings.get(SUBAGENT_CAP_KEY)) is not None):
+        return ""
+    return ('⚙️ "At once, for one task" held 6 on this install, the number earlier versions saved by themselves. '
+            "That limit of six subagents at once for one task is lifted: Ouroboros now decides how many to call, and "
+            "this computer's memory still limits them. To set a number again, enter it in Settings → Agents → "
+            "More: subagent limits and folders → At once, for one task.")
 
 
 def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
@@ -330,6 +349,10 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
             text = model_cap_notice(_raw_settings_document(), settings or {})
             if text:
                 owed.append((MODEL_CAP_NOTICE_KEY, text, "model_cap_notice"))
+        if not state.get(SUBAGENT_CAP_NOTICE_KEY):
+            text = subagent_cap_notice(_raw_settings_document(), settings or {})
+            if text:
+                owed.append((SUBAGENT_CAP_NOTICE_KEY, text, "subagent_cap_notice"))
         if not state.get(LEGACY_MEMORY_NOTICE_KEY) and message_bus.DATA_DIR:
             try:
                 text = legacy_memory_notice(legacy_memory_facts(message_bus.DATA_DIR))

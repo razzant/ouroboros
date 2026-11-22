@@ -395,13 +395,19 @@ def record_not_ours(drive_root: Any, entry: Dict[str, Any], evidence: Dict[str, 
     }, lock_timeout_sec=lock_timeout_sec)
 
 
+# Rows a measured launch stop may end by their own marker: services and a memory-gated foreground command.
+# Deliberately not the retention set of ``launch_custody._KEPT_PURPOSES``: a foreground command's row is
+# its own record's, retired with the command.
+_LAUNCH_PURPOSES = ("service:", "workspace_service:", "foreground_command:")
+
+
 def _service_group_survives_leader(entry: Dict[str, Any]) -> bool:
     """Keep dead/unknown-leader evidence; a measured foreign leader refutes the group."""
     purpose = str(entry.get("purpose") or "")
     scope = str(entry.get("scope") or "")
     pgid = int(entry.get("pgid") or 0)
     return bool(
-        (purpose.startswith(("service:", "workspace_service:")) or purpose == "maintenance")
+        (purpose.startswith(_LAUNCH_PURPOSES) or purpose == "maintenance")
         and scope in {"task", "session"}
         and pgid > 0
         and not (pgid == int(entry.get("pid") or 0) and measured_identity_mismatch(entry))
@@ -807,7 +813,7 @@ def _owned_service_row(entry: Dict[str, Any]) -> bool:
     leader's own signal authority (``process_scope._unmeasured_leaders``), never its marker's reach."""
     from ouroboros.process_census import is_launch_marker
 
-    return (not IS_WINDOWS and str(entry.get("purpose") or "").startswith(("service:", "workspace_service:"))
+    return (not IS_WINDOWS and str(entry.get("purpose") or "").startswith(_LAUNCH_PURPOSES)
             and is_launch_marker(str(entry.get("scope_marker") or "")))
 
 
@@ -866,7 +872,7 @@ def end_service_rows(drive_root: Any, entries: List[Dict[str, Any]], *, retained
 
 def _launch_row_of(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The launch row an ownership-set stop target names: its ledger row, or the row of a local executor record's marker."""
-    if entry.get("kind") == "service":
+    if entry.get("kind") in ("service", "foreground"):
         from ouroboros import workspace_executor as executor
 
         path = pathlib.Path(entry["record_path"])
@@ -875,6 +881,38 @@ def _launch_row_of(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 and executor._valid_process_record(path, record, check_identity=False) else None)
     row = entry.get("ledger_entry")
     return row if entry.get("kind") == "supervised" and isinstance(row, dict) and _owned_service_row(row) else None
+
+
+def record_launch_purpose(record: Dict[str, Any]) -> str:
+    """The ledger purpose of a durable executor record's launch row: a service keeps ``workspace_service:``, a
+    memory-gated foreground command ``foreground_command:`` (``_LAUNCH_PURPOSES``)."""
+    kind = "foreground_command" if record.get("record_type") == "foreground" else "workspace_service"
+    return f"{kind}:{record.get('name') or record.get('id')}"
+
+
+def record_birth_matches(record: Dict[str, Any]) -> bool:
+    """A launch record's leader is still the process it recorded: pid and birth (``canonical_birth`` on both sides).
+    Service records and memory-gated command records alike: the command was registered as its gate shim and has
+    exec'd its argv since, so its command hash no longer names it; a birth survives an exec and is not reused."""
+    from ouroboros.process_census import birth_text, canonical_birth
+
+    return canonical_birth(birth_text(int(record.get("host_pid") or 0))) == canonical_birth(record.get("host_birth"))
+
+
+def settle_foreground_records(drive_root: Any, *, wait: bool) -> List[Dict[str, Any]]:
+    """Kill the durable foreground records (``workspace_executor.kill_all_foreground``). A memory-gated command's
+    record keeps its launch identity (marker + birth): one measured pass ends everything that marker reaches, the
+    leaf's members even after the leader died, like a service's. Panic's no-census settle (``wait=False``) keeps
+    the identity-checked kill."""
+    from ouroboros import workspace_executor as executor
+    from ouroboros.process_scope import end_held_processes
+
+    records = executor._owned_process_records(drive_root, "foreground", launches=wait)
+    marked = [(path, record) for path, record in records if wait and executor._recorded_launch(record)]
+    together = end_held_processes([], others=executor._record_targets(marked), others_spared=spared_daemon_roots(drive_root),
+                                  graceful=False) if marked else {}
+    return [executor._settle_durable_record(path, record, wait=wait, ended=together.get(str(path)))
+            for path, record in records]
 
 
 def launch_stop_pass(root: Any, entries: List[Dict[str, Any]], retained: Any) -> Optional[Dict[str, Any]]:
@@ -1207,7 +1245,7 @@ def quiesce_custodied_services(
     blockers: List[str] = []
     for entry in entries:
         purpose = str(entry.get("purpose") or "")
-        is_service = purpose.startswith(("service:", "workspace_service:")) or purpose == "maintenance"
+        is_service = purpose.startswith(_LAUNCH_PURPOSES) or purpose == "maintenance"
         in_scope = is_service and str(entry.get("scope") or "") in {"task", "session"}
         if in_scope and _owned_service_row(entry):
             targets.append(entry)  # whatever its leader pid names now: its own reach is read below

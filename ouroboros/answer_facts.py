@@ -18,7 +18,8 @@ import json
 import logging
 from typing import Any, Mapping, Optional
 
-from ouroboros.owner_words import OWNER_CARD_INPUT, OWNER_PRESS
+OWNER_PRESS = "owner_press"
+OWNER_CARD_INPUT = "owner_card_input"  # retired submission: the input still reached this work, its words are unknown
 
 
 def pressed_index(block: Any) -> Optional[int]:
@@ -73,6 +74,11 @@ def press_record(shown: Any, asker: Any = "", *, who: str = "my human") -> str:
     return f"(host record: {who} pressed «{shown}» and wrote no words; the label is {text_owner(asker)})"
 
 
+def pressed_option_record(shown: Any, asker: Any = "", *, who: str = "my human") -> str:
+    """The host's record of the option a press chose, kept with the card it answered, apart from any words typed."""
+    return f"(host record: {who} pressed «{shown}»; the label is {text_owner(asker)})"
+
+
 def answer_source(block: Any, words_source: str = "owner_quiz_answer") -> str:
     """The corpus label of an answer to the card ``block``: ``OWNER_PRESS`` for a press without words."""
     return OWNER_PRESS if wordless_press(block) else words_source
@@ -120,6 +126,13 @@ def submitted_texts(values: Mapping) -> tuple[str, ...]:
                  for v in values.values() if v is not None and (not isinstance(v, str) or v.strip()))
 
 
+def submitted_fields_line(target: Mapping) -> str:
+    """A model-visible record of the field boundaries, separate from the body and question."""
+    values = target.get("submitted_values") if isinstance(target, Mapping) else None
+    return ("[Host record: submitted fields (JSON): " + json.dumps(values, ensure_ascii=False) + "]"
+            if isinstance(values, Mapping) and values else "")
+
+
 def word_spans(text: str, target: Mapping) -> tuple[str, ...]:
     """The separate fields one quotation can come from. Older flattened forms prove only spans within a line."""
     if isinstance(values := target.get("submitted_values"), Mapping):
@@ -148,13 +161,14 @@ def living_card_input(row: Any, root: Any = None) -> dict:
 def late_quiz_input(ref: Mapping, block: dict, words_source: str = "owner_mailbox") -> dict:
     """The corpus fact for one reading of a late answer, including an unavailable answer."""
     from ouroboros.owner_quiz import late_answer_owner_text
-    from ouroboros.owner_words import answered_card_reply
 
     content = late_answer_owner_text(block)
     if not content:
         return {"source": OWNER_CARD_INPUT, "content": "Quiz answer received. Its accepted answer is unavailable."}
+    pressed = late_answer_owner_text({**block, "comment": ""})
     return {"source": answer_source(block, words_source), "content": content, "source_task_id": ref["task_id"],
-            "quiz_id": ref["quiz_id"], "reply_to": answered_card_reply(block, ref["task_id"])}
+            "quiz_id": ref["quiz_id"], **({"pressed": pressed} if pressed else {}),
+            "reply_to": answered_card_reply(block, ref["task_id"])}
 
 
 def card_input(row: Any, root: Any, words_source: str = "owner_mailbox") -> dict:
@@ -172,7 +186,6 @@ def row_source(row: Any, words_source: str, root: Any = None) -> str:
     shows exactly that press, ``owner_quiz_answer`` for a quiz answer row's words, else ``words_source``."""
     from ouroboros.owner_quiz import late_answer_owner_text
     from ouroboros.owner_relay import owner_text
-    from ouroboros.owner_words import answered_card_source
 
     if isinstance(row, Mapping) and isinstance(answer := row.get("corpus_answer"), Mapping):
         if answer.get("source") in (OWNER_CARD_INPUT, OWNER_PRESS, "owner_quiz_answer", "owner_mailbox", "initial_user", "origin_message"):
@@ -188,7 +201,6 @@ def row_source(row: Any, words_source: str, root: Any = None) -> str:
 def row_words(row: Any, root: Any = None) -> str:
     """A held row's words as a quote shows them to a model: its text, or the host's record of a press without words."""
     from ouroboros.owner_relay import owner_text
-    from ouroboros.owner_words import answered_card_source
 
     if submitted := card_input(row, root):
         return (press_record(submitted["content"], submitted["source_task_id"]) if submitted["source"] == OWNER_PRESS
@@ -224,3 +236,98 @@ def mark_press_arrival(ctx: Any, message: dict) -> None:
         content = message["content"]
         message["content"] = ([*content, {"type": "text", "text": "\n" + line}] if isinstance(content, list)
                               else f"{content}\n{line}")
+
+
+# What a successor reads of an answered card beside the owner's words (``answered_card``).
+CARD_FIELDS = ("quiz_id", "question", "options", "option_details", "stake", "assumption", "host_facts", "materials",
+               "answered_index", "comment", "asked_at", "answered_at")
+
+
+def answered_card(block: Any, words: str) -> dict[str, Any] | None:
+    """What a successor reads of the card an owner answer replies to, or None.
+
+    ``block`` must be an answered card whose recorded owner words are exactly ``words``.
+    The question and options are the asking task's words; they ride beside the answer
+    and never enter the owner corpus.
+    """
+    import copy
+
+    from ouroboros.owner_quiz import STATE_ANSWERED, late_answer_owner_text
+
+    if not (isinstance(block, dict) and not block.get("secret_request") and block.get("state") == STATE_ANSWERED
+            and late_answer_owner_text(block) == words):
+        return None
+    return {key: copy.deepcopy(block[key]) for key in CARD_FIELDS if key in block}
+
+
+def carded(row: dict[str, Any], source: Any, root: Any = None) -> dict[str, Any]:
+    """``row`` with the card its words answer beside them (``answered_card_source(source)``) when that card records
+    exactly these words: the asking task, the card's id and the card a Continue successor reads."""
+    block, asker = answered_card_source(source, root)
+    card = answered_card(block, row["content"])
+    if card and all(isinstance(value, str) and value for value in (asker, card.get("quiz_id"))):
+        row.update(source_task_id=asker, quiz_id=card["quiz_id"], card=card)
+    return row
+
+
+def answered_card_source(row: Any, root: Any = None) -> tuple:
+    """``(block, asking task)`` of the card a row of my human's words answers, else ``(None, None)``: a relayed quiz row's
+    ``quiz``, a live delivery's ``quiz_delivery`` snapshot, or a late answer's typed snapshot (``late_answer_ref``)."""
+    row = row if isinstance(row, Mapping) else {}
+    if row.get("type") == "quiz_answer":
+        return row.get("quiz"), row.get("task_id")
+    if isinstance(delivery := row.get("quiz_delivery"), Mapping) and delivery:
+        return delivery.get("answer_snapshot"), delivery.get("task_id")
+    from ouroboros.owner_quiz import late_answer_ref, resolved_late_quiz
+
+    late = late_answer_ref(row.get("late_answer"))
+    return (resolved_late_quiz(root, late) or None, late["task_id"]) if late else (None, None)
+
+
+def answered_card_reply(block: Any, task_id: Any) -> dict[str, str]:
+    """The card my human answered, as the message their answer replies to (a corpus row's ``reply_to``), or {}.
+
+    The whole subject the card showed (question, options with details, stake, assumption, materials) is the asking
+    task's words: it rides beside the owner's answer for every reader of the corpus (Safety, reviewers, children,
+    Continue), never as the owner's words; the host's record of the pressed option closes it, so a choice survives
+    beside a comment. A secret request's form has none."""
+    block = block if isinstance(block, Mapping) else {}
+    if block.get("secret_request") or not str(block.get("question") or "").strip():
+        return {}
+    options = block.get("options") if isinstance(block.get("options"), list) else []
+    details = block.get("option_details") if isinstance(block.get("option_details"), list) else []
+    lines = [str(block["question"]), *(f"{n}. {label}" + (f" ({details[n - 1]})" if n <= len(details) and str(
+        details[n - 1]).strip() else "") for n, label in enumerate(options, 1))]
+    lines += [f"{name}: {block[key]}" for key, name in (("stake", "Stake"), ("assumption", "If unanswered"),
+                                                        ("host_facts", "Host facts")) if str(block.get(key) or "").strip()]
+    materials = [f"{m.get('name')} (task {m.get('task_id') or task_id})" for m in block.get("materials") or []
+                 if isinstance(m, Mapping) and m.get("name")]
+    lines += [f"Materials: {', '.join(materials)}"] * bool(materials)
+    if type(block.get("answered_index")) is int:
+        lines.append(f"(host record: my human pressed option {block['answered_index'] + 1})")
+    return {"address": f"quiz {block.get('quiz_id')} of task {task_id}", "author": f"Ouroboros, task {task_id}",
+            "text": "\n".join(lines)}
+
+
+def is_answered_card(reply: Any) -> bool:
+    """Whether a corpus row's ``reply_to`` is a card my human answered (``answered_card_reply``), not a chat message."""
+    return isinstance(reply, Mapping) and str(reply.get("address") or "").startswith("quiz ")
+
+
+def retained_card_input(row: Mapping, root: Any) -> dict:
+    """An accepted physical card row as an input. Only its own record can interpret the display text."""
+    if item := card_input(row, root):
+        return item
+    from ouroboros.owner_quiz import late_answer_owner_text
+    from ouroboros.owner_relay import owner_text
+
+    block, asker = answered_card_source(row, root)
+    if asker and isinstance(block, dict):
+        words = (late_answer_owner_text(block) if row.get("type") == "quiz_answer"
+                 and row.get("source") in (None, "", "owner_quiz_answer")
+                 and row.get("direction") == "system" else owner_text(row))
+        if (card := answered_card(block, words)) and card.get("quiz_id"):
+            return late_quiz_input({"task_id": asker, "quiz_id": card["quiz_id"]}, card, "owner_quiz_answer")
+    if isinstance(block, Mapping) or row.get("type") == "quiz_answer":
+        return {"source": OWNER_CARD_INPUT, "content": "Quiz answer received. Its accepted answer is unavailable."}
+    return {}

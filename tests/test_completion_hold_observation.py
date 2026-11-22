@@ -22,6 +22,7 @@ import pytest
 
 import ouroboros.loop as loop
 from ouroboros.tools.registry import ToolRegistry
+from tests._delivery_candidate_shared import holds  # noqa: F401  (the shared rows reader, kept importable from here)
 from tests.test_presence_owner_contact import contact_runtime as _contact_runtime
 from tests.test_presence_owner_contact import focus  # noqa: F401  (the fixture contact_runtime requests)
 from tests.test_presence_owner_stop import owner_stop as _owner_stop  # the public Stop over a live turn
@@ -56,13 +57,6 @@ def act(name, **arguments):
 def write_round():
     """A round that changes the result (a reviewable write) and leaves it unexamined."""
     return act("write_file", path="report.md", content="Report")
-
-
-def holds(root):
-    """The completion_held rows of the events log under ``root`` (absent file: none)."""
-    path = root / "logs" / "events.jsonl"
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
-    return [row for row in rows if row.get("type") == "task_checkpoint" and row.get("checkpoint_kind") == "completion_held"]
 
 
 def facts(row):
@@ -787,6 +781,76 @@ def test_only_a_current_bound_result_review_examines_the_result():
     assert result_unexamined(trace) is False, "the exact subject it reviewed is delivered again"
     trace["review_runs"] = [{"surface": "result", "aggregate": "NOT_DISPATCHED"}]
     assert result_unexamined(trace) is True, "a refusal dispatched no reviewer"
+
+
+def test_a_result_review_call_proved_refused_or_superseded_does_not_count():
+    """#3304: at the call level the door reads the call's typed linkage. Its own dispatched current run still
+    counts; its own $0 refusal — the typed refusal fact, or its bound run refused or superseded — does not;
+    a call without typed linkage stays counted as asked for (legacy), and so does an unbound pending review."""
+    from ouroboros.outcomes import result_unexamined
+
+    write = {"tool": "write_file", "status": "ok", "args": {"path": "report.md"}}
+    call = {"tool": "review_change", "args": {"subject": "result"},
+            "tool_result_meta": {"review_delivery": {"record_id": "r1"}}}
+    run = {"surface": "result", "record_id": "r1", "aggregate": "PASS"}
+
+    def trace_with(meta, run_over=None):
+        row = dict(call)
+        row["tool_result_meta"] = meta
+        return {"tool_calls": [dict(write), row], "review_runs": [dict(run, **(run_over or {}))]}
+
+    linked = {"review_delivery": {"record_id": "r1"}}
+    assert result_unexamined(trace_with(linked)) is False, "the call's own dispatched current run counts"
+    assert result_unexamined(trace_with(linked, {"aggregate": "NOT_DISPATCHED"})) is True, "its own bound refusal"
+    assert result_unexamined(trace_with(linked, {"superseded_by_revision": "candidate-2"})) is True, "its superseded run"
+    assert result_unexamined(trace_with({"result_review_refusal": {"reason": "review_cycles_exhausted"}},
+                                        {"aggregate": "NOT_DISPATCHED"})) is True, "the typed $0 refusal fact"
+    assert result_unexamined({"tool_calls": [dict(write), dict(write)],
+                               "review_runs": [dict(run)]}) is False, "another record's current run still counts"
+    assert result_unexamined({"tool_calls": [dict(write), {"tool": "review_change", "args": {"subject": "result"}}],
+                               "review_runs": []}) is False, "a call without typed linkage stays counted (legacy)"
+    assert result_unexamined(trace_with(linked)) is False, "a linked call whose run is not bound yet stays asked for"
+
+
+@pytest.mark.parametrize("refusal", ["review_cycles_exhausted", "continuation_refused"])
+def test_a_zero_refused_result_review_does_not_count_as_an_examination(turn, monkeypatch, refusal):
+    """#3304: a review_change(subject="result") the ceiling or a live continuation refused at $0 returns plain JSON,
+    but the typed refusal fact the refusal itself publishes reaches the trace row, so the real finish door warns
+    again and the record keeps ``receipt_absent``: the refused call examined nothing, exactly like the bound
+    NOT_DISPATCHED run the door already excludes."""
+    from ouroboros.outcomes import apply_receipt_absent_flag, derive_loop_outcome
+    from ouroboros.review_continuation import ContinuationRefused
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    if refusal == "review_cycles_exhausted":  # the ceiling's own answer: a record nothing was dispatched to
+        monkeypatch.setattr(
+            "ouroboros.tools.review_change.run_review_change",
+            lambda *_a, **_k: {"record_id": "r3304", "state": "settled", "aggregate": "NOT_DISPATCHED",
+                                "review_reference": {"record_id": "r3304", "task_id": "author-task", "surface": "result"},
+                                "dispatch_refusal": {"kind": "review_cycles_exhausted", "message": "ceiling", "cap": 5},
+                                "message": "The review-cycle ceiling is reached."})
+    else:
+
+        def refused(*_args, **_kwargs):
+            raise ContinuationRefused("seats_not_idle", "the chosen seats are still answering", offers=[])
+
+        monkeypatch.setattr("ouroboros.tools.review_change.run_review_change", refused)
+    script = [write_round(), act("review_change", subject="result"), finish("Answer"), finish("Answer")]
+
+    text, usage, trace = turn.run(script)
+
+    assert text == "Answer" and len(turn.calls) == len(script), "the refused call answered, and the last round delivered"
+    calls = [call for call in trace["tool_calls"] if call.get("tool") == "review_change"]
+    fact = calls[-1].get("tool_result_meta", {}).get("result_review_refusal")
+    assert isinstance(fact, dict) and fact["reason"] == (
+        "review_cycles_exhausted" if refusal == "review_cycles_exhausted" else "seats_not_idle"), "the typed fact"
+    assert [(row["reason"], row["subreason"]) for row in holds(turn.root)] == [
+        ("finalization_nudge", "pre_delivery_notice")], "the finish door warned again"
+    reminders = [row["content"] for row in turn.calls[-1] if str(row.get("content") or "").startswith("[SYSTEM REMINDER]")]
+    assert "has examined this result" in reminders[0], "the pre-delivery notice itself"
+    outcome = derive_loop_outcome(text, usage, trace)
+    apply_receipt_absent_flag(outcome, trace, turn.root, "author-task")
+    assert "receipt_absent" in (outcome["outcome_axes"]["objective"].get("warnings") or []), "the record keeps the fact"
 
 
 def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_path, monkeypatch):

@@ -2161,3 +2161,26 @@ def test_a_forced_answer_shows_the_answer_one_shot_facts_returned_before_replaci
 
     assert text.startswith("Done, see above.") and shown == [report]
     assert registry._ctx._delivery_candidate.full_text == text
+
+
+@pytest.mark.parametrize("denied", [True, False], ids=["denial", "ordinary"])
+def test_a_received_codex_denial_buys_the_two_attempt_forced_rail_no_second_send(tmp_path, monkeypatch, denied):
+    from ouroboros.llm_claudexor import CODEX_CONTENT_POLICY_DENIED
+
+    loop, _registry, ctx, _frame = _forced_test_context(tmp_path)
+    calls = 0
+
+    def refused(*_args, **_kwargs):  # what a classified refusal leaves: this attempt's kind stamped, no reply
+        nonlocal calls
+        calls += 1
+        ctx.accumulated_usage["_last_llm_error_kind"] = CODEX_CONTENT_POLICY_DENIED if denied else "bad_request"
+        return None, 0.0
+
+    drain = loop._drain_forced_owner_directives
+    monkeypatch.setattr(loop, "call_llm_with_retry", refused)
+    monkeypatch.setattr(loop, "_drain_forced_owner_directives", lambda *a, **k: (drain(*a, **k), "carried")[1])  # a late context-only row
+    text, usage, _trace = loop._forced_final_answer(
+        ctx, prompt="finalize", fallback_text="fallback", reason_code="round_limit")
+    assert calls == (1 if denied else 2)  # the ordinary kind keeps today's refresh
+    assert text == "fallback"
+    assert ("Codex content-policy denial" in usage.get("terminal_host_notice", "")) is denied

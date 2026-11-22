@@ -90,6 +90,31 @@ managed restart, its bounded crash fuse, panic semantics, and final cleanup.
 Adding a second restart owner would let systemd undo a panic stop or restart a
 runtime that the launcher deliberately stopped.
 
+`OOMPolicy=continue` (systemd 243 and later; below it systemd does not react to a child's OOM at all)
+keeps the service up when the kernel kills a process. `Delegate=memory` and `DelegateSubgroup=runtime`
+(systemd 254 and later) put the launcher, server and workers in a `runtime` subgroup beside a
+`commands` group: in sessions started by the unit, each local command gets its own memory leaf there
+(`ouroboros/command_memory.py`) and no swap, so an OOM at its limit kills that command alone. The `commands` group's
+limit is the host total less the 10% reserve and the memory held outside the commands (one snapshot, the `runtime`
+subgroup read directly); a new leaf gets all the room that leaves free, and running leaves are only raised. Every
+leaf, not only the command's own, is recomputed when any command starts or finishes, and when a running command's
+`memory.events` `max` count moves; that last refresh is a poll at the command's wait slice, so an allocation fast
+enough reaches its leaf's OOM before it. This holds only for the gated foreground tools (`run_command`, `run_script`,
+`verify_and_record` and the local executor) in a unit with systemd 254+ on cgroup v2. If two commands grow together
+and fill the shared `commands` limit, a command dies, even a healthy sibling, and it is meant to be the largest: every
+process of the command holding most gets a best-effort `oom_score_adj` of 1000, the others their command's share
+(only raised, never below 0), refreshed at every start, pressure refresh, finish and wait slice. That choice of
+victim is best effort, an accepted residual: the kernel picks a process, not a group, so a command that was largest
+keeps its 1000 after it shrinks, and between two commands at 1000 (or before a lagging refresh) the one with the
+bigger single process can die even if it is the smaller command. Only commands die either way; the service never. `start_service`,
+`skill_exec`, MCP servers, extension processes and Claudexor runs bypass the gate: they stay in `runtime` and are
+covered only by `OOMPolicy=continue`, so one of them can still take the whole group's room. A command's output is
+still collected whole in its worker, as before this change, so a command streaming gigabytes grows the worker, not
+its leaf. While free RAM is under 10%, new gated commands do not start; swap is not counted. This is delivered by the
+package, not by Update: a unit already loaded needs `systemctl --user daemon-reload` and a restart, and an older
+package, systemd below 254, the desktop entry and AppImage keep the old behaviour; `/status` says on Linux whether
+commands are isolated, and why not.
+
 `KillMode=control-group` sends the stop signal to the complete process tree
 started by the unit, including the launcher, server, and workers.
 `TimeoutStopSec=120` does not defer that signal and does not promise that an

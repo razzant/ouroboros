@@ -306,14 +306,23 @@ def _seat(data, task_id, operation, *, area=False):
     return home, files
 
 
+class _Offers(list):
+    """What the floor was offered, as (path, owned); ``serials`` holds each path's serial scope too."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.serials = {}
+
+
 @pytest.fixture
 def recorded(monkeypatch):
     """Every path offered to the floor, answered ``compressed`` without touching it."""
-    seen = []
+    seen = _Offers()
 
-    def outcome(path, owned=None, background=False):
+    def outcome(path, owned=None, background=False, serial=None):
         assert background, "the job's own rewrites run at the utility disk tier"
         seen.append((pathlib.Path(path), owned))
+        seen.serials[pathlib.Path(path)] = serial
         return "compressed"
 
     monkeypatch.setattr(artifact_storage, "compression_supported", lambda: True)
@@ -342,6 +351,25 @@ def test_the_job_offers_only_finished_records_never_a_copy_or_git(data, recorded
     row = maintenance_jobs.job(data, job.JOB)
     assert row["waiting"] == {"evidence": [], "seats": sorted(home.name for home in (_copy_home, _live_home))}
     assert _run(data) is None, "a second look at unchanged inputs is at rest"
+
+
+def test_evidence_files_ask_their_own_task_serial_and_the_other_planes_still_run(data, recorded, monkeypatch):
+    import contextlib
+    from ouroboros import task_custody
+
+    asked = []
+    monkeypatch.setattr(task_custody, "task_custody_lock", lambda root, task_id, **kw: (
+        asked.append((pathlib.Path(root).resolve(), task_id, kw)) or contextlib.nullcontext(True)))
+    first, second = _evidence(data, "first", live_files=False), _evidence(data, "second", live_files=False)
+    _home, seat = _seat(data, "first", "op-1")
+    assert _run(data)["state"] == "done"
+    for task_id, files in (("first", first), ("second", second)):
+        for path in files.values():
+            asked.clear()
+            with recorded.serials[path]() as held:
+                assert held is True
+            assert asked == [(data.resolve(), task_id, {"timeout_sec": 0})], "its own task's scope, never another's"
+    assert set(seat.values()) <= set(recorded.serials), "the seat plane is still offered its files"
 
 
 def test_new_terminal_writes_make_the_job_due_and_only_their_records_are_read(data, recorded):
@@ -1196,7 +1224,7 @@ def test_a_file_kept_without_a_read_costs_no_read_budget_and_is_still_counted(da
     """A segment a living copy shares is decided by the volume's answer alone: the files behind it are read in the same run."""
     closed = [_segment(data, f"events_20261101T00000{index}.jsonl") for index in range(4)]
     monkeypatch.setattr(artifact_storage, "compression_supported", lambda: True)
-    monkeypatch.setattr(artifact_storage, "compression_outcome", lambda path, owned=None, background=False: (
+    monkeypatch.setattr(artifact_storage, "compression_outcome", lambda path, owned=None, background=False, serial=None: (
         "compressed" if pathlib.Path(path) == closed[-1] else "shared"))
     monkeypatch.setattr(job, "_queue_live", lambda root: (lambda task_id: False))
     _walk(data)
@@ -1205,7 +1233,7 @@ def test_a_file_kept_without_a_read_costs_no_read_budget_and_is_still_counted(da
     assert _run(data)["state"] == "done", "three shared segments took none of the one read"
     row = _row(data)
     assert row["last"]["skipped"] == {"shared": 3} and row["totals"]["logs"]["compressed"] == 1
-    monkeypatch.setattr(artifact_storage, "compression_outcome", lambda path, owned=None, background=False: "failed")
+    monkeypatch.setattr(artifact_storage, "compression_outcome", lambda path, owned=None, background=False, serial=None: "failed")
     _start(data)
     assert _run(data)["state"] == "pending", "a file that was read takes the run's budget"
 

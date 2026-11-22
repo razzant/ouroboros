@@ -255,6 +255,55 @@ def test_the_saved_receipt_names_the_turn_by_its_own_name_or_by_none(main, named
         first["task"]["id"], expected, expected)
 
 
+def test_words_whose_best_effort_row_was_lost_keep_their_identity_by_value(main):
+    """The door's chat row is best-effort (``main`` loses every write). My human's accepted words still carry their
+    identity by value, as every earlier ingress gave it: the four older fields, no row digest and no visibility a row
+    would attest. Their turn keeps that origin and its words; the next message keeps its live receipt by client id
+    and its saved annotation, with no row address invented."""
+    from ouroboros.project_dialogue import build_owner_message_ref, latest_chat_annotations
+
+    _say(main.bridge, main.ctx, "Send it to our team channel", "cm-first")
+    (first,) = _turns()
+    task = first["task"]
+    ref = task["origin_message_ref"]
+    assert ref == build_owner_message_ref(chat_id=1, client_message_id="cm-first", ts=ref["ts"],
+                                          text="Send it to our team channel")
+    assert task["metadata"]["origin_message_ref"] == ref and task["origin_message_text"] == "Send it to our team channel"
+    assert "origin_message_snapshot" not in task["metadata"] and not task["metadata"].get("origin_suppressed")
+    _say(main.bridge, main.ctx, "This chat", "cm-second")
+    (ack,) = _delivered(main.bridge, "cm-second")
+    assert ack["target"] == task["id"] and not ack.get("source_row_address")
+    assert latest_chat_annotations(main.root)["cm-second"]["status"] == "delivered"
+
+
+@pytest.mark.parametrize("case", ["ambiguous_legacy", "unstored_legacy", "unkept_ingress"])
+def test_only_the_ingress_fact_lets_an_undigested_ref_answer_by_client_id(tmp_path, case):
+    """An undigested ref that merely matches the receipt's room and client id proves no row: two stored rows its old
+    fields cannot tell apart, or none at all. Its receipt then names no client id live and writes no durable row.
+    Only the ingress's own fact that this message's best-effort write kept no row (``ingress_unkept``, set by
+    ``message_ingress.record_inbound_message`` and carried by the server's intake) lets the transport ACK answer the
+    bubble just sent by client id, with no row address invented and a durable row its room alone may place."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.project_dialogue import build_owner_message_ref, latest_chat_annotations
+    from ouroboros.server_owner_routing import _record_routing_receipt
+    from tests._main_followup import _Bridge
+
+    row = {"ts": "2026-10-17T00:00:01+00:00", "direction": "in", "client_message_id": "dup", "text": "Send it"}
+    if case == "ambiguous_legacy":
+        ds.append(tmp_path, "chat", {**row, "chat_id": 1})
+        ds.append(tmp_path, "chat", row)  # written before rows named their room: chat 1 by the legacy convention
+    ref = build_owner_message_ref(chat_id=1, client_message_id="dup", ts=row["ts"], text=row["text"])
+    bridge = _Bridge()
+    _record_routing_receipt(bridge, SimpleNamespace(DRIVE_ROOT=tmp_path), chat_id=1, client_message_id="dup",
+                            action="mailbox_delivery", target="t1", status="delivered", source_ref=ref,
+                            ingress_unkept=case == "unkept_ingress")
+    [ack] = bridge.acks
+    kept = case == "unkept_ingress"
+    assert ack["client_message_id"] == ("dup" if kept else "") and not ack.get("source_row_address")
+    stored = latest_chat_annotations(tmp_path)
+    assert ("dup" in stored) is kept and not (stored.get("dup") or {}).get("source_row_address")
+
+
 _CARRIER = r"""
 import json, os, sys
 from contextlib import contextmanager

@@ -186,6 +186,17 @@ def test_buffer_copies_original_row_bytes_and_wakes_existing_owner(tmp_path, mon
     assert retry.snapshot()["bytes"] == 0
 
 
+def test_document_labels_keep_distinct_identities_across_dialogue_retry(tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    rows = [{"chat_id": 1, "ts": "same", "direction": "out", "type": "document", "filename": name, "text": "Caption"}
+            for name in ("report-\udcff.txt", r"report-\udcff.txt")]
+    for row in rows:
+        retry.retain(tmp_path, "chat", row)
+    assert retry.snapshot()["rows"] == 2
+    assert retry.drain() == 2
+    assert [row for row in chat_rows(tmp_path) if row.get("type") == "document"] == rows
+
+
 def test_retry_probe_uses_room_time_index(tmp_path, monkeypatch):
     seed(tmp_path, monkeypatch)
     statements = []

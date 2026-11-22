@@ -142,6 +142,20 @@ def test_append_jsonl_writes_one_compact_line_that_keeps_every_value(tmp_path):
     assert json.loads(raw) == row and list(json.loads(raw)) == list(row)
 
 
+def test_structured_log_round_trips_posix_name_bytes_without_reencoding_normal_unicode(tmp_path):
+    raw_names = [b"fixture-\x80.txt", b"fixture-\xff.txt"]
+    names = [name.decode("utf-8", "surrogateescape") for name in raw_names]
+    row = {"paths": [*names, r"fixture-\udcff.txt", "файл🪶.txt"], names[0]: "name as key"}
+    path = tmp_path / "events.jsonl"
+    assert utils.append_jsonl(path, row)
+    wire = path.read_bytes().decode("utf-8")
+    assert wire == (r'{"paths":["fixture-\udc80.txt","fixture-\udcff.txt","fixture-\\udcff.txt","файл🪶.txt"],'
+                    r'"fixture-\udc80.txt":"name as key"}' + "\n")
+    [restored] = utils.iter_jsonl_objects(path)
+    assert restored == row
+    assert [name.encode("utf-8", "surrogateescape") for name in restored["paths"][:2]] == raw_names
+
+
 def test_append_jsonl_reports_a_write_that_dies_mid_record_and_never_replays_it(tmp_path, monkeypatch):
     """A write that dies mid-record reports False and is not retried whole: a replay would duplicate the prefix
     already on disk. Only the open is retried."""

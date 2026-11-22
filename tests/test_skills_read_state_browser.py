@@ -12,6 +12,7 @@ import json
 import pytest
 
 from tests._skills_page_harness import (
+    open_view,
     URL,
     capture,
     fixture,
@@ -44,6 +45,29 @@ def test_retired_presence_runtime_has_no_form(skills_browser, browser_name, widt
         assert page.locator('[data-presence-runtime-form]').count() == 0
     finally:
         browser.close()
+
+
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1440), ("webkit", 390)])
+def test_the_first_listing_is_one_read_when_the_view_and_section_ask_together(skills_browser, browser_name, width):
+    """Skills opened from outside Extensions (the harness opens it as an explicit request does): its view asks for the
+    listing as it comes on screen, and the section's rows ask for the same facts before any listing is here. They share
+    one read of the listing, the skill settings state and the lifecycle queue (skills.js readInstalled `join`)."""
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        skills = open_skills(page, extensions=[])
+        page.goto(URL, wait_until="networkidle")
+        page.wait_for_function("() => !document.querySelector('#skills-empty').hidden")
+        reads = {prefix: sum(1 for method, path in skills.requests if method == "GET" and path.split("?")[0] == prefix)
+                 for prefix in ("/api/extensions", "/api/state", "/api/skills/lifecycle-queue")}
+        assert reads == {"/api/extensions": 1, "/api/state": 1, "/api/skills/lifecycle-queue": 1}, reads
+        # Once a listing is here, Refresh reads it anew.
+        refresh(page)
+        assert skills.requests.count(("GET", "/api/extensions")) == 2
+    finally:
+        if skills:
+            skills.close(browser)
 
 
 @pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
@@ -79,7 +103,7 @@ def test_skills_failure_recovery_and_catalog_refresh(skills_browser, browser_nam
 
         # Browse: a catalog that cannot be read is said; a later failed refresh keeps the earlier list.
         skills.fail("/api/skill-catalog", "Catalog temporarily unavailable")
-        page.locator('.skills-tab[data-tab="browse"]').click()
+        open_view(page, 'browse')
         status = page.locator("[data-browse-status]")
         page.wait_for_function("document.querySelector('[data-browse-status]').textContent.includes('Couldn’t read the catalogs')")
         assert page.locator("[data-browse-board] .marketplace-card").count() == 0
@@ -417,14 +441,18 @@ def test_skills_tabs_and_bottom_edge_menu(skills_browser, browser_name, width):
             for index in range(6)
         ], sources=CONFIRMED_SOURCES)
         page.goto(URL, wait_until="networkidle")
-        selected = page.locator('[data-tab="installed"]')
-        selected.focus()
-        selected.press("ArrowRight")
-        assert page.locator('[data-tab="browse"]').get_attribute("aria-selected") == "true"
+        # The views are pages of Extensions, never tabs: one is chosen from the list (its row is the current page
+        # beside the list), and a press of another row shows that view in the same column.
+        row = page.locator('#page-skills [data-extensions-open="browse"]')
+        if row.is_visible():  # two panes: the list stands beside the page
+            row.click()
+            assert row.get_attribute("aria-current") == "page"
+        else:
+            open_view(page, 'browse')
         assert page.locator('#skills-pane-browse').is_visible()
         assert page.locator('#skills-pane-installed').is_hidden()
-        page.keyboard.press("Home")
-        assert selected.get_attribute("aria-selected") == "true"
+        assert page.locator('#page-skills [role="tab"]').count() == 0
+        open_view(page, 'installed')
         page.wait_for_function("() => !document.querySelector('#skills-refresh').disabled")
 
         trigger = page.locator('.skills-card[data-skill="weather-5"] [data-skill-menu-trigger]')

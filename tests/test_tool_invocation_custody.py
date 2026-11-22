@@ -411,3 +411,27 @@ def test_a_read_steer_receipt_discharges_its_message_handoff(tmp_path, status, o
         append_chat_annotation(tmp_path, 'quiz_answer:root:1', action='steer_task', target='child',
                                status=status, routing_token='relay-1')
     assert claim_still_owns_effect(tmp_path, claim) is owns
+
+
+def test_a_notes_relay_handoff_reads_its_own_rooms_receipt_between_two_same_id_messages(tmp_path, monkeypatch):
+    """A note quoting two rooms' messages that share an id keys its receipt on one of them; its handoff keeps that
+    room, so the later check reads that room's row and settles. A descriptor that names no room reads by id as before
+    and, between two rooms, stays owned: no room is chosen for it."""
+    from ouroboros import tool_custody
+    from ouroboros.project_dialogue import append_chat_annotation
+
+    claims = []
+    monkeypatch.setattr(tool_custody, "_update_active_claim", lambda change: claims.append(change({})))
+    relay = {"type": "steer_task", "relay_id": "relay-1", "routing_token": "relay-1", "chat_id": 42,
+             "client_message_id": "owner-1", "target_task_id": "receiver"}
+    tool_custody.record_control_handoff(relay)
+    [descriptor] = claims[-1]["control_receipts"]
+    assert descriptor["source_chat_id"] == 42
+    for room, status in ((1, "unconfirmed"), (42, "delivered")):
+        append_chat_annotation(tmp_path, "owner-1", source_chat_id=room, action="steer_task", target="receiver",
+                               status=status, routing_token="relay-1")
+    assert tool_custody.claim_still_owns_effect(tmp_path, {"control_receipts": [descriptor]}) is False
+    unplaced = {key: value for key, value in descriptor.items() if key != "source_chat_id"}
+    assert tool_custody.claim_still_owns_effect(tmp_path, {"control_receipts": [unplaced]}) is True
+    tool_custody.record_control_handoff({**relay, "relay_id": "", "type": "steer_task"})  # an owner's own steer
+    assert "source_chat_id" not in claims[-1]["control_receipts"][0]

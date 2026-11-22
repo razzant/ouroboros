@@ -146,18 +146,18 @@ def _reject_schedule_task(
         try:
             from supervisor.task_admission import persist_never_admitted_refusal
 
-            write_refusal = persist_never_admitted_refusal if never_admitted else write_task_result
-            write_refusal(
-                ctx.DRIVE_ROOT,
-                tid,
-                **({"admission_token": preparation.token} if preparation is not None
-                   else {} if never_admitted else {"status": status}),
-                **write_fields,
-                result=detail,
-                # ABI-3: a rejected schedule spent a confirmed zero — stamped
-                # under the honest name (the retired alias is read-only).
-                accounted_upper_bound_usd=0.0,
-            )
+            # ABI-3: a rejected schedule spent a confirmed zero — stamped
+            # under the honest name (the retired alias is read-only).
+            receipt = dict(result=detail, accounted_upper_bound_usd=0.0, **write_fields)
+            if preparation is not None:
+                # Rejoin only the chosen receipt. A closing generation must
+                # still settle it; copy disposal and notice are not retried.
+                preparation.store_gate(functools.partial(
+                    persist_never_admitted_refusal, ctx.DRIVE_ROOT, tid,
+                    admission_token=preparation.token, **receipt), controls=False)
+            else:
+                write_refusal = persist_never_admitted_refusal if never_admitted else write_task_result
+                write_refusal(ctx.DRIVE_ROOT, tid, **({} if never_admitted else {"status": status}), **receipt)
             refusal_confirmed = True
         except Exception as exc:
             from supervisor.workspace_preparation import store_contention
@@ -240,8 +240,10 @@ def _direct_child_count(roots: list, parent_id: Any, tid: str, *, propagate_cont
     return max(counts) if counts and all(count is not None for count in counts) else None
 
 
-def _active_cap_state(root: str, parent: Any, pending: list, running: dict, maximum: int) -> tuple[bool, str]:
-    """The existing soft queueing/depth reservation and hard refusal, shared by both checks."""
+def _active_cap_state(root: str, parent: Any, pending: list, running: dict,
+                      maximum: Optional[int]) -> tuple[bool, str]:
+    """The soft queueing/depth reservation (only under the owner's number) and the hard refusal (always), shared by
+    both checks."""
     blocked = _subagent_cap_blocks(root, parent, pending, running, maximum)
     if blocked and _active_subagent_count(root, pending, running) >= MAX_ACTIVE_SUBAGENTS_HARD_CAP:
         return True, ("Subagent rejected: hard active child limit "
@@ -745,7 +747,7 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
 
         def recheck_child_admission(count: Any) -> tuple[str, str]:
             # Under Q, memory only, with the count the lane read.
-            nonlocal queued_behind_active_cap
+            nonlocal queued_behind_active_cap, max_active
             if room_refusal:
                 return room_refusal
             rights = check_delegation_admission(r.parent_budget, direct_child_count=count, room_mode=room_mode)
@@ -758,8 +760,9 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
                     active_child_count=_active_subagent_count(root_task_id, pending_ref, running))
                 if not decision.ok:
                     return decision.reason_code, f"Subagent rejected: {decision.reason_code}: {decision.detail}"
+            max_active = get_max_active_subagents_per_root()  # the notice and feed name the number that decided
             queued_behind_active_cap, detail = _active_cap_state(
-                root_task_id, parent_id, pending_ref, running, get_max_active_subagents_per_root())
+                root_task_id, parent_id, pending_ref, running, max_active)
             return ("active_subagent_hard_cap" if detail else ""), detail
 
         (admitted, scheduled_failure_reason, scheduled_failure_detail, persist_scheduled_failure,

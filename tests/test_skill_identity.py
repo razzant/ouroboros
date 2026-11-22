@@ -445,6 +445,7 @@ def test_promotion_admits_owner_edits_only_under_the_owner_door_stamp(tmp_path, 
     import types
 
     import supervisor.workers as workers
+    from ouroboros.project_dialogue import build_owner_message_ref
     from ouroboros.skill_repair_admission import load_repair_admission
 
     _skill(tmp_path / "skills" / "external")
@@ -452,11 +453,18 @@ def test_promotion_admits_owner_edits_only_under_the_owner_door_stamp(tmp_path, 
     enqueued = []
     ctx = types.SimpleNamespace(enqueue_task=enqueued.append, persist_queue_snapshot=lambda **_kwargs: True,
                                 load_state=lambda: {"owner_chat_id": 1})
+    if stamp.get("source_ref"):
+        stamp = {**stamp, "source_ref": build_owner_message_ref(
+            **stamp["source_ref"], ts="2026-09-01T10:03:00Z", text="Fix probe as asked")}
     result = workers.promote_chat_to_task({
         "type": "promote_chat_to_task", "task_id": "repair01", "objective": "Fix probe as asked", "chat_id": 1,
         "task_constraint": {"mode": "skill_repair", "skill_name": "probe", "payload_root": "skills/external/probe"},
         **stamp,
     }, ctx)
+    if stamp.get("source_ref") == {}:
+        assert result["status"] == "needs_manual_target" and result["reason"] == "project_binding_failed"
+        assert not enqueued and not load_repair_admission(tmp_path, "probe")
+        return
     assert result["status"] == "scheduled" and len(enqueued) == 1
     assert load_repair_admission(tmp_path, "probe")["owner_request"] is owner_request
 

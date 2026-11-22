@@ -33,18 +33,17 @@ def _owner_row(ctx: ToolContext, handle: str) -> Tuple[str, Dict[str, Any], str]
             return "", {}, "OWNER_SOURCE_NOT_HELD: choose one of the held owner handles " + json.dumps(list(held))
         return handle, held[handle], ""
     origin = (getattr(ctx, "task_metadata", None) or {}).get("origin_message_ref") or {}
-    for address, row in held.items():
-        if (origin and str(row.get("client_message_id") or "") == str(origin.get("client_message_id") or "")
-                and int(row.get("chat_id", 1)) == int(origin.get("chat_id", 1))):
-            return address, row, ""
+    from ouroboros.owner_words import _held_origin
+    row = _held_origin(origin, held)
+    if row is not None:
+        return next(address for address, value in held.items() if value is row), row, ""
     return "", {}, ("OWNER_SOURCE_REQUIRED: this turn answers no owner message; name the owner's words with "
                     "owner_source (one of " + json.dumps(list(held)) + ")")
 
 
 def _set_task_retention(ctx: ToolContext, task_id: str, keep: bool, reason: str, owner_source: str = "") -> str:
     from ouroboros.owner_keep import set_owner_keep
-    from ouroboros.owner_relay import owner_text
-    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.owner_relay import owner_row_source
     from ouroboros.task_results import resolve_ctx_lineage, validate_task_id
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tools.join_ledger import _is_delegated_task
@@ -61,9 +60,7 @@ def _set_task_retention(ctx: ToolContext, task_id: str, keep: bool, reason: str,
     if error:
         return _refuse(ctx, error.split(":", 1)[0], error.split(":", 1)[1].strip())
     source = {"basis": "owner_message", "address": address,
-              "message_ref": build_owner_message_ref(chat_id=int(row.get("chat_id", 1)),
-                                                     client_message_id=str(row.get("client_message_id") or ""),
-                                                     ts=str(row.get("ts") or ""), text=owner_text(row)),
+              "message_ref": owner_row_source(row)[0],
               "tool": "set_task_retention", "by_task_id": str(getattr(ctx, "task_id", "") or "")}
     result = set_owner_keep(canonical_data_root(ctx), target, keep=keep, source=source,
                             note=reason.strip()[:_REASON_MAX])

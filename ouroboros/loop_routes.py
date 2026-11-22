@@ -80,7 +80,6 @@ def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[D
     """
     from ouroboros import route_choice
     from ouroboros.context_fit import effort_lengthens_request
-    from ouroboros.loop_model_call import _record_authoring_handover
 
     selected = getattr(tools._ctx, "_authored_memory_plan", None)
     if selected is not None and selected.core_sha256 == getattr(context_fit_plan, "core_sha256", None):
@@ -91,9 +90,7 @@ def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[D
         ctx.active_model_override, ctx.active_use_local_override = current
         if not getattr(ctx, "active_role_override", None):  # the mind's own return says why; this is the host's
             route_choice.note_settings_change(ctx, previous[0], current[0], route_choice.follows(ctx.route_choice))
-            trace = getattr(ctx, "_execution_trace", None)
-            _record_authoring_handover(ctx, from_model=previous[0], to_model=current[0], reason="settings_change",
-                                       tool_calls_at_handover=len((trace or {}).get("tool_calls") or []) if isinstance(trace, dict) else 0)
+            ctx._pending_handover_reason = "settings_change"
     model, use_local, effort = _loop()._apply_runtime_overrides(ctx, *route)
     role, ctx.active_role_override = getattr(ctx, "active_role_override", None), None
     if role and getattr(ctx, "primary_route", None) and not getattr(ctx, "_owner_model_primary_changed", False):

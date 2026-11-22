@@ -18,6 +18,20 @@ import { terminalTimeNote } from './utils.js';
 
 export const PROJECT_ROW_TYPES = new Set(['project_started', 'project_handoff', 'project_completion_summary']);
 
+function foldHeight(message) {
+    const style = getComputedStyle(message);
+    return parseFloat(style.lineHeight) * parseFloat(style.getPropertyValue('--project-answer-lines'));
+}
+
+/** A passage can begin above the seven-line fold and continue behind it. */
+export function foldHides(words, row) {
+    const message = row.matches('.project-answer.is-folded') ? row.querySelector(':scope > .message') : null;
+    if (!message?.contains(words.startContainer)) return false;
+    const box = message.getBoundingClientRect(), scale = box.height / message.offsetHeight || 1;
+    const edge = box.top + foldHeight(message) * scale + 1;
+    return [...words.getClientRects()].some(rect => rect.height && rect.bottom > edge);
+}
+
 // Host-stamped Project lifecycle rows (§3 Main rows), live and replayed alike:
 // a mirrored final answer is an ordinary assistant message, the rest System text.
 export function appendProjectRow(addMessage, msg, text, opts) {
@@ -51,8 +65,7 @@ export function refreshProjectAnswerFold(bubble) {
 function measureFold(bubble) {
     const message = bubble.querySelector('.message');
     if (!message || !message.clientHeight) return null;
-    const style = getComputedStyle(message);
-    const fold = parseFloat(style.lineHeight) * parseFloat(style.getPropertyValue('--project-answer-lines'));
+    const fold = foldHeight(message);
     return { message, fold, folded: message.scrollHeight > fold + 1 };
 }
 

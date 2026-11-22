@@ -192,6 +192,66 @@ def test_budget_refusal_writes_nothing(harness):
     assert sub.calls == [] and _record(harness) == plan_record.empty_record()
 
 
+def test_budget_gate_admits_each_api_seat_with_the_envelope_its_executor_sends(harness):
+    """The ask is admitted as its API seats will send: each seat's tier (an explicit empty kept, an unbound one resolved
+    through its ``reviewer:<slot>`` role as every send is), its locality and its send's usage scope, read back off the
+    substrate's real API executor for the slots actually sent. A session seat rides its subscription: never priced."""
+    from dataclasses import replace
+
+    from ouroboros.model_slots import resolve_processing_preference
+    from ouroboros.review_execution import ApiChatReviewExecutor, ReviewAssignment, ReviewRouteKind
+    from ouroboros.tools import review_synthesis
+
+    harness.monkeypatch.setenv("OUROBOROS_PROCESSING_PREFERENCE", "fast")
+    harness.monkeypatch.delenv("OUROBOROS_MODEL_PROCESSING_PREFERENCES", raising=False)
+    harness.monkeypatch.setattr(review_synthesis, "per_slot_input_token_limits",
+                                lambda models, **kw: {slot.slot_id: 10 ** 9 for slot in kw["slots"]})
+    flex, plain, unbound, local, session = _slots(("s1", "m/a"), ("s2", "m/b"), ("s3", "m/c"), ("s4", "m/d"),
+                                                  ("s5", "cursor=grok", "session"))
+    harness.state["slots"] = [replace(flex, processing_preference="economy"), replace(plain, processing_preference=""),
+                              unbound, replace(local, use_local=True, processing_preference="standard"), session]
+    sub = harness.install({})
+    gates = []
+    harness.monkeypatch.setattr("ouroboros.tools.review_helpers.review_wave_budget_gate",
+                                lambda *_a, **kw: gates.append(kw))
+    text, result = _write(harness.make_ctx(), ask="council")
+    assert result.status == "ok", text
+    [gate] = gates
+    sent = {}
+    for call in sub.calls:
+        for slot in call["slots"]:
+            if slot.route is ReviewRouteKind.API_CHAT:
+                kwargs = ApiChatReviewExecutor(ReviewAssignment(request=call["request"], slot=slot))._kwargs()
+                sent[slot.slot_id] = (kwargs["model"], kwargs["use_local"],
+                                      resolve_processing_preference(kwargs["model_role"], override=kwargs["processing_preference"]))
+    assert gate["slot_ids"] == ["s1", "s2", "s3", "s4"] == sorted(sent)
+    assert [sent[sid] for sid in gate["slot_ids"]] == list(zip(gate["models"], gate["use_local"],
+                                                                gate["processing_preferences"]))
+    assert gate["processing_preferences"] == ["economy", "", "fast", "standard"]
+    assert gate["use_local"] == [False, False, False, True] and gate["categories"] == "plan_review_review"
+    assert gate["session_slots"] == 1
+
+
+@pytest.mark.parametrize("root_limit,group_limit,refusal", [
+    (0.0, 10.0, "per-task budget"), (10.0, 0.0, "whole-work billing-group"), (10.0, 10.0, None),
+])
+def test_plan_of_only_session_seats_obeys_the_works_limits(harness, root_limit, group_limit, refusal):
+    from ouroboros import usage_accounting as ua
+
+    ctx, sub = harness.make_ctx(), harness.install({})
+    harness.state["slots"] = _slots(("s1", "cursor=grok", "session"))
+    harness.monkeypatch.setattr(ua, "_reservation_cost", lambda *_a, **_k: pytest.fail("session priced as an API call"))
+    with ua.usage_scope(ua.UsageScope(drive_root=harness.drive, task_id=ctx.task_id, root_task_id=ctx.task_id,
+            root_limit_usd=root_limit, global_limit_usd=100.0, billing_group_id="original",
+            billing_group_limit_usd=group_limit, billing_group_limit_source="initial_task_admission")):
+        text, result = _write(ctx, ask="council")
+    if refusal:
+        assert result.code == "CAPABILITY_UNAVAILABLE" and "PLAN_ASK_SKIPPED_BUDGET" in text and refusal in text, text
+        assert "estimated API cost" not in text and sub.calls == [] and _record(harness) == plan_record.empty_record()
+    else:
+        assert result.status == "ok" and sub.calls, text
+
+
 # ---------------------------------------------------------------- write and read
 
 def test_write_records_a_revision_calls_nobody_and_identical_content_records_nothing(harness):

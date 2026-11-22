@@ -18,13 +18,16 @@ const initial = (label) => `<span class="model-source-mark model-source-initial"
 
 /**
  * A source's mark as markup: its harness's (a subscription), its provider's (an API key), else its initial.
- * @param {?{lane?: string, harness?: string, kind?: string, label?: string, sourceLabel?: string}} source
+ * A subscription's brand mark comes from the descriptor's `credentialHarness`, never the opaque source id —
+ * a globally registered harness mark must not brand an unrelated source.
+ * @param {?{lane?: string, harness?: string, credentialHarness?: string, kind?: string, label?: string, sourceLabel?: string}} source
  */
 export function sourceMark(source) {
     const label = source?.label || source?.sourceLabel || '';
     if (source?.lane === 'subscription') {
-        const mark = harnessPresentation(source.harness);
-        return mark.generic ? initial(label) : svg(mark.viewBox, `<path fill="currentColor" d="${mark.path}"/>`);
+        const harness = String(source.credentialHarness || '');
+        const mark = harness ? harnessPresentation(harness) : null;
+        return mark && !mark.generic ? svg(mark.viewBox, `<path fill="currentColor" d="${mark.path}"/>`) : initial(label);
     }
     const mark = MARKS[source?.kind];
     return mark ? svg(mark.viewBox, mark.body) : initial(label);

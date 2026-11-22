@@ -30,12 +30,18 @@ class StorageFreeManual(TypedDict):
     producer_retained: NotRequired[bool]  # a marked session-scratch handoff, removed by the custody trash remover
     loss: NotRequired[str]  # the producer marker's words and the owner-facing loss
     paths: NotRequired[List[str]]  # a marked handoff's scratch folders: what it holds and what its size counts
+    payload_release: NotRequired[bool]  # heavy files of a finished task the mind proposed (``payload_release``)
+    consequence: NotRequired[str]  # the author's words: what can no longer be checked again once they go
+    files: NotRequired[List[Dict[str, Any]]]  # every file that goes: ``{path, bytes, role, loss}``, store-relative
+    retained: NotRequired[List[Dict[str, Any]]]  # the refs that stay and carry the rest: ``{role, path, bytes}``
+    proposed_at: NotRequired[str]
+    root_task_id: NotRequired[str]
 
 
 class StorageFreeEntry(TypedDict):
     id: str  # exactly one filesystem object, inside this plan
     group: str
-    kind: Literal["work_folder", "working_copy", "environment", "scratch", "other"]
+    kind: Literal["work_folder", "working_copy", "environment", "scratch", "payload", "other"]
     name: str
     path: str
     task_id: Optional[str]
@@ -51,7 +57,7 @@ class StorageFreeEntry(TypedDict):
 
 class StorageFreeKept(TypedDict):
     reason: str  # results_pending | in_use | busy | unreadable_record | capture_unproven | unproven_excluded_inputs
-    # | owner_keep | changed | retained_evidence | undeclared_environment | advanced_group | restart | other
+    # | owner_keep | changed | retained_evidence | undeclared_environment | advanced_group | payload_offer | restart | other
     # ``results_pending`` also carries raw_evidence_uncustodied and artifact_source_missing;
     # their exact causes remain in each outcome's ``cause`` field.
     count: int
@@ -65,8 +71,8 @@ class StorageFreePool(TypedDict):
     bytes_complete: bool
     kinds: Dict[str, int]
     excluded: List[StorageFreeKept]
-    manual: Dict[str, Any]  # ``{count, bytes, bytes_complete, retained}`` of ``view=manual``: the owner's explicit discard,
-    # never in ``count``; ``retained`` of them are marked session scratch, the rest copies not proven saved
+    manual: Dict[str, Any]  # ``{count, bytes, bytes_complete, retained[, payloads]}`` of ``view=manual``: the owner's
+    # explicit discard, never in ``count``; ``retained`` are marked session scratch, ``payloads`` proposed heavy files, the rest copies
 
 
 class StorageFreeItemsResponse(TypedDict):
@@ -120,6 +126,18 @@ def manual_ids(plan: Dict[str, Any]) -> set:
     return {item.key for item in _manual(plan)}
 
 
+def _manual_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """The by-hand pool fact. ``payloads`` names proposed heavy files and appears only when one exists, so a plan
+    with no payload offer keeps the previous summary shape."""
+    found = _manual(plan)
+    summary = {"count": len(found), **_sized(found),
+               "retained": sum(1 for item in found if item.manual.get("producer_retained"))}
+    payloads = sum(1 for item in found if item.manual.get("payload_release"))
+    if payloads:
+        summary["payloads"] = payloads
+    return summary
+
+
 def _manual_entry(item: Any) -> StorageFreeEntry:
     offer = item.manual  # the plan holds the largest UNSAVED_LISTED paths with the whole count and bytes
     manual = {
@@ -130,6 +148,9 @@ def _manual_entry(item: Any) -> StorageFreeEntry:
     if offer.get("producer_retained"):
         manual.update(producer_retained=True, loss=str(offer.get("loss") or "producer-retained session scratch"),
                       paths=[str(path) for path in offer.get("paths") or ()])
+    if offer.get("payload_release"):  # every file and every retained ref, whole: nothing goes unnamed
+        manual.update({key: offer[key] for key in ("payload_release", "consequence", "files", "retained", "proposed_at",
+                                                   "root_task_id") if key in offer})
     return {**entry(item, reason=item.reason), "manual": manual}
 
 
@@ -145,8 +166,7 @@ def pool(plan: Dict[str, Any]) -> StorageFreePool:
     return {"count": len(items), **_sized(items), "kinds": kinds,
             "excluded": [{"reason": reason, "count": excluded[reason], **({"manual_count": by_hand[reason]} if reason in by_hand else {})}
                          for reason in sorted(excluded)],
-            "manual": {"count": len(_manual(plan)), **_sized(_manual(plan)),
-                       "retained": sum(1 for item in _manual(plan) if item.manual.get("producer_retained"))}}
+            "manual": _manual_summary(plan)}
 
 
 def _sized(items: List[Any]) -> Dict[str, Any]:

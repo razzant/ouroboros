@@ -227,6 +227,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         summary = _summary(page)
         report["summary"] = summary
         assert summary["Connected access"] == "OpenAI-compatible endpoint"
+        # The saved OpenAI key never chose an API, so the summary says the one it keeps.
         assert summary["OpenAI"] == f"configured · also used by the legacy address {legacy_url} · Chat Completions API"
         report["frames"]["summary"] = _frame(page, evidence, "summary-980x780")
         page.locator('[data-starter-toggle]').click()  # no public starter install from this isolated root

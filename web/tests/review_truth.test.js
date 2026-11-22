@@ -495,7 +495,7 @@ test('the terminal substrate FACT rides the tooltip beside the counts', () => {
             subscription_cost_usd: null, harness_models: [],
         },
     });
-    assert.match(attempted.title, /harness attempted, no delegated run succeeded/);
+    assert.match(attempted.title, /harness attempted; no successful run confirmed/);
 
     // An unknown/absent enum adds no clause — and never crashes the chip.
     const bare = executorChip({ executor_route: 'codex', actual_substrate: 'something_new' });
