@@ -15,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from ouroboros import owner_words as ow
 from ouroboros.subagent_work_order import (
     DECLARED_WORDS_FACT,
@@ -533,10 +535,12 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     assert "my human's words" in selection and "the marks in force and the knowledge outline" in selection
     assert "input_sources says what it starts with" in context
     assert "write the orientation it lacks" in context and "none of my other memory" in context
+    for text in (context, prompt):  # the named notes are memory a session starts with too
+        assert "of the notes their heads link" in text and " and the notes knowledge_notes names, " in text
     assert "why the work exists" in prompt and "the host supplies the canonical work order" in prompt
     assert "none of my other memory; the host appends those words verbatim" in prompt
-    assert "claim its room and of the notes their heads link, but none of my other memory" in context
-    assert "claim this work's room and of the notes their heads link, none of my other memory;" in prompt
+    assert "and the notes knowledge_notes names, but none of my other memory" in context
+    assert "heads link and the notes knowledge_notes names, none of my other memory;" in prompt
     assert selection.startswith("Every child starts with my human's words for the work verbatim and dated, ")
     assert ("other knowledge stays one read away. Omit or shared: it also starts with the heads of the notes that "
             "claim its room and of the notes their heads link, SYSTEM/BIBLE, " in selection)
@@ -592,3 +596,162 @@ def test_a_direct_start_never_counts_stamps_found_in_its_own_text():
     quoted = render_owner_words(rows, audience="session", root_task_id="r", gaps=[START_TAIL_FACT])
     facts = start_facts({"prompt": "Check this old order:\n" + quoted, "instructions": "HOST\n\n" + quoted})
     assert "owner_words" not in facts and set(facts) == {"assignment"}
+
+
+NOTE_ALPHA = "---\ntitle: Alpha plan\n---\n# Alpha\nAlpha head.\n## Detail\nALPHA_DETAIL below the first heading.\n"
+NOTE_BETA = "---\ntitle: Beta rules\n---\nBeta rule one.\n## More\nBETA_MORE\n"
+NAMED = [{"topic": "alpha-plan", "scope": "global"}, {"topic": "beta-rules", "scope": "global"}]
+
+
+def _write_notes(root):
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+
+    written = {}
+    for topic, text in (("alpha-plan", NOTE_ALPHA), ("beta-rules", NOTE_BETA)):
+        result = write_knowledge_note(resolve_knowledge_address(root, topic, "global"), text)
+        assert result.ok, result.reason
+        written[topic] = (result.current.revision, result.current.text)  # the store adds its own type field
+    return written
+
+
+def _named_block(written, title, topic):
+    revision, text = written[topic]
+    return (f"### {title}\nNote: knowledge_read(topic={topic!r}, scope='global')\n"
+            f"Revision: {revision} (state active, {len(text)} chars)\n\n{text}")
+
+
+def test_a_session_start_carries_the_named_notes_whole_declared_or_not_and_names_a_gap(tmp_path, monkeypatch):
+    """Both directions of the named notes in a session's memory delivery (owner, 21.11.2026, «4A»). A session task
+    scheduled without them starts as before: no named section, no custody fact. Scheduled with two, shared or
+    declared, every start holds each whole (below its first heading too) under its address and revision, then the
+    one working-notes line, and keeps them by address and revision for its custody; the work order and its
+    fingerprint never move. A note gone before the start is a named gap and the start proceeds; a store that
+    cannot be read for the marks or the outline no longer takes the named notes with it."""
+    from ouroboros import held_notes, memory_view_events
+    from ouroboros.subagent_work_order import NAMED_NOTES, session_host_references
+    from ouroboros.tools import control
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    revisions = _write_notes(tmp_path)
+    head = "\n\nMEMORY DELIVERY (host instructions, separate from canonical work order)\n"
+
+    def started(session):
+        nanny = _child(tmp_path, session)
+        return nanny, session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path)).split(head)[1]
+
+    _event, _stored, plain = _schedule(_root(tmp_path), subagent_id="session-builder")
+    nanny, quiet = started(plain)
+    assert "## Named knowledge notes" not in quiet and "ALPHA_DETAIL" not in quiet and nanny._session_named_notes is None
+    assert held_notes.HELPER_NOTE not in quiet and NAMED_NOTES not in plain["metadata"]
+    for sources in ("shared", "declared"):
+        _event, _stored, session = _schedule(_root(tmp_path), subagent_id="session-builder", input_sources=sources,
+                                             context="Judge.", knowledge_notes=[{"topic": "alpha-plan"}, NAMED[1]])
+        assert session["metadata"][NAMED_NOTES] == NAMED
+        nanny, memory = started(session)
+        named = memory.split("## Named knowledge notes\nThe notes named for this work (knowledge_notes), each whole "
+                             "as it stood when this start was prepared.\n\n", 1)[1]
+        assert named.startswith(_named_block(revisions, "Alpha plan", "alpha-plan") + "\n\n"
+                                + _named_block(revisions, "Beta rules", "beta-rules"))
+        assert named.split("BETA_MORE\n", 1)[1].startswith("\n\n" + held_notes.HELPER_NOTE), sources
+        assert nanny._session_named_notes == {"sent": [
+            {**NAMED[0], "revision": revisions["alpha-plan"][0], "chars": len(revisions["alpha-plan"][1])},
+            {**NAMED[1], "revision": revisions["beta-rules"][0], "chars": len(revisions["beta-rules"][1])}]}
+        without = {**{k: v for k, v in session.items() if k != NAMED_NOTES},
+                   "metadata": {k: v for k, v in session["metadata"].items() if k != NAMED_NOTES}}
+        assert "ALPHA_DETAIL" not in compile_external_work_order(session)
+        assert work_order_fingerprint(session) == work_order_fingerprint(without), "outside the fingerprint"
+        assert compile_external_work_order(session) == compile_external_work_order(without)
+    (tmp_path / "memory" / "knowledge" / "alpha-plan.md").unlink()  # valid at scheduling, gone at the start
+    nanny, gap = started(session)
+    assert ("### alpha-plan (global)\n[Host: this named note could not be read at this start (FileNotFoundError); "
+            "its text is not here.]\n\n" + _named_block(revisions, "Beta rules", "beta-rules")
+            in gap and "ALPHA_DETAIL" not in gap)
+    assert nanny._session_named_notes["gaps"] == [{**NAMED[0], "reason": "FileNotFoundError"}]
+    with monkeypatch.context() as patch:  # the marks and the outline cannot be read: the named notes still ride
+        patch.setattr(memory_view_events, "helper_names", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("x")))
+        nanny, broken = started(session)
+    assert ("not yours.\n\nMy memory could not be read here (RuntimeError); this start carries no marks and no "
+            "outline.\n\n## Named knowledge notes\n") in broken and "BETA_MORE\n\n\n" + held_notes.HELPER_NOTE in broken
+
+
+def test_schedule_names_the_notes_in_its_receipt_and_refuses_one_it_cannot_resolve_before_queueing(tmp_path, monkeypatch):
+    """Both directions at scheduling. An address that does not resolve is refused before anything is queued, with
+    the call that works and the global note where one exists; spellings that mean the same are taken and said. A
+    session child's receipt lists the addresses read at each start; an API child's names them as its own
+    knowledge_read calls and sends no text, and its first input carries one block of addresses, byte for byte
+    the input it gets without them plus that block."""
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.subagent_work_order import named_notes_block
+    from ouroboros.tools import control
+    from supervisor.events_subagent_admission import _compose_subagent_text
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    _write_notes(tmp_path)
+    root = _root(tmp_path)
+    missing = control._schedule_task(root, subagent_id="session-builder", objective="Judge", expected_output="Verdict",
+                                     knowledge_notes=[NAMED[0], {"topic": "no-such"}, {"topic": 7}])
+    assert missing.startswith("⚠️ TOOL_ARG_ERROR (schedule_subagent): knowledge_note_unresolved: "), missing
+    assert ("knowledge_notes 2: no note 'no-such' on the global shelf; knowledge_list(scope='global') lists that "
+            "shelf") in missing and "knowledge_notes 3={'topic': 7}: an object {topic, scope?}" in missing
+    assert "alpha-plan" not in missing and missing.endswith("The child was not queued.") and root.event_queue.empty()
+    room = create_project(tmp_path, "quotas", name="Quotas")["chat_id"]
+    bind_task_to_project(tmp_path, "root", "quotas", room, origin={"absent": "system"})
+    assert write_knowledge_note(resolve_knowledge_address(tmp_path, "room-rules", "project:quotas"), "Rules.\n").ok
+    elsewhere = control._schedule_task(root, subagent_id="session-builder", objective="Judge", expected_output="Verdict",
+                                       knowledge_notes=[{"topic": "alpha-plan", "scope": "project:quotas"}])
+    assert ("no note 'alpha-plan' on the project:quotas shelf; knowledge_list(scope='project:quotas') lists that "
+            "shelf; a global note exists: {'topic': 'alpha-plan', 'scope': 'global'}") in elsewhere, elsewhere
+    session = control._schedule_task(root, subagent_id="session-builder", objective="Judge", expected_output="Verdict",
+                                     knowledge_notes=["room-rules", NAMED[0], {"topic": "room-rules", "scope": ""},
+                                                      NAMED[1]])
+    assert not session.startswith("⚠️"), session
+    assert ("knowledge notes: room-rules (project:quotas), alpha-plan (global), beta-rules (global) (read whole at "
+            "each session start)") in session
+    assert "knowledge_notes 1='room-rules' read as {'topic': 'room-rules'}" in session
+    assert "knowledge_notes 3.scope='' ignored: this task's project shelf, else global" in session
+    assert "knowledge_notes 3 names room-rules (project:quotas) again; it is carried once" in session
+    assert root.event_queue.get_nowait()["knowledge_notes"][0] == {"topic": "room-rules", "scope": "project:quotas"}
+    event, _stored, api = _schedule(root, objective="Judge", knowledge_notes=[NAMED[0]])
+    assert event["knowledge_notes"] == api["metadata"]["knowledge_notes"] == [NAMED[0]]
+    block = named_notes_block(event["knowledge_notes"], session=False)
+    assert block == ("[NAMED KNOWLEDGE NOTES]\nThe parent named these knowledge notes for this work (knowledge_notes). "
+                     "Their text is not in this input.\n- knowledge_read(topic='alpha-plan', scope='global')")
+    fields = dict(role="", expected_output="figures", constraints="", context="Read the plan.")
+    plain = _compose_subagent_text("Judge", **fields, selected_inputs=None)
+    named = _compose_subagent_text("Judge", **fields, named_notes=event["knowledge_notes"])
+    assert block in named and named.replace("\n\n" + block, "") == plain and "Alpha head." not in named
+    assert plain == _compose_subagent_text("Judge", **fields, named_notes=None, session=True), "byte for byte"
+    told = control._schedule_task(root, subagent_id="api-builder", objective="Judge", expected_output="Verdict",
+                                  knowledge_notes=[NAMED[0]])
+    assert ("knowledge notes: alpha-plan (global) named; this child reads them itself: "
+            "knowledge_read(topic='alpha-plan', scope='global'); no text sent") in told, told
+    assert named_notes_block(None, session=False) == "" == named_notes_block([], session=True)
+
+
+def test_a_presence_bound_caller_hands_on_only_the_notes_its_own_knowledge_read_may_read(tmp_path, monkeypatch):
+    """The Presence floor, both directions: a caller without a ceiling is never refused by it; under a ceiling
+    without knowledge_read the address is refused with that guard's own text; a ceiling that grants it passes."""
+    from ouroboros.presence_authority import (PresenceCapabilityCeiling, PresenceResourceGrant, PresenceToolGrant,
+                                              presence_ceiling_payload)
+    from ouroboros.subagent_work_order import NamedNoteError, resolve_named_notes
+
+    _write_notes(tmp_path)
+    root = _root(tmp_path)
+    assert resolve_named_notes(root, [NAMED[0]]) == ([NAMED[0]], [])
+
+    def ceiling(*tools):
+        return {**root.task_contract, "capability_ceiling": presence_ceiling_payload(PresenceCapabilityCeiling(
+            skill_name="reader", skill_content_hash="a" * 64, profile_fingerprint="b" * 64, state_fingerprint="c" * 64,
+            selection_fingerprint="d" * 64, model_slot="main", inline_max_rounds=5,
+            tool_grants=tuple(PresenceToolGrant(name, ()) for name in tools),
+            resource_grants=(PresenceResourceGrant("runtime_data", ("read",), "."),), digest="0" * 64))}
+
+    root.task_contract = ceiling("delegate_start", "read_file")
+    with pytest.raises(NamedNoteError) as refused:
+        resolve_named_notes(root, [NAMED[0]])
+    assert "PRESENCE_CAPABILITY_BLOCKED: 'knowledge_read' is outside" in refused.value.detail
+    root.task_contract = ceiling("delegate_start", "knowledge_read")
+    assert resolve_named_notes(root, [NAMED[0]]) == ([NAMED[0]], [])
