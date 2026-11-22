@@ -810,3 +810,20 @@ def test_an_open_sign_in_requirement_written_before_starts_were_kept_reads_as_un
     with pytest.raises(mcp_oauth.MCPAuthRequired):
         asyncio.run(mcp_oauth.current_token(cfg))
     assert mcp_oauth.status(cfg)["since"] == "2026-11-20T08:00:00+00:00"  # a fresh requirement is dated
+
+
+def test_sign_out_keeps_an_open_requirements_start_and_dates_one_after_a_sign_in(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    times = iter(["2026-11-19T09:50:00+00:00", "2026-11-20T10:00:00+00:00"])
+    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    _bearer_call(cfg, lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"}))
+    assert asyncio.run(mcp_oauth.sign_out(cfg))["ok"]  # cancelling an unfinished sign-in: still the same state
+    assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "signed_out",
+                                     "since": "2026-11-19T09:50:00+00:00"}
+    mcp_oauth._save(cfg, {**_file(cfg), "tokens": {"access_token": "a"}, "pending": {"nonce": "n"},
+                          "sign_in": {"state": "signed_in", "since": "2026-11-20T09:00:00+00:00"}})
+    assert asyncio.run(mcp_oauth.sign_out(cfg))["ok"]  # a real sign-out of a signed-in grant
+    record = _file(cfg)
+    assert record["sign_in"] == {"state": "sign_in_required", "reason": "signed_out",
+                                 "since": "2026-11-20T10:00:00+00:00"}
+    assert "tokens" not in record and "pending" not in record
