@@ -449,8 +449,8 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
             gaps_extra.append("owner_accounts_unreadable: place rows of my human not confirmed")
     accounts = lineage.get("owner_accounts")
     requested = str(snapshot or "").strip().lower()
-    if requested and not _TOKEN.fullmatch(requested):
-        return _refusal("malformed")
+    if (snapshot and not requested) or (requested and not _TOKEN.fullmatch(requested)):
+        return _refusal("malformed")  # all spaces is a token that names nothing, not an absent one
     revision = _text_revision(root)
     judged: Dict[int, List[str]] = {}
 

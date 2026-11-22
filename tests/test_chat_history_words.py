@@ -435,12 +435,14 @@ def test_a_read_that_overlaps_an_edit_claims_no_exact_count_and_no_continuation(
     assert _read(tmp_path, words=["match"], count=1, offset=1, snapshot=token).startswith("CHAT_HISTORY_SNAPSHOT_CHANGED")
 
 
-@pytest.mark.parametrize("bad", ["nothex", "f" * 63, "f" * 64 + ":x", "f" * 64 + ":0", "{valid}:3"])
+@pytest.mark.parametrize("bad", ["nothex", "f" * 63, "f" * 64 + ":x", "f" * 64 + ":0", "{valid}:3", "   "])
 def test_every_malformed_continuation_is_a_typed_refusal(tmp_path, bad):
     _say(tmp_path, "2026-11-01T10:00:00Z", "match")
     valid = re.search(r"snapshot=([0-9a-f]{64})", _read(tmp_path, words=["match"])).group(1)
-    answer = _read(tmp_path, words=["match"], snapshot=bad.format(valid=valid))
+    answer = _read(tmp_path, words=["match"], snapshot=bad.format(valid=valid), offset=1)
     assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID") or answer.startswith("CHAT_HISTORY_SNAPSHOT_CHANGED")
+    if not bad.strip():  # all spaces names nothing: never read as no snapshot
+        assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID")
     if bad.startswith("{valid}") or ":" in bad:  # a suffix is never a snapshot
         assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID")
 

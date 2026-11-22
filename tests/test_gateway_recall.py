@@ -390,7 +390,7 @@ def test_a_malformed_snapshot_is_a_typed_400_and_an_unstable_one_a_409_with_its_
         _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", f"archive {minute}")
     first = _search(tmp_path, "archive", count=1)
     token = first["snapshot"]
-    for bad in ("nothex", token + ":x", token + ":5", token[:-1]):  # a suffix is never a snapshot
+    for bad in ("nothex", token + ":x", token + ":5", token[:-1], "   "):  # a suffix or spaces are never a snapshot
         assert _refused(tmp_path, ("words", "archive"), ("snapshot", bad)) == (400, {
             "code": "recall_bad_snapshot",
             "error": "Invalid snapshot. Use the snapshot from a search response or start again without it."})
