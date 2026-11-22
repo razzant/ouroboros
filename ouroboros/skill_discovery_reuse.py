@@ -171,7 +171,7 @@ def reused_inventory(key: Tuple[Any, ...], roots: Iterable[Any], walk: Callable[
     started = time.time_ns()
     inventory = _walked(walk)
     keys = identity()
-    if _trusted(keys, started):
+    if _trusted(keys, started) and not inventory.gaps:  # a walk that met an unreadable folder is read again next time
         _kept(_INVENTORIES, key, (keys, inventory))
     return inventory
 

@@ -572,3 +572,27 @@ def test_a_session_start_keeps_the_readable_guidance_and_says_which_folder_it_co
     os.utime(hidden)
     whole = session_skill_index(SimpleNamespace(drive_root=tmp_path))
     assert "NEIGHBOUR_BODY" in whole and "RESTRICTED_BODY" in whole and "unavailable" not in whole
+
+
+def test_a_walk_that_met_an_unreadable_folder_is_not_kept_so_the_next_read_walks_again(tmp_path, monkeypatch):
+    """A one-time read error (EIO) leaves no change key behind: a kept walk would report the folder unreadable
+    until something else changed (RV3 R3-4). A walk with gaps is never kept."""
+    monkeypatch.setattr("ouroboros.skill_discovery_reuse._RACY_NS", 0)  # settled metadata: a clean walk is kept
+    _skill(tmp_path, "kept")
+    hidden = tmp_path / "skills" / "clawhub"
+    (hidden / "inside").mkdir(parents=True)
+    (hidden / "inside" / "SKILL.md").write_text("---\nname: inside\ndescription: d\nversion: '1'\n"
+                                                "type: instruction\n---\nB\n", encoding="utf-8")
+    real_iterdir, failed = pathlib.Path.iterdir, []
+
+    def iterdir(self):
+        if self == hidden and not failed:
+            failed.append(True)
+            raise OSError(5, "Input/output error", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    first = discover_skills(tmp_path)
+    assert first.gaps == (f"{hidden} (OSError)",) and "inside" not in [skill.name for skill in first]
+    second = discover_skills(tmp_path)
+    assert second.gaps == () and sorted(skill.name for skill in second) == ["inside", "kept"]
