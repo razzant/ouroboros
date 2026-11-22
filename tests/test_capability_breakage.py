@@ -322,6 +322,27 @@ def test_an_unreadable_source_is_unknown_not_repaired_and_a_switched_off_or_remo
     assert _round(mcp_work) is None  # a surface whose reader failed is unknown as a whole
 
 
+def test_main_hears_at_its_next_turn_that_what_it_was_told_broke_recovered_and_another_work_does_not(
+        monkeypatch, tmp_path):
+    manager = _manager(monkeypatch, ("demo", True))
+    _call(manager, "demo", TimeoutError("slow"))
+
+    def turn(task, chat_id=1, depth=0):
+        work = SimpleNamespace(drive_root=tmp_path, task_metadata={}, current_chat_id=chat_id, task_id=task,
+                               is_direct_chat=True, task_depth=depth)
+        return work, breakage.start_notice_rows(work, [])
+
+    _first, notice = turn("main-1")
+    assert "calls not answered since" in notice[0]["error"]
+    _call(manager, "demo", ToolResult(status="ok", code="OK", text="pong"))  # repaired while Main was idle
+    for other in (turn("room-1", chat_id=7)[0], turn("child-1", depth=1)[0]):
+        assert _round(other) is None  # a room's work, or Main's child, was never told the break (and keeps Main's)
+    second, notice = turn("main-2")
+    assert notice == []  # its start says nothing is broken now...
+    assert "- MCP server demo: no longer reported broken (a call answered at" in _round(second)  # ...its round, the repair
+    assert _round(second) is None and _round(turn("main-3")[0]) is None
+
+
 def test_selecting_a_works_tools_again_never_adds_a_second_typed_notice(monkeypatch, tmp_path):
     from ouroboros import loop as loop_mod
     from ouroboros.context_budget import host_row_intact

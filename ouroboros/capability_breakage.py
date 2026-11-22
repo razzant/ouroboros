@@ -9,11 +9,12 @@ permissions the skill itself reported unavailable). This module only reads them.
 A work is told twice, never by rebuilding a row it was already sent: at its start one typed notice
 (``START_KIND``) carries one line per broken server or skill beside the registry's omissions, written once
 even when the work's tools are selected again; then at each round of the work the current facts are compared
-with what that work was last told, and only a change appends one typed host row (``CHANGE_KIND``). A source
-that cannot be read is unknown: its lines are carried over, never reported repaired; a line closes only with
-an observation (an answer, a listing, a live extension, a skill switched off or uninstalled, a server
-removed). Times are the facts' own, in UTC; order is by key. What to tell the owner, and when, stays the
-mind's judgment: no threshold, timer or required reaction lives here.
+with what that work was last told, and only a change appends one typed host row (``CHANGE_KIND``). Main keeps
+what it was told across turns, so Main's next turn hears what broke or recovered meanwhile. A source that
+cannot be read is unknown: its lines are carried over, never reported repaired; a line closes only with an
+observation (an answer, a listing, a live extension, a skill switched off or uninstalled, a server removed).
+Times are the facts' own, in UTC; order is by key. What to tell the owner, and when, stays the mind's
+judgment: no threshold, timer or required reaction lives here.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ CHANGE_KIND = "capability_change"
 START_KIND = "capability_notice"
 CHANGE_HEADER = "[CAPABILITY CHANGES]"
 _TOLD = "_capability_breakage_told"  # on the work's ToolContext: the broken facts it was last told, and its reach
+MAIN_TOLD = "capability_breakage_main.json"  # under state/: what Main was last told, for its next turn
 _PAGE = "Extensions → MCP servers"
 # The health record's own codes for an extension that is not meant to run (extension_liveness): off, not an
 # extension, or no such skill (the loader groups the last two alike, extension_loader.reconcile_extension).
@@ -252,12 +254,33 @@ def _blocked_surfaces(omissions: List[Dict[str, Any]]) -> set:
     return {row.get("surface") for row in omissions if isinstance(row, dict) and row.get("reason") == "resource_blocked"}
 
 
+def _is_main(tool_ctx: Any) -> bool:
+    """Main's own turn (a direct turn of chat 1, not a child), whose told facts outlive the turn."""
+    return (getattr(tool_ctx, "current_chat_id", None) == 1 and getattr(tool_ctx, "is_direct_chat", False) is True
+            and not getattr(tool_ctx, "task_depth", 0))
+
+
+def _main_path(tool_ctx: Any) -> pathlib.Path:
+    return _root(tool_ctx) / "state" / MAIN_TOLD
+
+
+def _keep_main(tool_ctx: Any, told: dict) -> None:
+    """Remember what Main was told, for its next turn (one small file, replaced on every change)."""
+    from ouroboros.utils import atomic_write_json
+
+    try:
+        atomic_write_json(_main_path(tool_ctx), {"_schema_version": 1, "facts": told["facts"]})
+    except Exception:  # noqa: BLE001 - a lost copy leaves the next turn its start notice
+        log.debug("Main's capability facts could not be kept", exc_info=True)
+
+
 def start_notice_rows(tool_ctx: Any, omissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The registry's omission rows with each broken capability's facts, recorded as what this work is told.
 
     A server's facts join its own row when it has one (provenance or an empty listing): one line per server;
     every other broken capability gets one row, in key order. A surface the work cannot reach
-    (``resource_blocked``) is not read."""
+    (``resource_blocked``) is not read. Main's work also inherits what its previous turn was told, so its first
+    round says what recovered since."""
     blocked = _blocked_surfaces(omissions)
     reach = {"mcp": "mcp" not in blocked, "skills": "extensions" not in blocked}
     try:
@@ -268,6 +291,14 @@ def start_notice_rows(tool_ctx: Any, omissions: List[Dict[str, Any]]) -> List[Di
     if tool_ctx is not None:
         try:
             told = {"facts": dict(seen.broken), **reach}
+            if _is_main(tool_ctx):
+                from ouroboros.utils import read_json_dict
+
+                earlier = (read_json_dict(_main_path(tool_ctx)) or {}).get("facts")
+                if isinstance(earlier, dict):  # told before and not broken now: the first round settles it
+                    told["facts"] = {**{k: str(v) for k, v in earlier.items()}, **seen.broken}
+                told["main"] = True
+                _keep_main(tool_ctx, told)
             setattr(tool_ctx, _TOLD, told)
         except Exception:
             pass
@@ -372,6 +403,8 @@ def append_change_row(ctx: Any) -> bool:
         text, after = change_text(told["facts"], seen)
         if after != told["facts"]:
             told["facts"] = after
+            if told.get("main"):
+                _keep_main(tool_ctx, told)
         if not text:
             return False
         from ouroboros.context_budget import bound_host_row
