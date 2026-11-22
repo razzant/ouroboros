@@ -25,7 +25,10 @@ from ouroboros.deadline_utils import (
 )
 from ouroboros.knowledge import observed_route_stamp
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
-from ouroboros.llm_claudexor import ClaudexorModelNotDispatched, daemon_not_delivered, propagate_model_error, presence_refusal_unstarted
+from ouroboros.llm_claudexor import (
+    CODEX_CONTENT_POLICY_DENIED, CODEX_CONTENT_POLICY_DISPLAY, ClaudexorModelNotDispatched,
+    codex_content_policy_denial, daemon_not_delivered, propagate_model_error, presence_refusal_unstarted,
+)
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import (
     OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait, model_wait_reason, propagate_model_control,
@@ -690,6 +693,8 @@ def _exception_provider_message(exc: Exception, safe_error: str = "") -> str:
     """The Logs diagnostic of a failure: the innermost party's own sentence (``provider_answer``), sanitized and
     truncated, else the exception's printed form. Two refusals can share a status and code (a content-filter block,
     a rejected field), so the durable event keeps the words; never the owner row or an input to classification."""
+    if codex_content_policy_denial(exc):
+        return CODEX_CONTENT_POLICY_DISPLAY
     engine = getattr(exc, "problem", None)  # an engine-typed problem's own message is its Logs diagnostic
     return sanitize_tool_result_for_log(provider_answer(exc).innermost()[1] or str(
         (engine.get("message") if isinstance(engine, dict) else "") or safe_error or "").strip())[:600]
@@ -720,6 +725,8 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     if getattr(exc, "stream_rejected", False): return LlmErrorClassification("provider_error", False)  # complete wire judged unusable: a local verdict, never a same-model repeat
     if getattr(exc, "code", "") == "model_outcome_unknown":
         return LlmErrorClassification("provider_outcome_unknown", False)
+    if codex_content_policy_denial(exc):
+        return LlmErrorClassification(CODEX_CONTENT_POLICY_DENIED, False, _exception_status_code(exc), exc.code)
     if getattr(exc, "code", "") == "model_substituted": return LlmErrorClassification("model_substituted", False, 0, exc.code)  # a well-formed request the route answered with another model: chain-eligible, never cools the requested one
     if getattr(exc, "code", "") in {"unsupported_parameter", "invalid_continuation", "auth_changed", "model_unavailable", "model_source_unavailable", "model_catalog_identity_mismatch", "model_capability_refused", "model_retry_invalid"}:
         return LlmErrorClassification("bad_request", False, _exception_status_code(exc), exc.code)
@@ -1059,7 +1066,9 @@ def provider_no_call_source(accumulated_usage: Dict[str, Any], deadline_exhauste
             or accumulated_usage.get("_pending_transport_outcome") or isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)):
         return "provider_outcome_unknown_no_resend", False
     if accumulated_usage.get("resource_refusal"): return "resource_refusal_no_resend", True  # typed temporary refusal: no route or owner wait recovered it
-    if same_route_refusal(accumulated_usage): return "same_route_refusal_no_resend", False  # a salvage call is the same request on the same route, and the accounts that refused it were just marked
+    if (same_route_refusal(accumulated_usage)
+            or str(accumulated_usage.get("_last_llm_error_kind") or "") == CODEX_CONTENT_POLICY_DENIED):
+        return "same_route_refusal_no_resend", False  # a salvage call is another send of the refused request
     if TIMEOUT_REPEAT_KEY in accumulated_usage: return "timeout_repeat_spent_no_resend", True  # its repeat answered nothing
     if not deadline_exhausted and bool(accumulated_usage.get(RETRY_WALL_EXHAUSTED_KEY)):
         return "retry_wall_exhausted_no_repay", True

@@ -96,6 +96,8 @@ def prepare_processing_target(target: dict) -> dict:
 class ClaudexorModelError(RuntimeError):
     """A model-operation fact with its exact role, route and recovery identity."""
 
+    content_policy_denial = False  # Only finish may prove the received, settled denial.
+
     def __init__(self, problem: dict, *, model_role: str = "", operation_id: str = "",
                  route: dict | None = None, unknown: bool = False, same_operation_recoverable: bool = False):
         self.problem = copy.deepcopy(problem)
@@ -123,6 +125,8 @@ class ClaudexorModelError(RuntimeError):
     @property
     def display_message(self) -> str:
         """Show typed provider details without changing exception classification text."""
+        if self.content_policy_denial:
+            return CODEX_CONTENT_POLICY_DISPLAY
         if self.code == "model_capability_refused":
             return sanitize_tool_result_for_log(capability_refusal_text(self.problem) or str(self))
         context = self.problem.get("context") or {}
@@ -176,6 +180,47 @@ def presence_refusal_unstarted(error: Exception, round_idx: int) -> bool:
     return (round_idx == 1 and isinstance(error, ClaudexorModelNotDispatched)
             and getattr(error, "presence_all_operations_not_started", False) is True
             and isinstance(capture, PhysicalAttemptCapture) and capture.state == "released")
+
+
+CODEX_CONTENT_POLICY_VENDOR_CODE = "cyber_policy"  # engine-owned typed vendor code
+CODEX_CONTENT_POLICY_CODES = ("provider_failed", "provider_content_refused")
+CODEX_CONTENT_POLICY_DENIED = "codex_content_policy_denied"
+CODEX_CONTENT_POLICY_WORDS = "a Codex content-policy denial (the request was received and declined, so it is not sent again)"
+CODEX_CONTENT_POLICY_DISPLAY = "Codex content-policy denial of this request (received and settled; not sent again)."
+
+
+def _proved_codex_content_policy_denial(problem: Any, result: Any, detail: Any, capture: Any) -> bool:
+    """Raw received shape only; absent or malformed metadata is ordinary. Read by finish."""
+    if not (isinstance(problem, dict) and isinstance(result, dict) and isinstance(detail, dict)):
+        return False
+    context, dispatch, route = problem.get("context"), detail.get("dispatch"), result.get("route")
+    sent = dispatch.get("route") if isinstance(dispatch, dict) else None
+    return (problem.get("code") in CODEX_CONTENT_POLICY_CODES and problem.get("retryable") is False
+            and isinstance(context, dict) and context.get("vendorCode") == CODEX_CONTENT_POLICY_VENDOR_CODE
+            and result.get("outcome") == "failed" and isinstance(dispatch, dict) and dispatch.get("state") == "response_received"
+            and isinstance(route, dict) and route.get("source") == "codex" and isinstance(sent, dict) and sent.get("source") == "codex"
+            and getattr(capture, "state", None) == "settled")
+
+
+def codex_content_policy_denial(error: object) -> bool:
+    """A settled typed Codex denial ends the request without retry, alternate or account penalty."""
+    return isinstance(error, ClaudexorModelError) and error.content_policy_denial is True
+
+
+def _typed_denial(invocation: _ModelInvocation, result: dict) -> bool:
+    """Read the same evidence at admission and finish, without inferring a reason from text."""
+    return invocation.detail.get("state") != "cancelled" and _proved_codex_content_policy_denial(
+        result.get("problem"), result, invocation.detail, invocation.capture)
+
+
+def _ends_on_content_denial(error: ClaudexorModelError, capability: CapabilityRetry) -> bool:
+    """Keep any earlier correlated attempt ids before ending this model call."""
+    if not codex_content_policy_denial(error):
+        return False
+    own = getattr(getattr(error, "physical_attempt_capture", None), "attempt_id", "")
+    if capability.attempts:
+        error.ledger_attempt_ids = list(dict.fromkeys([*capability.attempts, *([own] if own else [])]))
+    return True
 
 
 def propagate_model_error(error: Exception) -> None:
@@ -733,6 +778,7 @@ class _ModelInvocation:
                 error = ClaudexorModelError(problem, **identity)
                 if problem.get("code") == "processing_unavailable":
                     error.processing_refusal_conflict = True
+                error.content_policy_denial = _typed_denial(self, result)
             error.physical_attempt_capture = self.capture
             error.usage = usage
             raise error
@@ -950,7 +996,7 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
                 if capability.original is not None:
                     substitution.redos = substitution.used  # the correlated operation is the last send
                 if not _processing_failure(result):
-                    if substitution.admit(invocation, result):
+                    if not _typed_denial(invocation, result) and substitution.admit(invocation, result):
                         # Every later request in this round leaves account selection to the engine.
                         retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
                         payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
@@ -975,6 +1021,8 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
             payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
+            if _ends_on_content_denial(error, capability):
+                raise
             if is_processing_refusal(error):
                 repair = None if capability.ends_chain(error) else _processing_repair(
                     target, payload, parameters, invocation, error, repaired)
@@ -1103,7 +1151,7 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
                 if capability.original is not None:
                     substitution.redos = substitution.used
                 if not _processing_failure(result):
-                    if await invocation.offload(substitution.admit, invocation, result):
+                    if not _typed_denial(invocation, result) and await invocation.offload(substitution.admit, invocation, result):
                         # Every later request in this round leaves account selection to the engine.
                         retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
                         payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
@@ -1128,6 +1176,8 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
             payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
+            if _ends_on_content_denial(error, capability):
+                raise
             if is_processing_refusal(error):
                 repair = None if capability.ends_chain(error) else _processing_repair(
                     target, payload, parameters, invocation, error, repaired)
