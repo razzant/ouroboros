@@ -24,6 +24,7 @@ import { harnessPresentation } from './harness_presentation.js';
 import { START_FAILED_LEAD, bootPhase, createHostStart, startingStatus, supervisorReady } from './host_starting_status.js';
 import { fmt, tr, translateString } from './i18n.js';
 import { configuredServerCount, mcpNeedsSignIn, mcpServerOn, mcpStatusSeen, refreshStatus } from './mcp_settings.js';
+import { modelCatalog, watchModelCatalog } from './model_catalog_store.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, fluentIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
@@ -327,13 +328,24 @@ function dictationWord() {
 
 const markHtml = (presentation) => `<svg width="18" height="18" viewBox="${presentation.viewBox}" fill="currentColor" aria-hidden="true"><path d="${presentation.path}"/></svg>`;
 
-/** The glyphs that say a fact: Main's source (its harness mark, else the cube) and the theme. */
-function liveGlyphs({ settings, device = {} } = {}) {
+/** The descriptor-confirmed mark of Main's subscription route, from the catalogue already held; '' when that list
+ *  names no credential harness for it. The opaque source id is never itself evidence of a harness, and nothing is
+ *  read here: without a descriptor the caller's neutral cube stands. */
+function mainSourceMark({ value, local, modelSources }) {
+    if (local) return '';
+    const source = routeSource({ model: value, use_local: false });
+    if (!source.startsWith('subscription:')) return '';
+    const descriptor = (modelSources || []).find((entry) => entry?.id === source.slice('subscription:'.length));
+    const brand = harnessPresentation(String(descriptor?.credentialHarness || ''));
+    return brand.generic ? '' : markHtml(brand);
+}
+
+/** The glyphs that say a fact: Main's source (its descriptor-confirmed harness mark, else the cube) and the theme. */
+function liveGlyphs({ settings, device = {}, modelSources = [] } = {}) {
     const out = {};
     if (settings) {
-        const source = routeSource({ model: String(settings.OUROBOROS_MODEL || ''), use_local: truthy(settings.USE_LOCAL_MAIN) });
-        const brand = source.startsWith('subscription:') ? harnessPresentation(source.slice('subscription:'.length)) : null;
-        out.models = brand && !brand.generic ? markHtml(brand) : glyphHtml('cube');
+        out.models = mainSourceMark({ value: String(settings.OUROBOROS_MODEL || ''), local: truthy(settings.USE_LOCAL_MAIN),
+            modelSources }) || glyphHtml('cube');
     }
     if (device.theme) out.appearance = glyphHtml(device.theme === 'light' ? 'sun' : 'moon');
     return out;
@@ -416,7 +428,14 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     const cardEl = find('[data-settings-card]');
     const [needsEl, listEl, searchEl, countEl] = [find('[data-being-needs]'), find('[data-settings-list]'), find('#settings-search'), find('[data-being-count]')];
     const [stateEl, sepEl, overviewAnswer] = [find('[data-being-state]'), find('.settings-being-sep'), find('[data-overview-answer]')];
+    // The catalogue a model sheet already holds (no read of the home's own): its descriptors brand the source they
+    // name, and a descriptor that arrives later refreshes that one glyph.
+    const heldModelSources = () => {
+        const sources = modelCatalog.catalog()?.model_sources;
+        return Array.isArray(sources) ? sources : [];
+    };
     const facts = { device: {} };
+    facts.modelSources = heldModelSources();
     seenFacts = facts;
     let current = '';
     let needs = [];
@@ -468,6 +487,19 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         });
     }
 
+    const paintRowMark = (row, glyphs) => {
+        const mark = glyphs[row.dataset.settingsOpen];
+        const glyph = mark && row.querySelector('[data-settings-glyph]');
+        if (!glyph || glyph.dataset.glyph === mark) return;
+        glyph.dataset.glyph = mark;
+        glyph.innerHTML = mark;
+    };
+    // Only the rows' glyph slots, for a fact that changed without any row's answer: a descriptor adopted late.
+    function paintMarks() {
+        if (shownQuery) return;
+        const glyphs = liveGlyphs(facts);
+        listEl.querySelectorAll('[data-settings-open]').forEach((row) => paintRowMark(row, glyphs));
+    }
     function paintRows() {
         if (shownQuery) return;
         const answers = homeAnswers(facts);
@@ -480,11 +512,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
                 if (words.textContent !== answer.text) words.textContent = answer.text;
                 paintStatusMark(row.querySelector('.settings-door-mark'), answer.owner ? { shape: 'dot', hue: 'owner' } : {});
             }
-            const glyph = row.querySelector('[data-settings-glyph]');
-            if (glyphs[to] && glyph.dataset.glyph !== glyphs[to]) {
-                glyph.dataset.glyph = glyphs[to];
-                glyph.innerHTML = glyphs[to];
-            }
+            paintRowMark(row, glyphs);
             if (to === current) row.setAttribute('aria-current', 'page'); else row.removeAttribute('aria-current');
         });
     }
@@ -559,6 +587,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         readDevice();
         facts.state = ctx.stateSnapshots?.latest?.() || facts.state;
         facts.tools = mcpStatusSeen();  // the shared read may have settled while this list was put away
+        facts.modelSources = heldModelSources();
         readAccounts();
         paint();
         return Promise.all(names.map(read));
@@ -651,6 +680,10 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         paintRows();
     };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
+    const offCatalog = watchModelCatalog((catalog) => {
+        facts.modelSources = Array.isArray(catalog?.model_sources) ? catalog.model_sources : [];
+        if (!hidden) paintMarks();
+    });
     // A skill's lifecycle and an update's status, as the shell hears them. The socket's state is the card's first word:
     // its open and close repaint the card, reading nothing (a reconnect's read is settings.js's); the close and a
     // reconnect (on the page's own socket, which never hears a room's `resumed` return) forget the readiness the bodies
@@ -695,6 +728,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         dispose() {
             hide();
             offStore();
+            offCatalog();
             offs.forEach((off) => off?.());
             root.removeEventListener('click', onClick);
             cardEl?.removeEventListener('click', onClick);

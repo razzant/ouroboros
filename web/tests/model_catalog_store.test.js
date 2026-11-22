@@ -693,3 +693,67 @@ test('a work following Main gets the account read for its exact route, not an ea
     assert.equal(store.mainAccount(route(a)), '');
     assert.equal(store.mainAccount(route(b)), null);
 });
+
+test('a refresh failure handed over without items keeps the rows and says the read failed; a new success brings it back', async () => {
+    const store = createModelCatalogStore({ readCatalog: async () => ({ items: [item('a/one')] }) });
+    await store.read();
+    assert.equal(store.catalog().read_state, 'ok');
+    // What a failed refresh hands the store: the outcome, with no rows of its own.
+    store.adopt({ read_state: 'transport', errors: [{ provider_id: 'catalog', error: 'offline' }] });
+    assert.equal(store.catalog().read_state, 'transport', 'the read outcome is the price\'s own state');
+    assert.deepEqual(store.index().rows.map((row) => row.id), ['a/one'], 'the rows it listed stay for the chooser');
+    store.adopt({ read_state: 'ok', items: [item('a/one')] });
+    assert.equal(store.catalog().read_state, 'ok', 'a new success says the price again');
+    assert.deepEqual(store.index().rows.map((row) => row.id), ['a/one']);
+});
+
+test('a handed-over failure keeps the choices, says the read failed and leaves the next opening to read again', async () => {
+    let reads = 0;
+    const store = createModelCatalogStore({ readCatalog: async () => { reads += 1; return { items: [item('a/one')] }; } });
+    await store.read();
+    assert.deepEqual([reads, store.status().failed], [1, false]);
+    store.adopt({ read_state: 'transport', errors: [{ provider_id: 'catalog', error: 'offline' }] });
+    assert.equal(store.status().failed, true, 'the handed-over failure is a failure of the store too');
+    assert.equal(store.catalog().read_state, 'transport');
+    assert.deepEqual(store.index().rows.map((row) => row.id), ['a/one'], 'the choices stay for the chooser');
+    await store.read();
+    assert.equal(reads, 2, 'the next opening reads again: the provider may have come back');
+    assert.equal(store.status().failed, false);
+    // A cold failure lists nothing and still leaves the next opening to read.
+    let cold = 0;
+    const empty = createModelCatalogStore({ readCatalog: async () => { cold += 1; throw new Error('offline'); } });
+    await empty.read();
+    assert.deepEqual([empty.status().failed, empty.index().rows.length], [true, 0]);
+    assert.equal(empty.catalog().read_state, 'transport');
+    await empty.read();
+    assert.equal(cold, 2, 'a cold failure is read again on the next opening');
+});
+
+test('a cold chooser that answers HTTP 200 with a stated failure reads again; an empty or partial answer is not one', async () => {
+    let reads = 0;
+    const answers = [
+        { read_state: 'failed', items: [], errors: [{ provider_id: 'openrouter', error: 'no catalog' }] },
+        { read_state: 'ok', items: [item('a/one')] },
+    ];
+    const store = createModelCatalogStore({ readCatalog: async () => answers[reads++] });
+    await store.read();
+    assert.deepEqual([reads, store.status().failed], [1, true],
+        'an empty answer that STATES its failure is not a fresh catalog');
+    await store.read();
+    assert.deepEqual([reads, store.status().failed], [2, false], 'the next opening reads again');
+    // A successful empty read is not a failure: the catalog really lists nothing, and it keeps its life.
+    let emptyReads = 0;
+    const empty = createModelCatalogStore({ readCatalog: async () => { emptyReads += 1; return { read_state: 'ok', items: [] }; } });
+    await empty.read();
+    await empty.read();
+    assert.deepEqual([emptyReads, empty.status().failed], [1, false], 'an empty catalog is fresh, not a failure');
+    // A partial read kept what it could read and is not a failure either.
+    let partialReads = 0;
+    const partial = createModelCatalogStore({ readCatalog: async () => {
+        partialReads += 1;
+        return { read_state: 'partial', items: [item('a/one')], errors: [{ error: 'one source failed' }] };
+    } });
+    await partial.read();
+    await partial.read();
+    assert.deepEqual([partialReads, partial.status().failed], [1, false], 'a partial read is not a failure');
+});

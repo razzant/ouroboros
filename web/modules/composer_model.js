@@ -280,8 +280,10 @@ export function createModelControl({
         const said = describe(shown());
         el.dataset.known = String(Boolean(said));
         el.dataset.own = String(Boolean(said) && !follows());
-        const mark = said ? `${said.lane}|${said.harness}|${said.kind}|${said.sourceLabel}` : '';
-        if (mark !== markKey) { markKey = mark; glyph.innerHTML = sourceMark(said); }
+        // The mark itself is the identity: what it is drawn from (a subscription's `credentialHarness`) can arrive
+        // after the words it stands beside, and a key of hand-picked fields would hide that change.
+        const mark = sourceMark(said);
+        if (mark !== markKey) { markKey = mark; glyph.innerHTML = mark; }
         // Whose model this is: Main's, or its own source's.
         const sourceNamed = Boolean(said) && !follows();
         const words = sourceNamed ? said.sourceLabel : 'Main';

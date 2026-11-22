@@ -122,6 +122,7 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
                 label: lane === 'local' ? 'Local' : lane === 'subscription'
                     ? String(descriptor?.label || harnessPresentation(sub).label) : apiProviderLabel(id, {}, connections || []),
                 harness: lane === 'subscription' ? String(descriptor?.credentialHarness || sub) : '',
+                credentialHarness: lane === 'subscription' ? String(descriptor?.credentialHarness || '') : '',
                 kind: lane === 'api' ? kind : '', named: lane === 'api' && Boolean(name),
             });
         }
@@ -344,6 +345,7 @@ export function describeRoute(index, raw, { tier } = {}) {
         window, listed: Boolean(listed),
         available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
+        credentialHarness: own?.credentialHarness || '',
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),
         facts: [sourceLabel, price || PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),
     };

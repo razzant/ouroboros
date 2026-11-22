@@ -29,7 +29,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Adapter warnings | `(no class)` | modules/skill_card_renderer.js | 1 |
 | Add | `btn btn-default btn-sm` | modules/settings_secrets.js | 1 |
 | Add account & connect | `btn btn-primary` | modules/harness_login_cards.js | 1 |
-| Add agent | `btn btn-default btn-sm` | modules/subagents_settings.js | 1 |
+| Add agent | `btn btn-default btn-sm` | modules/agents_list_view.js | 1 |
 | Add fallback | `btn btn-default` | modules/model_roles.js | 1 |
 | Add fallback | `btn btn-default btn-sm` | modules/model_roles.js | 1 |
 | Add header | `btn btn-default` | modules/mcp_header_fields.js | 1 |
@@ -158,7 +158,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Install the local runtime | `btn btn-default` | modules/settings_local_model.js | 1 |
 | Keep it | `btn btn-default btn-sm` | modules/place_sheet.js | 1 |
 | Keep on Widgets | `btn btn-default btn-sm chat-card-action` | modules/chat_cards.js | 1 |
-| Keep one per model | `btn btn-default` | modules/subagents_settings.js | 1 |
+| Keep one per model | `btn btn-default` | modules/agents_list_view.js | 1 |
 | Largest parts | `(no class)` | modules/storage_format.js | 1 |
 | Last attempt | `(no class)` | modules/updates.js | 1 |
 | Later | `btn btn-default` | modules/skill_dialogs.js | 1 |
@@ -260,7 +260,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Retry same answer | `chat-quiz-retry btn btn-sm btn-default` | modules/quiz_submission.js | 1 |
 | Retry this range | `btn btn-default btn-sm` | modules/place_history.js | 1 |
 | Review & start | `btn btn-default` | modules/onboarding_wizard.js | 1 |
-| Reviewer origin | `(no class)` | modules/subagents_settings.js | 1 |
+| Reviewer origin | `(no class)` | modules/agents_list_view.js | 1 |
 | Rewrite | `btn btn-default btn-sm updates-letter-rewrite` | modules/updates.js | 1 |
 | Save | `btn` | modules/project_folder.js | 1 |
 | Save | `btn btn-default btn-sm` | modules/place_sheet.js | 3 |

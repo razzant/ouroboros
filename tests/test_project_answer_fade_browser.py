@@ -39,9 +39,9 @@ GEOMETRY = """b => {
 }"""
 
 
-def emit(page, key, answer, limitation=False):
+def emit(page, key, answer, limitation=False, *, project_name="Project"):
     row = {"role": "system", "system_type": "project_completion_summary", "chat_id": 1,
-           "task_id": key, "project_id": "alpha", "project_name": "Project", "task_name": "GitHub pass",
+           "task_id": key, "project_id": "alpha", "project_name": project_name, "task_name": "GitHub pass",
            "content": "Project completed", "completion_answer": answer,
            "ts": "2026-10-22T21:28:00Z", "history_id": key,
            "terminal_time": {"v": 1, "source": "executor_terminal", "occurred_at": "2026-10-22T21:28:00Z", "attempt": {}},
@@ -184,3 +184,115 @@ def test_extended_fade_keeps_main_mirror_footprint_and_actions(project_chat, tmp
     stable_footprint(page, warning)
     capture(page, warning, evidence / f"{stem}-warning.png")
     (evidence / f"{stem}.json").write_text(json.dumps(facts, indent=2), encoding="utf-8")
+
+
+# Check both the visible controls and their invisible ::after reach (ui.css "Touch reach"). A centre tap alone
+# misses the corner of a long Project reference that Copy used to cover.
+FINGER = """b => {
+    const own = node => node?.closest('.chat-message-actions > button');
+    const time = b.querySelector(':scope > .msg-time').getBoundingClientRect();
+    const reference = b.querySelector(':scope > .system-message-actions [data-intent="open-project"]');
+    const visible = reference.getBoundingClientRect();
+    const at = (x, y) => document.elementFromPoint(x, y);
+    const reach = (node, rect) => {
+        const style = getComputedStyle(node), after = getComputedStyle(node, '::after');
+        // Absolute inset starts at the padding edge, so account for the button border.
+        const inset = side => after.content === 'none' ? 0 : Math.min(0,
+            parseFloat(after[side]) + parseFloat(style.getPropertyValue(`border-${side}-width`)));
+        return {left: rect.left + inset('left'), right: rect.right - inset('right'),
+                top: rect.top + inset('top'), bottom: rect.bottom - inset('bottom')};
+    };
+    const link = reach(reference, visible);
+    const hits = box => [.05, .5, .95].flatMap(fy => [.05, .5, .95].map(fx =>
+        at(box.left + (box.right - box.left) * fx, box.top + (box.bottom - box.top) * fy)?.closest('button') === reference));
+    return {coarse: matchMedia('(pointer: coarse)').matches, timeRight: time.right,
+        reference: {visible: visible.toJSON(), reach: link, hits: hits(visible), reachHits: hits(link),
+                    tap: {x: visible.left + visible.width * .95, y: visible.top + visible.height * .95}},
+        controls: [...b.querySelectorAll(':scope > .chat-message-actions > button')].map(node => {
+            const r = node.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, half = 22;
+            const hit = (px, py) => own(at(px, py)) === node;
+            return {name: node.dataset.messageAction || node.className.split(' ')[0], left: r.left, right: r.right,
+                    x, y, reach: reach(node, r),
+                    hits: [hit(x, y), hit(x - half + 1, y), hit(x + half - 1, y), hit(x, y - half + 1), hit(x, y + half - 1)]};
+        })};
+}"""
+
+
+@pytest.mark.parametrize("project_chat", [
+    ("webkit", "light", 402), ("webkit", "dark", 402), ("chromium", "light", 320),
+], indirect=True)
+def test_folded_answer_footer_keeps_touch_targets_separate(project_chat, tmp_path):
+    chat = project_chat
+    page, expect = chat["page"], chat["expect"]
+    page.set_viewport_size({"width": chat["width"], "height": 874})
+    page.evaluate("async () => (await import('/static/modules/message_share.js')).registerMessageShare()")
+    evidence = _evidence_dir(tmp_path)
+    for size, name in (("short", "Project"), ("long", "Conference notes and drawings for a very long project name")):
+        sample = f"The {size} map is ready for review."
+        bubble = emit(page, f"finger-{size}", "\n\n".join([sample] * 12), project_name=name)
+        expect(bubble.locator("[data-message-action='share']")).to_be_visible()
+        expect(bubble.locator('[data-intent="open-project"]')).to_have_attribute('aria-label', f'Open project {name}')
+        expect(bubble.locator('.msg-time > span[aria-hidden]')).to_be_visible()
+        geo = bubble.evaluate(GEOMETRY)
+        assert geo['folded'] and not geo['viewportOverflow'], geo
+        stem = f"finger-{chat['engine']}-{chat['theme']}-{chat['width']}-{size}"
+        capture(page, bubble, evidence / f"{stem}.png")
+        found = bubble.evaluate(FINGER)
+        (evidence / f"{stem}.json").write_text(json.dumps(found, indent=2), encoding="utf-8")
+        assert found['coarse'], found
+        reference, controls = found['reference'], found['controls']
+        assert reference['hits'] == reference['reachHits'] == [True] * 9, found
+        assert [c['name'] for c in controls] == ['chat-message-reply', 'share', 'chat-message-copy'], found
+        assert found['timeRight'] <= controls[0]['left'], found
+        r = reference['reach']
+        assert r['right'] - r['left'] >= 44 and r['bottom'] - r['top'] >= 44, found
+        for control in controls:
+            assert control['hits'] == [True] * 5, (control['name'], found)
+            c = control['reach']
+            assert c['right'] - c['left'] >= 44 and c['bottom'] - c['top'] >= 44, found
+            assert r['right'] <= c['left'] or r['left'] >= c['right'] or r['bottom'] <= c['top'] or r['top'] >= c['bottom'], found
+        page.touchscreen.tap(reference['tap']['x'], reference['tap']['y'])
+        assert page.evaluate('window.openedProject?.project') == {'id': 'alpha', 'name': name}
+        reply = controls[0]
+        page.touchscreen.tap(reply['x'], reply['y'])
+        page.wait_for_function("() => document.activeElement?.id === 'chat-input'")
+        cancel = page.get_by_role('button', name='Cancel reply', exact=True)
+        expect(cancel).to_be_visible()
+        quote = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
+        assert quote['address'] == bubble.get_attribute('data-row-address')
+        assert quote['snippet'].startswith(sample)
+        cancel.tap()
+
+
+@pytest.mark.parametrize("project_chat", [("webkit", "light", 402), ("chromium", "dark", 402)], indirect=True)
+def test_system_project_row_over_copy_keeps_the_answers_clearance(project_chat, tmp_path):
+    """A System Project row (an ending with no answer; started and handoff rows share its action row) above a copy control keeps the same touch
+    clearance as an answer's: its long reference's right end opens the Project, and Reply and Copy hit themselves."""
+    chat = project_chat
+    page, expect = chat["page"], chat["expect"]
+    page.set_viewport_size({"width": chat["width"], "height": 874})
+    name = "Conference notes and drawings for a very long project name"
+    page.evaluate("row => emit('chat', row)", {
+        "role": "system", "system_type": "project_completion_summary", "chat_id": 1, "task_id": "sibling-row",
+        "project_id": "alpha", "project_name": name, "task_name": "GitHub pass", "content": "Project completed",
+        "completion_reason": "The work stopped before it wrote an answer.",
+        "ts": "2026-10-22T21:28:00Z", "history_id": "sibling-row",
+        "terminal_time": {"v": 1, "source": "executor_terminal", "occurred_at": "2026-10-22T21:28:00Z", "attempt": {}},
+        "row_address": "row:1@2026-10-22T21:28:00Z#sibling-row"})
+    bubble = page.locator('#chat-messages > .chat-bubble.system[data-task-id="sibling-row"]')
+    bubble.wait_for()
+    bubble.scroll_into_view_if_needed()
+    expect(bubble.locator('.chat-message-actions > .chat-message-copy')).to_be_visible()
+    found = bubble.evaluate(FINGER)
+    (_evidence_dir(tmp_path) / f"sibling-{chat['engine']}-{chat['theme']}.json").write_text(json.dumps(found, indent=2), encoding="utf-8")
+    assert found['coarse'], found
+    reference, controls = found['reference'], found['controls']
+    assert [c['name'] for c in controls] == ['chat-message-reply', 'chat-message-copy'], found
+    assert reference['hits'] == reference['reachHits'] == [True] * 9, found
+    r = reference['reach']
+    for control in controls:
+        assert control['hits'] == [True] * 5, (control['name'], found)
+        c = control['reach']
+        assert r['right'] <= c['left'] or r['left'] >= c['right'] or r['bottom'] <= c['top'] or r['top'] >= c['bottom'], found
+    page.touchscreen.tap(reference['tap']['x'], reference['tap']['y'])
+    assert page.evaluate('window.openedProject?.project') == {'id': 'alpha', 'name': name}

@@ -21,7 +21,7 @@ import { apiClient, apiFetch } from './api_client.js';
 import {
     apiConnections, connectionParts, MODEL_ACCOUNTS_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_PREFERENCE_KEY, tierPriced,
 } from './route_editor_primitives.js';
-import { MODEL_CATALOG_TIMEOUT_MS, invalidateModelCatalogReads, mergeModelCatalog } from './settings_catalog.js';
+import { MODEL_CATALOG_TIMEOUT_MS, catalogReadFailed, invalidateModelCatalogReads, mergeModelCatalog } from './settings_catalog.js';
 import { buildModelIndex, normalizeRoute, routeKey, routeSource, sameRoute } from './chat_model_routes.js';
 
 const CATALOG_FRESH_MS = 5 * 60 * 1000;
@@ -162,10 +162,15 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
     const staleForTier = () => state.cacheTier !== null && state.readTier !== state.cacheTier
         && (state.catalog?.items || []).some((item) => item?.price?.cache_write_ttl && item.price.cache_write_ttl !== state.cacheTier);
 
-    function adopt(data) {
+    /** One read outcome, however it arrived: the rows it lists are kept, a read that did not complete keeps the
+     *  last good choices and says so, and the store stays failed so that the next opening reads again. */
+    function applyOutcome(data) {
         state.catalog = mergeModelCatalog(state.catalog || {}, data);
-        state.readAt = staleForTier() ? 0 : now();
-        state.failed = false;
+        // An answer that came back HTTP 200 with `read_state: 'failed'` IS a failure: the chooser must read again on
+        // its next opening instead of holding a failed answer as a fresh catalog. A successful empty read (the
+        // catalog really lists nothing) and a partial one (what it could read is real) are not failures.
+        state.failed = catalogReadFailed(data);
+        state.readAt = state.failed ? 0 : staleForTier() ? 0 : now();
     }
 
     function read({ force = false } = {}) {
@@ -179,13 +184,12 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
         const epoch = state.sourceEpoch;
         state.reading = (async () => {
             try {
-                adopt(fit(await readCatalog(), epoch));
+                const data = await readCatalog();
+                // A failed read does not settle a changed source’s pending capability.
+                applyOutcome(fit(data, catalogReadFailed(data) ? -1 : epoch));
             } catch (error) {
                 // A failed read keeps what an earlier one listed, and says so.
-                state.catalog = mergeModelCatalog(state.catalog || {}, { read_state: 'transport',
-                    errors: [{ provider_id: 'catalog', error: String(error?.message || error) }] });
-                state.readAt = now();
-                state.failed = true;
+                applyOutcome({ read_state: 'transport', errors: [{ provider_id: 'catalog', error: String(error?.message || error) }] });
             } finally {
                 state.reading = null;
                 notify();
@@ -438,8 +442,11 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
             state.mainAccountRoute = normalizeRoute(route);
             notify();
         },
-        /** Another reader's `/api/model-catalog` answer (Settings › Models' Refresh). */
-        adopt(data) { if (Array.isArray(data?.items)) { adopt(fit(data)); notify(); } },
+        /** Another reader's `/api/model-catalog` answer (Settings › Models' Refresh). A failed or scoped-unsupported
+         *  answer (no items) is still a read outcome: adopt it so its read_state invalidates the held price and keeps
+         *  the rows for the chooser; only a body with no read at all is ignored. A failed read leaves the store
+         *  failed, so the next opening reads again instead of showing an empty sheet forever. */
+        adopt(data) { if (data && typeof data === 'object' && (Array.isArray(data.items) || data.read_state || data.error || Array.isArray(data.errors))) { applyOutcome(fit(data)); notify(); } },
         /** The settings document Settings loaded or saved: a changed tier or key reaches the list without a read. */
         adoptSettings(settings) { if (settings && typeof settings === 'object') { adoptSettings(settings); notify(); } },
         /** `/api/state`'s `processing_tiers`: Main's own tier and the default one. */
@@ -470,6 +477,21 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
 }
 
 export const modelCatalog = createModelCatalogStore();
+
+/**
+ * The catalogue as it changes: the caller hears a new read outcome, not every pin press. A legacy
+ * core's prices are a view of this one full read, so a failed refresh must reach the caller at once
+ * (hiding the price without losing the rows) and a new success must bring it back.
+ */
+export function watchModelCatalog(onChange) {
+    let last = modelCatalog.catalog();
+    return modelCatalog.subscribe(() => {
+        const catalog = modelCatalog.catalog();
+        if (catalog === last) return;
+        last = catalog;
+        onChange(catalog);
+    });
+}
 
 // A page that can be listened to: the module is also loaded where there is none (a reader of the work state).
 if (typeof globalThis.document?.addEventListener === 'function') {

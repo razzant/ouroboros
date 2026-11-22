@@ -2,8 +2,10 @@
 //
 // Brand vector provenance (paths and viewBoxes preserved byte-for-byte from
 // Claudexor's HarnessLogoData.swift): Claude, Cursor and OpenCode are from
-// Simple Icons; Codex/OpenAI is from SVGL. The marks are monochrome and inherit
-// currentColor. Product names and marks remain the property of their owners.
+// Simple Icons; Codex/OpenAI is from SVGL. Antigravity's is Google's own one-colour
+// mark (antigravity.google/assets/image/brand/antigravity-icon__one-color.svg), not
+// Claudexor's or Simple Icons'. The marks are monochrome and inherit currentColor.
+// Product names and marks remain the property of their owners.
 //
 // This module presents identity only. It does not decide route availability,
 // status, requested/effective/executed truth, or review authority.
@@ -31,6 +33,11 @@ export const HARNESS_MARKS = Object.freeze({
         viewBox: '0 0 24 24',
         path: 'M22 24H2V0h20zM17 4.8H7v14.4h10z',
     }),
+    agy: Object.freeze({
+        label: 'Antigravity',
+        viewBox: '0 0 180 180',
+        path: 'M144.248 149.062C151.748 154.688 162.998 150.938 152.685 140.625C121.748 110.625 128.31 28.125 89.8727 28.125C51.4352 28.125 57.9977 110.625 27.0602 140.625C15.8102 151.875 27.9977 154.688 35.4977 149.062C64.5602 129.375 62.6852 94.6875 89.8727 94.6875C117.06 94.6875 115.185 129.375 144.248 149.062Z',
+    }),
 });
 
 export const GENERIC_HARNESS_MARK = Object.freeze({
@@ -38,7 +45,7 @@ export const GENERIC_HARNESS_MARK = Object.freeze({
     path: 'M12 2 22 12 12 22 2 12Z',
 });
 
-const GENERIC_LABELS = Object.freeze({ agy: 'Antigravity', copilot: 'GitHub Copilot' });
+const GENERIC_LABELS = Object.freeze({ copilot: 'GitHub Copilot' });
 // Names of the API providers (a task card's route rows, the route editor's fallback when the setup contract
 // does not describe one, e.g. GigaChat). The contract's label wins wherever it exists.
 export const API_PROVIDER_LABELS = Object.freeze({
@@ -120,6 +127,15 @@ export const META_PART_SEPARATOR = ' \u00b7 ';
 
 export function joinMetaParts(parts) {
     return parts.filter(Boolean).join(META_PART_SEPARATOR);
+}
+
+/** The source identity as elements: a static word stays translatable chrome, an owner's or product's
+ *  name is authored, and each separator is one skipped element — so no dot fuses into a name and the
+ *  overlay never reports it as a key. */
+export function identityPartsHtml(parts) {
+    return (parts || []).filter((part) => part && String(part.text || '').trim()).map((part) => (part.kind === 'authored'
+        ? `<span data-i18n-authored>${escapeHtml(part.text)}</span>`
+        : `<span>${escapeHtml(part.text)}</span>`)).join(`<span class="harness-identity-sep" data-i18n-skip>${escapeHtml(META_PART_SEPARATOR)}</span>`);
 }
 
 /** Normalize coordinator route provenance from a recorded snapshot or frame. */

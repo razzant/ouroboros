@@ -816,6 +816,114 @@ def recover_review_producer(root: Any, request: Any, slot: Any, row: dict) -> An
         return actor
 
 
+def retained_original_run_answer(root, *, task_id, surface, row, retry_key, root_task_id, review_contract, usage_ctx):
+    """Read an original successful run without needing a verdict producer receipt or calling a model: its masked text
+    and what its words are (``review_session_custody.answer_words``: a ``redacted_copy`` named by the bytes kept, the
+    source's identity unknown), or ``unavailable`` without text where only a preview was retained."""
+    from ouroboros import delegate_collection, delegate_custody_current, delegate_invocation
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.delegate_custody_usage import names_another_run, summary_of
+    from ouroboros.review_custody import _ACTIVE, _ACTIVE_LOCK, _attempt_key
+    from ouroboros.review_dispatch import recorded_binding_conflicts, recorded_invocation_tokens, review_operation_binding
+    from ouroboros.review_session_custody import output_answer_words, read_session_answer_checkpoint
+    from ouroboros.review_verdict_extraction import canonicalize_session_verdict
+    from ouroboros.triad_review import request_output_shape
+
+    operation = row["operation_id"]
+    request, slot = recorded_review_assignment(root, task_id=task_id, surface=surface, row=row, retry_key=retry_key,
+                                               root_task_id=root_task_id, review_contract=review_contract)
+    if slot.route.value != "agent_session":
+        return None
+    key = _attempt_key(request, slot)
+    with _ACTIVE_LOCK:
+        live = _ACTIVE.get(key)
+        if live is not None and (not live.event.is_set() or live.operation_id != operation):
+            return None
+        actor = live.actor if live else None
+    expected = review_operation_binding(request, slot, operation)
+    checkpoint = read_session_answer_checkpoint(root, expected)
+    tokens = recorded_invocation_tokens(row)
+    if checkpoint is not None:
+        token, run_id = checkpoint["invocation_id"], checkpoint["run_id"]
+        if tokens and tokens != {token}:
+            return None
+    else:  # Older producers only attest this recovery with a bound extraction-failure receipt.
+        if actor is None:
+            actor = (getattr(usage_ctx, "_review_settled_attempts", None) or {}).get(key)
+        if actor is None:
+            actor = recover_review_producer(root, request, slot, row)
+        if (actor is None or actor.operation_id != operation or actor.slot_id != slot.slot_id
+                or actor.failure_code != "provider_outcome_unknown" or not actor.recovery_binding
+                or recorded_binding_conflicts(actor.recovery_binding, expected)):
+            return None
+        tokens |= recorded_invocation_tokens(asdict(actor))
+        if len(tokens) != 1:
+            return None
+        token, run_id = tokens.pop(), (actor.usage or {}).get("delegated_run_id")
+    invocation = delegate_invocation.invocation_record(root, token) or {}
+    if (not run_id or invocation.get("state") != "started" or invocation.get("run_id") != run_id
+            or any(invocation.get(k) != expected[k] for k in ("task_id", "root_task_id", "surface", "slot_id", "operation_id"))
+            or any(v and v != run_id for v in (row.get("delegated_run_id"), (row.get("usage") or {}).get("delegated_run_id")))):
+        return None
+    run = delegate_custody_current.run(root, run_id)
+    if (run is None or run.task_id != task_id or run.invocation_id != token or run.terminal_state != "succeeded"):
+        return None
+    if checkpoint is not None:
+        text, conformed, words = checkpoint["text"], checkpoint.get("conformance_passed") is True, checkpoint["words"]
+    else:
+        full = delegate_collection.retained_payload(root, run)
+        if full is not None:
+            if full.get("run_id") != run_id or full.get("state") != "succeeded":
+                return None
+            primary, conformance = full.get("primary_output"), full.get("output_conformance")
+        elif run.terminal_source:
+            detail = json.loads(read_actor_source_bytes(root, task_id, run.terminal_source))
+            summary = summary_of(detail)
+            if names_another_run(detail, run_id) or summary.get("state") != "succeeded":
+                return None
+            primary, conformance = detail.get("primaryOutput"), summary.get("outputConformance")
+        else:
+            return None
+        read = output_answer_words(primary)  # the stored projection's masking, before anything shows or keeps it
+        if read is not None and not read[0]:  # only a host preview was kept: the engine may still hold the whole result
+            read = output_answer_words(_engine_full_primary(invocation, run_id, primary)) or read
+        if read is None:
+            return None
+        (text, words), conformed = read, conformance == "passed"
+        if not text:
+            return {"operation_id": operation, "invocation_id": token, "run_id": run_id, **words}
+    _, method, _ = canonicalize_session_verdict(text, conformance_passed=conformed,
+                                                shape=request_output_shape(request), allow_extraction=False)
+    return {"operation_id": operation, "invocation_id": token, "run_id": run_id, "method": method, "text": text, **words}
+
+
+def _engine_full_primary(invocation: dict, run_id: str, primary: Any) -> Any:
+    """The run's own terminal primary output, whole, where its retained observation kept only a truncated preview:
+    the one existing resolver (``delegate_output._resolve_full_primary_output``: a GET of the run's artifact, its size
+    or preview prefix checked against what the run reported) through the read-only owned gateway the invocation was
+    bound to. Nothing is sent, started or retried; anything short of a verified whole text returns the preview."""
+    from ouroboros.claudexor_daemon import read_owned_gateway
+    from ouroboros.delegate_output import _resolve_full_primary_output
+    from ouroboros.execution_domain import run_gateway
+
+    try:
+        gateway = run_gateway(invocation, read_owned_gateway)
+    except Exception:
+        log.debug("full terminal output of %s: daemon unavailable", run_id, exc_info=True)
+        return primary
+    try:
+        resolved, full_ok, _disclosure = _resolve_full_primary_output(gateway, run_id, primary)
+        return resolved if full_ok else primary
+    except Exception:
+        log.debug("full terminal output of %s could not be read", run_id, exc_info=True)
+        return primary
+    finally:
+        try:
+            gateway.close()
+        except Exception:
+            log.debug("full terminal output gateway close failed", exc_info=True)
+
+
 def _row_actor(slot: Any, operation_id: str, row: Optional[dict], *, state: str, reason: str) -> Any:
     """A typed gap (``custody_lost``) or a proven zero-send row (``not_dispatched``)."""
     from ouroboros.review_records import ReviewActorRecord

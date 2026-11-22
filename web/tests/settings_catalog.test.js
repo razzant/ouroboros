@@ -378,3 +378,27 @@ test('a merge marks what this read itself said: what a gap keeps for the list is
     assert.deepEqual([offline.items.length, offline.current], [kept.items.length, null], 'a read that listed nothing said nothing');
     assert.equal(mergeModelCatalog({}, kept).current, partial, 'a catalog merged before keeps the mark it has');
 });
+
+test('a scoped legacy read and a connection overlay use the entry\'s own identity, never a reparsed value', async () => {
+    const legacy = { items: [
+        { name: 'legacy-openrouter-nested', value: 'openrouter::openai::vendor/model' },
+        { name: 'legacy-unknown-head', value: 'vendor::family/model' },
+        { name: 'modern-openrouter-nested', provider_id: 'openrouter', id: 'openai::vendor/model', value: 'openai::vendor/model' },
+        { name: 'local', provider_id: 'local', id: 'qwen.gguf', value: 'local::qwen.gguf', use_local: true },
+        { name: 'modern-openai', provider_id: 'openai', id: 'vendor/model', value: 'openai::vendor/model' },
+    ] };
+    const names = (answer) => answer.items.map((item) => item.name);
+    const catalog = createScopedModelCatalog({ supportsScopes: () => false, legacyCatalog: () => legacy });
+    assert.deepEqual(names(await catalog.read('provider_id=openrouter')),
+        ['legacy-openrouter-nested', 'legacy-unknown-head', 'modern-openrouter-nested'],
+        'OpenRouter\'s own ids stay in its scope, including one whose head names no provider');
+    assert.deepEqual(names(await catalog.read('provider_id=openai')), ['modern-openai'],
+        'the OpenAI key keeps its own model, never the OpenRouter row that spells the same id');
+    assert.deepEqual(names(await catalog.read('provider_id=local')), ['local'],
+        'the local row is the local lane\'s, never a provider\'s');
+    // The connection overlay replaces exactly the rows of its own source.
+    const composed = withConnectionCatalogs({ read_state: 'ok', items: legacy.items }, { 'openai': [{ name: 'openai-connection' }] });
+    assert.deepEqual(composed.items.map((item) => item.name),
+        ['legacy-openrouter-nested', 'legacy-unknown-head', 'modern-openrouter-nested', 'local', 'openai-connection'],
+        'only the OpenAI connection\'s own rows are replaced');
+});

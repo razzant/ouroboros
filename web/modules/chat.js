@@ -65,6 +65,7 @@ import {
     requestStop,
 } from './task_control_menu.js';
 import { composerMarkup, createComposer } from './composer.js';
+import { composerHeightAtRest, syncShortRoom } from './composer_fold.js';
 import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import { createChatReplies } from './chat_reply.js';
@@ -2703,65 +2704,55 @@ export function createChatInstance({
     }
     const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
 
-    // The composer's height once its reply strip moved (chat_reply.js `data-motion`): opening, the full strip
-    // (`--reply-h`) plus the wrap's gap; leaving, none. One reserve move per motion, never per frame: each write
-    // restyles the whole room (~90 ms on a 34k-element WebKit Main; four in a row stuttered the close).
-    function composerHeightAtRest() {
-        const strips = inputArea.querySelectorAll('.chat-quote--composer[data-motion]');
-        if (!strips.length) return inputArea.offsetHeight || 0;
-        // Mid-motion heights are fractional: whole pixels would differ by one from frame to frame and write again.
-        let height = inputArea.getBoundingClientRect().height;
-        for (const strip of strips) {
-            // The room a strip takes is its box and its margins (style.css): opening it ends at --reply-room, shut at none.
-            const { marginTop, marginBottom } = getComputedStyle(strip);
-            const now = strip.getBoundingClientRect().height + (parseFloat(marginTop) || 0) + (parseFloat(marginBottom) || 0);
-            const end = strip.dataset.motion === 'open' ? (parseFloat(strip.style.getPropertyValue('--reply-room')) || 0) : 0;
-            height += end - now;
-        }
-        return height;
-    }
-
     function updateMessagesPadding(preserveStickiness = true) {
         // A room not displayed (Main behind a page) measures its bars as 0: it keeps the reserves it was laid out
         // with, or it would come back with its newest message under the composer.
         if (leaving || !page.getClientRects().length) return false;
-        // The room's measured layout variables, each written only when it changes (true then).
-        const layout = { setProperty: (name, value) => page.style.getPropertyValue(name) !== value
-            && (page.style.setProperty(name, value), true) };
+        // Stage only changed CSS properties; then apply the measurements in one timeline transaction.
+        const changes = [];
+        const setProperty = (name, value) => page.style.getPropertyValue(name) !== value && (changes.push([name, value]), true);
+        const shortMoved = syncShortRoom(page);
         let chromeMoved = false;
-        const mutate = () => {
-            let changed = false;
-            if (pageHeader && messagesDiv) {
-                // The bar's own height places the note under it; the transcript clears both.
-                const bar = Math.ceil(pageHeader.offsetHeight || 0);
-                const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
-                changed = layout.setProperty('--chat-header-bar', `${bar}px`);
-                changed = layout.setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`) || changed;
+        if (pageHeader && messagesDiv) {
+            // The bar's own height places the note under it; the transcript clears both.
+            const bar = Math.ceil(pageHeader.offsetHeight || 0);
+            const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
+            setProperty('--chat-header-bar', `${bar}px`);
+            setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`);
+        }
+        if (inputArea && messagesDiv) {
+            setProperty('--chat-composer-height', `${composerHeightAtRest(inputArea)}px`);
+            // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
+            const box = el => el.getBoundingClientRect();
+            if (document.body.classList.contains('keyboard-open') && !inputArea.querySelector('[data-motion]')) {
+                const top = Math.max(readBand(messagesDiv, pageHeader, null).top,
+                    pageNote?.offsetHeight ? box(pageNote).bottom : 0);
+                chromeMoved = setProperty('--chat-keyboard-chrome', `${Math.round(top - box(pageHeader || page).top
+                    + box(inputArea).height - box(input).height)}px`);
             }
-            if (inputArea && messagesDiv) {
-                const reserve = Math.max(92, Math.ceil(composerHeightAtRest()) + 16);
-                changed = layout.setProperty('--chat-input-reserve', `${reserve}px`) || changed;
-                // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
-                const box = el => el.getBoundingClientRect();
-                if (pageHeader && document.body.classList.contains('keyboard-open')
-                        && !inputArea.querySelector('[data-motion]')) {
-                    chromeMoved = layout.setProperty('--chat-keyboard-chrome', `${Math.round(box(messagesDiv).top
-                        - box(pageHeader).top + box(inputArea).height - box(input).height)}px`);
-                }
-            }
-            return changed || chromeMoved;
-        };
-        const changed = preserveStickiness ? withStableViewport(mutate) : mutate();
-        if (chromeMoved) composer?.resize();  // a grown cap sends no resize
+        }
+        if (changes.length || shortMoved) {
+            const write = () => { for (const [name, value] of changes) page.style.setProperty(name, value); };
+            const apply = () => preserveStickiness ? withStableViewport(write) : write();
+            if ((chromeMoved || shortMoved) && composer) composer.remeasureInput(apply);
+            else if (changes.length) apply();
+        }
         // The scrollbar this feed draws (none where scrollbars overlay the page): a Project's focus corners keep off it.
-        if (asPanel) layout.setProperty('--chat-feed-lane', `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`);
+        if (asPanel) {
+            const lane = `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`;
+            if (lane !== page.style.getPropertyValue('--chat-feed-lane')) page.style.setProperty('--chat-feed-lane', lane);
+        }
         updateScrollButton();
-        return changed;
     }
 
     // Kept on the instance so destroy() can disconnect it (the observer was
     // previously an unreachable closure — the P3 lifecycle leak).
     let chatResizeObserver = null;
+
+    function reflowViewport() {
+        if (destroyed || leaving) return;
+        reading.reflow(updateMessagesPadding);
+    }
 
     function installChatResizeObservers() {
         if (typeof ResizeObserver !== 'function') return;
@@ -2771,9 +2762,7 @@ export function createChatInstance({
             queued = true;
             requestAnimationFrame(() => {
                 queued = false;
-                if (destroyed || leaving) return;
-                reading.reflow();
-                updateMessagesPadding();
+                reflowViewport();
             });
         };
         chatResizeObserver = new ResizeObserver(schedule);
@@ -2783,6 +2772,8 @@ export function createChatInstance({
         if (inputArea) chatResizeObserver.observe(inputArea);
     }
 
+    const syncComposerReserve = () => updateMessagesPadding();
+    inputArea?.addEventListener('ouro:composer-reserve', syncComposerReserve);
     installChatResizeObservers();
 
     // An open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners (style.css): a
@@ -3488,6 +3479,7 @@ export function createChatInstance({
         showLatest,
         resume,
         ws,
+        reflowViewport,
         captureReading: () => reading.capture(),
         showHistoryNotice: () => { if (!destroyed) historyControls.showNotice(); },
         refreshHistory: readReceipt.refresh,
@@ -3564,6 +3556,7 @@ export function createChatInstance({
             header?.destroy();
             focusPanel?.removeEventListener('pointerdown', quietFocus);
             focusPanel?.removeEventListener('keydown', showFocus);
+            inputArea?.removeEventListener('ouro:composer-reserve', syncComposerReserve);
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
             historyResyncScheduler.cancel();

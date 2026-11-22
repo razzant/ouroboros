@@ -132,6 +132,18 @@ test('a room follows Main until it chooses, and says so: the name word is Main, 
     r.controls.destroy();
 });
 
+test('a source confirmed late wears its harness mark: the capsule repaints the mark when the catalog names it', async () => {
+    const r = room();
+    const glyph = () => r.el.querySelector('.chat-capsule-glyph').innerHTML;
+    // The catalog has not been read: the source is an unknown one, so only its initial stands.
+    assert.match(glyph(), /model-source-initial" aria-hidden="true">C</, 'an unknown source wears its initial, never an invented mark');
+    await r.store.read();  // the read brings the source's descriptor (id codex, credentialHarness codex)
+    await flush();
+    // The same words (Codex) now stand beside the harness's own mark: the mark is what changed.
+    assert.match(glyph(), /^<svg class="model-source-mark"/, 'the harness mark stands where the descriptor names it');
+    r.controls.destroy();
+});
+
 test('it is the first capsule of the row and one of its family: a press opens it, hover never does, and one is open at a time', async () => {
     const r = room({ hover: true });
     assert.equal(r.row.children[0], r.el);
