@@ -202,7 +202,7 @@ def test_after_finish_the_token_is_granted_and_the_code_posted_once_with_the_opt
         return {"ok": True}
 
     monkeypatch.setattr("ouroboros.skill_lifecycle_actions.run_skill_action", grant)
-    answers = iter([409, 200, 200])
+    answers = iter([(409, {}), (200, {"ok": True, "owner_ignored": False}), (200, {"ok": True})])
 
     def post(path, body):
         posts.append((path, dict(body)))
@@ -234,15 +234,19 @@ def test_failures_are_recorded_never_raised_and_a_refused_post_drops_the_code(sk
     monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: False)
     monkeypatch.setattr("ouroboros.skill_lifecycle_actions.run_skill_action", lambda *a, **k: {"error": "missing grants"})
     posts = []
-    record = cards.settle(drive, post=lambda path, body: posts.append(path) or 200)[0]
+    record = cards.settle(drive, post=lambda path, body: posts.append(path) or (200, {}))[0]
     assert record["grant"].startswith("failed: missing grants") and record["post"] == "pending" and posts == []
     assert record["code"] == CODE, "a skill that cannot run keeps its code for a later grant"
     monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: True)
     cards.record_consent(drive, _entry())
-    refused = cards.settle(drive, post=lambda path, body: 400)[0]
+    refused = cards.settle(drive, post=lambda path, body: (400, {}))[0]
     assert refused["post"] == "failed: the route answered 400" and "code" not in refused
+    # A 200 that says the route left the owner's values unchanged saved nothing of them: never a success.
     cards.record_consent(drive, _entry())
-    waiting = cards.settle(drive, post=lambda path, body: 409)[0]
+    ignored = cards.settle(drive, post=lambda path, body: (200, {"ok": True, "owner_ignored": True}))[0]
+    assert ignored["post"].startswith("failed:") and "owner_ignored" in ignored["post"] and "code" not in ignored
+    cards.record_consent(drive, _entry())
+    waiting = cards.settle(drive, post=lambda path, body: (409, {}))[0]
     assert waiting["post"] == "waiting" and waiting["code"] == CODE, "a route not serving yet is tried again at the next run"
 
     def boom(*_a, **_k):
@@ -251,7 +255,7 @@ def test_failures_are_recorded_never_raised_and_a_refused_post_drops_the_code(sk
     monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: False)
     monkeypatch.setattr("ouroboros.skill_lifecycle_actions.run_skill_action", boom)
     cards.record_consent(drive, _entry())
-    assert cards.settle(drive, post=lambda path, body: 200) == []  # logged by type, never raised
+    assert cards.settle(drive, post=lambda path, body: (200, {})) == []  # logged by type, never raised
 
 
 def test_a_skill_finishing_its_load_in_the_server_settles_the_cards_waiting_for_it(tmp_path, monkeypatch):

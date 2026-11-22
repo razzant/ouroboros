@@ -355,39 +355,50 @@ def _bodies(card: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Dict[str,
     return bodies
 
 
-def _post(record: Dict[str, Any], *, post: Optional[Callable[[str, Dict[str, str]], int]] = None) -> str:
+Answer = Tuple[int, Dict[str, Any]]  # a route's HTTP status and its JSON object ({} when it sent none)
+
+
+def _post(record: Dict[str, Any], *, post: Optional[Callable[[str, Dict[str, str]], Answer]] = None) -> str:
     """ONE post per declared route of the card's skill-settings values: «posted», «waiting» (the route does not serve
-    yet: the next event tries again), or «failed: …» (the route refused it)."""
+    yet: the next event tries again), or «failed: …» (the route refused it, or answered that it left the owner's
+    values unchanged: ``owner_ignored``, which saved nothing of them)."""
     card = declared_card(record["skill"])
     if card is None:
         return "failed: the skill no longer declares its card"
     send = post or _loopback_post
     for route, body in _bodies(card, record).items():
-        status = send(f"/api/extensions/{card['skill']}/{route}", body)
+        status, answer = send(f"/api/extensions/{card['skill']}/{route}", body)
         if status in _NOT_LIVE:
             return "waiting"
         if not 200 <= status < 300:
             return f"failed: the route answered {status}"
+        if answer.get("owner_ignored") is True:
+            return "failed: the route left the owner's values unchanged (owner_ignored)"
     return "posted"
 
 
-def _loopback_post(path: str, body: Dict[str, str]) -> int:
+def _loopback_post(path: str, body: Dict[str, str]) -> Answer:
     """This server's own request to a skill route: from 127.0.0.1, with no Origin and no Mini App mark, so the route's
     guard reads the owner's local session. Nothing reaches this but ``settle``, from a consent the owner gave at a
-    Finish the Mini App could not send; no route lets a caller choose what it posts."""
+    Finish the Mini App could not send; no route lets a caller choose what it posts. Call it off the event loop."""
     request = urllib.request.Request(f"http://127.0.0.1:{_server_port()}{path}", data=json.dumps(body).encode("utf-8"),
                                      method="POST", headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=30) as answer:
-            return int(answer.status)
+            status, raw = int(answer.status), answer.read(65536)
     except urllib.error.HTTPError as answer:
-        return int(answer.code)
+        return int(answer.code), {}
     except Exception:  # noqa: BLE001 — not answering yet
-        return 0
+        return 0, {}
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        payload = {}
+    return status, payload if isinstance(payload, dict) else {}
 
 
 def settle(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None, *,
-           post: Optional[Callable[[str, Dict[str, str]], int]] = None) -> List[Dict[str, Any]]:
+           post: Optional[Callable[[str, Dict[str, str]], Answer]] = None) -> List[Dict[str, Any]]:
     """For each recorded card whose skill is installed: grant its token key where needed, then make its one post. The
     outcome lands in the marker and the code leaves it once posted or refused; a skill not installed yet, or a route
     not serving yet, waits for the next event. Never raises; call it off the server's event loop."""
@@ -403,7 +414,7 @@ def settle(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None, *,
 
 def _settle_records(drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path], read_marker: Callable[..., Any],
                     write_marker: Callable[..., Any], *,
-                    post: Optional[Callable[[str, Dict[str, str]], int]]) -> List[Dict[str, Any]]:
+                    post: Optional[Callable[[str, Dict[str, str]], Answer]]) -> List[Dict[str, Any]]:
     records = [dict(record) for record in read_marker(drive_root).get("connections") or [] if isinstance(record, dict)]
     for record in records:
         if record.get("post") not in ("pending", "waiting") or not _installed(drive_root, str(record.get("skill") or "")):

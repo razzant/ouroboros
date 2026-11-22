@@ -987,8 +987,9 @@ shares a route (here the code and the option) to `/api/extensions/<skill>/<route
 loopback, so the route's own guard (owner changes only from the owner's local session) reads it as local; no request
 can choose what it posts. It posts on events that already happen, never on a timer: the starter install's end, a
 saved completion for a skill already installed, the skill's extension finishing its load, and the next start; a route
-that does not serve yet (409) waits for the next of them. The code leaves the record once posted or refused; each
-outcome is recorded there and none blocks Start. A card missing any part the host needs is not shown, and the skill
+that does not serve yet (409) waits for the next of them. A route that answers 200 with `owner_ignored: true` left
+the owner's values unchanged: that is recorded as not saved, never as a success. The code leaves the record once
+posted or refused; each outcome is recorded there and none blocks Start. A card missing any part the host needs is not shown, and the skill
 stays an ordinary row.
 
 ## Grants for protected keys and host permissions
