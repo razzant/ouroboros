@@ -1307,7 +1307,7 @@ def test_a_system_key_arrives_as_a_system_defined_event(host, launch):
 @desktop_only
 def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_path, record_property):
     """600 characters (Latin, Cyrillic, emoji, line breaks) through type_text: the text view holds all 600, and the
-    fixture's own log says how long they took. The skill's budget allows mac_input.TYPE_MS_PER_CHAR per character
+    fixture's own log says how long they took, per marked key down it saw (all 600 on success). The skill's budget allows mac_input.TYPE_MS_PER_CHAR per character
     beyond a fixed part, so more than that fails here: green means the budget holds on this runner, red that it must be
     raised (from this measurement, which goes to the job summary and the artifact, not from a guess)."""
     call, _schema = host
@@ -1329,11 +1329,16 @@ def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_pa
                                              "chars_sent": sent.get("chars_sent"), "wall_ms": wall_ms, "budget_ms": budget,
                                              "fixture_s": (keys[-1]["t"] - keys[0]["t"]) if keys else None,
                                              "ok": sent.get("ok"), "error": sent.get("error")})
-    per_char = round((keys[-1]["t"] - keys[0]["t"]) * 1000 / len(text), 2) if keys else None
+    # The time per key the fixture saw: the span of the program's own marked key downs over their number, so a run cut
+    # short (300 of 600 in six seconds) is measured at its real pace, not at half of it.
+    downs = [k for k in keys if k["event"] == "key_down" and k.get("tag") == SKILL_TAG]
+    per_char = round((keys[-1]["t"] - keys[0]["t"]) * 1000 / len(downs), 2) if downs else None
+    record_property("marked_key_downs", len(downs))
     record_property("ms_per_char", per_char)  # the job summary prints it beside the case
     record_property("wall_ms", wall_ms)
     log.warning("long text: %s characters, %s ms wall, %s ms per character, budget %s ms", len(text), wall_ms, per_char, budget)
     assert sent.get("ok") is True and sent.get("chars_sent") == sent.get("chars_total") == 600, sent
+    assert len(downs) == 600, {"marked_key_downs": len(downs)}  # one marked key down per grapheme reached the fixture
     assert after["text"] == text, {"arrived": len(after["text"]), "sent": len(text)}
     from skills.unix_computer_use import mac_input  # the allowance the program's deadline is computed from
     assert per_char is not None and per_char <= mac_input.TYPE_MS_PER_CHAR, {"ms_per_char": per_char, "budget_ms": budget}
