@@ -95,8 +95,8 @@ def _check_budget_limits(
         accumulated_usage["reason_code"] = "budget_exhausted"
         if ctx.round_idx <= 1 and not accumulated_usage.get("rounds"):
             # Its row says the phrase with the step beside it whenever these words are what it publishes.
-            accumulated_usage["host_notice_row"] = {"text": phrase, "record": finish_reason,
-                                                    **fields("budget_exhausted", step="raise_total_budget")}
+            accumulated_usage["host_notice_row"] = {"text": phrase, "record": finish_reason, **fields(
+                "budget_exhausted", step="raise_total_budget", details="setting: TOTAL_BUDGET")}  # the key: a detail
             trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
             tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
             suffix = (

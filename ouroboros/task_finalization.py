@@ -181,21 +181,18 @@ def send_provider_death_notice(
     if str(final_result.get("terminal_origin") or "") in HOST_AUTHORED_TERMINAL_ORIGINS:
         return False
     plan_note = (
-        f"\n\n{TERMINAL_PLAN_REVIEW_NOTE}"
+        TERMINAL_PLAN_REVIEW_NOTE
         if final_result.get("terminal_plan_review_open") is True and not final_result.get("terminal_host_notice") else ""
-    )
-    notice = str(final_result.get("terminal_provider_notice") or "") or (
-        "A model-provider outage stopped this task. Partial work and workspace files "
-        "are preserved; inspect the task details before starting another run."
     )
     from ouroboros.host_notice import fields
 
-    ctx.send_with_budget(  # the outage's own words say the task stopped; the task's id is the notice's detail
-        chat_id,
-        f"{notice}{plan_note}",
-        role="system",
-        system_type="terminal_incident",
-        progress_meta=fields("provider_outage", details=f"task {task_id}"),
+    # One stable phrase and its step; the provider's own diagnostic (its last code and wait), the open plan review
+    # and the task's id are the notice's details. The task's result keeps its own text.
+    details = "\n\n".join(part for part in (f"task {task_id}", str(final_result.get("terminal_provider_notice") or ""), plan_note) if part)
+    ctx.send_with_budget(
+        chat_id, "A model-provider outage stopped this task; its partial work and workspace files are kept.",
+        role="system", system_type="terminal_incident",
+        progress_meta=fields("provider_outage", step="inspect_task", details=details),
     )
     return True
 
@@ -333,7 +330,7 @@ def prepare_terminal_send_event(
             and text == row.get("record")):
         # The host published its notice's record (no suffix or other words joined it): the row says the phrase with
         # the notice beside it, and the result keeps the record's sentence.
-        send_event.update(text=str(row["text"]), log_text=str(row["text"]))
+        send_event.update(text=str(row["text"]), log_text=str(row["text"]), terminal_record=text)  # recovery's result
         send_event.setdefault("progress_meta", {})["notice"] = dict(row["notice"])
     canonical_root = pathlib.Path(task.get("budget_drive_root") or env_drive_root)
     preserved_path = ""

@@ -342,7 +342,8 @@ def bundled_rows(evt: Dict[str, Any]) -> tuple:
         row = {**answer, "text": text, "log_text": text, "role": "system", "system_type": "custody_notice"}
         if row_id:
             row.update(delivery_id=row_id, progress_meta={
-                **{key: value for key, value in meta.items() if key not in ("task_phase", "task_terminal_status")},
+                # The answer's own host notice (its step, its raw details) is not this row's: each row says its own.
+                **{key: value for key, value in meta.items() if key not in ("task_phase", "task_terminal_status", "notice")},
                 "card_row": "timeline", "card_row_id": row_id, **marks})
         for key in ("terminal_host_notice", "terminal_origin", "_finalization_timing",
                     "terminal_projection_token"):
@@ -601,8 +602,10 @@ def _send_message(evt: Dict[str, Any], ctx: Any) -> Any:
                             "routed_chat_id": chat_id} if bound_chat == chat_id or chat_id != int(evt["chat_id"]) else None}
             if isinstance(evt.get("presence_delivery"), dict):  # its conversation's own delivery, for the receipt
                 emitted["presence_delivery"] = evt["presence_delivery"]
+            if isinstance(evt.get("terminal_record"), str):  # a host notice's record: what recovery keeps as the result
+                emitted["terminal_record"] = evt["terminal_record"]
             _DELIVERED_MESSAGE_IDS.append((memory_id, {k: v for k, v in emitted.items()
-                                                       if k not in ("text", "presence_delivery")}))
+                                                       if k not in ("text", "presence_delivery", "terminal_record")}))
             # Retain the physical-send fact before slower capture/ack. A failed registry
             # write is covered by the existing bounded in-process dedupe until replay.
             _defer_delivery(ctx, {**evt, "emitted": emitted, "transport_failed": False})

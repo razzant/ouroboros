@@ -43,7 +43,7 @@ import uuid
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from supervisor.state import append_jsonl
-from ouroboros.host_notice import fields, with_notice
+from ouroboros.host_notice import STEPS, fields, with_notice
 from ouroboros.consciousness_authority import wake_cause
 from ouroboros.task_carrier import EXECUTOR_INLINE_CALL
 from ouroboros.utils import utc_now_iso
@@ -735,7 +735,7 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
                 agent.env.drive_root, task_id, STATUS_CANCELLED if stopped else STATUS_FAILED,
                 _field_projector=lambda current, incoming: (None if current.get("status") in _TRULY_TERMINAL_STATUSES
                                                             else incoming),
-                _terminal_observed=True, result=text, reason_code=control, metadata=metadata,
+                _terminal_observed=True, result=notice.get("record") or text, reason_code=control, metadata=metadata,
                 outcome_axes=infra_failed_axes(control, lifecycle="cancelled" if stopped else "failed",
                                                review_trigger="before_task_start"),
                 **origin, **effort_result_fields(task))
@@ -914,9 +914,11 @@ class CarrierTurn:
 
 
 def _budget_spent_notice() -> Dict[str, Any]:
-    """A turn the spent total budget refused before it started: its phrase, and the owner's step to raise it."""
-    return {"text": "The total budget is spent, so this turn did not start.",
-            **fields("budget_exhausted", step="raise_total_budget")}
+    """A turn the spent total budget refused before it started: its phrase and the owner's step to raise it; the
+    task's record says both, and the setting's key is the notice's detail."""
+    phrase = "The total budget is spent, so this turn did not start."
+    return {"text": phrase, "record": f"{phrase} {STEPS['raise_total_budget']}",
+            **fields("budget_exhausted", step="raise_total_budget", details="setting: TOTAL_BUDGET")}
 
 
 def _host_operation_failure(metadata: Optional[dict]) -> dict:

@@ -101,6 +101,7 @@ def _capture_emitted_answer(drive_root: Any, delivery_id: str, emitted: Dict[str
         # A Presence root's final keeps its conversation's own delivery (``working_checkpoint.registered_answer``).
         record.update({key: dict(emitted[key]) for key in ("routing", "presence_delivery")
                        if isinstance(emitted.get(key), dict)})
+        record.update({"terminal_record": emitted["terminal_record"]} if isinstance(emitted.get("terminal_record"), str) else {})
         ref = store_actor_source_bytes(
             pathlib.Path(drive_root), task_id, category="context_checkpoints", source_id="terminal-delivery",
             data=json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8"), extension="json")

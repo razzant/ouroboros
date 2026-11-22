@@ -512,6 +512,17 @@ def _failed(text: str, *, reason_code: str, usage: Optional[Dict[str, Any]] = No
     return text, out
 
 
+def with_review_record(text: str, usage: Dict[str, Any], record_id: str) -> str:
+    """The review's text with its ledger record after it. A failure's host notice row says that same record (its
+    details name the record too), so the published text still equals the row's record and keeps its notice."""
+    suffix = f"Review record: {record_id} (surface=system)"
+    row = usage.get("host_notice_row") if isinstance(usage, dict) else None
+    if isinstance(row, dict) and row.get("record") == text and isinstance(row.get("notice"), dict):
+        row["record"] = f"{text}\n\n{suffix}"
+        row["notice"]["details"] = "; ".join(part for part in (str(row["notice"].get("details") or ""), suffix) if part)
+    return f"{text}\n\n{suffix}"
+
+
 def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
                      usable_window_tokens: int = 0,
                      required_sources: Optional[list] = None,
@@ -794,8 +805,9 @@ def _run_retrieving_review(
         from ouroboros.triad_review import emit_review_execution_error
 
         emit_review_execution_error(usage_ctx, assignment, "empty response", usage=usage, prompt_ref=prompt_ref)
-        return _failed("⚠️ Model returned an empty response for the deep self-review.",
-                       reason_code="deep_self_review_error", usage=usage)
+        return _failed("⚠️ Model returned an empty response for the deep self-review.", reason_code="deep_self_review_error",
+                       usage=usage, phrase="The deep self-review ended without a report: its model answered with nothing.",
+                       details="empty response")
     if delivery == "native_tool_rounds":
         detail = _native_read_coverage(usage, repo_dir)
         usage["deep_review_coverage_basis"] = "source_ranges" if any(c["evidence_basis"] == "source_ranges" for c in detail.values()) else "legacy_lines"
