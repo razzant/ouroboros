@@ -227,15 +227,16 @@ def helper_names(ctx: Any, root: Path) -> tuple[str, ...]:
 def situation_names(task: Mapping[str, Any], room_id: str) -> tuple[str, ...]:
     """The names from host facts, given the room already resolved by the memory view; a helper's are those it carries.
     An own-clock wake (``is_own_clock_wake``, read at the top level or under ``metadata`` as the view role is) also
-    has ``WAKE``; a focus wake, a Main turn and the work a wake starts have their own names only."""
+    has ``WAKE``; a focus wake, a Main turn and the work a wake starts have their own names only. Carried names keep
+    ``WAKE`` only for an own-clock wake (ordinary admission keeps what a task carries; ``helper_names``' rule)."""
+    own_clock = is_own_clock_wake({**task, **_mapping(task.get("metadata"))})
     if (carried := carried_names(task)) is not None:
-        return carried
+        return tuple(name for name in carried if own_clock or name != WAKE)
     place_id, route = _place_facts(task)
     names = (f"room:{room_id}",)
     if place_id:
         names += (_place_name(place_id),)
-    wake = (WAKE,) if is_own_clock_wake({**task, **_mapping(task.get("metadata"))}) else ()
-    return names + _route_names(route) + wake
+    return names + _route_names(route) + ((WAKE,) if own_clock else ())
 
 
 @dataclass(frozen=True)

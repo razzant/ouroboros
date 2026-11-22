@@ -143,6 +143,20 @@ def test_only_an_own_clock_wake_has_the_wake_name_and_no_helper_carries_it(tmp_p
         assert helper_names(passing, tmp_path) == ("room:1",)
 
 
+def test_carried_names_keep_wake_only_for_an_own_clock_wake(tmp_path):
+    """Ordinary task admission keeps the names a task carries (``gateway.tasks``): ``wake`` among them stays only for
+    an own-clock wake, the rule ``helper_names`` applies to what a helper passes on, so no other focus holds the notes
+    claiming it or names it in its receipts; the other carried names stay."""
+    names = ["room:1", WAKE, "place:team"]
+    for task in ({"type": "task", "metadata": {CARRIED_NAMES: names}}, {CARRIED_NAMES: names}):
+        assert situation_names(task, "1") == ("room:1", "place:team")
+    assert situation_names({"metadata": {**OWN_WAKE, CARRIED_NAMES: names}}, "1") == tuple(names)
+    carrying = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="owner-task", current_chat_id=1,
+                           task_metadata={CARRIED_NAMES: ["room:1", WAKE]})
+    receipt = _knowledge_read(carrying, "unwritten", scope="global").splitlines()
+    assert "This situation's names: room:1 (Main)" in receipt
+
+
 def test_a_wakes_receipts_name_it_and_a_claim_of_it_is_a_present_situation(tmp_path):
     """Inside a wake the receipts' names line adds ``wake`` in words; a Main turn's line is as it was. A note claiming
     ``wake``, written from either, stands where a present situation holds it, and an unknown name still matches none."""
