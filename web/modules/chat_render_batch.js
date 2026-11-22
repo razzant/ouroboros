@@ -890,7 +890,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     const lastIdx = record.items.length - 1;
     // Full-array dedup keeps routine history syncs from growing Notes.
     const existingIdx = record.items.findIndex((it) => it.dedupeKey === syntheticKey || it.occurrenceKey === syntheticKey);
-    if (existingIdx !== -1 && inPlaceByKey) {
+    if (existingIdx !== -1 && (inPlaceByKey || summary.serviceStop)) {
         const it = record.items[existingIdx];
         if (Number.isSafeInteger(it.cardRowRevision)
             && (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision <= it.cardRowRevision)) {

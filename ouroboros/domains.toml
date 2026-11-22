@@ -938,6 +938,7 @@ D20 = "Presence"
 "ouroboros/tools/scope_review_contract.py" = "D06"
 "ouroboros/tools/scope_window.py" = "D06"
 "ouroboros/tools/search.py" = "D05"
+"ouroboros/tools/service_stop.py" = "D05"
 "ouroboros/tools/services.py" = "D05"
 "ouroboros/tools/kept_service_outputs.py" = "D05"  # a kept service's declared outputs for a stop that is not its task's
 "ouroboros/tools/shell.py" = "D05"

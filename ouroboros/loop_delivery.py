@@ -36,6 +36,7 @@ from ouroboros.outcomes import reviewable_effect_projection
 from ouroboros.task_finalization import schedule_report_ctx, set_terminal_host_notice, set_terminal_plan_review_open
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.task_carrier import execution_kind
+from ouroboros.utils import json_dumps_utf8
 
 
 from typing import TYPE_CHECKING
@@ -315,13 +316,11 @@ def delivery_evidence_fingerprint(
         "verification_receipts": read_context_verification_receipts(
             tool_ctx, task_id, fallback_root=receipt_root,
         ),
-        # Task-scoped service teardown can register declared outputs or
-        # surface an output-finalization failure. Those facts arise outside an
-        # ordinary tool call, so bind their stable projection explicitly; else
-        # a result review could judge the pre-teardown state.
+        # Bind teardown's outputs and failures, which can arise outside a tool call,
+        # so result review cannot judge the pre-teardown state.
         "service_finalization": _loop()._service_finalization_evidence(llm_trace),
     }
-    return hashlib.sha256(json.dumps(
+    return hashlib.sha256(json_dumps_utf8(
         evidence,
         ensure_ascii=False,
         sort_keys=True,
