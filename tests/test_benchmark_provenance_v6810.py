@@ -73,6 +73,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "model_wake_failed": (False, "owner_model.py: primary saved, wake unconfirmed; the same request can repair delivery"),
     "main_binding_invalid": (False, "gateway/owner_settings.py and task_model_wait.py: a Main model/account binding refused with HTTP 400 before it is saved or served; no execution is truncated"),
     "provider_response_failed": (False, "tools/search.py: a web-search provider's failed or incomplete response is reported to the calling tool as its own error; the task continues, never a task terminal"),
+    "authoring_handover_incomplete": (False, "loop_nudges.py: after a handover reminder the successor returned text without doing work or selecting the result; a degraded outcome, not a runtime cutoff"),
+    "tool_failure": (False, "an unrecovered tool failure is a failed outcome; a legacy schedule retains its full report when confirmation is refused, not a cut-short trial"),
     # Logs reads refuse selectors, sources or byte ranges; no task is stopped.
     "invalid_view": (False, "gateway/logs.py unknown view (400); not a task terminal"),
     "invalid_log_source": (False, "gateway/logs.py scope/projection refusal (400); not execution truncation"),
@@ -89,6 +91,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "task_source_invalid": (False, "gateway/task_archive.py: source selector basename differs from the requested artifact; HTTP 400, not a task terminal or trial truncation"),
     "artifact_archive_empty": (False, "gateway/task_archive.py: no eligible recorded directory member; HTTP refusal, not a task terminal"),
     "artifact_archive_invalid": (False, "gateway/task_archive.py: invalid selector; HTTP refusal, not a task terminal"),
+    "artifact_archive_released": (False, "gateway/task_archive.py: no archive member remains after an owner release; 410 read response, not a task terminal"),
+    "payload_release_pending": (False, "gateway/task_archive.py: owner release is not yet accounted, before or during archive capture; 503 read refusal, not a task terminal"),
     "artifact_archive_unavailable": (False, "gateway/task_archive.py: confined read or spool unavailable; HTTP refusal, not a task terminal"),
     "artifact_archive_unverified": (False, "gateway/task_archive.py: member drift or capture verification failure; HTTP refusal, not a task terminal"),
     "artifact_identity_changed": (False, "gateway/task_archive.py: a mutable file's bytes no longer match its recorded identity; HTTP 409, not a task terminal"),
