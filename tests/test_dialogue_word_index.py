@@ -14,7 +14,7 @@ from ouroboros.tools.control_runtime import _chat_history
 from tests import _dialogue as dialogue_test
 from tests._dialogue import chat_rows, seed
 
-pytestmark = pytest.mark.skipif(not dwi.fts5_available(), reason="this SQLite has no FTS5")
+needs_fts5 = pytest.mark.skipif(not dwi.fts5_available(), reason="this SQLite has no FTS5")
 
 LONG = "x" * 70 + "tail"
 
@@ -58,6 +58,7 @@ QUERIES = [["реш сок"], ['"red fox"'], ["fox", "zero"], ["history"], ['"ch
            ["alpha"], ["x" * 66], ['"' + LONG + '"'], ["zero decis"], ["missing"]]
 
 
+@needs_fts5
 def test_scan_and_postings_give_the_same_answer(tmp_path):
     _corpus(tmp_path)
     scanned = {json.dumps(q): _read(tmp_path, words=q) for q in QUERIES}
@@ -71,6 +72,7 @@ def test_scan_and_postings_give_the_same_answer(tmp_path):
     assert "row:1@2026-11-01T00:00:00Z" in _read(tmp_path, words=["zero"])
 
 
+@needs_fts5
 def test_a_scan_only_read_installs_nothing_and_an_append_writes_no_posting(tmp_path):
     _say(tmp_path, "2026-11-01T00:00:00Z", "plain words")
     _read(tmp_path, words=["plain"])
@@ -87,6 +89,7 @@ def test_a_scan_only_read_installs_nothing_and_an_append_writes_no_posting(tmp_p
     assert dwi.due(tmp_path, {}, {}, False)
 
 
+@needs_fts5
 def test_an_edit_is_found_by_its_new_words_and_not_its_old_ones(tmp_path):
     _corpus(tmp_path)
     receipt = _say(tmp_path, "2026-11-04T00:00:00Z", "kumquat original")
@@ -102,6 +105,7 @@ def test_an_edit_is_found_by_its_new_words_and_not_its_old_ones(tmp_path):
     assert "total=1" in _read(tmp_path, words=["kumquat"]) and "total=0" in _read(tmp_path, words=["persimmon"])
 
 
+@needs_fts5
 def test_a_missed_edit_latches_the_generation_and_a_rebuild_restores_it(tmp_path):
     _corpus(tmp_path)
     receipt = _say(tmp_path, "2026-11-04T00:00:00Z", "kumquat original")
@@ -120,6 +124,7 @@ def test_a_missed_edit_latches_the_generation_and_a_rebuild_restores_it(tmp_path
     assert "Read by postings" in rebuilt and "total=1" in rebuilt and "0 edited" in rebuilt
 
 
+@needs_fts5
 def test_an_edit_without_a_counter_step_is_a_discontinuity(tmp_path):
     receipt = _say(tmp_path, "2026-11-04T00:00:00Z", "kumquat original")
     dwi.run(tmp_path, lambda: False)
@@ -131,6 +136,7 @@ def test_an_edit_without_a_counter_step_is_a_discontinuity(tmp_path):
     assert "Read by scan" in _read(tmp_path, words=["silent"])
 
 
+@needs_fts5
 def test_a_rolled_back_edit_leaves_no_trace(tmp_path):
     receipt = _say(tmp_path, "2026-11-04T00:00:00Z", "kumquat original")
     dwi.run(tmp_path, lambda: False)
@@ -154,6 +160,7 @@ def _two_archives(root):
     di.cutover(root)
 
 
+@needs_fts5
 def test_an_earlier_segment_completed_after_a_later_one_is_never_lost(tmp_path):
     _two_archives(tmp_path)
     di.import_segment(tmp_path, "chat", "chat_20261002T000000.jsonl")  # the later file first
@@ -172,6 +179,7 @@ def test_an_earlier_segment_completed_after_a_later_one_is_never_lost(tmp_path):
     assert {row["text"] for row in chat_rows(tmp_path)} >= {"earlier archive quince", "later archive medlar"}
 
 
+@needs_fts5
 def test_a_stopped_pass_keeps_its_progress_and_resumes(tmp_path, monkeypatch):
     _corpus(tmp_path)
     monkeypatch.setattr(dwi, "CHUNK_ROWS", 5)
@@ -184,6 +192,7 @@ def test_a_stopped_pass_keeps_its_progress_and_resumes(tmp_path, monkeypatch):
     assert "0 not yet posted" in _read(tmp_path, words=["fox"])
 
 
+@needs_fts5
 def test_two_workers_cannot_post_one_interval_twice(tmp_path):
     _corpus(tmp_path)
     name = dwi._install(tmp_path)
@@ -198,6 +207,7 @@ def test_two_workers_cannot_post_one_interval_twice(tmp_path):
         assert conn.execute("SELECT next_ord FROM dw_mark WHERE segment=?", (segment,)).fetchone()[0] == upper
 
 
+@needs_fts5
 def test_a_busy_writer_leaves_the_chunk_pending(tmp_path, monkeypatch):
     _corpus(tmp_path)
     dwi._install(tmp_path)
@@ -219,6 +229,7 @@ def test_a_busy_writer_leaves_the_chunk_pending(tmp_path, monkeypatch):
                                                      "token_bytes", "rows_read"} <= set(chunks[-1])
 
 
+@needs_fts5
 def test_without_fts5_the_reader_scans_and_the_job_rests(tmp_path, monkeypatch):
     _corpus(tmp_path)
     dwi.run(tmp_path, lambda: False)
@@ -236,6 +247,7 @@ def test_without_fts5_the_reader_scans_and_the_job_rests(tmp_path, monkeypatch):
     assert "Read by scan" in _read(tmp_path, words=["fox"])  # latched, never silently trusted again
 
 
+@needs_fts5
 def test_an_older_body_opens_appends_edits_and_exports_byte_exactly(tmp_path):
     plain, posted = tmp_path / "plain", tmp_path / "posted"
     for root in (plain, posted):
@@ -269,6 +281,7 @@ def test_the_trigger_needs_no_fts5_module(tmp_path):
         assert tuple(conn.execute("SELECT seen_rev, usable FROM dw_meta").fetchone()) == (1, 1)
 
 
+@needs_fts5
 def test_retirement_frees_pages_and_leaves_the_rows(tmp_path):
     assert dwi.retire(tmp_path)["state"] == "absent"
     _corpus(tmp_path)
@@ -287,6 +300,7 @@ def test_retirement_frees_pages_and_leaves_the_rows(tmp_path):
     assert dwi.main(["--retire", "--data-root", str(tmp_path)]) == 0
 
 
+@needs_fts5
 def test_the_maintenance_duty_works_then_rests_and_wakes_on_new_rows(tmp_path):
     assert "dialogue_words" in maintenance.JOB_NAMES
     assert maintenance.JOB_NAMES.index("dialogue_words") > maintenance.JOB_NAMES.index("dialogue_import")
@@ -297,6 +311,7 @@ def test_the_maintenance_duty_works_then_rests_and_wakes_on_new_rows(tmp_path):
     assert maintenance.run_job(tmp_path, "dialogue_words")["state"] == "done"
 
 
+@needs_fts5
 def test_a_bounded_postings_read_examines_the_newest_candidates_and_advances(tmp_path, monkeypatch):
     for n in range(6):
         _say(tmp_path, f"2026-11-0{n + 1}T00:00:00Z", f"plum {n}")
@@ -318,6 +333,7 @@ def test_a_bounded_postings_read_examines_the_newest_candidates_and_advances(tmp
     assert "total=0" in _read(tmp_path, words=["zzz"])  # no candidate at all: nothing left unexamined
 
 
+@needs_fts5
 def test_postings_built_under_other_unicode_data_are_bypassed(tmp_path, monkeypatch):
     import unicodedata
 
@@ -332,6 +348,7 @@ def test_postings_built_under_other_unicode_data_are_bypassed(tmp_path, monkeypa
     assert "Read by scan" in _read(tmp_path, words=["plum"]) and dwi.due(tmp_path, {}, {}, False)
 
 
+@needs_fts5
 def test_the_uncovered_rows_are_found_by_the_ordinal_index_whatever_the_history(tmp_path):
     """With every row posted, finding the rows no posting covers costs one index probe a unit, never a walk of
     the chat history: the plan names ``dialogue_ordinal`` and the work does not grow with the rows."""
@@ -357,6 +374,7 @@ def test_the_uncovered_rows_are_found_by_the_ordinal_index_whatever_the_history(
     assert steps["large"] == steps["small"], steps  # thirty times the rows, the same work
 
 
+@needs_fts5
 def test_a_generation_still_on_its_first_pass_leaves_the_read_to_the_scan(tmp_path, monkeypatch):
     _corpus(tmp_path)
     monkeypatch.setattr(dwi, "CHUNK_ROWS", 5)
@@ -368,6 +386,7 @@ def test_a_generation_still_on_its_first_pass_leaves_the_read_to_the_scan(tmp_pa
     assert "Read by postings" in built and _total(built) == _total(partial)
 
 
+@needs_fts5
 def test_a_window_never_splits_rows_of_one_recorded_time(tmp_path, monkeypatch):
     row = {"ts": "2026-11-01T10:00:00Z", "direction": "in", "chat_id": 1, "text": "twice stored plum"}
     ds.append(tmp_path, "chat", dict(row))
@@ -381,3 +400,43 @@ def test_a_window_never_splits_rows_of_one_recorded_time(tmp_path, monkeypatch):
     rest = _read(tmp_path, words=["plum"], snapshot=token)
     assert "older plum" in rest and "twice stored" not in rest
     assert _read(tmp_path, words=["plum"], snapshot=token[:-1] + "1").startswith("CHAT_HISTORY_SNAPSHOT_INVALID")
+
+
+def test_a_runtime_without_fts5_beside_a_postings_table_keeps_every_dialogue_path(tmp_path, monkeypatch):
+    """The stand-in for a SQLite without FTS5 on any runner: ``dw_post`` names a module this library lacks and
+    FTS5 is reported absent. The read scans, append and an edit through the trigger work, the legacy search
+    works, the job rests, the export is byte-exact, and retirement answers that it needs FTS5, latched."""
+    plain, held = tmp_path / "plain", tmp_path / "held"
+    for root in (plain, held):
+        _say(root, "2026-11-01T00:00:00Z", "plum before")
+    with ds.transaction(held, write=True) as conn:
+        for statement in dwi._DDL:
+            if "VIRTUAL TABLE" not in statement:
+                conn.execute(statement)
+        conn.execute("INSERT INTO dw_meta (id, format, generation, seen_rev, usable, built_epoch) "
+                     "VALUES (1, ?, ?, 0, 1, 0)", (dwi.FORMAT, f"{dwi.FORMAT}:x:g"))
+    raw = sqlite3.connect(ds.path(held))
+    version = raw.execute("PRAGMA schema_version").fetchone()[0]
+    raw.execute("PRAGMA writable_schema=ON")
+    raw.execute("INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES "
+                "('table', 'dw_post', 'dw_post', 0, 'CREATE VIRTUAL TABLE dw_post USING no_such_fts(tokens)')")
+    raw.execute(f"PRAGMA schema_version={version + 1}")
+    raw.execute("PRAGMA writable_schema=OFF")
+    raw.commit()
+    raw.close()
+    monkeypatch.setattr(dwi, "_FTS5", False)
+    for root in (plain, held):
+        receipt = _say(root, "2026-11-02T00:00:00Z", "plum appended")
+        ds.revise_text(root, "chat", receipt.seq, "plum edited")
+    with ds.transaction(held, write=False) as conn:
+        assert _all(conn, "SELECT seq FROM dw_dirty") and conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    answer = _read(held, words=["plum"])
+    assert "total=2" in answer and "Read by scan of every row" in answer
+    assert _read(held, search="plum").startswith("Showing 2 of 2 messages")
+    assert not dwi.due(held, {}, {}, False) and dwi.run(held, lambda: False)["state"] == "done"
+    for root in (plain, held):
+        di.export_for_older_body(root)
+    assert (plain / "logs" / "chat.jsonl").read_bytes() == (held / "logs" / "chat.jsonl").read_bytes()
+    assert dwi.retire(held)["state"] == "fts5_required"
+    with ds.transaction(held, write=False) as conn:
+        assert not dwi.generation(conn)["usable"]
