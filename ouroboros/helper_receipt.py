@@ -180,8 +180,6 @@ def build(facts: Mapping[str, Any]) -> Receipt:
     if lineage := facts.get("lineage"):
         counted = NO_RECORD if isinstance(lineage, str) else f"{_plural(lineage[0], 'file')}, {lineage[1]} bytes"
         summary.append((PREPARED, "inputs: automatic lineage, " + counted))
-    if named.get("named") or named.get("sent") or named.get("gaps"):
-        summary.append(_notes_text(named))
     if view:
         summary.append((REQUESTED, "memory view: " + _memory_text(view.get("view"), view["role"])))
     if "owner_words" in facts:
@@ -190,6 +188,8 @@ def build(facts: Mapping[str, Any]) -> Receipt:
         summary.append((PREPARED, "my human's words: " + told))
     if assignment := facts.get("assignment"):
         summary.append((assignment[1], f"{assignment[2] if len(assignment) > 2 else 'assignment'}: {assignment[0]}"))
+    if named.get("named") or named.get("sent") or named.get("gaps"):
+        summary.append(_notes_text(named))
     return Receipt(differences, summary)
 
 

@@ -755,3 +755,56 @@ def test_a_presence_bound_caller_hands_on_only_the_notes_its_own_knowledge_read_
     assert "PRESENCE_CAPABILITY_BLOCKED: 'knowledge_read' is outside" in refused.value.detail
     root.task_contract = ceiling("delegate_start", "knowledge_read")
     assert resolve_named_notes(root, [NAMED[0]]) == ([NAMED[0]], [])
+
+
+def test_a_direct_start_carries_the_named_notes_records_them_and_a_retry_replays_its_bytes(tmp_path, monkeypatch):
+    """The direct ``delegate_start`` path, both directions. An address that does not resolve is refused before
+    the engine is touched (definitely unrun); the start's instructions hold each named note whole, its row keeps
+    them by address and revision (no text), its receipt says what was sent; retry_of with knowledge_notes is a
+    selector conflict, and a retry replays the recorded bytes (a note deleted since does not change them) and
+    states the recorded fact. The terminal line names a note a start could not read, and is silent without one."""
+    from types import SimpleNamespace
+
+    from ouroboros import claudexor_daemon, delegate_custody as custody
+    from ouroboros.helper_receipt import run_result_line
+    from ouroboros.tool_access_paths import canonical_data_root
+    from tests.test_delegate_input_files import Recording, _ctx, _start
+
+    ctx, _engine = _ctx(tmp_path, monkeypatch)
+    data = canonical_data_root(ctx)
+    revisions = _write_notes(data)
+    engine = Recording(fail_first=True)
+    monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda: engine)
+    refused = _start(ctx, knowledge_notes=[NAMED[0], {"topic": "no-such"}])
+    assert refused["reason"] == "knowledge_note_unresolved" and refused["definitely_unrun"] is True, refused
+    assert ("knowledge_notes 2: no note 'no-such' on the global shelf; knowledge_list(scope='global') lists that "
+            "shelf") in refused["detail"] and engine.requests == []
+    lost = _start(ctx, knowledge_notes=NAMED)
+    invocation = lost["pending_invocation_id"]
+    [request] = engine.requests
+    sent = [{**entry, "revision": revisions[entry["topic"]][0], "chars": len(revisions[entry["topic"]][1])}
+            for entry in NAMED]
+    assert (_named_block(revisions, "Alpha plan", "alpha-plan") + "\n\n" + _named_block(revisions, "Beta rules",
+                                                                                         "beta-rules")) in request["instructions"]
+    assert custody.invocation_record(ctx.drive_root, invocation)["named_notes"] == {"sent": sent}
+    conflict = _start(ctx, retry_of=invocation, prompt="", subagent_id=None, access=None, knowledge_notes=NAMED)
+    assert conflict["reason"] == "retry_selector_conflict", conflict
+    (data / "memory" / "knowledge" / "alpha-plan.md").unlink()
+    retried = _start(ctx, retry_of=invocation, prompt="", subagent_id=None, access=None)
+    assert retried["status"] == "started" and engine.requests[1] == engine.requests[0], retried
+    line = "knowledge notes sent: " + ", ".join(
+        f"{row['topic']} (global)@{row['revision'][:12]} {row['chars']} chars" for row in sent)
+    assert line in retried["note"], retried["note"]
+    fresh = _start(ctx, knowledge_notes=[NAMED[1]])
+    assert fresh["status"] == "started" and "ALPHA_DETAIL" not in engine.requests[2]["instructions"]
+    assert (f"\nprepared: sent: prompt 28 + host instructions {len(engine.requests[2]['instructions'])} chars; knowledge "
+            f"notes sent: beta-rules (global)@{sent[1]['revision'][:12]} {sent[1]['chars']} chars") in fresh["note"]
+    assert "knowledge notes" not in _start(ctx)["note"], "a start that names none says nothing of them"
+    gap = {"gaps": [{**NAMED[0], "reason": "FileNotFoundError"}], "sent": sent[1:]}
+    terminal = run_result_line(ctx, SimpleNamespace(run_id="r1", access="readonly", request_event={"named_notes": gap}),
+                               {"effective": "readonly"})
+    assert ("knowledge note alpha-plan (global) named, not readable at this start (FileNotFoundError); not sent "
+            "[prepared]") in terminal
+    quiet = run_result_line(ctx, SimpleNamespace(run_id="r1", access="readonly",
+                                                 request_event={"named_notes": {"sent": sent}}), {"effective": "readonly"})
+    assert "knowledge note" not in quiet
