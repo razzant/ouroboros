@@ -869,9 +869,16 @@ def settle_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool) -> D
         from supervisor.state import load_state
 
         owner_chat = int((load_state() or {}).get("owner_chat_id") or 0)
-        if owner_chat:  # a handoff that names no task stays a runtime fact
-            send_with_budget(owner_chat, f"🧬 Body adoption: {result['note']}", role="system",
-                             system_type="restart_notice")
+        if owner_chat:  # a handoff that names no task stays a runtime fact; its commits are the notice's details
+            from ouroboros.host_notice import fields
+
+            said = {"adopted": "A change Ouroboros prepared for its own code is now running.",
+                    "superseded": "A change Ouroboros adopted for its own code was replaced by a later checkout.",
+                    "not_applied": "A change Ouroboros prepared for its own code was not applied; the running code is unchanged."}
+            send_with_budget(owner_chat, said.get(str(result.get("outcome") or ""),
+                                                  "A change Ouroboros prepared for its own code is not confirmed yet."),
+                             progress_meta=fields(f"body_adoption_{result.get('outcome') or 'unconfirmed'}",
+                                                  details=result["note"]), role="system", system_type="restart_notice")
 
     for applies, step in ((result.get("outcome") == "adopted", record_and_push), (bool(result.get("note")), notify)):
         if applies:

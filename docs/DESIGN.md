@@ -107,7 +107,10 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    visible (an unconfirmed Panic; a message not confirmed as saved, beside Send again);
    provenance, caveats, codes and any gap (`not recorded`, `not declared`,
    `not confirmed`) that changes neither are facts of the record and of details that pointer,
-   touch and keyboard open, never hover alone. A thing with an accepted name in the field keeps
+   touch and keyboard open, never hover alone. A host notice says what happened in one phrase of
+   owner words, then the owner's next step when there is one (a control, a place in Settings, or that
+   Ouroboros retries by itself once the retry is scheduled); its codes, raw errors, paths, worker slots
+   and commits are its details, behind Details for the owner and beside the phrase for the mind. A thing with an accepted name in the field keeps
    it (subagents, MCP servers, context window, max output tokens, worktrees, fallback models), the
    product's own things keep the product's names (rooms, places, wake-ups), and a plainer paraphrase
    replaces neither. Clarity comes from placement, never from
@@ -1144,7 +1147,8 @@ runtime's state (a settings change saved outside the app: one
 `settings_changed` row per save, what changed and who changed it; the app's own
 writes publish none), Main's Project lifecycle, or words signed by their author (a reminder, a
 skill notice). It is one short typed mark in owner words, never a
-paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
+paragraph or text written for a model, and a notice's phrase, step and details follow principle 7
+(`ouroboros/host_notice.py`). `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
 its counted producer sites. Room status carries connection loss; reconnecting adds
 no feed row or counter in Main or a Project (`tests/test_reconnect_feed_browser.py`).
@@ -1156,7 +1160,8 @@ and System voice at render from a translation memory the install generated or
 imported, never from a dictionary in the repository: status words, cause
 sentences and question status by their stable code (`tr`), labels and help copy
 by their rendered English (the overlay), a relayed host sentence by its exact
-text (`tx`). Model-authored text, owner-supplied names, logs and code are never
+text (`tx`); a host notice's phrase by its text and its step by its code, joined by the host
+into the one line the window, Telegram and Copy say. Model-authored text, owner-supplied names, logs and code are never
 translated, and durable rows keep the English with their typed codes; a string
 the memory lacks stays English, never blank or guessed.
 
@@ -1185,10 +1190,10 @@ exception, not a pattern for new notices.
 Built-in chrome uses words and monochrome `currentColor` vectors, not decorative
 emoji. System keeps its resting body and amber/gold label without an edge; status stays explicit in
 words and the tone primitive. Functional icons keep state and accessible names.
-Known typed host prefixes are hidden only at display (`host_notice_text.js`);
-unlisted or ambiguous records remain literal. History, keys, exports and the
-existing Copy input are unchanged (Copy already uses translated text for two
-notice types). Authored text, quoted evidence, names, documents, logs and author
+A host notice writes no pictograph. For rows written before notices, known typed host prefixes
+are hidden only at display (`host_notice_text.js`) and unlisted or ambiguous records remain
+literal. History, keys and exports keep the stored bytes; Copy keeps a notice's line and, for two
+older notice types, their translated text. Authored text, quoted evidence, names, documents, logs and author
 widget icons/interiors are not chrome and keep their characters.
 
 Main's empty-chat greeting speaks in neither voice: it is host copy in a quiet
@@ -2944,7 +2949,8 @@ preserve the edited value, caret, focus, selection and scroll position, assignin
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 
-The six wizard steps are Accounts, Models, Review and access, Consciousness, Budget, Summary. Codex is the
+The seven wizard steps are Accounts, Models, Choose access, Consciousness, Skills, Review limits, Summary;
+Consciousness and Skills only where setup offers them. Codex is the
 recommended start without an API key; other connections name their capability.
 Signed in reports authentication, not execution, independently of model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
 contextual Retry that keeps the fields. Connected accounts the engine names as agents only read
@@ -2975,11 +2981,66 @@ choices, its positions in Dashboard › Consciousness words, starting on. Where 
 whatever the state says: setup never changes it, so clicking through lifts no owner or Panic stop, and Dashboard ›
 Consciousness is the place to change it. What the positions mean leads as the step's copy at body size; beneath the
 switch, in meta size: on a subscription alone that its wakes use the quota (said once), the autonomy, allowance and
-own-task limit it runs under now, and where to change it later. Review & start lands on it; its Continue goes to
-Summary, one row there. The choice rides the one save: no command, no row in Main. Summary labels the model row
-Consciousness model, so it does not read as this choice.
+own-task limit it runs under now, and where to change it later. The copy says that, on, its wakes go on within the
+allowance even before the first reply, and that Start begins the first conversation in either position (owner
+2026-11-21). Review & start lands on it; its Continue goes on
+(Skills, then Summary), one row there. The choice rides the one save: no command, no row in Main. Summary labels the
+model row Consciousness model, so it does not read as this choice.
 
-The first-run wizard is compact; the step rail alone says which step this is. An
+Skills is its own step after Consciousness (owner 2026-11-21: «показать что есть много крутых скилов анимированным
+списком, но юзер может поснимать галочки», which revises his 4A of 2026-10-17, a Summary row), offered only where Finish
+honors its ticks: a data root whose starter list never ran. Elsewhere the step is absent and Extensions › Skills is where
+skills change, so no tick is shown that Finish would ignore: Summary's Skills row says «Add or remove them in Extensions
+› Skills» and keeps the hub's trust sentence with its choices per source, which Finish still applies. It is a list, not cards (his «слишком крупные карточки»
+of the same day): one row per skill with no surface of its own, its box, its human title and, muted on one line with
+it, what it gives (an author's longer description falls back there) and, quieter, what it lacks in a few words (the
+catalog's mark: «· Gemini key», else «· needs setup»), whose whole sentence a screen reader hears instead. The catalog's
+pitches are written to keep each row on one line at 980 px; where the step is narrower than 35rem (a phone) every row
+takes two, the title and then what it gives with its mark, one rhythm instead of breaks mid-sentence, never cut. The
+groups, by category with built-ins first (his 7A of 2026-10-17), flow down two columns where each keeps 400px, each
+group whole in its column, and one column below that and on a phone; a group's head is its name only, and categories
+of a single skill close the list together as «More». The maintainer's recommended skills are
+ticked; the box is the chosen thing. Inside a group what works at once leads, recommended first, and what needs a key
+or an account comes last; the hub's category order stays. Tick all and Untick all head the list; an empty choice
+installs nothing. Under the list one muted line counts the catalog's other skills, «24 more skills in the catalog,
+after start» (his 4A of 2026-11-21), from the sources already read; while none is read there is no line. Where the
+hub's skills come from and how they install is one small sentence under the list (Official
+skills from the hub without a review, the community's reviewed first), its two choices per source behind it in
+Settings' words. What is still being read stands under the list too, where the hub's skills join it, so their arrival
+moves no row; a refresh keeps the ticks, focus and the row being read. Entering the step, the rows arrive once in a
+short sequence, the owner's «анимированный список»: each comes on `--motion-open` by position and opacity, a 30 ms beat
+after the one above it in its own column, so both columns start at once and build at one pace, 700 ms in all; the
+boxes answer from the first frame, a repaint or the hub's late list never plays it again, and reduced motion shows the
+list as it ends. Review & start passes it; Summary keeps one row back to
+it. Nothing installs before Start.
+
+A skill that declares a connection card stands first in the step as that card (the Telegram skill's «Phone via
+Telegram»; owner 2026-11-21, 3A: the QR right in the wizard), its box the skill's tick, with Connect. Open, it shows the
+skill's own steps to get a token, the token field under the last of them (which says what to paste) and, once the
+host's identity check names the account, a QR of the skill's link with a one-time code made in the page, the account's
+@name, the skill's hint and note (Telegram: scan, press Start; finishing setup now is fine), the same link for this
+device and the skill's options (Telegram's «Send results and errors of work here», on for a new connection). On a phone
+the Check button sits under the field. The QR is drawn on the device by
+the vendored encoder, dark on a white square in both themes, and holds the link alone, never the token; an edit of
+the checked token takes that QR and its words off at once, the field untouched. A failed check
+says only its own cause («Could not reach Telegram from here, so there is no QR code», «Telegram did not accept this
+token»; only the service's refusal says it did not accept), a draft that is no token (a space or line break inside,
+more than 512 characters) says so in the page's own words and is never checked, and none blocks Continue or Finish; a
+refused token or a non-token is not saved, an unchecked one is, alone. The code is made once per card and goes out only
+with the QR and the link that show it: Finish saves the token, and once the QR was drawn the code and the options go
+to the skill once it runs, never into Settings; without it no code is armed and the skill's own rule for a bot with
+no code applies (Telegram: the first person to write becomes its owner). Where the
+install grants skills nothing on its own, the card's outcome line reads «Telegram starts after you allow it in
+Extensions» instead of the skill's note, since nothing in the card allows it. Summary
+shows the card's row when a token will be saved; it names the account only once the page painted its QR (a check that
+answers after the card was hidden or the step left arms no code and says «Token checked · QR not shown yet»). The
+card's words, steps, link and options are the skill's declaration: nothing in the step is a service's own. Being a
+built-in's, they translate as the catalog's words do; words composed with a name (the service, the account) go
+through the composed seam, and an account's @name and the token stay as they are.
+
+The first-run wizard is compact; the step rail alone says which step this is. It names each step by one short word
+(`railTitle`), so seven pills keep one line where the window allows; a phone's rail shows the current pill alone, its
+number of all and its name, never a clipped neighbour. An
 ordinary Accounts state, blank or connected, and the Consciousness step fit a 980×752 client viewport
 with every row, the limits warning and Continue in view: subscriptions
 are equal rows, two columns where they fit, the warning under them in every state,

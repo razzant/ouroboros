@@ -265,8 +265,11 @@ def test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch(engin
     facts_copy = ' '.join(mixed.locator(':scope > .chat-live-details > [data-live-facts]').evaluate(COPY).split())
     assert f'Executor {sentence}' in facts_copy, facts_copy
     assert part(mixed, '.chat-live-executor-chip').inner_text().strip() == 'Codex · 1 of 2 runs failed'
-    # The phase chip stays the work indicator: the quiet name is not a running proof.
-    assert cards['m-assigned'].locator(':scope > .chat-live-summary-button [data-live-phase]').inner_text() == 'Working'
+    # The phase chip stays the work indicator: the quiet name is not a running proof. A nested card says its own
+    # member's state and a saved row proves no current one (#3929, DESIGN "Room work status"), so this replayed running
+    # helper, which no server read lists, is unconfirmed, whatever its executor chip names.
+    assert cards['m-assigned'].locator(':scope > .chat-live-summary-button [data-live-phase]').inner_text() == \
+        'Activity unconfirmed'
     capture(page, f'{shot}-expanded')
     # Keyboard: Enter closes and Space reopens through the same control.
     mixed.locator(':scope > .chat-live-summary-button [data-live-disclosure]').focus()

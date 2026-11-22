@@ -37,8 +37,6 @@ from ouroboros.extension_ui_validation import (
     validate_settings_schema as _validate_settings_schema,  # noqa: F401
     validate_ui_render as _validate_ui_render,  # noqa: F401
 )
-from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME  # noqa: F401
-from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS  # noqa: F401
 from ouroboros.extension_isolated_deps import _isolated_python_site_dirs, async_isolated_site_dirs_scope, invalidate_import_caches, isolated_site_dirs_scope, is_skill_cache_path  # noqa: F401
 from ouroboros.extension_child_catalog import (
     _out_of_process_handler_proxy,  # noqa: F401
@@ -135,9 +133,6 @@ from ouroboros.extension_surface_names import (
 )
 from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES, _sanitize_skill_name, LoadedSkill, SkillPayloadUnreadable, compute_content_hash, discover_skills, discover_selected_skill_candidates, discover_skill_identity, find_skill, grant_status_for_skill, requested_core_setting_keys, skill_conflict_status, skill_review_gate, skill_state_dir, skill_state_dir_path  # noqa: F401
 from ouroboros.skill_loader import _skill_location_inventory
-from ouroboros.skill_token import SkillToken  # noqa: F401
-from ouroboros.tools.skill_exec import _scrub_env  # noqa: F401
-from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -306,6 +301,10 @@ def _finalize_extension_reconcile(
     record_health_for_runtime_state(drive_root, skill_name, state, stamp=health_stamp, companions=companions,
                                     skill_dir=directory, foreign=foreign,
                                     observe_retained=lambda: _observe_retained_companions(state, skill))
+    if reason == "loaded" and state["process"] == "server":  # a setup card waiting for this skill to serve posts now
+        from ouroboros.onboarding_connections import settle_later
+
+        settle_later(drive_root)
 
 
 def reconcile_extension(

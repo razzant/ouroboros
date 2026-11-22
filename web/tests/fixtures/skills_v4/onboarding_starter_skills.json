@@ -7,6 +7,10 @@
         {
           "id": "builtin/telegram",
           "name": "telegram",
+          "title": "Telegram",
+          "pitch": "Chat with Ouroboros from your phone",
+          "needs": "Needs a Telegram bot token",
+          "mark": "bot token",
           "description": "Message your own Ouroboros from Telegram: text, photos, files and the Mini App.",
           "official": true,
           "builtin": true,
@@ -51,6 +55,9 @@
         {
           "id": "ouroboros/pdf_tools",
           "name": "pdf_tools",
+          "title": "PDF files",
+          "pitch": "Read PDFs page by page and create new ones",
+          "needs": "",
           "description": "Read PDF files and make new ones.",
           "official": true,
           "builtin": false,
@@ -60,6 +67,9 @@
         {
           "id": "ouroboros/word_tools",
           "name": "word_tools",
+          "title": "Word documents",
+          "pitch": "Read Word files and create new documents",
+          "needs": "",
           "description": "Read Word documents and make new ones.",
           "official": true,
           "builtin": false,
@@ -75,6 +85,9 @@
         {
           "id": "ouroboros/duckduckgo",
           "name": "duckduckgo",
+          "title": "Web search",
+          "pitch": "Search the web with DuckDuckGo, free and without a key",
+          "needs": "",
           "description": "Web search. No key needed.",
           "official": true,
           "builtin": false,
@@ -84,6 +97,9 @@
         {
           "id": "ouroboros/keenable",
           "name": "keenable",
+          "title": "Source search",
+          "pitch": "Find sources, read pages and check facts",
+          "needs": "",
           "description": "Focused web search and page reading, with site and date filters.",
           "official": true,
           "builtin": false,
@@ -112,6 +128,9 @@
         {
           "id": "ouroboros/memory-atlas",
           "name": "memory-atlas",
+          "title": "Memory browser",
+          "pitch": "Browse what Ouroboros remembers, room by room",
+          "needs": "",
           "description": "Browse Ouroboros's memory and see where each fact came from.",
           "official": true,
           "builtin": false,
@@ -127,6 +146,9 @@
         {
           "id": "ouroboros/anti-slop",
           "name": "anti-slop",
+          "title": "Better writing",
+          "pitch": "Plain, specific prose that keeps your voice",
+          "needs": "",
           "description": "Helps Ouroboros write clear, honest text in your voice.",
           "official": true,
           "builtin": false,

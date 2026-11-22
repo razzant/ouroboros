@@ -125,6 +125,7 @@ async def _effect(host, fresh, cached, silent):
     from ouroboros.loop_tool_execution import process_tool_results
     from ouroboros.realtime_setup import rows_for_engine
     from ouroboros.tools.tool_discovery import bind_resident_schemas
+    from ouroboros.capability_breakage import append_change_row
     async with host._tools_lock:
         host.rounds += 1
         host.ctx._live_tool_step = f"{host.ctx.task_id}:call-tools:{host.rounds}"  # Safety's step (_authoring_call)
@@ -186,6 +187,8 @@ async def _effect(host, fresh, cached, silent):
                     _append_or_merge_user_content(host.messages, row["content"], stamp=host.ctx)
                 else:
                     host.messages.append(row)
+            # This round's capability changes since the call was told: into history and, with its results, the connection.
+            await joined(asyncio.to_thread(append_change_row, host))
             host._context_changed()
             changes = [copy.deepcopy(row) for i, row in enumerate(host.messages)
                        if row is not unit and (i >= len(before) or sha256(canonical_json(row)) != before[i])]

@@ -45,7 +45,7 @@ from typing import Any, Dict, Optional
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ouroboros import dialogue_store as ds
+from ouroboros import dialogue_store as ds, host_notice
 from ouroboros.chat_references import project_answer_text
 from ouroboros.chat_uploads import attachment_views
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
@@ -191,6 +191,7 @@ def _candidate(entry, data_dir, answers=None) -> Dict[str, Any]:
             found[key] = str(entry[key])
     if entry.get("narration") is True:  # authored words outrank a stale host type (host_notice_text.js)
         found["narration"] = True
+    found.update(host_notice.view(entry))  # a notice's line is its visible words (a read: no translation is offered)
     if found["role"] == "user" and isinstance(entry.get("attachments"), list) and entry["attachments"]:
         # History's own views (``attachment_views``, its stat witness too): a card or a player shows the name, an
         # available image only its picture.

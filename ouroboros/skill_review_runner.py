@@ -439,7 +439,11 @@ def _append_interrupted_review_progress(
     ):
         if key in payload:
             lifecycle[key] = payload[key]
-    text = f"Skill review: `{skill_name}` — interrupted — {reason}"
+    from ouroboros.host_notice import phrase
+
+    # Its reason code is the notice's detail; a fresh review is its step; the skill's name is never translated.
+    text, said = phrase("skill_review_interrupted", "Skill review: `{skill}` — interrupted", step="review_again",
+                        details=reason, skill=skill_name)
     dialogue_store.append_quietly(
         drive_root, "progress",
         {
@@ -455,6 +459,7 @@ def _append_interrupted_review_progress(
             "content": text,
             "format": "",
             "lifecycle": lifecycle,
+            **said,
         },
     )
 

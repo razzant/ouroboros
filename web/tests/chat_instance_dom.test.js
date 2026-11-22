@@ -767,6 +767,45 @@ test('duplicate lifecycle pointer never mints a task and enriches only an existi
         restoreDom(prior);
     }
 });
+test('a duplicate review pointer with its notice is a System row: its line, the original job behind Details (RVD4 22)', async () => {
+    const { prior, mount } = installDom();
+    const handlers = new Map();
+    const ws = {
+        on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
+        isConnected: () => true, send() {},
+    };
+    let generation = 0;
+    const stateSnapshots = {
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
+        isCurrent: () => true, apply() {},
+    };
+    let instance;
+    try {
+        instance = createChatInstance({
+            ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+            updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const messages = globalThis.document.byId.get('chat-messages');
+        const line = 'Обзор навыка `alpha` уже идёт; ход его видно в исходном чате.';
+        handlers.get('chat')({
+            chat_id: 2, role: 'system', is_progress: true, task_id: '', system_type: 'skill_lifecycle_pointer',
+            content: 'Skill review: `alpha` — already running; progress reports in its original chat.',
+            progress_meta: { lifecycle_pointer: { kind: 'review', job_id: 'job-original', status: 'running', target: 'alpha',
+                group_id: 'task:root-pointer:alpha', presentation_owner_task_id: 'root-pointer' } },
+            notice: { code: 'skill_review_duplicate', details: 'job job-original', line },
+        });
+        const [row] = messages.children.filter((node) => node.classList.contains('chat-bubble'));
+        assert.ok(row.classList.contains('system') && !row.classList.contains('progress'), 'a System row, never a Thought');
+        assert.match(row.innerHTML, /уже идёт/);
+        assert.doesNotMatch(row.innerHTML, /already running/);
+        const details = row.children.find((child) => child.tagName === 'DETAILS');
+        assert.equal(details?.children[1].textContent, 'job job-original', 'the original job opens from Details');
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
+});
 test('history replay keeps one duplicate lifecycle acknowledgement without a task card', async () => {
     const pointerRow = {
         chat_id: 2, role: 'assistant', is_progress: true, task_id: '',

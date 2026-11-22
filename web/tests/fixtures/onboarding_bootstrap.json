@@ -1,7 +1,7 @@
 {
   "consciousnessOffer": {
     "autonomy": "act",
-    "dailyUsd": 20.0,
+    "dailyUsd": 15.0,
     "enabled": null,
     "maxTasks": 2,
     "offered": true,
@@ -9,7 +9,7 @@
       "choice": "Also on its own and in places",
       "door": "Change it later in Dashboard \u203a Consciousness; the allowance is in Dashboard \u203a Costs.",
       "gloss": "When Ouroboros acts.",
-      "meaning": "Off: it works only when you write to it, and places you connect are heard, not answered. On: it also wakes between your messages and answers in places you make Active.",
+      "meaning": "Off: it works when you write to it, and places you connect are heard, not answered. On: it also keeps waking on its own within its daily allowance, even before your first reply, and answers in places you make Active. Either way, Start begins your first conversation.",
       "off": "Only when you write to it",
       "on": "Also on its own",
       "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages."
@@ -405,6 +405,7 @@
         "footer": "Add more subscriptions or API access later in Settings \u2192 Accounts and keys.",
         "id": "accounts",
         "railCopy": "Subscriptions + API",
+        "railTitle": "Accounts",
         "title": "Connect your accounts"
       },
       {
@@ -412,6 +413,7 @@
         "footer": "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider.",
         "id": "models",
         "railCopy": "model slots",
+        "railTitle": "Models",
         "title": "Choose models"
       },
       {
@@ -419,6 +421,7 @@
         "footer": "",
         "id": "review_mode",
         "railCopy": "Reach",
+        "railTitle": "Access",
         "title": "Choose access"
       },
       {
@@ -426,13 +429,23 @@
         "footer": "",
         "id": "consciousness",
         "railCopy": "When it acts",
+        "railTitle": "Consciousness",
         "title": "Consciousness"
+      },
+      {
+        "copy": "Ouroboros starts with the ticked skills; clear any you do not want.",
+        "footer": "Add or remove skills any time in Extensions.",
+        "id": "skills",
+        "railCopy": "What it can do",
+        "railTitle": "Skills",
+        "title": "Skills"
       },
       {
         "copy": "Review subscription quotas and optional API spending limits.",
         "footer": "",
         "id": "budget",
         "railCopy": "Quota + API budget",
+        "railTitle": "Limits",
         "title": "Review limits"
       },
       {
@@ -440,6 +453,7 @@
         "footer": "The same onboarding values remain editable later in Settings.",
         "id": "summary",
         "railCopy": "Final check",
+        "railTitle": "Review",
         "title": "Review before launch"
       }
     ],
@@ -677,6 +691,7 @@
     "models",
     "review_mode",
     "consciousness",
+    "skills",
     "budget",
     "summary"
   ],

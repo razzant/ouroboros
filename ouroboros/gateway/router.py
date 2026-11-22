@@ -75,19 +75,23 @@ def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
 
 def _setup_routes() -> list[BaseRoute]:
     """What the setup wizard asks before and at its Finish: the preview of its draft and the draft's own model
-    catalog (neither saves), the one atomic owner-scoped completion (D-8: it replaced the wizard's old
-    POST /api/settings + POST /api/owner/runtime-mode pair) and the read-back of one completion attempt."""
+    catalog (neither saves), a connection card's token check (writes nothing), the one atomic owner-scoped completion
+    (D-8: it replaced the wizard's old POST /api/settings + POST /api/owner/runtime-mode pair) and the read-back of
+    one completion attempt."""
     from ouroboros.gateway.onboarding import (
         api_onboarding_complete,
         api_onboarding_model_catalog,
         api_onboarding_subagents_preview,
     )
     from ouroboros.gateway.onboarding_host import api_onboarding_attempt
+    from ouroboros.onboarding_connections import api_connection_identity, guard_completion
 
     return [
         Route("/api/onboarding/subagents/preview", endpoint=api_onboarding_subagents_preview, methods=["POST"]),
         Route("/api/onboarding/model-catalog", endpoint=api_onboarding_model_catalog, methods=["POST"]),
-        Route("/api/onboarding/complete", endpoint=api_onboarding_complete, methods=["POST"]),
+        Route("/api/onboarding/connection/identity", endpoint=api_connection_identity, methods=["POST"]),
+        # A connection card's code names an account's owner: never from the Telegram Mini App (onboarding_connections).
+        Route("/api/onboarding/complete", endpoint=guard_completion(api_onboarding_complete), methods=["POST"]),
         Route("/api/onboarding/complete", endpoint=api_onboarding_attempt, methods=["GET"]),
     ]
 

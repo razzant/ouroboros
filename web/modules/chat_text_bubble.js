@@ -5,10 +5,12 @@
 // saved row offers: Copy with the exact words shown, Share's source (an Ouroboros message's own words,
 // message_actions.js), the reply quote and Reply (chat_reply.js), the Project reference of another room's answer
 // (project_answer.js). Its caller decides whether a row is new, places the bubble and enhances its Markdown once it
-// is mounted.
+// is mounted. A host notice says its one line, Copy keeps that line, and its raw details open from Details.
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { linkify, renderChatMarkdown } from './chat_markdown.js';
-import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
+import { hostRowDisplayText, hostSentenceText, noticeLine } from './host_notice_text.js';
+import { tr } from './i18n.js';
+import { rawDetails } from './ui_primitives.js';
 import { attachmentCaption, attachmentViews } from './chat_attachments.js';
 import { renderSkillReviewDisclosure, wireSkillReviewDisclosure } from './skill_review_card.js';
 import { evidenceLinkHtml, formatMsgTime, senderLabel, stampNodeTimestamp } from './chat_activity.js';
@@ -27,11 +29,12 @@ import { markSwarmLabel } from './swarm_presentation.js';
  * keeps, whether the row is a Skill Review and whether Markdown was left unparsed (no parser: its marks show).
  */
 export function bubbleWords(text, role, { markdown = false, systemType = '', source = '', attachments = [], narration,
-    textPlaceholder = false, skillReview: review = null } = {}) {
+    textPlaceholder = false, skillReview: review = null, notice = null } = {}) {
     const stored = text;
     if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = hostSentenceText(text);
-    // Render-only: Copy keeps `shown`, the pre-cleanup sentence.
-    const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration }, text);
+    // A notice's line is what it says and what Copy keeps; other rows: render-only, Copy keeps `shown`.
+    text = noticeLine({ role, narration, notice }) || text;
+    const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration, notice }, text);
     const skillReview = role === 'system' && systemType === 'skill_review' && narration !== true;
     const rich = role !== 'user' && !skillReview && (role !== 'system' || markdown === true);
     // Only the web composer writes the file-name tail; a Telegram/skill caption is kept word for word.
@@ -80,8 +83,9 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         if (legacyKey) bubble.dataset.messageKey = legacyKey;
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 
+        const notice = role === 'system' ? opts.reply?.notice : null;
         const { rendered, rich: richMarkdown, shown, skillReview, unparsed } = bubbleWords(text, role, { markdown, systemType, source,
-            attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview });
+            attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview, notice });
         if (skillReview) bubble.classList.add('chat-skill-review');
         // A passage's coordinates are the parsed words': an unparsed message offers none, nor lands a saved one.
         const authored = ['user', 'assistant'].includes(role) && !isProgress && opts.textPlaceholder !== true && Boolean(shown)
@@ -97,6 +101,8 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
             ${pendingHtml}
             ${timeHtml}
         `;
+        if (notice?.details && opts.narration !== true) bubble.querySelector('.message')
+            .after(rawDetails(document, notice.details, tr('chat.notice.details', 'Details')));
         decorateContactSource(bubble, opts.presenceContact);
         if (attachments.length) chatMedia.mountAttachments(bubble, attachments, shown);
         if (!isProgress && shown) {

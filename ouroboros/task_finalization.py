@@ -63,6 +63,17 @@ TERMINAL_PLAN_REVIEW_NOTE = (
 )
 
 
+def exception_notice(exc: BaseException, subject: str = "task") -> Dict[str, Any]:
+    """The host notice of work an unexpected exception ended (``host_notice``): ``text``, the owner's one phrase;
+    ``notice``, its code and the raw error as details; ``record``, the sentence the task result keeps with the raw
+    error, which the parent's digest, the CLI and the task's details read as before (BIBLE P1)."""
+    from ouroboros.host_notice import fields
+
+    raw = f"{type(exc).__name__}: {exc}"
+    phrase = f"This {subject} stopped on an unexpected error."
+    return {"text": phrase, **fields("task_exception", details=raw), "record": f"{phrase[:-1]}: {raw}"}
+
+
 def set_terminal_host_notice(usage: Dict[str, Any], *parts: str) -> None:
     """Keep the current host disclosure beside the answer, never inside its identity."""
     notice = sanitize_tool_result_for_log("\n\n".join(part.strip() for part in parts if part.strip()))
@@ -170,18 +181,22 @@ def send_provider_death_notice(
     if str(final_result.get("terminal_origin") or "") in HOST_AUTHORED_TERMINAL_ORIGINS:
         return False
     plan_note = (
-        f"\n\n{TERMINAL_PLAN_REVIEW_NOTE}"
+        TERMINAL_PLAN_REVIEW_NOTE
         if final_result.get("terminal_plan_review_open") is True and not final_result.get("terminal_host_notice") else ""
     )
-    notice = str(final_result.get("terminal_provider_notice") or "") or (
-        "A model-provider outage stopped this task. Partial work and workspace files "
-        "are preserved; inspect the task details before starting another run."
-    )
+    from ouroboros.host_notice import fields
+
+    # One stable phrase from the terminal's typed cause (the install's own model slots or engine, else the provider)
+    # and its step; the diagnostic (its last code and wait), the open plan review and the task's id are the notice's
+    # details. The task's result keeps its own text.
+    code, said = {"local_capacity": ("local_model_capacity", "This task stopped because no local model slot freed up for its last request"),
+                  "local_engine": ("local_engine_silent", "This task stopped because the local Claudexor engine did not answer")}.get(
+        str(final_result.get("terminal_provider_cause") or ""), ("provider_outage", "A model-provider outage stopped this task"))
+    details = "\n\n".join(part for part in (f"task {task_id}", str(final_result.get("terminal_provider_notice") or ""), plan_note) if part)
     ctx.send_with_budget(
-        chat_id,
-        f"🔌 Task {task_id} was NOT completed.\n\n{notice}{plan_note}",
-        role="system",
-        system_type="terminal_incident",
+        chat_id, f"{said}; its partial work and workspace files are kept.",
+        role="system", system_type="terminal_incident",
+        progress_meta=fields(code, step="inspect_task", details=details),
     )
     return True
 
@@ -314,6 +329,13 @@ def prepare_terminal_send_event(
             log.warning("Wrap up receipt row unavailable for %s", task.get("id"), exc_info=True)
     if origin not in _STAMPED_TERMINAL_ORIGINS:
         return send_event
+    row = usage.get("host_notice_row") if isinstance(usage.get("host_notice_row"), dict) else {}
+    if (origin == TERMINAL_ORIGIN_HOST_NOTICE and not presence and row.get("text") and row.get("notice")
+            and text == row.get("record")):
+        # The host published its notice's record (no suffix or other words joined it): the row says the phrase with
+        # the notice beside it, and the result keeps the record's sentence.
+        send_event.update(text=str(row["text"]), log_text=str(row["text"]), terminal_record=text)  # recovery's result
+        send_event.setdefault("progress_meta", {})["notice"] = dict(row["notice"])
     canonical_root = pathlib.Path(task.get("budget_drive_root") or env_drive_root)
     preserved_path = ""
     if text and origin == TERMINAL_ORIGIN_HOST_SALVAGE:
@@ -367,7 +389,7 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
         fields["owner_message_sent"] = True
     if usage.get("terminal_plan_review_open") is True:
         fields["terminal_plan_review_open"] = True
-    for key in ("terminal_provider_notice", "terminal_host_notice"):
+    for key in ("terminal_provider_notice", "terminal_provider_cause", "terminal_host_notice"):
         if isinstance(usage.get(key), str) and usage[key]:
             fields[key] = usage[key]
     handovers = usage.get("authoring_handovers")

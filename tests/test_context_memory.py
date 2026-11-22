@@ -192,7 +192,9 @@ def test_installed_skills_section_includes_warnings_verdict(tmp_path, monkeypatc
     assert "warnings" in section
 
 
-def test_installed_skills_section_qualifies_extension_liveness_process(tmp_path, monkeypatch):
+def test_installed_skills_section_leaves_extension_process_liveness_out(tmp_path, monkeypatch):
+    """Whether a process holds the extension now moves between restores, so block C never says it (C07); the
+    start-of-work notice does. A desired extension this worker has not loaded reads as its configuration: ready."""
     from ouroboros.context import _build_installed_skills_section
 
     class FakeEnv:
@@ -208,6 +210,7 @@ def test_installed_skills_section_qualifies_extension_liveness_process(tmp_path,
                 "review_status": "pass",
                 "executable_review": True,
                 "review_stale": False,
+                "desired_live": True,
                 "live_loaded": False,
                 "live_reason": "load_error",
                 "process": "worker",
@@ -217,4 +220,5 @@ def test_installed_skills_section_qualifies_extension_liveness_process(tmp_path,
 
     section = _build_installed_skills_section(FakeEnv())
 
-    assert "Live (worker): no (load_error)" in section
+    assert "- weather_widget (extension, pass)" in section
+    assert "Live (" not in section and "worker" not in section and "Status:" not in section

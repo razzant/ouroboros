@@ -37,7 +37,7 @@ from supervisor.update_candidate import (  # noqa: F401
     record_managed_tests_proof, update_tx_phase, update_tx_phase_or_keep,
     worktree_snapshot_tree,
     find_update_stash_sha, restore_stash_with_marker, restore_update_stash,
-    stash_local_changes_for_update, lookup_update_stash,
+    stash_local_changes_for_update, lookup_update_stash, stash_recovery_command,
     destructive_apply_guard, project_version_carriers,
     quarantine_corrupt_update_tx_marker, StashRestoreResult,
     RESOLVER_POOL, ensure_assisted_resolver_ready, refuse_unready_boot_resolver, resolver_slot_owed,
@@ -931,6 +931,9 @@ def _complete_stash_recovery(
     restored = restore_stash_with_marker(tx, context)
     disclosure = ({"stash_note": restored.note, "stash_restore_status": restored.status}
                   if restored.note else {})
+    if restored.status == "preserved" and tx.get("stash_sha"):  # Q1=C: the exact command; an interrupted apply: look first
+        disclosure.update(stash_command=stash_recovery_command(str(tx["stash_sha"])),
+                          stash_interrupted=bool(restored.evidence.get("interrupted")))
     if not restored.complete:
         return {"finalized": False, "reason": "stash_recovery_incomplete", **disclosure}
     cleared = clear_update_tx()
@@ -961,13 +964,14 @@ def _rollback_raised(exc: Exception) -> Tuple[bool, str]:
     return False, f"rollback raised {type(exc).__name__}: {exc}"
 
 
-def _boot_smoke_rollback(tx: Dict[str, Any], reason: str) -> Tuple[bool, str]:
+def _boot_smoke_rollback(tx: Dict[str, Any], reason: str) -> Tuple[bool, str, Dict[str, Any]]:
     """The boot-smoke door: a pre-update tree WITHOUT the store is reached through the authority
     switch (intent now, export and reset at the restart exit the caller requests); one with it
-    through today's restore. A second intent before the restart is a refusal, not a reset."""
+    through today's restore. A second intent before the restart is a refusal, not a reset. The
+    third item is the result's facts: ``rollback_deferred`` while only the intent is recorded."""
     pre = str(tx.get("pre_update_sha") or "")
     if not pre:
-        return rollback_managed_update_on_boot(reason)  # its own typed refusal
+        return (*rollback_managed_update_on_boot(reason), {})  # its own typed refusal
     try:
         from ouroboros.store_switch import switch_or_reset
 
@@ -976,10 +980,10 @@ def _boot_smoke_rollback(tx: Dict[str, Any], reason: str) -> Tuple[bool, str]:
             reason=reason, door="boot_smoke_rollback",
             reset=lambda: rollback_managed_update_on_boot(reason))
     except RuntimeError as exc:
-        return False, str(exc)  # the switch's own refusal, e.g. an intent already recorded
+        return False, str(exc), {}  # the switch's own refusal, e.g. an intent already recorded
     except Exception as exc:  # the whole door, its Git probes and intent write included
-        return _rollback_raised(exc)
-    return ok, msg
+        return (*_rollback_raised(exc), {})
+    return ok, msg, ({"rollback_deferred": True} if _deferred else {})  # HEAD still holds the update
 
 
 def _finalize_pending_boot_smoke(tx: Dict[str, Any], supervisor_ready: bool) -> Dict[str, Any]:
@@ -1002,23 +1006,23 @@ def _finalize_pending_boot_smoke(tx: Dict[str, Any], supervisor_ready: bool) -> 
     ):
         smoke = update_restart_smoke()
         if not smoke.get("ok"):
-            ok, msg = _boot_smoke_rollback(tx, "recovered_pre_restart_smoke_failed")
+            ok, msg, door = _boot_smoke_rollback(tx, "recovered_pre_restart_smoke_failed")
             _log_supervisor({
                 "type": "managed_update_recovered_smoke_failed",
                 "ok": ok,
                 "msg": msg,
                 "smoke": smoke,
             })
-            return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg, "smoke": smoke}
+            return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg, "smoke": smoke, **door}
         tx["pre_restart_smoke"] = _PRE_RESTART_SMOKE_PASSED
         write_update_tx(tx)
     if bool(supervisor_ready) and merge_in_head:
         native_smoke = external_host_restart_smoke()
         if not native_smoke.get("ok"):
-            ok, msg = _boot_smoke_rollback(tx, "external_host_post_boot_smoke_failed")
+            ok, msg, door = _boot_smoke_rollback(tx, "external_host_post_boot_smoke_failed")
             _log_supervisor({"type": "managed_update_native_host_failed", "ok": ok,
                              "msg": msg, "smoke": native_smoke})
-            return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg, "smoke": native_smoke}
+            return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg, "smoke": native_smoke, **door}
         if not _g._clear_update_intent():
             mark_update_tx_gate_blocked("finalize_intent_cleanup_failed")
             return {"finalized": False, "reason": "could not clear update intent"}
@@ -1027,10 +1031,10 @@ def _finalize_pending_boot_smoke(tx: Dict[str, Any], supervisor_ready: bool) -> 
             {"type": "managed_update_finalized", "head": head},
         )
     if (bool(supervisor_ready) and head_resolved and not merge_in_head) or attempts >= 2:
-        ok, msg = _boot_smoke_rollback(tx, "post_boot_smoke_failed")
+        ok, msg, door = _boot_smoke_rollback(tx, "post_boot_smoke_failed")
         _log_supervisor({"type": "managed_update_rollback_after_failed_boot",
                          "ok": ok, "msg": msg, "boot_attempts": attempts})
-        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
+        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg, **door}
     tx["boot_attempts"] = attempts
     write_update_tx(tx)
     return {"finalized": False, "boot_attempts": attempts}
@@ -1396,6 +1400,34 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
         reason = "replace_apply_interrupted"
     ok, msg = rollback_managed_update_on_boot(reason)
     return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
+
+
+def boot_outcome_notice(result: Dict[str, Any]) -> Dict[str, Any]:
+    """The owner's row for a boot finalization that left a note: one phrase chosen from the outcome its branch observed
+    (a deferred rollback has only recorded its switch) and from its stash restore's verified status, with the note
+    (Git's facts) as the notice's details. A kept stash (Q1=C) adds the step and, as the one-line instruction, the exact
+    command; an ``incomplete`` restore stays the next start's to finish, so it sends nobody to Git by hand."""
+    from ouroboros.host_notice import fields
+
+    outcome = str((result.get("observed") or {}).get("outcome") or "")
+    if result.get("rollback_deferred") is True:
+        lead, code = "The last update will be rolled back as the app restarts", "managed_update_rollback_recorded"
+    elif result.get("rolled_back") is True or outcome == "rolled_back":
+        lead, code = "The last update was rolled back", "managed_update_rolled_back"
+    elif outcome == "not_applied":
+        lead, code = "The last update was not applied", "managed_update_not_applied"
+    elif result.get("finalized") is True and outcome in ("", "applied"):
+        lead, code = "The update is in place", "managed_update_finalized"
+    else:
+        lead, code = "The last update did not finish cleanly", "managed_update_unfinished"
+    status = str(result.get("stash_restore_status") or "")
+    tail = {"restored": ", and your local changes were put back.", "": ".", "not_needed": ".",
+            "preserved": "; Git kept your local changes aside, so they are not lost."}.get(
+        status, "; your local changes have not been put back yet.")
+    command = str(result.get("stash_command") or "") if status == "preserved" else ""
+    step = ("inspect_then_restore_kept_changes" if result.get("stash_interrupted") else "restore_kept_changes") if command else ""
+    return {"text": lead + tail, "progress_meta": fields(code, step=step, details=str(result.get("stash_note") or ""),
+                                                         instruction=command)}
 
 
 def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, Any]:

@@ -207,8 +207,10 @@ def test_a_handoff_that_names_no_task_stays_an_owner_wide_runtime_notice(scene, 
     settled = body_adoption.settle_on_boot(scene.data, scene.serving, supervisor_ready=True)
 
     assert settled["outcome"] == "not_applied" and settled["task_id"] == ""
-    assert rows == [] and sent == [(7, f"🧬 Body adoption: {settled['note']}",
-                                    {"role": "system", "system_type": "restart_notice"})]
+    # One phrase for the owner; the adoption's own note, its commits included, is the notice's detail.
+    assert rows == [] and sent == [(7, "A change Ouroboros prepared for its own code was not applied; the running code is unchanged.",
+                                    {"role": "system", "system_type": "restart_notice", "progress_meta": {"notice": {
+                                        "code": "body_adoption_not_applied", "details": settled["note"]}}})]
     assert "body_adoptions" not in load_task_result(scene.data, scene.ctx.task_id)
 
 

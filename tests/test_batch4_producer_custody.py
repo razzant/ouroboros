@@ -4,33 +4,10 @@ import subprocess
 
 import pytest
 
-from tests._budget_pause_exact_helpers import _install_queue
-from tests.test_batch4_repair_compositions import _running
 
 
 
-def _registry(tmp_path, monkeypatch, backend=None):
-    from ouroboros import workspace_executor as executor
-    from ouroboros import safety
-    from ouroboros.tools.registry import ToolRegistry
-
-    queue, _, workers = _install_queue(tmp_path, monkeypatch)
-    _running(tmp_path, workers)
-    workspace = tmp_path.parent / (tmp_path.name + "-workspace")
-    workspace.mkdir()
-    registry = ToolRegistry(repo_dir=tmp_path.parent / (tmp_path.name + "-system"), drive_root=tmp_path)
-    ctx = registry._ctx
-    ctx.task_id = ctx.root_task_id = "root"
-    ctx.task_attempt = 1
-    ctx.workspace_mode, ctx.workspace_root = "external", workspace
-    if backend:
-        ctx.executor_ref = {"type": backend, "container_name": "test-container", "network": "host",
-                            "workspace_host_path": str(workspace), "workspace_backend_path": "/workspace"}
-    monkeypatch.setattr(executor, "_panic_requested", False)
-    monkeypatch.setattr(executor, "_FOREGROUND", {})
-    monkeypatch.setattr(executor, "_SERVICES", {})
-    monkeypatch.setattr(safety, "check_safety", lambda *_a, **_kw: (True, ""))
-    return registry, queue, workers
+from tests._invocation_harness import _registry  # noqa: F401 -- shared (tests/_invocation_harness.py)
 
 
 def _owned(root):

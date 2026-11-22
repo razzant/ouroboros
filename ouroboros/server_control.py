@@ -41,11 +41,13 @@ def dispatch_accepted_restart(bridge, text: str, *, callback=None, **message) ->
     from ouroboros.task_finalization import host_operation_reply_kwargs
     from supervisor.message_bus import send_with_budget
 
-    def reply(body, status=""):
+    def reply(body, status="", said=None):  # said: a host notice's fields (a cancelled restart's diagnostic)
+        from ouroboros.host_notice import carried
+
         bridge.activate_update_transport(message)
         send_with_budget(message["chat_id"], body, role="system", system_type="command_reply",
-                         **host_operation_reply_kwargs(message.get("accepted_source_ref"), status,
-                                                       str(message.get("client_message_id") or "")))
+                         **carried(host_operation_reply_kwargs(message.get("accepted_source_ref"), status,
+                                                               str(message.get("client_message_id") or "")), said))
 
     identity = {key: message[key] for key in ("source", "user_id", "chat_id")}
     action = callback(text, **identity, reply=reply,

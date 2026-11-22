@@ -449,12 +449,23 @@ def test_an_sse_post_refused_for_sign_in_ends_the_session_at_once(loopback, monk
 
 def test_insufficient_scope_keeps_the_grant_and_shows_the_step_up(monkeypatch, tmp_path):
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
-    mcp_oauth._save(cfg, {"tokens": {"access_token": "synthetic-access", "scope": "files:read"}})
-    refused = _bearer_call(cfg, lambda request: httpx.Response(403, headers={
-        "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="files:write"'}))
-    assert refused.reason == "insufficient_scope"
+    times = iter(["2026-11-22T10:00:00+00:00", "2026-11-22T11:00:00+00:00"])
+    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    grant = {"tokens": {"access_token": "synthetic-access", "scope": "files:read"}}
+    mcp_oauth._save(cfg, grant)
+
+    def write_refused():
+        return _bearer_call(cfg, lambda request: httpx.Response(403, headers={
+            "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="files:write"'}))
+    assert write_refused().reason == "insufficient_scope"
     row = mcp_oauth.status(cfg)
     assert (row["state"], row["reason"], row["required_scope"]) == ("signed_in", "insufficient_scope", "files:read files:write")
+    assert row["required_scope_since"] == "2026-11-22T10:00:00+00:00"  # the gap is dated when it opens
+    write_refused()
+    assert mcp_oauth.status(cfg)["required_scope_since"] == "2026-11-22T10:00:00+00:00"  # a repeat keeps its start
+    mcp_oauth._save(cfg, {**grant, "required_scope": "files:read files:write"})  # a file written before kept none
+    write_refused()
+    assert mcp_oauth.status(cfg)["required_scope_since"] is None  # its start stays unknown
 
 
 def test_a_403_after_a_refreshed_retry_is_still_the_typed_step_up(monkeypatch, tmp_path):
@@ -751,3 +762,113 @@ def test_a_new_pending_sign_in_survives_an_old_refresh_that_finishes_after_it(si
         thread.join(20)
     assert not thread.is_alive() and not failures
     assert _complete(new_cfg, returned)["ok"] is True
+
+
+def test_a_repeated_sign_in_refusal_keeps_the_open_states_start_and_a_later_one_starts_anew(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    times = iter(["2026-11-19T09:50:00+00:00", "2026-11-20T08:00:00+00:00"])
+    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    challenge = lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"})  # noqa: E731
+    _bearer_call(cfg, challenge)
+    assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "not_signed_in",
+                                     "since": "2026-11-19T09:50:00+00:00"}
+    _bearer_call(cfg, challenge)  # still not signed in: the open state's start survives the repeat
+    assert _file(cfg)["sign_in"]["since"] == "2026-11-19T09:50:00+00:00"
+    mcp_oauth._save(cfg, {**_file(cfg), "tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
+                          "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"},
+                          "sign_in": {"state": "signed_in", "since": "2026-11-19T21:47:00+00:00"}})
+    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(400, json={"error": "invalid_grant"}))))
+    with pytest.raises(mcp_oauth.MCPAuthRequired):
+        asyncio.run(mcp_oauth.current_token(cfg))
+    assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "refresh_rejected",
+                                     "since": "2026-11-20T08:00:00+00:00"}  # after the 21:47 sign-in: its own start
+
+
+@pytest.mark.parametrize(("code", "cleared"), [("MCP_AUTH_REQUIRED", True), ("MCP_TIMEOUT", False)])
+def test_a_completed_sign_in_clears_a_sign_in_refusal_but_not_a_transport_failure(monkeypatch, tmp_path, code, cleared):
+    from ouroboros import mcp_catalog
+
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    mcp_catalog.publish(cfg, mcp_catalog.attempt_envelope(cfg, None, at="2026-11-22T10:00:00+00:00", items=[],
+                                                          complete=True))
+    assert mcp_catalog.record_call(cfg, ok=False, code=code, method="echo", at="2026-11-22T10:00:01+00:00")
+    started = asyncio.run(mcp_oauth.begin(cfg))
+    assert asyncio.run(mcp_oauth.complete(cfg, state=_state_of(started), code="c", iss="https://auth.example"))["ok"]
+    assert (mcp_catalog.latest_call(cfg) is None) is cleared, mcp_catalog.latest_call(cfg)
+
+
+def test_a_completed_sign_in_answers_and_lists_even_when_its_call_record_cannot_be_removed(signin, monkeypatch):
+    from pathlib import Path
+
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from ouroboros import mcp_catalog
+    from ouroboros.gateway import mcp as gateway_mcp
+
+    _, manager, cfg, settings = signin()
+    assert _complete(cfg, _provider_return(cfg))["ok"] and manager.refresh_server(cfg.id)["ok"]
+    assert asyncio.run(mcp_oauth.sign_out(cfg))["ok"]
+    assert manager._call_tool_result("mcp_docs__echo", {"text": "signed out"}).code == "MCP_AUTH_REQUIRED"
+    assert mcp_catalog.latest_call(cfg)["code"] == "MCP_AUTH_REQUIRED"
+    monkeypatch.setattr(gateway_mcp, "load_settings", lambda: settings)
+    client = TestClient(Starlette(routes=gateway_mcp.mcp_routes()))
+    payload = {"action": "complete", **mcp_oauth.parse_return(_provider_return(cfg))}
+    held, unlink = mcp_catalog.calls_path(cfg.id), Path.unlink
+
+    def sharing_violation(path, *args, **kwargs):
+        if path == held:  # Windows: another process holds the file open
+            raise PermissionError("the call record is open in another process")
+        return unlink(path, *args, **kwargs)
+    with monkeypatch.context() as locked:
+        locked.setattr(Path, "unlink", sharing_violation)
+        answer = client.post("/api/mcp/sign-in", json=payload)
+    assert answer.status_code == 200 and answer.json()["ok"] and answer.json()["listing"]["ok"], answer.text
+    assert mcp_oauth.status(cfg)["state"] == "signed_in"
+    assert client.post("/api/mcp/sign-in", json=payload).json()["reason"] == "sign_in_superseded"  # consumed once
+    assert mcp_catalog.latest_call(cfg)["code"] == "MCP_AUTH_REQUIRED"  # kept, not reported removed
+    assert manager._call_tool_result("mcp_docs__echo", {"text": "signed in"}).status == "ok"
+    assert mcp_catalog.latest_call(cfg)["ok"] is True  # the next call replaces it
+
+
+def test_an_open_sign_in_requirement_written_before_starts_were_kept_reads_as_unknown_and_a_new_one_is_dated(
+        monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    times = iter(["2026-11-20T08:00:00+00:00", "2026-11-20T09:00:00+00:00"])
+    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    old = {"v": 1, "url": cfg.url, "client": {"client_id": "c", "issuer": "https://auth.example"},
+           "pending": {"nonce": "n", "started": "2026-11-19T21:00:00+00:00"},  # what the v1 writer left
+           "sign_in": {"state": "sign_in_required", "reason": "token_rejected", "since": "2026-11-19T21:07:00+00:00"}}
+    mcp_oauth._path(cfg.id).parent.mkdir(parents=True, exist_ok=True)
+    mcp_oauth._path(cfg.id).write_text(json.dumps(old), encoding="utf-8")
+    assert mcp_oauth.status(cfg)["since"] is None  # 21:07 was only its latest refusal; the start is unknown
+    _bearer_call(cfg, lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"}))
+    upgraded = _file(cfg)
+    assert upgraded["v"] == 2 and upgraded["sign_in"]["since"] is None  # a repeat keeps the unknown start
+    assert upgraded["client"] == old["client"] and upgraded["pending"] == old["pending"]
+    mcp_oauth._save(cfg, {**upgraded, "tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
+                          "metadata": {"token_endpoint": "https://auth.example/token"},
+                          "sign_in": {"state": "signed_in", "since": "2026-11-20T07:00:00+00:00"}})
+    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(400, json={"error": "invalid_grant"}))))
+    with pytest.raises(mcp_oauth.MCPAuthRequired):
+        asyncio.run(mcp_oauth.current_token(cfg))
+    assert mcp_oauth.status(cfg)["since"] == "2026-11-20T08:00:00+00:00"  # a fresh requirement is dated
+
+
+def test_sign_out_keeps_an_open_requirements_start_and_dates_one_after_a_sign_in(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    times = iter(["2026-11-19T09:50:00+00:00", "2026-11-20T10:00:00+00:00"])
+    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    _bearer_call(cfg, lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"}))
+    assert asyncio.run(mcp_oauth.sign_out(cfg))["ok"]  # cancelling an unfinished sign-in: still the same state
+    assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "signed_out",
+                                     "since": "2026-11-19T09:50:00+00:00"}
+    mcp_oauth._save(cfg, {**_file(cfg), "tokens": {"access_token": "a"}, "pending": {"nonce": "n"},
+                          "sign_in": {"state": "signed_in", "since": "2026-11-20T09:00:00+00:00"}})
+    assert asyncio.run(mcp_oauth.sign_out(cfg))["ok"]  # a real sign-out of a signed-in grant
+    record = _file(cfg)
+    assert record["sign_in"] == {"state": "sign_in_required", "reason": "signed_out",
+                                 "since": "2026-11-20T10:00:00+00:00"}
+    assert "tokens" not in record and "pending" not in record

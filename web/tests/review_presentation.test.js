@@ -123,6 +123,17 @@ test('Plan review references normalize from both live and nested durable envelop
     });
 });
 
+test('an interrupted review says its notice line with the fresh-review step, never its raw reason (RVD4 11)', () => {
+    const lifecycle = { kind: 'review', status: 'interrupted', phase: 'interrupted', target: 'alpha', id: 'job-9',
+        group_id: 'task:root:alpha', presentation_owner_task_id: 'root', error: 'owner_process_exited' };
+    const line = 'Skill review: `alpha` — interrupted Start a fresh review of this skill before you enable it or grant it access.';
+    const notice = { code: 'skill_review_interrupted', step: 'review_again', details: 'owner_process_exited', line };
+    const [said] = classifyReviewLifecycle({ role: 'system', lifecycle, notice }).group.attempts;
+    assert.equal(said.summary, line);
+    const [older] = classifyReviewLifecycle({ role: 'system', lifecycle }).group.attempts;
+    assert.equal(older.summary, 'owner_process_exited', 'a row written before notices keeps its words');
+});
+
 test('live lifecycle ignores its synthetic outer task id and updates the same group', () => {
     const live = reviewGroupFromLifecycle({
         task_id: 'skill_lifecycle_review_alpha_job-2',

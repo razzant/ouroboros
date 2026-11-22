@@ -1,19 +1,6 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, a skill's Connect tools in ./skill_mcp_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js. */
-/** @typedef {Object} CostPresentation
- * @property {'own'|'root_tree'} scope
- * @property {?number} tracked_amount
- * @property {boolean} has_unpriced
- * @property {boolean} tracked_final
- * @property {boolean} accounting_open
- * @property {boolean} has_rows
- */
-/** @typedef {Object} CostCustody
- * @property {'available'|'unavailable'} status
- * @property {Array<string>} open_run_ids
- * @property {Array<string>} unrecorded_run_ids
- * @property {Array<string>=} closed_unrecorded_run_ids
- * @property {Array<string>} pending_invocation_ids
- */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, a skill's Connect tools in ./skill_mcp_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js, the task cost envelopes (`CostPresentation`, `CostCustody`) in ./cost_types.js. */
+/** @typedef {import('./cost_types.js').CostPresentation} CostPresentation */
+/** @typedef {import('./cost_types.js').CostCustody} CostCustody */
 /** @typedef {Object} StateResponse
  * @property {number} uptime
  * @property {number} workers_alive  // live worker slots of both lanes; inline carriers may be thread-backed
@@ -85,7 +72,7 @@
  * Background Consciousness alarm clock (server._describe_bg_consciousness_state over consciousness.status_snapshot). A wake-up is an ordinary Main turn; the direct-activity census owns its liveness.
  * @typedef {Object} BgConsciousnessState
  * @property {boolean} enabled
- * @property {string} status  // disabled | starting | stopped | thinking | due | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
+ * @property {string} status  // disabled | starting | stopped | thinking | due | sleeping | owner_chat_unknown | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
  * @property {string} detail  // one honest owner-readable line (e.g. "Sleeping until 14:05 (UTC+03:00).", in the server's zone)
  * @property {string=} detail_note  // what follows from that state, said beneath it; only a proven allowance hold has one
  * @property {string} level  // observe | act | full
@@ -226,11 +213,19 @@
 /** @typedef {import('./client_contract_types.js').ChatInbound} ChatInbound */
 /** @typedef {import('./client_contract_types.js').CommandInbound} CommandInbound */
 /** @typedef {import('./client_contract_types.js').PanicAcceptedOutbound} PanicAcceptedOutbound */
-/** @typedef {import('./client_contract_types.js').CallOpenRequest} CallOpenRequest */
-/** @typedef {import('./client_contract_types.js').CallOpenResponse} CallOpenResponse */
-/** @typedef {import('./client_contract_types.js').CallRefusal} CallRefusal */
-/** @typedef {import('./client_contract_types.js').CallSocketContract} CallSocketContract */
-/** @typedef {import('./client_contract_types.js').ConversationFinishedOutbound} ConversationFinishedOutbound */
+/** @typedef {import('./call_contract_types.js').CallOpenRequest} CallOpenRequest */
+/** @typedef {import('./call_contract_types.js').CallOpenResponse} CallOpenResponse */
+/** @typedef {import('./call_contract_types.js').CallRefusal} CallRefusal */
+/** @typedef {import('./call_contract_types.js').CallSocketContract} CallSocketContract */
+/** @typedef {import('./call_contract_types.js').ConversationFinishedOutbound} ConversationFinishedOutbound */
+/** A host notice on a System row (ouroboros/host_notice.py): the row's `text` is its one phrase.
+ * @typedef {Object} HostNotice
+ * @property {string=} code  // the notice's stable code
+ * @property {string=} step  // the owner's next step, a key of host_notice.STEPS; absent = no step
+ * @property {string=} details  // the raw facts behind Details
+ * @property {string=} instruction  // one line the owner acts on, as written (a Git command); a reader without Details says it under the line
+ * @property {string=} line  // phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
+ */
 /** @typedef {Object} ChatOutbound
  * @property {import('./client_contract_types.js').PresenceContact=} presence_contact
  * @property {{kind:'publication'|'answer'|'closure',state:'owed'|'delivered',reason_code?:string,dismissed?:boolean}=} question_delivery Canonical settlement delivery fact.
@@ -260,6 +255,7 @@
  * @property {number=} answered_index
  * @property {string=} comment
  * @property {string=} host_facts
+ * @property {HostNotice=} notice A host notice's code, step, raw details and assembled line.
  * @property {"chat"} type
  * @property {"user"|"assistant"|"system"} role
  * @property {string} content

@@ -811,14 +811,18 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
     if not changed:
         return f"OK: project {project['id']} is already {state}."
     action = "reopened" if reopen else "closed"
-    text = f"Ouroboros ({task_id}) {action} this project. {note.strip()}"
-    if not reopen:
-        text += " A message from you in this room or a new task will reopen it."
+    from ouroboros.host_notice import phrase
+
+    # The mind's own note is put back as written, never translated; which work did it is the notice's detail.
+    text, said = phrase(f"project_{action}", f"Ouroboros {action} this project." + (" {note}" if note.strip() else ""),
+                        step="" if reopen else "reopen_project", details=f"by task {task_id}",
+                        **({"note": note.strip()} if note.strip() else {}))
     page = "" if reopen else _closing_page(ctx, root, project, note.strip(), notice)
     try:
         delivery = outbox.enqueue_terminal_delivery_outcome(root, {
             "type": "send_message", "chat_id": project["chat_id"],
             "role": "system", "system_type": "project_closure", "text": text, "delivery_id": notice,
+            "progress_meta": said,
         }, event_queue=getattr(ctx, "event_queue", None))
     except Exception:
         log.warning("Project closure committed but room notice failed", exc_info=True)

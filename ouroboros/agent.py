@@ -51,7 +51,10 @@ from ouroboros.agent_startup_checks import (
 from ouroboros.agent_task_pipeline import (
     emit_task_results, build_review_context,
 )
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, schedule_report_run, terminal_result_fields
+from ouroboros.task_finalization import (
+    TERMINAL_ORIGIN_HOST_NOTICE, exception_notice, schedule_report_run, terminal_result_fields,
+)
+from ouroboros.host_notice import phrase
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
@@ -123,8 +126,8 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
         "reasoning_notes": [], "tool_calls": [], "loop_evidence_unavailable": True,
     }
     usage.update(execution_status="infra_failed", reason_code="task_exception",
-                 terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE)
-    text = f"⚠️ Error during processing: {type(exc).__name__}: {exc}"
+                 terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE, host_notice_row=exception_notice(exc))
+    text = usage["host_notice_row"]["record"]  # its row says the phrase with the error behind Details
     log.error("Task %s failed with an unexpected exception", task.get("id"), exc_info=exc)
     append_jsonl(drive_logs / "events.jsonl", {
         "ts": utc_now_iso(), "type": "task_error", "task_id": task.get("id"),
@@ -679,17 +682,17 @@ class OuroborosAgent:
         )
         if str(task.get("delegation_role") or "") == "subagent" and self._event_queue is not None and self._current_chat_id is not None:
             try:
-                role = str(task.get("role") or "").strip()
+                role, tid = str(task.get("role") or "").strip(), str(task.get("id") or "")
+                text, said = phrase("subagent_started", "Subagent running ({role})." if role else "Subagent running.",
+                                    details=f"task {tid}", **({"role": role} if role else {}))  # its id: a detail
                 self._event_queue.put({
                     "type": "send_message", "chat_id": self._current_chat_id,
                     "role": "system", "system_type": "subagent_started",
-                    "text": f"▶️ Subagent {task.get('id')} running{' (' + role + ')' if role else ''}.",
+                    "text": text,
                     "format": "markdown",
                     "is_progress": True,
                     "task_id": str(task.get("id") or ""),
-                    "progress_meta": subagent_message_meta(
-                        task, task_id=str(task.get("id") or ""), event="running",
-                    ),
+                    "progress_meta": {**subagent_message_meta(task, task_id=tid, event="running"), **said},
                     "ts": utc_now_iso(),
                 })
             except Exception:
@@ -1165,7 +1168,7 @@ class OuroborosAgent:
                 # surface=system) on the row the request named, else Main (decision 3A).
                 # It writes memory/deep_review.md itself and keeps the last report on failure.
                 try:
-                    from ouroboros.deep_self_review import deep_review_unavailable_text
+                    from ouroboros.deep_self_review import deep_review_unavailable, with_review_record
                     from ouroboros.tools.review_change import ReviewChangeArgumentError, run_system_review
                     self._emit_progress("Starting deep self-review... This may take several minutes.")
                     try:
@@ -1175,11 +1178,10 @@ class OuroborosAgent:
                             deadline_at=str((self._current_task_metadata or {}).get("deadline_at") or ""),
                         )
                         text, usage = str(outcome.get("report") or ""), dict(outcome.get("usage") or {})
-                        if outcome.get("record_id"):
-                            text += f"\n\nReview record: {outcome['record_id']} (surface=system)"
-                    except ReviewChangeArgumentError as exc:
-                        text = deep_review_unavailable_text(str(exc))
-                        usage = {"execution_status": "infra_failed", "reason_code": "deep_self_review_unavailable"}
+                        if outcome.get("record_id"):  # a failed review's notice row names the record too
+                            text = with_review_record(text, usage, str(outcome["record_id"]))
+                    except ReviewChangeArgumentError as exc:  # its row says a phrase, the cause behind Details
+                        text, usage = deep_review_unavailable(str(exc))
                     if usage:
                         self._pending_events.append({
                             "type": "llm_usage",
@@ -1208,11 +1210,9 @@ class OuroborosAgent:
                         "task_id": task.get("id"), "error": repr(e),
                         "traceback": truncate_for_log(tb, 2000),
                     })
-                    text = f"⚠️ Deep self-review error: {type(e).__name__}: {e}"
-                    usage = {
-                        "execution_status": "infra_failed",
-                        "reason_code": "deep_self_review_error",
-                    }
+                    from ouroboros.deep_self_review import deep_review_error
+
+                    text, usage = deep_review_error(e)  # the record keeps the error; its row says a phrase
                     llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
             else:
                 with self._owner_message_admission_lock:

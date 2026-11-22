@@ -975,6 +975,8 @@ def _require_route_headroom(gateway: Any, route: Any, shape: Any) -> None:
     unavailable, reset_at = route_health(gateway, route.route_id, shape, route_model=route.model,
                                          pinned_profile=str(getattr(route, "profile_id", "") or ""))
     if unavailable in WINDOW_EXHAUSTED_CODES or reset_at:
+        from ouroboros.subscription_census import note_limit_failure
+        note_limit_failure(unavailable or "subscription_window_exhausted")  # a seat refused on a spent window: read again
         raise ClaudexorSubscriptionWindowExhausted(
             "delegated review route subscription window is exhausted"
             + (f" (resets {reset_at})" if reset_at else "")
