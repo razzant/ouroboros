@@ -905,7 +905,8 @@ def _looks_like_skill_dir(path: pathlib.Path) -> bool:
     except OSError as exc:
         from ouroboros.skill_discovery_reuse import note_unreadable
 
-        note_unreadable(path, exc)
+        if not note_unreadable(path, exc):  # no fail-soft walk in progress (a strict scan, the RC audit): it raises
+            raise
         return False
 
 

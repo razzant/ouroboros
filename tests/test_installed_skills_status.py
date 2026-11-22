@@ -498,3 +498,40 @@ def test_the_context_build_passes_the_bound_skill_to_the_catalog(tmp_path):
     assert "Whole text: list_skills(name='design-off')." in texts["bound"]
     assert "Whole text: list_skills(name='design-off')." not in texts["ordinary"]
     assert "skill_name='design-off', path='SKILL.md')." in texts["ordinary"]
+
+
+def test_a_package_that_cannot_be_checked_fails_strict_readers_and_is_a_named_gap_of_the_soft_walk(tmp_path):
+    """A real permission fault on one package beside a readable one (RV3 N1): a strict reader (discover_skills
+    strict=True, secret_requests.key_consumers) still raises, so its callers say "unknown", never "none"; the
+    fail-soft walk keeps the neighbour and names the package."""
+    import os
+    import stat
+
+    import pytest
+
+    from ouroboros import secret_requests
+
+    if not hasattr(os, "geteuid") or os.geteuid() == 0:
+        pytest.skip("directory permissions do not bind this process")
+    _skill(tmp_path, "kept")
+    locked = tmp_path / "skills" / "external" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "SKILL.md").write_text("---\nname: locked\ndescription: d\nversion: '1'\ntype: script\nruntime: python3\n"
+                                     "env_from_settings: [PROBE_KEY]\n---\nB\n", encoding="utf-8")
+    mode = stat.S_IMODE(locked.stat().st_mode)
+    locked.chmod(0)
+    try:
+        try:
+            (locked / "SKILL.md").is_file()
+            pytest.skip("this filesystem does not enforce directory permissions")
+        except PermissionError:
+            pass
+        soft = discover_skills(tmp_path)
+        assert [skill.name for skill in soft] == ["kept"] and soft.gaps == (f"{locked} (PermissionError)",)
+        with pytest.raises(OSError):
+            discover_skills(tmp_path, strict=True)
+        with pytest.raises(OSError):
+            secret_requests.key_consumers(tmp_path, ["PROBE_KEY"])
+    finally:
+        locked.chmod(mode)
+    assert sorted(skill.name for skill in discover_skills(tmp_path, strict=True)) == ["kept", "locked"]

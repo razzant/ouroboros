@@ -131,11 +131,14 @@ class WalkedSkills(list):
     gaps: Tuple[str, ...] = ()
 
 
-def note_unreadable(path: Any, error: BaseException) -> None:
-    """For the walk in progress, a folder it could not read; outside a walk nothing is noted."""
+def note_unreadable(path: Any, error: BaseException) -> bool:
+    """For the walk in progress, a folder it could not read: True when noted. Outside such a walk (a strict
+    reader's own scan) nothing is noted and the caller's error stands."""
     sink = _WALK_GAPS.get()
-    if sink is not None:
-        sink.setdefault(str(path), type(error).__name__)
+    if sink is None:
+        return False
+    sink.setdefault(str(path), type(error).__name__)
+    return True
 
 
 def _walked(walk: Callable[[], Any]) -> Walked:
