@@ -567,17 +567,19 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     storyWords.append(storyTitle, statusLine);
     const measures = element('div', 'evo-measures', { role: 'group', 'aria-label': 'Measure' });
     measures.hidden = true;
+    // These are pressed choices of one view, not tabs. The install measures wrap together on a narrow card.
+    const release = element('span', 'evo-measure-set');
+    const install = element('span', 'evo-measure-set evo-measures-install');
+    const divider = element('span', 'evo-measures-sep', { 'aria-hidden': 'true' });
+    install.append(divider);
+    measures.append(release, install);
     MEASURES.forEach((measure, index) => {
-        if (index === 3) measures.append(element('span', 'evo-measures-sep', { 'aria-hidden': 'true' }));
         const button = element('button', `ui-segment evo-measure${index === 0 ? ' active' : ''}`,
-            { type: 'button', 'data-measure': measure.key, 'aria-pressed': String(index === 0) });
+            { type: 'button', 'data-measure': measure.key, 'aria-pressed': String(index === 0) }, measure.label);
         if (measure.install) button.setAttribute('aria-label', `${measure.label}, this installation`);
-        button.textContent = measure.label;
-        measures.append(button);
+        (measure.install ? install : release).append(button);
     });
     storyHead.append(storyWords, measures);
-    // The measures are one single choice (the shared segments): pressed choices of one view, not tabs (no panels,
-    // nothing to select by arrows). On a narrow card they wrap onto a second line, so none hides past the edge (U125).
     const body = element('div', 'evo-story-body');
     story.append(storyHead, body);
     // The cycles' settings (settings_rows.js), drawn once: no repaint touches them. The direction is a card of its own.
@@ -820,6 +822,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         const figure = body.querySelector('[data-chart]');
         const width = figure?.clientWidth || 0;
         if (!figure || !width || !model?.versions.length) return;
+        divider.hidden = release.offsetTop !== install.offsetTop;
         const chart = chartSvg(model, view, width);
         const svg = figure.querySelector('[data-svg]');
         svg.setAttribute('viewBox', `0 0 ${width} ${chart.height}`);
@@ -919,6 +922,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         if (typeof ResizeObserver === 'function') {
             resizeObserver = new ResizeObserver(() => { draw(); syncShowMore(); });
             resizeObserver.observe(figure);
+            resizeObserver.observe(measures);
         }
     }
 

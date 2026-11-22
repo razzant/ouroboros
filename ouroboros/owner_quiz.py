@@ -635,9 +635,10 @@ def record_answered(
     drive_root: Any, task_id: str, *,
     quiz_id: str, option_index: Optional[int], request_id: str, comment: str = "",
     allow_expired: bool = False,
-    answer_source: str = "web",
+    answer_source: str = "web", answer_surface: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Ingress-side answer write — request-id idempotent, first answer wins.
+    """Ingress-side answer write — request-id idempotent, first answer wins (``answer_surface``: the Telegram bot and
+    chat the bundled bridge relayed it from, where its late answer's turn replies; ``chat_references``).
 
     ``option_index=None`` is the owner's OWN answer: none of the offered
     options was taken, so no ``answered_index`` is written at all (a stored 0
@@ -698,7 +699,7 @@ def record_answered(
         block.update({
             "state": STATE_ANSWERED, "answered_at": stamp,
             "request_id": str(request_id or ""),
-            "answer_source": str(answer_source or "web"),
+            "answer_source": str(answer_source or "web"), **({"answer_surface": dict(answer_surface)} if answer_surface else {}),
             "delivery": _delivery_debt(task_id, quiz_id, "answer"),
             # Audit only: the card was answered after its author finished.
             **({"answered_after_terminal": True} if late else {}),

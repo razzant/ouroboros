@@ -323,7 +323,7 @@ def cancel_task_by_id(task_id: str) -> bool:
             )
             failed = {tid for tid, state in outcomes.items() if state == q.CANCEL_FAILED}
         # Delegated runs a settled member's end spared wait for this Stop (its verdict); the check below sees the rest.
-        _stop_open_tree_runs(q, task_id)
+        _stop_open_tree_runs(q, task_id, cascade_claim)
         # UNCONDITIONAL postcondition. For a CASCADE the answer is a property of the
         # TREE, not a tally of who did the killing: success means nothing of the
         # subtree is live and nothing refused custody. (A concurrent cascade over

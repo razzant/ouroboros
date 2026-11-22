@@ -198,6 +198,7 @@ def test_the_launcher_attaches_before_it_can_open_any_window():
 def cocoa(backend, monkeypatch):
     host = types.SimpleNamespace()
     fake_objc = types.ModuleType("objc")
+    fake_objc.selector = lambda method, signature: method
     fake_objc.classAddMethods = lambda cls, methods: [setattr(cls, method.__name__, method) for method in methods]
     monkeypatch.setitem(sys.modules, "objc", fake_objc)
     guilib = backend("cocoa", BrowserView=types.SimpleNamespace(WebKitHost=host))
@@ -608,3 +609,103 @@ def test_qtwebkit_keeps_pywebviews_answer(backend):
                      BrowserView=types.SimpleNamespace(WebView=QtHost, instances={"master": types.SimpleNamespace(webview=view)}))
     lcm._restore_qt(guilib, Window())
     assert view.policy == "none"
+
+
+def test_mac_chat_quote_requires_the_marked_view_its_document_and_current_menu(backend, monkeypatch):
+    class View:
+        url = "http://127.0.0.1:4321/"
+
+        def __init__(self):
+            self.calls = []
+
+        def URL(self):
+            return types.SimpleNamespace(absoluteString=lambda: self.url)
+
+        def evaluateJavaScript_completionHandler_(self, script, reply):
+            # Fake WebKit retains completions for delivery after the menu-open call returns.
+            self.calls.append((script, reply))
+
+    view = View()
+    window = Window()
+    lcm.enable_quote_menu(window, view.url)
+    host = type("WebKitHost", (), {})
+    gui = backend("cocoa", BrowserView=types.SimpleNamespace(WebKitHost=host, instances={
+        window.uid: types.SimpleNamespace(webview=view)}))
+    monkeypatch.setitem(sys.modules, "objc", types.SimpleNamespace(
+        selector=lambda method, signature: method,
+        classAddMethods=lambda cls, methods: [setattr(cls, m.__name__, m) for m in methods]))
+    monkeypatch.setattr(lcm, "_quote_view", None)
+    monkeypatch.setattr(lcm, "_quote_origin", "")
+    monkeypatch.setattr(lcm, "_quote_ticket", "")
+    class QuoteItem(Item):
+        @classmethod
+        def alloc(cls):
+            return cls((None, 0))
+
+        def initWithTitle_action_keyEquivalent_(self, title, action, equivalent):
+            self.title, self.action, self.equivalent = title, action, equivalent
+            return self
+
+        def setTarget_(self, target):
+            self.target = target
+
+        def setIdentifier_(self, identifier):
+            self.entry = (identifier, 0)
+
+        def setRepresentedObject_(self, ticket):
+            self.ticket = ticket
+
+        def representedObject(self):
+            return self.ticket
+
+    class QuoteMenu(Menu):
+        updates = 0
+
+        def insertItem_atIndex_(self, item, index):
+            self.items.insert(index, item)
+
+        def update(self):
+            self.updates += 1
+
+    monkeypatch.setitem(sys.modules, "AppKit", types.SimpleNamespace(NSMenuItem=QuoteItem))
+    lcm._restore_cocoa(gui, window)
+    menu = QuoteMenu([LOOK_UP, COPY])
+    other_view = View()
+    host.willOpenMenu_withEvent_(other_view, menu, None)
+    assert not other_view.calls and not view.calls and menu.updates == 0
+    for foreign in ("http://127.0.0.1:4322/", "http://127.0.0.1:4321/files/other", "https://outside.invalid/"):
+        view.url = foreign
+        host.willOpenMenu_withEvent_(view, menu, None)
+        assert not view.calls
+    view.url = "http://127.0.0.1:4321/"
+    host.willOpenMenu_withEvent_(view, menu, None)
+    first = view.calls[-1][1]
+    host.willOpenMenu_withEvent_(view, menu, None)
+    first(True, None)
+    view.calls[-1][1](False, None)
+    assert menu.entries() == [LOOK_UP, COPY] and menu.updates == 0
+    host.willOpenMenu_withEvent_(view, menu, None)
+    probe, answer = view.calls[-1]
+    assert 'location.origin === "http://127.0.0.1:4321"' in probe and ".available(" in probe
+    assert menu.entries() == [LOOK_UP, COPY]
+    answer(True, None)
+    sender = menu.items[0]
+    assert menu.entries() == [(lcm._QUOTE_ITEM, 0), LOOK_UP, COPY] and menu.updates == 1
+    assert (sender.title, sender.action, sender.equivalent, sender.target) == ("Reply to quote", "ouroReplyToQuote:", "", view)
+    view.url = "http://127.0.0.1:4321/help"
+    host.ouroReplyToQuote_(view, sender)
+    assert all(".activate(" not in script for script, _ in view.calls)
+    view.url = "http://127.0.0.1:4321/"
+    host.ouroReplyToQuote_(view, sender)
+    assert all(".activate(" not in script for script, _ in view.calls)
+    host.willOpenMenu_withEvent_(view, menu, None)
+    assert menu.entries() == [LOOK_UP, COPY]
+    view.calls[-1][1](True, None)
+    host.ouroReplyToQuote_(view, sender)  # item from the earlier menu
+    sender = menu.items[0]
+    ticket = sender.ticket
+    host.ouroReplyToQuote_(view, sender)
+    host.ouroReplyToQuote_(view, sender)
+    [activation] = [script for script, _ in view.calls if ".activate(" in script]
+    assert f'.activate("{ticket}")' in activation
+    assert menu.entries() == [(lcm._QUOTE_ITEM, 0), LOOK_UP, COPY] and menu.updates == 2

@@ -64,12 +64,18 @@ def request_or_result(root, entry, *, generation, recapture=False):
 
 def accept_result(root, entry, result):
     """Server-only, after its fresh continuation check, still under the disposition lock."""
-    from ouroboros.delegate_named_evidence import _publish
+    from ouroboros.delegate_named_evidence import publish_saved, said_released, saved_named_evidence
     from ouroboros.delegate_continuation import disposition_refusal
 
     entry = current.run(root, entry.run_id)
     if entry.capture_job.get("binding") != identity(entry) or disposition_refusal(root, entry):
         return False
+    named = result.get("named_evidence") or {}
+    if named.get("reason") in {"release_state_unavailable", "payload_release_pending"}:
+        _, latest = saved_named_evidence(root, entry, observe=False)
+        named = result["named_evidence"] = latest or {"status": "partial", "retry": "transient", "files": []}
+    elif named and entry.capture_job.get("state") == "consumed":
+        named = result["named_evidence"] = said_released(named)
     if entry.capture_job.get("state") == "consumed":
         return True
     if entry.capture_job.get("state") != "ready":
@@ -80,9 +86,10 @@ def accept_result(root, entry, result):
         payload["capture_dir"] = str(pathlib.Path(result["manifest_artifact"]).parent)
         if not custody.record_patch_captured(root, entry, **payload):
             raise OSError("patch receipt publication failed")
-    named = result.get("named_evidence") or {}
-    if named:
-        _publish(root, entry, pathlib.Path(named["evidence_dir"]).name, named)
+    if named.get("evidence_dir") and not named.get("reason"):
+        named = result["named_evidence"] = publish_saved(root, entry, named, pathlib.Path(named["evidence_dir"]))
+    if named.get("reason"):
+        return True  # transport and patch remain usable; no named receipt or consumed acknowledgement
     if not _record(root, entry, {**entry.capture_job, "state": "consumed", "binding": identity(entry),
                                 "retry": result.get("retry") or named.get("retry", "")}):
         raise OSError("capture result acknowledgement failed")

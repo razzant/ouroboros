@@ -398,7 +398,7 @@ class _AnthropicLaneMixin:
         }
         # The counters above keep their billing shape; events read what was REPORTED (#1578).
         usage[REPORTED_TOKENS_KEY] = anthropic_token_counts(raw_usage)
-        for key in ("speed", "service_tier", "processing"):
+        for key in ("speed", "service_tier"):
             if key in raw_usage:
                 usage[key] = raw_usage[key]
         attach_processing_receipt(target, usage)
@@ -409,7 +409,7 @@ class _AnthropicLaneMixin:
         write_split = self._cache_write_split(raw_usage)
         if write_split:
             usage["cache_write_tokens_by_ttl"] = write_split
-        if usage["prompt_tokens"] or usage["completion_tokens"]:
+        if not usage.get("provider_reported_cost_only") and (usage["prompt_tokens"] or usage["completion_tokens"]):
             from ouroboros.pricing import estimate_cost_optional
 
             estimated_cost = estimate_cost_optional(
@@ -578,7 +578,7 @@ class _AnthropicLaneMixin:
                     limit_physical_send(target, _post),
                     _candidate_before_dispatch(candidate, request),
                 )
-                note_wire_send_succeeded(last_physical_attempt_capture())
+                note_wire_send_succeeded(last_physical_attempt_capture(), target)
                 prior_capture = strongest_dispatch_capture(prior_capture, last_physical_attempt_capture())
                 return result
             except UsageAccountingError as exc:
@@ -650,31 +650,39 @@ def anthropic_web_search_server_tool(
     accounting_scope: Optional[UsageScope] = None,
     timeout: Optional[float] = None,
     processing_preference: str | None = None,
+    target: Optional[Dict[str, Any]] = None,
     _recovery: Any,
 ) -> Any:
     """Run Anthropic's provider-owned web_search server tool."""
 
     import anthropic
+    import os
     from ouroboros.model_slots import resolve_processing_preference
     from ouroboros.usage_accounting import current_usage_scope
     from dataclasses import replace
 
-    target = {"provider": "anthropic", "usage_model": model, "resolved_model": model,
-              "processing_preference": resolve_processing_preference("websearch", override=processing_preference)}
-
-    client_kwargs: Dict[str, Any] = {"api_key": api_key, "max_retries": 0}
+    if target is None:
+        base_url = os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
+        target = {"provider": "anthropic", "usage_model": model, "resolved_model": model,
+                  "api_key": api_key, "base_url": base_url.rstrip("/") + "/v1"}
+    target = {**target, "processing_preference": resolve_processing_preference("websearch", override=processing_preference)}
+    # Messages.create adds /v1/messages; keep any prefix on the chosen endpoint.
+    messages_base = target["base_url"].rstrip("/")
+    if not messages_base.endswith("/v1"):
+        raise ValueError("Anthropic Messages search needs a resolved /v1 base")
+    client_kwargs: Dict[str, Any] = {"api_key": target["api_key"], "base_url": messages_base.removesuffix("/v1"),
+                                     "max_retries": 0}
+    if target.get("default_headers"):
+        client_kwargs["default_headers"] = dict(target["default_headers"])
     if timeout is not None:
         client_kwargs["timeout"] = float(timeout)
     payload = dict(
-        model=model,
+        model=target["resolved_model"],
         max_tokens=2048,
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
         messages=[{"role": "user", "content": query}],
     )
     apply_processing_preference(target, payload)
-    headers = processing_contract_headers(target, payload)
-    if headers:
-        client_kwargs["default_headers"] = headers
     from ouroboros.net_transport import trust_ssl_context
     trust = trust_ssl_context()
     http_cls = getattr(anthropic, "DefaultHttpxClient", None)
@@ -688,9 +696,11 @@ def anthropic_web_search_server_tool(
         kwargs = {key: value for key, value in candidate.items() if key != "speed"}
         if "speed" in candidate:
             kwargs["extra_body"] = {"speed": candidate["speed"]}
+        if headers := processing_contract_headers(target, candidate):
+            kwargs["extra_headers"] = headers
         return client.messages.create(**kwargs)
     if timeout is not None:
         payload["timeout"] = float(timeout)  # the leg's own bound: each send narrows it, never replaces it (#572)
     scope = replace(accounting_scope or current_usage_scope() or UsageScope(), source="web_search.anthropic")
     with usage_scope(scope):
-        return _recovery(send, payload, target)
+        return _recovery(send, payload, target, search_server_tool=True)

@@ -146,6 +146,7 @@ class TestValidateQuizPayload:
 
 @pytest.mark.parametrize("wait_for_answer", [False, True])
 def test_send_quiz_broadcasts_publishes_and_persists_row(monkeypatch, tmp_path, wait_for_answer):
+    from ouroboros.chat_chain import format_address, row_address
     from ouroboros.owner_quiz import record_asked
 
     record_asked(tmp_path, "task-quiz", quiz_id="qz-1", question="Merge now?", options=["Yes", "No"],
@@ -188,6 +189,7 @@ def test_send_quiz_broadcasts_publishes_and_persists_row(monkeypatch, tmp_path, 
         # "quiz:{task_id}:{quiz_id}" without it.
         "message_origin", "chat_id", "transport", "quiz_id", "task_id", "question", "options",
         "stake", "assumption", "state", "ts", "wait_for_answer", "question_delivery",
+        "row_address", "row_client_message_id", "reply_author_label",
     }
     assert payload["message_origin"] == {}
     row = json.loads(dialogue_test.log_text(tmp_path / "logs" / "chat.jsonl").splitlines()[-1])
@@ -198,6 +200,10 @@ def test_send_quiz_broadcasts_publishes_and_persists_row(monkeypatch, tmp_path, 
     assert row["quiz"]["state"] == "open"
     assert row["quiz"]["options"][0] == {"label": "Yes"}
     assert live["wait_for_answer"] is payload["wait_for_answer"] is row["quiz"]["wait_for_answer"] is wait_for_answer
+    assert live["row_address"] == payload["row_address"] == format_address(row_address(row))
+    assert live["row_client_message_id"] == payload["row_client_message_id"] == row["client_message_id"]
+    assert row["client_message_id"] == "quiz_publication:task-quiz:qz-1"
+    assert row["direction"] == "out" and live["reply_author_label"] == payload["reply_author_label"] == "Ouroboros"
 
 
 def test_send_quiz_accepts_a_long_question_through_the_shared_validator(monkeypatch, tmp_path):

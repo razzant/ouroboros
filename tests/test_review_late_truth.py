@@ -73,6 +73,12 @@ def test_canonical_pending_settles_late_without_reparse_and_keeps_cost_and_recei
     card = _card(settled)
     assert (card["transport_status"], card["parse_status"], card["semantic_verdict"]) == ("success", "valid", "PASS")
     assert card["cost"] == {"kind": "unknown" if cost is None else "usd", "usd": cost}
+    # The late record keeps what ran, from this same operation's saved usage; the request stays the request.
+    assert seat["operation_id"] == actor["operation_id"] and seat["requested"]["model"] == "requested/model"
+    assert {key: seat["effective"][key] for key in ("route", "model", "provider", "source")} == {
+        "route": "api_chat", "model": "observed/model", "provider": "openai", "source": "reviewer_slot_last_execution"}
+    assert [execution.get("model") for execution in card["executions"]] == ["observed/model"]
+    assert (card["requested_model"], card["observed_model"], card["provider"]) == ("requested/model", "observed/model", "openai")
     assert review_pause._seat_words(seats[0]) == "change PASS; coupling PASS"
     live = ledger.build_commit_gate_record(_facts([_parsed(actor)]), record_id=record["record_id"]).to_dict()
     assert review_waiting.outcome_ids(live) == review_waiting.outcome_ids(settled)

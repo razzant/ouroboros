@@ -227,7 +227,8 @@ def validate_task_authority_sources(env: Any, task: Dict[str, Any]) -> Dict[str,
         if not owner_message_ref_is_valid(origin_ref):
             return _unavailable(owner_source, "named owner source reference has an invalid host identity shape")
 
-        origin_text = task.get("origin_message_text")
+        snapshot = (task.get("metadata") or {}).get("origin_message_snapshot") or {}
+        origin_text = snapshot.get("placeholder_text") or task.get("origin_message_text")
         if isinstance(origin_text, str) and origin_text:
             if _text_sha256(origin_text) != str(origin_ref.get("text_sha256") or ""):
                 return _unavailable(owner_source, "retained origin text does not match its ingress checksum")
@@ -242,7 +243,8 @@ def validate_task_authority_sources(env: Any, task: Dict[str, Any]) -> Dict[str,
             if matching is None:
                 return _unavailable(
                     owner_source, "named canonical owner row is not readable and no retention-proof text is stored")
-            task["origin_message_text"] = str(matching.get("text") or "")
+            from ouroboros.owner_relay import owner_text
+            task["origin_message_text"] = owner_text(matching)
 
     predecessor = task.get("predecessor_authority_source")
     if predecessor not in (None, {}) and not isinstance(predecessor, dict):

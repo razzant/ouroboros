@@ -168,7 +168,7 @@ function childFixture(details) {
     const fx = {details, reads: [], gate: null, members: ['root', 'child'], connected: true};
     const activity = {activity_id: 'root', chat_id: 1, kind: 'managed_task', phase: 'working'};
     const census = () => ({supervisor_ready: true, active_chat_activities_complete: true, active_chat_activities: [activity],
-        ...projection(1, [work(activity, {members: {ids: fx.members}})], room('working'))});
+        ...projection(1, [work(activity, {members: {ids: fx.members, ...(fx.states && {states: fx.states})}})], room('working'))});
     const env = installDom(async raw => {
         const url = String(raw);
         if (url.startsWith('/api/tasks/')) {
@@ -210,6 +210,194 @@ function childFixture(details) {
         close() { instance.destroy(); restoreDom(env.prior); },
     });
 }
+
+test('mounted and later nested cards paint their own member state while the root works', async () => {
+    const fx = childFixture({});
+    try {
+        await fx.start();
+        fx.members = ['root', 'child', 'sibling'];
+        const queued = {activity: 'queued', transition: 'none', call: '', release: 'self', live: false,
+            confirmed: true, turn: [], because: [], tails: [], mark: 'still'};
+        fx.states = {child: {...queued, activity: 'waiting',
+            because: [{code: 'sleeping', text: 'Sleeping until it is woken'}],
+            tails: [{kind: 'run', state: 'open', code: 'external_runs_open', count: 1, ids: ['run']}]}, sibling: queued};
+        fx.queue = {pending: [{id: 'child', task: {project_admission_hold: {}}}], running: []};
+        await fx.hydrate();
+        fx.child('sibling');
+        const child = fx.card('child');
+        const word = child.querySelector('[data-live-phase]');
+        const reason = child.querySelector('[data-live-phase-secondary]');
+        assert.deepEqual([fx.chip('root')[1], word.textContent, fx.chip('sibling')[1]], ['Working', 'Waiting', 'Queued']);
+        assert.equal(reason.textContent, 'Sleeping until it is woken · 1 external run is open');
+        assert.equal(reason.parentNode, child.querySelector('[data-live-summary-button]'));
+        assert.equal(word.getAttribute('aria-label'), `Subagent status: Waiting, ${reason.textContent}`);
+        assert.equal(fx.card('sibling').querySelector('[data-live-phase-secondary]').textContent, '');
+        fx.states.child = { ...fx.states.child, confirmed: false, activity: 'unknown', because: [], mark: 'ring',
+            tails: [{ kind: 'run', state: 'live', code: 'delegated_running', count: 1, ids: ['run'] }] };
+        await fx.hydrate();
+        const external = { task_id: 'child', run_id: 'run', after_seq: 0, through_seq: 1,
+            parts: [{ kind: 'message', actor: 'executor', text: 'Reading', seq: 1 }], source: { kind: 'run_events', read_through: 1 } };
+        fx.handlers.get('chat')({ chat_id: 1, role: 'assistant', is_progress: true, task_id: 'child',
+            parent_task_id: 'root', subagent_task_id: 'child', delegated_activity: external, content: 'Reading' });
+        assert.deepEqual([word.textContent, reason.textContent], ['Activity unconfirmed', '1 external run still working']);
+        fx.states = {sibling: queued};
+        await fx.hydrate(Infinity, {works_complete: false});
+        assert.deepEqual([word.textContent, reason.textContent, word.firstElementChild.dataset.shape],
+            ['Activity unconfirmed', '', 'ring']);
+        fx.handlers.get('log')({chat_id: 1, data: {type: 'task_done', task_id: 'child', status: 'cancelled'}});
+        fx.states.child = queued;
+        await fx.hydrate();
+        assert.deepEqual(fx.chip('child'), ['1', 'Stopped']);
+    } finally { fx.close(); }
+});
+
+// Cold open: a nested child's own phase is unconfirmed while its own external run is independently observed.
+// Whichever the room reads first, its history page or the first state body, the evidenced external activity
+// keeps the child's chip visible with its line, and a member nothing current attests stays a quiet
+// historical row (DESIGN "Room work status": a nested card shows its own member and external work).
+const coldRows = [
+    {task_id: 'root', is_progress: true, text: 'Root works', ts: '2026-11-19T09:00:00Z'},
+    {task_id: 'child', subagent_task_id: 'child', parent_task_id: 'root', root_task_id: 'root',
+        delegation_role: 'subagent', subagent_role: 'reader', subagent_event: 'running',
+        is_progress: true, text: 'Saved child work', ts: '2026-11-19T09:00:01Z'},
+];
+const unknownMember = (tails) => ({activity: 'unknown', transition: 'none', call: '', release: 'self',
+    live: false, confirmed: false, turn: [], because: [], mark: 'ring', tails});
+const liveRun = [{kind: 'run', state: 'live', code: 'delegated_running', count: 1, ids: ['run']}];
+
+for (const first of ['history', 'state']) {
+    test(`cold open (${first} first) shows a child its observed external run evidences`, async () => {
+        const fx = childFixture({});
+        try {
+            fx.history = coldRows;
+            fx.states = {child: unknownMember(liveRun)};
+            if (first === 'state') await fx.hydrate();
+            await fx.instance.refreshHistory({revision: 1});
+            if (first === 'history') {
+                const quiet = fx.card('child');
+                assert.equal(quiet.querySelector('[data-live-phase]').hidden, true,
+                    'before any state body the replayed row is quiet');
+                assert.match(quiet.querySelector('[data-live-meta]').innerHTML, /Activity unconfirmed/);
+                await fx.hydrate();
+            }
+            const card = fx.card('child');
+            const chip = card.querySelector('[data-live-phase]');
+            assert.equal(chip.hidden, false, 'the observed external run is current evidence in either order');
+            assert.equal(chip.textContent, 'Activity unconfirmed');
+            assert.equal(card.querySelector('[data-live-phase-secondary]').textContent,
+                '1 external run still working');
+            assert.notEqual(card.dataset.inert, '1');
+            assert.doesNotMatch(card.querySelector('[data-live-meta]').innerHTML, /Activity unconfirmed/);
+        } finally { fx.close(); }
+    });
+
+    test(`cold open (${first} first) keeps a member nothing observes quiet`, async () => {
+        const fx = childFixture({});
+        try {
+            fx.history = coldRows;
+            fx.states = {child: unknownMember([])};
+            if (first === 'state') await fx.hydrate();
+            await fx.instance.refreshHistory({revision: 1});
+            if (first === 'history') await fx.hydrate();
+            const card = fx.card('child');
+            assert.equal(card.querySelector('[data-live-phase]').hidden, true,
+                'an unknown member without observed external work stays a quiet historical row');
+            assert.equal(card.dataset.inert, '1');
+            assert.match(card.querySelector('[data-live-meta]').innerHTML, /Activity unconfirmed/);
+        } finally { fx.close(); }
+    });
+
+    test(`cold open (${first} first) keeps a child a complete body lists nowhere quiet`, async () => {
+        const fx = childFixture({});
+        try {
+            fx.history = coldRows;
+            fx.members = ['root'];
+            if (first === 'state') await fx.hydrate();
+            await fx.instance.refreshHistory({revision: 1});
+            await fx.hydrate();
+            const card = fx.card('child');
+            assert.equal(card.querySelector('[data-live-phase]').hidden, true,
+                'a member the complete body lists nowhere is no current evidence');
+            assert.equal(card.dataset.inert, '1');
+        } finally { fx.close(); }
+    });
+}
+
+// A read started before a child's live frame and answered after it: each frame below lands after `started`.
+test('a read older than a live child frame still applies its explicit state and its failure', async () => {
+    const fx = childFixture({});
+    const priorNow = Date.now;
+    let now = 100000;
+    const member = (activity, extra = {}) => ({activity, transition: 'none', call: '', release: 'self',
+        live: activity === 'working', confirmed: true, turn: [], because: [], tails: [],
+        mark: activity === 'working' ? 'moving' : 'still', ...extra});
+    const unconfirmed = member('unknown', {confirmed: false, mark: 'ring'});
+    const later = () => { const started = now; now += 10; return started; };
+    try {
+        Date.now = () => now;
+        await fx.start();
+        fx.states = {child: member('queued')};
+        await fx.hydrate(now);
+        let started = later();
+        fx.child('child');
+        assert.equal(fx.chip('child')[1], 'Queued', 'a recorded hold keeps its word against a live frame');
+        fx.states = {child: member('working')};
+        await fx.hydrate(started);
+        assert.equal(fx.chip('child')[1], 'Working', 'the frame the hold ignored discards no explicit state');
+        fx.states = {child: unconfirmed};
+        await fx.hydrate(now);
+        started = later();
+        fx.child('child');
+        assert.equal(fx.chip('child')[1], 'Working', 'an unconfirmed child takes its frame\'s phase');
+        fx.states = {};
+        await fx.hydrate(started);
+        assert.equal(fx.chip('child')[1], 'Working', 'a read begun before that frame says nothing against it');
+        await fx.hydrate(now + 1);
+        assert.equal(fx.chip('child')[1], 'Activity unconfirmed', 'a read begun after the frame speaks for the child');
+        // A failed read is never outranked by a frame: after a body that listed no member (an empty map) or the child.
+        for (const states of [{}, {child: unconfirmed}]) {
+            fx.states = states;
+            now += 10;
+            await fx.hydrate(now);
+            started = later();
+            fx.child('child');
+            assert.equal(fx.chip('child')[1], 'Working');
+            fx.instance.hydrateStateSnapshot(null, started);
+            await tick(); await tick();
+            assert.equal(fx.chip('child')[1], 'Activity unconfirmed', `a failed read after ${JSON.stringify(states)}`);
+        }
+    } finally { Date.now = priorNow; fx.close(); }
+});
+
+// A child's own frames may reach the room before its lineage: the root-shaped card they made becomes the child's card.
+test('a shell promoted to a child keeps its newer live phase only against silence and takes a recorded hold', async () => {
+    const fx = childFixture({});
+    const priorNow = Date.now;
+    let now = 200000;
+    const queued = {activity: 'queued', transition: 'none', call: '', release: 'self', live: false,
+        confirmed: true, turn: [], because: [], tails: [], mark: 'still'};
+    const shell = (id) => fx.handlers.get('chat')({chat_id: 1, role: 'assistant', is_progress: true, task_id: id,
+        content: `${id} works`});
+    // A lifecycle frame that paints no phase of its own: what the card says after it is what promotion left.
+    const lineage = (id) => fx.handlers.get('chat')({chat_id: 1, role: 'assistant', is_progress: true, task_id: id,
+        content: `${id} scheduled`, subagent_task_id: id, parent_task_id: 'root', root_task_id: 'root',
+        delegation_role: 'subagent', subagent_role: 'reader', subagent_event: 'scheduled'});
+    try {
+        Date.now = () => now;
+        await fx.start();
+        fx.members = ['root', 'child', 'held', 'quiet'];
+        fx.states = {held: queued};
+        await fx.hydrate(now);
+        now += 10;
+        for (const id of ['held', 'quiet']) shell(id);
+        assert.deepEqual([fx.chip('held')[1], fx.chip('quiet')[1]], ['Working', 'Working'], 'root-shaped shells');
+        for (const id of ['held', 'quiet']) lineage(id);
+        assert.equal(fx.chip('held')[1], 'Queued', 'the recorded hold applies when the shell becomes the child');
+        assert.equal(fx.chip('quiet')[1], 'Working', 'an older read silent about it keeps its live phase');
+        await fx.hydrate(now + 1);
+        assert.equal(fx.chip('quiet')[1], 'Activity unconfirmed', 'a read begun after the frame speaks for the child');
+    } finally { Date.now = priorNow; fx.close(); }
+});
 
 test('a lost child terminal settles from its own result while its root still works', async () => {
     const fx = childFixture({child: 'completed'});

@@ -334,8 +334,8 @@ def build_skill_publish_preflight(
             reason_code=exc.reason_code,
             summary=str(exc) if explained
             else "The publication destination is not a GitHub repository this install can publish to.",
-            repair_hint="Choose the hub or a GitHub git source in Skills → Sources as the destination, then retry."
-            if explained else "Connect the hub or a GitHub git source in Skills → Sources, then retry.",
+            repair_hint="Choose the hub or a GitHub git source in Extensions → Sources as the destination, then retry."
+            if explained else "Connect the hub or a GitHub git source in Extensions → Sources, then retry.",
             status_code=409,
         )
     if not raw_skill or safe_skill == "_unnamed" or safe_skill != raw_skill:

@@ -603,6 +603,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "annotation_type",
         "chat_id",
         "client_message_id",
+        "source_row_address",
         "action",
         "target",
         "target_label",
@@ -619,6 +620,23 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "suppress_bubble",
         "ts", "project_name", "target_task_ids", "target_titles"
     }
+    # The host stamps the exact physical row of the annotated message so the browser can
+    # put the receipt on THAT message. The field is additive-optional in both mirrors
+    # (frames without it stay valid) and it is a string in both — the Python witness and
+    # the browser JSDoc mirror carry the same exact field set, neither widened nor filtered.
+    annotation_hints = get_type_hints(MessageAnnotationOutbound, include_extras=True)
+    assert set(annotation_hints) == _js_typedef_fields(text, "MessageAnnotationOutbound"), (
+        "MessageAnnotationOutbound Python and browser mirrors must carry the same exact fields"
+    )
+    assert "source_row_address" in _notrequired_fields(MessageAnnotationOutbound), (
+        "MessageAnnotationOutbound.source_row_address must stay optional"
+    )
+    source_row_annotation = MessageAnnotationOutbound.__annotations__["source_row_address"]
+    source_row_rendered = getattr(source_row_annotation, "__forward_arg__", None) or str(source_row_annotation)
+    assert "NotRequired[str]" in source_row_rendered, source_row_rendered
+    assert ("string=", "source_row_address") in _js_typedef_properties(text, "MessageAnnotationOutbound"), (
+        "api_types.js MessageAnnotationOutbound.source_row_address must stay an optional string"
+    )
     # The notice carrier is one literal pair in both mirrors: an ACK and the System row beside it read the same words.
     for cls in (MessageAnnotationOutbound, ChatOutbound):
         carrier = get_type_hints(cls, include_extras=True)["routing_notice_carrier"]
@@ -806,6 +824,11 @@ def test_decision_comment_limit_and_optional_index_pinned_across_python_and_js()
     assert quiz_decl
     assert "@property {number=} answered_index" in quiz_decl.group(1)
     assert "@property {string=} comment" in quiz_decl.group(1)
+    # Additive: replay names the answer row its card shows; the frozen live quiz_state frame does not grow.
+    assert "@property {string=} answer_row_address" in quiz_decl.group(1)
+    assert "answer_row_address" in QuizOutbound.__annotations__
+    assert "answer_row_address" not in QuizStateOutbound.__annotations__
+    assert "answer_row_address" not in _js_typedef_fields(text, "QuizStateOutbound")
 
 
 def test_max_link_actions_pinned_across_python_and_js():

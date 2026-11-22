@@ -1282,6 +1282,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
     lines.append(f"pending: {len(pending_list)}")
     from supervisor.pool_admission import status_words  # why queued work may wait for a new process
     lines.extend(filter(None, [status_words()]))
+    from ouroboros.command_memory import status_note  # one line while commands run without their own memory group (Linux)
+    lines.extend(filter(None, [status_note()]))
     lines.append(f"running: {len(running_dict)}")
     if pending_list:
         preview = []

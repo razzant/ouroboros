@@ -962,6 +962,9 @@ def _request_view(record: Optional[Dict[str, Any]], drive_root: Optional[pathlib
                     current = successor
                     continue
                 view["status"] = str(effective.get("status") or "unknown")
+                # A Stop still being carried out rides beside the honest status (task_status's cancel projection).
+                if str(effective.get("cancel_state") or "") == "pending":
+                    view["cancel_state"] = "pending"
                 break
             else:
                 raise ValueError("cyclic description task continuation")
@@ -1012,14 +1015,16 @@ def author_request_text(record: Dict[str, Any], request: Dict[str, Any]) -> str:
         f"(channel {key.get('update_channel') or 'unknown'}, ref {key.get('target_ref') or 'unknown'}"
         + (f", target version {target_version}" if target_version else "") + "). "
         + saved + "\n\n" + _request_sources(record, key) + "\n\n"
-        "Write it for my human: what this update changes for them and for me, in the language we use "
-        "together, as long and as structured as the change needs. It explains the update so they can decide about "
-        "applying it; it is not a new release audit, so I need not repeat product tests or a full code review to write "
-        "it, while checking a claim, asking for critique or involving a helper stays my call. The panel already shows "
-        "the recorded checks beside the text: I say what they mean where that changes the decision, and a recorded "
-        "test or review is not by itself a PASS, particularly on development. Say honestly what was not verified where it matters; "
-        "promise nothing about how applying will go. A helper I involve receives what it must read as files through "
-        "input_files (a read saved with save_as, or diffs I saved), with the exact range and how to read further in its "
+        "Write it for my human: what this update changes for them and for me, as consequences in plain words, neither "
+        "softened nor padded, in the language we use together and as long and as structured as the change needs; they "
+        "ask when they want more. I read the sources this range needs and save as soon as they support a complete "
+        "explanation; the panel shows it at that save, so no optional check, critique or helper comes before it and no "
+        "further round is required after it, while a later save may still refine it with the revision the first returned. "
+        "It explains the update so my human can decide; "
+        "it is not a release audit and adds no check status, verification caveat or advice to wait or to apply, and a "
+        "question about installing gets its own answer. A recorded test or review is not by itself a PASS, and I promise "
+        "nothing about how applying will go. A helper I involve receives what it must read as files through input_files "
+        "(a read saved with save_as, or diffs I saved), with the exact range and how to read further in its "
         "order; one that should run Git needs repository access of its own. Save it with record_update_description("
         f"base_sha=\"{base}\", target_sha=\"{target}\", expected_revision={request['revision_at_request']}, text=...), "
         "or text_file={\"root\": ..., \"path\": ...} in place of text for a Markdown file you wrote "
@@ -1058,7 +1063,8 @@ def _request_sources(record: Dict[str, Any], key: Dict[str, str]) -> str:
                     "No update material is stored") + "; read this range in the repository.\n"
                    + READ_RECIPE.format(base=base, target=target))
     if _same_range(facts, base, target):
-        return f"{sources}\n{CHECK_FACTS}"
+        return (f"{sources}\n{CHECK_FACTS} The panel already shows these recorded checks beside the description, so "
+                "retelling them is not required.")
     stored = _range_text(facts)
     return f"{sources}\nNo check facts for this range are recorded{f' (the recorded ones cover {stored})' if stored else ''}."
 

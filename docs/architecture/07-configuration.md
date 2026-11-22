@@ -85,8 +85,8 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_MODEL_LIGHT | openai/gpt-6-luna | Light model |
 | OUROBOROS_MODEL_SAFETY | (empty) | Safety Supervisor; empty uses Light, then Main. Outside Cyber Pro only owner writes change the resolved checker (owner Safety endpoints, the model-wait card); a provider change that re-proposes an unauthored slot saves (audited); a deployment checker replaces it |
 | OUROBOROS_MODEL_ACCOUNTS | {} | Role-owned managed-account pins; empty = Auto |
-| OUROBOROS_PROCESSING_PREFERENCE | "" | Global provider-neutral tier standard/fast/economy; empty keeps the adapter default |
-| OUROBOROS_MODEL_PROCESSING_PREFERENCES | {} | Role-owned preferences; empty roles inherit the global one |
+| OUROBOROS_PROCESSING_PREFERENCE | "" | Global standard/fast/economy, empty uses adapter default |
+| OUROBOROS_MODEL_PROCESSING_PREFERENCES | {} | Role tiers inherit global when empty. Only `main` also accepts `ultrafast` |
 | OUROBOROS_MODEL_CONTEXT_WINDOWS | {} | Role-owned context sizing assertions; zero = Auto; grants no reviewer authority |
 | OUROBOROS_MODEL_VISION | "" | Vision model (empty inherits) |
 | OUROBOROS_IMAGE_INPUT_MODE | auto | Send-time image routing (`vision_routing.py`) |
@@ -94,7 +94,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_MODEL_CONSCIOUSNESS | "" | Background-consciousness model (empty inherits) |
 | OUROBOROS_MODEL_FALLBACKS | openai/gpt-6.1-terra | Cross-model fallback chain, Safety's too on outage (not owner-guarded; `fallback_cooldown.py`); blank = none |
 | OUROBOROS_SERVED_MODEL_REDOS | 2 | Redos of a round another model answered, each a new operation (clamped 0-5) |
-| OUROBOROS_MODEL_MAX_CONCURRENCY | "" | Calls in flight per model route (credential, endpoint), install-wide, one fair queue, awaited turns first; blank: API routes unlimited, local 3; ≤0 = off (Settings › Models › More; live); Claudexor routes: the engine's |
+| OUROBOROS_MODEL_MAX_CONCURRENCY | "" | Install-wide fair queue per model/credential/endpoint, awaited turns first. Blank: APIs unlimited; built-in send, count and Test share 1. ≤0 disables. Live in Settings › Models › More; Claudexor owns its queue |
 | OUROBOROS_PROJECT_NAMING_TIMEOUT_SEC | 60 | Project-naming operation ceiling |
 | OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC | 8 | Inline naming bound when a card becomes a project (`gateway/projects.py`) |
 | OUROBOROS_UI_TRANSLATION_TIMEOUT_SEC | 120 | One translation batch, slot wait and call together (`ui_translation.py`) |
@@ -229,7 +229,9 @@ The generic Settings save, the owner Safety model endpoint, the wizard and the m
 
 #### Direct-provider routes
 
-Routes carry their connection (`parse_model_route`): `kind@name::model` reads its `OUROBOROS_CONNECTIONS` row (`llm_routing.resolve_target`); a missing or disabled one refuses (`connection_unavailable`), never another key. Factory review roles (`compute_direct_review_seats`) cover every direct provider. Exclusivity (`exclusive_direct_kind`) needs one provider without OpenRouter, a compatible endpoint or `OPENAI_BASE_URL`. Proposals and panels use `proposal_connection`: the built-in key, else the sole named one, else Main's (asked: `main_connection_choice`); only a built-in key respells saved ids. Off-provider Main mints none (DEVELOPMENT "Provider Independence").
+`parse_model_route`/`llm_routing.resolve_target`: `kind@name::model` uses its `OUROBOROS_CONNECTIONS` row; missing/disabled gives `connection_unavailable`, no other key. Factory review roles (`compute_direct_review_seats`) cover each direct provider. `exclusive_direct_kind`: one, without OpenRouter, a compatible endpoint or `OPENAI_BASE_URL`. Proposals/panels (`proposal_connection`): built-in, sole named, else Main's (`main_connection_choice`); only built-in respells saved ids. Off-provider Main mints none (DEVELOPMENT "Provider Independence").
+
+Only the official Go Chat URL (ASCII case-insensitive scheme/host, exact path) gets Ouroboros's User-Agent and model-scoped conversation ID. Go allowance is not cash. Claudexor's `opencode` Agent runs the external program.
 
 DeepSeek (`deepseek::`) uses `DEEPSEEK_BASE_URL`; proxies/mirrors use `openai-compatible::`, `deepseek/...` stays OpenRouter. `DEEPSEEK_REASONING_EFFORT_ALIASES` maps effort; forced tools disable thinking (`llm_openai_compatible.py`). MiniMax roles use `MINIMAX_DIRECT_DEFAULTS`; saved choices stay. Move PAYG M2.7 pins before [18 Nov 2026](https://platform.minimax.io/docs/faq/models.md). Exact direct `MiniMax-M3.1-Flash` maps none/minimal→low, ultra→max (`MINIMAX_FLASH_EFFORT_ALIASES`). Both report `reasoning_effort_clamped`. MiniMax `reasoning_split=true` requests reasoning, replayed verbatim same-route; details stay display-only. Live wire unverified.
 

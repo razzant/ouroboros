@@ -394,6 +394,10 @@ def probe_provider_readiness(
                 "exception_type": "ProviderNotConfigured",
             }
         candidate = _probe_candidate(target)
+        from ouroboros.opencode_go import go_chat_headers
+
+        if headers := go_chat_headers(target):
+            candidate["extra_headers"] = headers
         provider = str(target.get("provider") or "")
 
         if provider in {
@@ -530,8 +534,9 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
         # connection allowance for every HEAD phase, not the LLM read window.
         timeout = min(float(timeout), float(llm._no_proxy_timeout(timeout).connect))
         from ouroboros.net_transport import verify_kwargs
+        from ouroboros.opencode_go import go_client_headers
         with httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False, **verify_kwargs()) as client:
-            response = client.head(url)
+            response = client.head(url, headers=go_client_headers(target.get("provider"), url))
         # An upstream HTTP refusal still proves connectivity. A gateway/server
         # outage does not. This says nothing about the old generation's outcome.
         if 200 <= response.status_code < 500:
