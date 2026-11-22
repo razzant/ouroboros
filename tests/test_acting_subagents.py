@@ -16,6 +16,7 @@ from ouroboros.contracts.task_constraint import (
 from ouroboros.tool_access import active_tool_profile
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, ACTING_SUBAGENT_TOOL_NAMES, META_TOOL_NAMES
 from ouroboros.runtime_mode_policy import mode_allows_protected_write
+from ouroboros.tool_policy import initial_tool_schemas
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros import subagent_worktrees as sw
 from tests._store_shared import seed_result
@@ -173,7 +174,7 @@ def test_cyber_acting_registry_exposes_review_skill_and_runtime_tools(tmp_path, 
     reg = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     reg._ctx = ctx
 
-    names = set(reg.initial_tool_names())
+    names = {schema["function"]["name"] for schema in initial_tool_schemas(reg)}
     assert {"review_status", "plan_task", "skill_review", "skill_exec", "toggle_evolution"} <= names
     assert "commit_reviewed" in names
     schemas = {
@@ -221,6 +222,21 @@ def test_acting_protected_write_blocked_without_pro_grant(tmp_path):
     out = reg.execute("write_file", {"root": "active_workspace", "path": "ouroboros/safety.py", "content": "x\n"})
     # advanced (default) + no grant => protected block, regardless of grant.
     assert "protected" in out.lower() or "PROTECTED" in out
+
+
+@pytest.mark.parametrize(("mode", "grant", "written"), [
+    ("pro", False, False), ("pro", True, True), ("cyber_pro", False, True),
+])
+def test_acting_protected_write_follows_the_one_rule(tmp_path, monkeypatch, mode, grant, written):
+    """The dispatcher reads the same ``protected_write_admitted`` as the integration doors: Pro needs the
+    child's own grant, Cyber Pro none (11.09, capability parity), so the doors' answers can no longer differ."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **kw: (True, ""))
+    reg, _ctx, worktree = _acting_registry(tmp_path, surface="self_worktree", grant=grant)
+    (worktree / "ouroboros").mkdir(exist_ok=True)
+    out = reg.execute("write_file", {"root": "active_workspace", "path": "ouroboros/safety.py", "content": "x\n"})
+    assert ("CORE_PROTECTION_BLOCKED" in out) is not written, out
+    assert (worktree / "ouroboros" / "safety.py").exists() is written, out
 
 
 def test_protected_write_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
@@ -271,9 +287,13 @@ def test_shrink_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
 
 def test_acting_tool_visibility_is_acting_set(tmp_path):
     reg, _ctx, _wt = _acting_registry(tmp_path)
-    names = set(reg.initial_tool_names())
+    # The array the child's first request really carries: the acting set less the compat
+    # aliases, which stay callable and are never advertised.
+    names = {schema["function"]["name"] for schema in initial_tool_schemas(reg)}
+    aliases = {entry.name for entry in reg._entries.values() if entry.alias_for}
     # The schema selectors ride every role (#1860): they load schemas and grant nothing.
-    assert names == set(ACTING_SUBAGENT_TOOL_NAMES) | META_TOOL_NAMES
+    assert META_TOOL_NAMES <= names
+    assert names == (set(ACTING_SUBAGENT_TOOL_NAMES) | META_TOOL_NAMES) - aliases
     assert "commit_reviewed" not in names
     assert "integrate_subagent_patch" in names
 
@@ -563,11 +583,19 @@ def test_integrate_reject_records_verdict(tmp_path):
     assert child.get("child_result_disposition") == "irrelevant"
 
 
-@pytest.mark.parametrize(("mode", "caller"), [
-    ("advanced", "parent"), ("advanced", "acting"), ("pro", "acting"), ("cyber_pro", "acting"), ("pro", "granted"),
+@pytest.mark.parametrize(("mode", "caller", "applies"), [
+    ("advanced", "parent", False), ("advanced", "acting", False), ("pro", "acting", False), ("pro", "granted", True),
+    # Owner decision 6A (21.11.2026): Cyber Pro holds the dispatcher's rule here too. The acting child that may
+    # write ouroboros/safety.py itself applies its nested child's patch to it without a grant of its own.
+    ("cyber_pro", "acting", True),
+    # ...while a consciousness Act/Observe tree stays capped to light on any install.
+    ("cyber_pro", "capped", False),
 ])
-def test_integrate_protected_refusal_names_its_actual_cause(tmp_path, monkeypatch, mode, caller):
-    """The gate stays: mode allowing protected writes AND an acting caller's own protected_paths_grant.
+def test_integrate_protected_refusal_names_its_actual_cause(tmp_path, monkeypatch, mode, caller, applies):
+    """The door reads the dispatcher's own protected-path rule (``workspace_copies.protected_write_admitted``):
+    Pro admits protected paths with the applying task's own protected_paths_grant, Cyber Pro without one;
+    advanced and a tree capped to light refuse. What the refusal used to protect in Cyber Pro (a nested
+    child's changes reaching protected files without the delegator's own look) is the cost the owner accepted.
     #2734: a missing grant is named as the integrating task's own, never as a mode to switch to, and the
     captured result stays for its parent; a mode refusal keeps the policy's advice."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
@@ -578,16 +606,20 @@ def test_integrate_protected_refusal_names_its_actual_cause(tmp_path, monkeypatc
     _make_child_patch(repo, drive, "child3", "ouroboros/safety.py", "X = 2\n")
     acting = {} if caller == "parent" else {"mode": ACTING_SUBAGENT_MODE, "surface": "self_worktree",
                                             "protected_paths_grant": caller == "granted"}
-    out = _integrate_subagent_patch(_integrate_ctx(repo, drive, **acting), task_id="child3")
-    if caller == "granted":
+    ctx = _integrate_ctx(repo, drive, **acting)
+    if caller == "capped":
+        ctx.task_metadata = {"initiator": "consciousness", "consciousness_autonomy": "act", "runtime_mode_cap": "light"}
+    out = _integrate_subagent_patch(ctx, task_id="child3")
+    if applies:
         assert "Integrated subagent patch" in out, out
         assert (repo / "ouroboros/safety.py").read_text(encoding="utf-8") == "X = 2\n"
         return
     assert out.startswith("⚠️ CORE_PROTECTION_BLOCKED") and "ouroboros/safety.py" in out, out
-    assert ("protected_paths_grant" in out) == (caller == "acting"), out
+    assert ("protected_paths_grant" in out) == (caller in ("acting", "capped")), out
     assert ("Switch to runtime_mode" in out) == (caller == "parent"), out
-    if caller == "acting":
-        assert f"runtime_mode={mode!r}" in out and "kept unapplied" in out and "your parent" in out, out
+    if caller in ("acting", "capped"):
+        shown = "light" if caller == "capped" else mode
+        assert f"runtime_mode={shown!r}" in out and "kept unapplied" in out and "your parent" in out, out
     from ouroboros.task_status import load_effective_task_result
     assert not load_effective_task_result(drive, "child3").get("child_result_disposition")  # the result stays
     assert (repo / "ouroboros/safety.py").read_text(encoding="utf-8") == "X = 1\n"  # unchanged

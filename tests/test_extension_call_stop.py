@@ -688,7 +688,7 @@ def test_actual_key_keeps_stop_and_independent_failure_distinct(tmp_path, monkey
 
     module, _plain, device = mac(
         tmp_path, monkeypatch, on_input=on_input,
-        cliclick=(1, "", "input helper failed") if failure == "helper_failure" else (0, "", ""))
+        events=(1, "", "input helper failed") if failure == "helper_failure" else (0, "", ""))
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
     monkeypatch.setattr("ouroboros.extension_loader.is_extension_live", lambda *_a, **_k: True)
     name = extension_surface_name("unix_computer_use", "key")
@@ -702,7 +702,7 @@ def test_actual_key_keeps_stop_and_independent_failure_distinct(tmp_path, monkey
     assert result.meta["control_reason"] == "cancelled"
     assert result.host_annotations[-1].startswith("⚠️ OWNER_OPERATION_REFUSED: ")
     assert report["observed_effect"] is True and report["steps_total"] == 3
-    assert inputs(device) == [["cliclick", "kp:arrow-down"]], "no second input, including on failure"
+    assert inputs(device) == [[{"op": "keys", "mods": [], "code": 125}]], "no second input, including on failure"
     if failure:
         assert (result.status, result.code) == ("error", "TOOL_REPORTED_FAILURE")
         assert report["ok"] is False and report.get("status") != "stopped"

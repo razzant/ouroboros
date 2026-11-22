@@ -104,19 +104,40 @@ def parse_deadline_ts(value: Any) -> Optional[datetime]:
         return None
 
 
+def naive_instant(raw: str) -> bool:
+    """True when an ISO instant names no UTC offset: ``parse_deadline_ts`` reads such a time as UTC, so a caller
+    that must not guess (``schedule_followup`` beside a zone, ``set_next_wakeup(at)``) refuses it."""
+    try:
+        return datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw).tzinfo is None
+    except ValueError:
+        return False
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def span_text(seconds: float) -> str:
+    """A span in words at one-minute granularity ("less than a minute" below it): ``ago_text``'s units, for a
+    fact that lies ahead ("in 2 h 5 min") as well as one that passed."""
+    seconds = max(0, int(seconds))
+    if seconds >= 86400:
+        return f"{seconds // 86400} d {(seconds % 86400) // 3600} h"
+    if seconds < 3600:
+        return f"{seconds // 60} min" if seconds >= 60 else "less than a minute"
+    return f"{seconds // 3600} h {(seconds % 3600) // 60} min"
 
 
 def ago_text(seconds: float) -> str:
     """Elapsed seconds in words for a dated fact, at one-minute granularity ("less than a minute ago" below it):
     the one formatter of the wake's lines and the round's own focus line."""
-    seconds = max(0, int(seconds))
-    if seconds >= 86400:
-        return f"{seconds // 86400} d {(seconds % 86400) // 3600} h ago"
-    if seconds < 3600:
-        return f"{seconds // 60} min ago" if seconds >= 60 else "less than a minute ago"
-    return f"{seconds // 3600} h {(seconds % 3600) // 60} min ago"
+    return span_text(seconds) + " ago"
+
+
+def utc_offset_text(when: datetime) -> str:
+    """``UTC+03:00``: the offset an aware time is printed in, the form the host clock line uses."""
+    offset = when.strftime("%z")
+    return f"UTC{offset[:3]}:{offset[3:5]}"
 
 
 def seconds_until(value: Any) -> Optional[float]:

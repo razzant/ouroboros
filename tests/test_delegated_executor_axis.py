@@ -372,8 +372,8 @@ def test_a_rowless_child_runs_native_and_asks_the_daemon_nothing(monkeypatch):
     monkeypatch.setattr(gw, "ClaudexorGateway", _boom)
 
     class _NoVerbs:
-        def available_tools(self):
-            return ["read_file"]
+        def callable_rows(self, namespace=""):
+            return [{"name": "read_file"}]
 
     for stored in ("", "auto", "native", "a-value-from-an-older-build"):
         task = {"id": "t-diag", "type": "task", "delegation_role": "subagent",
