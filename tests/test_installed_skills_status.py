@@ -109,6 +109,24 @@ def test_a_name_two_folders_claim_is_one_off_entry(tmp_path):
     for text in (section.full_text, section.operative_view):
         assert text.count("twin") == 1
         assert "name conflict: several folders claim this name, none is selected" in text
+    # No folder is selected, so the name is never ready, whatever its empty readiness says (RV1 F3).
+    summary = summarize_skills(tmp_path)
+    assert all(skill_status(row)["ready"] is False for row in summary["skills"] if row["name"] == "twin")
+    assert [row["ready"] for row in list_skills_payload(summary, drive_root=tmp_path)["skills"]] == [False, False]
+
+
+def test_a_readiness_note_is_shown_in_both_forms_and_list_skills_and_none_without_one(tmp_path, monkeypatch):
+    rows = [_extension(name="noted", readiness={"ready": True, "blockers": [], "notes": ["works; key X is not granted"]}),
+            _extension(name="plain")]
+    monkeypatch.setattr("ouroboros.skill_loader.summarize_skills", lambda *_: {"skills": rows})
+    section = _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[])
+    for text in (section.full_text, section.operative_view):
+        cards = {block.split(" ", 1)[0]: block for block in text.split("\n- ")[1:]}
+        assert "  Note: works; key X is not granted" in cards["noted"] and "Status:" not in cards["noted"]
+        assert "Note:" not in cards["plain"] and "Status:" not in cards["plain"]
+    page = {row["name"]: row for row in list_skills_payload({"skills": rows})["skills"]}
+    assert page["noted"]["notes"] == ["works; key X is not granted"] and page["noted"]["ready"] is True
+    assert "notes" not in page["plain"]
 
 
 def _extension(**over):
