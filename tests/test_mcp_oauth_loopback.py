@@ -755,7 +755,7 @@ def test_a_new_pending_sign_in_survives_an_old_refresh_that_finishes_after_it(si
 
 def test_a_repeated_sign_in_refusal_keeps_the_open_states_start_and_a_later_one_starts_anew(monkeypatch, tmp_path):
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
-    times = iter(["2026-11-19T09:50:00+00:00", "2026-11-19T21:07:00+00:00", "2026-11-20T08:00:00+00:00"])
+    times = iter(["2026-11-19T09:50:00+00:00", "2026-11-20T08:00:00+00:00"])
     monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
     challenge = lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"})  # noqa: E731
     _bearer_call(cfg, challenge)
@@ -771,7 +771,7 @@ def test_a_repeated_sign_in_refusal_keeps_the_open_states_start_and_a_later_one_
     with pytest.raises(mcp_oauth.MCPAuthRequired):
         asyncio.run(mcp_oauth.current_token(cfg))
     assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "refresh_rejected",
-                                     "since": "2026-11-19T21:07:00+00:00"}  # a new state after the sign-in: its own start
+                                     "since": "2026-11-20T08:00:00+00:00"}  # after the 21:47 sign-in: its own start
 
 
 @pytest.mark.parametrize(("code", "cleared"), [("MCP_AUTH_REQUIRED", True), ("MCP_TIMEOUT", False)])

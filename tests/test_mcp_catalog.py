@@ -691,17 +691,31 @@ def call_with(manager, outcome):
     return manager._call_tool_result("mcp_demo__ping", {})
 
 
-def test_a_failing_listing_keeps_its_series_start_and_a_listing_closes_it():
+class _ListingClock:
+    """``mcp_client.datetime`` for listings: each ``now()`` is the next of the given UTC times."""
+
+    def __init__(self, *times):
+        self._times = iter(times)
+
+    def now(self, tz=None):
+        from types import SimpleNamespace
+
+        value = next(self._times)
+        return SimpleNamespace(isoformat=lambda: value)
+
+
+def test_a_failing_listing_keeps_its_series_start_and_a_listing_closes_it(monkeypatch):
+    t0, t1, t2, t3, t4 = (f"2026-11-22T10:0{minute}:00+00:00" for minute in range(5))
+    monkeypatch.setattr(mcp_client, "datetime", _ListingClock(t0, t1, t2, t3, t4))
     manager = publisher()
     assert manager.refresh_server("demo")["published"] and "listing_failing_since" not in envelope_now()
     fail(manager)
     first = envelope_now()
-    assert first["latest_attempt"]["ok"] is False and first["listing_failing_since"] == first["latest_attempt"]["at"]
+    assert (first["latest_attempt"]["ok"], first["latest_attempt"]["at"], first["listing_failing_since"]) == (False, t1, t1)
     assert set(first["latest_attempt"]) == {"at", "ok", "error", "partial"}  # the published attempt keeps its shape
     fail(manager)
     again = envelope_now()
-    assert again["listing_failing_since"] == first["listing_failing_since"]
-    assert again["latest_attempt"]["at"] >= first["latest_attempt"]["at"]
+    assert (again["latest_attempt"]["at"], again["listing_failing_since"]) == (t2, t1)  # the attempt moves, the start stays
     manager._async_list_tools = publisher()._async_list_tools
     assert manager.refresh_server("demo")["ok"] and "listing_failing_since" not in envelope_now()
     # A failing record written before starts were kept: its start stays unknown, never "now".
