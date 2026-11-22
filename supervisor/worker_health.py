@@ -605,7 +605,8 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             raise TerminalFileRecoveryPending("crash terminal result could not be stored") from exc
         # Message before task_done: otherwise the UI may close the card first.
         try:
-            # A crash that exhausted its retries says so in words; its ids and exit code are the notice's details.
+            # A crash that exhausted its retries says so in words; its ids and exit code are the notice's details. Only that
+            # ordinary crash offers a new try: past an owner-wait or budget checkpoint a repeat could redo completed actions.
             user_msg = result_text if replay_unsafe else "The task failed because its worker process kept crashing."
             incident_task_id = str(task_id or "")
             _pool().send_with_budget(
@@ -616,7 +617,8 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 progress_meta={
                     "task_incident": reason_code,
                     "toast_once": f"{incident_task_id}:{reason_code}:{attempt}",
-                    "notice": notice(reason_code, step="try_again", details=f"task {task_id}, {attempt} attempts, last exit code {exitcode}"),
+                    "notice": notice(reason_code, step="" if replay_unsafe else "try_again",
+                                     details=f"task {task_id}, {attempt} attempts, last exit code {exitcode}"),
                 },
                 role="system", system_type="worker_failure")
         except Exception:
