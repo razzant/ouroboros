@@ -151,6 +151,49 @@ def test_an_accepted_retry_names_its_recorded_selection_and_lineage_only_where_c
         assert recorded is None and "inputs: automatic lineage, no record" in answer["note"], answer["note"]
 
 
+@pytest.mark.parametrize("case", ["drive_untraversable", "moved_to_folderless", "moved_to_folder"])
+def test_an_accepted_retry_decides_its_lineage_line_from_its_own_recorded_request(tmp_path, monkeypatch, case):
+    """The lineage line of a found start comes from what THAT start's request recorded (its ``scope.root`` is this
+    invocation's own preparation address, or not), never from the task's present folder, and nothing touches the
+    filesystem before the lookup: a task drive the process cannot traverse still lets the one lookup reach the
+    engine; a work moved after its first start keeps the line its first request warrants, in both directions."""
+    from ouroboros.tools import delegate
+    from tests._delegated_transport_shared import _REAL_GATEWAY
+
+    registry, engine = _delegating(tmp_path, monkeypatch)
+    ctx = registry._ctx
+    first_folderless = case != "moved_to_folderless"
+    folder = tmp_path.parent / f"folder-{tmp_path.name}"
+    folder.mkdir(exist_ok=True)
+    ctx.project_id = ctx.task_metadata["project_id"] = "test-project"
+    if first_folderless:
+        ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}
+    else:
+        ctx.workspace_root, ctx.workspace_mode = str(folder), "external"
+    monkeypatch.setattr(_REAL_GATEWAY, "project_registration", lambda _self, _root: ("prj-scratch", None))
+    drive = tmp_path / "task_drives" / ctx.task_id
+    drive.mkdir(parents=True, exist_ok=True)
+    (drive / "brief.md").write_text("first attempt", encoding="utf-8")
+    engine.lose = 1
+    token = json.loads(delegate._delegate_start(ctx, "Read the brief.", max_seconds=120).text)["pending_invocation_id"]
+    c._CUSTODY.clear()
+    carrier = tmp_path / "task_drives"
+    if case == "moved_to_folderless":  # the same work, now in a Project without a folder
+        ctx.workspace_root, ctx.workspace_mode = "", ""
+        ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}
+    elif case == "moved_to_folder":
+        ctx.workspace_root, ctx.workspace_mode = str(folder), "external"
+        ctx.task_metadata.pop("resource_intent", None)
+    else:
+        carrier.chmod(0)
+    try:
+        answer = _start(registry, retry_of=token)
+    finally:
+        carrier.chmod(0o755)
+    assert answer["recovered_without_start"] and len(engine.creates) == len(engine.lookups) == 1, answer
+    assert ("inputs: automatic lineage, no record" in answer["note"]) is first_folderless, answer["note"]
+
+
 @pytest.mark.parametrize("consumer", ["retry", "sweep"])
 def test_a_queued_job_with_no_run_yet_is_bound_by_its_job_id_and_settles_once_through_it(tmp_path, monkeypatch, consumer):
     registry, engine, token = _lost_start(tmp_path, monkeypatch)

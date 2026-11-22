@@ -376,8 +376,8 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
                            retry_of=retry_token, recorded_max_seconds=seconds)
     from ouroboros.delegate_readonly_inputs import replayed_lineage
 
-    lineage = replayed_lineage(ctx, str(request_body.get("access") or ""),
-                               record.get("authority_source") == INVESTIGATION_AUTHORITY, record.get("input_files"))
+    lineage = replayed_lineage(request_body, retry_token, record.get("authority_source") == INVESTIGATION_AUTHORITY,
+                               record.get("input_files"))
     if (accepted := _accepted_retry(drive, retry_token, record, lineage)) is not None:
         return None, accepted  # the start the engine already holds: a receipt, never a second POST
     if record.get("resume_decisions"):

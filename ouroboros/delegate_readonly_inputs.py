@@ -501,14 +501,18 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
     return inputs._replace(selected=inputs.selected if asked else None), None
 
 
-def replayed_lineage(ctx: Any, access: str, investigation: bool, selected: Any) -> Optional[str]:
-    """What a replayed start may say of automatic lineage copies it holds no count of: ``NO_RECORD`` only where it
-    could have received them (a read-only or investigation start with a folderless scratch directory and no
-    nonempty selection, as ``prepare_readonly_inputs`` decides), else None: nothing to say."""
+def replayed_lineage(request: Any, invocation_id: str, investigation: bool, selected: Any) -> Optional[str]:
+    """What a replayed start may say of automatic lineage copies it holds no count of, from what THAT start's own
+    request recorded and nothing else (no folder is read or made before the engine's lookup): ``NO_RECORD`` only
+    where it was prepared for them (a read-only or investigation start without a nonempty selection whose recorded
+    ``scope.root`` is this invocation's own local preparation address, ``<task drive>/CONTAINER/<invocation_id>``),
+    else None: a managed copy's address is kept by its scratch owner, so the record alone does not decide it."""
     from ouroboros.helper_receipt import NO_RECORD
-    from ouroboros.tool_access import folderless_scratch_dir
 
-    possible = (access == "readonly" or investigation) and not selected and folderless_scratch_dir(ctx) is not None
+    body = request if isinstance(request, dict) else {}
+    root = pathlib.PurePath(str((body.get("scope") if isinstance(body.get("scope"), dict) else {}).get("root") or ""))
+    prepared = bool(invocation_id) and root.name == invocation_id and root.parent.name == CONTAINER
+    possible = (body.get("access") == "readonly" or investigation) and not selected and prepared
     return NO_RECORD if possible else None
 
 
