@@ -857,3 +857,27 @@ def test_a_presence_ceiling_hides_tools_not_names_that_are_no_tool(tmp_path):
     assert registry.policy_hidden_reason("read_file") is None
     for name in ("calendar", "definitely_not_a_tool"):
         assert not registry.is_builtin(name) and registry.policy_hidden_reason(name) is None, name
+
+
+def test_named_discovery_reads_availability_only_when_it_decides(tmp_path, monkeypatch):
+    """A closed network answers a named look-up of a network built-in before any credential is read (the GitHub
+    CLI's settings are a file read); with the network open the missing credential is the reason, read then."""
+    from ouroboros.tools import github
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    reads = []
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(github, "github_cli_configured", lambda: reads.append("read") is None and False)
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="named",
+                                     task_contract={"allowed_resources": {"network": False}}))
+    assert registry.policy_hidden_reason("github_read") == "resource_blocked (network=false)"
+    assert registry.get_schema_by_name("github_read") is None
+    assert reads == []
+    registry._ctx.task_contract = {"allowed_resources": {"network": True}}
+    assert registry.policy_hidden_reason("github_read") == "unavailable (missing_credential)"
+    assert registry.get_schema_by_name("github_read") is None
+    assert reads == ["read", "read"]
+    assert any(row.get("reason") == "missing_credential" and row.get("tools") == ["github_read"]
+               for row in registry.capability_omissions())

@@ -537,28 +537,35 @@ class ToolRegistry:
     def _builtin_hidden(self, entry: ToolEntry, view: _BuiltinView,
                         availability: Optional[tuple] = None) -> Optional[str]:
         """The ONE visibility rule of a registered built-in: None when this task is shown it (or, for
-        dispatch, may call it), else the first cause, in one order: contract, Presence ceiling, alias,
-        network, local availability (``availability`` when the caller already read it), web (dispatch
-        only), child profile. schemas(), available_tools, policy_hidden_reason, get_schema_by_name and
-        callable_rows all read it; dispatch keeps its own argument-aware admission."""
+        dispatch, may call it), else the first cause (``_builtin_verdict``). schemas(), available_tools,
+        policy_hidden_reason, get_schema_by_name and callable_rows all read it; dispatch keeps its own
+        argument-aware admission."""
+        return self._builtin_verdict(entry, view, availability)[0]
+
+    def _builtin_verdict(self, entry: ToolEntry, view: _BuiltinView,
+                         availability: Optional[tuple] = None) -> tuple:
+        """``(cause, availability)`` in one order: contract, Presence ceiling, alias, network, local
+        availability, web (dispatch only), child profile. Availability (a key, a backend, the GitHub CLI's
+        settings) is read only when no earlier cause decided, unless the caller already holds it."""
         name = entry.name
         if name in view.disabled:
-            return "disabled"
+            return "disabled", availability
         if not _presence_tool_allowed(self._ctx, name):
-            return "presence"
+            return "presence", availability
         if _alias_hidden(self._ctx, entry):
-            return "alias"
+            return "alias", availability
         if not registry_guards._builtin_network_allowed(self._ctx, name):
-            return "network"
-        if not (availability or _builtin_tool_availability(name, self._ctx))[0]:
-            return "unavailable"
+            return "network", availability
+        availability = availability or _builtin_tool_availability(name, self._ctx)
+        if not availability[0]:
+            return "unavailable", availability
         if view.for_dispatch and name in registry_guards._WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
-            return "web"
+            return "web", availability
         if view.readonly and not self._readonly_tool_allowed(name):
-            return "readonly"
+            return "readonly", availability
         if view.acting_names is not None and name not in view.acting_names:
-            return "acting"
-        return None
+            return "acting", availability
+        return None, availability
 
     def is_builtin(self, name: str) -> bool:
         """Whether ``name`` is a registered built-in of this catalog (aliases included), shown or not."""
@@ -880,8 +887,7 @@ class ToolRegistry:
             if tool_namespace(requested) == BUILTIN_NAMESPACE:
                 return None
             return None if _presence_tool_allowed(self._ctx, requested) else _HIDDEN_REASON_TEXT["presence"]
-        availability = _builtin_tool_availability(requested, self._ctx)
-        cause = self._builtin_hidden(entry, self._builtin_view(), availability)
+        cause, availability = self._builtin_verdict(entry, self._builtin_view())
         return f"unavailable ({availability[1]})" if cause == "unavailable" else _HIDDEN_REASON_TEXT.get(cause or "")
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
@@ -899,8 +905,7 @@ class ToolRegistry:
             return None
         entry = self._entries.get(requested)
         if entry:
-            availability = _builtin_tool_availability(requested, self._ctx)
-            cause = self._builtin_hidden(entry, self._builtin_view(), availability)
+            cause, availability = self._builtin_verdict(entry, self._builtin_view())
             if cause == "unavailable" and availability[1]:
                 self._capability_omissions.append({
                     "surface": "tools",
