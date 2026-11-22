@@ -1,0 +1,897 @@
+name: Tools and skills qualification
+run-name: tools-qa ${{ github.sha }}
+
+on:
+  push:
+    branches: ['@QA_BRANCH@']
+
+permissions:
+  contents: read
+
+# A newer push to the same qualification branch supersedes the running one;
+# different branches never cancel each other.
+concurrency:
+  group: qualify-tools-${{ github.ref }}
+  cancel-in-progress: true
+
+# RENDER CONTRACT. GitHub must start exactly this inert template with every occurrence of the four
+# AT-delimited placeholders QA_BRANCH, BASE, SUBJECT and TREE (delimiters included) substituted by
+# one global text pass. The tip commit carries this template beside the rendered workflow; the bind
+# step re-renders it from graph-pinned values and byte-compares it with the started workflow.
+# No command script in this file writes a placeholder between AT delimiters: scripts assemble the
+# pattern from the delimiter and the label, so the text pass has nothing to rewrite. Counted
+# invariant of the reviewed template: eight placeholder occurrences, four in executable lines and
+# four in the dispatch comment block; zero inside command scripts; zero in any rendered file.
+
+env:
+  BASE: '@BASE@'
+  SUBJECT: '@SUBJECT@'
+  SUBJECT_TREE: '@TREE@'
+
+# linux-appimage-native.yml is workflow_dispatch only and checks out inputs.candidate_sha.
+# Its bind requires git HEAD and GITHUB_SHA to equal that SHA, so the dispatched ref's tip
+# must be exactly @SUBJECT@. Dispatching @QA_BRANCH@ fails: that tip adds qualify-tools.yml.
+# This workflow has contents: read and does not start that run. The publisher runs, on a
+# branch whose tip is @SUBJECT@:
+#   gh workflow run linux-appimage-native.yml --ref <that-branch> -f candidate_sha=@SUBJECT@
+#
+# Scope: named current-candidate checks only. This exhibit is not the full suite.
+
+jobs:
+  merge-selector:
+    name: merge-selector
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      counts: ${{ steps.selector.outputs.counts }}
+      managed: ${{ steps.managed.outputs.counts }}
+      selector_outcome: ${{ steps.selector.outcome }}
+      managed_outcome: ${{ steps.managed.outcome }}
+      template: ${{ steps.bind.outputs.template_sha256 }}
+    steps:
+      - &qa_checkout
+        name: Checkout the pushed qualification branch tip
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - &qa_bind
+        name: Bind the job to the exact subject commit and stage the JUnit reader
+        id: bind
+        run: |
+          set -euo pipefail
+          TIP="$(git rev-parse HEAD)"
+           # The branch tip is the subject plus exactly two workflow-only additions: the rendered
+           # qualify-tools.yml and the inert reviewed template qualify-tools.yml.in. Neither file is
+           # taken on report: both are staged from this checkout, the subject is detached under its
+           # pinned tree, then the started bytes must equal the template rendered with exactly the
+           # four AT-delimited placeholders. Script patterns are assembled from delimiter and label,
+           # so the global text pass finds nothing in them to rewrite.
+           test "$(git rev-parse HEAD^)" = "$SUBJECT"
+           test "$(git diff --name-only HEAD^ HEAD)" = "$(printf '.github/workflows/qualify-tools.yml\n.github/workflows/qualify-tools.yml.in')"
+           cp .github/workflows/qualify-tools.yml "$RUNNER_TEMP/qa-rendered-workflow.yml"
+           cp .github/workflows/qualify-tools.yml.in "$RUNNER_TEMP/qa-template-workflow.yml.in"
+           git switch --detach "$SUBJECT" >/dev/null
+           test "$(git rev-parse HEAD)" = "$SUBJECT"
+           test "$(git rev-parse 'HEAD^{tree}')" = "$SUBJECT_TREE"
+           test "$(git rev-parse HEAD^)" = "$BASE"
+           git diff --check "$BASE" HEAD
+           # Product carries no QA workflow files.
+           test ! -e .github/workflows/qualify-tools.yml
+           test ! -e .github/workflows/qualify-tools.yml.in
+           # Substitution values are graph/ref-pinned by the four checks above (SUBJECT = real tip
+           # parent, BASE = real subject parent, SUBJECT_TREE = real detached tree, branch by GitHub);
+           # the branch name must stay plain so the sed replacement cannot be broken.
+           printf '%s' "$GITHUB_REF_NAME" | grep -Eq '^qa/[A-Za-z0-9._/-]+$'
+           d='@'
+           sed -e "s|${d}QA_BRANCH${d}|$GITHUB_REF_NAME|g" \
+               -e "s|${d}BASE${d}|$BASE|g" \
+               -e "s|${d}SUBJECT${d}|$SUBJECT|g" \
+               -e "s|${d}TREE${d}|$SUBJECT_TREE|g" \
+             "$RUNNER_TEMP/qa-template-workflow.yml.in" > "$RUNNER_TEMP/qa-expected-workflow.yml"
+           cmp "$RUNNER_TEMP/qa-expected-workflow.yml" "$RUNNER_TEMP/qa-rendered-workflow.yml"
+          # The template bytes whose rendering the cmp above proved equal to the started workflow. Their digest
+          # rides in the report; a reader compares it with the template the independent pre-run check read.
+          template_sha256="$(sha256sum "$RUNNER_TEMP/qa-template-workflow.yml.in" | cut -d ' ' -f 1)"
+          echo "template_sha256=$template_sha256" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/qa-results"
+          {
+            echo "tip=$TIP"
+            echo "subject=$(git rev-parse HEAD)"
+            echo "tree=$(git rev-parse 'HEAD^{tree}')"
+            echo "base=$BASE"
+            echo "template_sha256=$template_sha256"
+            echo "run=${{ github.run_id }}-${{ github.run_attempt }}"
+          } > "$RUNNER_TEMP/qa-results/subject.txt"
+          cat "$RUNNER_TEMP/qa-results/subject.txt"
+          cat > "$RUNNER_TEMP/qa-junit.py" <<'PYEOF'
+          """One JUnit reader for every lane: counts, required names, honest failure.
+
+          usage: qa-junit.py XML [--lane NAME] [--require NAME]... [--require-total N]
+                   [--require-module NAME]... [--require-function NAME]... [--allow-skips]
+                   [--allow-skipped-case NAME]...
+                   [--exact-cases] [--no-output]
+          Prints one counts line, appends it to $GITHUB_STEP_SUMMARY and (unless
+          --no-output) as `counts=` to $GITHUB_OUTPUT. Exits 1 when the XML does not
+          prove what the lane claims: an unreadable file, a failure/error, an
+          unexplained skip, a missing required passed name, too few testcases, a
+          module with no collected case.
+          """
+          import json
+          from pathlib import Path
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+
+          def emit(line, output=True):
+              print(line, flush=True)
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a", encoding="utf-8") as stream:
+                      stream.write(f"- {line}\n")
+              destination = os.environ.get("GITHUB_OUTPUT")
+              if output and destination:
+                  with open(destination, "a", encoding="utf-8") as stream:
+                      stream.write(f"counts={line}\n")
+
+
+          def main(argv):
+              if len(argv) < 2:
+                  print("usage: qa-junit.py XML [options]", file=sys.stderr)
+                  return 2
+              lane, require, modules, total = "lane", [], [], None
+              functions, allowed_skipped_cases = [], []
+              allow_skips = no_output = exact_cases = False
+              index = 2
+              while index < len(argv):
+                  option = argv[index]
+                  if option in ("--lane", "--require", "--require-module", "--require-function", "--allow-skipped-case", "--require-total"):
+                      index += 1
+                      value = argv[index]
+                      if option == "--lane":
+                          lane = value
+                      elif option == "--require":
+                          require.append(value)
+                      elif option == "--require-module":
+                          modules.append(value)
+                      elif option == "--require-function":
+                          functions.append(value)
+                      elif option == "--allow-skipped-case":
+                          allowed_skipped_cases.append(value)
+                      else:
+                          total = int(value)
+                  elif option == "--allow-skips":
+                      allow_skips = True
+                  elif option == "--exact-cases":
+                      exact_cases = True
+                  elif option == "--no-output":
+                      no_output = True
+                  else:
+                      print(f"qa-junit.py: unknown option {option}", file=sys.stderr)
+                      return 2
+                  index += 1
+              try:
+                  cases = ET.parse(argv[1]).findall(".//testcase")
+              except (OSError, ET.ParseError) as exc:
+                  emit(f"{lane}: JUnit unreadable ({type(exc).__name__}) - execution evidence unavailable", not no_output)
+                  return 1
+              rows = []
+              for case in cases:
+                  outcome = next((tag for tag in ("error", "failure", "skipped") if case.find(tag) is not None), "passed")
+                  rows.append((case.get("classname", ""), case.get("name", ""), outcome))
+              def count(outcome):
+                  return sum(1 for row in rows if row[2] == outcome)
+              counts = {"total": len(rows), "passed": count("passed"), "failed": count("failure"),
+                        "error": count("error"), "skipped": count("skipped")}
+              Path(argv[1]).with_suffix('.json').write_text(json.dumps(rows, ensure_ascii=True) + '\n', encoding='utf-8')
+              problems = []
+              if counts["failed"] or counts["error"]:
+                  failed = [f"{cls}::{name}" for cls, name, outcome in rows if outcome in ("failure", "error")]
+                  # Only synthetic test identities, never assertion text, stdout, fixture payloads or paths from a traceback.
+                  print(f"{lane}: failed/error test names ({len(failed)} total): " + ", ".join(failed[:20]))
+                  problems.append(f"{counts['failed']} failed, {counts['error']} errored")
+              skipped = [f"{classname}::{name}" for classname, name, outcome in rows
+                         if outcome == "skipped" and name not in allowed_skipped_cases]
+              if skipped and not allow_skips:
+                  problems.append(f"{len(skipped)} skipped (a skip is not a pass): " + ", ".join(skipped))
+              for required in require:
+                  results = [outcome for _cls, name, outcome in rows if name == required]
+                  if not results or any(outcome != "passed" for outcome in results):
+                      problems.append(f"required exact case not passed: {required}")
+              if exact_cases:
+                  found = [name for _, name, _ in rows]
+                  if (not require or sorted(found) != sorted(require) or len(set(found)) != len(found)
+                      or (modules and any(not any(m in cls.split(".") for m in modules) for cls, _, _ in rows))):
+                      problems.append("collected identities differ from the exact list")
+              for module in modules:
+                  if not any(module in classname.split(".") and outcome == "passed" for classname, _name, outcome in rows):
+                      problems.append(f"no passing case from required module: {module}")
+              for function in functions:
+                  cases_of = [outcome for _cls, name, outcome in rows if name == function or name.startswith(function + "[")]
+                  if not cases_of or any(outcome != "passed" for outcome in cases_of):
+                      problems.append(f"required test function not fully passed: {function} ({len(cases_of)} case(s) seen)")
+              if total is not None and counts["total"] < total:
+                  problems.append(f"collected {counts['total']} testcase(s), required at least {total}")
+              text = (f"{lane}: total={counts['total']} passed={counts['passed']} failed={counts['failed']} "
+                  f"error={counts['error']} skipped={counts['skipped']}")
+              if problems:
+                  text += " | PROBLEMS: " + "; ".join(problems)
+              emit(text, not no_output)
+              return 1 if problems else 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv))
+          PYEOF
+      - &qa_python
+        name: Locked Python environment on the shipped interpreter
+        uses: ./.github/actions/setup-python-env
+        id: python
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - &qa_node
+        name: Reviewed pinned Node (ouroboros/claudexor_runtime_pin.json node_version)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        id: node
+        with:
+          node-version: '24.22.3'
+      - name: Check PR selection and readback on named fixtures
+        id: selector
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/qa-results/merge-selector"
+          nodes=(
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[zero-publish_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[zero-continue_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[zero-repo]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[false-publish_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[false-continue_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[false-repo]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[null-publish_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[null-continue_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[null-repo]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[list-publish_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[list-continue_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[list-repo]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[dict-publish_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[dict-continue_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[dict-repo]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[space-publish_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[space-continue_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[space-repo]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[whitespace-publish_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[whitespace-continue_receipt_id]"
+            "tests/test_pr_merge_receipts.py::test_a_malformed_merge_selector_is_refused_before_any_io[whitespace-repo]"
+            "tests/test_pr_merge_receipts.py::test_publication_retry_requires_the_host_before_any_io"
+            "tests/test_pr_merge_receipts.py::test_publication_recovery_reports_its_own_result"
+            "tests/test_github_pr_write.py::test_a_pr_view_with_no_body_text_cannot_confirm_an_empty_body"
+            "tests/test_pr_merge_receipts.py::test_an_untyped_pr_number_stops_at_argument_validation[boolean]"
+            "tests/test_pr_merge_receipts.py::test_an_untyped_pr_number_stops_at_argument_validation[zero]"
+            "tests/test_pr_merge_receipts.py::test_an_untyped_pr_number_stops_at_argument_validation[text]"
+            "tests/test_pr_merge_receipts.py::test_an_untyped_pr_number_stops_at_argument_validation[float]"
+            "tests/test_pr_merge_receipts.py::test_merge_readback_requires_a_whole_commit_identity_when_present[without-commit]"
+            "tests/test_pr_merge_receipts.py::test_merge_readback_requires_a_whole_commit_identity_when_present[whole-commit]"
+            "tests/test_pr_merge_receipts.py::test_merge_readback_requires_a_whole_commit_identity_when_present[partial-evidence]"
+            "tests/test_pr_merge_receipts.py::test_an_omitted_or_empty_publish_receipt_id_is_the_ordinary_merge[omitted]"
+            "tests/test_pr_merge_receipts.py::test_an_omitted_or_empty_publish_receipt_id_is_the_ordinary_merge[empty]"
+          )
+          required=(--exact-cases)
+          for node in "${nodes[@]}"; do required+=(--require "${node##*::}"); done
+          process_exit=0
+          python -I -S scripts/safe_test.py -- "$VIRTUAL_ENV/bin/python" -m pytest -q \
+            "${nodes[@]}" --junitxml="$report.xml" > "$report.log" 2>&1 || process_exit=$?
+          reader_exit=0
+          /usr/bin/python3 "$RUNNER_TEMP/qa-junit.py" "$report.xml" --lane merge-selector \
+            "${required[@]}" || reader_exit=$?
+          printf 'process_exit=%s\nreader_exit=%s\n' "$process_exit" "$reader_exit" > "$report.exit"
+          cat "$report.exit"
+          test "$process_exit" = 0 && test "$reader_exit" = 0
+      # Named observation and admission cases; parsed rows and process/reader exits are separate evidence.
+      - name: Check the managed Python reader and the work-domain flows by exact case
+        id: managed
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/qa-results/managed-reader"
+          nodes=(
+            "tests/test_skill_exec.py::test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type[known-absence]"
+            "tests/test_skill_exec.py::test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type[unknown]"
+            "tests/test_skill_exec.py::test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type[refused]"
+            "tests/test_skill_exec.py::test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type[deadline]"
+            "tests/test_skill_exec.py::test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type[unreadable-record]"
+            "tests/test_skill_exec.py::test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type[absent-record]"
+            "tests/test_skill_exec.py::test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type[no-location]"
+            "tests/test_skill_exec.py::test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type[checkout]"
+            "tests/test_process_interpreters.py::test_a_managed_skills_python_is_the_work_domains_not_the_service_hosts"
+            "tests/test_process_interpreters.py::test_a_skill_whose_env_python_cannot_run_here_is_refused_not_rerouted"
+            "tests/test_work_domain_flows.py::test_an_installed_script_skill_runs_from_its_verified_work_copy_with_dependencies_built_there"
+            "tests/test_skill_exec.py::test_managed_service_dependency_records_preserve_observation_and_admission[absent]"
+            "tests/test_skill_exec.py::test_managed_service_dependency_records_preserve_observation_and_admission[unreadable]"
+            "tests/test_skill_exec.py::test_managed_service_dependency_records_preserve_observation_and_admission[invalid]"
+          )
+          required=(--exact-cases)
+          for node in "${nodes[@]}"; do required+=(--require "${node##*::}"); done
+          process_exit=0
+          python -I -S scripts/safe_test.py -- "$VIRTUAL_ENV/bin/python" -m pytest -q \
+            "${nodes[@]}" --junitxml="$report.xml" > "$report.log" 2>&1 || process_exit=$?
+          reader_exit=0
+          /usr/bin/python3 "$RUNNER_TEMP/qa-junit.py" "$report.xml" --lane managed-reader \
+            "${required[@]}" || reader_exit=$?
+          printf 'process_exit=%s\nreader_exit=%s\n' "$process_exit" "$reader_exit" > "$report.exit"
+          cat "$report.exit"
+          test "$process_exit" = 0 && test "$reader_exit" = 0
+      - name: Upload only named outcomes and exit evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-merge-selector-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qa-results/subject.txt
+            ${{ runner.temp }}/qa-results/managed-reader.json
+            ${{ runner.temp }}/qa-results/managed-reader.exit
+            ${{ runner.temp }}/qa-results/merge-selector.json
+            ${{ runner.temp }}/qa-results/merge-selector.exit
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Lane 3: the real GitHub CLI at both pinned versions, on the six cases selected from four
+  #    `test_installed_gh_*` functions in tests/test_github_enterprise_host.py. This is not the whole
+  #    enterprise module (its `two_hosts` fixture runs the INSTALLED gh against a local AF_UNIX fake host
+  #    and skips without it). The 12 files importing tests/_github_process.py use a synthetic stub, are
+  #    version-independent and ride the selected tier. Each version's record is read back from its own
+  #    JUnit with the pytest process exit beside it; a refused download or digest, an unreadable JUnit
+  #    and a failed reader are named in the record, and the process exit alone proves nothing.
+  gh-cli:
+    name: gh-cli
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      counts: ${{ steps.gh_run.outputs.counts }}
+    steps:
+      - *qa_checkout
+      - *qa_bind
+      - *qa_python
+      - name: Run the installed-gh transport tests under gh 2.45.0 and 2.101.0
+        id: gh_run
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          # Reads one JUnit back: prints the reader's output and sets $row to its counts line beside
+          # the pytest process exit, then returns the reader's own status.
+          read_back() {  # lane xml process-exit reader-options...
+            local lane="$1" xml="$2" pexit="$3" out status=0
+            shift 3
+            out="$(/usr/bin/python3 "$RUNNER_TEMP/qa-junit.py" "$xml" --lane "$lane" "$@" --no-output)" || status=$?
+            printf '%s\n' "$out"
+            row="$lane process_exit=$pexit reader_exit=$status: $(printf '%s\n' "$out" | tail -n 1)"
+            return "$status"
+          }
+          result=0
+          line="gh:"
+          while read -r version digest; do
+            work="$RUNNER_TEMP/gh-$version"
+            mkdir "$work"
+            file="gh_${version}_linux_amd64.tar.gz"
+            if ! {
+              curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                "https://github.com/cli/cli/releases/download/v${version}/${file}" -o "$work/$file" \
+                && (cd "$work" && printf '%s  %s\n' "$digest" "$file" | sha256sum -c - \
+                  && tar xzf "$file" --strip-components=1 "gh_${version}_linux_amd64/bin/gh")
+            }; then
+              line="$line [$version REFUSED: download or digest check failed, no JUnit read]"
+              result=1
+              continue
+            fi
+            rc=0
+            (
+              export PATH="$work/bin:$PATH"
+              test "$(command -v gh)" = "$work/bin/gh" || exit 1
+              gh --version > "$RUNNER_TEMP/qa-results/gh-$version.txt"
+              test "$(awk 'NR == 1 {print $3}' "$RUNNER_TEMP/qa-results/gh-$version.txt")" = "$version" || exit 1
+              gh api --help > "$RUNNER_TEMP/gh-$version-help.txt" || exit 1
+              python -I -S scripts/safe_test.py -- "$VIRTUAL_ENV/bin/python" -m pytest -q \
+                --junitxml="$RUNNER_TEMP/qa-results/gh-$version.xml" \
+                tests/test_github_enterprise_host.py::test_installed_gh_reads_the_completed_jobs_bytes_during_an_active_run \
+                tests/test_github_enterprise_host.py::test_installed_gh_creates_and_merges_a_named_pr_after_checkout_moves \
+                tests/test_github_enterprise_host.py::test_installed_gh_reads_completed_run_logs \
+                tests/test_github_enterprise_host.py::test_installed_gh_error_answer_past_a_small_cap_is_classified_not_retained \
+                > "$RUNNER_TEMP/gh-$version.log" 2>&1
+            ) || rc=$?
+            printf '%s\n' "$rc" > "$RUNNER_TEMP/qa-results/gh-$version.exit"
+            reader=0
+            read_back "gh-$version" "$RUNNER_TEMP/qa-results/gh-$version.xml" "$rc" --require-total 6 \
+              --require 'test_installed_gh_reads_completed_run_logs[full]' \
+              --require 'test_installed_gh_reads_completed_run_logs[failed]' \
+              --require 'test_installed_gh_error_answer_past_a_small_cap_is_classified_not_retained[1]' \
+              --require 'test_installed_gh_error_answer_past_a_small_cap_is_classified_not_retained[262144]' \
+              --require test_installed_gh_reads_the_completed_jobs_bytes_during_an_active_run \
+              --require test_installed_gh_creates_and_merges_a_named_pr_after_checkout_moves || reader=1
+            line="$line [$row]"
+            if (( rc || reader )); then result=1; fi
+          done <<'PINS'
+          2.45.0 79e89a14af6fc69163aee00e764e86d5809d0c6c77e6f229aebe7a4ed115ee67
+          2.101.0 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+          PINS
+          echo "counts=$line" >> "$GITHUB_OUTPUT"
+          echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+      - name: Upload gh evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-gh-cli-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qa-results/subject.txt
+            ${{ runner.temp }}/qa-results/gh-2.45.0.txt
+            ${{ runner.temp }}/qa-results/gh-2.101.0.txt
+            ${{ runner.temp }}/qa-results/gh-2.45.0.json
+            ${{ runner.temp }}/qa-results/gh-2.101.0.json
+            ${{ runner.temp }}/qa-results/gh-2.45.0.exit
+            ${{ runner.temp }}/qa-results/gh-2.101.0.exit
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Lane 4: Harbor 0.26, 0.20 and 0.18 admission/construction on the installed versions only — no trials, models or keys.
+  #    harbor==0.26.0 requires Python >=3.12 (PyPI, checked 2026-11-18). The
+  #    shipped interpreter is python-build-standalone 3.12.15
+  #    (scripts/download_python_standalone.sh), so the Harbor venv is created from
+  #    the SAME interpreter binary as the core env and may borrow its site-packages
+  #    through site.addsitedir — the pattern of the earlier working VM harness
+  #    (3.12 core + 3.12 harbor). The lane fails loudly if that ever drifts apart.
+  harbor:
+    name: harbor
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      counts: ${{ steps.harbor_run.outputs.counts }}
+    steps:
+      - *qa_checkout
+      - *qa_bind
+      - *qa_python
+      - name: Check capability admission and legacy construction without a trial or model call
+        id: harbor_run
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          rc=0
+          "$VIRTUAL_ENV/bin/python" -c 'import sys; assert sys.version_info >= (3, 12), f"core interpreter {sys.version} is below Harbor 0.26.0 requires-python >=3.12"'
+          core_packages=$("$VIRTUAL_ENV/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+          tb_runner() {  # harbor venv borrowing the locked core packages, run from the subject tree
+            python -I -S scripts/safe_test.py -- "$1/bin/python" -c 'import os, site, sys; site.addsitedir(sys.argv.pop(1)); sys.path.insert(0, os.getcwd()); import pytest; sys.exit(pytest.main(sys.argv[1:]))' "$core_packages" "${@:2}"
+          }
+          # Reads one JUnit back: prints the reader's output and sets $row to its counts line beside
+          # the pytest process exit, then returns the reader's own status (same helper as lane 3).
+          read_back() {  # lane xml process-exit reader-options...
+            local lane="$1" xml="$2" pexit="$3" out status=0
+            shift 3
+            out="$(/usr/bin/python3 "$RUNNER_TEMP/qa-junit.py" "$xml" --lane "$lane" "$@" --no-output)" || status=$?
+            printf '%s\n' "$out"
+            row="$lane process_exit=$pexit reader_exit=$status: $(printf '%s\n' "$out" | tail -n 1)"
+            return "$status"
+          }
+          # Installed versions only, nothing newer. A venv, install or version proof that fails refuses that version.
+          ready=""
+          for version in 0.26.0 0.20.0 0.18.0; do
+            hv="$RUNNER_TEMP/harbor-$version"
+            if uv venv --python "$VIRTUAL_ENV/bin/python" "$hv" \
+              && uv pip install --python "$hv/bin/python" --only-binary :all: "harbor==$version" \
+              && "$hv/bin/python" -c 'import importlib.metadata, sys; v=importlib.metadata.version("harbor"); print(sys.version, v); assert v == sys.argv[1]' "$version" > "$RUNNER_TEMP/qa-results/harbor-$version-version.txt"; then
+              ready="$ready $version"
+            else
+              echo "harbor $version: venv, install or version proof refused"
+            fi
+          done
+          line="harbor:"
+          # The same explicit list drives selection and the complete JUnit comparison.
+          path=devtools/benchmarks/terminal_bench/test_run_tb_methodology.py
+          methodology_cases=(
+            'test_run_tb_admits_one_effort_before_publishing_job[empty-env]'
+            'test_run_tb_admits_one_effort_before_publishing_job[whitespace-env]'
+            'test_run_tb_admits_one_effort_before_publishing_job[env-wins]'
+            'test_run_tb_admits_one_effort_before_publishing_job[runtime-default]'
+            'test_invalid_main_effort_is_a_typed_refusal_at_admission'
+            'test_invalid_env_effort_is_refused_at_admission'
+            'test_all_model_actor_is_durable_before_tb_external_probe'
+            'test_malformed_host_roster_is_a_typed_refusal_on_the_durable_manifest'
+            'test_harbor_smoke_child_uses_the_durable_pinned_actor[cloud-light]'
+            'test_harbor_smoke_child_uses_the_durable_pinned_actor[local-light]'
+            'test_settings_save_after_admission_keeps_the_admitted_search_choice_and_excluded_seats[saved-model]'
+            'test_settings_save_after_admission_keeps_the_admitted_search_choice_and_excluded_seats[saved-blank]'
+            'test_settings_save_after_admission_keeps_the_admitted_light_choice[cli-named-light]'
+            'test_settings_save_after_admission_keeps_the_admitted_light_choice[host-inherited-light]'
+            'test_settings_save_after_admission_keeps_the_admitted_light_choice[admitted-blank-light]'
+            'test_fresh_container_loader_keeps_the_authored_light_and_empty_roster'
+            'test_real_harbor_admits_generated_agent_before_trials'
+            'test_plain_model_binds_roster_into_job_manifest_and_adapter'
+          )
+          if [[ " $ready " == *" 0.26.0 "* ]]; then
+            prc=0
+            reader=0
+            selected=()
+            required=(--exact-cases --require-module test_run_tb_methodology)
+            for case_name in "${methodology_cases[@]}"; do
+              selected+=("$path::$case_name")
+              required+=(--require "$case_name")
+            done
+            tb_runner "$RUNNER_TEMP/harbor-0.26.0" -q "${selected[@]}" \
+              --junitxml="$RUNNER_TEMP/qa-results/harbor-0.26.0-methodology.xml" > "$RUNNER_TEMP/harbor-0.26.0-methodology.log" 2>&1 || prc=$?
+            read_back harbor-0.26.0-methodology "$RUNNER_TEMP/qa-results/harbor-0.26.0-methodology.xml" "$prc" "${required[@]}" || reader=1
+            line="$line [$row]"
+            if (( prc || reader )); then rc=1; fi
+          else
+            line="$line [0.26.0 methodology REFUSED: harbor venv not ready, no JUnit read]"
+            rc=1
+          fi
+          # Host-specific construction only, once per installed version (no trial or provider): the admission
+          # path reads the harbor API (AgentConfig/AgentFactory, generated-roster binding). Scope-labeled.
+          for version in 0.20.0 0.18.0; do
+            if [[ " $ready " != *" $version "* ]]; then
+              line="$line [$version construction REFUSED: harbor venv not ready, no JUnit read]"
+              rc=1
+              continue
+            fi
+            prc=0
+            reader=0
+            tb_runner "$RUNNER_TEMP/harbor-$version" -q \
+              devtools/benchmarks/terminal_bench/test_run_tb_methodology.py::test_real_harbor_admits_generated_agent_before_trials \
+              devtools/benchmarks/terminal_bench/test_run_tb_methodology.py::test_plain_model_binds_roster_into_job_manifest_and_adapter \
+              --junitxml="$RUNNER_TEMP/qa-results/harbor-$version-construction.xml" > "$RUNNER_TEMP/harbor-$version-construction.log" 2>&1 || prc=$?
+            read_back "harbor-$version-construction" "$RUNNER_TEMP/qa-results/harbor-$version-construction.xml" "$prc" --exact-cases --require-module test_run_tb_methodology \
+              --require test_real_harbor_admits_generated_agent_before_trials \
+              --require test_plain_model_binds_roster_into_job_manifest_and_adapter || reader=1
+            line="$line [$row]"
+            if (( prc || reader )); then rc=1; fi
+          done
+          echo "counts=$line combined_exit=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: Upload harbor evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-harbor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qa-results/subject.txt
+            ${{ runner.temp }}/qa-results/harbor-*.json
+            ${{ runner.temp }}/qa-results/harbor-*-version.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Lane 5: the local-model Settings page in real Chromium and WebKit.
+  #    Narrow collection on purpose (Settings in both engines and the wizard Stop case);
+  #    --require-ui-browser is NOT passed because it rejects narrow collections
+  #    (tests/browser_lane.py) and the full lane is not run here.
+  browser:
+    name: browser
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      counts: ${{ steps.browser_run.outputs.counts }}
+    steps:
+      - *qa_checkout
+      - *qa_bind
+      - *qa_python
+      - name: Exercise the local-model Settings page in Chromium and WebKit
+        id: browser_run
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          rc=0
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/ui-browsers"
+          python -I -S scripts/ci_browser_install.py --python "$VIRTUAL_ENV/bin/python" \
+            --attempt-seconds 150 chromium webkit
+          python -I -S scripts/safe_test.py -- env OUROBOROS_RUN_UI_SMOKE=1 \
+            OUROBOROS_UI_EVIDENCE_DIR="$RUNNER_TEMP/qa-results" \
+            "$VIRTUAL_ENV/bin/python" -m pytest -q -o addopts='' \
+            tests/test_settings_restart_browser.py::test_local_model_update_after_startup_exit_requires_a_click \
+            tests/test_settings_restart_browser.py::test_stop_during_download_starts_an_available_file_before_the_transfer_returns \
+            tests/test_settings_restart_browser.py::test_a_saved_local_model_setting_waits_for_the_local_models_own_stop_then_start \
+            tests/test_settings_restart_browser.py::test_managed_deployment_never_offers_the_runtime_install \
+            tests/test_settings_restart_browser.py::test_a_stop_from_another_client_ends_the_start_an_install_offered_even_across_a_later_install \
+            tests/test_onboarding_interactions_browser.py::test_wizard_local_stop_failure_preserves_edit_and_retry_feedback \
+            tests/test_onboarding_interactions_browser.py::test_wizard_installing_runtime_keeps_start_unavailable_and_accepts_ordinary_stop \
+            --junitxml="$RUNNER_TEMP/qa-results/settings.xml" > "$RUNNER_TEMP/settings.log" 2>&1 || rc=$?
+          for scene in update managed; do
+            for engine in chromium webkit; do
+              test -s "$RUNNER_TEMP/qa-results/local-model-$scene-$engine.png" || {
+                echo "missing or empty screenshot: local-model-$scene-$engine.png"; rc=1; }
+            done
+          done
+          for scene in failed retried; do
+            test -s "$RUNNER_TEMP/qa-results/wizard-local-stop-$scene.png" || {
+              echo "missing or empty screenshot: wizard-local-stop-$scene.png"; rc=1; }
+          done
+          for engine in chromium webkit; do
+            test -s "$RUNNER_TEMP/qa-results/wizard-local-installing-$engine.png" || {
+              echo "missing or empty screenshot: wizard-local-installing-$engine.png"; rc=1; }
+          done
+          /usr/bin/python3 "$RUNNER_TEMP/qa-junit.py" "$RUNNER_TEMP/qa-results/settings.xml" --lane browser \
+            --require-total 15 \
+            --require 'test_wizard_local_stop_failure_preserves_edit_and_retry_feedback' \
+            --require 'test_wizard_installing_runtime_keeps_start_unavailable_and_accepts_ordinary_stop[chromium]' \
+            --require 'test_wizard_installing_runtime_keeps_start_unavailable_and_accepts_ordinary_stop[webkit]' \
+            --require 'test_stop_during_download_starts_an_available_file_before_the_transfer_returns[chromium-1400]' \
+            --require 'test_stop_during_download_starts_an_available_file_before_the_transfer_returns[webkit-390]' \
+            --require 'test_a_saved_local_model_setting_waits_for_the_local_models_own_stop_then_start[chromium-1400]' \
+            --require 'test_a_saved_local_model_setting_waits_for_the_local_models_own_stop_then_start[webkit-390]' \
+            --require 'test_managed_deployment_never_offers_the_runtime_install[chromium-1400]' \
+            --require 'test_managed_deployment_never_offers_the_runtime_install[webkit-390]' \
+            --require 'test_local_model_update_after_startup_exit_requires_a_click[chromium-1400]' \
+            --require 'test_local_model_update_after_startup_exit_requires_a_click[webkit-390]' \
+            --require 'test_local_model_update_after_startup_exit_requires_a_click[chromium-1400-stop-before-reply]' \
+            --require 'test_local_model_update_after_startup_exit_requires_a_click[webkit-390-stop-before-reply]' \
+            --require 'test_a_stop_from_another_client_ends_the_start_an_install_offered_even_across_a_later_install[chromium-1400]' \
+            --require 'test_a_stop_from_another_client_ends_the_start_an_install_offered_even_across_a_later_install[webkit-390]' || rc=1
+          exit "$rc"
+      # Slot for tests of pending source changes. Empty adds nothing. Fill only with exact pytest node ids of tests
+      # that exist in the subject, one per line; any other line fails the lane. Its cases are read back from its own JUnit.
+      - name: Pending-source selector slot (empty means no case is selected)
+        id: pending
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.python.outcome == 'success' }}
+        env:
+          PENDING_NODES: ''
+        run: |
+          set -euo pipefail
+          re='^tests/[A-Za-z0-9_/]+\.py::[A-Za-z0-9_]+(\[[A-Za-z0-9_.-]+\])?$'
+          nodes=()
+          while IFS= read -r node; do
+            [ -n "$node" ] || continue
+            [[ "$node" =~ $re ]] || { echo "pending selectors: an entry is not one exact pytest node id"; exit 1; }
+            nodes+=("$node")
+          done <<< "$PENDING_NODES"
+          if (( ${#nodes[@]} == 0 )); then echo "pending selectors: slot empty, no case selected"; exit 0; fi
+          rc=0
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/ui-browsers"
+          python -I -S scripts/safe_test.py -- env OUROBOROS_RUN_UI_SMOKE=1 \
+            OUROBOROS_UI_EVIDENCE_DIR="$RUNNER_TEMP/qa-results" \
+            "$VIRTUAL_ENV/bin/python" -m pytest -q -o addopts='' "${nodes[@]}" \
+            --junitxml="$RUNNER_TEMP/qa-results/browser-pending.xml" > "$RUNNER_TEMP/browser-pending.log" 2>&1 || rc=$?
+          /usr/bin/python3 "$RUNNER_TEMP/qa-junit.py" "$RUNNER_TEMP/qa-results/browser-pending.xml" --lane browser-pending \
+            --require-total "${#nodes[@]}" --no-output || rc=1
+          exit "$rc"
+      - name: Upload browser evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qa-results/subject.txt
+            ${{ runner.temp }}/qa-results/settings.json
+            ${{ runner.temp }}/qa-results/browser-pending.json
+            ${{ runner.temp }}/qa-results/local-model-update-*.png
+            ${{ runner.temp }}/qa-results/local-model-managed-*.png
+            ${{ runner.temp }}/qa-results/wizard-local-stop-failed.png
+            ${{ runner.temp }}/qa-results/wizard-local-stop-retried.png
+            ${{ runner.temp }}/qa-results/wizard-local-installing-*.png
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-local-model:
+    name: windows-local-model
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      counts: ${{ steps.stamp.outputs.counts }}
+    steps:
+      - *qa_checkout
+      - *qa_bind
+      - *qa_python
+      # These cases launch a loopback stand-in for the local model server that loads no model
+      # (tests/test_local_context_evidence.py:314, ThreadingHTTPServer :316/:366); the model-list
+      # answer is synthesized by the app the test itself owns (LOCAL_LAUNCH_HEADER :72/:319).
+      # The stand-in is not a model. No prior landed-Windows battery proof is assumed or claimed;
+      # this run's proof is exactly the enumerated JUnit case outcomes (12 node ids below).
+      - name: Check owned launch and measurement through a synthetic local model server
+        id: stamp
+        shell: pwsh
+        run: |
+          $py = Join-Path $env:VIRTUAL_ENV 'Scripts/python.exe'
+          $xml = Join-Path $env:RUNNER_TEMP 'qa-results/windows-launch.xml'
+          $nodes = @(
+            'tests/test_settings_restart_application.py::test_actual_local_start_health_and_restart_clear_saved_mismatch',
+            'tests/test_browser_service_bindings.py::test_child_observes_late_local_model_health_binding_and_stop',
+            'tests/test_settings_restart_application.py::test_a_model_list_without_current_launch_evidence_never_applies_settings',
+            'tests/test_settings_restart_application.py::test_late_health_cannot_publish_the_same_child_after_interruption',
+            'tests/test_local_input_measurement.py::test_owned_model_list_adds_only_its_launch_header',
+            'tests/test_settings_restart_application.py::test_a_stop_ends_the_start_an_install_offered_for_good_but_not_a_later_one',
+            'tests/test_settings_restart_application.py::test_a_joined_install_gets_no_receipt_and_the_admitting_callers_start_follows_it',
+            'tests/test_settings_restart_application.py::test_a_stop_after_the_boot_decision_cancels_the_staged_autostart',
+            'tests/test_settings_restart_application.py::test_boot_hands_the_decisions_own_grant_to_the_autostart_it_stages',
+            'tests/test_local_context_evidence.py::test_serving_measurement_keeps_input_and_instance_binding',
+            'tests/test_local_tool_parsing.py::test_the_owned_server_stamps_the_model_list_of_the_app_it_creates',
+            'tests/test_local_context_evidence.py::test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns'
+          )
+          & $py -I -S scripts/safe_test.py -- $py -m pytest -q @nodes "--junitxml=$xml" *> (Join-Path $env:RUNNER_TEMP 'windows-launch.log')
+          $testExit = $LASTEXITCODE
+          $required = @('--require-total', '19')
+          $cases = @(
+            'test_actual_local_start_health_and_restart_clear_saved_mismatch',
+            'test_child_observes_late_local_model_health_binding_and_stop',
+            'test_a_model_list_without_current_launch_evidence_never_applies_settings[200-None]',
+            'test_a_model_list_without_current_launch_evidence_never_applies_settings[200-earlier-launch]',
+            'test_a_model_list_without_current_launch_evidence_never_applies_settings[307-current-launch]',
+            'test_late_health_cannot_publish_the_same_child_after_interruption[stop]',
+            'test_late_health_cannot_publish_the_same_child_after_interruption[panic]',
+            'test_late_health_cannot_publish_the_same_child_after_interruption[exit]',
+            'test_owned_model_list_adds_only_its_launch_header[None]',
+            'test_owned_model_list_adds_only_its_launch_header[fixture-launch]',
+            'test_a_stop_ends_the_start_an_install_offered_for_good_but_not_a_later_one[deferred]',
+            'test_a_stop_ends_the_start_an_install_offered_for_good_but_not_a_later_one[explicit]',
+            'test_a_joined_install_gets_no_receipt_and_the_admitting_callers_start_follows_it',
+            'test_a_stop_after_the_boot_decision_cancels_the_staged_autostart[deferred]',
+            'test_a_stop_after_the_boot_decision_cancels_the_staged_autostart[explicit]',
+            'test_boot_hands_the_decisions_own_grant_to_the_autostart_it_stages',
+            'test_serving_measurement_keeps_input_and_instance_binding',
+            'test_the_owned_server_stamps_the_model_list_of_the_app_it_creates',
+            'test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns'
+          )
+          foreach ($caseName in $cases) { $required += @('--require', $caseName) }
+          & $py (Join-Path $env:RUNNER_TEMP 'qa-junit.py') $xml --lane windows-local-model @required
+          if ($LASTEXITCODE -ne 0) { exit 1 }; exit $testExit
+      - name: Upload Windows case outcomes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-windows-local-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qa-results/subject.txt
+            ${{ runner.temp }}/qa-results/windows-launch.json
+          if-no-files-found: error
+          retention-days: 7
+
+  structural:
+    name: structural
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      counts: ${{ steps.structure.outputs.counts }}
+    steps:
+      - *qa_checkout
+      - *qa_bind
+      - *qa_python
+      - name: Read back each named source, shape and persistence check
+        id: structure
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/qa-results/structural"
+          nodes=(
+            tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree
+            tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base
+            tests/test_docs_sync.py::test_resident_docs_residue_only_shrinks
+            tests/test_generated_inventories.py::test_data_layout_inventory_is_byte_identical
+            tests/test_generated_inventories.py::test_facade_inventory_is_byte_identical
+            tests/test_shell_extraction.py::test_shell_catalog_schema_bytes_and_handler_owners_are_stable
+            tests/test_persistence_inventory.py::test_scan_is_populated_and_pinned
+            tests/test_persistence_inventory.py::test_every_scanned_path_has_an_inventory_row
+            tests/test_persistence_inventory.py::test_every_inventory_row_is_still_real
+          )
+          required=(--exact-cases)
+          for node in "${nodes[@]}"; do required+=(--require "${node##*::}"); done
+          process_exit=0
+          python -I -S scripts/safe_test.py -- env OURO_SIZE_RATCHET_BASE_REF="$BASE" \
+            "$VIRTUAL_ENV/bin/python" -m pytest -q -o addopts='' "${nodes[@]}" \
+            --junitxml="$report.xml" > "$RUNNER_TEMP/structural.log" 2>&1 || process_exit=$?
+          reader_exit=0
+          /usr/bin/python3 "$RUNNER_TEMP/qa-junit.py" "$report.xml" --lane structural \
+            "${required[@]}" || reader_exit=$?
+          printf 'process_exit=%s\nreader_exit=%s\n' "$process_exit" "$reader_exit" > "$report.exit"
+          cat "$report.exit"
+          test "$process_exit" = 0 && test "$reader_exit" = 0
+      - name: Upload structural outcomes and binding
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-structural-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qa-results/subject.txt
+            ${{ runner.temp }}/qa-results/structural.json
+            ${{ runner.temp }}/qa-results/structural.exit
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── The run's one honest verdict: every lane's real conclusion and counts.
+  summary:
+    name: summary
+    if: ${{ always() && github.repository == 'razzant/ouroboros' }}
+    needs: [merge-selector, gh-cli, harbor, browser, windows-local-model, structural]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      JOB_SELECTOR_MANAGED: ${{ needs.merge-selector.result }}
+      RESULT_SELECTOR: ${{ needs.merge-selector.outputs.selector_outcome }}
+      COUNTS_SELECTOR: ${{ needs.merge-selector.outputs.counts }}
+      RESULT_MANAGED: ${{ needs.merge-selector.outputs.managed_outcome }}
+      COUNTS_MANAGED: ${{ needs.merge-selector.outputs.managed }}
+      RESULT_GH: ${{ needs.gh-cli.result }}
+      COUNTS_GH: ${{ needs.gh-cli.outputs.counts }}
+      RESULT_HARBOR: ${{ needs.harbor.result }}
+      COUNTS_HARBOR: ${{ needs.harbor.outputs.counts }}
+      RESULT_BROWSER: ${{ needs.browser.result }}
+      COUNTS_BROWSER: ${{ needs.browser.outputs.counts }}
+      RESULT_WINDOWS: ${{ needs.windows-local-model.result }}
+      COUNTS_WINDOWS: ${{ needs.windows-local-model.outputs.counts }}
+      RESULT_STRUCTURAL: ${{ needs.structural.result }}
+      COUNTS_STRUCTURAL: ${{ needs.structural.outputs.counts }}
+      TEMPLATE_SHA256: ${{ needs.merge-selector.outputs.template }}
+    steps:
+      - name: Name every lane's real exit status and counts
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import os, sys
+          lanes = [
+              ("merge-selector", "SELECTOR"),
+              ("managed-reader", "MANAGED"),
+              ("gh-cli", "GH"),
+              ("harbor", "HARBOR"),
+              ("browser", "BROWSER"),
+              ("windows-local-model", "WINDOWS"),
+              ("structural", "STRUCTURAL"),
+          ]
+          # A counts line that records absent proof is no execution record, even when the job exited 0.
+          absent = ("unreadable", "REFUSED", "PROBLEMS", "PROOF ABSENT")
+          rows, bad = [], []
+          for lane, key in lanes:
+              result = os.environ.get(f"RESULT_{key}") or "unobserved"
+              counts = os.environ.get(f"COUNTS_{key}") or ""
+              rows.append((lane, result, counts or "(execution evidence unavailable)"))
+              if result != "success" or not counts or any(mark in counts for mark in absent):
+                  bad.append(f"{lane}={result}" + (" (no counts)" if not counts else ""))
+          shared_job = os.environ.get("JOB_SELECTOR_MANAGED") or "unobserved"
+          if shared_job != "success":
+              bad.append(f"selector/managed shared job={shared_job}")
+          template = os.environ.get("TEMPLATE_SHA256", "")
+          if not template:
+              bad.append("template-sha256=unrecorded")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+              stream.write("## Tools and skills qualification - lane outcomes\n\n")
+              stream.write(f"base `{os.environ['BASE']}` subject `{os.environ['SUBJECT']}` "
+                           f"tree `{os.environ['SUBJECT_TREE']}` branch `{os.environ['GITHUB_REF_NAME']}`\n\n")
+              stream.write(f"inert template sha256 `{template or 'UNRECORDED'}`: the bytes whose rendering the bind step compared with the started workflow\n\n")
+              stream.write(f"Shared selector/managed job outcome: `{shared_job}`.\n\n")
+              stream.write("| lane | step/job outcome | executed counts |\n|---|---|---|\n")
+              for lane, result, counts in rows:
+                  cell = counts.replace("|", "\\|")
+                  stream.write(f"| {lane} | {result} | {cell} |\n")
+              stream.write("\nNot run: broad Linux/Windows selection, widening, native AppImage and Windows gh. "
+                           "The managed-reader row covers eleven named cases on this Linux runner, not whole modules, an older tree or any real work machine. "
+                           "The CLI rows cover six named cases per version. Harbor covers deterministic 0.26 methodology "
+                           "and older construction only. Windows local-model uses an owned stand-in; browser evidence still needs "
+                           "inspection. No old core, trial, provider or real account.\n")
+          for lane, result, counts in rows:
+              print(f"{lane}: {result} | {counts}")
+          if bad:
+              print("NOT GREEN: " + "; ".join(bad))
+              sys.exit(1)
+          print("ALL LANES GREEN with execution read back from JUnit or runner evidence (diagnostic scope, see the note)")
+          PY
