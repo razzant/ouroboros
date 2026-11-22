@@ -2128,6 +2128,16 @@ of effects; only your state retains them. This reads immediate task Stop, not Wr
 Stop after the read cannot reach an action already starting. Never split one action (key press/release, drag).
 The host checks between whole calls for extensions that never ask. Bundled `unix_computer_use` also checks before `key` can raise the target and before each chord.
 
+### Reporting a permission the skill lacks
+
+A failing result (`{"ok": false, ...}`) may name why with a string `reason` (a snake_case code) and an optional
+`refusal` object: `capability_unavailable` (bool), `permission` (an id such as `accessibility`), `repair` (`owner`,
+`retry` or `self`) and `where` (a short hint). The host copies the valid fields into `meta.extension_reason`, ignores any
+other type and keeps the code `TOOL_REPORTED_FAILURE`. With `capability_unavailable` true and a `permission`, the
+skill's health record keeps that permission open and dated, and every work is told. Only a success that lists it in
+`permissions_available` (`{"ok": true, "permissions_available": ["accessibility"], ...}`) closes it: a skill that
+reports refusals but never what is available keeps the line open.
+
 ### Async tool handlers
 
 Tool handlers may be plain functions or `async def`. A coroutine runs on a helper thread's own loop or in the
