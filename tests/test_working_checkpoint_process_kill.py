@@ -132,7 +132,8 @@ def _unacked_beyond(drive: Path, attempt: int, held: list) -> list:
     return [row["msg_id"] for row in drain_owner_entries(drive, TASK_ID, set(held), attempt)]
 
 
-@pytest.mark.parametrize("scenario", ["inflight_effect", "inflight_sequential_batch", "inflight_parallel_batch"])
+@pytest.mark.parametrize("scenario", ["inflight_effect", "inflight_sequential_batch", "inflight_parallel_batch",
+                                      "inflight_read_group"])
 def test_sigkill_inside_an_accepted_batch_never_replays_it_and_keeps_acked_mail_once(
         tmp_path, monkeypatch, scenario):
     _tool, call_ids = BATCHES[scenario]

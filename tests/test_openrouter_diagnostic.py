@@ -127,8 +127,13 @@ def test_no_key_starts_no_thread_at_boot_or_crossing(sample, monkeypatch):
     assert "openrouter_last_check_at" not in result
 
 
-def test_busy_crossing_is_consumed_and_late_result_uses_its_paired_ledger(sample, monkeypatch):
-    with _held_http(monkeypatch) as (entered, _release, requests):
+@pytest.mark.parametrize("key_delta, alert", [(0.0, False), (40.25, False), (100.0, True)])
+def test_busy_crossing_is_consumed_and_late_result_uses_its_paired_ledger(sample, monkeypatch, key_delta, alert):
+    from ouroboros.context_sections import _drive_state_section
+    from ouroboros.section_floor import relocated_text
+
+    provider = {"total_usd": 1000.0 + key_delta, "daily_usd": key_delta}
+    with _held_http(monkeypatch, provider) as (entered, _release, requests):
         assert state.update_budget_from_usage({}) is True
         assert entered.wait(5)
         sample.update(physical_calls=100, accounted_usd=180.0, _ledger_high_water_seq=[0, 100])
@@ -139,8 +144,18 @@ def test_busy_crossing_is_consumed_and_late_result_uses_its_paired_ledger(sample
     result = state.load_state()
     assert result["spent_usd"] == 180.0 and result["openrouter_ledger_settled_usd"] == 80.0
     assert result["openrouter_checked_ledger_settled_usd"] == 40.0
-    assert result["budget_drift_pct"] == 0.0
-    assert "openrouter tracked: $40.00 vs OpenRouter key: $40.00" in state.status_text({}, [], {})
+    assert result["budget_drift_alert"] is alert
+    assert f"openrouter tracked: $40.00 vs OpenRouter key: ${key_delta:.2f}" in state.status_text({}, [], {})
+    reads = []
+    with monkeypatch.context() as patch:
+        for name in ("usage_breakdown", "usage_writer_snapshot", "usage_projection"):
+            patch.setattr(f"ouroboros.usage_accounting.{name}", lambda *_a, _name=name, **_k: reads.append(_name))
+        section = _drive_state_section(SimpleNamespace(drive_path=lambda rel: state.DRIVE_ROOT / rel))
+    assert reads == []  # no new money read for the context
+    for view in (section.full_text, relocated_text(section, section.reader)):
+        assert f"check published {result['openrouter_last_check_at']}" in view
+        assert f"local settled spend $40.00 (sampled before the key request); key usage ${key_delta:.2f}" in view
+        assert "$80.00" not in view and '"budget_drift_alert":' not in view and '"budget_drift_pct":' not in view
     checks = []
     monkeypatch.setattr(state, "check_openrouter_ground_truth",
                         lambda key: checks.append(key) or {"total_usd": 1080.0, "daily_usd": 80.0})

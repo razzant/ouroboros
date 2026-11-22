@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { COST_PERIODS, compactTokens, costPeriodPresentation } from '../modules/cost_period.js';
+import { COST_PERIODS, compactTokens, costPeriodPresentation, mountCostPeriod } from '../modules/cost_period.js';
 
 // The period view as `GET /api/cost-breakdown?period=7d` answers it (ouroboros/gateway/cost_period.py).
 const VIEW = {
@@ -83,6 +83,77 @@ test('cache writes read by what they followed, in the fact\'s own words', () => 
         ['204', '149M', '$1,250.93'], ['444', '146M', '$1,189.29'], ['9', '1.2M', '$9.60 for 900k tokens · 2 not split'], ['5', '700', '—']]);
 });
 
+test('the hourly write note distinguishes zero, a small price, and an unavailable comparison', () => {
+    for (const [ratio, reads] of [[0, '0'], [0.002, 'less than 0.1'], [null, null]]) {
+        const row = { ...VIEW.models[0], write_price_in_reads: ratio };
+        const [model] = costPeriodPresentation({ available: true, models: [row] }).models;
+        const notes = model.notes.filter((note) => note.startsWith('One token written'));
+        assert.deepEqual(notes, reads === null ? [] : [`One token written for 1 hour costs ${reads} read tokens at this model’s base price.`]);
+        assert.equal(model.notes.includes('The base price of a write for 1 hour cannot be expressed in read tokens.'), reads === null);
+    }
+});
+
+test('a write’s price in read tokens is promised only where one is known, and a missing price list is said once', () => {
+    const notes = (row) => costPeriodPresentation({ available: true, models: [{ model: 'vendor/m', calls: 4, cost: 0.125, open_rows: 0,
+        unpriced_rows: 0, tokens: { cache_write: 900, cache_read: 100, output: 0, uncached_input: 0 }, write_price_lifetime: '1h', ...row }] }).models[0].notes;
+    const ratioWords = (list) => list.filter((note) => /read tokens/.test(note));
+    // None of the model's calls could be shared (the catalogue holds no price list, or no price for the hourly write): that is
+    // the one fact, said where the split is said, and no ratio and no second sentence about one follows.
+    const none = notes({ by_class: null, unshared_cost: 0.125, unshared_calls: 4, write_price_in_reads: null });
+    assert.deepEqual(none.filter((note) => /price list/.test(note)), ['Not split by class: these calls have no price list, token counts or named cache lifetime at hand.']);
+    assert.deepEqual(ratioWords(none), []);
+    // Shared by a price list but a write cannot be set against a read (a read priced at nothing, routes that disagree): that
+    // is a fact of its own, still said, and still no ratio.
+    const shared = notes({ by_class: { cache_write: 0.1, cache_read: 0, output: 0, uncached_input: 0.025 }, unshared_cost: 0, unshared_calls: 0,
+        tokens_shared: { cache_write: 900, cache_read: 100, output: 0, uncached_input: 0 }, write_price_in_reads: null });
+    assert.deepEqual(ratioWords(shared), ['The base price of a write for 1 hour cannot be expressed in read tokens.']);
+    assert.deepEqual(shared.filter((note) => /price list/.test(note)), []);
+    // Part of the cost shared and part not: each fact is its own sentence.
+    const part = notes({ by_class: { cache_write: 0.05, cache_read: 0, output: 0, uncached_input: 0.025 }, unshared_cost: 0.05, unshared_calls: 2,
+        tokens_shared: { cache_write: 400, cache_read: 100, output: 0, uncached_input: 0 }, write_price_in_reads: null });
+    assert.deepEqual([part.filter((note) => /price list/.test(note)).length, ratioWords(part).length], [1, 1]);
+    // A known ratio is said with its lifetime, zero and a small price as they are, never as an unknown.
+    for (const [ratio, reads] of [[40, '40'], [0, '0'], [0.002, 'less than 0.1']]) {
+        assert.deepEqual(ratioWords(notes({ by_class: { cache_write: 0.1, cache_read: 0.025 }, unshared_cost: 0, write_price_in_reads: ratio })),
+            [`One token written for 1 hour costs ${reads} read tokens at this model’s base price.`]);
+    }
+});
+
+test('a standard and a priority payment show only the standard tokens beside the shared dollars', async () => {
+    const tiny = 0.00000025;
+    const view = { available: true, models: [{
+        model: 'vendor/mixed', calls: 2, cost: 1 + tiny, tokens: { cache_write: 100 }, tokens_shared: { cache_write: 10 },
+        by_class: { cache_write: tiny }, unshared_calls: 1, unshared_cost: 1, write_price_lifetime: '1h', write_price_in_reads: null,
+    }], cache_writes: [{ class: 'not_recorded', calls: 2, write_tokens: 100, shared_write_tokens: 10, write_cost: tiny, unshared_calls: 1 }] };
+    const { models: [model], writes: [write] } = costPeriodPresentation(view);
+    assert.equal(model.sum, '$1.00 · 2 calls');
+    assert.equal(model.parts[0].text, '<$0.0001 · <1% · 10 tokens');
+    assert.deepEqual([model.parts.at(-1).label, model.parts.at(-1).text], ['Not split', '$1.00 · >99% · 1 call']);
+    assert.equal(write.cost, '<$0.0001 for 10 tokens · 1 not split');
+    assert.equal(write.tokens, '100');
+
+    const cells = {};
+    const host = { querySelector: (selector) => (cells[selector] ??= {}), querySelectorAll: () => [], addEventListener() {} };
+    await mountCostPeriod(host, { load: async () => view }).reload();
+    const html = cells['.costs-period-models'].innerHTML;
+    assert.ok(html.includes('&lt;$0.0001 · &lt;1% · 10 tokens'));
+    assert.ok(cells['.costs-period-writes-host'].innerHTML.includes('&lt;$0.0001 for 10 tokens · 1 not split'));
+    const width = html.match(/data-cost-class="cache_write" style="--share:([^"]+)"/);
+    assert.ok(width && Number(width[1]) > 0 && Number(width[1]) < 0.005);
+});
+
+test('one hourly write distinguishes a tiny payment, measured zero and missing money', () => {
+    for (const [cost, sum, writeCost] of [[0.00000025, '<$0.0001', '<$0.0001'], [0, '$0.00', '$0.00'], [null, 'no recorded cost', '—']]) {
+        const view = { available: true, models: [{ model: 'vendor/model', calls: 1, cost, tokens: { cache_write: 2 },
+            tokens_shared: { cache_write: 2 }, by_class: cost ? { cache_write: cost } : null }],
+            cache_writes: [{ class: 'not_recorded', calls: 1, write_tokens: 2, write_cost: cost, unshared_calls: cost === null ? 1 : 0 }] };
+        const { models: [model], writes: [write] } = costPeriodPresentation(view);
+        assert.equal(model.sum, `${sum} · 1 call`);
+        assert.equal(write.cost, writeCost);
+        if (cost) assert.equal(model.parts[0].text, '<$0.0001 · 100% · 2 tokens');
+    }
+});
+
 test('an unavailable or empty period says so and invents nothing', () => {
     for (const view of [null, undefined, { available: false, period: '7d', error_code: 'ledger_unavailable' }]) {
         const shown = costPeriodPresentation(view);
@@ -101,8 +172,34 @@ test('token counts keep a glance\'s precision, and the periods are the three the
     assert.deepEqual(COST_PERIODS.map(([key]) => key), ['24h', '7d', '30d']);
 });
 
+test('the page leaving ends the period read out and drops its answer, and a read already out is kept when asked', async () => {
+    const reads = [];
+    const cells = {};
+    const host = { innerHTML: '', querySelector: (selector) => (cells[selector] ??= { textContent: '', innerHTML: '' }), querySelectorAll: () => [],
+        addEventListener: () => {} };
+    const card = mountCostPeriod(host, { load: (period, signal) => new Promise((resolve) => reads.push({ period, signal, resolve })) });
+    assert.equal(card.leave(), false, 'nothing is out before the first read');
+    const first = card.reload();
+    card.reload({ ifIdle: true });
+    assert.equal(reads.length, 1, 'a read out is kept when the caller asks for one only if none is');
+    assert.equal(cells['.costs-period-status'].textContent, 'Counting…');
+    assert.equal(card.leave(), true, 'the page leaves with a read out');
+    assert.equal(reads[0].signal.aborted, true, 'its transport is released at once');
+    assert.equal(cells['.costs-period-status'].textContent, '', 'and the card does not say it is counting');
+    reads[0].resolve({ available: true, models: [{ model: 'late/model', calls: 1, cost: 1 }], cache_writes: [] });
+    await first;
+    assert.equal(cells['.costs-period-models'].innerHTML, '', 'an answer that comes after leaving paints nothing');
+    assert.equal(card.leave(), false, 'nothing is out now');
+    const second = card.reload({ ifIdle: true });
+    assert.equal(reads.length, 2, 'an idle card reads when asked');
+    reads[1].resolve({ available: true, models: [{ model: 'now/model', calls: 1, cost: 1 }], cache_writes: [] });
+    await second;
+    assert.match(cells['.costs-period-models'].innerHTML, /now\/model/);
+    assert.equal(card.leave(), false, 'an answered read is not cut short by leaving');
+    assert.equal(cells['.costs-period-models'].innerHTML.includes('now/model'), true, 'and its answer stays');
+});
+
 test('a later period choice abandons the read it replaces', async () => {
-    const { mountCostPeriod } = await import('../modules/cost_period.js');
     const signals = [];
     const host = { innerHTML: '', querySelector: () => ({ textContent: '', innerHTML: '' }), querySelectorAll: () => [],
         addEventListener: () => {} };
