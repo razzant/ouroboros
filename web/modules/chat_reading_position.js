@@ -468,8 +468,11 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             feed.scrollTop += offset;
             state.top = feed.scrollTop; state.stick = false; state.remember(true); updateButton();
         },
-        followAfterLayout() {
+        /** Follows the newest message across the next layouts. `yielding`: a follow nobody asked for (an opening's saved
+         * preview) gives way to a navigation that claimed this generation and left the newest message (a Reply). */
+        followAfterLayout(yielding = false) {
             const token = generation;
+            if (yielding && claimed === token && !state.stick) return;
             let passes = 0;
             const apply = () => {
                 if (!alive() || token !== generation) return;

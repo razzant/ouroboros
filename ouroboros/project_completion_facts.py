@@ -18,11 +18,7 @@ def completion_facts(root, task_id: str, task: dict, result: dict, event: dict) 
     metadata = {**task, **result}.get("metadata")
     if isinstance(metadata, dict) and (origin := place_origin(metadata)):
         facts["place_origin"] = origin
-    reply = origin_reply(root, task_id, {**task, **result}) or origin_reply(root, task_id)
-    if not reply:
-        from ouroboros.projects_registry import project_binding_for_task
-        binding = project_binding_for_task(root, task_id) or {}
-        reply = origin_reply(root, task_id, {"origin_message_ref": binding.get("source_ref")})
+    reply = origin_reply(root, task_id, {**task, **result}, chat_id=1, binding_fallback=True)
     if reply:
         facts["reply_to"] = reply
     if isinstance(result.get("wake_summary"), str) and result["wake_summary"].strip():

@@ -11,9 +11,9 @@ const ME = 'session-me';
 const TS = '2026-10-16T09:40:00Z';
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
-function fixture({ savedReply, keptSends, onSend } = {}) {
+function fixture({ chatId = 1, history = () => [], savedReply, keptSends, onSend } = {}) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: [], window: { complete: true } }
+        String(url).startsWith('/api/chat/history') ? { messages: history(), window: { complete: true } }
             : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true } }));
     globalThis.sessionStorage.setItem('ouro_chat_session_id', ME);
     if (savedReply) globalThis.sessionStorage.setItem('ouro_chat_reply', JSON.stringify(savedReply));
@@ -34,7 +34,7 @@ function fixture({ savedReply, keptSends, onSend } = {}) {
                 return { status, clientMessageId: id };
             } },
         state: { activePage: 'chat', projectChatIds: new Set([7]), unreadCount: 0 },
-        updateUnreadBadge() {}, chatId: 1, idPrefix: 'chat', mountEl: env.mount,
+        updateUnreadBadge() {}, chatId, idPrefix: 'chat', mountEl: env.mount, asPanel: chatId !== 1,
         stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
     });
@@ -107,6 +107,25 @@ test('a new reply staged as the socket sends belongs to the next message', async
         assert.equal(echo.querySelector('.chat-quote-text').textContent, sent);
         assert.equal(f.kept().at(-1).reply.reply_to.address, sent);
         assert.equal(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).address, later);
+    } finally { f.close(); }
+});
+
+test('a Project\'s copy of an id-less original takes that row\'s Reply once the row is read, and sends its exact address', async () => {
+    // The copy and the row are one message by the binding's exact origin, never by its words or time.
+    let rows = [{ role: 'user', text: 'Original request', ts: TS, client_message_id: '', origin_projected: true,
+        origin_id: 'binding-origin', chat_id: 1 }];
+    const f = fixture({ chatId: 42, history: () => rows });
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const kept = f.bubbleOf((node) => node.dataset.originId === 'binding-origin');
+        assert.ok(kept && !replyButton(kept), 'the copy alone, unverified, offers no Reply');
+        const address = 'row:1@then#origin';
+        rows = [{ ...rows[0], origin_projected: false, history_id: 'chat:origin', row_address: address, source: 'web' }];
+        await f.instance.refreshHistory({ revision: 2 });
+        assert.equal(f.bubbleOf((node) => node.dataset.originId === 'binding-origin'), kept, 'adopted in place');
+        replyButton(kept).click();
+        await f.send('continue from here');
+        assert.equal(f.sent.at(-1).frame.reply_to, address, 'the composer sends the adopted row\'s own address');
     } finally { f.close(); }
 });
 

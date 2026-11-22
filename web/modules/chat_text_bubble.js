@@ -70,6 +70,13 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         for (const key of ['clientMessageId', 'systemType', 'senderSessionId', 'taskId', 'deliveryId', 'projectId']) {
             if (meta[key]) bubble.dataset[key] = meta[key];
         }
+        if (role === 'user' && Number.isInteger(meta.ownerChatId)) bubble.dataset.ownerChatId = String(meta.ownerChatId);
+        // A Project's retained copy names its original's room (history's `chat_id`), the room that room's receipts for
+        // it name (chat_history_replay.statedOwnerRoom). A copy from before copies named it states none.
+        if (role === 'user' && opts.originProjected && Number.isInteger(opts.reply?.chat_id)) {
+            bubble.dataset.sourceChatId = String(opts.reply.chat_id);
+            if (opts.reply.source_row_address) bubble.dataset.sourceRowAddress = opts.reply.source_row_address;
+        }
         if (legacyKey) bubble.dataset.messageKey = legacyKey;
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 

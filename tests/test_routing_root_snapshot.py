@@ -49,10 +49,13 @@ def main_host(tmp_path, monkeypatch):
     return ctx, turns
 
 
-def _route(ctx, client_message_id="m-1", chat_id=1, **task_metadata):
-    server_owner_routing._route_owner_message(object(), ctx, {
-        "chat_id": chat_id, "text": "how is it going?", "client_message_id": client_message_id,
-        "log_text": "how is it going?", "origin_message_ref": {"chat_id": chat_id, "client_message_id": client_message_id},
+def _route(ctx, client_message_id="m-1", chat_id=1, *, row=None, bridge=None, **task_metadata):
+    from ouroboros.owner_relay import owner_row_source
+
+    text = row["text"] if row is not None else "how is it going?"
+    server_owner_routing._route_owner_message(bridge if bridge is not None else object(), ctx, {
+        "chat_id": chat_id, "text": text, "client_message_id": client_message_id, "log_text": text,
+        **({"origin_message_ref": owner_row_source(row)[0]} if row is not None else {}),
         **({"task_metadata": task_metadata} if task_metadata else {})})
 
 
@@ -131,12 +134,16 @@ def test_web_project_context_requires_membership_when_numeric_chat_matches(tmp_p
     monkeypatch.setattr(server_owner_routing, "_route_project_chat_to_running_task", lambda *_a, **_kw: "")
     monkeypatch.setattr(routing, "_recent_root_results", lambda *_a: ([], {}))
     monkeypatch.setattr(owner_relay, "carry_room_context",
-                        lambda _drive, source, message, members, routed_to, *, reply=None:
-                        relays.append((source, message, [row["task_id"] for row in members], routed_to)))
+                        lambda _drive, source, message, members, routed_to, *, reply=None, source_ref=None:
+                        relays.append((source, message, [member["task_id"] for member in members], routed_to, source_ref)))
 
-    _route(ctx, "m-members", chat_id=chat)
+    row = {"direction": "in", "chat_id": chat, "text": "A note for this Project",
+           "ts": "2026-11-20T10:15:00+00:00", "client_message_id": "m-members"}
+    from ouroboros.dialogue_store import append
+    row = append(tmp_path, "chat", row).row
+    _route(ctx, "m-members", chat_id=chat, row=row)
 
-    assert relays == [(chat, "m-members", ["bound-member", "admitted-member"], "")]
+    assert relays == [(chat, "m-members", ["bound-member", "admitted-member"], "", owner_relay.owner_row_source(row)[0])]
 
 
 def test_a_room_row_reaches_the_other_live_roots_as_context_once_whatever_the_routing_outcome(tmp_path, monkeypatch):
@@ -169,7 +176,7 @@ def test_a_room_row_reaches_the_other_live_roots_as_context_once_whatever_the_ro
         row = {"chat_id": chat, "direction": "in", "ts": f"2026-10-01T00:0{client_message_id[-1]}:00Z", "text": text,
                "client_message_id": client_message_id, **typed}
         dialogue_store.append(tmp_path, "chat", row)
-        _route(ctx, client_message_id, chat_id=chat, **typed)
+        _route(ctx, client_message_id, chat_id=chat, row=row, **typed)
         return format_address(row_address(row))
 
     def mail(tid):

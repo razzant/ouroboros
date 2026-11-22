@@ -410,6 +410,7 @@
  * @property {string=} host_facts
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {string=} answer_row_address  // the answer's own row, shown on this card (DESIGN "Replies")
  * @property {string=} owner_wait_state
  * @property {string=} owner_wait_resume_reason
  */
@@ -432,6 +433,7 @@
  * @property {string=} address
  * @property {number=} chat_id
  * @property {'user'|'assistant'|'system'=} role
+ * @property {'user'=} quote_role  // the owner's ink on a recorded card answer
  * @property {string=} author_label
  * @property {string=} kind
  * @property {string=} snippet
@@ -513,7 +515,10 @@
  * @property {boolean=} text_placeholder
  * @property {Object=} chat_annotation
  * @property {string=} origin_id
+ * @property {string=} source_row_address
  * @property {boolean=} origin_projected
+ * @property {('owner_press'|'owner_card_input'|'owner_quiz_answer'|'owner_mailbox')=} opening_input_kind  // retained card input, not bubble text
+ * @property {number=} chat_id  // on that copy: the room its original was written in (its receipt's room)
  * @property {('document'|'photo'|'video'|'links'|'quiz'|'card')=} msg_type
  * @property {string=} filename
  * @property {string=} mime
@@ -1033,6 +1038,11 @@
  * @property {Object=} source_ref
  * @property {*=} origin_absent
  * @property {string=} source_text
+ * @property {boolean=} source_projectable
+ * @property {Array<Object>=} source_attachments
+ * @property {string=} source_channel
+ * @property {boolean=} source_text_placeholder
+ * @property {Object.<string,(string|Object)>=} source_input  // bound card kind, asker, label and exact submitted content/fields
  */
 
 /**
@@ -1584,7 +1594,6 @@
  * @property {boolean} saved  // always true
  * @property {string} post_commit_failed
  */
-
 /** @typedef {Object} SettingsSaveRequest Open partial document of setting keys.
  * @property {Object<string, string>=} if_unchanged
  * @property {string[]=} unset

@@ -11617,13 +11617,14 @@ html[data-layout="stack"] .project-panel {
     cursor: pointer;
     transition: var(--motion-tone);
 }
-.chat-quiz-option:hover:not(:disabled) { background: var(--surface-capsule-hover); }
-.chat-quiz-option:active:not(:disabled) { filter: var(--press); }
+.chat-quiz-option:hover:not(:disabled, :where(.chosen[aria-disabled="true"])) { background: var(--surface-capsule-hover); }
+.chat-quiz-option:active:not(:disabled, :where(.chosen[aria-disabled="true"])) { filter: var(--press); }
 .chat-quiz-option:disabled { color: var(--text-disabled); cursor: default; background: var(--surface-tray); box-shadow: none; }
 .chat-quiz-option.chosen { color: var(--tone-chosen-answer-ink); background: var(--tone-chosen-answer); }
-/* A settled answer is a record: its chosen card keeps the lift the theme gives it. A chosen card that still takes a
-   press (a choice dialog's radio card) stands like every capsule. */
-.chat-quiz-option.chosen:disabled { box-shadow: var(--tone-chosen-answer-shadow); }
+/* A settled answer is a record: its chosen card keeps the lift the theme gives it and takes no press, inert by
+   aria-disabled so a Reply can still land on it. A chosen card that still takes a press (a choice dialog's radio card)
+   stands like every capsule. */
+.chat-quiz-option.chosen:is(:disabled, [aria-disabled="true"]) { box-shadow: var(--tone-chosen-answer-shadow); cursor: default; }
 .chat-quiz-option.pending-choice {
     transition: none;
     box-shadow: var(--elev-rest), inset 0 0 0 1px var(--focus-accent-border);
@@ -11631,8 +11632,8 @@ html[data-layout="stack"] .project-panel {
     color: var(--text-primary);
 }
 .chat-quiz-card [aria-disabled="true"] { cursor: default; }
-.chat-quiz-card [aria-disabled="true"]:not(.pending-choice) { opacity: var(--quiz-held-opacity); }
-.chat-quiz-card [aria-disabled="true"]:hover:not(.pending-choice) {
+.chat-quiz-card [aria-disabled="true"]:not(.pending-choice, .chosen) { opacity: var(--quiz-held-opacity); }
+.chat-quiz-card [aria-disabled="true"]:hover:not(.pending-choice, .chosen) {
     background: var(--surface-tray);
 }
 .chat-quiz-feedback {
@@ -11925,12 +11926,21 @@ html[data-layout="stack"] .project-panel {
     from { box-shadow: 0 0 0 3px var(--accent-25); }
     to { box-shadow: 0 0 0 3px transparent; }
 }
-:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
+/* An answer to a card is shown on it (DESIGN "Replies"): its recorded choice, else the owner's words. A choice with
+   words beside it is one answer: the card lends its words line the same moment (the :has() stays on the card). */
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
+.chat-quiz-card:has(> .chat-quiz-options > .chat-quiz-option.is-quote-target) {
+    --quiz-answer-lit: chat-quote-target;
+    --quiz-answer-ring: 0 0 0 3px var(--accent-25);
+}
+.chat-quiz-answer { animation: var(--quiz-answer-lit, none) 1.4s ease-out; }
 /* A row that takes focus only to be returned to (a quote's target, a closed row menu) shows the one keyboard ring. */
-:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item)[tabindex="-1"]:focus { outline: none; }
-:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer)[tabindex="-1"]:focus { outline: none; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
-    :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item).is-quote-target { animation: none; box-shadow: 0 0 0 3px var(--accent-25); }
+    :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer).is-quote-target { animation: none; box-shadow: 0 0 0 3px var(--accent-25); }
+    .chat-quiz-option.chosen.is-quote-target { box-shadow: var(--tone-chosen-answer-shadow), 0 0 0 3px var(--accent-25); }
+    .chat-quiz-answer { animation: none; box-shadow: var(--quiz-answer-ring, none); }
 }
 
 /* === The quote panel (docs/DESIGN.md "Replies"): one component (chat_reply_quote.js) inside a bubble and

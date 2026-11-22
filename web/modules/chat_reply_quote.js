@@ -49,6 +49,7 @@ export function normalizeReplyRef(raw) {
         address: oneSpace(raw.address),
         chat_id: Number.isInteger(chatId) ? chatId : 1,
         role,
+        ...(raw.quote_role === 'user' ? { quote_role: 'user' } : {}),
         author_label: oneSpace(raw.author_label) || authorOf(role),
         kind: KINDS.includes(raw.kind) ? raw.kind : 'message',
         snippet: oneSpace(raw.snippet),
@@ -101,7 +102,7 @@ export function createReplyQuote(raw, { onJump = null, onCancel = null, composer
     const when = formatTime(ref.ts)?.short || '';
     const root = node('div', composer ? 'chat-quote chat-quote--composer' : 'chat-quote');
     if (composer) root.setAttribute('role', 'group');
-    root.dataset.author = ref.role || 'neutral';
+    root.dataset.author = ref.quote_role || ref.role || 'neutral';
     root.dataset.kind = ref.kind;
     if (ref.excerpt) { root.dataset.excerpt = '1'; root.dataset.address = ref.address; }
     root.dataset.mode = composer ? 'composer' : 'reply';

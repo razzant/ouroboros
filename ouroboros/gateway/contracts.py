@@ -427,8 +427,8 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
 
     Optional questions continue under ``assumption``; ``wait_for_answer`` marks
     required waiting without an implied answer. ``state`` carries lifecycle.
-    Replay merges the stored ``answered_index`` and verbatim ``comment``; a
-    comment without an index is the owner's whole answer, not an option choice.
+    Replay merges the stored ``answered_index``, verbatim ``comment`` (without an index,
+    the owner's whole answer) and ``answer_row_address``, the answer row its card shows.
     A private Presence question's one frame names its work's Project in ``also_rooms``."""
 
     type: Literal["quiz"]
@@ -445,6 +445,7 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     ts: str
     answered_index: NotRequired[int]
     comment: NotRequired[str]
+    answer_row_address: NotRequired[str]  # replay only, never the live quiz_state frame
     host_facts: NotRequired[str]  # host-written, never the model's: asking task, run start, owner's last message
     materials: NotRequired[List[Dict[str, Any]]]
     question_delivery: NotRequired[Dict[str, Any]]
@@ -564,6 +565,7 @@ class MessageAnnotationOutbound(TypedDict):
     status: str
     suppress_bubble: bool
     chat_id: NotRequired[int]
+    source_row_address: NotRequired[str]
     target: NotRequired[str]
     project_name: NotRequired[str]
     target_task_ids: NotRequired[list[str]]

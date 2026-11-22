@@ -24,11 +24,11 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D14 | Skills & extensions | 74 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 42 | 0 |
 | D16 | Observability, usage accounting & cost | 33 | 0 |
-| D17 | Projects, workspaces & task results | 61 | 0 |
+| D17 | Projects, workspaces & task results | 62 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1072** | **0** |
+| **total** | | **1073** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -52,7 +52,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 | **D14** | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · |
 | **D15** | ✓ | · | ✓ | ✓ | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | ✓ | ✓ | ✓ | · |
 | **D16** | · | ✓ | · | ✓ | · | ✓ | · | · | · | · | · | ✓ | · | · | · | · | ✓ | ✓ | ✓ | · |
-| **D17** | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | · | · | ✓ | ✓ | · | ✓ | ✓ | · |
+| **D17** | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | · | · | ✓ | ✓ | · | ✓ | ✓ | · |
 | **D18** | · | · | · | · | · | · | · | · | ✓ | ✓ | · | ✓ | ✓ | · | · | · | · | · | · | · |
 | **D19** | · | · | · | · | · | · | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | · | · |
 | **D20** | · | · | · | ✓ | ✓ | · | · | · | · | · | · | · | · | · | ✓ | · | ✓ | ✓ | ✓ | · |
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **129**
+- lazy-only cross-domain pairs: **128**
   - D01->D08
   - D01->D10
   - D01->D11
@@ -171,7 +171,6 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D16->D11
   - D16->D15
   - D17->D02
-  - D17->D09
   - D17->D13
   - D17->D14
   - D17->D20
@@ -1181,6 +1180,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 
 ### D17 — Projects, workspaces & task results
 
+- `ouroboros/chat_annotations.py`
 - `ouroboros/coop_checkpoint.py`
 - `ouroboros/deliverables_paths.py`
 - `ouroboros/dialogue_import.py`

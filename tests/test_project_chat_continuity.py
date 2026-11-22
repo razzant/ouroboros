@@ -713,7 +713,14 @@ def test_owner_project_message_survives_into_history_with_annotation(tmp_path, m
         "project_id": "racer", "project_chat_id": chat_id, "project_name": "racer",
         "target_task_ids": ["running-root"], "target_titles": [],
     }
+    # The receipt names the physical row it belongs to (CLIENT_CONTRACT "Annotation receipts"): the address is
+    # assembled here from the canonical saved row, never read back from the receipt under test.
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
+
+    address = format_address(row_address(dict(dialogue_store.accepted_row(tmp_path, chat_id, "owner-msg-1").row)))
     assert row["chat_annotation"] == {
+        "source_row_address": address,
         "action": "mailbox_delivery",
         "target": "running-root",
         "target_label": "Task",
@@ -723,3 +730,4 @@ def test_owner_project_message_survives_into_history_with_annotation(tmp_path, m
     }
     for key in ("target_label", *destination):
         assert acks[-1][1][key] == row["chat_annotation"][key]
+    assert acks[-1][1]["source_row_address"] == address  # the live receipt names the same row

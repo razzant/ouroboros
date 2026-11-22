@@ -61,7 +61,7 @@ class _CompactionRoundContext:
     extra_tool_schemas: Tuple[Dict[str, Any], ...] = ()  # host-admitted feature schemas, under the same selection
 
 
-def _arrival(row: Any = None, received: Any = "") -> Dict[str, Any]:
+def _arrival(row: Any = None, received: Any = "", *, held: bool = False) -> Dict[str, Any]:
     """Where and when an owner row arrived, for its corpus row's ``origin``: the room, client id and accept time
     of the chat row the host holds for it; without one, ``received``, when its mailbox entry was written or (none
     given) this drain read it. A time the host does not have is never invented."""
@@ -69,11 +69,16 @@ def _arrival(row: Any = None, received: Any = "") -> Dict[str, Any]:
 
     row = row if isinstance(row, dict) else {}
     ids = {key: row.get(key) for key in ("chat_id", "client_message_id")}
+    if row and held:
+        from ouroboros.owner_relay import owner_row_identity
+        identity = owner_row_identity(row)
+        ids.update(chat_id=str(identity["chat_id"]), row_sha256=identity["row_sha256"])
     return {**ids, "ts": row["ts"]} if row.get("ts") else {**ids, "received": str(received or utc_now_iso())}
 
 
 def _stamp_owner_delivery(
-    owner_ctx: Any, *, msg_id: str, client_message_id: str, text: str, ts: str,
+    owner_ctx: Any, *, msg_id: str, client_message_id: str, text: str, ts: str, source_ref: Any = None,
+    origin_suppressed: bool = False,
 ) -> Any:
     """Record the latest owner message this turn actually DRAINED (latest wins); returns the chat row held for it.
 
@@ -88,10 +93,15 @@ def _stamp_owner_delivery(
     """
     if owner_ctx is None:
         return None
-    from ouroboros.owner_relay import retain_owner_message
-    held = retain_owner_message(owner_ctx, client_message_id=client_message_id)
+    from ouroboros.owner_relay import owner_row_identity, retain_owner_message
+    from ouroboros.chat_chain import format_address
+    held = (None if origin_suppressed else
+            retain_owner_message(owner_ctx, client_message_id=client_message_id, source_ref=source_ref))
+    identity = owner_row_identity(held) if held else None
     owner_ctx.last_owner_delivery = {
         "msg_id": msg_id, "client_message_id": client_message_id, "text": text, "ts": ts,
+        **({"origin_suppressed": True} if origin_suppressed else {}),
+        **({"chat_id": identity["chat_id"], "source_row_address": format_address(identity)} if identity else {}),
     }
     return held
 
@@ -186,16 +196,19 @@ def _drain_incoming_messages(
                 target = reply_target(getattr(owner_ctx, "budget_drive_root", None) or drive_root, injected.get("reply_reference"))
                 _append_reply_context(messages, target, owner_ctx)
                 owner_content = _owner_content(injected, drive_root, task_id)
-                _loop()._record_owner_directive(
-                    owner_ctx, source="direct_incoming", content=owner_content, origin=_arrival(injected), reply_to=target or None,
-                    msg_id=str(injected.get("client_message_id") or injected.get("msg_id") or ""),
-                )
-                _stamp_owner_delivery(
+                held = _stamp_owner_delivery(
                     owner_ctx,
                     msg_id=str(injected.get("msg_id") or ""),
                     client_message_id=str(injected.get("client_message_id") or ""),
                     text=str(injected.get("text") or ""),
                     ts=str(injected.get("ts") or ""),
+                    source_ref=injected.get("origin_message_ref"),
+                    origin_suppressed=injected.get("origin_suppressed") is True,
+                )
+                _loop()._record_owner_directive(
+                    owner_ctx, source="direct_incoming", content=owner_content, origin=_arrival(held or injected, held=bool(held)),
+                    msg_id=str(injected.get("client_message_id") or injected.get("msg_id") or ""),
+                    reply_to=target or None,
                 )
                 _loop()._append_or_merge_user_content(
                     messages, _loop()._owner_marked_content(owner_content), slot=owner_ctx, kind=OWNER_WORDS_KIND,
@@ -263,18 +276,14 @@ def _drain_incoming_messages(
                 continue
             dmsg = entry.get("text") or ""
             if kind == KIND_TASK_MESSAGE:
-                # A principal's words to this task are premises every review reads
-                # (plan and acceptance share one corpus); a host system frame and a
-                # descendant's escalation are not the principal's directives. A sibling's
-                # words the parent RELAYED are context with a real source, not the
-                # principal's own directive: the typed provenance and the relay ids ride
-                # the row, exactly as the dialogue renderer already distinguishes them.
-                # An INDEPENDENT task's words (a peer root speaking for itself) are
-                # context the receiving model judges, never a directive: they enter no
-                # owner corpus, so owner_source_sha256, the post-drain growth check and
-                # the acceptance premises stay the owner's (owner 4=A -- only the
-                # owner's messages supersede a reviewed answer). The typed provenance
-                # and the sender id ride the row, the injected event and the ack.
+                # A principal's words are premises every review reads (plan and acceptance share
+                # one corpus); a host system frame and a descendant's escalation are not the
+                # principal's directives. A sibling's words the parent RELAYED are context with a
+                # real source, not the principal's own directive; an INDEPENDENT task's words (a
+                # peer root speaking for itself) are judged context that enter no owner corpus, so
+                # owner_source_sha256, the post-drain growth check and the acceptance premises stay
+                # the owner's (owner 4=A). The typed provenance and the relay/sender id ride the
+                # row, the injected event and the ack.
                 provenance = str(entry.get("provenance") or "ancestor_task")
                 arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
                 if provenance == "place_event":
@@ -373,6 +382,8 @@ def _drain_incoming_messages(
                 client_message_id=str(entry.get("client_message_id") or ""),
                 text=dmsg,
                 ts=str(entry.get("ts") or ""),
+                source_ref=entry.get("origin_message_ref"),
+                origin_suppressed=entry.get("origin_suppressed") is True,
             )
             source = living.get("source") or row_source(entry, "owner_mailbox", chats)
             target = (living.get("reply_to") or answered_card_reply(*answered_card_source(entry, chats))
@@ -383,8 +394,8 @@ def _drain_incoming_messages(
                 source=source,
                 content=living["content"] if living else _owner_content(entry, drive_root, task_id), words=None if living else dmsg,  # the rendering, its exact text beside
                 msg_id=str(entry.get("msg_id") or ""),
-                # The same message relayed, or read from its room, is one row: its room and client id name it.
-                origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id"),
+                # Keep the physical identity and the card fields distinct from the mailbox delivery id.
+                origin={**_arrival(held, entry.get("ts"), held=True), "client_message_id": entry.get("client_message_id"),
                         "source_task_id": living.get("source_task_id"), "quiz_id": living.get("quiz_id")},
                 reply_to=target or None,
             )
@@ -458,7 +469,7 @@ def _record_quiz_delivery(ctx, entry: dict, text: str) -> str:
     _loop()._record_owner_directive(
         ctx, source=source, content=text, msg_id=str(entry.get("msg_id") or ""),
         origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"),
-                **_arrival(held, entry.get("ts"))},
+                **_arrival(held, entry.get("ts"), held=True)},
         reply_to=answered_card_reply(answer, delivery.get("task_id")),
     )
     return source

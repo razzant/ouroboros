@@ -42,6 +42,18 @@ test('a reply quote is one jump button in the QUOTED author\'s voice, words set 
     assert.deepEqual(jumps, ['row:1@a#1']);
 }));
 
+test('a recorded choice has owner ink and its jump keeps the system row identity', () => withDom(() => {
+    const raw = { address: 'row:1@a#1', role: 'system', author_label: 'You', snippet: 'First' };
+    const jumps = [];
+    const panel = createReplyQuote({ ...raw, quote_role: 'user' }, { onJump: ref => jumps.push(ref) });
+    assert.equal(panel.dataset.author, 'user');
+    panel.children[0].click();
+    assert.equal(jumps[0].role, 'system');
+    assert.equal(jumps[0].address, raw.address);
+    assert.equal(createReplyQuote(raw).dataset.author, 'system');
+    assert.equal(createReplyQuote({ ...raw, quote_role: 'unknown' }).dataset.author, 'system');
+}));
+
 test('the composer strip is the same panel with a lead word and a cancel control', () => withDom(() => {
     let cancelled = 0;
     const strip = createReplyQuote({ address: 'row:1@a#1', role: 'assistant', snippet: 'answer' },

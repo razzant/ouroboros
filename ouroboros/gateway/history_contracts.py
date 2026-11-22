@@ -53,7 +53,8 @@ class PresenceContact(TypedDict, total=False):
 class ChatHistoryQuiz(TypedDict, total=False):
     """The question card of a ``msg_type: "quiz"`` row (the question itself is the row's ``text``).
     ``state`` is the durable lifecycle merged at read time: open, answered, closed,
-    expired_terminal or superseded. ``answered_index`` and ``comment`` are the recorded answer."""
+    expired_terminal or superseded. ``answered_index`` and ``comment`` are the recorded answer,
+    ``answer_row_address`` its own row, which the card shows (DESIGN "Replies")."""
 
     quiz_id: Required[str]
     options: List[Dict[str, Any]]  # QuizOption rows: {label, detail?, recommended?}
@@ -66,6 +67,7 @@ class ChatHistoryQuiz(TypedDict, total=False):
     host_facts: str
     answered_index: int
     comment: str
+    answer_row_address: str
     owner_wait_state: str
     owner_wait_resume_reason: str
 
@@ -184,7 +186,10 @@ class ChatHistoryMessage(TypedDict, total=False):
     text_placeholder: bool
     chat_annotation: Dict[str, Any]  # the routing outcome shown on an owner message
     origin_id: str
+    source_row_address: str  # the physical original of a retained copy, even outside this store
     origin_projected: bool  # a Project's start message rebuilt from its binding's own copy
+    opening_input_kind: Literal["owner_press", "owner_card_input", "owner_quiz_answer", "owner_mailbox"]
+    chat_id: int  # on that copy: the room its original was written in (its receipt's room)
     msg_type: Literal["document", "photo", "video", "links", "quiz", "card"]
     filename: str
     mime: str

@@ -7,6 +7,7 @@
 import { tr } from './i18n.js';
 import { showToast } from './toast.js';
 import { isStoreMigrating } from './api_client.js';
+import { ownerRowRoom } from './chat_history_replay.js';
 import { authorOf, createRelayQuote, createReplyQuote, normalizeReplyRef, replySnippet } from './chat_reply_quote.js';
 import { createRelayDecks } from './chat_relay_deck.js';
 import { fullText } from './text_fit.js';
@@ -481,13 +482,18 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             if (bubble && address && bubble.dataset.rowAddress !== address) bubble.dataset.rowAddress = address;
             if (bubble && row?.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
         },
-        /** The host's saved row for the owner's own echo: the bubble takes its address and, with it, its Reply. */
-        adopt(row) {
+        /**
+         * The host's saved row for the owner's own echo: the bubble takes its address and, with it, its Reply. A
+         * canonical row the caller matched to the retained copy it already shows by that copy's exact origin
+         * (`verified`) adopts that copy, an id-less one included; a copy alone, unverified, takes none.
+         */
+        adopt(row, verified = null) {
             const cmid = String(row?.client_message_id || '');
             const address = String(row?.row_address || '');
-            if (row?.role !== 'user' || !cmid || !address) return false;
-            const bubble = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
-                .find((node) => node.dataset.clientMessageId === cmid);
+            if (row?.role !== 'user' || !(cmid || verified) || !address || row.origin_projected) return false;
+            const bubble = verified || [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
+                .find((node) => node.dataset.clientMessageId === cmid && !node.dataset.rowAddress
+                    && !node.dataset.originProjected && Number(node.dataset.ownerChatId ?? chatId) === ownerRowRoom(row, chatId));
             if (bubble && row.reply_excerpt_disabled) bubble.dataset.replyExcerptDisabled = '1';
             if (bubble && row.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
             if (!bubble || bubble.dataset.rowAddress === address) return false;

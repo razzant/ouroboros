@@ -15,6 +15,7 @@ from ouroboros.dialogue_provenance import presence_root_carrier, presence_root_r
 from ouroboros.tools.control_events import (
     _emit_and_wait_for_routing,
     _promotion_pool_disabled_from_snapshot,
+    _routing_status_root,
 )
 from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.tools.registry import ToolContext
@@ -64,14 +65,18 @@ def _attach_origin_from_metadata(ctx: ToolContext, evt: Dict[str, Any]) -> None:
     ref = metadata.get("origin_message_ref")
     if isinstance(ref, dict) and ref:
         evt["source_ref"] = dict(ref)
-        text = metadata.get("origin_message_text")
+        snapshot = metadata.get("origin_message_snapshot") or {}
+        if snapshot:
+            evt["origin_message_snapshot"] = snapshot
+        text = snapshot.get("placeholder_text") or metadata.get("origin_message_text")
         if isinstance(text, str) and text:
             evt["source_text"] = text
     elif metadata.get("origin_suppressed"):
         evt["origin_suppressed"] = True
 
 
-def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any]) -> None:
+def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any], source: Optional[Dict[str, Any]] = None,
+                              *, owner_basis: Optional[Dict[str, Any]] = None) -> None:
     """Keep the routed objective's author separate from the ingress owner corpus.
 
     A routing run with neither owner-door stamp opens the new root with this drafted
@@ -80,14 +85,212 @@ def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any]) -> None:
     one, and a suppressed stamp is owner input that the door did not log.
 
     The corpus is persisted with the start (its receipt, the queue snapshot, the running
-    record): the one owner-corpus projection (``owner_words.carried_owner_corpus``).
+    record): the one owner-corpus projection (``owner_words.carried_owner_corpus``);
+    ``source``: the held row ``owner_source`` selected to open the start.
     """
-    from ouroboros.owner_words import carried_owner_corpus
+    from ouroboros.owner_words import carried_owner_corpus, merged_corpus
 
     evt["objective_author"] = {"kind": "task", "task_id": str(getattr(ctx, "task_id", "") or "")}
     if not (evt.get("source_ref") or evt.get("origin_suppressed")):
         evt["origin_message_absent"] = True
-    evt["owner_corpus"] = carried_owner_corpus(ctx, evt.get("source_text"))
+    words = "" if (evt.get("origin_message_snapshot") or {}).get("placeholder_text") else evt.get("source_text")
+    evt["owner_corpus"] = carried_owner_corpus(ctx, words, source=source)
+    if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
+        if owner_basis["source"] in ("owner_press", "owner_quiz_answer") or (owner_basis.get("reply_to") or {}).get("card_id"):
+            evt["owner_corpus"] = merged_corpus(evt.get("owner_corpus"), [owner_basis])
+        else:
+            evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
+
+
+def _selected_source(ctx: ToolContext, handle: str, presence_carrier: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+    """``(row, refusal)``: the held owner row ``owner_source`` names to open the new work, read before any effect.
+
+    Only a root the owner door stamped (``run_origin``'s ``owner_ingress``) and that acts for no place chooses; the
+    row must be one this run holds and still quotable now (``owner_relay.quote_rows``: a revoked account's or a
+    forwarded row is not). A quote rebuilt from the corpus keeps its words without becoming a source row.
+    Choosing names which of the owner's messages the work answers; it grants nothing new.
+    """
+    from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.owner_relay import quote_rows
+    from ouroboros.task_results import resolve_ctx_lineage
+    from ouroboros.tools.join_ledger import _is_delegated_task
+
+    metadata = getattr(ctx, "task_metadata", None)
+    if presence_carrier or _is_delegated_task(ctx) or not resolve_ctx_lineage(ctx)["is_root_task"] or not run_origin(
+            {"metadata": metadata if isinstance(metadata, dict) else {}})["owner_ingress"]:
+        return {}, ("owner_source belongs to a root your human's message started; this work keeps the source it "
+                    "inherits (a place's work names its destination, a private start its owner_quote).")
+    quotes, error = quote_rows(ctx, [handle])
+    if error:
+        return {}, f"owner_source names no held owner message now ({error})."
+    from ouroboros.dialogue_store import ROW_SHA_KEY
+    from ouroboros.owner_relay import held_owner_messages, owner_row_source
+    from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
+    from ouroboros.store import StoreError
+
+    row = quotes[0]["owner_row"]
+    if row.get("_owner_corpus_rebuilt") or row.get("corpus_answer"):
+        return {}, "owner_source is a corpus quote. Choose the original message to open new work from it."
+    ref, _words = owner_row_source(row)
+    if not owner_message_ref_is_valid(ref):
+        return {}, "owner_source has no complete host row identity."
+    if isinstance(held_owner_messages(ctx)[handle].get("carried"), dict) and not row.get(ROW_SHA_KEY):
+        # Older automatic carries did not distinguish a reconstructed quote. Require the exact
+        # existing row, not a weaker search by the quote's display fields.
+        try:
+            original = resolve_owner_message_source(row.get("_owner_source_root") or canonical_data_root(ctx), ref)
+        except StoreError:
+            original = None
+        if original is None:
+            return {}, "owner_source is a carried quote whose original message could not be confirmed."
+    return row, ""
+
+
+def _selected_source_fields(ctx: ToolContext, row: Dict[str, Any]) -> Dict[str, Any]:
+    """The start's source fields from the selected row, by value: its identity and the words its checksum covers
+    (``owner_relay.owner_row_source``), its client id, its files from the root it was read from, its sending
+    surface, each or its absence. The caller's chat, project and workspace stay the call's addressing. The files
+    are a held row's (``inherited``): staging names one it cannot copy and refuses nothing, unlike a turn's own."""
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source, upload_specs
+    from ouroboros.tool_access import canonical_data_root
+
+    ref, words = owner_row_source(row)
+    surface = row.get("client_surface")
+    snapshot = origin_snapshot(row, canonical_data_root(ctx), include_reply=True)
+    return {"source_ref": ref, "source_text": words, "origin_message_snapshot": snapshot,
+            "client_message_id": ref["client_message_id"],
+            "attachment_uploads": [{**spec, "inherited": True} for spec in upload_specs(
+                row, row.get("_owner_source_root") or canonical_data_root(ctx))],
+            **({"client_surface": dict(surface)} if isinstance(surface, dict) and surface else {})}
+
+
+def _is_turn_message(ctx: ToolContext, own: Any, ref: Dict[str, Any]) -> bool:
+    """Whether the selected row (``ref``) IS the message this turn answers (``own``: its origin ref), by physical row.
+    Only the row key the owner door minted at ingress decides: an older stamp without one proves nothing (the one
+    held row its fields identify is not that key), and equal room, client id, time and words prove nothing either —
+    two rows can share them and carry different files."""
+    key = ref.get("row_sha256")
+    return bool(isinstance(own, dict) and key and own.get("row_sha256") == key)
+
+
+def _origin_file_refs(ctx: ToolContext, ref: Dict[str, Any]) -> list | None:
+    """The file refs of the message this run answers, by value; ``None`` where they cannot be known.
+
+    A snapshot the owner door recorded answers for its row (one without ``attachments`` records no files). Where none
+    was recorded (an older stamp; no writer keeps an empty one) the list is recovered from the one row the origin ref
+    identifies: the row this run holds, else the canonical row that ref picks out uniquely and quotably, never one
+    matched by equal words. With neither, the files are a gap, not an empty list."""
+    metadata = getattr(ctx, "task_metadata", None)
+    snapshot = metadata.get("origin_message_snapshot") if isinstance(metadata, dict) else None
+    if isinstance(snapshot, dict) and snapshot:
+        return snapshot.get("attachments") or []
+    from ouroboros.owner_relay import origin_snapshot, quotable_owner_row
+    from ouroboros.owner_words import _held_origin
+    from ouroboros.project_dialogue import resolve_owner_message_source
+
+    try:
+        held = getattr(ctx, "_held_owner_messages", None)  # built every round: no second read of what it holds
+        row = _held_origin(ref, held) if isinstance(held, dict) and ref.get("row_sha256") else None
+        if row is None:
+            found = resolve_owner_message_source(canonical_data_root(ctx), ref)
+            row = found if found and quotable_owner_row(found, canonical_data_root(ctx)) else None
+        return None if row is None else origin_snapshot(row, canonical_data_root(ctx)).get("attachments") or []
+    except Exception:
+        log.debug("start_task: the files of the origin row could not be resolved", exc_info=True)
+        return None
+
+
+def _source_files(ctx: ToolContext, evt: Dict[str, Any], *, selected: bool) -> tuple[list, bool]:
+    """Settle the start's files before it is sent: ``(this turn's own files the choice displaced, whether its source's
+    file list is unknown)``. ``evt["attachment_uploads"]`` is what the start asks the host to stage.
+
+    Without a selection, separate work answers the message this run answers and receives that message's files: a
+    direct turn's own fresh uploads (``chat_attachment_uploads``, already on the event), else the files its origin
+    row records (``_origin_file_refs``), staged without refusal. A selection replaces the turn's own uploads with
+    the selected row's own complete ordered specs (labels, duplicates and availability included), which are named
+    as not given; selecting the turn's own message keeps its fresh uploads only when the ingress origin ref and
+    the selection carry the same physical row key (``_is_turn_message``). Admission, never this settling, says
+    what was staged."""
+    from ouroboros.owner_relay import source_upload_specs
+
+    metadata = getattr(ctx, "task_metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    fresh = [spec for spec in metadata.get("chat_attachment_uploads") or [] if isinstance(spec, dict)]
+    unknown = False
+    if not selected and not fresh and evt.get("source_ref"):
+        refs = _origin_file_refs(ctx, evt["source_ref"])
+        unknown = refs is None
+        evt["attachment_uploads"] = source_upload_specs(ctx, refs or [])
+    if selected and fresh and _is_turn_message(ctx, metadata.get("origin_message_ref"), evt["source_ref"]):
+        evt["attachment_uploads"] = fresh
+        return [], unknown
+    return ([str(spec.get("label") or "attachment") for spec in fresh] if selected else []), unknown
+
+
+def _files_note(ctx: ToolContext, evt: Dict[str, Any], receipt: Dict[str, Any], files: tuple | None) -> str:
+    """The sentences of the start's result about its files (``files``: what ``_source_files`` returned).
+
+    Each file of its source reads as the admission recorded it: the token-matched receipt of a scheduled start
+    (``routing_wait.admitted_files``). With no admission yet nothing is known of staging: a file with a path is
+    pending and one without names its known reason. An unknown file list and the turn's own files a selection
+    displaced each get a sentence of their own; labels are never rewritten."""
+    if files is None:
+        return ""
+    from ouroboros.owner_relay import NOT_GIVEN
+
+    displaced, unknown = files
+    specs = [spec for spec in evt.get("attachment_uploads") or [] if isinstance(spec, dict)]
+    more = 0
+    if specs and str(receipt.get("status") or "") == "scheduled":
+        from ouroboros.routing_wait import complete_admitted_files
+
+        rows = complete_admitted_files(_routing_status_root(ctx), str(evt.get("task_id") or ""), receipt)
+        declared = receipt.get("attachment_declared")  # reporting runs after the effect: it may not raise
+        more = max(0, declared - len(rows)) if type(declared) is int else 0
+        named = [f"{row.get('label') or 'attachment'} (" + ("staged at start" if row.get("status") == "staged" else
+                 f"not staged: {row.get('reason') or 'staging_failed'}") + ")" for row in rows] or [
+                 f"{spec.get('label') or 'attachment'} (no admission outcome recorded)" for spec in specs]
+    else:
+        named = [f"{spec.get('label') or 'attachment'} (" + ("pending with its admission" if spec.get("path") else
+                 f"not staged: {spec.get('unavailable') or 'invalid_path'}") + ")" for spec in specs]
+    return ((f" Its source's files: {'; '.join(named)}" + (f"; {more} more are in the new work's own input manifest"
+                                                           if more else "") + "." if named else "")
+            + (" Its source's file list is unknown (no snapshot of it was recorded and its row cannot be read): no files "
+               "were given." if unknown else "")
+            + (f" This turn's own files are {NOT_GIVEN} ({'; '.join(displaced)}): its source is the selected message."
+               if displaced else ""))
+
+
+def _source_note(ctx: ToolContext, evt: Dict[str, Any], selected: str) -> str:
+    """One sentence for the start's result: which owner message the new work answers (its ``source_ref``), by the
+    handle this run holds for it, else its room and client id, and a short snippet."""
+    from ouroboros.answer_facts import OWNER_CARD_INPUT, OWNER_PRESS
+    from ouroboros.owner_relay import owner_text
+    from ouroboros.owner_words import _held_origin
+    from ouroboros.project_dialogue import opening_input
+
+    ref = evt["source_ref"]
+    held = getattr(ctx, "_held_owner_messages", None) or {}
+    snapshot = evt.get("origin_message_snapshot") or {}
+    address = selected or (snapshot.get("reply") or {}).get("address")
+    if not address:
+        known = _held_origin(ref, held)
+        address = next((handle for handle, row in held.items() if row is known), "")
+    words = "" if snapshot.get("placeholder_text") else evt.get("source_text")
+    row = held.get(address) or _held_origin(ref, held)
+    item = opening_input(row, canonical_data_root(ctx), retained=snapshot.get("input"))
+    pressed = item.get("source") == OWNER_PRESS
+    if item:
+        words = "" if item.get("source") == OWNER_CARD_INPUT else item.get("content")
+    elif row:
+        words = owner_text(row)
+    words = " ".join(str(words or "").split())
+    shown = (f"«{words if len(words) <= 80 else words[:79].rstrip() + '…'}»" if words else
+             "(no words of theirs)" if snapshot.get("placeholder_text") else "(owner words unavailable)")
+    where = address or (
+        f"chat {ref.get('chat_id')} / {ref.get('client_message_id') or ref.get('ts')}")
+    what = "the owner's card press" if pressed else "the owner message"
+    return f" It answers {what} {where} ({'selected' if selected else 'inherited'}): {shown}."
 
 
 def _inherited_project_scope(ctx: ToolContext) -> str:
@@ -262,6 +465,7 @@ def _start_task(
     owner_quote: str = "",
     owner_words: str = "",
     review_answer: bool = False,
+    owner_source: str = "",
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
     from ouroboros.owner_words import cited_owner_basis
@@ -294,11 +498,16 @@ def _start_task(
     chosen: Dict[str, Any] = {"destination": destination} if presence_carrier else {}
     if private:
         chosen["owner_quote"] = owner_quote
-    from ouroboros.project_facts import (
-        explicit_project_id_ok,
-        project_id_from_display_name,
-        sanitize_project_id,
-    )
+    selected = owner_source.strip() if isinstance(owner_source, str) else owner_source
+    source_row: Dict[str, Any] = {}
+    if selected not in (None, ""):
+        source_row, source_error = (({}, "owner_source must be one held owner_quote_handle string.")
+                                    if not isinstance(selected, str) else _selected_source(ctx, selected, presence_carrier))
+        if source_error:
+            return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+                f"⚠️ TOOL_ARG_ERROR (start_task): {source_error} Nothing was scheduled.")))
+        chosen["owner_source"] = selected  # the selector rides the durable intent: an explicit retry names it again
+    from ouroboros.project_facts import explicit_project_id_ok, project_id_from_display_name, sanitize_project_id
 
     display_name = str(project_name or "").strip()
     pid = ""
@@ -449,21 +658,24 @@ def _start_task(
     if not private:  # a private owner start carries its own owner contract (#2795); a place start, its writer's kind
         evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")},
                                                  started_root=True, owner_basis=owner_basis))
-        _attach_origin_from_metadata(ctx, evt)
-        _attach_client_surface(ctx, evt)
-        if pid and not presence_carrier and not is_focus_wake(metadata) and getattr(ctx, "is_direct_chat", False):
+        if source_row:  # the selected row opens the start in place of the run's own: its identity, files and surface
+            evt.update(_selected_source_fields(ctx, source_row))
+        else:
+            _attach_origin_from_metadata(ctx, evt)
+            _attach_client_surface(ctx, evt)
+        if (pid and not presence_carrier and not is_focus_wake(metadata) and getattr(ctx, "is_direct_chat", False)
+                and (not source_row or _is_turn_message(ctx, metadata.get("origin_message_ref"), evt.get("source_ref") or {}))):
             from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
 
             if transported := reply_transport_from_metadata(canonical_data_root(ctx), metadata):
                 evt[TURN_ADDRESS] = transported
-    _attach_drafted_objective(ctx, evt)
-    if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
-        if owner_basis["source"] in ("owner_press", "owner_quiz_answer") or (owner_basis.get("reply_to") or {}).get("card_id"):
-            from ouroboros.owner_words import merged_corpus
-            evt["owner_corpus"] = merged_corpus(evt.get("owner_corpus"), [owner_basis])
-        else:
-            evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
+    # An ordinary owner-word start settles its source's files; a private start and a place's work keep their own doors.
+    files = None if private or presence_carrier else _source_files(ctx, evt, selected=bool(source_row))
+    _attach_drafted_objective(ctx, evt, source_row or None, owner_basis=owner_basis)
     kind_note = " " + model_note if model_note else ""
+    source_note = (_source_note(ctx, evt, selected if source_row else "") if isinstance(evt.get("source_ref"), dict)
+                   and evt["source_ref"] and not private and not presence_carrier else "")
+    kind_note += source_note
     if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
         kind_note += (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
                       else " Started as your human's work on their cited words." if owner_basis else
@@ -480,7 +692,7 @@ def _start_task(
         scope_note = _effective_scope_note(ctx, effective_pid)
         response = (
             f"OK: task {tid}{scope_note} accepted and durably scheduled ({mode}){repo_root_note}."
-            f"{source_confirmation}{kind_note} "
+            f"{source_confirmation}{kind_note}{_files_note(ctx, evt, confirmation, files)} "
             "The task now runs independently, and follow-up chat can steer it. "
             "Use wait_task/get_task_result if its result "
             "is needed in this conversation."
@@ -500,9 +712,7 @@ def _start_task(
             f"{f' ({shown_reason})' if shown_reason else ''}{_cause_words(reason)}. "
             "Do not report this task as created."
         )
-        return _finish_swarm_handoff(
-            ctx, evt, response, status="rejected", reason=shown_reason or "admission_rejected",
-        )
+        return _finish_swarm_handoff(ctx, evt, response, status="rejected", reason=shown_reason or "admission_rejected")
     root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     try:
         append_jsonl(
@@ -528,7 +738,7 @@ def _start_task(
                     + admission_observation(root, observed_at=utc_now_iso()))
     response = (
         f"Not confirmed yet: separate task {tid} is waiting to start. Its complete intent is durable; "
-        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed}{' ' + model_note if model_note else ''} "
+        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed}{' ' + model_note if model_note else ''}{source_note}{_files_note(ctx, evt, confirmation, files)} "
         "A [ROUTING_RECEIPTS] row reports its recorded outcome. "
         f"Use get_task_result({tid}) to reconcile it before an explicit retry."
     )

@@ -143,6 +143,11 @@ def stage_task_attachments(
 
         {"ordinal", "status": "rejected", "reason": "source_missing",
          "label"}
+
+    A staged row of a spec marked ``path_only`` (a file new work inherits from the owner row it
+    answers, ``owner_relay.source_upload_specs``) keeps ``"path_only": True``: the one marker by
+    which a start and its Continue leave an image out of ``attachment_images``, so it is read by
+    path and never injected as pixels. Nothing else reads it.
     """
 
     declared = list(attachments) if isinstance(attachments, list) else []
@@ -247,13 +252,16 @@ def stage_task_attachments(
         else:
             raw_path = str(raw_item or "").strip()
         label = _display_label(raw_item, raw_path, ordinal)
+        # A ref whose bytes are known gone or held by another store names that reason, never a vague path.
+        known = raw_item.get("unavailable") if isinstance(raw_item, dict) else None
+        known = known if known in ("missing", "outside_store") else ""
         if not raw_path:
-            manifest.append(_rejected(ordinal, label, "invalid_path"))
+            manifest.append(_rejected(ordinal, label, known or "invalid_path"))
             continue
         try:
             source = pathlib.Path(raw_path).expanduser().resolve(strict=False)
             if not source.exists():
-                manifest.append(_rejected(ordinal, label, "source_missing"))
+                manifest.append(_rejected(ordinal, label, known or "source_missing"))
                 continue
             if not source.is_file():
                 manifest.append(_rejected(ordinal, label, "source_not_file"))
@@ -317,6 +325,7 @@ def stage_task_attachments(
                 "abs_path": str(dest),
                 "mime": mime,
                 "is_image": kind == "image",
+                **({"path_only": True} if isinstance(raw_item, dict) and raw_item.get("path_only") is True else {}),
             })
         except Exception:
             log.debug("stage_task_attachments: rejected a file on error", exc_info=True)

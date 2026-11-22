@@ -201,7 +201,7 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
     for entry in entries:
         if injected >= MAX_LIVE_IMAGE_BLOCKS:
             break  # remaining images stay manifest-readable, not amputated
-        if not isinstance(entry, dict) or not entry.get("is_image"):
+        if not isinstance(entry, dict) or not entry.get("is_image") or entry.get("path_only"):
             continue
         relpath = str(entry.get("relpath") or "").strip()
         if not relpath:
