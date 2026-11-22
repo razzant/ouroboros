@@ -1018,8 +1018,11 @@ def newest_owner_candidates(root: Any, *, before: int, limit: int) -> List[Row]:
 # The rooms my human reads: Main, Project rooms and owner transport chats; 0 is the hidden partition, negative ids
 # are A2A traffic and ``places.conversation_chat_id`` puts correspondents' place rooms at 2**40 and above.
 _OWNER_ROOMS = (1, (1 << 40) - 1)
-# What I write to my human besides an untyped answer: send_user_message's rows and my questions.
-_MY_MESSAGE_KINDS = ("proactive_message", "main_notice", "relay_reply", "quiz")
+# What I write to my human besides an untyped answer: send_user_message's rows, my questions, what the message bus
+# delivers for me (a photo, a video, a document with my caption, a links card) and my retained words of a live call.
+_MY_MESSAGE_KINDS = ("proactive_message", "main_notice", "relay_reply", "quiz", "photo", "video", "document", "links",
+                     "model_narration")
+_BOTH_WROTE: set = set()  # stores (path, file identity) where both have written: that answer never turns back
 
 
 def owner_exchange(root: Any) -> Tuple[bool, bool]:
@@ -1027,9 +1030,14 @@ def owner_exchange(root: Any) -> Tuple[bool, bool]:
     existence probes over those rooms that stop at their first match: an untyped inbound row (``dialogue_inbound``;
     my human's words, as ``newest_owner_candidates`` counts them) and an outbound row of mine, untyped (an answer)
     or one of ``_MY_MESSAGE_KINDS`` (``dialogue_room``; host rows are System or other types). A store that cannot be
-    read raises: the caller says unknown, never no."""
+    read raises: the caller says unknown, never no; so does a negative answer while the store's history is still
+    importing (``require_imported``). Once both have written, this store is not asked again in this process (keyed by
+    its file, so a Reset's new store is asked afresh)."""
     low, high = _OWNER_ROOMS
     kinds = ", ".join(f"'{kind}'" for kind in _MY_MESSAGE_KINDS)
+    known = (str(path(root)), store.file_identity(path(root)))
+    if known in _BOTH_WROTE:
+        return True, True
     if not present(root) and holds_dialogue_files(root):  # never a cutover from a read
         raise StoreMigrating(f"dialogue store not created yet: {path(root)}")
     with transaction(root, write=False) as conn:
@@ -1039,6 +1047,10 @@ def owner_exchange(root: Any) -> Tuple[bool, bool]:
             "WHERE stream='chat' AND chat_id BETWEEN ? AND ? AND direction='out' "
             f"AND (kind IS NULL OR kind IN ({kinds})))",
             (low, high, low, high)).fetchone()
+    if theirs and mine and known[1] is not None:
+        _BOTH_WROTE.add(known)
+    elif not (theirs and mine):
+        require_imported(root, "chat")  # a no the history still importing could turn: unknown, never no
     return bool(theirs), bool(mine)
 
 

@@ -1096,6 +1096,50 @@ def test_the_exchange_counts_only_the_words_of_my_human_and_mine_in_rooms_they_r
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(dialogue_store, "owner_exchange", lambda root: (_ for _ in ()).throw(StoreLost("torn page")))
         assert setup_fact(tmp_path)["exchange"] == "unknown: the dialogue could not be read (StoreLost)"
+    # Known both ways, the answer sticks: the store is not asked again (no walk of Main's history per context).
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(dialogue_store, "transaction", lambda *a, **k: pytest.fail("asked again after both wrote"))
+        assert dialogue_store.owner_exchange(tmp_path) == (True, True)
+
+
+@pytest.mark.parametrize("kind", ["document", "photo", "video", "links", "model_narration"])
+def test_what_the_message_bus_delivers_for_me_and_my_spoken_words_in_a_call_are_messages_of_mine(tmp_path, kind):
+    """A first message of mine may be a file with my caption, a links card or what I said in a live call: each is a
+    message of mine to my human; what the call heard (System) is not, nor a file in the hidden partition."""
+    from ouroboros import dialogue_store
+
+    (tmp_path / "state").mkdir()
+    _said(tmp_path, ("10:00", "out"), kind="call_heard")
+    _said(tmp_path, ("10:01", "out"), chat_id=0, kind=kind)
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)
+    _said(tmp_path, ("10:02", "out"), kind=kind)
+    assert dialogue_store.owner_exchange(tmp_path) == (False, True)
+
+
+def test_a_no_while_the_history_is_still_importing_is_unknown_and_a_yes_stands(tmp_path):
+    """A store whose cutover was not planned yet (a cutover that failed after ``create``) may still hold my older
+    messages: «not written» is then unknown, never no; a message already found stands."""
+    from ouroboros import dialogue_store
+    from ouroboros.context_first_hour import setup_fact
+    from ouroboros.store import StoreMigrating
+
+    (tmp_path / "state").mkdir()
+    _said(tmp_path, ("10:00", "system"), kind="task_summary")
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)  # the history is complete: a no is a no
+    with dialogue_store.transaction(tmp_path, write=True) as conn:
+        conn.execute("DELETE FROM meta WHERE key='cutover'")
+    dialogue_store._PLANNED.discard(str(dialogue_store.path(tmp_path)))
+    with pytest.raises(StoreMigrating):
+        dialogue_store.owner_exchange(tmp_path)
+    assert setup_fact(tmp_path)["exchange"] == "unknown: the dialogue could not be read (StoreMigrating)"
+    with pytest.MonkeyPatch.context() as patch:  # a message of mine found while still importing: a yes stands
+        patch.setattr(dialogue_store, "require_imported", lambda *a, **k: pytest.fail("a yes needs no full history"))
+        with dialogue_store.transaction(tmp_path, write=True) as conn:
+            conn.execute("INSERT INTO dialogue (stream, seq, length, segment, ordinal, ts, chat_id, direction, body) "
+                         "VALUES ('chat', 999999, 1, 0, 999999, '', 1, 'out', '{}')")
+            conn.execute("INSERT INTO dialogue (stream, seq, length, segment, ordinal, ts, chat_id, direction, body) "
+                         "VALUES ('chat', 1999999, 1, 0, 1999999, '', 1, 'in', '{}')")
+        assert dialogue_store.owner_exchange(tmp_path) == (True, True)
 
 
 @pytest.mark.parametrize("shape", ["pressed", "written", "no_press", "unknown_exchange"])
