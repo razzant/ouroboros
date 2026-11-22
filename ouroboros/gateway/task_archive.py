@@ -21,12 +21,13 @@ under an identity a parent's disposition may have bound; a listing without a dig
 streams its current bytes and says so (``x-ouroboros-artifact-identity: unmeasured``).
 
 A directory download includes only recorded regular files lexically under its
-own-store directory, with no failed/missing capture and a Unicode ZIP name. The
-task detail counts exclusions; this ZIP is a view, not a proof of preservation.
-One relpath is one member (canonical store first), named relative to the
-directory's parent. It spools in 1 MiB chunks through one anonymous temporary
-file (bounded memory, exact ``Content-Length``, status settled before the first
-byte); a recorded digest must match while read, or the answer is a typed refusal. Wrap up's saved-work
+own-store directory, with no failed/missing capture and a Unicode ZIP name; files the
+owner released in Storage are named in its ``RELEASED-BY-OWNER.json`` member and counted
+apart (``released``), never a silent gap. The task detail counts exclusions; this ZIP is a
+view, not a proof of preservation. One relpath is one member (canonical store first), named
+relative to the directory's parent. It spools in 1 MiB chunks through one anonymous temporary
+file (bounded memory, exact ``Content-Length``, status settled before the first byte); a
+recorded digest must match while read, or the answer is a typed refusal. Wrap up's saved-work
 document (``?wrap_up=``) is written on read into such a spool the same way.
 
 Without a supported confined backend, ordinary files, archives and delegated
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -58,6 +60,8 @@ from ouroboros import artifacts as artifact_store
 from ouroboros.confined_files import (DIR_FLAGS, CONFINED_OPEN_AVAILABLE, IS_WINDOWS, confined_directory,
                                      lexical_relative, open_regular_at, relative_parts, root_spellings)
 from ouroboros.gateway._helpers import json_error
+from ouroboros.payload_release_state import ReleaseUnavailable, pending_files, read_release_state
+from ouroboros.store import StoreError
 from ouroboros.task_custody import task_artifact_stores
 from ouroboros.task_status import load_effective_task_result
 
@@ -103,6 +107,8 @@ def recorded_identity(row: Any) -> Optional[Dict[str, Any]]:
 
 def _eligible(row: Dict[str, Any]) -> bool:
     """A row whose capture still offers bytes (an immutable one only with the identity to verify)."""
+    if row.get("release_pending") or row.get("release_unavailable"):
+        return False
     if row.get("immutable") and (not isinstance(row.get("size"), int) or not row.get("sha256")):
         return False
     return not row.get("errors") and not row.get("copy_status") \
@@ -200,7 +206,10 @@ def directory_archives(stores: List[pathlib.Path], rows: Any, *, anchor: Any = N
             if not sep or (location is None and not plain_segments(relpath)):
                 continue
             entry = view.setdefault(directory, {"name": directory + ARCHIVE_SUFFIX, "files": 0, "size": 0,
-                                                "excluded": 0, "available": False})
+                                                "excluded": 0, "released": 0, "available": False})
+            if row.get("released"):  # the owner released it in Storage: said apart, never a silent gap
+                entry["released"] += 1
+                continue
             observed = (_member_stat(parents, _zip_route(anchor, stores[location[0]], relpath))
                         if location and _eligible(row) else None)
             if observed is None:
@@ -227,8 +236,8 @@ def _archive_members(stores: List[pathlib.Path], rows: Any, directory: str, *,
     with _Parents() as parents:
         for order, row in enumerate(rows if isinstance(rows, list) else []):
             location = task_artifact_location(stores, row.get("path"), spellings) if isinstance(row, dict) else None
-            if location is None or not location[2].startswith(prefix) or not _eligible(row):
-                continue
+            if location is None or not location[2].startswith(prefix) or not _eligible(row) or row.get("released"):
+                continue  # a released file is named in RELEASED-BY-OWNER.json, never a member, even if a name reappears
             route = _zip_route(anchor, stores[location[0]], location[2])
             if route is not None and _member_stat(parents, route) is not None and (
                     location[2] not in picked or (location[0], order) < picked[location[2]][0]):
@@ -274,15 +283,34 @@ def serve_directory_archive(drive_root: Any, task_id: str, name: str, directory:
     if not CONFINED:
         return json_error("archive confinement needs directory-relative no-follow opens, which this platform "
                           "lacks (issue #1297)", 503, **unavailable)
-    result = load_effective_task_result(drive_root, task_id) or {}
+    try:
+        result = load_effective_task_result(drive_root, task_id) or {}
+    except (StoreError, OSError, ValueError) as exc:
+        return json_error("task record unavailable", 503, cause=type(exc).__name__, **unavailable)
+    if any(rel.startswith(directory + "/") for rel in pending_files(result)):
+        return json_error("owner release is pending accounting", 503, reason_code="payload_release_pending")
     if not result:
         return json_error("task not found", 404)
-    members = _archive_members(task_artifact_stores(drive_root, task_id), result.get("artifacts"), directory,
-                               anchor=drive_root)
+    stores = task_artifact_stores(drive_root, task_id)
+    rows = result.get("artifacts") or []
+    members = _archive_members(stores, rows, directory, anchor=drive_root)
+    released = []
+    spellings = root_spellings(drive_root)
+    for row in rows:
+        location = task_artifact_location(stores, row.get("path"), spellings) if isinstance(row, dict) else None
+        if location and location[2].startswith(directory + "/"):
+            if row.get("release_unavailable") or row.get("release_pending"):
+                return json_error("archive release state is unsettled", 503, **unavailable)
+            if row.get("released"):
+                released.append((location[2], row["released"]))
+    released.sort(key=lambda item: item[0])
+    if not members and released:
+        return json_error("every file of this directory was released by the owner in Storage", 410,
+                          reason_code="artifact_archive_released", task_id=task_id, artifact=name, directory=directory)
     if not members:
         return json_error("no recorded ready file of this task lies in that directory", 404,
                           reason_code="artifact_archive_empty", task_id=task_id, artifact=name, directory=directory)
-    member = ""
+    member, verified = "", []
     try:
         spool = tempfile.TemporaryFile()
     except OSError:
@@ -293,7 +321,11 @@ def serve_directory_archive(drive_root: Any, task_id: str, name: str, directory:
             for member, route, row in members:
                 handle, observed = _open_member(parents, route)  # the handle, never the path, from here on
                 with handle, archive.open(_zip_info(member, observed), "w") as sink:
-                    artifact_store.stream_artifact_file(handle, sink, expected=recorded_identity(row))
+                    measured = artifact_store.stream_artifact_file(handle, sink, expected=recorded_identity(row))
+                    location = task_artifact_location(stores, row["path"], spellings)
+                    verified.append((stores[location[0]], location[2], recorded_identity(row), measured))
+            if released:  # the archive says what it cannot hold: these exact files went by the owner's choice
+                archive.writestr(f"{parts[-1]}/RELEASED-BY-OWNER.json", json.dumps([{"path": rel, **fact} for rel, fact in released], indent=1))
     except OSError as exc:
         spool.close()
         if exc.errno is None or exc.errno in _MEMBER_GONE:  # verification failures carry no errno
@@ -304,9 +336,26 @@ def serve_directory_archive(drive_root: Any, task_id: str, name: str, directory:
     except BaseException:
         spool.close()
         raise
+    try:
+        state = read_release_state(drive_root, task_id)
+        if any(rel.startswith(directory + "/") for rel in state.pending):
+            spool.close()
+            return json_error("owner release is pending accounting", 503, reason_code="payload_release_pending")
+        for store, rel, row, measured in verified:
+            selected = state.download_address(store, rel, row, measured=measured)
+            if selected in state.released or selected in state.pending:
+                spool.close()
+                return json_error("archive membership changed during capture", 503, **unavailable)
+    except ReleaseUnavailable as exc:
+        spool.close()
+        return _release_response(exc)
+    except Exception as exc:
+        spool.close()
+        return json_error("release record unavailable", 503, cause=type(exc).__name__, **unavailable)
     size = spool.tell()
-    return StreamingResponse(_drain(spool), media_type="application/zip",
-                             headers={"Content-Length": str(size), "Content-Disposition": _disposition("attachment", name)})
+    return StreamingResponse(_drain(spool), media_type="application/zip", headers={
+        "Content-Length": str(size), "Content-Disposition": _disposition("attachment", name),
+        "x-ouroboros-archive-released": str(len(released))})
 
 
 def serve_wrap_up_document(drive_root: Any, task_id: str, name: str, request_id: str, *,
@@ -389,8 +438,12 @@ def serve_task_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[
     try:
         return Response(artifact_store.read_task_result_source_bytes(drive_root, result, name, source),
                         media_type="application/json", headers={"Content-Disposition": _disposition("inline", name)})
+    except ReleaseUnavailable as exc:
+        return _release_response(exc)
     except (OSError, ValueError, RuntimeError):
-        pass
+        refusal = download_refusal(drive_root, task_id, source)
+        if refusal is not None:
+            return refusal
     record = _ACCEPTANCE_SOURCE_RE.fullmatch(str(source or ""))
     try:
         if record and record.group(1) == name:
@@ -463,6 +516,25 @@ class DescriptorResponse(Response):
             self._handle.close()
 
 
+def _release_response(exc):
+    if exc.reason == "artifact_released":
+        return json_error("released by the owner in Storage", 410, reason_code=exc.reason, released=exc.receipt)
+    cause = type(exc.__cause__).__name__ if exc.__cause__ else exc.reason
+    return json_error("release record unavailable or awaiting accounting", 503, reason_code=exc.reason, cause=cause)
+
+
+def download_refusal(drive_root: Any, task_id: str, relpath: str, *, store=None, expected=None, handle=None):
+    """Decide against the canonical document after the confined open, including a nonterminal task."""
+    try:
+        state = read_release_state(drive_root, task_id)
+        state.require_available(state.download_address(store, relpath, expected, handle=handle))
+    except ReleaseUnavailable as exc:
+        return _release_response(exc)
+    except Exception as exc:
+        return json_error("release record unavailable", 503, reason_code="artifact_unavailable", cause=type(exc).__name__)
+    return None
+
+
 def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: str,
                     expected: Optional[Dict[str, Any]], *, task_id: str, mutable: bool = False,
                     head_only: bool = False) -> Response:
@@ -473,14 +545,25 @@ def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: st
     ``artifact_unverified`` (missing, swapped for a link or FIFO, changed while read, or a capture
     that did not verify) or 503 ``artifact_unavailable`` (including a platform without
     confinement, issue #1297)."""
+    handle = None
     try:
-        if not CONFINED:
-            raise OSError(errno.ENOTSUP, "confined file open unavailable (issue #1297)")
-        route = _route(pathlib.Path(drive_root).resolve(strict=False), store, relpath)
-        if route is None:
-            raise OSError("artifact relpath is not plain segments")
-        with _Parents() as parents:
-            handle, observed = _open_member(parents, route)
+        try:
+            if not CONFINED:
+                raise OSError(errno.ENOTSUP, "confined file open unavailable (issue #1297)")
+            route = _route(pathlib.Path(drive_root).resolve(strict=False), store, relpath)
+            if route is None:
+                raise OSError("artifact relpath is not plain segments")
+            with _Parents() as parents:
+                handle, observed = _open_member(parents, route)
+        except OSError as exc:
+            open_error = exc
+        refusal = download_refusal(drive_root, task_id, relpath, store=store, expected=expected, handle=handle)
+        if refusal is not None:
+            if handle is not None:
+                handle.close()
+            return refusal
+        if handle is None:
+            raise open_error
         if expected is not None:
             spool = None
             try:

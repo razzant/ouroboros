@@ -68,7 +68,7 @@ export function projectResultArtifacts(taskId, records, archives = null, wrapUp 
         const bytes = row.size !== null && row.size !== '' && Number.isFinite(size) && size >= 0 ? size : null;
         const status = String(row.status || '').trim().toLowerCase();
         const serving = (status === '' || status === 'ready') && !(Array.isArray(row.errors) && row.errors.length)
-            && !row.copy_status;
+            && !row.copy_status && !row.released;  // released by the owner in Storage: no download is offered
         if (parts.length > 1) {
             const folder = folders.get(parts[0])
                 || { name: parts[0], fileCount: 0, bytes: 0, unavailableCount: 0, relpaths: [], archive: null };
@@ -85,7 +85,7 @@ export function projectResultArtifacts(taskId, records, archives = null, wrapUp 
         files.push({
             name, bytes,
             note: url ? (row.measured === false ? 'unverified' : '')
-                : serving ? 'download unavailable' : (status || 'unavailable'),
+                : row.released ? 'released' : serving ? 'download unavailable' : (status || 'unavailable'),
             url,
         });
     }

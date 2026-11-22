@@ -456,6 +456,7 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
     custody lock or a failed step keeps it for the next pass. Links and junctions are never followed."""
     from ouroboros.body_candidate import _recorded_terminal
     from ouroboros.owner_keep import gate
+    from ouroboros.payload_release import recover
     from ouroboros.session_scratch import (
         aggregate_holds,
         child_parent,
@@ -471,7 +472,7 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
     from ouroboros.tools.kept_service_outputs import owed_declarations
 
     root = pathlib.Path(data_root)
-    report: Dict[str, Any] = {"released": [], "holds": [], "errors": []}
+    report: Dict[str, Any] = {"released": [], "holds": [], "errors": list(recover(root)["errors"])}  # an owner's release a stop interrupted: recorded, then published
     held: List[Tuple[str, str, Any]] = []
     reads, members = TaskReads(root), {}
     owed = owed_declarations(root)

@@ -343,6 +343,10 @@ def render_result_view(
         payload["unread_mail_notice"] = unread
     if gap := raw_evidence_notice(data):
         payload["test_evidence_gap"] = gap
+    from ouroboros.payload_release_state import notice as released_notice
+
+    if released := released_notice(data):  # the owner's Storage release, typed, with where its bytes are now
+        payload["released_payloads"] = released
     if effort:
         payload["effort"] = dict(effort)
 

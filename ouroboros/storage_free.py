@@ -31,9 +31,10 @@ The ordinary action works on exact objects: the *pool* (``storage_free_view``) i
 working copy and declared temporary environment (``copy_environments``), each addressed alone; everything else
 is listed with its reason. Selecting by ``items`` retires those objects, each re-judged under its retirer's own
 lock and the owner's keep (``owner_keep``); the dashboard still exposes saved groups below, with their own words.
-``manual`` is a third, separate form: exact finished copies whose work no capture holds, and session scratch its
-run marked to keep (a ``producer_retained`` custody-trash handoff, sized by the scratch it holds), each named with
-what it would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them
+``manual`` is a third, separate form: exact finished copies whose work no capture holds, session scratch its run
+marked to keep (a ``producer_retained`` custody-trash handoff, sized by the scratch it holds) and the heavy files of
+a finished task the mind proposed (``stored_payloads``, ``payload_release``), each named with what it would lose
+(``view=manual``) and sent with ``accept_loss``; nothing else reaches them
 (``copy_capture_proof.discard_offer``, ``copy_capture_proof.discard_unsaved_copy``).
 
 Five more groups hold what no background retirer removes, so only the owner's press frees them
@@ -81,8 +82,9 @@ GROUP_REVIEW_CHECKOUTS = "review_checkouts"
 GROUP_LOST_COPIES = "lost_copies"
 GROUP_SERVICE_FOLDERS = "service_folders"
 GROUP_RESULT_PINS = "result_pins"
+GROUP_STORED_PAYLOADS = "stored_payloads"  # heavy files of finished work the mind proposed; the owner's choice alone
 GROUPS = (GROUP_WORK_FOLDERS, GROUP_WORKING_COPIES, GROUP_REVIEW_EVIDENCE, GROUP_REVIEW_CHECKOUTS,
-          GROUP_LOST_COPIES, GROUP_SERVICE_FOLDERS, GROUP_RESULT_PINS)
+          GROUP_LOST_COPIES, GROUP_SERVICE_FOLDERS, GROUP_RESULT_PINS, GROUP_STORED_PAYLOADS)
 LARGEST_ITEMS = 20
 # A retirer's typed reason -> the owner's reason (the client's sentences): results or messages
 # still being saved (late mail and call records that moved under the pass included: the next pass
@@ -94,12 +96,17 @@ _KEPT_REASONS = {
                         "canonical_changed", "drive_occupant_changed", "canonical_not_settled", "post_work_open",
                         "artifacts_not_terminal", "child_drive_mismatch"),
     "in_use": ("task_live", "liveness_unknown", "owner_processes_live", "owner_not_terminal", "task_not_terminal", "parent_not_terminal",
-               "not_proven_over", "custody_held", "owner_paused", "review_custody_active", "seat_checking", "operation_live", "review_environment_held"),
-    "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
-    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable", "review_state_unreadable", "marker_unreadable"),
+               "not_proven_over", "custody_held", "owner_paused", "review_custody_active", "seat_checking", "operation_live", "review_environment_held",
+               "task_not_proven_over", "tree_live", "tree_unsettled", "review_open", "custody_open", "continuable"),  # a work's closure
+    "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy", "release_pending"),
+    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable", "review_state_unreadable", "marker_unreadable",
+                          "tree_unreadable", "tree_unresolved", "census_unknown", "custody_unreadable", "continuation_unverified",
+                          "proposal_unreadable", "released_source_unproven"),
     "capture_unproven": ("capture_unproven", "capture_incomplete"),
-    "retained_evidence": ("retained_process_environment", "undeclared_environment", "producer_retained"),
-    "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
+    "retained_evidence": ("retained_process_environment", "undeclared_environment", "producer_retained", "release_unexplained"),
+    "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected", "payload_changed", "payload_missing",
+                "payload_shared", "payload_linked", "payload_not_regular", "payload_protected", "payload_unreadable",
+                "retained_changed", "retained_by_other_offer", "retained_is_released", "release_partial"),
     "unproven_excluded_inputs": ("unproven_excluded_inputs",),
     "owner_keep": ("owner_keep",),
     "restart": ("generation_closed",),
@@ -334,6 +341,7 @@ def _reason(raw: str) -> str:
     raw = str(raw or "")
     if raw.startswith("custody_error"):
         return "unreadable_record" if "ValueError" in raw else "other"
+    raw = raw.removeprefix("continued_")  # a Continue successor's closure holds as the work's own (``tree_hold``)
     for reason, codes in _KEPT_REASONS.items():
         if raw in codes:
             return reason
@@ -449,6 +457,33 @@ class FreeSpace:
             entries, complete = custody_trash_scan(root) if run["moved"] else ([], True)
         except OSError:
             entries, complete = [], False
+        from ouroboros.payload_release_state import operation_outcome
+
+        for item in run["items"]:
+            if item.layout != "payload" or not item.row.get("operation"):
+                continue
+            with self._lock:
+                if not any(item.key in run[name] for name in ("kept_items", "moved", "removed", "failed")):
+                    continue  # the worker has not reported this choice yet
+            try:
+                fact = operation_outcome(root, item.row)
+            except Exception:
+                fact = {"state": "pending", "bytes": 0, "cause": "record_unreadable"}
+            if not fact:
+                continue
+            # Reconcile the same reported choice; concurrent readers must not duplicate its classification.
+            with self._lock:
+                category = run["kept_items"].pop(item.key, None)
+                if category:
+                    run["kept"][category] = max(0, run["kept"].get(category, 1) - 1)
+                for name in ("moved", "removed", "failed"):
+                    run[name][:] = [key for key in run[name] if key != item.key]
+                item.cause = fact["cause"] or None
+                if fact["state"] == "moved":
+                    item.bytes = run["sizes"][item.key] = fact["bytes"]
+                    run["moved"].append(item.key)
+                else:
+                    self._keep(run, item, fact["cause"])
         survived = self._survived_trash(root) if entries else {}
         named = {name: name if _RELEASE_MARK in name else name.rsplit("-", 1)[0] for name, _identity in entries}
         waiting = {named[name] for name, identity in entries if identity is None or survived.get(name) != identity}
@@ -892,6 +927,10 @@ class FreeSpace:
                 _sorted_into(root, group, verdict, _Candidate(GROUP_RESULT_PINS, f"pins:{snap}", pathlib.Path(
                     str(row.get("path") or "")), "pins", task=str(row.get("task_id") or ""), row=row))
             groups.append(group)
+        if GROUP_STORED_PAYLOADS in self._offered:  # each proposal one manual object (``payload_release.free_group``)
+            from ouroboros.payload_release import free_group
+            groups.append(free_group(root, live, new_group(GROUP_STORED_PAYLOADS), lambda key, path, task: _Candidate(
+                GROUP_STORED_PAYLOADS, key, path, "payload", task=task)))
         return groups
 
     def _size(self, root: pathlib.Path, repo_dir: pathlib.Path, candidates: List[_Candidate]) -> None:
@@ -972,7 +1011,8 @@ class FreeSpace:
             with self._lock:
                 self._plan = plan  # the counts appear at once; the sizes fill in while the state stays listing
             candidates = [item for group in groups for item in group["candidates"]]
-            self._size(root, repo_dir, candidates + [item for group in groups for item in group["excluded"] if item.manual])
+            self._size(root, repo_dir, candidates + [item for group in groups for item in group["excluded"]
+                                                     if item.manual and item.layout != "payload"])  # sized by its identities
             _name_items(root, [item for group in groups for item in [*group["candidates"], *group["excluded"]]])
             with self._lock:
                 self._plan, self._state = {**plan, "finished_at": utc_now_iso()}, "ready"
@@ -1176,6 +1216,7 @@ class FreeSpace:
 
     def _free_manual(self, root: pathlib.Path, candidates: List[_Candidate], run: Dict[str, Any]) -> None:
         """The owner's exact discards, one retirer call per copy: a copy that stays says the retirer's reason."""
+        from ouroboros import payload_release
         from ouroboros.copy_capture_proof import discard_unsaved_copy
         from ouroboros.subagent_worktrees import SubagentWorktreeRegistryCorrupt, WorktreeOpsLockBusy
 
@@ -1185,6 +1226,13 @@ class FreeSpace:
                 raise _Stopped()
             if item.layout == "producer_retained":
                 self._settle(run, item, self._free_producer_retained(root, item), moved=True)
+                continue
+            if item.layout == "payload":  # the owner's exact choice (``payload_release``): only what moved counts
+                reason, moved = payload_release.settle(root, item, live, self._interlock(self._closed), owner=self._request is None)
+                if moved:
+                    item.bytes = run["sizes"][item.key] = moved
+                    item.cause = reason or None  # a partial batch says so beside its outcome
+                self._settle(run, item, "" if moved else reason, moved=True)
                 continue
             path, reasons = str(item.row.get("path") or ""), {}
             try:

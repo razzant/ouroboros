@@ -350,7 +350,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/tasks": Shape("200:TaskListResponse 503:ErrorResponse", query="status limit queue_only"),
     "GET /api/tasks/{task_id}": Shape("200:TaskDetailResponse 400,404,503:ErrorResponse"),
     "GET /api/tasks/{task_id}/artifacts/{name}": Shape(
-        "200,206:file 400,404,409,500,503:ErrorResponse", query="relpath archive source", headers="Range",
+        "200,206:file 400,404,409,410,500,503:ErrorResponse", query="relpath archive source", headers="Range",
         note="Range supported; x-ouroboros-artifact-sha256 when the bytes are verified"),
     "GET /api/tasks/{task_id}/events": Shape(
         "200:sse/TaskEvent 400,404:sse", query="cursor wait",

@@ -77,9 +77,18 @@ def _retained_copy(root: Any, task_id: str, item: Dict[str, Any], registration: 
     the live path never changes what its subject names; else why no copy exists. Its cost: on APFS, btrfs or XFS a
     clone shares the original's blocks; elsewhere (ext4, a Docker overlay, Windows) each distinct content takes its
     full size once more. The copy belongs to the task's records under ``source_handles/tool_results``: no age bound,
-    ``record_compression`` shrinks it where the filesystem compresses, and nothing removes it apart from them."""
+    ``record_compression`` shrinks it where supported. An owner release of its address also binds later copies."""
     from ouroboros.artifacts import actor_source_reference, copy_artifact_file, stream_artifact_file, task_artifact_dir_path
+    from ouroboros.payload_release_state import file_release_gap
+    from ouroboros.task_custody import task_custody_lock
+    from ouroboros.temp_sweep import atomic_temp_path
 
+    source = pathlib.Path(str(item.get("path") or ""))
+    try:
+        if gap := file_release_gap(source, anchor=root):
+            return {"retained_gap": gap}
+    except Exception as exc:
+        return {"retained_gap": f"release record unavailable ({type(exc.__cause__ or exc).__name__})"}
     sha = str(item.get("sha256") or "")
     if sha == "deleted" or sha.startswith("unreadable"):
         return {"retained_gap": "the file is gone" if sha == "deleted" else sha}
@@ -90,17 +99,39 @@ def _retained_copy(root: Any, task_id: str, item: Dict[str, Any], registration: 
         ref = actor_source_reference(category="tool_results", source_id=f"result-material-{sha[:16]}", data=b"",
                                      extension=pathlib.Path(item["path"]).suffix.lstrip(".") or "bin", measured=identity)
         target = task_artifact_dir_path(root, task_id, create=True).joinpath(*pathlib.PurePosixPath(ref["path"]).parts)
-        try:  # write-once by digest: an intact copy of these bytes IS this one
+        if gap := file_release_gap(target, anchor=root):
+            return {"retained_gap": gap}
+        try:
             present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=identity))
         except OSError:
             present = False
-        if not present and work_domain.is_work(item["path"]):  # its bytes received from the work, then verified
-            with tempfile.TemporaryFile() as spool:
-                work_domain.measure(item["path"], spool)
-                spool.flush()
-                copy_artifact_file(spool, target, expected=identity, mode=0o444)
-        elif not present:
-            copy_artifact_file(pathlib.Path(item["path"]), target, expected=identity, mode=0o444)
+        if not present:
+            temporary = atomic_temp_path(target)
+            try:
+                if work_domain.is_work(item["path"]):
+                    with tempfile.TemporaryFile() as spool:
+                        work_domain.measure(item["path"], spool)
+                        spool.flush()
+                        copy_artifact_file(spool, temporary, expected=identity, mode=0o444)
+                else:
+                    copy_artifact_file(source, temporary, expected=identity, mode=0o444)
+                with task_custody_lock(root, task_id) as locked:
+                    if not locked:
+                        return {"retained_gap": "task custody busy"}
+                    if gap := file_release_gap(target, anchor=root) or file_release_gap(source, anchor=root):
+                        return {"retained_gap": gap}
+                    if target.exists():
+                        stream_artifact_file(target, expected=identity)
+                    else:
+                        temporary.replace(target)
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except PermissionError:
+                    if os.name != "nt":
+                        raise
+                    temporary.chmod(0o600)  # an unpublished, task-owned read-only copy
+                    temporary.unlink()
     except Exception as exc:  # changed while it was copied, a full disk, a closed publication: a stated gap
         return {"retained_gap": f"its copy could not be retained ({type(exc).__name__}: {exc})"}
     return {"retained": str(target)}
@@ -179,6 +210,11 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
         if key in covered:
             return None
         covered.add(key)
+        from ouroboros.payload_release_state import file_release_gap
+
+        if gap := file_release_gap(key, anchor=root):
+            out["issues"].append(f"{gap}: {key}")
+            return None
         out["files"].append({"path": key, "kind": kind, **_file_identity(pathlib.Path(key))})
         return out["files"][-1]
 
@@ -206,6 +242,14 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
                     covered.add(source)
     except Exception as exc:
         out["issues"].append(f"task artifacts could not be listed ({type(exc).__name__}: {exc})")
+    try:  # a file the owner released in Storage is a named gap, never silently absent production
+        from ouroboros.payload_release_state import released_files
+        from ouroboros.task_store import read_document
+
+        for rel, receipt in sorted(released_files(read_document(root, task_id)).items()):
+            out["issues"].append(f"released by the owner in Storage at {receipt.get('at')}: {rel} ({receipt.get('loss') or 'loss not said'})")
+    except Exception as exc:
+        out["issues"].append(f"released files could not be read ({type(exc).__name__}: {exc})")
     try:
         from ouroboros.mutation_attribution import attributed_commit_paths, attributed_git_candidates
 

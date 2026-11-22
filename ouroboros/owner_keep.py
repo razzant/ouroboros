@@ -70,6 +70,8 @@ class OwnerKeepResponse(TypedDict):
     # named or started it, no release is recorded) and ``held``/``refused``/``abandoned``;
     # ``managed_import:<key>`` -> held | release_unconfirmed | future_reuse_released | upload_cancelled |
     # binding_unavailable:<outcome> | release_refused:<code>; none proves deletion of bytes
+    # Canonical files -> held | queued (not moved) | moved (not accounted) | staged | deleting | deleted |
+    # missing | unknown. Moved/staged/deleting are retired from Keep, not proof of deleted bytes.
 
 
 def _valid(task_id: Any) -> bool:
@@ -177,7 +179,7 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
     """Everything a gated retirer could remove for this exact task, as ``(places, unknown, pins)``, ``pins``
     naming the copy path whose record each ``pins:`` place stands on, and the ownership record each session
     scratch stands on. One listing per current folder (copy records, the copies' root, review seats and
-    checkouts) and one keyed custody read per stopped seat's operation, no walk of history; a listing, marker or
+    checkouts), the task's canonical artifact tree and one keyed custody read per stopped seat's operation; a listing, marker or
     start that cannot be read names its class in ``unknown``."""
     from ouroboros.copy_environments import ENV_SUFFIX, scratch_owner
     from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR
@@ -202,6 +204,21 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                           for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)})
     except OSError:
         unknown.append("saved_states")
+    from ouroboros.artifacts import iter_artifact_tree
+    from ouroboros.payload_release_state import store_of
+
+    canonical = store_of(root, task_id)
+    try:
+        try:
+            canonical.lstat()
+        except FileNotFoundError:
+            canonical = None
+        if canonical is not None:
+            if canonical.resolve(strict=False) != canonical:
+                raise OSError("canonical artifact store reached through a link")
+            places += [str(path) for path in iter_artifact_tree(canonical) if path.is_file() and not path.is_symlink()]
+    except OSError:
+        unknown.append("canonical_payloads")
     read = read_records(root)
     if read.unlistable or read.unreadable or read.import_pending:
         unknown.append("private_copies")
@@ -341,6 +358,7 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
     managed-import release saves Keep with ``release_unconfirmed``."""
     from ouroboros.task_custody import task_custody_lock
     from ouroboros.delegate_documents import managed_keep_places
+    from ouroboros.payload_release_state import keep_places
     from ouroboros.task_results import load_task_result
     from ouroboros.task_store import patch_document
     from ouroboros.utils import utc_now_iso
@@ -378,13 +396,16 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             unknown.append("managed_imports")
         places = sorted(set(places) | set(documents))
         releases.update(documents)
+        payloads = keep_places(base, task_id, row, places)  # fresh canonical facts under the same custody lock
+        places = sorted(set(places) | set(payloads))
+        releases.update({place: state for place, (state, _present_now) in payloads.items()})
         releasing = [place for place, state in releases.items() if state == RELEASE_UNCONFIRMED]
-        present = {place: _thread_present(releases[place]) if place in releases
+        present = {place: payloads[place][1] if place in payloads else _thread_present(releases[place]) if place in releases
                    else _present(base, task_id, place, pins) for place in places if place not in releasing}
         retained = [place for place in present if present[place]]
         retired = [place for place in present if present[place] is False]
         for place in [place for place in present if present[place] is None]:
-            kind = ("managed_imports" if place.startswith("managed_import:") else
+            kind = ("canonical_payloads" if place in payloads else "managed_imports" if place.startswith("managed_import:") else
                     "saved_states" if place.startswith(SAVED_STATES_PLACE) else
                     "private_copies" if place.startswith("pins:") else _THREADS_CLASS if place in releases
                     else "environments")
