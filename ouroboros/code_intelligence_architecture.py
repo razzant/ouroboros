@@ -27,7 +27,7 @@ import ast
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple
 
 from ouroboros import work_domain
 from ouroboros.code_intelligence import CodeInventory, _resolve_relative_import
@@ -281,6 +281,18 @@ def _population_resolver(modules: Dict[str, str]):
     return resolve
 
 
+def reexported_names(tree: ast.Module, lines: List[str], path: str) -> Iterator[Tuple[str, ast.alias]]:
+    """``(resolved source module, alias)`` for each name a top-level ``from ... import`` binds when one
+    of its lines carries the ``noqa: F401`` marker: the re-export convention, read here and by the
+    diff pulse's shape facts (its re-exported names)."""
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            end = getattr(node, "end_lineno", node.lineno) or node.lineno
+            if any(_NOQA_F401.search(lines[lineno - 1]) for lineno in range(node.lineno, min(end, len(lines)) + 1)):
+                base = _resolve_relative_import(pathlib.PurePosixPath(path), node.module or "", int(node.level or 0))
+                yield from ((base, alias) for alias in node.names)
+
+
 def facade_reexports(
     repo_root: pathlib.Path,
     manifest: DomainManifest | None = None,
@@ -305,27 +317,15 @@ def facade_reexports(
             tree = ast.parse(source, filename=path)
         except SyntaxError:
             continue
-        for node in tree.body:
-            if not isinstance(node, ast.ImportFrom):
+        for base, alias in reexported_names(tree, lines, path):
+            if alias.name == "*":
+                leaf = resolve(base)
+            else:
+                leaf = resolve(f"{base}.{alias.name}") or resolve(base)
+            if leaf is None or leaf == path:
                 continue
-            end = getattr(node, "end_lineno", node.lineno) or node.lineno
-            if not any(
-                _NOQA_F401.search(lines[lineno - 1])
-                for lineno in range(node.lineno, min(end, len(lines)) + 1)
-            ):
-                continue
-            base = _resolve_relative_import(
-                pathlib.PurePosixPath(path), node.module or "", int(node.level or 0),
-            )
-            for alias in node.names:
-                if alias.name == "*":
-                    leaf = resolve(base)
-                else:
-                    leaf = resolve(f"{base}.{alias.name}") or resolve(base)
-                if leaf is None or leaf == path:
-                    continue
-                exported = alias.asname or alias.name
-                facades.setdefault(path, {})[exported] = leaf
+            exported = alias.asname or alias.name
+            facades.setdefault(path, {})[exported] = leaf
     return facades
 
 

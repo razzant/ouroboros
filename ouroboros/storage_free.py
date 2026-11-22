@@ -60,7 +60,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple
 
 from ouroboros.storage_free_view import (  # noqa: F401 -- public re-exports
     StorageFreeEntry, StorageFreeItemsResponse, StorageFreeKept, StorageFreeManual, StorageFreePool, UNSAVED_LISTED, VIEWS, manual_ids,
@@ -348,6 +348,17 @@ def _reason(raw: str) -> str:
     return "other"
 
 
+def generation_closed() -> bool:
+    """The server's supervisor generation is closing or closed (lifespan teardown, a restart; a fresh lifespan opens
+    the next): no count, listing or run starts, and a running one stops between items. False outside a server."""
+    try:
+        from ouroboros.server_maintenance import _stop_requested
+
+        return bool(_stop_requested())
+    except Exception:
+        return False
+
+
 class FreeSpace:
     """The server's one free-space owner: a preview, then a run, one at a time (module docstring).
     ``live`` is the supervisor's liveness probe and ``guard`` its ownership interlock; both resolve
@@ -360,6 +371,7 @@ class FreeSpace:
         self._cancel = threading.Event()
         self._live, self._guard, self._offered = live, guard, tuple(offered)
         self._thread: Optional[threading.Thread] = None
+        self._admitting: Optional[threading.Thread] = None  # the thread inside an admission (``_admission``)
         self._process = None
         self._state: str = "idle"
         self._plan: Optional[Dict[str, Any]] = None
@@ -386,14 +398,19 @@ class FreeSpace:
 
     def _closed(self) -> bool:
         """The owner's Stop, the server's stop, or a closed supervisor generation."""
-        if self._cancel.is_set() or self._stopped.is_set():
-            return True
-        try:
-            from ouroboros.server_maintenance import _stop_requested
+        return self._cancel.is_set() or self._stopped.is_set() or generation_closed()
 
-            return bool(_stop_requested())
-        except Exception:
-            return False
+    @contextlib.contextmanager
+    def _admission(self) -> Iterator[bool]:
+        """The lock for one listing or run admission, refused after the server's stop or in a closed generation.
+        While it decides (the selection checked, the thread started) the exit census names the deciding thread, so a
+        restart never reads an admission in progress as idle (``live_children``)."""
+        with self._lock:
+            self._admitting = None if self._stopped.is_set() or generation_closed() else threading.current_thread()
+            try:
+                yield self._admitting is not None
+            finally:
+                self._admitting = None
 
     # ---- the projection ---------------------------------------------------------------------
 
@@ -552,8 +569,8 @@ class FreeSpace:
 
     def preview(self, data_root: Any, repo_dir: Any) -> bool:
         """Start one preview unless one lists or a run runs; False means the caller joined it."""
-        with self._lock:
-            if self._stopped.is_set() or self._busy():
+        with self._admission() as admitted:
+            if not admitted or self._busy():
                 return False
             self._cancel.clear()
             self._state, self._plan, self._run, self._error = "listing", None, None, None
@@ -571,8 +588,8 @@ class FreeSpace:
         if sum(form is not None for form in (items, groups, manual)) > 1:
             return {"started": False, "reason": "selection_conflict"}
         chosen = [str(group) for group in groups] if isinstance(groups, list) else None
-        with self._lock:
-            if self._stopped.is_set() or self._busy_elsewhere():
+        with self._admission() as admitted:
+            if not admitted or self._busy_elsewhere():
                 return {"started": False, "reason": "busy"}
             if self._plan is None or self._state != "ready" or str(plan_id or "") != self._plan["id"]:
                 return {"started": False, "reason": "preview_outdated"}
@@ -582,13 +599,7 @@ class FreeSpace:
                 refusal, discards = self._exact_manual(self._plan, manual, accept_loss)
                 if refusal:
                     return {"started": False, "reason": refusal}
-                self._cancel.clear()
-                self._state, self._error = "running", None
-                self._progress = {"done": 0, "total": len(discards)}
-                self._thread = threading.Thread(target=self._free, args=(pathlib.Path(data_root), self._plan, [], None, discards),
-                                                name="storage-free-run", daemon=True)
-                self._thread.start()
-                return {"started": True, "reason": ""}
+                return self._launch(len(discards), pathlib.Path(data_root), self._plan, [], None, discards)
             if items is not None:
                 refusal, selected = self._exact(self._plan, items)
                 if refusal:
@@ -597,13 +608,20 @@ class FreeSpace:
                           if any(item.key in selected for item in group["candidates"])]
             elif not chosen or any(group not in known for group in chosen):
                 return {"started": False, "reason": "unknown_group" if chosen else "nothing_selected"}
-            self._cancel.clear()
-            self._state, self._error = "running", None
-            self._progress = {"done": 0, "total": sum(sum(1 for item in group["candidates"] if selected is None or item.key in selected)
-                                                     for group in self._plan["groups"] if group["id"] in chosen)}
-            self._thread = threading.Thread(target=self._free, args=(pathlib.Path(data_root), self._plan, chosen, selected),
-                                            name="storage-free-run", daemon=True)
-            self._thread.start()
+            return self._launch(sum(sum(1 for item in group["candidates"] if selected is None or item.key in selected)
+                                    for group in self._plan["groups"] if group["id"] in chosen),
+                                pathlib.Path(data_root), self._plan, chosen, selected)
+
+    def _launch(self, total: int, *run: Any) -> Dict[str, Any]:
+        """Start the run under the admission lock, unless the server stopped or the generation closed while the
+        selection was checked: the census named the admission meanwhile, and nothing starts after Stop."""
+        if self._stopped.is_set() or generation_closed():
+            return {"started": False, "reason": "busy"}
+        self._cancel.clear()
+        self._state, self._error = "running", None
+        self._progress = {"done": 0, "total": total}
+        self._thread = threading.Thread(target=self._free, args=run, name="storage-free-run", daemon=True)
+        self._thread.start()
         return {"started": True, "reason": ""}
 
     @staticmethod
@@ -711,20 +729,27 @@ class FreeSpace:
                 return False
             self._cancel.set()
             process = self._process
-        if process is not None:
-            with contextlib.suppress(OSError):
-                process.kill()
+        self._signal(process)
         return True
 
     def stop(self) -> None:
-        self._stopped.set()
-        self.cancel()
+        self._stopped.set()  # never under the lock a page request holds: Panic must not wait
+        self._signal(self._process)  # the sizing thread publishes its child, then rechecks Stop
 
     def live_children(self) -> list:
-        process, thread = self._process, self._thread
+        """Exit census after Stop: the sizing child, else the listing or run thread, else a thread inside an admission."""
+        process, thread, admitting = self._process, self._thread, self._admitting
         if process is not None and process.poll() is None:
             return [process]
-        return [thread] if thread is not None and thread.is_alive() else []
+        if thread is not None and thread.is_alive():
+            return [thread]
+        return [admitting] if admitting is not None else []
+
+    @staticmethod
+    def _signal(process) -> None:
+        if process is not None:  # not published yet, or already reaped
+            with contextlib.suppress(OSError):
+                process.kill()
 
     # ---- the preview ------------------------------------------------------------------------
 
@@ -961,8 +986,7 @@ class FreeSpace:
         if not by_path:
             return
         process = spawn_maintenance_job(root, repo_dir, PURPOSE, args=("--size-paths",), stdin=subprocess.PIPE)
-        with self._lock:
-            self._process = process
+        self._process = process  # no lock: Stop and Cancel set their flag, then read this; the check below reads theirs
         try:
             if self._closed():
                 process.kill()

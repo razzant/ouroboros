@@ -294,7 +294,7 @@ def test_selected_session_visibility_failure_blocks_without_native_substitution(
     monkeypatch.setattr(agent_module, "envelope_from_task", lambda *_a, **_k: {})
     task = {"id": "child1", "configured_subagent": {"schema": 1}}
     amended, changed = agent_module.preflight_delegate_visibility(
-        SimpleNamespace(available_tools=lambda: []), task, dispatch,
+        SimpleNamespace(callable_rows=lambda namespace="": []), task, dispatch,
     )
     assert changed is True
     assert amended.executor == "blocked"

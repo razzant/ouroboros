@@ -24,6 +24,7 @@ _PROGRESS_ID_UNSET = object()
 from ouroboros.utils import (
     append_jsonl,
     atomic_write_json,
+    count_routing_lists,
     emit_log_event,
     get_git_info,
     read_json_dict,
@@ -486,8 +487,8 @@ class OuroborosAgent:
             log.warning("Worker boot logging failed", exc_info=True)
             return
 
-    def _persist_running_record(self, task: Dict[str, Any]) -> None:
-        """Record actual start on the execution drive and bind split tasks canonically.
+    def _persist_running_record(self, task: Dict[str, Any]) -> bool:
+        """Record actual start on the execution drive and bind split tasks canonically; True once it is stored.
 
         For a delegated child every derived field here was stamped onto ``task`` by
         `resolve_dispatch_axes` moments earlier, so model, effort, route, tool
@@ -596,8 +597,10 @@ class OuroborosAgent:
                     _is_direct_chat=bool(task.get("_is_direct_chat")),
                     **{key: running[key] for key in ("started_at", "ts", "task_attempt") if key in running},
                 )
+            return running.get("status") == STATUS_RUNNING
         except Exception:
             log.warning("Failed to persist running task status", exc_info=True)
+            return False
 
     def _run_delegate_preflight(
         self, drive_logs: Any, task: Dict[str, Any], dispatch: Optional[SubagentDispatch],
@@ -663,12 +666,13 @@ class OuroborosAgent:
         freeze_tool_profile(task)
         _record_executor_resolution(drive_logs, task, dispatch)
         sanitized_task = sanitize_task_for_event(task, drive_logs)
+        if self._persist_running_record(task):  # its source stored first (DEVELOPMENT 03): the event counts the lists
+            sanitized_task = count_routing_lists(sanitized_task)
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task,
                      # #1578: the task's own ids at top level beside its (content) task body.
                      "task_id": str(task.get("id") or ""),
                      **{key: str(task[key]) for key in ("root_task_id", "parent_task_id") if task.get(key)},
                      "activity_emitted_at": getattr(self, "_activity_emitted_at", None)})
-        self._persist_running_record(task)
         # After persistence, mirror the same resolution to the supervisor/queue.
         emit_dispatch_resolution(self._event_queue, task, dispatch)
         self._emit_live_log(

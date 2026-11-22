@@ -1,7 +1,8 @@
 /* The paste chord of type_text(via="paste") on a Mac, locally (osascript -l JavaScript <this file>) and over SSH
    (the same source through osascript -e on that Mac): Command plus the key that gives "v" UNDER COMMAND in the
    active keyboard layout, posted with exactly the Command flag. JavaScript for Automation is part of macOS and posts
-   through CoreGraphics under the Accessibility grant cliclick needs (no Automation grant, nothing to install).
+   through CoreGraphics under the grant to post input events, Accessibility (no Automation grant, nothing to install);
+   each event carries the skill's mark in kCGEventSourceUserData (field 42), as input_events.js does.
    Measured (#2589, macOS 26.4 guest, AppKit Edit menu): the menu matched the Command-plane characters of the event,
    so typing the "v" of the layout itself missed Paste on Russian - PC (Option added) and Dvorak - QWERTY Command ("." under
    Command), and a fixed US-V key missed it on Dvorak ("k"); this key pasted on ABC, the three Russian layouts and
@@ -26,8 +27,13 @@ function run(argv) {
                                "void*", "unsigned long", "void*", "void*"]]],
    ["CGPreflightPostEventAccess", ["bool", []]], ["CGEventSourceCreate", ["void*", ["int"]]],
    ["CGEventCreateKeyboardEvent", ["void*", ["void*", "unsigned short", "bool"]]],
-   ["CGEventSetFlags", ["void", ["void*", "unsigned long long"]]], ["CGEventPost", ["void", ["unsigned int", "void*"]]]
+   ["CGEventSetFlags", ["void", ["void*", "unsigned long long"]]], ["CGEventPost", ["void", ["unsigned int", "void*"]]],
+   ["CGEventSetIntegerValueField", ["void", ["void*", "unsigned int", "long long"]]]
   ].forEach(function (f) { ObjC.bindFunction(f[0], f[1]); });
+  if (!$.CGPreflightPostEventAccess()) { /* the grant first: without it no layout advice is the answer */
+    console.log("WARNING: Accessibility privileges not enabled (no right to post input events); the " + what + " was not sent");
+    return "";
+  }
   var source = $.TISCopyCurrentKeyboardLayoutInputSource(), id = "", data = null, key = -1;
   if (source) {
     var name = $.TISGetInputSourceProperty(source, $("TISPropertyInputSourceID"));
@@ -60,10 +66,6 @@ function run(argv) {
                 "); the " + what + " was not sent");
     return "";
   }
-  if (!$.CGPreflightPostEventAccess()) {
-    console.log("WARNING: Accessibility privileges not enabled (no right to post input events); the " + what + " was not sent");
-    return "";
-  }
   /* All events exist before the first is posted: one the system cannot make fails the chord with nothing sent.
      An error once a key went down still lets up what went down (the key, then Shift, then Command; each at most
      once, nothing goes down again) and ends the program with that same error: osascript exits 1, never an ok receipt. */
@@ -79,6 +81,7 @@ function run(argv) {
       }
       chord.push(event);
       $.CGEventSetFlags(event, step[2]);
+      $.CGEventSetIntegerValueField(event, 42, 0x4f55524f); /* "OURO": the skill's mark (kCGEventSourceUserData) */
     });
     chord.forEach(function (event) { tried++; $.CGEventPost(1, event); posted++; delay(0.02); }); /* session tap */
   } catch (error) {

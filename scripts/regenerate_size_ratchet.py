@@ -99,8 +99,10 @@ def _render(manifest: SizeRatchetManifest) -> str:
 def _next_manifest(
     rationales: dict[str, str],
     *,
-    checked_candidate: SizeRatchetManifest | None = None,
+    written: SizeRatchetManifest | None = None,
 ) -> SizeRatchetManifest:
+    """The manifest the live tree needs. A band entry's rationale is the one named on the command
+    line, else the one ``written`` on disk (an earlier run or a hand edit), else the committed one."""
     if _git("ls-files", "-u").stdout.strip():
         raise ValueError("merge in progress: resolve conflicts first")
     head = _git("rev-parse", "HEAD").stdout.strip()
@@ -123,18 +125,13 @@ def _next_manifest(
         )
     else:
         inventory = collect_size_ratchet_inventory(REPO_ROOT, repo_paths=_tracked_paths())
-        band_paths: dict[str, str | None] = {}
-        for path in sorted(inventory.band_paths):
-            if path in previous.band_paths:
-                band_paths[path] = previous.band_paths[path]
-            else:
-                checked_rationale = checked_candidate.band_paths.get(path) if checked_candidate is not None else None
-                band_paths[path] = rationales.get(path, checked_rationale)
-                unused.discard(path)
-        # An entry whose module now sits at 1501-1600 lines is kept with its
-        # reason; the validator accepts it there and the module usually returns.
-        for path in sorted(inventory.above_band_paths & set(previous.band_paths)):
-            band_paths[path] = previous.band_paths[path]
+        on_disk = written.band_paths if written is not None else {}
+        # Every 1001-1500 module has an entry; one at 1501-1600 lines keeps its entry or takes one named here.
+        entries = inventory.band_paths | (
+            inventory.above_band_paths & (set(previous.band_paths) | set(on_disk) | set(rationales)))
+        band_paths = {path: rationales.get(path) or on_disk.get(path) or previous.band_paths.get(path)
+                      for path in sorted(entries)}
+        unused -= entries
         current = SizeRatchetManifest(
             baseline_source_sha=previous.baseline_source_sha,
             giant_paths=inventory.giant_paths,
@@ -144,7 +141,7 @@ def _next_manifest(
             byte_baseline_debt=previous.byte_baseline_debt,
             byte_debt=dict(inventory.byte_debt),
         )
-        transition_errors = validate_manifest_transition(current, previous)
+        transition_errors = validate_manifest_transition(current, previous, inventory.line_counts())
         if transition_errors:
             raise ValueError("\n".join(transition_errors))
 
@@ -161,16 +158,21 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         metavar="PATH=TEXT",
-        help="authorize one new or re-entered 1001-1500-line path",
+        help="set the reason of one 1001-1600-line module: a new or re-entered entry, a touched module "
+             "without one, or a replacement of the recorded reason (repeatable)",
     )
     args = parser.parse_args(argv)
     try:
         rationales = _parse_rationales(args.band_rationale)
         path = REPO_ROOT / SIZE_RATCHET_MANIFEST_PATH
-        checked_candidate = (
-            parse_size_ratchet_manifest(path.read_text(encoding="utf-8")) if args.check and path.exists() else None
-        )
-        rendered = _render(_next_manifest(rationales, checked_candidate=checked_candidate))
+        written = None
+        if path.exists():
+            try:
+                written = parse_size_ratchet_manifest(path.read_text(encoding="utf-8"))
+            except ValueError:
+                if args.check:
+                    raise  # regeneration replaces an unreadable manifest; a check reports it
+        rendered = _render(_next_manifest(rationales, written=written))
         # Candidate mode: prove the rendered manifest against the live tree
         # BEFORE overwriting the checked-in one, so a red regeneration never
         # clobbers the on-disk manifest with an invalid candidate.
@@ -180,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if candidate_errors:
         print(
-            "size-ratchet candidate validation failed (manifest not written):\n" + "\n".join(candidate_errors),
+            "size-ratchet candidate validation failed (manifest not written):\n" + "\n".join(candidate_errors)
+            + "\n(a module's reason is set with --band-rationale PATH=TEXT)",
             file=sys.stderr,
         )
         return 2
