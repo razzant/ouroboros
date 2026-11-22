@@ -2,8 +2,8 @@
 instant, my human's last reported zone comes only from their own zoned message at ingress, and the "Own clock"
 lines a wake reads say both with this wake's appointment and the owner's bounds, as facts, not instructions.
 
-How the alarm uses a named time is pinned in ``test_consciousness.py``; the tool's arguments and receipts in
-``test_consciousness_wake_lane.py``.
+How the alarm uses a named time is pinned in ``test_consciousness_named_time.py``; the tool's arguments and receipts
+in ``test_consciousness_wake_lane.py``.
 """
 from __future__ import annotations
 

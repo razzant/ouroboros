@@ -12,8 +12,9 @@ failure (``consumed_by``), decided inside the settlement's own state write on th
 written meanwhile stays and sets the next wake. The wake that stood appointed when it was stored, pending or running,
 never consumes it: each named time is consumed by one wake that started with it stored, and a passed one never adds
 a wake. With consciousness on, a time at or before the pending appointment is refused: that wake keeps its time
-(owner 12.10, #1603), and ``schedule_followup(run_at=…)`` serves work at that moment. Stored while consciousness is
-off, it is the first wake when consciousness is turned on while it is still ahead (``consciousness.start``).
+(owner 12.10, #1603), and ``schedule_followup(run_at=…)`` serves work at that moment. Turning consciousness on
+(``consciousness.start``) appoints the earlier of the appointment Off left and a named time still ahead, no sooner
+than MIN after the last wake, boot or skip.
 
 My human's last reported zone (``OWNER_ZONE_STATE_KEY``) is overwritten at owner ingress (``note_owner_zone``) from
 their own message whose client reported a valid IANA zone, dated by that message's own time, never over a report
