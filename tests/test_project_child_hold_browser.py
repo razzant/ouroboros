@@ -322,7 +322,8 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
             page.locator('.chat-live-card[data-task-id="parent"] > [data-live-summary-button] [data-live-disclosure]').click()
             child_card = page.locator(CHILD)
             child_card.wait_for(state="visible")
-            assert child_card.locator('[data-live-phase]').inner_text() == "Working"
+            # A nested card says its own member's state (#3929): the server's projection has the child queued.
+            assert child_card.locator('[data-live-phase]').inner_text() == "Queued"
             page.evaluate("() => window.__heldCard = document.querySelector('.chat-live-card[data-task-id=held]')")
             shot(page, "scheduled")
             unreadable["on"] = True
@@ -337,7 +338,9 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
             host.pending.append(parent_row)
             assert queue.persist_queue_snapshot()
             page.wait_for_function("text => document.querySelector('.chat-live-card[data-task-id=parent] [data-live-phase]')?.textContent === text", arg=WAIT)
-            assert child_card.locator('[data-live-phase]').inner_text() == "Working"
+            # The child's card says its own member's state (#3929): unreadable and not yet held, it is unconfirmed;
+            # its earlier running snapshot no longer speaks for it.
+            assert child_card.locator('[data-live-phase]').inner_text() == "Activity unconfirmed"
             # The room says the server's room: the parent waits and the child's state is unconfirmed (a ring),
             # whatever the child's card still shows from its earlier snapshot.
             page.wait_for_function("() => { const s = document.querySelector('#chat-status');"
