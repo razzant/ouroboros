@@ -84,24 +84,30 @@ function caretLineTop(input, at, width, style, line) {
     }
 }
 
+/** Whether the reader sees the caret's line `y` (its line box's top, in the field's scroll pixels): at least half
+ * of that box inside the scrolled field. An engine reveals the caret's own box, shorter than the line, so the line
+ * box may start above the top edge while the caret shows whole (Linux Chromium: 1.3 px). */
+export function caretRowShown({ top, height }, y, line) {
+    return Math.min(y + line, top + height) - Math.max(y, top) >= line / 2;
+}
+
 function keepVisibleCaret(input, before, now) {
     if (!samePlace(before, now)) return;
     const { height, width, top, scrollHeight } = now;
     // A wider field rewraps too: fewer rows above a middle caret lift it out of an unchanged scroll place.
     if (!height || (height >= before.height && width === before.width && scrollHeight === before.scrollHeight)) return;
-    const style = getComputedStyle(input), pad = px(style.paddingBottom);
+    const style = getComputedStyle(input), pad = px(style.paddingBottom), line = px(style.lineHeight);
+    // Only a caret the reader saw is kept, then in full; reading higher in a long draft leaves the same scroll place.
     if (before.at === input.value.length) {
-        // Pin the tail only if it was visible; reading higher in a long draft leaves the same caret offset.
-        if (before.scrollHeight - before.top - before.height <= pad + 1
+        if (caretRowShown(before, before.scrollHeight - pad - line, line)
             && scrollHeight - top - height > pad + 1) input.scrollTop = scrollHeight;
         return;
     }
-    const line = px(style.lineHeight);
     const y = caretLineTop(input, before.at, width, style, line);
     // A fold narrows the field frame by frame: the frame before measured this caret's line at the width it had then.
     const oldY = width === before.width ? y : before.lineTop ?? caretLineTop(input, before.at, before.width, style, line);
     now.lineTop = y;
-    if (oldY < before.top - 1 || oldY + line > before.top + before.height + 1) return;
+    if (!caretRowShown(before, oldY, line)) return;
     if (y < top - 1) input.scrollTop = y - px(style.paddingTop);
     else if (y + line > top + height + 1) input.scrollTop = Math.ceil(y + line + pad - height);
 }
