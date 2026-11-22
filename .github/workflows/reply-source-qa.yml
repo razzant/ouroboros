@@ -1,0 +1,547 @@
+# Temporary, branch-only verification. The product PR contains no workflow changes.
+name: Reply source verification
+on:
+  push:
+    branches: [qa/reply-source-bfb7070e6744]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    env:
+      PRODUCT: 96ba5045ef5e6796aeec2266010eccd33ce196a0
+      PRODUCT_TREE: bfb7070e674425946d919ccf69d0c206f162ef54
+      PRODUCT_BASE: ea78023155d91aec1ab1d2fcc099d444fe96b325
+      LANE: not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet
+      # The one case with its own paired lane (pinned base and candidate). The selected
+      # suite deselects exactly this node id, so it is not run a second time there.
+      COMPONENT_MAP_CASE: 'tests/test_docs_sync.py::test_architecture_component_map_covers_every_live_runtime_module'
+      PY_SELECTED: |
+        tests/test_architecture_facts.py
+        tests/test_chat_attachments.py
+        tests/test_chat_chain.py
+        tests/test_chat_references.py
+        tests/test_chat_search.py
+        tests/test_card_press_thread.py
+        tests/test_client_contract_doc.py
+        tests/test_context.py
+        tests/test_context_physical_exposure.py
+        tests/test_continue_author_stop.py
+        tests/test_continue_converted_room.py
+        tests/test_continue_main_origin.py
+        tests/test_living_cards_api.py
+        tests/test_owner_live_delivery.py
+        tests/test_press_is_an_act.py
+        tests/test_continue_quiz_origin.py
+        tests/test_conversation_lane_laws.py
+        tests/test_conversation_lane_saved_turn_restore.py
+        tests/test_delegate_wake_mail_delivery.py
+        tests/test_dialogue_addressed_readers.py
+        tests/test_dialogue_evidence.py
+        tests/test_dialogue_evidence_identity.py
+        tests/test_direct_project_turn_recovery.py
+        tests/test_docs_sync.py
+        tests/test_domain_manifest.py
+        tests/test_domain_report.py
+        tests/test_gateway_parity.py
+        tests/test_generated_inventories.py
+        tests/test_helper_owner_words_flow.py
+        tests/test_history_physical_coverage.py
+        tests/test_history_reply_navigation.py
+        tests/test_host_service_operation_identity.py
+        tests/test_ingress_chat_routing.py
+        tests/test_main_authored_context.py
+        tests/test_memory_view_room.py
+        tests/test_message_bus.py
+        tests/test_message_routing.py
+        tests/test_new_work_intent.py
+        tests/test_owner_continue.py
+        tests/test_owner_delivery_stamp.py
+        tests/test_owner_relay.py
+        tests/test_owner_words.py
+        tests/test_owner_words_at_receipt.py
+        tests/test_owner_words_carried.py
+        tests/test_owner_words_identity.py
+        tests/test_project_chat_continuity.py
+        tests/test_project_routing_v664.py
+        tests/test_quiz_history_evidence.py
+        tests/test_room_messages.py
+        tests/test_root_effort_ingress.py
+        tests/test_route_tool_schema_limit.py
+        tests/test_routing_decision.py
+        tests/test_routing_receipt_facts.py
+        tests/test_routing_receipts_wave1.py
+        tests/test_routing_refusal_causes.py
+        tests/test_routing_root_snapshot.py
+        tests/test_run_origin_provenance.py
+        tests/test_safety_focus_bundle.py
+        tests/test_send_clock.py
+        tests/test_start_task_source_files.py
+        tests/test_swarm_host_admission.py
+        tests/test_telegram_routing_notices.py
+        tests/test_tool_invocation_custody.py
+        tests/test_ui_historical_outcomes.py
+        tests/test_unplaced_receipt_source.py
+        tests/test_v6730_origin_invariant.py
+      # The contract floor (ouroboros/test_selection.py FLOOR_TESTS; the two
+      # floor modules already in PY_SELECTED are not repeated).
+      PY_FLOOR: |
+        tests/test_contracts.py
+        tests/test_hermetic_data_root.py
+        tests/test_packaging_sync.py
+        tests/test_preflight_process_containment.py
+        tests/test_process_custody.py
+        tests/test_safety_policy.py
+        tests/test_smoke.py
+      # Direct importers of the changed test modules (AST-level
+      # `from tests.test_<changed> import ...`), so a changed test helper
+      # cannot break its consumers silently.
+      PY_IMPORTERS: |
+        tests/test_acceptance_fence_cold_resume.py
+        tests/test_authority_pause_gateway.py
+        tests/test_batch4_upstream_integration.py
+        tests/test_body_feed.py
+        tests/test_call_open_ingress.py
+        tests/test_chronicle_read_path.py
+        tests/test_chronicle_tools.py
+        tests/test_chronicle_transfer.py
+        tests/test_client_contract_bindings.py
+        tests/test_client_contract_history.py
+        tests/test_client_contract_journeys.py
+        tests/test_common_story.py
+        tests/test_common_story_composition.py
+        tests/test_common_story_nested_sources.py
+        tests/test_common_story_selection.py
+        tests/test_consciousness_memory_facts.py
+        tests/test_consumed_selection_retention.py
+        tests/test_context_fit_report.py
+        tests/test_context_memory.py
+        tests/test_continue_memory_drive.py
+        tests/test_continue_wake_opening.py
+        tests/test_delegate_recovery.py
+        tests/test_detached_focus.py
+        tests/test_dialogue_facts.py
+        tests/test_dir02_consumed_grant_retry.py
+        tests/test_direct_project_turn_resource.py
+        tests/test_doc_context.py
+        tests/test_duty_rest.py
+        tests/test_execution_clock_consumed_recovery.py
+        tests/test_execution_clock_resume_handover.py
+        tests/test_execution_timeout_runtime.py
+        tests/test_external_work_order_owner_words.py
+        tests/test_gateway_client_contract.py
+        tests/test_helper_start_view.py
+        tests/test_history_addressed.py
+        tests/test_history_around.py
+        tests/test_late_input_head_name.py
+        tests/test_late_review_marks.py
+        tests/test_light_overview_reserved.py
+        tests/test_live_caption_store.py
+        tests/test_living_cards_delivery.py
+        tests/test_main_closure_checkpoint.py
+        tests/test_main_durable_edges.py
+        tests/test_main_project_consistency.py
+        tests/test_main_retry_resume_identity.py
+        tests/test_main_state_projection.py
+        tests/test_main_unread_counter.py
+        tests/test_mcp_import.py
+        tests/test_memory_capture_reads.py
+        tests/test_memory_distance_forms.py
+        tests/test_memory_fallback.py
+        tests/test_memory_fallback_max.py
+        tests/test_memory_fallback_reachability.py
+        tests/test_memory_inventory.py
+        tests/test_memory_reader.py
+        tests/test_memory_room_liveness.py
+        tests/test_memory_sealing.py
+        tests/test_memory_story_reuse.py
+        tests/test_memory_tail_facts.py
+        tests/test_memory_view_activation.py
+        tests/test_memory_view_floor.py
+        tests/test_memory_view_holding_readers.py
+        tests/test_memory_view_iso_period.py
+        tests/test_memory_view_memo.py
+        tests/test_memory_view_readers.py
+        tests/test_memory_view_story.py
+        tests/test_memory_view_told.py
+        tests/test_memory_waiting.py
+        tests/test_memory_wake_directory.py
+        tests/test_mind_controls.py
+        tests/test_model_route_contract_parity.py
+        tests/test_one_work_placement.py
+        tests/test_owner_relay_busy_store.py
+        tests/test_owner_words_owe_no_reply.py
+        tests/test_pending_deadline_continuations.py
+        tests/test_pending_execution_deadlines.py
+        tests/test_place_memory.py
+        tests/test_placement_pinned_resources.py
+        tests/test_planned_delegate_assignment.py
+        tests/test_presence_delivery.py
+        tests/test_presence_history.py
+        tests/test_presence_owner_contact.py
+        tests/test_presence_recovery_facts.py
+        tests/test_project_admission_boundaries.py
+        tests/test_project_admission_integration.py
+        tests/test_project_admission_repair.py
+        tests/test_project_authority_outages.py
+        tests/test_project_closure.py
+        tests/test_project_hold_dispatch.py
+        tests/test_project_hold_recovery.py
+        tests/test_project_pin.py
+        tests/test_project_semantic_admission.py
+        tests/test_project_surface_admission.py
+        tests/test_promote_admission_pending.py
+        tests/test_promote_chat_flow.py
+        tests/test_promote_event_transport.py
+        tests/test_quiz_contract_completion.py
+        tests/test_quiz_delivery_recovery.py
+        tests/test_quiz_display.py
+        tests/test_quiz_late_answer.py
+        tests/test_receptive_commit_review.py
+        tests/test_reply_target_carried.py
+        tests/test_resume_handover.py
+        tests/test_retry_activity_consumers.py
+        tests/test_retry_pause_generations.py
+        tests/test_retry_pause_identity.py
+        tests/test_retry_pause_stop_transfer.py
+        tests/test_retry_resume_dispatch.py
+        tests/test_retry_resume_lineage_faults.py
+        tests/test_retry_resume_stop_authority.py
+        tests/test_room_appearances.py
+        tests/test_room_membership_parity.py
+        tests/test_root_post_task_synthesis.py
+        tests/test_root_resume_selection_survival.py
+        tests/test_scheduled_origin_read.py
+        tests/test_scheduled_subagents_auto.py
+        tests/test_skill_mcp.py
+        tests/test_skill_mcp_management_contract.py
+        tests/test_steer_relay.py
+        tests/test_storage_dashboard_backend.py
+        tests/test_supervisor_route_flow.py
+        tests/test_swarm_provider_disclosure.py
+        tests/test_task_review_sources.py
+        tests/test_terminal_projection_archive_bound.py
+        tests/test_tool_classification_differential.py
+        tests/test_two_writers_one_room.py
+        tests/test_ui_i18n_contract_parity.py
+        tests/test_work_answer_races.py
+        tests/test_work_control_races.py
+        tests/test_work_detach_races.py
+        tests/test_work_intent_races.py
+        tests/test_work_placement_races.py
+        tests/test_work_state_endpoint.py
+        tests/test_working_recovery_admission.py
+        tests/test_working_recovery_clocks.py
+        tests/test_working_recovery_relay.py
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind this run to the author-accepted product commit
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD^)" = "$PRODUCT"
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/reply-source-qa.yml
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCT_TREE"
+          test "$(git cat-file -p HEAD | awk '/^parent /{print $2}')" = "$PRODUCT_BASE"
+          echo "Tested commit $PRODUCT, tree $PRODUCT_TREE, base $PRODUCT_BASE" >> "$GITHUB_STEP_SUMMARY"
+      - uses: ./.github/actions/setup-python-env
+        id: setup
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        id: node
+        with:
+          node-version: '22'
+      - name: Install the browsers used by the focused journeys
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        id: browsers
+        timeout-minutes: 70
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Reply, receipts and quiz choices in the browser
+        id: ui
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
+        timeout-minutes: 60
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/private"
+          xvfb-run -a python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/ui" -- \
+            python -m pytest -o addopts= -n0 -m ui_browser --timeout=900 -q --tb=short \
+              tests/test_history_reply_browser.py tests/test_routing_receipt_browser.py tests/test_quiz_response_browser.py \
+              tests/test_human_rows_browser.py::test_reworded_host_rows_live_and_after_reload tests/test_wrap_up_files_browser.py \
+              --ci-evidence-dir="$RUNNER_TEMP/evidence/ui" --junitxml="$RUNNER_TEMP/private/ui.xml"
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          rows = ET.parse(root/'private/ui.xml').findall('.//testcase')
+          assert rows and all(not any(r.find(tag) is not None for tag in ('failure','error','skipped')) for r in rows)
+          names = [r.get('name','') for r in rows]
+          for engine in ('chromium','webkit'):
+              for test, minimum in [('reads_their_choice_in_their_voice',1), ('lands_on_that_answer',7)]:
+                  assert sum(test in n and engine in n for n in names) >= minimum, (engine, test)
+          quote = 'test_main_quotes_the_request_that_started_the_completed_project'
+          # One Chromium test, two parameter ids, once each: [quote-shown] opens the selected saved row, [quote-hidden-directly-above] only observes. A bare, extra, missing or repeated id is refused.
+          assert sorted(n for n in names if n.split('[', 1)[0] == quote) == sorted([quote + '[quote-shown]', quote + '[quote-hidden-directly-above]']), [n for n in names if quote in n]
+          for source in ('late_reply', 'relay'):
+              assert sum('a_routed_message_receipt_reads_the_same_live_and_after_reload' in n and source in n for n in names) >= 3
+          for engine in ('chromium', 'webkit'):
+              assert any('test_reworded_host_rows_live_and_after_reload' in n and engine in n for n in names)
+          assert any('test_saved_work_download_and_receipt_survive_real_chat_reload' in n for n in names)
+          assert any('quiz_pending_persistent_profile_recovery_and_keyboard' in n for n in names)
+          print(f'{len(rows)} browser cases passed without skips; both engines exercised the quote and the landing.')
+          PY
+      - name: Compare the component-map test on the pinned base and the candidate
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/private" "$RUNNER_TEMP/evidence"
+          module=${COMPONENT_MAP_CASE%%::*}
+          name=${COMPONENT_MAP_CASE##*::}
+          # The selected suite deselects this case by node-id prefix; that prefix must name this case alone.
+          found=$(grep -c -E "^(async +)?def +$name" "$module" || true)
+          test "$found" = 1 || { echo "::error::$module must define exactly one test starting with $name (found $found)"; exit 1; }
+          git worktree add --quiet --detach "$RUNNER_TEMP/base-source" "$PRODUCT_BASE"
+          py=$(python -c 'import sys; print(sys.executable)')
+          test "$(git -C "$RUNNER_TEMP/base-source" rev-parse HEAD)" = "$PRODUCT_BASE"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          base_rc=0
+          candidate_rc=0
+          # The same node id, each run in its own pinned tree with that tree's own scripts and test file.
+          # Neither run may stop the other: the report below reads both exit codes and both JUnit files.
+          (cd "$RUNNER_TEMP/base-source" && "$py" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/base-docs" -- "$py" -B -m pytest -p no:cacheprovider -o addopts= -n0 -q "$COMPONENT_MAP_CASE" --junitxml="$RUNNER_TEMP/private/base-docs.xml") || base_rc=$?
+          "$py" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/candidate-docs" -- "$py" -B -m pytest -p no:cacheprovider -o addopts= -n0 -q "$COMPONENT_MAP_CASE" --junitxml="$RUNNER_TEMP/private/candidate-docs.xml" || candidate_rc=$?
+          python - "$base_rc" "$candidate_rc" <<'PY'
+          import ast, json, os, re, sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          case = os.environ['COMPONENT_MAP_CASE']
+          module, name = case.split('::')
+          classname = os.path.splitext(module)[0].replace('/', '.')
+          named = re.compile(r"docs/ARCHITECTURE\.md names no owner for these live modules: (\[[^\]\n]*\])")
+          source = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./-]*\.py')
+
+          def outcome(side, rc, junit):
+              # One validated outcome per tree: passed, or failed with exactly the named component-map list.
+              if rc not in (0, 1):
+                  raise ValueError(f'{side}: pytest exit {rc}, so the case produced no verdict')
+              try:
+                  top = ET.parse(root / 'private' / junit).getroot()
+              except (OSError, ET.ParseError) as err:
+                  raise ValueError(f'{side}: JUnit file unreadable ({err})')
+              cases = list(top.iter('testcase'))
+              if [(c.get('classname'), c.get('name')) for c in cases] != [(classname, name)]:
+                  raise ValueError(f'{side}: JUnit must hold exactly {case}')
+              totals = {k: sum(int(s.get(k, 0)) for s in top.iter('testsuite')) for k in ('tests', 'failures', 'errors', 'skipped')}
+              one = cases[0]
+              failures = one.findall('failure')
+              if totals != {'tests': 1, 'failures': rc, 'errors': 0, 'skipped': 0} or len(failures) != rc or one.find('error') is not None or one.find('skipped') is not None:
+                  raise ValueError(f'{side}: pytest exit {rc} disagrees with the JUnit result {totals}; an error or a skip is never accepted')
+              if rc == 0:
+                  return {'result': 'passed', 'missing': []}
+              hit = named.search(failures[0].get('message', ''))
+              try:
+                  listed = ast.literal_eval(hit.group(1)) if hit else None
+              except (ValueError, SyntaxError):
+                  listed = None
+              if not (isinstance(listed, list) and listed and all(isinstance(m, str) and source.fullmatch(m) for m in listed)):
+                  raise ValueError(f'{side}: the case failed for another reason, or its module list is not parseable')
+              return {'result': 'failed', 'missing': sorted(set(listed))}
+
+          seen, problems = {}, []
+          for side, rc, junit in (('base', sys.argv[1], 'base-docs.xml'), ('candidate', sys.argv[2], 'candidate-docs.xml')):
+              try:
+                  seen[side] = outcome(side, int(rc), junit)
+              except ValueError as err:
+                  problems.append(str(err))
+          if problems:
+              raise SystemExit('Component-map comparison is not usable:\n' + '\n'.join(problems))
+          base, head = seen['base'], seen['candidate']
+          new = sorted(set(head['missing']) - set(base['missing']))
+          cleared = sorted(set(base['missing']) - set(head['missing']))
+          verdict = 'new_missing' if new else 'passed' if head['result'] == 'passed' else 'inherited_only'
+          record = {'case': case, 'base': {'commit': os.environ['PRODUCT_BASE'], **base}, 'candidate': {'commit': os.environ['PRODUCT'], **head}, 'new_missing': new, 'cleared_missing': cleared, 'verdict': verdict}
+          (root / 'evidence/base-docs.json').write_text(json.dumps(record, indent=2) + '\n')
+          text = f"Component-map case on both trees: base {base['result']} {base['missing']}; candidate {head['result']} {head['missing']}; new {new}; cleared {cleared}. The selected suite deselects only this case."
+          print(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              print(text, file=summary)
+          if new:
+              raise SystemExit(f'The candidate leaves live modules without a component-map owner that the base did not miss: {new}')
+          if verdict == 'inherited_only':
+              print(f"::warning::The candidate still lacks only the component-map owners the base already lacked: {head['missing']}")
+          PY
+      - name: Source, compatibility, contract floor, importers and static UI witnesses
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          # Only the component-map case is left out (it has the paired step above); every other case runs unfiltered.
+          python scripts/ci_retry.py --evidence-dir "$RUNNER_TEMP/evidence/selected" -- \
+            python scripts/run_tests.py $PY_SELECTED $PY_FLOOR $PY_IMPORTERS tests/test_*_static.py \
+              -o addopts= -n0 -m "$LANE" --timeout=300 -q --tb=short \
+              --deselect="$COMPONENT_MAP_CASE" \
+              --ci-evidence-dir="$RUNNER_TEMP/evidence/selected"
+      - name: Keyless context gate
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 35
+        run: |
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/context" -- \
+            python -c "import runpy,sys; raise SystemExit(runpy.run_path(sys.argv[1])['main'](sys.argv[2:]))" \
+              "$GITHUB_WORKSPACE/scripts/context_gate.py" --workers 2 --evidence-dir "$RUNNER_TEMP/evidence/context"
+      - name: All browser-module Node tests
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        working-directory: web
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap --test-timeout=300000 tests/*.test.js | tee "$RUNNER_TEMP/node.tap"
+          grep -Eq '^# tests [1-9][0-9]*$' "$RUNNER_TEMP/node.tap"
+          grep -Eq '^# fail 0$' "$RUNNER_TEMP/node.tap"
+      - name: Size against the pinned product base
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 30
+        run: |
+          mkdir -p "$RUNNER_TEMP/private"
+          # Measure this single product commit, rather than the multi-change branch-push mode.
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/raw/size" -- \
+            env -u GITHUB_EVENT_NAME OURO_SIZE_RATCHET_BASE_REF="$PRODUCT_BASE" python -m pytest -o addopts= -n0 tests/ -m size_ratchet --ci-evidence-dir="$RUNNER_TEMP/evidence/size" --junitxml="$RUNNER_TEMP/private/size.xml" -q --tb=short
+          python - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          rows = ET.parse(os.path.join(os.environ['RUNNER_TEMP'],'private/size.xml')).findall('.//testcase')
+          assert len(rows) >= 7 and all(not any(r.find(t) is not None for t in ('error','failure','skipped')) for r in rows)
+          assert {'test_a_change_does_not_grow_a_reference_book','test_a_change_does_not_grow_bible_or_the_prompts'} <= {r.get('name') for r in rows}
+          print(f'{len(rows)} size checks passed against the product base')
+          PY
+      - name: Record evidence coverage and both Git identities
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, re, shutil, subprocess
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          e = os.environ; root = Path(e['RUNNER_TEMP']); ev = root/'evidence'; ev.mkdir(exist_ok=True)
+          report = dict(workflow_commit=e['GITHUB_SHA'], product_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(), product_tree=e['PRODUCT_TREE'], product_base=e['PRODUCT_BASE'], run=e['GITHUB_RUN_ID'], attempt=e['GITHUB_RUN_ATTEMPT'])
+          required = ['base-docs.json','selected/results.json','selected/verdict.json','context/results.json','context/verdict.json','ui/results.json','size/results.json']
+          report['reports'] = {n:hashlib.sha256((ev/n).read_bytes()).hexdigest() if (ev/n).is_file() else None for n in required}
+          # Typed projection of what the two retry lanes actually decided. The verdict file's
+          # own text is never echoed: only an enumerated state and integer counts are kept.
+          # green = the first session passed clean; flaky = a retry recovered it; accepted = a
+          # known failure was accepted; red = a failure stands; not_read = missing, unreadable
+          # or invalid, so an unknown lane is never counted as a pass.
+          VERDICT_STATES = ('green', 'flaky', 'accepted', 'red')
+          def lane_verdict(name):
+              path = ev/name/'verdict.json'
+              try:
+                  data = json.loads(path.read_bytes())
+              except (OSError, ValueError):
+                  return {'state': 'not_read'}
+              if not isinstance(data, dict):
+                  return {'state': 'not_read'}
+              state = data.get('verdict')
+              if state not in VERDICT_STATES:
+                  return {'state': 'not_read'}
+              projected = {'state': state}
+              rounds = data.get('rounds')
+              if isinstance(rounds, list):
+                  projected['rounds'] = len(rounds)
+              counts = data.get('counts')
+              if isinstance(counts, dict):
+                  kept = {k: counts[k] for k in ('passed','flaky','failed','accepted','not_run','skipped')
+                          if isinstance(counts.get(k), int) and not isinstance(counts.get(k), bool)}
+                  if kept:
+                      projected['counts'] = kept
+              return projected
+          report['lane_verdicts'] = {'selected': lane_verdict('selected'), 'context': lane_verdict('context')}
+          report['lanes_clean'] = all(lane.get('state') == 'green' for lane in report['lane_verdicts'].values())
+          tap = root/'node.tap'
+          report['node'] = {k:int(v) for k,v in re.findall(r'^# (tests|pass|fail|skipped) (\d+)\s*$', tap.read_text() if tap.is_file() else '', re.M)}
+          out = root/'reply-views'; out.mkdir(exist_ok=True)
+          report['views'] = {}
+          # The selected-origin room view now comes from the replay phase of the same node; the other two
+          # rendered names belong to other tests and stay exactly as they were.
+          for name in ['selected-origin-project-replay-shown-chromium.png','card-answer-quote-reload-chromium.png','card-answer-landing-option_comment-0-reload-webkit.png']:
+              files = list((root/'raw/ui').glob(f'run-*/quoted-navigation/*/{name}'))
+              if len(files) == 1 and files[0].is_file():
+                  shutil.copyfile(files[0], out/name)
+                  report['views'][name] = hashlib.sha256((out/name).read_bytes()).hexdigest()
+              else:
+                  report['views'][name] = None
+          # Retain just the two synthetic row addresses per click of the visible case. Raw browser events stay private.
+          # The hidden case is a separate observed non-click: its stem is never matched here and its facts are never a landing.
+          def address(value):
+              # One short printable string. Any other type, an empty value or a long one is refused, never trimmed.
+              return value if type(value) is str and 0 < len(value) <= 512 and value.isprintable() else None
+          def visible(phase):
+              # Exactly one record per phase; only two bounded strings are kept from it.
+              found = list((root/'raw/ui').glob(f'run-*/quoted-navigation/*/selected-origin-project-{phase}-shown-chromium.json'))
+              if len(found) != 1:
+                  return None
+              try:
+                  result = json.loads(found[0].read_bytes())
+                  facts = result['facts']
+                  # The record names its own phase, so a bridged delivery cannot be filed as a persisted
+                  # reload (nor the reverse): file name and recorded phase are compared, not just the name.
+                  if result['fixture']['arrival'] != phase:
+                      return None
+                  pair = {'selected': address(result['fixture']['selected']), 'opened': address(facts.get('address'))}
+                  hidden = facts.get('hidden')
+              except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                  return {'selected': None, 'opened': None}
+              return {'selected': None, 'opened': None} if hidden is True else pair
+          # The typed pass of exactly one visible testcase, read from the JUnit file the browser step wrote.
+          shown = 'test_main_quotes_the_request_that_started_the_completed_project[quote-shown]'
+          try:
+              cases = [r for r in ET.parse(root/'private/ui.xml').findall('.//testcase') if r.get('name') == shown]
+          except (OSError, ET.ParseError):
+              cases = []
+          passed = len(cases) == 1 and all(cases[0].find(tag) is None for tag in ('failure','error','skipped'))
+          landings = report['selected_origin'] = {}
+          for phase in ('live-arrival', 'replay'):
+              pair = visible(phase)
+              if pair is not None:
+                  landings[phase] = pair
+          landed = len(landings) == 2 and all(r['selected'] and r['selected'] == r['opened'] for r in landings.values())
+          if landed:
+              landed = landings['live-arrival']['selected'] == landings['replay']['selected']
+          report['phases_kept'] = sorted(landings)
+          complete = landed and passed and report['product_commit'] == e['PRODUCT'] and all(report['reports'].values()) and all(report['views'].values()) and report['node'].get('tests',0)>0
+          report['evidence_complete'] = complete
+          (ev/'identity.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(f'Visible quote case passed exactly once: {passed}; phases kept: {sorted(landings)}')
+          print(f"Retry lanes: selected {report['lane_verdicts']['selected']['state']}; context {report['lane_verdicts']['context']['state']}; both clean: {report['lanes_clean']}")
+          assert complete, 'Structural evidence incomplete; see identity.json. Actual test outcomes are separate.'
+          assert report['lanes_clean'], 'Retry lanes not clean; see identity.json. Actual test outcomes are separate.'
+          PY
+      - name: Save only public test projections and synthetic views
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reply-source-check-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/evidence/identity.json
+            ${{ runner.temp }}/evidence/base-docs.json
+            ${{ runner.temp }}/evidence/selected/results.json
+            ${{ runner.temp }}/evidence/selected/verdict.json
+            ${{ runner.temp }}/evidence/context/results.json
+            ${{ runner.temp }}/evidence/context/verdict.json
+            ${{ runner.temp }}/evidence/ui/results.json
+            ${{ runner.temp }}/evidence/size/results.json
+            ${{ runner.temp }}/reply-views/selected-origin-project-replay-shown-chromium.png
+            ${{ runner.temp }}/reply-views/card-answer-quote-reload-chromium.png
+            ${{ runner.temp }}/reply-views/card-answer-landing-option_comment-0-reload-webkit.png
