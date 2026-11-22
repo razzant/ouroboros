@@ -1249,7 +1249,8 @@ def _declared_tests(source: str, path: str) -> tuple[int, collections.Counter]:
 
 def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
     """What the last complete battery recorded for these test modules, on the slowest of
-    its systems, and how many it did not record; ``None`` without a readable table."""
+    its systems, and how many it did not record; ``None`` without a readable table (one whose
+    values for them are finite numbers of milliseconds)."""
     from ouroboros import config
 
     try:
@@ -1257,9 +1258,10 @@ def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
         systems = list(table["platforms"].values())
         recorded = [max(files.get(path, 0) for files in systems) for path in paths
                     if any(path in files for files in systems)]
+        readable = all(type(value) in (int, float) and math.isfinite(value) for value in recorded)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
-    return sum(recorded) / 1000, len(paths) - len(recorded)
+    return (sum(recorded) / 1000, len(paths) - len(recorded)) if readable else None
 
 
 def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
