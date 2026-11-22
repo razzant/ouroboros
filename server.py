@@ -1377,12 +1377,11 @@ def _restart_cleanup_kwargs() -> dict:
 def _emergency_process_cleanup() -> dict:
     """Kill child processes, workers and companions; the kill census. The main and
     Host Service listeners close with this process: no port is swept."""
-    from ouroboros.maintenance import child as maintenance_child
-    from ouroboros.storage import count as storage_count
-    from ouroboros.storage_free import free as storage_free
-    maintenance_child.stop()
-    storage_count.stop()
-    storage_free.stop()
+    from ouroboros.startup_historical_audit import live_background_children, stop_background_children
+    background = stop_background_children()  # the maintenance child, the Storage count and Free
+    with suppress(Exception):  # a teardown cut short may not have stopped the local model: ask the loaded one, if any
+        if (model := sys.modules["ouroboros.local_model"].get_manager(create=False)) is not None:  # no import: it waits
+            model.panic_stop(request_only=True)  # its server, an install and a stop still waiting: no lock, no wait
     begin_owned_stop(DATA_DIR, cause=server_stop_cause())  # the grace starts here; cause and pending stops are recorded before any wait
     worker_exits = None  # the pool's own PID census; None until kill_workers ran to its end
     try:
@@ -1420,8 +1419,7 @@ def _emergency_process_cleanup() -> dict:
             pass
     if _restart_requested.is_set():  # only the restart that carried an adoption can arm it; never a wait
         body_adoption.arm(DATA_DIR, worker_exits=worker_exits,
-                          live_children=multiprocessing.active_children() + maintenance_child.live_children()
-                          + storage_count.live_children() + storage_free.live_children(),
+                          live_children=multiprocessing.active_children() + live_background_children(background),
                           owned_stop=owned_stop, owner_restart=_owner_restart_requested.is_set())
     try:
         from ouroboros.extension_companion import panic_kill_all
@@ -1429,8 +1427,7 @@ def _emergency_process_cleanup() -> dict:
     except Exception:
         pass
     return {"worker_exits": worker_exits, "owned_stop": owned_stop,
-            "live_children": multiprocessing.active_children() + maintenance_child.live_children()
-            + storage_count.live_children() + storage_free.live_children()}
+            "live_children": multiprocessing.active_children() + live_background_children(background)}
 
 def main() -> int:
     from ouroboros.delegate_recovery import observe_restart_parent
