@@ -526,6 +526,53 @@ def test_main_uses_current_canonical_result_after_project_append(project_root, m
     assert project_root.queued[0]['progress_meta']['completion_answer'] == 'fresh canonical answer'
 
 
+def test_new_debt_during_project_append_holds_main_without_rereading_per_consumer(project_root, monkeypatch):
+    from unittest.mock import Mock
+
+    from ouroboros import project_dialogue
+    from supervisor import terminal_delivery
+
+    root, task = project_root.root, project_root.task
+    tid = task["id"]
+    _store(root, chat_id=task["chat_id"], terminal_origin="model_final", result="Current answer", task_attempt=1)
+    pending = terminal_delivery.build_completed_result_event(root, task, tid, {"result": "A different answer"})
+    append = project_dialogue.append_canonical_task_summary
+
+    def append_and_owe(drive, row):
+        wrote = append(drive, row)
+        assert terminal_delivery.register_pending_delivery(drive, pending)
+        return wrote
+
+    monkeypatch.setattr(project_dialogue, "append_canonical_task_summary", append_and_owe)
+    reads = Mock(wraps=terminal_delivery.terminal_answer_receipts)
+    monkeypatch.setattr(terminal_delivery, "terminal_answer_receipts", reads)
+    waits = {}
+    assert settle_terminal_projection(root, tid, task=task, waits=waits) == SETTLEMENT_DEFERRED
+    assert waits == {"on": "terminal_delivery"} and reads.call_count == 2  # one on each side of the append
+    assert len(_project_rows(root, tid)) == 1 and project_root.queued == []
+    assert terminal_delivery.register_delivery(root, pending["delivery_id"], emitted=pending)
+    reads.reset_mock()
+    assert settle_terminal_projection(root, tid, task=task) == SETTLEMENT_SETTLED
+    reads.assert_called_once_with(root, tid)
+    [mirror] = project_root.queued
+    assert mirror["progress_meta"]["completion_answer"] == "Current answer"
+
+
+def test_project_publication_needs_stored_adoption_evidence_even_with_a_richer_task_input(project_root):
+    root, task = project_root.root, project_root.task
+    tid, child = task["id"], str(root / "child-drive")
+    adoption = {"headless_child_drive_root": child,
+                "child_ref_promotion": {"schema_version": 1, "status": "complete"}}
+    _store(root, chat_id=task["chat_id"], child_drive_root=child)
+    waits = {}
+    assert settle_terminal_projection(root, tid, task={**task, **adoption}, waits=waits) == SETTLEMENT_DEFERRED
+    assert waits == {"on": "child_files"}
+    assert not _project_rows(root, tid) and not project_root.queued
+    write_task_result(root, tid, STATUS_COMPLETED, **adoption)
+    assert settle_terminal_projection(root, tid, task=task) == SETTLEMENT_SETTLED
+    assert len(_project_rows(root, tid)) == len(project_root.queued) == 1
+
+
 def test_main_address_and_retry_claim_are_durable_before_live_queue(project_root, monkeypatch):
     _store(project_root.root)
 

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
-from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
+from ouroboros.gateway.reference_contracts import ChatReferenceFields, ReplyExcerpt, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageCount, StorageCounting, StorageError, StoragePart, StoragePlace, StorageResponse, StorageRest,
     StorageVolume, StorageRemover,
@@ -86,6 +86,7 @@ class ChatInbound(TypedDict):
     # Multi-project chat routing: the owner stays user_id 1; chat_id selects the thread, project_id scopes memory.
     chat_id: NotRequired[int]
     project_id: NotRequired[str]
+    reply_excerpt: NotRequired[ReplyExcerpt]
     reply_to: NotRequired[str]  # Host resolves the selected row/card at acceptance.
     client_surface: NotRequired[dict]
 
@@ -147,6 +148,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     ingress_pending: NotRequired[bool]  # This live host process accepted the row and has entered or refused neither yet.
     attachments: NotRequired[List[ChatAttachmentView]]  # owner message's attachments (same views as history)
     text_placeholder: NotRequired[bool]  # owner row whose text the host wrote (no words were sent); shown as no caption
+    reply_excerpt_disabled: NotRequired[bool]  # a wordless or mixed card display; whole-row Reply still works
     markdown: NotRequired[bool]
     is_progress: NotRequired[bool]
     task_id: NotRequired[str]
@@ -425,8 +427,8 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
 
     Optional questions continue under ``assumption``; ``wait_for_answer`` marks
     required waiting without an implied answer. ``state`` carries lifecycle.
-    Replay merges the stored ``answered_index`` and verbatim ``comment``; a
-    comment without an index is the owner's whole answer, not an option choice.
+    Replay merges the stored ``answered_index``, verbatim ``comment`` (without an index,
+    the owner's whole answer) and ``answer_row_address``, the answer row its card shows.
     A private Presence question's one frame names its work's Project in ``also_rooms``."""
 
     type: Literal["quiz"]
@@ -443,6 +445,7 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     ts: str
     answered_index: NotRequired[int]
     comment: NotRequired[str]
+    answer_row_address: NotRequired[str]  # replay only, never the live quiz_state frame
     host_facts: NotRequired[str]  # host-written, never the model's: asking task, run start, owner's last message
     materials: NotRequired[List[Dict[str, Any]]]
     question_delivery: NotRequired[Dict[str, Any]]
@@ -562,6 +565,7 @@ class MessageAnnotationOutbound(TypedDict):
     status: str
     suppress_bubble: bool
     chat_id: NotRequired[int]
+    source_row_address: NotRequired[str]
     target: NotRequired[str]
     project_name: NotRequired[str]
     target_task_ids: NotRequired[list[str]]
@@ -878,7 +882,7 @@ class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     available_subagents: AvailableSubagentsSettingsMeta
     policy_state: SettingsPolicyState
     restart_state: SettingsRestartState
-    connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
+    connections: list[Dict[str, Any]]  # every API connection as the picker shows it, with its opaque ``revision`` (owner_settings)
     main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
     known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.spend_coverage)
     partly_counted_spend: list[Dict[str, str]]  # {name, condition}: counted only under a price condition (the same)
@@ -1191,6 +1195,9 @@ class TaskDetailResponse(TypedDict, total=False):
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
     review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?, skills?} (review_overrides.py)
+    # Host switches after tool use: {from_model, to_model, status, selection?, work_observed?, reply_observed?}.
+    # reply_observed=true confirms a reply; legacy rows may not say. Absent list means history unavailable.
+    authoring_handovers: List[Dict[str, Any]]
     place_origin: Dict[str, Any]  # ChatOutbound.place_origin's shape, from the task's own admitted focus; absent elsewhere
     error: str
 

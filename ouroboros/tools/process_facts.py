@@ -17,7 +17,8 @@ publication carries no process facts at all — under the typed-result organ
 
 This lives outside ``tools/shell.py`` deliberately: it is a loop↔handler seam
 (``tools/verify.py`` consumes the attested runtime through it too; run_script reads the
-loop's persisted dispatch-source ref through it), and keeping it here keeps
+loop's persisted dispatch-source ref through it). It also holds ``check_output_views``, the masked
+bounded views and durable whole-output source of a ``verify_and_record`` check. Keeping it here keeps
 ``shell.py`` under the repository's 1600-line hard size gate.
 """
 
@@ -52,18 +53,229 @@ def redact_process_data(value):
     """Mask selected values at result/receipt egress, retaining typed host facts."""
     from ouroboros.secret_masking import redact_known_values
 
-    prepared = getattr(_process_facts_tls, "environment", None)
-    secrets = prepared[1] if prepared is not None else ()
+    secrets = selected_process_secrets()
     if isinstance(value, dict):
         # Host vocabulary/identity is not a child echo. In particular a one-char
         # selected secret must not rewrite PASS/status or receipt identity hashes.
         typed = {"tool", "status", "code", "contract_kind", "expected_match", "ts", "receipt_ts",
                  "criterion_source", "check_rendering", "root", "source", "kind",
-                 "sha256", "content_sha256", "input_sha256", "output_sha256"}
+                 "sha256", "content_sha256", "input_sha256", "output_sha256",
+                 # The retained-output omission codes are host-owned controlled vocabulary and
+                 # round-trip unchanged in the durable row and the typed result alike: a selected
+                 # value equal to one must not rewrite the code (arbitrary text elsewhere masks).
+                 "output_source_unavailable", "output_source_call_unavailable"}
         return {key: item if key in typed else redact_process_data(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact_process_data(item) for item in value]
     return redact_known_values(value, secrets)
+
+
+def masked_process_text(raw):
+    """``raw`` masked once for every durable or shown copy of a process's text.
+
+    The established diagnostic redaction (conventional token shapes, URL credentials, credential keys) reads the
+    ORIGINAL text while the selected Settings values' occurrences are kept in view, so a range the first policy masks
+    cannot leave the remainder of a selected value behind. With no selected occurrence the established single-source
+    call runs, byte for byte. The WHOLE composition is one strict seam — walk construction, the conventional walk and
+    the final rendering included: any masking failure raises ``MaskingFailed`` and the caller withholds the output
+    (``output_source_unavailable: masking_failed``) instead of showing or storing a lossy mask; host-only typed facts
+    pass ``redact_process_data`` untouched."""
+    from ouroboros.secret_masking import MaskingFailed, selected_value_walk
+    from ouroboros.utils import sanitize_tool_result_for_log
+
+    text = str(raw or "")
+    try:
+        walk = selected_value_walk(text, selected_process_secrets())
+        if walk is None:
+            return redact_process_data(sanitize_tool_result_for_log(text, strict=True))
+        return walk.finish(sanitize_tool_result_for_log(text, walk=walk, strict=True))
+    except MaskingFailed:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed: no partial text, no other leak of the failure
+        raise MaskingFailed(f"the composed mask could not complete ({type(exc).__name__})") from exc
+
+
+WITHHELD_PROCESS_OUTPUT = ("The process text is withheld: its mask could not complete (masking_failed). This note "
+                           "carries no text; the check's own exit status, verdict and receipt are unaffected.")
+
+WITHHELD_CHECK_OUTPUT = ("The process text is withheld: its mask could not complete (masking_failed); no output "
+                         "source was retained and no reader is offered.")
+
+
+def masked_process_or_withheld(raw):
+    """``masked_process_text(raw)`` for a diagnostic note, or the withheld note when the mask cannot complete.
+
+    A note may lose its text that way; the caller's own verdict, exit status and receipt are not affected, and this
+    helper is the diagnostic note's alone — the retained check source is a different fact and is not claimed here."""
+    from ouroboros.secret_masking import MaskingFailed
+
+    try:
+        return masked_process_text(raw)
+    except MaskingFailed:
+        return WITHHELD_PROCESS_OUTPUT
+
+
+_RAW_JSON_LINE_BREAKS = str.maketrans(dict.fromkeys("\x85\u2028\u2029", "\n"))
+
+
+def receipt_line_safe(text):
+    """``text`` with the line breaks ``str.splitlines`` honours but JSON writes raw (U+0085, U+2028, U+2029) folded to
+    ``\\n``: a bounded preview stored in a JSONL receipt keeps its row one line for ``read_receipts``."""
+    return str(text or "").translate(_RAW_JSON_LINE_BREAKS)
+
+
+def check_output_views(ctx, raw, *, captured=False, view_cap=4000, summary_cap=20000):
+    """``(summary, reply_view, disclosure)`` of a check's PROCESS output (stdout, then ``"\\n" + stderr``).
+
+    Durable receipt evidence is bounded (``summary_cap``) and the reply is bounded separately for transport
+    (``view_cap``); the cut is always disclosed, never silent (BIBLE P1). ONE masked text (``masked_process_text``)
+    feeds both views and the retained copy, before anything is sliced or stored; the caller's matcher keeps the raw
+    text. Views are built from the text ``read_file`` pages (CRLF folded): whole and trimmed when it fits the reply,
+    else cut at the real beginning with the whitespace it has. When that body is longer than the reply view, the same
+    masked text is retained whole as a ``tool_results`` source of this task in the canonical store
+    (``persist_exact_text_source``: verified read-back, no rerun). The reply names the ``read_file`` call for the end,
+    by line because ``start_char`` counts inside a line window, and states the retained body's own size and lines;
+    the disclosure holds a compact ``output_source`` ref. Only that call (the address) is checked against selected
+    values: one they would alter is not offered and nothing is stored for it; prose is masked by the registry wrapper
+    as any reply. The call is then consulted once against this task's dispatch (``_offered_read``): offered with its
+    Presence-bound arguments and the line its window starts on only if that window delivers the end; one it would
+    refuse, retarget or bind short of the end keeps the source and its ref, and the reply says why instead of offering
+    it (``output_source_call_unavailable``); the offered arguments are checked against selected values as well. Any other gap is said (``output_source_unavailable``), never an address.
+    The summary folds the line breaks JSON writes raw (``receipt_line_safe``); the source keeps them. Notes about
+    anything but the process (a byte comparison) are the caller's, beside these views.
+
+    ``captured``: the check never returned (Stop now, timeout). What the host holds is "Captured masked output"; an
+    observed exit proves nothing about the rest of what the process wrote, and none held is said so. ``raw=None``:
+    the wait returned no stream at all, so whether the check wrote anything is unknown, and said so."""
+    from ouroboros.tool_result_delivery import reader_text
+
+    if captured and raw is None:
+        return (unknown := "The interrupted wait returned none of the check's output; whether it wrote any is unknown."), unknown, {}
+    from ouroboros.secret_masking import MaskingFailed
+
+    try:
+        masked = masked_process_text(raw)
+    except MaskingFailed:
+        return WITHHELD_CHECK_OUTPUT, WITHHELD_CHECK_OUTPUT, {"output_source_unavailable": "masking_failed"}
+    if captured and not masked:
+        return (none := "No captured output is available."), none, {}
+    body = reader_text(masked)  # what read_file pages: the views, the stated size, lines and tail all come from this one text
+    text = body.strip() if len(body) <= view_cap else body
+    summary, reply = (text if len(text) <= cap else text[:cap] + f"\n…[truncated {len(text) - cap} of {len(text)} chars]"
+                      for cap in (summary_cap, view_cap))
+    label = "Captured" if captured else "Full"
+    if captured:
+        summary, reply = (f"Captured masked output:\n{part}" for part in (summary, reply))
+    summary = receipt_line_safe(summary)
+    if len(body) <= view_cap:
+        return summary, reply, {}
+    from ouroboros.artifacts import actor_source_reference, persist_exact_text_source, task_artifact_dir_path, task_id_for_artifacts
+    from ouroboros.tool_access import canonical_data_root
+
+    gone = (f"No verified address for the {label.lower()} output ({len(body)} chars): this view is cut at {view_cap}, "
+            f"the receipt summary keeps up to {summary_cap}.")
+    try:
+        task_id, source_id = task_id_for_artifacts(ctx), "verify_and_record-output"
+        planned = actor_source_reference(category="tool_results", source_id=source_id, data=masked.encode("utf-8"), extension="txt")
+        # read_file counts start_char inside its max_lines window, so the tail is addressed by its own line; it points
+        # at the real end (trailing whitespace excluded), never before the start.
+        rows, begin = body.splitlines(keepends=True), 0
+        end = len(body.rstrip()) or len(body)  # the real end: trailing whitespace is not this run's content
+        tail = max(0, end - view_cap)
+        first = next((n for n, row in enumerate(rows) if (begin := begin + len(row)) > tail), len(rows) - 1)
+        reader = {"root": "artifact_store", "path": planned["path"], "start_line": first + 1, "max_lines": len(rows) - first,
+                  "start_char": tail - (begin - len(rows[first])), "max_chars": view_cap}
+        if redact_process_data(_read_call(reader)) != _read_call(reader):  # the address itself must survive the wrapper's masking
+            return summary, reply + "\n" + gone, {"output_source_unavailable": "address_masked"}
+        # Canonical store, as the other retained tool sources: custody never promotes a fork's own ``source_handles``,
+        # and ``read_file(root='artifact_store')`` reaches this one through ``retained_actor_source_read_target``.
+        _, ref, issue = persist_exact_text_source(canonical_data_root(ctx), task_id, source_id=source_id, text=masked)
+        if issue or ref.get("path") != planned["path"]:
+            return summary, reply + "\n" + gone, {"output_source_unavailable": str((issue or {}).get("status") or "mismatch")}
+        held = f"{label} masked output of this same run ({len(body)} chars, {len(rows)} lines, sha256 {planned['sha256']}) is retained"
+        retained = {"output_source": {k: ref[k] for k in ("kind", "root", "path", "size", "sha256")}}
+    except Exception as exc:  # noqa: BLE001 - the bounded views stand; the gap is said, never an address
+        return summary, reply + "\n" + gone, {"output_source_unavailable": type(exc).__name__}
+    try:  # the named call is this task's own dispatch: its bindings consulted per cut, never a read
+        reader, paging, code, why = _offered_read(ctx, reader, task_artifact_dir_path(canonical_data_root(ctx), task_id, create=False) / ref["path"], rows, end)
+    except Exception as exc:  # noqa: BLE001 - admission that cannot be established is not permission
+        code, why = "admission_unknown", f"its admission could not be established ({type(exc).__name__})."
+    if not code and redact_process_data(call := _read_call(reader)) != call:  # the advertised, bound arguments too
+        code, why = "address_masked", "a selected value would alter its bound arguments."
+    if code:  # the source and its ref stand: another reader may open it; this task's call would not read its tail
+        return summary, reply + (f"\n{held} at {ref['path']!r} (artifact_store, output_source), but this task cannot read "
+                                 f"its end through the named call: {why}"), {**retained, "output_source_call_unavailable": code}
+    return summary, reply + f"\n{held}; read its end without rerunning: {call}; {paging}", retained
+
+
+def _read_call(args):
+    return f"read_file({', '.join(f'{key}={value!r}' for key, value in args.items())})"
+
+
+def _offered_read(ctx, reader, target, rows, end):
+    """``(args, paging, code, reason)`` for the proposed ``reader``. ``args`` is that proposal as this task's dispatch
+    would run it: the registry's Presence argument bindings and capability ceiling (``_presence_bound_args``) applied
+    once, nothing refitted. On it then run the resource guard, the REAL ``read_file`` entry's public-argument
+    preparation (``tool_resolution._prepare_public_builtin_args`` — no second kwargs enumeration, no registry built
+    here), the dispatch's path normalization exactly as ``_execute_admitted_text`` runs it (for a read tool its only
+    reachable effect is the in-place root/path rewrite these arguments then carry; the redirect it turns into a
+    refusal is a write-tool shape), and only then ``read_file``'s own admission on the FULL prepared arguments as the
+    handler calls it (profile, binding, Presence resource grants, runtime-data and protected paths, ``bucket`` and
+    ``skill_name`` included). With no real ``read_file`` record registered there is no entry to prepare against and
+    nothing establishes the dispatch: the consultation refuses (``admission_unknown``), it never skips onward. The
+    same-target check compares the exact RESOLVED physical target after those full root checks: a root label the
+    handler admits as an alias of the same file is allowed, a different file is not; the admission's normalized root
+    is applied to the advertised arguments, because that is the label the handler reads. Then
+    ``_render_line_slice``'s arithmetic over the retained ``rows``, never a read, decides whether that window
+    delivers the last real character (``end``). An empty or whitespace-only range past it is no delivery:
+    ``presence_window``. An argument refusal is the stable typed omission ``arg_refused`` and keeps the genuine
+    retained source, never a fabricated call. ``paging`` names the window's effective start_line; earlier text is
+    requested only as far as the bindings permit."""
+    from ouroboros.tools import core, tool_resolution
+    from ouroboros.tools.core_file_tools import (_coerce_line_window, _coerce_max_chars, _coerce_start_char,
+                                                 read_admission)
+    from ouroboros.tools.registry_core import _presence_bound_args
+    from ouroboros.tools.registry_guards import _capability_resource_guard_result
+
+    def said(refusal):
+        return str(getattr(refusal, "text", refusal) or getattr(refusal, "code", "")).replace("⚠️ ", "").strip()
+
+    args, refusal = _presence_bound_args(ctx, "read_file", dict(reader))
+    if refusal:
+        return reader, "", "presence_refused", said(refusal)
+    if (refusal := _capability_resource_guard_result(ctx, "read_file", args)) is not None:
+        return args, "", "dispatch_refused", said(refusal)
+    entry = next((item for item in core.get_tools() if item.name == "read_file"), None)
+    if entry is None:
+        # No real tool record: nothing here prepared these arguments and nothing can run them — a refusal, never a
+        # bypass of the skipped checks into an advertised call.
+        return args, "", "admission_unknown", "read_file is not registered in this process's tool set."
+    if arg_error := tool_resolution._prepare_public_builtin_args(entry, args):
+        return args, "", "arg_refused", said(arg_error)
+    tool_resolution._normalize_dispatch_path_args_result(ctx, "read_file", args)  # rewrites args in place, as dispatch reads them
+    root, binding, refusal = read_admission(ctx, args.get("root"), args.get("path"),
+                                            bucket=str(args.get("bucket") or ""),
+                                            skill_name=str(args.get("skill_name") or ""))
+    if refusal is not None:
+        return args, "", "read_refused", said(refusal)
+    if root != args.get("root"):
+        args["root"] = root  # advertise the normalized selector this admission resolved and the handler reads with
+    if binding is None or pathlib.Path(binding.target_path).resolve() != pathlib.Path(target).resolve():
+        return args, "", "target_changed", f"read_file resolves {getattr(binding, 'root', args.get('root'))}:{args.get('path')} to another file."
+    # The span read_file delivers for exactly these arguments, in source characters (``_render_line_slice``).
+    start, span = _coerce_line_window(args.get("start_line", 1), args.get("max_lines", 2000))
+    start = max(1, min(start, len(rows) + 1))
+    stop = min(start + span - 1, len(rows))
+    base, size = sum(map(len, rows[:start - 1])), sum(map(len, rows[start - 1:stop]))
+    offset, budget = min(_coerce_start_char(args.get("start_char", 0)), size), _coerce_max_chars(args.get("max_chars"))
+    delivered, reach = base + offset, base + (size if budget is None else min(size, offset + budget))
+    changed = sorted(key for key in set(args) | set(reader) if args.get(key) != reader.get(key))
+    if not delivered < end <= reach:
+        return args, "", "presence_window", (f"Presence argument bindings set {', '.join(changed)} for read_file; that window "
+                                             f"(lines {start}-{stop}, characters {delivered}-{reach}) misses this run's end at {end}.")
+    # Equality with the proposal proves no freedom (a binding may pin the proposed value), so the guidance is qualified.
+    return args, (f"this window starts at start_line={start}; earlier characters or lines take another start_char or "
+                  "start_line only where this task's bindings permit."), "", ""
 
 
 @contextlib.contextmanager
@@ -207,6 +419,12 @@ def selected_process_environment():
     return prepared[0] if prepared is not None else {}
 
 
+def selected_process_secrets():
+    """The selected Settings values of this scope's launch environment: the one reader of the values both maskers use."""
+    prepared = getattr(_process_facts_tls, "environment", None)
+    return prepared[1] if prepared is not None else ()
+
+
 def process_path_for_cwd(path, cwd):
     """Resolve PATH search entries against the child cwd, preserving lexical paths."""
     return os.pathsep.join(
@@ -329,6 +547,7 @@ PROCESS_FACT_KEYS = (
     "killed_by_host",
     "pre_exec_failure",
     "ws_relay_failures",
+    "memory_oom",
 )
 
 
@@ -351,7 +570,7 @@ def active_resolved_runtime(ctx) -> str:
 def publish_process_facts(
     *, returncode=None, started_ts: float, resolved_runtime: str = "",
     timed_out: bool = False, killed_by_host: bool = False,
-    pre_exec_failure: str = "", ws_relay_failures=None,
+    pre_exec_failure: str = "", ws_relay_failures=None, memory_oom=None,
 ) -> Dict[str, object]:
     """Publish this thread's typed process facts for the in-flight process tool.
 
@@ -397,6 +616,13 @@ def publish_process_facts(
         }
         if failures:
             facts["ws_relay_failures"] = failures
+    # The kernel's own OOM counts for this command's memory leaf (``command_memory.outcome``): fixed
+    # keys, integer counts and booleans, None where unread. Separate observations, never a verdict.
+    if isinstance(memory_oom, dict):
+        observed = {key: memory_oom[key] for key in ("victim_in_leaf", "leaf_local_oom", "commands_local_oom", "unknown")
+                    if key in memory_oom and (memory_oom[key] is None or type(memory_oom[key]) in (bool, int))}
+        if observed:
+            facts["memory_oom"] = observed
     if provenance := getattr(_process_facts_tls, "runtime_provenance", None):
         facts["runtime_provenance"] = provenance
     facts = redact_process_data(facts)
@@ -419,8 +645,24 @@ def consume_last_process_facts() -> "Dict[str, object] | None":
     return facts if isinstance(facts, dict) else None
 
 
+def _memory_reason(fact: dict) -> str:
+    """A human reading of the kernel's OOM counts for the command's memory group. The group's kill and the
+    command's own exit status are separate observations: the kill may have taken any process of the group
+    (a descendant, or all of them), so it is never attributed to the process whose status is reported."""
+    seen = []
+    if fact.get("victim_in_leaf"):
+        seen.append("the kernel recorded an out-of-memory kill in its memory group (any process of the group)")
+    elif fact.get("victim_in_leaf") is False:
+        seen.append("no kill in its memory group was recorded")
+    if fact.get("commands_local_oom"):
+        seen.append(f"{fact['commands_local_oom']} out-of-memory event(s) hit the commands group")
+    if fact.get("unknown"):
+        seen.append("the kernel's memory events could not all be read")
+    return "memory: " + "; ".join(seen or ["no out-of-memory event recorded"])
+
+
 def describe_returncode(returncode: int, *, cwd=None, binding=None,
-                        lived_ms: "int | None" = None, resolved_runtime: str = "") -> str:
+                        lived_ms: "int | None" = None, resolved_runtime: str = "", memory_oom=None) -> str:
     """Render a return code with signal details when applicable.
 
     On a SIGNAL death the caller may disclose the child's lifetime (a
@@ -436,6 +678,8 @@ def describe_returncode(returncode: int, *, cwd=None, binding=None,
             suffix.append(f"lived={lived_ms}ms")
         if resolved_runtime:
             suffix.append(f"runtime={resolved_runtime}")
+    if isinstance(memory_oom, dict) and (signal_name == "SIGKILL" or memory_oom.get("victim_in_leaf")):
+        suffix.append(_memory_reason(memory_oom))  # after the leader's own signal; a group kill may end a plain exit too
     if cwd is not None:
         suffix.append(f"cwd={pathlib.Path(cwd).resolve(strict=False)}")
     rendered_suffix = f" ({', '.join(suffix)})" if suffix else ""

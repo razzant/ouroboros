@@ -1593,3 +1593,92 @@ def test_the_active_turn_token_never_reaches_usage_the_ledger_or_ordinary_logs(s
     token = TURN["payload"]["turnState"]
     assert token not in json.dumps(usage, default=str) and token not in json.dumps(ledger(root))
     assert all(token not in path.read_text(encoding="utf-8") for path in (root / "logs").glob("*.jsonl"))
+
+
+DENIAL_PROBLEM = {"code": "provider_failed", "message": "Synthetic refusal text.", "retryable": False,
+                  "context": {"vendorCode": "cyber_policy"}}  # shape of Claudexor run 44417855654, case 697/legacy-failure
+
+
+def _chat_once(client, method="chat"):
+    value = getattr(client, method)([{"role": "user", "content": "synthetic request"}], MODEL, model_role="main", timeout=2)
+    return asyncio.run(value) if method == "chat_async" else value
+
+
+@pytest.mark.parametrize("method", ["chat", "chat_async"])
+@pytest.mark.parametrize("code", ["provider_failed", "provider_content_refused"])
+def test_a_settled_codex_content_policy_denial_ends_its_call_with_custody_intact(setup, monkeypatch, method, code):
+    from ouroboros import llm_substitution
+
+    root, gateway, client = setup
+    problem = {**deepcopy(DENIAL_PROBLEM), "code": code}
+    gateway.results = [{**result(outcome="failed", problem=problem), "message": None}, result()]
+    gateway.dispatch = ["response_received"] * 2
+    spied = []
+    monkeypatch.setattr(llm_substitution.AccountRotation, "refused_call",
+                        lambda self, *a, **k: spied.append("rotation") or True)
+    monkeypatch.setattr(llm_substitution, "remember_failed_profile", lambda *a, **k: spied.append("penalty"))
+    admitted = []
+    monkeypatch.setattr(transport.SubstitutionBudget, "admit", lambda self, *a, **k: admitted.append(True) or False)
+    with pytest.raises(transport.ClaudexorModelError) as raised:
+        _chat_once(client, method)
+    error = raised.value
+    assert error.content_policy_denial is True and transport.codex_content_policy_denial(error)
+    assert error.code == code and error.problem == problem
+    assert error.physical_attempt_capture.state == "settled" and not admitted
+    assert error.display_message == transport.CODEX_CONTENT_POLICY_DISPLAY
+    assert "cyber_policy" not in error.display_message and "Synthetic" not in error.display_message
+    assert not spied  # no rotation, no account penalty
+    assert len(gateway.uploads) == len(gateway.creates) == len(gateway.acks) == 1
+    assert error.usage["claudexor"]["result_custody"]["state"] == "acknowledged"
+    rows = ledger(root)
+    assert len(rows) == 1 and rows[0]["state"] == "settled"  # settled billing keeps its row
+
+
+@pytest.mark.parametrize("problem,route,dispatch", [
+    pytest.param({**DENIAL_PROBLEM, "context": {"vendorCode": "server_overloaded"}}, None, "response_received", id="ordinary-overload"),
+    pytest.param({**DENIAL_PROBLEM, "retryable": True}, None, "response_received", id="retryable"),
+    pytest.param({**DENIAL_PROBLEM, "context": {"vendorCode": " cyber_policy"}}, None, "response_received", id="padded-code"),
+    pytest.param({**DENIAL_PROBLEM, "context": {"vendorCode": "CYBER_POLICY"}}, None, "response_received", id="other-case"),
+    pytest.param({**DENIAL_PROBLEM, "code": "invalid_request"}, None, "response_received", id="other-wrapper-code"),
+    pytest.param({**DENIAL_PROBLEM, "code": "provider_content_refused", "context": {"vendorCode": "server_overloaded"}}, None, "response_received", id="different-vendor-typed-code"),
+    pytest.param(DENIAL_PROBLEM, {**ROUTE, "source": "other"}, "response_received", id="not-codex"),
+    pytest.param(DENIAL_PROBLEM, None, "unknown", id="outcome-unknown"),
+])
+def test_only_the_exact_received_typed_denial_is_a_denial(setup, problem, route, dispatch):
+    root, gateway, client = setup
+    gateway.results = [result(outcome="failed", problem=deepcopy(problem), route=route) for _ in range(12)]
+    gateway.dispatch = [dispatch] * 12
+    with pytest.raises(transport.ClaudexorModelError) as raised:
+        _chat_once(client)
+    assert getattr(raised.value, "content_policy_denial", False) is False
+
+
+def test_a_control_interruption_after_receipt_outranks_the_denial(setup, monkeypatch):
+    root, gateway, client = setup
+    gateway.results = [result(outcome="failed", problem=deepcopy(DENIAL_PROBLEM)), result()]
+    gateway.dispatch = ["response_received"] * 2
+    acknowledged = []
+    acknowledge, check = transport._ModelInvocation.acknowledge, transport._ModelInvocation.check_control
+    monkeypatch.setattr(transport._ModelInvocation, "acknowledge", lambda self: acknowledged.append(1) or acknowledge(self))
+
+    def interrupted(self, *args, **kwargs):  # Stop/Pause arrives between settlement and the verdict
+        if acknowledged:
+            raise transport.ClaudexorModelError(
+                {"code": "model_operation_interrupted", "message": "Stopped", "context": {"control_reason": "cancelled"}},
+                model_role=self.role, operation_id=self.operation_id)
+        return check(self, *args, **kwargs)
+
+    monkeypatch.setattr(transport._ModelInvocation, "check_control", interrupted)
+    with pytest.raises(transport.ClaudexorModelError) as raised:
+        _chat_once(client)
+    assert raised.value.code == "model_operation_interrupted" and not raised.value.content_policy_denial
+    assert raised.value.model_result["outcome"] == "failed"
+    assert len(gateway.creates) == len(gateway.acks) == 1  # one send, ACKed once, no denial raised
+
+
+def test_admission_is_still_asked_for_an_ordinary_answer(setup, monkeypatch):
+    root, gateway, client = setup
+    admitted = []
+    monkeypatch.setattr(transport.SubstitutionBudget, "admit", lambda self, *a, **k: admitted.append(1) or False)
+    _chat_once(client)
+    assert admitted == [1]

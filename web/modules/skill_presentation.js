@@ -136,15 +136,32 @@ export function officialMarkHtml({ control = true, sourceId = '' } = {}) {
         : `<span class="skills-mark" data-mark="official">${inner}</span>`;
 }
 
-/** The promise behind the mark, bound to the source that set it. */
+/**
+ * The condition every sentence about a new install carries. What a card, a sheet or a popup shows is a source's
+ * setting as it was read; the host reads the source again when Install is pressed and installs by what it finds
+ * then. «You trust» is the owner's confirmed choice only; an unconfirmed setting is said as the suggested one.
+ */
+function whileSet(policy, name) {
+    if (policy.trust === 'trusted' && policy.confirmed === true) return `while you trust ${name}`;
+    return `while that is the${policy.confirmed === false ? ' suggested' : ''} setting for ${name}`;
+}
+
+/** A source as a sentence names it: bare on a card, whose who line says what it is; else «the X source». */
+const sourceNamed = (policy, bare = false) => (!policy.name ? 'its source' : bare ? policy.name : `the ${policy.name} source`);
+
+/**
+ * The promise behind the mark. Official vouches for exact bytes; how a new install goes is the setting of the source
+ * it comes from, said only for the source this mark is bound to (`{name, url, trust, confirmed}`) and only while that
+ * setting holds. A copy already installed keeps the review it was installed with: its own Details say which.
+ */
 export function officialPromise(source = null) {
-    const name = source?.name || 'Ouroboros';
-    const address = displayAddress(source?.url || '');
-    const where = address ? `the ${name} source (${address})` : `the ${name} source`;
-    const trust = source?.trust === 'review'
-        ? 'Ouroboros still reviews it, because you chose to review each skill from that source.'
-        : 'so it installs without review while you trust that source.';
-    return `Official — the maintainer of Ouroboros vouches for this exact version. It comes from ${where}${source?.trust === 'review' ? '. ' : ', '}${trust}`;
+    const lead = 'Official — the maintainer of Ouroboros vouches for this exact version.';
+    if (source?.trust !== 'trusted' && source?.trust !== 'review') {
+        return `${lead} The mark doesn’t decide the review: a new install follows its source’s setting in Sources.`;
+    }
+    const named = sourceNamed(source);
+    const address = displayAddress(source.url || '');
+    return `${lead} It comes from ${named}${address ? ` (${address})` : ''}. A new install ${source.trust === 'trusted' ? 'skips the review' : 'is still reviewed'} ${whileSet(source, named)}.`;
 }
 
 /** An address as people read it: no scheme, no trailing slash. */
@@ -282,11 +299,18 @@ export function catalogWhoHtml(item = {}, { version = false, now = Date.now() } 
     return parts.filter(Boolean).join(' · ');
 }
 
-/** The consequence of Install, said before it is pressed (UX §0.3 rule 2). */
-export function trustSentence(source) {
-    if (source?.kind === 'builtin') return 'Comes with the app';
-    if (source?.trust === 'trusted') return `Installs without review — you trust ${source.name || 'this source'}`;
-    return 'Ouroboros reviews it before it runs';
+/**
+ * The consequence of Install, said before it is pressed (UX §0.3 rule 2), from how the entry's source was set when
+ * its catalog was read (`{trust, name, confirmed}`): never a bare promise, since the host installs by the setting it
+ * finds at the press. Where a skill comes from (built in, a hub) is not its review setting. No trust fact: no promise.
+ */
+export function trustSentence(policy, { detail = false } = {}) {
+    if (policy?.trust !== 'trusted' && policy?.trust !== 'review') {
+        return detail ? 'Whether Ouroboros reviews it before it runs is its source’s setting in Sources.' : 'Its source’s setting decides the review';
+    }
+    const set = whileSet(policy, sourceNamed(policy, !detail));
+    if (policy.trust === 'trusted') return `Installs without review ${set}${detail ? '.' : ''}`;
+    return detail ? `Ouroboros reviews it on this computer before it runs ${set}. You can skip the review.` : `Reviewed before it runs ${set}`;
 }
 
 /** The one-line «about» of a source row: the source's kind in words. */

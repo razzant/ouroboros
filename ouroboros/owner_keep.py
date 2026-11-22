@@ -7,7 +7,8 @@ message the turn holds; a call without such a source writes nothing, keep or rel
 
 Every retirer of a task's material reads the fact inside ``gate`` around its effect; the writer saves it
 under the same per-task custody lock, so an answer of "kept" never follows a move or removal already
-accepted. The fact only withholds deletion: it never stops a running task, its review captures or
+accepted. A child scratch handoff stays owned until its record accepts deletion under this lock;
+Keep refreshes relocated handoffs here. Root and seat handoffs keep their earlier meaning. The fact only withholds deletion: it never stops a running task, its review captures or
 lossless compression (``subagent_worktrees._task_proven_over`` does not read it). A queue hold and a
 producer's retention marker mean other things and are not read here. An engine reviewer thread goes only
 through a release operation bound on this document inside ``gate`` (``review_thread_retention``); every thread
@@ -69,6 +70,8 @@ class OwnerKeepResponse(TypedDict):
     # named or started it, no release is recorded) and ``held``/``refused``/``abandoned``;
     # ``managed_import:<key>`` -> held | release_unconfirmed | future_reuse_released | upload_cancelled |
     # binding_unavailable:<outcome> | release_refused:<code>; none proves deletion of bytes
+    # Canonical files -> held | queued (not moved) | moved (not accounted) | staged | deleting | deleted |
+    # missing | unknown. Moved/staged/deleting are retired from Keep, not proof of deleted bytes.
 
 
 def _valid(task_id: Any) -> bool:
@@ -176,7 +179,7 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
     """Everything a gated retirer could remove for this exact task, as ``(places, unknown, pins)``, ``pins``
     naming the copy path whose record each ``pins:`` place stands on, and the ownership record each session
     scratch stands on. One listing per current folder (copy records, the copies' root, review seats and
-    checkouts) and one keyed custody read per stopped seat's operation, no walk of history; a listing, marker or
+    checkouts), the task's canonical artifact tree and one keyed custody read per stopped seat's operation; a listing, marker or
     start that cannot be read names its class in ``unknown``."""
     from ouroboros.copy_environments import ENV_SUFFIX, scratch_owner
     from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR
@@ -201,6 +204,21 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                           for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)})
     except OSError:
         unknown.append("saved_states")
+    from ouroboros.artifacts import iter_artifact_tree
+    from ouroboros.payload_release_state import store_of
+
+    canonical = store_of(root, task_id)
+    try:
+        try:
+            canonical.lstat()
+        except FileNotFoundError:
+            canonical = None
+        if canonical is not None:
+            if canonical.resolve(strict=False) != canonical:
+                raise OSError("canonical artifact store reached through a link")
+            places += [str(path) for path in iter_artifact_tree(canonical) if path.is_file() and not path.is_symlink()]
+    except OSError:
+        unknown.append("canonical_payloads")
     read = read_records(root)
     if read.unlistable or read.unreadable or read.import_pending:
         unknown.append("private_copies")
@@ -237,6 +255,7 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                     pins[scratch] = str(owner / "scratch.json")
     except (OSError, ValueError):
         unknown.append("environments")
+    _child_scratch_places(root, task_id, places, unknown, pins)
     places += _thread_places(row)  # engine material: its release record, not the disk, says where it stands
     try:  # a seat whose reply named no thread is still known by what it started
         started, complete = seat_threads(root, row)
@@ -276,11 +295,27 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
     return sorted({place for place in places if place}), unknown, pins
 
 
+def _child_scratch_places(root: pathlib.Path, task_id: str, places: List[str], unknown: List[str],
+                           pins: Dict[str, str]) -> None:
+    """Refresh a child's unaccepted handoffs; relocation alone no longer releases its scratch."""
+    from ouroboros.session_scratch import child_handoff_records
+
+    try:
+        for record in child_handoff_records(root, task_id):
+            scratch = str(_json(record).get("path") or "")
+            if scratch:
+                places.append(scratch)
+                pins[scratch] = str(record)
+    except Exception:  # unread task/store or handoff layout proves no absence
+        if "environments" not in unknown:
+            unknown.append("environments")
+
+
 def _present(root: pathlib.Path, task_id: str, place: str, pins: Dict[str, str]) -> Optional[bool]:
     """On disk now; a pin is there while its copy record, one file read under custody, still names it
-    for this task, and a session scratch while its ownership record in the task's drive still names
-    it (``workspace_preflight.release_finished_scratch`` removes that record when it accepts the
-    scratch for deletion). ``None`` when that record cannot be read: nothing is claimed about it."""
+    for this task. A session scratch stays owned while its record names it: in the drive, or a
+    child's handoff before a confirmed release. Root/seat handoff still ends ownership. ``None`` when
+    that record cannot be read: nothing is claimed about it."""
     from ouroboros.private_copy_read import record_at
 
     if place.startswith(SAVED_STATES_PLACE):  # the folder stays with its sources: present while a saved state is left
@@ -297,7 +332,10 @@ def _present(root: pathlib.Path, task_id: str, place: str, pins: Dict[str, str])
         return os.path.lexists(place)
     if not place.startswith("pins:"):
         try:
-            return _json(pathlib.Path(pins[place])).get("path") == place and os.path.lexists(place)
+            from ouroboros.session_scratch import release_finalized
+
+            row = _json(pathlib.Path(pins[place]))
+            return not release_finalized(row) and row.get("path") == place and os.path.lexists(place)
         except FileNotFoundError:
             return False
         except (OSError, ValueError):
@@ -312,14 +350,15 @@ def _present(root: pathlib.Path, task_id: str, place: str, pins: Dict[str, str])
 def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any], note: str = "",
                    timeout_sec: float = 10.0) -> OwnerKeepResponse:
     """Save or clear the fact under the task's custody lock and answer what its materials are now.
-    The inventory is read first, without a lock; under the lock each place is checked again and the
-    current document decides, so a material moved meanwhile is reported retired, never kept. A retirer
-    inside its effect holds that lock: then nothing is saved and the answer is ``inflight``. With a
+    Inventory is read before locking; under the lock each place and the current document are rechecked.
+    Moved material is retired except unaccepted child scratch handoffs, refreshed here and still owned.
+    A retirer inside its effect holds that lock: then nothing is saved and the answer is ``inflight``. With a
     complete inventory where everything named is already gone nothing is saved (``already_retired``);
     an unreadable class keeps the fact saved, since material may remain. A bound thread or
     managed-import release saves Keep with ``release_unconfirmed``."""
     from ouroboros.task_custody import task_custody_lock
     from ouroboros.delegate_documents import managed_keep_places
+    from ouroboros.payload_release_state import keep_places
     from ouroboros.task_results import load_task_result
     from ouroboros.task_store import patch_document
     from ouroboros.utils import utc_now_iso
@@ -347,6 +386,7 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             return answer("inflight", is_kept(base, task_id), reason="custody_busy", unknown=unknown)
         row = load_task_result(base, task_id, strict=True) or {}
         stands = isinstance(row.get(OWNER_KEEP), dict)
+        _child_scratch_places(base, task_id, places, unknown, pins)
         places = sorted(set(places) | set(_thread_places(row)))  # a thread declared or bound since the first read too
         releases = {place: _thread_release(row, place) for place in places if place.startswith(THREAD_PLACE)}
         try:
@@ -356,13 +396,16 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             unknown.append("managed_imports")
         places = sorted(set(places) | set(documents))
         releases.update(documents)
+        payloads = keep_places(base, task_id, row, places)  # fresh canonical facts under the same custody lock
+        places = sorted(set(places) | set(payloads))
+        releases.update({place: state for place, (state, _present_now) in payloads.items()})
         releasing = [place for place, state in releases.items() if state == RELEASE_UNCONFIRMED]
-        present = {place: _thread_present(releases[place]) if place in releases
+        present = {place: payloads[place][1] if place in payloads else _thread_present(releases[place]) if place in releases
                    else _present(base, task_id, place, pins) for place in places if place not in releasing}
         retained = [place for place in present if present[place]]
         retired = [place for place in present if present[place] is False]
         for place in [place for place in present if present[place] is None]:
-            kind = ("managed_imports" if place.startswith("managed_import:") else
+            kind = ("canonical_payloads" if place in payloads else "managed_imports" if place.startswith("managed_import:") else
                     "saved_states" if place.startswith(SAVED_STATES_PLACE) else
                     "private_copies" if place.startswith("pins:") else _THREADS_CLASS if place in releases
                     else "environments")

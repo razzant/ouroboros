@@ -16,6 +16,39 @@ from typing import Any, Dict, Optional, Tuple
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
 
+# The review facts a retained commit carries to the worker that resumes it: the receipt writes
+# these names and the resume reads these names, one list. The landing attribution
+# (``_current_review_record_id`` and the outcome the commit continued over) is restored later,
+# after the receipt proved it still binds this exact commit (#3451).
+_REVIEW_FACTS = (
+    "_last_triad_models", "_last_scope_model", "_last_triad_raw_results",
+    "_last_scope_raw_result", "_review_degraded_reasons", "_author_commit_record",
+)
+
+
+def managed_postcommit_receipt(ctx, commit_message: str, pre_fingerprint: Dict[str, Any],
+                                post_fingerprint: Dict[str, Any]) -> Dict[str, Any]:
+    """The receipt a retained managed commit carries to the worker that resumes it: the commit
+    and its binding, the review facts of the wave, and the landing attribution of the review
+    this commit continued over (#3451).
+
+    Without the last two scalars a resumed worker names no record and no outcome, so the
+    landing of that commit is lost (the review record keeps no landing, the counter keeps no
+    row). An older receipt without them stays unknown.
+    """
+    from ouroboros.review_overrides import landing_reason
+
+    return {
+        "commit_message": commit_message, "pre_fingerprint": pre_fingerprint,
+        "post_fingerprint": post_fingerprint,
+        "review_context": {
+            **{key: getattr(ctx, key, None) for key in _REVIEW_FACTS},
+            "_current_review_record_id": str(getattr(ctx, "_current_review_record_id", "") or ""),
+            "_landing_override_reason": landing_reason(ctx),
+        },
+    }
+
+
 def _git():
     """Read the public facade at call time so monkeypatches keep one binding."""
     from ouroboros.tools import git
@@ -123,9 +156,9 @@ def _resume_managed_commit(ctx, tx, started_at):
     saved = tx["postcommit_resume"]
     if not isinstance(saved, dict):
         return "⚠️ MANAGED_UPDATE_ERROR: retained post-commit receipt is invalid; recovery is required."
-    for key, value in (saved.get("review_context") or {}).items():
-        if key in {"_last_triad_models", "_last_scope_model", "_last_triad_raw_results",
-                   "_last_scope_raw_result", "_review_degraded_reasons", "_author_commit_record"}:
+    context = saved.get("review_context") or {}
+    for key, value in context.items():
+        if key in _REVIEW_FACTS:
             setattr(ctx, key, value)
     sha, message = str(tx.get("merge_commit") or ""), str(saved.get("commit_message") or "")
     fingerprints = (saved.get("pre_fingerprint") or {}, saved.get("post_fingerprint") or {})
@@ -146,4 +179,12 @@ def _resume_managed_commit(ctx, tx, started_at):
         ctx.last_reviewed_commit_sha = sha
     finally:
         _git()._release_git_lock(lock)
+    # The landing attribution of the review this commit continued over (#3451): the record it
+    # answered and the outcome it went on over. Restored only now — the receipt proved it still
+    # binds this exact commit and the gates passed — so only the successful finish publishes it.
+    # The outcome joins this call's own per-call field, which the next commit call's reset
+    # clears: a later call on this context starts without it (no second lasting flag).
+    # A receipt written before these fields keeps them unknown: no record, no outcome, no row.
+    ctx._current_review_record_id = str(context.get("_current_review_record_id") or "")
+    ctx._review_override_this_call = str(context.get("_landing_override_reason") or "")
     return _finish_managed_commit(ctx, tx, sha, message, started_at, warning, fingerprints)

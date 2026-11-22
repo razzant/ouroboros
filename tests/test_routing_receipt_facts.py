@@ -21,7 +21,7 @@ import pytest
 
 # What the browser paints from a receipt (routing_receipt.js) and the history replay must
 # keep: listed here independently of the production list, so the test pins the contract.
-SHOWN = ("action", "target", "target_label", "status", "routing_token", "cause", "options",
+SHOWN = ("source_row_address", "action", "target", "target_label", "status", "routing_token", "cause", "options",
          "attachment_manifest", "reasoning_effort", "project_id", "project_chat_id", "project_name",
          "target_task_ids", "target_titles")
 DESTINATION = ("project_id", "project_chat_id", "project_name", "target_task_ids", "target_titles")
@@ -272,6 +272,127 @@ def test_a_supervisor_receipt_sends_the_facts_its_row_was_written_with(tmp_path,
     assert _shown(frame) == _shown(row)
 
 
+def test_relay_receipts_follow_both_seed_rows_through_delivery_and_read(tmp_path, monkeypatch):
+    from ouroboros import project_dialogue, tool_custody
+    from ouroboros.chat_annotations import addressed_chat_annotations
+    from ouroboros.owner_relay import acknowledge_relay, owner_quote, publish_relay_ack, relay_envelope
+    from ouroboros.routing_wait import recorded_act_receipt
+    from supervisor.steering import _steer_receipt
+    from tests import _dialogue
+
+    seed = {"direction": "in", "chat_id": 1, "client_message_id": "seeds", "ts": "2024-04-08T13:45:00Z"}
+    _dialogue.seed(tmp_path, live={"chat": [{**seed, "text": text} for text in ("Count the peas", "Count the beans")]})
+    _dialogue.import_all(tmp_path)
+    quotes = [owner_quote(tmp_path, row) for row in _dialogue.chat_rows(tmp_path)]
+    addresses = [quote["source"]["address"] for quote in quotes]
+    relay = relay_envelope("garden", [*quotes, quotes[0]], chat_id=1)
+    event = {**relay, "type": "steer_task", "client_message_id": "seeds", "routing_token": "garden",
+             "chat_id": 1, "issuer": {"kind": "owner_turn"}}
+    bridge, frames = _bridge(tmp_path, monkeypatch)
+    _steer_receipt(SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=bridge), event, "gardener",
+                   target_label="Seed count", status="delivered")
+
+    def seen(status):
+        return [f.get("source_row_address") for f in _annotation_frames(frames) if f["status"] == status]
+
+    assert seen("delivered") == addresses
+    claims = []
+    monkeypatch.setattr(tool_custody, "_update_active_claim", lambda change: claims.append(change({})))
+    tool_custody.record_control_handoff(event)
+    [descriptor] = claims[0]["control_receipts"]
+    assert recorded_act_receipt(tmp_path, descriptor)["source_row_address"] == addresses[0]
+    assert not tool_custody.claim_still_owns_effect(tmp_path, claims[0])
+    acknowledge_relay(tmp_path, "gardener", {"relay": relay})
+    placed = addressed_chat_annotations(tmp_path, by_token=True)
+    assert [placed[1, "seeds", address, "garden"]["status"] for address in addresses] == ["read", "read"]
+    for address, label in zip(addresses, ("Peas", "Beans")):
+        project_dialogue.append_chat_annotation(tmp_path, "seeds", action="steer_task", target="gardener",
+                                               target_label=label, status="read", routing_token="garden",
+                                               source_row_address=address, source_chat_id=1)
+    publish_relay_ack(tmp_path, "gardener", relay, bridge)
+    assert seen("read") == addresses
+    assert [f["target_label"] for f in _annotation_frames(frames) if f["status"] == "read"] == ["Peas", "Beans"]
+    assert project_dialogue.chat_annotation_receipt(tmp_path, "seeds", "garden", source_chat_id=1) == {}
+    frames.clear()
+    monkeypatch.setattr("ouroboros.chat_annotations.placed_token_receipts", _unreadable)
+    publish_relay_ack(tmp_path, "gardener", relay, bridge)
+    assert seen("read") == addresses
+
+
+def test_legacy_seed_receipt_uses_distinct_addresses_across_replays(tmp_path, monkeypatch):
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_annotations import addressed_chat_annotations, append_chat_annotation
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.owner_relay import publish_relay_ack
+    from tests import _dialogue
+
+    seed = {"direction": "in", "chat_id": 1, "client_message_id": "seeds", "ts": "2024-04-08T13:45:00Z",
+            "text": "Count the peas"}
+    bean = {**seed, "client_message_id": "beans"}
+    _dialogue.seed(tmp_path, archives={"chat_20240407T000000.jsonl": [seed, bean]}, live={"chat": [
+        seed, {**bean, "text": "Count the beans"}, "{torn\n"]})
+    ds.ensure(tmp_path)
+    assert not ds.range_coverage(tmp_path, "chat")["imported"]
+    assert ds.annotation_rooms(tmp_path, ["seeds"]) == ds.annotation_sources(tmp_path, ["seeds"]) == {}
+    _dialogue.import_all(tmp_path)
+    address = format_address(row_address(seed))
+    assert len(ds.rows_by_client_id(tmp_path, "seeds")) == 2
+    relay = {"relay_id": "garden", "source": {"chat_id": 1, "client_message_id": "seeds"}}
+    bridge, frames = _bridge(tmp_path, monkeypatch)
+    assert ds.annotation_rooms(tmp_path, ["seeds"]) == {"seeds": 1}
+    assert ds.annotation_sources(tmp_path, ["seeds"])[None, "seeds"] == (1, address)
+    for message in ("seeds", "beans"):
+        append_chat_annotation(tmp_path, message, action="steer_task", status="read", routing_token="garden")
+    placed = addressed_chat_annotations(tmp_path)
+    assert placed[1, "seeds", address]["source_row_address"] == address
+    assert all(message != "beans" for _, message, _ in placed)
+    publish_relay_ack(tmp_path, "gardener", relay, bridge)
+    assert _annotation_frames(frames)[-1]["source_row_address"] == address
+    assert ds.annotation_rooms(tmp_path, ["beans"]) == {}
+    assert ds.annotation_sources(tmp_path, ["beans"])[1, "beans"] is None
+    publish_relay_ack(tmp_path, "gardener", {**relay, "source": {**relay["source"], "client_message_id": "beans"}}, bridge)
+    assert "source_row_address" not in _annotation_frames(frames)[-1]
+
+
+@pytest.mark.parametrize("primary", ["peas", "herbs"])
+def test_refused_garden_relay_reports_the_act_and_marks_only_identified_quotes(tmp_path, monkeypatch, primary):
+    from ouroboros.chat_annotations import addressed_chat_annotations, chat_annotation_receipt
+    from ouroboros.chat_chain import format_address, row_address
+    from supervisor.steering import _handle_steer_task
+    from tests import _dialogue
+
+    first = {"direction": "in", "chat_id": 1, "ts": "2024-04-08T13:45:00Z", "text": "Count the seedlings"}
+    rows = [{**first, "client_message_id": plant} for plant in ("peas", "beans", "herbs")]
+    # The quiz and inbound rows share an id. A lookup restricted to inbound messages would pick the wrong Reply.
+    answers = [{**row, "direction": "system", "type": "quiz_answer", "text": "Count the garden beds"}
+               for row in rows[:2]]
+    _dialogue.seed(tmp_path, live={"chat": rows + answers})
+    _dialogue.import_all(tmp_path)
+    bridge, frames = _bridge(tmp_path, monkeypatch)
+    notices = []
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=bridge, PENDING=[], RUNNING={},
+                          send_with_budget=lambda chat, text, **kw: notices.append((chat, text, kw)))
+    monkeypatch.setattr("ouroboros.cancel_intents.cancel_pending", lambda *_: True)
+    quotes = [{"source": {"chat_id": 1, "client_message_id": plant}}
+              for plant in dict.fromkeys([primary, "peas", "beans", "herbs"])]
+    _handle_steer_task({"chat_id": 1, "client_message_id": primary, "target_task_id": "gardener",
+                        "quotes": quotes, "routing_token": "garden"}, ctx)
+
+    [frame] = _annotation_frames(frames)
+    address = format_address(row_address(rows[2]))
+    assert (frame["client_message_id"], frame["source_row_address"], frame["status"]) == ("herbs", address, "rejected")
+    assert set(addressed_chat_annotations(tmp_path)) == {(1, "herbs", address)}
+    for row in rows:
+        receipt = chat_annotation_receipt(tmp_path, row["client_message_id"], "garden", source_chat_id=1)
+        assert receipt["status"] == "rejected" and receipt["reason"] == "cancel_pending"
+    if primary == "peas":
+        [(chat, text, notice)] = notices
+        assert chat == 1 and frame["cause"] in text and notice["system_type"] == "steer_not_delivered"
+        assert notice["progress_meta"] == {"routing_notice_carrier": "system", "reply_to": {}}
+    else:
+        assert not notices and frame["routing_notice_carrier"] == "routing_ack"
+
+
 def test_the_relay_read_ack_publishes_the_row_it_saved(tmp_path, monkeypatch):
     """The work's read acknowledgement is saved in the worker and published by the supervisor:
     the live frame is that saved row, not a second read of the work's title and room."""
@@ -434,12 +555,11 @@ def test_words_reaching_a_work_whose_project_is_closing_offer_no_room_to_open(tm
 def test_a_relay_read_ack_with_an_unreadable_sidecar_still_reaches_the_owner(tmp_path, monkeypatch):
     """The saved-row read is new: when the sidecar cannot be read, the ack goes out from the
     work's facts, as it always did."""
-    from ouroboros import project_dialogue
     from ouroboros.owner_relay import publish_relay_ack
 
     _room(tmp_path)
     bridge, frames = _bridge(tmp_path, monkeypatch)
-    monkeypatch.setattr(project_dialogue, "chat_annotation_receipt", _unreadable)
+    monkeypatch.setattr("ouroboros.chat_annotations.placed_token_receipts", _unreadable)
     publish_relay_ack(tmp_path, "work-1", {"relay_id": "relay-1",
                                            "quotes": [{"source": {"chat_id": 1, "client_message_id": "cm-q"}}]}, bridge)
 
@@ -538,3 +658,44 @@ def test_every_receipt_field_is_one_store_bus_contract_and_replay_field():
     assert [key for key in SHOWN if not re.search(rf"@property \{{[^}}]+\}} {key}\b", block)] == []
     row = {key: f"<{key}>" for key in (*SHOWN, "detail", "reason", "ts", "type", "client_message_id")}
     assert set(_user_annotation("user", "cm", {"cm": row})) == {*SHOWN, "detail"}
+
+
+def test_a_read_ack_names_each_quoted_message_by_its_own_room_once(tmp_path):
+    """Two rooms' messages may share an id: each quoted message is saved, read back and acknowledged under its own
+    room, once, from its own saved row. A quote that names no room has no known addressee: no ACK goes out for it."""
+    from ouroboros.chat_annotations import chat_annotation_receipt
+    from ouroboros.owner_relay import acknowledge_relay, publish_relay_ack
+
+    _room(tmp_path)
+    relay = {"relay_id": "relay-1", "quotes": [{"source": {"chat_id": 1, "client_message_id": "cm-q"}},
+                                               {"source": {"chat_id": 7, "client_message_id": "cm-q"}},
+                                               {"source": {"chat_id": 1, "client_message_id": "cm-q"}},
+                                               {"source": {"client_message_id": "cm-unplaced"}}]}
+    acknowledge_relay(tmp_path, "work-1", {"relay": relay})
+    sent = []
+    publish_relay_ack(tmp_path, "work-1", relay,
+                      SimpleNamespace(send_routing_ack=lambda chat, **frame: sent.append((chat, frame))))
+    assert [chat for chat, _frame in sent] == [1, 7]
+    for chat, frame in sent:
+        saved = chat_annotation_receipt(tmp_path, "cm-q", "relay-1", source_chat_id=chat)
+        assert saved["status"] == frame["status"] == "read" and frame["client_message_id"] == "cm-q"
+    assert chat_annotation_receipt(tmp_path, "cm-q", "relay-1") == {}  # an id alone names no room between two
+
+
+def test_an_acts_earlier_roomless_row_neither_erases_its_receipt_nor_is_placed_by_guess(tmp_path, monkeypatch):
+    """While the history cannot place a receipt row an older body wrote without its room (a partial import), that
+    act's later row in its named room stays the act's receipt, as its waiter reads it by token; the per-message
+    view that paints a room's row still places neither row by guess."""
+    from ouroboros import dialogue_store
+    from ouroboros.chat_annotations import (append_chat_annotation, chat_annotation_receipt,
+                                            latest_chat_annotations, scoped_chat_annotations)
+
+    monkeypatch.setattr(dialogue_store, "annotation_rooms", lambda *_a, **_k: {})
+    append_chat_annotation(tmp_path, "cm-1", action="steer_task", target="work-1", status="needs_manual_target",
+                           routing_token="act-1")
+    append_chat_annotation(tmp_path, "cm-1", action="steer_task", target="work-1", status="delivered",
+                           routing_token="act-1", source_chat_id=1)
+    assert chat_annotation_receipt(tmp_path, "cm-1", "act-1")["status"] == "delivered"
+    assert chat_annotation_receipt(tmp_path, "cm-1", "act-1", source_chat_id=1)["status"] == "delivered"
+    assert "cm-1" not in latest_chat_annotations(tmp_path)
+    assert list(scoped_chat_annotations(tmp_path)) == [(1, "cm-1")]

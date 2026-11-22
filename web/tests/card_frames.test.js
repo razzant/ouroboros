@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import {
     CARD_APP_CSP, CARD_APP_SANDBOX, CARD_STATE_MAX_BYTES, INLINE_FRAME_FLOOR, cardAppSrcdoc, cardSubmitLine,
-    cardThemeTokens, createCardAppBridge, createInlineFit, inlineFrameHeight, mountCardApp,
+    cardThemeTokens, cardThemeValues, createCardAppBridge, createInlineFit, inlineFrameHeight, mountCardApp,
 } from '../modules/card_frames.js';
 import { WIDGET_FRAME_MAX_HEIGHT } from '../modules/widget_module.js';
 import { installCardDom } from './helpers/card_dom.js';
@@ -199,6 +199,8 @@ test('an app reads the material its frame lies on: the connected host at mount a
         assert.equal(window.listeners('ouro:theme-changed'), 0);
         // Without a material the packet is the document root's, as before.
         assert.deepEqual(packetValues(cardThemeTokens().css), { '--ouro-text': '#efeff2', '--ouro-tray': 'rgba(255, 255, 255, 0.045)', '--ouro-error': '#fe9498' });
+        // The same palette as values, for a frame that applies them itself (Beautiful Context, context_report_host.js).
+        assert.deepEqual(cardThemeValues(), { name: 'dark', tokens: { '--ouro-text': '#efeff2', '--ouro-tray': 'rgba(255, 255, 255, 0.045)', '--ouro-error': '#fe9498' } });
     } finally {
         if (prior) Object.defineProperty(globalThis, 'ouroTheme', prior); else delete globalThis.ouroTheme;
         dom.restore();

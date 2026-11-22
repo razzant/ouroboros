@@ -209,13 +209,16 @@ def _wait_for_routing_annotation(
     routing_token: str,
     *,
     timeout_sec: float = _PROMOTE_CONFIRM_TIMEOUT_SEC,
+    source_chat_id: int | None = None,
+    source_row_address: str = "",
 ) -> Dict[str, Any]:
     """Wait for an exact chat-annotation receipt (SSOT in routing_wait, #198)."""
     from ouroboros.routing_wait import wait_for_routing_annotation
 
     return wait_for_routing_annotation(
         _routing_status_root(ctx), client_message_id, routing_token,
-        timeout_sec=timeout_sec, poll_sec=_PROMOTE_CONFIRM_POLL_SEC,
+        timeout_sec=timeout_sec, poll_sec=_PROMOTE_CONFIRM_POLL_SEC, source_chat_id=source_chat_id,
+        source_row_address=source_row_address,
     )
 
 
@@ -245,6 +248,9 @@ def _emit_and_wait_for_routing(
         }
     timeout = _PROMOTE_CONFIRM_TIMEOUT_SEC if mode == "live" else 0.0
     kind = str(evt.get("type") or "")
+    from ouroboros.routing_wait import relay_receipt_scope
+
+    scope = relay_receipt_scope(evt)
     if kind == "promote_chat_to_task":
         receipt = _wait_for_promotion_admission(
             ctx,
@@ -259,11 +265,13 @@ def _emit_and_wait_for_routing(
             str(evt.get("client_message_id") or ""),
             str(evt.get("routing_token") or ""),
             timeout_sec=timeout,
+            **scope,
         )
     # Emitted, but its outcome was not seen in time: it may still land, or already
     # has. The turn keeps the exact identity, so a later acting round reports the
     # recorded outcome (``loop_model_call._append_routing_receipts``), even for an
-    # act no owner message carries (an agent-steer id, a wake's promote).
+    # act no owner message carries (an agent-steer id, a wake's promote). A note's
+    # relay keeps the room it keyed its receipt in, so that later read names one row.
     if str(receipt.get("status") or "unconfirmed") == "unconfirmed" and kind in {"promote_chat_to_task", "steer_task"}:
         acts = getattr(ctx, "unconfirmed_routing_acts", None)
         if isinstance(acts, list):
@@ -272,5 +280,6 @@ def _emit_and_wait_for_routing(
                 "client_message_id": str(evt.get("client_message_id") or ""),
                 "routing_token": str(evt.get("routing_token") or ""),
                 "target": str(evt.get("task_id") or evt.get("target_task_id") or ""),
+                **scope,
             })
     return mode, receipt

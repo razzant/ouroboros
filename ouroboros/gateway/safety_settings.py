@@ -9,7 +9,7 @@ from ouroboros.deployment_policy import choice_refusal
 from ouroboros.gateway._helpers import request_json_or
 from ouroboros.gateway.owner_settings import (
     MANAGED_BY_DEPLOYMENT, _owner_audit, _owner_update_settings, owner_write_guard, record_settings_change,
-    settings_document_mutation, unsaved_error, CommitBoundary, settings_receipt, post_commit_failure_response, settings_roster_error,
+    settings_document_mutation, unsaved_error, BindingRefused, CommitBoundary, settings_receipt, post_commit_failure_response, settings_roster_error,
 )
 
 # Models inherits Light then Main. The same owner transaction can edit that
@@ -104,6 +104,8 @@ def _api_owner_safety_model_sync(request: Request, body: Any) -> JSONResponse:
         safety_configuration(settings)
         return _persist(request, settings, "safety_model", {"changed_settings": sorted(settings)},
                         if_unchanged=body.get("if_unchanged"), allow_empty=body.get(ALLOW_EMPTY_REVIEW_POOL) is True)
+    except BindingRefused:
+        raise  # The shared owner guard preserves the Main binding's typed refusal.
     except (TypeError, ValueError) as exc:
         return unsaved_error(str(exc), 400)
 

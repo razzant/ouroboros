@@ -105,6 +105,10 @@ test('counts, a chosen part, exact words inside parts and what a card cannot dra
     assert.equal(shareText(sliceBlocks(blocks, pieces)), 'river: flat,\n\n3. do Comércio,\n\n```js\n  const a = 1;\n```');
     assert.deepEqual(cardUnsupported(blocks), ['table', 'math', 'diagram']);
     assert.deepEqual(cardUnsupported(pickBlocks(blocks, new Set([0, 1, 2]))), []);
+    const area = blocks.at(-1);
+    const excerpt = (start, end) => sliceBlocks(blocks, [{ block: area.index, run: 0, start, end }]);
+    assert.deepEqual(cardUnsupported(excerpt(0, 'Area is'.length)), []);
+    assert.deepEqual(cardUnsupported(excerpt(8, 8 + '$$x^2$$'.length)), ['math']);
     assert.equal(blocks[11].rtl, true);
     assert.equal(textDirection('Hello שלום'), 'ltr', 'the first letter sets the direction');
 });

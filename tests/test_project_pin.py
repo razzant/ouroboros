@@ -216,6 +216,97 @@ def test_unreadable_registry_is_an_error_for_the_complete_list_and_the_exact_id(
     registry.create_project(root, "room-002", name="Neutral room 002", origin="owner_ui")
     assert len(client.get("/api/projects?all=1").json()["projects"]) == 1
     (root / "state/projects.json").write_text("{not json")
-    for query in ("all=1", "id=room-002"):
-        response = client.get(f"/api/projects?{query}")
-        assert response.status_code >= 500 and "projects" not in response.json(), query
+    for suffix in ("", "?all=1", "?id=room-002"):
+        response = client.get(f"/api/projects{suffix}")
+        assert response.status_code == 500 and set(response.json()) == {"error"}, suffix
+
+
+@pytest.mark.parametrize("url", ["/api/projects", "/api/projects?all=1"])
+def test_project_list_accepts_known_empty_and_hides_tombstones(pin_client, url):
+    from unittest.mock import patch
+
+    from ouroboros import project_admission
+
+    client, root = pin_client
+    path = root / "state/projects.json"
+    for initialized in (False, True):
+        if initialized:
+            path.parent.mkdir(exist_ok=True)
+            path.write_text('{"projects": []}', encoding="utf-8")
+        assert path.exists() is initialized
+        with patch.object(project_admission, "_registry_snapshot",
+                          wraps=project_admission._registry_snapshot) as snapshot:
+            assert registry.readable_rooms(root) == set()
+            snapshot.assert_called_once()
+        response = client.get(url)
+        assert response.status_code == 200 and response.json() == {"projects": []}
+    project = registry.create_project(root, "hidden", origin="owner_ui")
+    registry.begin_project_deletion(root, project["id"])
+    registry.complete_project_deletion(root, project["id"])
+    assert registry.readable_rooms(root) == {project["chat_id"]}
+    response = client.get(url)
+    assert response.status_code == 200 and response.json() == {"projects": []}
+
+
+@pytest.mark.parametrize("url", ["/api/projects", "/api/projects?all=1"])
+def test_project_list_refuses_unreadable_rooms_then_recovers(pin_client, url):
+    client, root = pin_client
+    project = registry.create_project(root, "visible", name="Visible room", origin="owner_ui")
+    path = root / "state/projects.json"
+    intact = path.read_bytes()
+    assert path.with_name("projects.json.committed").is_file()
+    healthy = client.get(url)
+    assert healthy.status_code == 200 and [p["id"] for p in healthy.json()["projects"]] == [project["id"]]
+
+    invalid = {"chat_id": 7}  # no valid reservation identity
+    for source, detail in ((None, "Project registry is missing beside its commit witness"),
+                           (json.dumps({"projects": [invalid]}).encode(), "Project registry contains no readable room")):
+        if source is None:
+            path.unlink()
+        else:
+            path.write_bytes(source)
+        assert registry.readable_rooms(root) is None
+        response = client.get(url)
+        assert response.status_code == 500 and response.json() == {"error": detail}
+        assert (path.read_bytes() if path.exists() else None) == source
+
+    data = json.loads(intact)
+    data["projects"].append(invalid)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert registry.readable_rooms(root) == {project["chat_id"]}
+    beside = client.get(url)
+    assert beside.status_code == 200 and beside.json() == healthy.json()
+
+    path.write_bytes(intact)
+    restored = client.get(url)
+    assert restored.status_code == 200 and restored.json() == healthy.json()
+
+
+@pytest.mark.parametrize("url", ["/api/projects", "/api/projects?all=1"])
+def test_project_list_refuses_a_damaged_lifecycle_instead_of_claiming_no_projects(pin_client, url):
+    """A room can reserve its history address even when its visibility is unknown."""
+    client, root = pin_client
+    registry.create_project(root, "seed", origin="owner_ui")
+    path = root / "state/projects.json"
+    data = json.loads(path.read_text())
+    template = data["projects"][0]
+
+    def write(rows):
+        path.write_text(json.dumps({**data, "projects": rows}), encoding="utf-8")
+
+    write([{**template, "id": "damaged", "chat_id": 40001, "lifecycle": "unknown"}])
+    response = client.get(url)
+    assert response.status_code == 500 and "invalid lifecycle" in response.json()["error"], response.json()
+    assert registry.readable_rooms(root) == {40001}  # the reservation is still vouched for, never dropped
+    write([{**template, "id": "damaged", "chat_id": 40001, "lifecycle": "unknown"},
+           {**template, "id": "gone", "chat_id": 40002, "lifecycle": "tombstoned"}])
+    response = client.get(url)
+    assert response.status_code == 500 and "invalid lifecycle" in response.json()["error"]
+    write([{**template, "id": "gone", "chat_id": 40002, "lifecycle": "tombstoned"}])
+    assert client.get(url).json() == {"projects": []}  # only tombstones: a legitimately empty list
+    write([])
+    assert client.get(url).json() == {"projects": []}  # a provably empty registry
+    write([{**template, "id": "healthy", "chat_id": 40010},
+           {**template, "id": "damaged", "chat_id": 40011, "lifecycle": "unknown"}])
+    response = client.get(url)
+    assert response.status_code == 200 and [row["id"] for row in response.json()["projects"]] == ["healthy"]

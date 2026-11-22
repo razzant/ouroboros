@@ -794,7 +794,7 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             assert renamed_save.value.ok and answer["status"] == "saved" and answer.get("no_changes") is True, answer
             assert renamed_save.value.request.post_data_json["MCP_SERVERS"][0]["id"] == "Legacy Docs"
             expect(legacy.locator('[data-editor-save]')).to_be_enabled()
-            expect(legacy.locator('[data-editor-result]')).to_have_text('')  # unchanged is quiet
+            expect(legacy.locator('[data-editor-result]')).to_have_text('Already saved.')
             assert json.loads((data_dir / "settings.json").read_text(encoding="utf-8")) == json.loads(saved_before)
             disk = _disk(data_dir)
             assert disk["legacy_docs"]["auth_token"] == BEARER and disk["legacy_docs"]["headers"] == {"X-Tenant": TENANT}

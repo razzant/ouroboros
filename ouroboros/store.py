@@ -34,7 +34,7 @@ LOCK_NAME = "current.lock"  # the name-tier lock around every access
 IMPORT_LOCK_NAME = "current_import.lock"
 GENERATION = 8  # the lifecycle generation that owns the store
 GENERATION_KEY = "current_store_generation"  # in state/migrations.json
-SCHEMA_VERSION = 11  # 6: hot facts; 7: task cards; 8: root windows, terminal_seq; 9: list selection; 10: task origin; 11: task chat
+SCHEMA_VERSION = 12  # 6: hot facts; 7: task cards; 8: root windows, terminal_seq; 9: list selection; 10: task origin; 11: task chat; 12: payload offers flag
 STORE_WAIT_SEC = 10.0
 JOURNAL_SIZE_LIMIT = 64 << 20  # retain at most 64 MiB of an idle rollback journal (PERSISTENCE.md: what it bounds)
 TIER_ENFORCED, TIER_NAME = "enforced", "name"
@@ -49,7 +49,7 @@ TYPED_COLUMNS = ("status", "parent_task_id", "root_task_id", "delegation_role", 
 FLAG_COLUMNS = {"synthesis": "owes_synthesis", "terminal_projection": "owes_terminal_projection",
                 "promotions": "has_pending_promotion", "pause_notices": "has_pause_notices",
                 "delegated_runs": "delegated_runs_unreconciled", "pending_drives": "pending_drive",
-                "owner_questions": "has_owner_questions"}
+                "owner_questions": "has_owner_questions", "payload_offers": "has_payload_offer"}
 # Per-operation ``task_handoffs`` (kind = field): claim/wait/retirement writes one row, not the body.
 # Present keys stay as {} at their place; load restores exact bytes. A new key appears while it has rows.
 ROW_BACKED_FIELDS: Tuple[str, ...] = ("launch_handoffs", "model_waits", "retired_model_consumers", "swarm_fanouts")
@@ -71,7 +71,7 @@ CREATE TABLE tasks (
   owes_synthesis INTEGER NOT NULL DEFAULT 0, owes_terminal_projection INTEGER NOT NULL DEFAULT 0,
   has_pending_promotion INTEGER NOT NULL DEFAULT 0, has_pause_notices INTEGER NOT NULL DEFAULT 0,
   delegated_runs_unreconciled INTEGER NOT NULL DEFAULT 0, pending_drive INTEGER NOT NULL DEFAULT 0,
-  has_owner_questions INTEGER,
+  has_owner_questions INTEGER, has_payload_offer INTEGER,
   review_collection_pending INTEGER, plan_collection_pending INTEGER, drive_retention_at TEXT, terminal_seq INTEGER);
 CREATE INDEX tasks_parent ON tasks(parent_task_id); CREATE INDEX tasks_root ON tasks(root_task_id);
 CREATE INDEX tasks_status ON tasks(status); CREATE INDEX tasks_project ON tasks(project_id);
