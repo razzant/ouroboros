@@ -151,7 +151,11 @@ class SkillCatalogItem(TypedDict, total=False):
     source_name: Required[str]
     trust: str
     name: Required[str]
+    title: str  # the catalog's human name ("" when it has none: show ``name``)
     description: str
+    pitch: str  # the catalog's one line for people ("" when it has none)
+    needs: Optional[str]  # the prerequisite in words ("Needs a Telegram bot token"); "" none, null the catalog says nothing
+    mark: str  # ``needs`` in a few words ("bot token"); "" when the catalog gives none
     category: List[str]
     version: str
     digest: str
@@ -284,13 +288,83 @@ class SkillUninstallResponse(TypedDict, total=False):
     error: str
 
 
+class StarterConnection(TypedDict, total=False):
+    """A built-in skill's declared connection card, carried on its starter item (the skill manifest's
+    ``connection_card``; DESIGN §7). ``token`` names the skill's secret field for its token; ``pairing.link`` holds
+    ``{username}`` and ``{code}``. ``title``, ``pitch``, ``steps`` ([{text, link, action}]), ``pairing.hint``,
+    ``pairing.note`` and ``options`` ([{key, label, on, off, new_connection}]) are the skill's own words. The card
+    checks a token with ``POST /api/onboarding/connection/identity`` and its values ride the completion as
+    ``connections``. ``needs_allow``: this install grants reviewed skills nothing on its own, so the skill starts
+    only once the owner allows it in Extensions."""
+
+    skill: Required[str]
+    token: Required[str]
+    pairing: Required[Dict[str, str]]
+    title: str
+    pitch: str
+    steps: List[Dict[str, str]]
+    options: List[Dict[str, Any]]
+    needs_allow: bool
+
+
+class ConnectionIdentityRequest(TypedDict):
+    """``POST /api/onboarding/connection/identity``: the built-in skill whose card is open and the token typed there."""
+
+    skill: str
+    token: str
+
+
+class ConnectionIdentityResponse(TypedDict, total=False):
+    """Which account the token names (``ok`` with ``username``), or why not: ``cause`` ``refused`` (the service
+    rejected it) or ``unreachable``; ``error`` when the check itself did not run (400, 404, 500, 503). Never the token."""
+
+    ok: Required[bool]
+    username: str
+    cause: str
+    error: str
+
+
+class CompletionConnection(TypedDict, total=False):
+    """One skill's entry in the completion's ``connections`` ({skill: CompletionConnection}): its card's token by the
+    token field's declared name (saved to Settings), the one-time pairing code the page minted and its options by key
+    (the declared on or off value), those two only once the page drew the QR that holds the code; the code and the
+    options go to the skill's own settings, never the core's."""
+
+    fields: Required[Dict[str, str]]
+    code: str
+    options: Dict[str, str]
+
+
+class StarterSkillItem(TypedDict, total=False):
+    """One skill the setup's Skills step offers. ``title`` and ``pitch`` are the catalog's optional words for people
+    ("" when it has none: show ``name`` and ``description``); ``needs`` is its prerequisite in words ("" none, null
+    when the catalog says nothing) and ``mark`` the same in a few words for its row; ``recommended`` means ticked by the starter list; ``needs_keys`` names every
+    setting the skill reads, required or optional."""
+
+    id: Required[str]
+    name: Required[str]
+    title: str
+    pitch: str
+    needs: Optional[str]
+    mark: str
+    description: str
+    icon: Dict[str, Any]  # the catalog's icon spec, {} for none
+    official: bool
+    builtin: bool
+    recommended: bool
+    needs_keys: List[str]
+    connection: StarterConnection
+
+
 class StarterSkillsResponse(TypedDict):
     """``GET /api/onboarding/starter-skills``: built-in and Official skills grouped by category (the ticked
-    ones are the starter list), the two hub rows whose trust the owner confirms, and source states."""
+    ones are the starter list), the two hub rows whose trust the owner confirms, source states, and how many skills
+    of the read catalog the step does not offer (``None`` while no source is read)."""
 
-    groups: List[Dict[str, Any]]  # [{category, label, items: [{id, name, description, official, builtin, recommended, needs_keys}]}]
+    groups: List[Dict[str, Any]]  # [{category, label, items: [StarterSkillItem]}]
     hub_rows: List[Dict[str, str]]  # [{id, name, trust, part}]
     sources: List[SkillSourceRow]
+    catalog_more: Optional[int]
 
 
 __all__ = [
@@ -301,5 +375,6 @@ __all__ = [
     "SkillSourceChangeResponse", "SkillSourceProbeRequest", "SkillSourceProbeResponse", "SkillSourceRow",
     "SkillSourceSuggestion", "SkillSourcesResponse", "SkillUninstallResponse", "SkillUpdateRequest",
     "SkillUpdateResponse",
-    "StarterSkillsResponse",
+    "CompletionConnection", "ConnectionIdentityRequest", "ConnectionIdentityResponse",
+    "StarterConnection", "StarterSkillItem", "StarterSkillsResponse",
 ]

@@ -442,8 +442,14 @@ def test_onboarding_steps_and_stylesheet_keep_their_owner_facing_shape():
 
     assert {"Connect your accounts", "Choose models", "Choose access", "Review limits"} <= titles
     assert {"Subscriptions + API", "model slots"} <= rails
-    assert "@media (max-width: 720px)" in css
-    assert "scroll-snap-type: x proximity;" in css
+    # The rail names each step by one short word, so seven fit one line; the step heads keep their titles.
+    assert [step["railTitle"] for step in contract["steps"]] == [
+        "Accounts", "Models", "Access", "Consciousness", "Skills", "Limits", "Review"]
+    assert all(" " not in step["railTitle"] for step in contract["steps"])
+    # A phone's rail shows the current pill alone with «N of M» (no sideways rail of clipped pills).
+    phone = css.split("@media (max-width: 720px)", 1)[1].split("\n}\n", 1)[0]
+    assert ".wizard-step {\n    display: none;" in phone and ".wizard-step.active {" in phone and ".wizard-step-of {" in phone
+    assert "scroll-snap-type" not in phone
 
 
 def test_setup_contract_exports_active_model_slots_only():
@@ -461,13 +467,17 @@ def test_setup_contract_exports_active_model_slots_only():
 # --------------------------------------------------------------------------
 
 
-def test_agents_share_accounts_in_the_six_step_onboarding():
-    """Subscriptions and API access share the first step, then the same role editors; Consciousness is its own step
-    between access and limits (owner decision 2026-11-20)."""
+def test_agents_share_accounts_in_the_seven_step_onboarding():
+    """Subscriptions and API access share the first step, then the same role editors; Consciousness (owner decision
+    2026-11-20) and Skills (owner 2026-11-21) are their own steps between access and limits, each only where setup
+    offers it."""
     contract = build_setup_contract("web")
     ids = [step["id"] for step in contract["steps"]]
-    assert ids == ["accounts", "models", "review_mode", "consciousness", "budget", "summary"]
+    assert ids == ["accounts", "models", "review_mode", "consciousness", "skills", "budget", "summary"]
     assert build_setup_bootstrap({}, "web")["stepOrder"] == ids
+    assert build_setup_bootstrap({}, "web", starter_choice=False)["stepOrder"] == [i for i in ids if i != "skills"]
+    assert build_setup_bootstrap({}, "web", starter_choice=False, consciousness_first_state=False)["stepOrder"] == [
+        "accounts", "models", "review_mode", "budget", "summary"]
     assert "coding agent" not in repr(contract).lower()
     assert contract["steps"][0]["title"] == "Connect your accounts"
 

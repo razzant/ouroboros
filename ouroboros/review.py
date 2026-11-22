@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Tuple
 
-from ouroboros.tools.review_helpers import _VENDORED_NAMES, _VENDORED_SUFFIXES
+from ouroboros.tools.review_helpers import _VENDORED_NAMES, _VENDORED_PATHS, _VENDORED_SUFFIXES
 
 TARGET_MODULE_LINES = 1000
 MAX_MODULE_LINES = 1600
@@ -145,7 +145,8 @@ def is_gated_js_module(path: str) -> bool:
     if any(part in _MODULE_SKIP_DIR_NAMES for part in posix.parts[:-1]):
         return False
     name = posix.name
-    return name not in _VENDORED_NAMES and not any(name.endswith(suffix) for suffix in _VENDORED_SUFFIXES)
+    return (name not in _VENDORED_NAMES and rel not in _VENDORED_PATHS
+            and not any(name.endswith(suffix) for suffix in _VENDORED_SUFFIXES))
 
 
 def _is_gated_module_path(path: str) -> bool:

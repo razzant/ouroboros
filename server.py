@@ -692,7 +692,7 @@ def _run_supervisor(settings: dict) -> None:
         ))
 
         from supervisor.message_bus import send_with_budget
-        from ouroboros.consciousness import BackgroundConsciousness
+        from ouroboros.consciousness import BackgroundConsciousness, owner_chat_of
         import types
 
         prior_worker_pids = _startup_worker_pids(DATA_DIR)
@@ -742,15 +742,11 @@ def _run_supervisor(settings: dict) -> None:
         startup_upgrade_notices(settings)
 
         run_startup_phase(_loop_liveness, "startup:resume", auto_resume_after_restart)
+        from supervisor.first_meeting import admit_first_meeting  # setup's Start opens one root, at most once a state
+        run_startup_phase(_loop_liveness, "startup:first_meeting", lambda: admit_first_meeting(DATA_DIR))
 
-        def _get_owner_chat_id() -> Optional[int]:
-            try:
-                return int((load_state() or {}).get("owner_chat_id") or 0) or None
-            except Exception:
-                return None
-
-        _consciousness = BackgroundConsciousness(
-            drive_root=DATA_DIR, repo_dir=REPO_DIR, owner_chat_id_fn=_get_owner_chat_id,
+        _consciousness = BackgroundConsciousness(  # wakes speak in the bound chat, or Main while it is known empty
+            drive_root=DATA_DIR, repo_dir=REPO_DIR, owner_chat_id_fn=lambda: owner_chat_of(load_state()),
             routing_metadata_fn=lambda cid: main_lane_routing_metadata(_event_ctx, cid))  # _event_ctx is built below
 
         # A boot grant needs a KNOWN True and no unconsumed Panic flag (#1307).

@@ -274,7 +274,9 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         assert.match(access, /Folder of your own skills \(optional\)/);
         doc.getElementById('next-btn').fire('click');   // Access → Consciousness: the switch starts on (no state yet).
         assert.match(doc.getElementById('root').innerHTML, /data-consciousness-choice="on" aria-pressed="true"/);
-        doc.getElementById('next-btn').fire('click');   // Consciousness → budget.
+        doc.getElementById('next-btn').fire('click');   // Consciousness → Skills: the step's own list (owner 2026-11-21).
+        assert.match(doc.getElementById('root').innerHTML, /<h2 class="step-title">Skills<\/h2>[\s\S]*data-starter-skills="step"/);
+        doc.getElementById('next-btn').fire('click');   // Skills → budget.
         for (const [id, value] of [['total-budget', '15.5'], ['per-task-budget', '5.25']]) {
             const input = doc.getElementById(id);
             input.value = value;
@@ -830,11 +832,11 @@ test('Summary says what an exhausted subscription quota does, with and without a
         const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel, automaticModels: [] } };
         await withWizard(bootstrap, query, async ({ doc }) => {
             await settle();
-            for (let step = 0; step < 5; step += 1) {
+            for (const step of BOOTSTRAP.stepOrder.slice(1)) {
                 doc.getElementById('next-btn').fire('click');
                 await settle();
-                if (step === 2) mind = doc.getElementById('root').innerHTML;  // the Consciousness step
-                if (step === 3) budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
+                if (step === 'consciousness') mind = doc.getElementById('root').innerHTML;
+                if (step === 'budget') budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
             }
             html = doc.getElementById('root').innerHTML;
         }, { fetch });
@@ -907,7 +909,7 @@ test('a slot still holding a preview\'s proposal takes the proposal of a changed
         const bootstrap = { ...BOOTSTRAP, freshInstall: true, initialState: { ...BOOTSTRAP.initialState, ...initial } };
         await withWizard(bootstrap, query, async ({ doc }) => {
             await settle();
-            for (let step = 0; step < 6; step += 1) {
+            for (let step = 0; step < BOOTSTRAP.stepOrder.length; step += 1) {  // every step's Continue, then Start
                 doc.getElementById('next-btn').fire('click'); await settle();
                 if (step === 0 && onModels) { await onModels(doc); catalogChanged = true; await settle(); }
             }
@@ -991,7 +993,8 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
         assert.deepEqual(reads, ['first', 'second', 'first'], 'return to the changed access reads it once and discards the late answer');
         await click('next-btn');                                        // Models → Access
         await click('next-btn');                                        // Access → Consciousness
-        await click('next-btn');                                        // Consciousness → limits: the answered preview's line
+        await click('next-btn');                                        // Consciousness → Skills
+        await click('next-btn');                                        // Skills → limits: the answered preview's line
         assert.match(doc.getElementById('root').innerHTML, /id="budget-gaps"[^>]*>Not counted: Light \(price unknown\)\.</);
         // Its words are composed (data-i18n-fmt, which the page walker skips): a language change says them again.
         const { applyPayload } = await import('../modules/i18n.js');
@@ -1223,10 +1226,15 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
             type(revisitInputs);
             routeLocal(revisitLocalMode);
             await click(shortcut ? 'quick-start-btn' : 'next-btn');
-            // Review & start lands on the Consciousness step, and its Continue goes to Summary.
-            if (shortcut) assert.match(doc.getElementById('root').innerHTML, /data-consciousness-step/);
+            // Review & start lands on its own steps in order (Consciousness, then Skills, where the page offers them);
+            // the last one's Continue goes to Summary.
+            for (const step of shortcut ? bootstrap.stepOrder.filter((id) => ['consciousness', 'skills'].includes(id)) : []) {
+                assert.match(doc.getElementById('root').innerHTML, step === 'skills' ? /data-starter-skills="step"/ : /data-consciousness-step/);
+                await click('next-btn');
+            }
+            if (shortcut) assert.match(doc.getElementById('root').innerHTML, /Start Ouroboros/, 'then Summary');
         }
-        for (let step = 0; step < (shortcut ? 2 : 5); step += 1) await click('next-btn');   // … Consciousness … → Start Ouroboros.
+        for (let step = 0; step < (shortcut ? 1 : bootstrap.stepOrder.length - 1); step += 1) await click('next-btn');   // … → Start Ouroboros.
     }, { fetch, location });
     assert.equal(posted.length, 1, 'the walk reached the completion POST');
     return posted[0];
@@ -1329,6 +1337,22 @@ for (const [name, models, expected] of [
         if (name === 'main-edited') assert.equal(body.OUROBOROS_MODEL, 'zai::owner-main');
     });
 }
+
+// Review & start passes the steps a quick start still asks (owner 2026-11-21: Skills joins Consciousness there), and
+// only the ones the page offers: without Skills Consciousness goes on to Summary, without both Summary is next.
+test('Review & start passes Consciousness and Skills where the page offers them, then Summary', async () => {
+    const quiet = { ...BOOTSTRAP.consciousnessOffer, offered: false };
+    for (const [stepOrder, consciousnessOffer] of [
+        [BOOTSTRAP.stepOrder, BOOTSTRAP.consciousnessOffer],
+        [BOOTSTRAP.stepOrder.filter((step) => step !== 'skills'), BOOTSTRAP.consciousnessOffer],
+        [BOOTSTRAP.stepOrder.filter((step) => !['consciousness', 'skills'].includes(step)), quiet],
+    ]) {
+        const body = await finishFromAccounts({ ...FRESH, stepOrder, consciousnessOffer }, `quick-${stepOrder.length}`,
+            { inputs: { 'zai-key': ZAI_KEY }, revisit: true, shortcut: true });
+        assert.equal(body.subscriptionsConnected, true, stepOrder.join());
+        assert.equal(body.consciousness, consciousnessOffer.offered ? true : undefined);
+    }
+});
 
 // Owner 4A: a fresh local-only setup proposes no unreachable remote Light or Fallbacks — blank
 // Light follows the local Main and blank Fallbacks is no chain (the server's own proposal). An

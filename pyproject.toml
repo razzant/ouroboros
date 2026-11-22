@@ -159,6 +159,7 @@ web = [
     "vendor/katex/contrib/*.js",
     "vendor/katex/fonts/*.woff2",
     "vendor/licenses/*",
+    "vendor/qrcodegen/*.js",
 ]
 [tool.ruff]
 line-length = 120

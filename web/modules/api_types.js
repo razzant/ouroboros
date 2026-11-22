@@ -85,7 +85,7 @@
  * Background Consciousness alarm clock (server._describe_bg_consciousness_state over consciousness.status_snapshot). A wake-up is an ordinary Main turn; the direct-activity census owns its liveness.
  * @typedef {Object} BgConsciousnessState
  * @property {boolean} enabled
- * @property {string} status  // disabled | starting | stopped | thinking | due | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
+ * @property {string} status  // disabled | starting | stopped | thinking | due | sleeping | owner_chat_unknown | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
  * @property {string} detail  // one honest owner-readable line (e.g. "Sleeping until 14:05 (UTC+03:00).", in the server's zone)
  * @property {string=} detail_note  // what follows from that state, said beneath it; only a proven allowance hold has one
  * @property {string} level  // observe | act | full
@@ -226,11 +226,11 @@
 /** @typedef {import('./client_contract_types.js').ChatInbound} ChatInbound */
 /** @typedef {import('./client_contract_types.js').CommandInbound} CommandInbound */
 /** @typedef {import('./client_contract_types.js').PanicAcceptedOutbound} PanicAcceptedOutbound */
-/** @typedef {import('./client_contract_types.js').CallOpenRequest} CallOpenRequest */
-/** @typedef {import('./client_contract_types.js').CallOpenResponse} CallOpenResponse */
-/** @typedef {import('./client_contract_types.js').CallRefusal} CallRefusal */
-/** @typedef {import('./client_contract_types.js').CallSocketContract} CallSocketContract */
-/** @typedef {import('./client_contract_types.js').ConversationFinishedOutbound} ConversationFinishedOutbound */
+/** @typedef {import('./call_contract_types.js').CallOpenRequest} CallOpenRequest */
+/** @typedef {import('./call_contract_types.js').CallOpenResponse} CallOpenResponse */
+/** @typedef {import('./call_contract_types.js').CallRefusal} CallRefusal */
+/** @typedef {import('./call_contract_types.js').CallSocketContract} CallSocketContract */
+/** @typedef {import('./call_contract_types.js').ConversationFinishedOutbound} ConversationFinishedOutbound */
 /** @typedef {Object} ChatOutbound
  * @property {import('./client_contract_types.js').PresenceContact=} presence_contact
  * @property {{kind:'publication'|'answer'|'closure',state:'owed'|'delivered',reason_code?:string,dismissed?:boolean}=} question_delivery Canonical settlement delivery fact.

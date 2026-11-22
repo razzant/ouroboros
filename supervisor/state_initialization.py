@@ -31,8 +31,8 @@ A root whose every trace was deleted is indistinguishable from a new one: that
 is a disclosed residual, not proof of historylessness.
 
 What a created first state is born with is ``first_state`` (a re-mint after loss
-and an owner Reset included): update notices a fresh install owes nothing, and the
-consciousness switch its setup left on.
+and an owner Reset included): update notices a fresh install owes nothing, the
+consciousness switch its setup left on, and the first meeting its setup's Start opens.
 """
 
 from __future__ import annotations
@@ -157,32 +157,55 @@ def first_state(drive_root: Any, initialization_id: str) -> Dict[str, Any]:
     takes a settings lock. A fresh install never ran an earlier release, so the notices
     ``upgrade_notices.BORN_SETTLED_NOTICE_KEYS`` names are born marked; that stamp is not a
     delivery (no chat receipt exists for it), and the notices judged by facts stay owed.
-    Consciousness is born on when this root's setup left its switch on (``setup_left_consciousness_on``)."""
+    Consciousness is born on when this root's setup left its switch on (``setup_left_consciousness_on``),
+    and a state minted after a recorded setup owes the first meeting its Start opens (``supervisor.first_meeting``)."""
     from ouroboros.upgrade_notices import BORN_SETTLED_NOTICE_KEYS  # D08 -> D11 is allowed only lazily
+    from supervisor.first_meeting import FIRST_MEETING_KEY, owed
 
+    pressed_at = setup_pressed_start_at(drive_root)
     return {"initialization_id": initialization_id, **dict.fromkeys(BORN_SETTLED_NOTICE_KEYS, utc_now_iso()),
-            **({"bg_consciousness_enabled": True} if setup_left_consciousness_on(drive_root) else {})}
+            **({"bg_consciousness_enabled": True} if setup_left_consciousness_on(drive_root) else {}),
+            **({FIRST_MEETING_KEY: owed(pressed_at)} if pressed_at else {})}
+
+
+def _setup_document(drive_root: Any) -> Dict[str, Any]:
+    """The settings document of ``drive_root`` as setup left it: the configured document when that root is the
+    configured data root, else ``<root>/settings.json``. Read lock-free and verified (the caller may hold STATE_LOCK and
+    takes no settings lock); ``{}`` for none, and a document that cannot be read raises."""
+    from ouroboros import config
+    from ouroboros.settings_integrity import read_settings_json_verified
+
+    root = pathlib.Path(drive_root)
+    configured = root.resolve() == pathlib.Path(config.DATA_DIR).resolve()
+    document = read_settings_json_verified(config.SETTINGS_PATH if configured else root / "settings.json")
+    return document if isinstance(document, dict) else {}
 
 
 def setup_left_consciousness_on(drive_root: Any) -> bool:
-    """The setup choice the settings document of ``drive_root`` records (owner decision 2026-11-20): the configured
-    document when that root is the configured data root, else ``<root>/settings.json``. Read lock-free and verified
-    under STATE_LOCK, so it takes no settings lock; an unreadable document is no choice, and a pending installation
-    Panic withholds it (Panic's own controls write keeps it off)."""
-    from ouroboros import config
+    """The setup choice the settings document of ``drive_root`` records (owner decision 2026-11-20); an unreadable
+    document is no choice, and a pending installation Panic withholds it (Panic's own controls write keeps it off)."""
     from ouroboros.installation_stop import installation_panic
-    from ouroboros.settings_integrity import read_settings_json_verified
     from ouroboros.settings_setup_contract import ONBOARDING_CONSCIOUSNESS_KEY
 
-    root = pathlib.Path(drive_root)
     try:
-        configured = root.resolve() == pathlib.Path(config.DATA_DIR).resolve()
-        document = read_settings_json_verified(config.SETTINGS_PATH if configured else root / "settings.json")
-        chosen = isinstance(document, dict) and document.get(ONBOARDING_CONSCIOUSNESS_KEY) == "on"
-        return chosen and not installation_panic(root)
+        chosen = _setup_document(drive_root).get(ONBOARDING_CONSCIOUSNESS_KEY) == "on"
+        return chosen and not installation_panic(pathlib.Path(drive_root))
     except Exception:
         log.warning("the setup's consciousness choice could not be read; the first state is born off", exc_info=True)
         return False
+
+
+def setup_pressed_start_at(drive_root: Any) -> str:
+    """When my human pressed Start at the end of setup, as the settings document of ``drive_root`` records it (the
+    completion fact ``OUROBOROS_ONBOARDING_COMPLETED_AT``); "" for no recorded setup (Colab, headless, env-only) or a
+    document that cannot be read."""
+    from ouroboros.settings_setup_contract import ONBOARDING_COMPLETED_KEY
+
+    try:
+        return str(_setup_document(drive_root).get(ONBOARDING_COMPLETED_KEY) or "").strip()
+    except Exception:
+        log.warning("the setup's completion could not be read; the first state owes no first meeting", exc_info=True)
+        return ""
 
 
 def authority_reason(drive_root: Any, initialization_id: str) -> str:

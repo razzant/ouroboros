@@ -125,7 +125,8 @@ def clock(monkeypatch, tmp_path):
     monkeypatch.setattr("supervisor.queue.live_consciousness_roots", lambda: [
         {"task_id": "root", "title": "Root", "consciousness_cause": "started"}])
     get_direct_activity_registry().clear()
-    clock = BackgroundConsciousness(tmp_path, tmp_path / "repo", lambda: store.get("owner_chat_id"), now=T0)
+    # The server's own reader (``owner_chat_of``): the bound chat, None for a known empty slot, an unknown one raises.
+    clock = BackgroundConsciousness(tmp_path, tmp_path / "repo", lambda: clock_module.owner_chat_of(dict(store)), now=T0)
     yield SimpleNamespace(clock=clock, store=store, launches=launches, receipt=receipt, root=tmp_path,
                           running=running, finish=finish)
     get_direct_activity_registry().clear()
@@ -692,7 +693,7 @@ def test_a_restart_restores_no_recheck_from_any_other_record(clock, monkeypatch,
     assert restarted.tick(T0 + FLOOR + 1) == "not_due"
 
 
-@pytest.mark.parametrize("before", ["allowance_unknown", "waiting_for_first_conversation", "a finished wake"])
+@pytest.mark.parametrize("before", ["allowance_unknown", "owner_chat_unknown", "a finished wake"])
 def test_a_changed_limit_rechecks_only_a_money_skip(clock, monkeypatch, before):
     """The other side: a skip for another reason and an ordinary wake keep their time whatever the limit."""
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "20")
@@ -701,9 +702,9 @@ def test_a_changed_limit_rechecks_only_a_money_skip(clock, monkeypatch, before):
         monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: {
             "status": "allowance_unknown", "error": "OSError: ledger", "limit_usd": 20.0})
         assert clock.clock.tick(now) == "skipped:allowance_unknown"
-    elif before == "waiting_for_first_conversation":
-        clock.store["owner_chat_id"] = None
-        assert clock.clock.tick(now) == "skipped:waiting_for_first_conversation"
+    elif before == "owner_chat_unknown":
+        clock.store["_recovery"] = {"unconfirmed": ["owner_chat_id"]}
+        assert clock.clock.tick(now) == "skipped:owner_chat_unknown"
     else:
         assert clock.clock.tick(now) == "launched"
         clock.finish("wake0001", True)
@@ -711,11 +712,61 @@ def test_a_changed_limit_rechecks_only_a_money_skip(clock, monkeypatch, before):
     assert clock.clock.tick(clock.clock.next_wake_at - 1) == "not_due"
 
 
-def test_no_owner_chat_waits_for_the_first_conversation(clock):
-    clock.store["owner_chat_id"] = None
-    assert clock.clock.tick(T0 + FLOOR + 1) == "skipped:waiting_for_first_conversation"
-    assert clock.clock.next_wake_at == T0 + FLOOR + 1 + FLOOR
-    assert clock.launches == []
+@pytest.mark.parametrize("slot", ["bound", "known_empty", "read_once", "unconfirmed", "unreadable", "holds_zero"])
+def test_a_wake_speaks_in_the_bound_chat_or_main_while_known_empty_and_skips_an_unknown_one(clock, slot):
+    """Where a wake speaks is read once and passed to its launch: the bound owner chat, or Main while the slot is
+    KNOWN empty (the wake binds nothing; the person's first message does). A binding that cannot be read, or a slot
+    that holds no chat, is the disclosed skip ``owner_chat_unknown`` with its reason, never a guessed chat or chat 0
+    (``gateway.control._admit_description_task`` places a press by the same known-empty rule)."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros import consciousness_view as view
+    from supervisor.state import STATE_READ_KEY
+
+    if slot in ("known_empty", "read_once"):
+        clock.store["owner_chat_id"] = None
+    if slot == "read_once":  # a second read would fail: the launch keeps the destination its tick observed
+        answers = iter([None])
+        clock.clock._owner_chat_id_fn = lambda: next(answers)
+    elif slot == "unconfirmed":
+        clock.store["_recovery"] = {"unconfirmed": ["owner_chat_id"]}
+    elif slot == "unreadable":
+        clock.clock._owner_chat_id_fn = lambda: clock_module.owner_chat_of(
+            {**clock.store, STATE_READ_KEY: {"quality": "unavailable", "reason": "primary unreadable"}})
+    elif slot == "holds_zero":
+        clock.store["owner_chat_id"] = 0
+    now = T0 + FLOOR + 1
+    outcome = clock.clock.tick(now)
+    if slot in ("bound", "known_empty", "read_once"):
+        assert outcome == "launched"
+        assert [launch["chat_id"] for launch in clock.launches] == [7 if slot == "bound" else WEB_UI_CHAT_ID]
+        assert clock.store["owner_chat_id"] == (7 if slot == "bound" else None)  # the wake binds nothing
+        return
+    why = {"unconfirmed": "the owner chat binding is not confirmed", "holds_zero": "the owner chat slot holds 0",
+           "unreadable": "runtime state unavailable: primary unreadable"}[slot]
+    assert outcome == "skipped:owner_chat_unknown" and clock.launches == []
+    assert clock.clock.next_wake_at == now + FLOOR
+    [skipped] = [row for row in _events(clock.root) if row["type"] == "consciousness_wake_skipped"]
+    assert (skipped["reason"], skipped["error"]) == ("owner_chat_unknown", why)
+    described = view.describe_consciousness_state(clock.clock.status_snapshot(), True)
+    assert described["status"] == "owner_chat_unknown"
+    assert described["detail"].startswith(f"The owner chat could not be read ({why}); retry ")
+
+
+def test_the_servers_owner_chat_reader_keeps_bound_known_empty_and_unknown_apart():
+    """``owner_chat_of`` is the reader the server hands the clock: a failed read never reads as an empty slot."""
+    from supervisor.state import STATE_READ_KEY
+
+    assert clock_module.owner_chat_of({"owner_chat_id": 7}) == 7
+    assert clock_module.owner_chat_of({"owner_chat_id": None}) is None
+    for st, why in (({"owner_chat_id": 7, STATE_READ_KEY: {"quality": "unavailable", "reason": "primary missing"}},
+                     "runtime state unavailable: primary missing"),
+                    ({"owner_chat_id": None, "_recovery": {"unconfirmed": ["owner_chat_id"]}},
+                     "the owner chat binding is not confirmed"),
+                    ({}, "the owner chat binding is not confirmed"),
+                    ({"owner_chat_id": "main"}, "the owner chat slot holds 'main'")):
+        with pytest.raises(LookupError) as raised:
+            clock_module.owner_chat_of(st)
+        assert str(raised.value) == why
 
 
 # --- launch -----------------------------------------------------------------------
