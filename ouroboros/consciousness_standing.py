@@ -296,9 +296,10 @@ def _fallen_section(facts: StandingFacts) -> Optional[StandingSection]:
 
     if facts.registry is None:
         raise LookupError("project registry unreadable")
-    if not facts.registry:  # empty is "no projects" only where the registry proves it (``readable_rooms``' rule)
-        list_reserved_projects(facts.root, require_readable=True)
-    works = fallen_works(facts.root, now=facts.now, projects=facts.registry)
+    # empty is "no projects" only where the registry proves it (``readable_rooms``' rule), and the rows that read
+    # validated are the ones listed: a registry repaired after the wake's lenient read still names its projects
+    projects = facts.registry or list_reserved_projects(facts.root, require_readable=True)
+    works = fallen_works(facts.root, now=facts.now, projects=projects)
     return StandingSection(FALLEN_KIND, FALLEN_TITLE, FALLEN_WORDS, tuple(work.line for work in works)) if works else None
 
 

@@ -443,6 +443,19 @@ def test_a_registry_lost_beside_its_commit_witness_is_the_sections_gap_never_no_
         assert observation.standing == () and not [gap for gap in observation.gaps if gap.startswith("fallen_work")]
 
 
+def test_an_empty_lenient_read_lists_the_projects_its_validating_read_returns(tmp_path):
+    """The rows the validating read (``list_reserved_projects(require_readable=True)``) returns are the section's: a
+    registry repaired between the wake's lenient read and that read lists its project's work, never a quiet wake;
+    a lenient read that names the project keeps working from its own rows."""
+    _registry(tmp_path, *PROJECTS)
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    for lenient in ([], PROJECTS):
+        gaps = set()
+        sections = standing.standing_sections(standing.StandingFacts(root=tmp_path, now=T0, registry=lenient), gaps)
+        assert [section.kind for section in sections] == [standing.FALLEN_KIND] and not gaps, lenient
+        assert len(sections[0].lines) == 1 and sections[0].lines[0].startswith("- task fell Failed in project Audit")
+
+
 def test_every_form_of_the_wake_keeps_the_section_and_the_bare_pointer_folds_it(tmp_path):
     """The projection (the form a wake takes when its observation does not fit) keeps the lines; only the bare
     pointer, the physical window's last form, folds them to a count with the kind of their rows at the source."""
