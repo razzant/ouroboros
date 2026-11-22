@@ -550,6 +550,50 @@ def test_a_carrier_ends_a_held_task_itself_and_never_runs_its_body(org, monkeypa
         assert ran == ["queued-1"] and ended == []
 
 
+@pytest.mark.parametrize("carrier", ["place", "legacy_binding"])
+def test_a_held_place_bound_root_ends_typed_with_its_presence_result_and_owed_project_notice(org, monkeypatch, carrier):
+    """Review round 2 (Astra 5): the hold before any body ends a Project-bound root that carries a place conversation
+    with no run (``ctx`` None), through the real terminal pipeline. No selection was made, so neither a place carrier
+    nor a retained legacy binding is read: the root ends typed, with one Presence result and one owed Project notice."""
+    import queue
+    from types import SimpleNamespace
+
+    import ouroboros.agent_task_pipeline as pipeline
+    from ouroboros import places
+    from ouroboros.deployment_extensions import HOLD_REASON
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor import worker_process
+    from supervisor.terminal_delivery import pending_deliveries
+
+    require(org, monkeypatch)
+    data = org.data
+    project = create_project(data, "compiler", name="Compiler reports")
+    place = places.connect_place(data, connector="bridge", provider="chat", account_id="a", conversation_id="r",
+                                 wakes=["mention"])
+    presence = {"binding_id": place.place_id, "transport_skill": "bridge",
+                "event": {"provider": "chat", "account_id": "a", "conversation_id": "r", "thread_id": "",
+                          "conversation_key": "chat:a:r:0"},
+                **({"place_id": place.place_id} if carrier == "place" else {})}
+    metadata = {"presence": presence, "delegation_role": "root"}
+    task = {"id": "held-root", "type": "task", "chat_id": project["chat_id"], "text": "Prepare the report",
+            "metadata": metadata, "delegation_role": "root", "root_task_id": "held-root",
+            "_skip_post_task_synthesis": True}
+    bind_task_to_project(data, "held-root", project["id"], project["chat_id"], origin={"absent": "system"})
+    write_task_result(data, "held-root", "running", metadata=metadata, delegation_role="root",
+                      root_task_id="held-root", chat_id=project["chat_id"])
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *_a, **_kw: None)
+    env = SimpleNamespace(drive_root=data, repo_dir=data, branch_dev="test", drive_path=lambda rel: data / rel)
+    runner = SimpleNamespace(env=env, memory=None, llm=None, handle_task=lambda *_: pytest.fail("a held task ran"))
+    out = queue.Queue()
+    worker_process.run_worker_task(runner, task, wid=1, out_q=out, repo_dir=str(data), drive_root=str(data))
+    frames = list(out.queue)
+    assert load_task_result(data, "held-root")["reason_code"] == HOLD_REASON
+    assert [frame.get("type") for frame in frames].count("presence_result") == 1
+    assert any(frame.get("type") == "send_message" and "Not started" in str(frame.get("text")) for frame in frames)
+    assert len([row for row in pending_deliveries(data, strict=True) if row.get("task_id") == "held-root"]) == 1
+
+
 @pytest.mark.parametrize("mode", ["hold", "warn", None])
 def test_the_queue_keeps_ordinary_work_waiting_while_the_server_does_not_run_a_requirement(org, monkeypatch, mode):
     from supervisor import queue, worker_assignment
