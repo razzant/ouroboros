@@ -72,6 +72,8 @@ def test_ruby_file_open_is_mode_aware():
     assert "/tmp/o" in writer_target_tokens(["ruby", "-e", "File.open('/tmp/o','w') { |f| f.puts 'x' }"])
     assert "/tmp/o" in writer_target_tokens(["ruby", "-e", "File.new('/tmp/o','w')"])
     assert "/tmp/o" not in writer_target_tokens(["ruby", "-e", "File.new('/tmp/o','r')"])
+    # File.delete takes no mode: its literal path is a target as it stands.
+    assert "/tmp/d" in writer_target_tokens(["ruby", "-e", "File.delete('/tmp/d')"])
 
 
 def test_python_keyword_mode_and_library_saves_name_their_target():

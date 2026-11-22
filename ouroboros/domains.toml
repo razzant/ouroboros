@@ -211,6 +211,7 @@ D20 = "Presence"
 "ouroboros/code_navigation.py" = "D05"
 "ouroboros/code_occurrences.py" = "D05"
 "ouroboros/code_search_rg.py" = "D05"
+"ouroboros/code_shape_facts.py" = "D05"  # the diff pulse's code-shape facts, read lazily by review.py (D06)
 "ouroboros/colab_bootstrap.py" = "D12"
 "ouroboros/commit_admission.py" = "D06"
 "ouroboros/config.py" = "D12"
