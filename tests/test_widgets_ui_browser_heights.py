@@ -1896,8 +1896,11 @@ def test_a_small_drag_keeps_the_owners_exact_height_where_the_content_has_no_hei
         return page.evaluate("async (key) => ((await (await fetch('/api/ui/preferences')).json()).widget_size || {})[key] ?? null", key)
 
     def wait_stored(key: str, h: int) -> None:
-        wait_until(page, """async ([key, h]) => (((await (await fetch('/api/ui/preferences')).json()).widget_size || {})[key]
-            || { h: 0 }).h === h""", arg=[key, h], timeout=8_000)
+        try:
+            wait_until(page, """async ([key, h]) => (((await (await fetch('/api/ui/preferences')).json()).widget_size || {})[key]
+                || { h: 0 }).h === h""", arg=[key, h], timeout=8_000)
+        except AssertionError as error:  # name what the drag left: another height saved, or none (#3988)
+            raise AssertionError(f"{key} never stored h={h}: stored {stored(key)}, shown {page.evaluate(BODY, key)}") from error
 
     def shown(key: str) -> float:
         facts = page.evaluate(BODY, key)
