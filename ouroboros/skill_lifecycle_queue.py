@@ -247,7 +247,8 @@ def _notify_chat_progress(job: LifecycleJob, phase: str) -> None:
         text, notice = phrase(f"skill_{job.kind}_{phase}", f"Skill {job.kind}: `{{target}}` — {phase}"
                               + (" — {message}" if said else ""), details=job.error, target=job.target, **said)
         send_with_budget(_effective_chat_id(job), text, is_progress=True, task_id=_chat_task_id(job),
-                         progress_meta={"lifecycle": lifecycle, **notice}, role="system", system_type="skill_lifecycle")
+                         progress_meta={"lifecycle": lifecycle, "notice": notice["notice"]}, role="system",
+                         system_type="skill_lifecycle")
     except Exception:
         return
 
@@ -291,7 +292,7 @@ def _notify_duplicate_pointer(requested: LifecycleJob, existing: LifecycleJob) -
                 "origin_root_task_id": existing.origin_root_task_id,
                 "presentation_owner_task_id": existing.presentation_owner_task_id,
                 "source": existing.source,
-            }, **notice},
+            }, "notice": notice["notice"]},
             role="system", system_type="skill_lifecycle_pointer")
     except Exception:
         return
