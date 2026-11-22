@@ -59,7 +59,7 @@ def test_the_start_notice_dates_a_broken_server_on_its_one_line_and_is_silent_wh
     manager = _manager(monkeypatch, ("demo", True), ("calm", True))
     assert breakage.start_notice_rows(_work(tmp_path), []) == []  # all is well: nothing to say
     _call(manager, "demo", TimeoutError("slow"))
-    since = json.loads((tmp_path / "state" / "mcp" / "catalogs" / "server-demo.json").read_text(
+    since = json.loads((tmp_path / "state" / "mcp" / "calls" / "server-demo.json").read_text(
         encoding="utf-8"))["latest_call"]["since"]
     [row] = breakage.start_notice_rows(_work(tmp_path), [])
     assert row == {"surface": "mcp", "reason": "capability_broken", "error": (

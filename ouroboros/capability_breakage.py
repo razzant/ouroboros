@@ -1,7 +1,7 @@
 """One reader of the dated records that say a capability does not work now (C10 item 56, first delivery).
 
 The records' owners keep the facts and their starts: the MCP catalog (a failing listing's
-``listing_failing_since``, ``latest_call``), MCP sign-in (``mcp_oauth.status``) and the extension
+``listing_failing_since``) and its call record (``latest_call``), MCP sign-in (``mcp_oauth.status``) and the extension
 health record (the server's load and companion state, the worker qualifier, permissions the skill
 itself reported unavailable). This module only reads them.
 
@@ -48,7 +48,7 @@ def _root(tool_ctx: Any) -> pathlib.Path:
 
 def _mcp_facts() -> Tuple[Facts, Facts]:
     """``(broken, working)`` by key for the configured MCP servers and MCP's own configuration."""
-    from ouroboros import mcp_client, mcp_oauth
+    from ouroboros import mcp_catalog, mcp_client, mcp_oauth
 
     mcp_client.ensure_configured_from_settings()
     manager = mcp_client.get_manager()
@@ -66,7 +66,7 @@ def _mcp_facts() -> Tuple[Facts, Facts]:
         if not cfg.enabled:
             continue
         catalog = catalog or {}
-        attempt, call = catalog.get("latest_attempt") or {}, catalog.get("latest_call") or {}
+        attempt, call = catalog.get("latest_attempt") or {}, mcp_catalog.latest_call(cfg) or {}
         sign_in = (mcp_oauth.status(cfg) or {}) if mcp_oauth.applies(cfg) else {}
         problems = []
         if attempt.get("ok") is False:
