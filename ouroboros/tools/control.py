@@ -430,7 +430,7 @@ def get_tools() -> List[ToolEntry]:
         }, _request_deep_self_review),
         ToolEntry("chat_history", {
             "name": "chat_history",
-            "description": "Retrieve live and recent archived chat messages. Supports exact provenance/date filters, substring search or words, and pagination.",
+            "description": "Retrieve live and archived chat messages. Supports exact provenance/date filters, substring search or words, and pagination.",
             "parameters": {"type": "object", "properties": {
                 "count": {"type": "integer", "default": 100, "description": "How many rows to return. With words, the first of the requested order; otherwise the latest."},
                 "offset": {"type": "integer", "default": 0, "description": "How many rows to skip in that order. Without words, skip that many from the latest."},

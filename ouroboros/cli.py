@@ -652,10 +652,9 @@ def build_parser() -> argparse.ArgumentParser:
     recall = subparsers.add_parser(
         "recall", help="find dialogue rows by words or reopen one row (no model turn)",
         description="Find dialogue rows by words, or reopen one row, without a model turn. A search across rooms "
-                    "uses the word index when available: usually within a second, several seconds for a broad one, "
-                    "and as long as reading the whole conversation for a very common word. While the index is being "
-                    "built, or without a usable one, it scans the conversation and can take a minute or more. Give "
-                    "--room-id to search one room.")
+                    "uses the word index when available. Broad searches can take several seconds. A very common word "
+                    "or an unusable index, including one still building, can require a full scan lasting a minute or "
+                    "more. Give --room-id to search one room.")
     form = recall.add_mutually_exclusive_group(required=True)
     form.add_argument("--words", action="append", help="word prefixes that must all occur in one field of one row "
                       "(quote a part for an exact word or phrase); repeat for alternatives")
