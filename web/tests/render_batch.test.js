@@ -848,7 +848,7 @@ test('a living card straddling the top edge anchors the visible row below it and
 test('disappearing temporary cards at or straddling the top keep the reference row below stationary without ts collision', () => {
     const feed = layoutNode({ height: 750, scroll: 5000 });
     const records = new Map();
-    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records });
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records, band: () => ({ top: 88, bottom: 750 }) });
     const distantSameTs = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:early', 'data-ts': '1700000000' }, y: 200, height: 100, parent: feed });
     const tempCard = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'temp-1', 'data-ts': '1700000000' }, y: 2010, height: 98, parent: feed });
     const summary = layoutNode({ data: { 'data-live-summary-button': '1' }, y: 8, height: 40, parent: tempCard });
@@ -870,7 +870,7 @@ test('disappearing temporary cards at or straddling the top keep the reference r
 test('collapsing an expanded card whose top is above the viewport preserves the visible row below it', () => {
     const feed = layoutNode({ height: 750, scroll: 5000 });
     const records = new Map();
-    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records });
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records, band: () => ({ top: 88, bottom: 750 }) });
     const card = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'portal-1', 'data-expanded': '1' }, y: 1700, height: 466, parent: feed });
     const timeline = layoutNode({ data: { 'data-live-timeline': '1' }, y: 80, height: 370, parent: card });
     const line = layoutNode({ classes: ['chat-live-line'], data: { 'data-live-line-key': 'line-1' }, y: 230, height: 80, parent: timeline });
@@ -886,6 +886,31 @@ test('collapsing an expanded card whose top is above the viewport preserves the 
     refRow.y = 1876;
     assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
     assert.equal(refRow.getBoundingClientRect().top - feed.getBoundingClientRect().top, 180, 'reference row moves 0 px');
+});
+
+test('an expanded live card collapsing under a floating bar keeps the row after it; with no bar its own top holds', () => {
+    // The card's top is under the bar (+20 of a band from +88): the line read inside it goes when it collapses, and
+    // the row below it holds the place. With no bar the same top is in the band, the card itself the place.
+    for (const bar of [88, 0]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const records = new Map();
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records,
+            band: () => (bar ? { top: bar, bottom: 750 } : null) });
+        const card = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'open-1', 'data-expanded': '1' }, y: 2020, height: 470, parent: feed });
+        const line = layoutNode({ classes: ['chat-live-line'], data: { 'data-live-line-key': 'line-1' }, y: 90, height: 80, parent: card });
+        const after = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:after' }, y: 2500, height: 120, parent: feed });
+        records.set('open-1', { groupId: 'open-1', root: card, items: [{ lineKey: 'line-1' }] });
+        feed.scrollTop = 2000;
+        const anchor = anchors.captureVisibleTimelineAnchor();
+        assert.equal(anchor.node, bar ? line : card, bar ? 'under the bar the line inside is read' : 'the card heads the band');
+        card.attrs['data-expanded'] = '0';
+        card.height = 166;
+        line.height = 0;
+        after.y = 2196;
+        assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+        if (bar) assert.equal(after.getBoundingClientRect().top, 500, 'under the bar the row after the card stays');
+        else assert.equal(card.getBoundingClientRect().top, 20, 'with no bar the card keeps its own top');
+    }
 });
 
 test('captureVisibleTimelineAnchor ignores collapsed stack rows with zero rects before and after a straddling card', () => {

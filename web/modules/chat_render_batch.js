@@ -733,6 +733,8 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
     function restoreVisibleTimelineAnchor(anchor, { exact = false, cardOnly = false, out = null } = {}) {
         if (!anchor) return false;
         const inPlace = !exact && !cardOnly;
+        const rect = messagesDiv.getBoundingClientRect(), scale = rect.height / messagesDiv.offsetHeight || 1;
+        const bandOffset = (Math.max(rect.top, band()?.top ?? rect.top) - rect.top) / scale;  // capture's bandTop, feed px
         const isRendered = (node) => {
             if (!node?.isConnected || !messagesDiv.contains(node)) return false;
             const rect = node.getBoundingClientRect();
@@ -740,10 +742,9 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
         };
         const restoreNode = (node, offset) => {
             if (!isRendered(node)) return false;
-            const rect = messagesDiv.getBoundingClientRect(), scale = rect.height / messagesDiv.offsetHeight || 1;
             const nodeRect = node.getBoundingClientRect();
-            let targetOffset = inPlace && offset < 0 && (node.classList?.contains?.('chat-card-bubble')
-                || node.classList?.contains?.('chat-live-card')) && nodeRect.height / scale + offset <= 0 ? 0 : offset;
+            let targetOffset = inPlace && offset < bandOffset && (node.classList?.contains?.('chat-card-bubble')
+                || node.classList?.contains?.('chat-live-card')) && nodeRect.height / scale + offset <= bandOffset ? bandOffset : offset;
             if (inPlace && node === anchor.node && anchor.scrollBox && anchor.scrollBox !== node
                 && anchor.scrollBox.contains?.(node)) {
                 targetOffset -= anchor.scrollBox.scrollTop - (anchor.boxScrollTop || 0);
@@ -837,7 +838,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
         if (exact && cardChain.length && restoreNode(ownerCard, anchor.offset)) return true;
         if (exact && !anchor.clientMessageId) return false;
         for (const entry of cardChain) {
-            if (inPlace && entry.offset < 0 && restoreFallback()) return true;
+            if (inPlace && entry.offset < bandOffset && restoreFallback()) return true;
             if (restoreNode(resolveCard(entry), entry.offset)) return true;
         }
         if (cardOnly) return restoreFallback();
