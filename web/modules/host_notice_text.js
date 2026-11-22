@@ -133,6 +133,8 @@ export const hostTaskMessage = (evt) => evt?.provenance === 'system' && (!evt.so
 /** A host notice's line, the one its server assembled for every reader (`notice.line`); '' for any other row. */
 export const noticeLine = (row) => (row?.role === 'system' && row.narration !== true
     && typeof row.notice?.line === 'string' ? row.notice.line : '');
+// A notice's raw details open from its card line as plain text (`fullBody`), never in a toast.
+export const noticeBody = (row) => (noticeLine(row) && row.notice.details ? { fullBody: String(row.notice.details), bodyFormat: 'text' } : {});
 
 // Authored narration outranks a stale host type, on both bubble and timeline paths.
 export function hostRowDisplayText(row, shown = row.text ?? row.content ?? '') {

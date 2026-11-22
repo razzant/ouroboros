@@ -1073,8 +1073,10 @@ def _make_outbound(api, cue: TypingCue | None = None):
                     await _telegram_client(api, event, chat_id).send_message(chat_id, notice, parse_mode="")
                 return
 
-            # The host's one line (a notice's phrase and step, the technical pause), each part translated first.
-            text = notice_line(event, lang, drive_root=telegram_i18n.drive_root())
+            # The host's one line (a notice's phrase and step, the technical pause), each part translated first: the
+            # frame's own line when the host assembled one, so the phone says what the window and Copy say.
+            line = event["notice"].get("line") if isinstance(event.get("notice"), dict) else None
+            text = line if isinstance(line, str) and line else notice_line(event, lang, drive_root=telegram_i18n.drive_root())
             # A relay quotes the owner's own words above Ouroboros's note; they are sent verbatim, as plain text.
             relayed = event.get("system_type") == "relay_entry" and isinstance(event.get("relay"), dict)
             if relayed:

@@ -12,7 +12,7 @@ import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
 import { checkFailureView, redCheckPhrase, toolStepDiagnostic } from './verification_presentation.js';
-import { hostRowDisplayText, hostTaskMessage, toolErrorDisplayText } from './host_notice_text.js';
+import { hostRowDisplayText, hostTaskMessage, noticeBody, noticeLine, toolErrorDisplayText } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
 import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
@@ -1240,7 +1240,7 @@ export function summarizeChatLiveEvent(evt) {
 function summarizeChatLiveEventView(evt) {
     const t = evt.type || evt.event || 'unknown';
     const groupId = getLogTaskGroupId(evt);
-    const progressText = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240, { markdown: true });
+    const progressText = describeText(String(noticeLine(evt) || evt.content || evt.text || '').replace(/^💬\s*/, ''), 240, { markdown: true });
     const key = (...parts) => [t, groupId, ...parts].join(':');
 
     if (t === 'history_retention') return chatView({ visible: false, dedupeKey: key(evt.status || '') });
@@ -1373,7 +1373,7 @@ function summarizeChatLiveEventView(evt) {
         // narration is promoted (title, collapsed line). ABSENT = predates the fact.
         const narration = evt.narration === true || evt.narration === undefined;
         const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
-        return chatView({
+        return Object.assign(chatView({  // a host notice's raw details open from its line as plain text, never its toast
             phase: ended === 'failed' ? 'lifecycle_error' : ended ? 'done' : 'working',
             // An empty note is no narration: a placeholder would become the card title as if said (#1369).
             headline: note.preview || '',
@@ -1387,7 +1387,7 @@ function summarizeChatLiveEventView(evt) {
             chip: executorChip(evt),
             model: evt.model,
             dedupeKey: progressText.full ? `progress:${progressText.full}` : `progress:${evt.task_id || ''}`,
-        });
+        }), noticeBody(evt));
     }
 
     if (t === 'llm_usage') {

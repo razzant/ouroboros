@@ -716,10 +716,9 @@
 /**
  * A saved message as the fields the room's renderer draws its words from (chat_search_words.js `candidateBox`): the
  * text history gives it (`system_type`, `markdown`, `narration`, `source` and the owner's `attachments` names choose
- * how), a photo, video or file's `caption` and a file's `filename`, a links row's `title` and `actions`, a question's
- * `quiz` card, a Project lifecycle row's answer and ending. Whether its words contain the query is the client's
- * reading.
- * `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
+ * how) or a host notice's line (`notice`), a photo, video or file's `caption` and a file's `filename`, a links row's
+ * `title` and `actions`, a question's `quiz` card, a Project lifecycle row's answer and ending; whether its words
+ * contain the query is the client's reading. `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
  * @typedef {Object} ChatSearchCandidate
  * @property {string} history_id
  * @property {string} row_address
@@ -746,6 +745,7 @@
  * @property {string=} task_name
  * @property {string=} completion_reason
  * @property {Object=} completion_notice
+ * @property {import('./api_types.js').HostNotice=} notice  // its line is the words the bubble draws; its details are not searched
  */
 
 /**
