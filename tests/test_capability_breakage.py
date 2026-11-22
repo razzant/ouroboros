@@ -273,8 +273,8 @@ def test_a_lost_skill_binding_and_an_invalid_settings_row_reach_a_running_work_a
     manager._configuration_errors = [{"id": "files", "enabled": True, "code": "MCP_CONFIG_ERROR",
                                       "last_error": "secret ${MISSING_MCP_SECRET} is not set"}]
     assert "- MCP server files: its settings are invalid (MCP_CONFIG_ERROR): secret ${MISSING_MCP_SECRET}" in _round(work)
-    manager._configuration_errors = []
-    assert "- MCP server files: no longer reported broken (" in _round(work)
+    manager._configuration_errors = [{**manager._configuration_errors[0], "enabled": False}]  # the owner's Off
+    assert "- MCP server files: no longer reported broken (disabled in Extensions → MCP servers)" in _round(work)
     assert _round(work) is None
 
 
@@ -318,13 +318,13 @@ def test_a_listing_failure_says_its_reason_and_only_a_changed_reason_reaches_a_r
 
 
 def test_an_unreadable_source_is_unknown_not_repaired_and_a_switched_off_or_removed_skill_says_so(monkeypatch, tmp_path):
-    enabled = {"desk": True, "gone": True}
+    enabled = {"desk": True, "gone": True, "tool": True}
     monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: (
         SimpleNamespace(enabled=enabled[name]) if enabled[name] is not None else None))
     for name in enabled:
         extension_health.record_extension_health(tmp_path, name, status=extension_health.BROKEN, reason="load_error")
     work = _work(tmp_path)
-    assert len(breakage.start_notice_rows(work, [])) == 2
+    assert len(breakage.start_notice_rows(work, [])) == 3
     path = extension_health.health_path(tmp_path, "desk")
     good = path.read_bytes()
     path.write_text("{not json", encoding="utf-8")  # unreadable for a moment (a lock, a torn copy)
@@ -334,9 +334,11 @@ def test_an_unreadable_source_is_unknown_not_repaired_and_a_switched_off_or_remo
     enabled.update(desk=False, gone=None)  # the owner switched one off and uninstalled the other
     (path.parent / "enabled.json").write_text(json.dumps({"enabled": False}), encoding="utf-8")
     (extension_health.health_path(tmp_path, "gone").parent / "uninstalled.json").write_text("{}", encoding="utf-8")
+    extension_health.record_extension_health(tmp_path, "tool", status=extension_health.INACTIVE, reason="not_extension")
     change = _round(work)
     assert "- skill desk: no longer reported broken (switched off)" in change
     assert "- skill gone: no longer reported broken (uninstalled)" in change
+    assert "- skill tool: no longer reported broken (no longer an extension)" in change
     manager = _manager(monkeypatch, ("demo", True))
     _call(manager, "demo", TimeoutError("slow"))
     mcp_work = _work(tmp_path)

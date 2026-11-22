@@ -35,9 +35,9 @@ CHANGE_HEADER = "[CAPABILITY CHANGES]"
 _TOLD = "_capability_breakage_told"  # on the work's ToolContext: the broken facts it was last told, and its reach
 MAIN_TOLD = "capability_breakage_main.json"  # under state/: what Main was last told, for its next turn
 _PAGE = "Extensions → MCP servers"
-# The health record's own codes for an extension that is not meant to run (extension_liveness): off, not an
-# extension, or no such skill (the loader groups the last two alike, extension_loader.reconcile_extension).
-_NOT_MEANT_TO_RUN = frozenset({"disabled", "not_extension", "missing"})
+# The health record's own codes for an extension that is not meant to run (extension_liveness), with the words that
+# close a line it was broken on: off, not an extension, or no such skill (extension_loader.reconcile_extension).
+_NOT_MEANT_TO_RUN = {"disabled": "switched off", "not_extension": "no longer an extension", "missing": "uninstalled"}
 _WORDS = 160  # a quoted error's cut: one line of the source's words, never its whole text
 
 Facts = Dict[str, str]
@@ -141,7 +141,9 @@ def _mcp_facts() -> Observed:
         else:
             seen.working[key] = positive
     for row in records["invalid"]:  # a Settings row that does not parse: the manager's typed code and words
-        if row.get("enabled") and row.get("id"):
+        if row.get("id") and not row.get("enabled"):
+            seen.working[f"mcp:{row['id']}"] = f"disabled in {_PAGE}"
+        elif row.get("id"):
             seen.broken[f"mcp:{row['id']}"] = (f"its settings are invalid ({row.get('code') or 'MCP_CONFIG_ERROR'}): "
                                                f"{_words(row.get('last_error'))}")
     return seen
@@ -205,8 +207,8 @@ def _skill_facts(root: pathlib.Path) -> Observed:
                 seen.working[key] = "switched off" if state == "off" else "uninstalled"
         elif record.get("status") == health.LIVE:
             seen.working[key] = f"live as observed {_utc(observed.get('ts'))}"
-        elif reason in ("disabled", "missing"):
-            seen.working[key] = "switched off" if reason == "disabled" else "uninstalled"
+        elif reason in _NOT_MEANT_TO_RUN:
+            seen.working[key] = _NOT_MEANT_TO_RUN[reason]
     return seen
 
 
