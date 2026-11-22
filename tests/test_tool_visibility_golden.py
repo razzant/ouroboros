@@ -51,6 +51,8 @@ EXT_SKILL = "weather"
 MCP_PINNED = "mcp_pinned__lookup"
 MCP_LAZY = "mcp_lazy__search"
 LEGACY_SKILL = "legacy"
+# The prose of the dynamic surfaces, kept here so a test can reword it as a catalog update would.
+DYNAMIC_PROSE = {MCP_PINNED: "Lookup records.", MCP_LAZY: "Search the archive.", EXT_SKILL: "Forecast weather."}
 # A transport per route family; each one's own ceiling and projection is read from the code.
 ROUTES = {
     "openai_direct": ("openai::gpt-5.6-terra", False),  # OpenAI's own API: 128 schemas at most
@@ -145,11 +147,12 @@ class _Manager:
     def __init__(self):
         schema = {"type": "object", "properties": {"q": {"type": "string"}}}
         self.rows = [
-            {"name": MCP_PINNED, "raw_name": "lookup", "description": "Lookup records.", "raw_description": "Lookup records.",
-             "schema": schema, "server_id": "pinned", "schemas_at_start": True,
-             "metadata": {"annotations": {"readOnlyHint": True}}},
-            {"name": MCP_LAZY, "raw_name": "search", "description": "Search the archive.", "raw_description": "Search the archive.",
-             "schema": schema, "server_id": "lazy", "schemas_at_start": False, "metadata": {}},
+            {"name": MCP_PINNED, "raw_name": "lookup", "description": DYNAMIC_PROSE[MCP_PINNED],
+             "raw_description": DYNAMIC_PROSE[MCP_PINNED], "schema": schema, "server_id": "pinned",
+             "schemas_at_start": True, "metadata": {"annotations": {"readOnlyHint": True}}},
+            {"name": MCP_LAZY, "raw_name": "search", "description": DYNAMIC_PROSE[MCP_LAZY],
+             "raw_description": DYNAMIC_PROSE[MCP_LAZY], "schema": schema, "server_id": "lazy",
+             "schemas_at_start": False, "metadata": {}},
         ]
 
     def list_tools_for_registry(self):
@@ -208,7 +211,7 @@ def _catalog_patches(name: str, spec: dict, root: pathlib.Path):
         manager = _Manager()
         mp.setattr(mcp_client, "get_manager", lambda: manager)
         mp.setitem(extension_loader._tools, _ext_name(), {
-            "name": _ext_name(), "handler": lambda ctx: "ok", "description": "Forecast weather.",
+            "name": _ext_name(), "handler": lambda ctx: "ok", "description": DYNAMIC_PROSE[EXT_SKILL],
             "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": EXT_SKILL,
         })
         live = {EXT_SKILL: True}
@@ -312,8 +315,9 @@ def snapshot(registry: ToolRegistry) -> dict:
         "get_schema_by_name_differs": sorted(name for name, schema in answers.items()
                                              if name in by_canonical and schema != by_canonical[name]
                                              or name not in by_canonical and schema is not None),
-        # A built-in row is its name; an MCP row keeps its raw name and marks.
-        "callable_rows": [row["name"] if set(row) == {"name"} else row for row in rows],
+        # A built-in row is its name; an MCP row keeps its raw name and marks, never the server's prose.
+        "callable_rows": [row["name"] if set(row) == {"name"} else
+                          {key: row[key] for key in ("name", "raw_name", "marks") if key in row} for row in rows],
         "shapes": {name: _shape(schema) for name, schema in by_canonical.items()},
         "child_described": {name: registry._entries[name].schema.get("description")
                             != by_canonical[name]["function"].get("description")
@@ -455,7 +459,7 @@ def test_the_record_holds_decisions_not_bytes():
 
 def test_a_description_edit_does_not_move_the_record(tmp_path, monkeypatch):
     """The record pins decisions: rewording every tool's description, as most tool changes do, leaves it as it was,
-    child-profile substitutions included."""
+    child-profile substitutions included, and so does new prose from an MCP server or an extension."""
     from dataclasses import replace
 
     from ouroboros.tools.tool_catalog import ToolCatalog
@@ -471,6 +475,8 @@ def test_a_description_edit_does_not_move_the_record(tmp_path, monkeypatch):
             for name, entry in loaded.entries.items())
 
     monkeypatch.setattr(ToolRegistry, "_load_modules", reworded)
+    for name, prose in list(DYNAMIC_PROSE.items()):
+        monkeypatch.setitem(DYNAMIC_PROSE, name, f"{prose} Reworded.")
     assert _against_main(_snapshots(tmp_path / "after", names)) == before
 
 
