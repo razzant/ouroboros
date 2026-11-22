@@ -1531,15 +1531,18 @@ event identity). An author parked on a review it left for an addressed message (
 review) yields the conversation and answers early: `status: "continuing"` with `continuation_ref` (equal to `turn_ref`) and an
 initial `outcome`/`text`/`output_ref`. `deferred` with empty text means a result may follow; an
 author-selected early output (`pending_review=finish`) is speech to send once under its
-`output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; poll
-both independently. `status: "completed"` (with `continuation_ref: ""`) means the author ended
+`output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; a connector
+that follows work for speech or status polls both independently (whether a final is speech at all: the
+`presence_explicit_completion` paragraph above; a door connector's finals are records).
+`status: "completed"` (with `continuation_ref: ""`) means the author ended
 within the request. A retry of the same event returns the identical stored envelope, never a rerun;
 `continuing` releases text to you and is not proof of provider delivery.
 
 Poll `GET /presence/work/{continuation_ref}?binding_id=...` like other late work. Ordinary pending
 and terminal continuation views carry producer `task_id`, `work_ref` and `continuation_ref` naming the author, plus
-`child_work_ref` for its promoted independent work (empty if none). Discover and retain the child
-before handling author status; poll it independently. A child promoted after the first yield
+`child_work_ref` for its promoted independent work (empty if none). A connector that follows work
+for speech or status discovers and retains the child before handling author status and polls it
+independently. A child promoted after the first yield
 appears at the next park even if the immutable initial envelope has an empty `work_ref`.
 While the author lives it answers HTTP 202 `pending` with `outputs`: the ordered
 `{output_ref, outcome, text}` the author released so far. Its terminal answers 200 with

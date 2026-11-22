@@ -1166,6 +1166,44 @@ def test_a_restart_after_a_door_roots_saved_answer_reads_the_record_note_first(f
     assert text == "Hello" and (event["outcome"], event["text"]) == ("silent", "")
 
 
+def test_a_handed_off_roots_door_line_reads_the_place_as_it_is_now(focus, monkeypatch):
+    """A root carries its source event's snapshot of the place (Silent during a rehearsal) and the owner activated the
+    place since: its record note, shown only while the place reads Active, describes the place as it is now. The
+    FOCUS frame's line keeps the event's snapshot."""
+    from ouroboros.place_reply import place_state_now, prepare_focus_reply, speak_line
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    task["metadata"]["presence"].setdefault("place", {})["state"] = "silent"
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=False)
+    allowed, note = prepare_focus_reply(ctx, "Hello")
+    assert not allowed and note.startswith("[FOCUS_FINISH_IS_A_RECORD]") and "is Silent" not in note
+    assert place_state_now(root, task["metadata"]) == "active"
+    assert "is Silent" in speak_line(task["metadata"]) and "is Silent" not in speak_line(task["metadata"], state="active")
+
+
+def test_a_door_roots_finish_after_its_run_ended_is_the_record_with_no_held_row(focus, monkeypatch):
+    """A handed-off root's run ended on a rail that kept its prose answer (``model_final``, nothing rode): no round
+    can read the record note any more, so the answer is the record, with no System row claiming a held reply."""
+    from ouroboros import dialogue_store
+    from ouroboros.presence_runner import build_presence_result_event
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=False, _presence_selection_seq=0)
+    event = build_presence_result_event(task, "Hello", ctx, terminal_origin="model_final")
+    assert (event["outcome"], event["text"]) == ("silent", "")
+    held = [entry.row for entry in dialogue_store.iter_rows(root, "chat")
+            if "Reply held after finalization" in str(entry.row.get("text"))]
+    assert held == [], held
+
+
 # --- a place turn reads any project journal; writes and a child's reads stay forbidden (owner 06.11, 4=A) ----------
 
 

@@ -225,10 +225,12 @@ def test_a_handed_off_root_of_a_door_connector_hears_where_its_words_go(fired_co
                                 thread="thread_id")
     registry, turn = _source_turn(root, THREAD)
     promoted = _promote(root, monkeypatch, turn, registry)
+    promoted["metadata"]["presence"].setdefault("place", {})["state"] = "silent"  # the event's snapshot; Active now
     rendered = first_request(promoted)
     assert _section(rendered) == 0 and rendered.count(WORDS) == 1 and GUIDANCE in rendered
     body = rendered.split(WORDS, 1)[1].split("##", 1)[0]
-    assert name in body and json.dumps(speak_line(promoted["metadata"]), ensure_ascii=False)[1:-1] in body
+    assert name in body and json.dumps(speak_line(promoted["metadata"], state="active"), ensure_ascii=False)[1:-1] in body
+    assert "is Silent" not in body, "the line reads the place as it is now, never the event's snapshot"
 
 
 def test_place_guidance_reads_the_canonical_root_and_names_an_absent_or_unreadable_place(tmp_path):

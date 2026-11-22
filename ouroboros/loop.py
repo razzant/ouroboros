@@ -508,7 +508,7 @@ def _load_working_recovery(ctx: Any, messages: List[Dict[str, Any]]) -> Dict[str
         return state
     except Exception as exc:
         log.warning("Working recovery source unusable for %s", getattr(ctx, "task_id", ""), exc_info=True)
-        ctx.working_recovery, ctx._working_recovery_lost = None, True  # a lost source still precedes this start
+        ctx.working_recovery = None  # a lost source still precedes this start
         messages.append({"role": "user", "content": (
             "[SYSTEM NOTICE]\nThis task was interrupted and its saved working state could not be restored "
             f"({type(exc).__name__}). It starts again from the original request: earlier tool effects may "

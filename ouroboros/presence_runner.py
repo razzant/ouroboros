@@ -153,6 +153,8 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     if carrier:
         # Ordinary exits have already returned flags to the mind. Forced exits cannot buy a
         # new round: preserve the flag as a held reply instead of releasing unchecked speech.
+        # No round reads a record note now, so a records-only finish is simply the record.
+        ctx._records_only_noted = True
         allowed, refusal = prepare_focus_reply(ctx, str(text or ""), quiet=terminal_origin != "model_final" or silent)
         if not allowed:
             from ouroboros.place_reply import record_notice

@@ -1048,7 +1048,7 @@ def _capture_context_core(
                          for section in recent)
     try:
         from ouroboros.consciousness_authority import is_focus_wake
-        from ouroboros.place_reply import records_only, reply_carrier, speak_line
+        from ouroboros.place_reply import place_state_now, records_only, reply_carrier, speak_line
         from ouroboros.presence_context import build_presence_context_section
 
         inline = bool(task.get("_presence_turn")) or is_focus_wake(task_metadata)
@@ -1064,7 +1064,7 @@ def _capture_context_core(
             status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
             scheduled=scheduled,
             answers_conversation=spoken and not records,
-            record_line=speak_line(task_metadata) if records else "",
+            record_line=speak_line(task_metadata, state=place_state_now(canonical_root, task_metadata)) if records else "",
             inline=inline,
         )
         if presence_section:

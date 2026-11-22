@@ -345,10 +345,20 @@ def waking_message_id(event) -> str:
     return str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
 
 
-def speak_line(metadata) -> str:
+def place_state_now(root, metadata):
+    """The bound place's state in the store now, for a line outside the FOCUS frame (whose snapshot is the event's);
+    None when it cannot be read, so the snapshot stands."""
+    try:
+        return get_place(root, resolved_carrier(root, metadata)["place_id"]).state
+    except Exception:
+        return None
+
+
+def speak_line(metadata, *, state=None) -> str:
     """How words and declared gestures reach this place: every declared door with its own arguments, ids prefilled
     from the event (the host picks none: a pick would be a verdict), and the finish's fate. A connector with a send
-    door makes the finish a record; one with only gesture doors keeps posting a non-silent finish as words."""
+    door makes the finish a record; one with only gesture doors keeps posting a non-silent finish as words. ``state``
+    is the place's state now (``place_state_now``); the FOCUS frame keeps the event's snapshot."""
     from ouroboros.consciousness_authority import is_observe_origin
 
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -374,7 +384,7 @@ def speak_line(metadata) -> str:
     doors = [door(name, effect, "words") for name, effect in tools] + [door(name, effect, "gesture") for name, effect in gestures]
     through = ("one of " if len(doors) > 1 else "") + "; ".join(doors)
     act = "send or gesture" if gestures else "send"
-    state = str(place.get("state") or "")
+    state = str(place.get("state") or "") if state is None else str(state)
     held = (f" ({label} is {state.title()}: a {act} is refused and your finish is held for your human, not posted)"
             if state in {"silent", "paused"} else
             f" (autonomy is Advises: a {act} is refused and your finish is held for your human, not posted)"
@@ -408,8 +418,8 @@ def record_note(ctx) -> str:
                         for row in sends["calls_without_receipt"]) or "none"
     return (f"[FOCUS_FINISH_IS_A_RECORD] Nothing was posted: in {label} (route {route}) your finish is your record, and "
             f"people hear only what you send. Confirmed sent there by this run: {sends['confirmed']}. Your own send calls "
-            f"there without a receipt yet: {pending}. {speak_line(metadata)} Send it now, or finish again to keep this "
-            "text as your record.")
+            f"there without a receipt yet: {pending}. {speak_line(metadata, state='active')} Send it now, or finish "
+            "again to keep this text as your record.")  # shown only while records_only_now reads the place Active
 
 
 def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, str]:
