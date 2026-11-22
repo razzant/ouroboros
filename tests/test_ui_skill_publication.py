@@ -62,6 +62,8 @@ def test_skills_card_geometry_tracks_card_width_and_keeps_grant_on_card(direct_s
             page = browser.new_page(viewport={'width': 720, 'height': 900})
             page.goto(url, wait_until='domcontentloaded')
             page.click('[data-nav-page="skills"]')
+            # At 720 Extensions' box holds one column: its list first; the Skills row opens the installed skills.
+            page.locator('#page-skills [data-extensions-open="installed"]').click()
             page.wait_for_selector(f'.skills-card[data-skill="{names[1]}"]')
             measurements = []
             for viewport, sidebar in [(720, 280), (1100, 560), (1440, 280)]:  # 720 = the docked layout's first width (layout.js)

@@ -495,9 +495,11 @@ def _runtime_main(settings: Mapping[str, Any]) -> str:
 
 def role_route_binding(settings: Mapping[str, Any], role: str = "main") -> Dict[str, Any]:
     """Main's (or Light's) model as a catalog row runs it — the reachable route in full identity
-    (the ``(local)`` label), a managed source's account pin and that role's processing — or ``{}``
+    (the ``(local)`` label), a managed source's account pin and any processing the row can store — or ``{}``
     without access."""
-    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, resolve_processing_preference
+    from ouroboros.model_slots import (
+        MODEL_ACCOUNTS_KEY, PROCESSING_PREFERENCES, model_role_option, resolve_processing_preference,
+    )
     from ouroboros.provider_models import provider_for_model
 
     model = dict(zip(("main", "light"), _effective_api_models(settings))).get(role, "")
@@ -511,7 +513,8 @@ def role_route_binding(settings: Mapping[str, Any], role: str = "main") -> Dict[
         pin = processing = ""
     if pin and provider_for_model(model) == "claudexor":
         route["credential_profile_id"] = pin
-    return {"route": route, **({"processing_preference": processing} if processing else {})}
+    # Main Ultrafast reaches new helpers through the work that starts them.
+    return {"route": route, **({"processing_preference": processing} if processing in PROCESSING_PREFERENCES else {})}
 
 
 def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:

@@ -544,7 +544,7 @@ def test_a_carrier_ends_a_held_task_itself_and_never_runs_its_body(org, monkeypa
     if mode == "hold":
         assert ran == [] and events == [{"type": "task_done", "task_id": "queued-1", "reason_code": HOLD_REASON}]
         [(text, usage, ctx)] = ended
-        assert text.startswith("🔒 Not started: your organization requires an extension that isn’t running")
+        assert text.startswith("🔒 Not started: your organization requires an extension skill that isn’t running")
         assert (usage["terminal_origin"], ctx) == ("host_notice", None), "no other task's facts ride along"
     else:
         assert ran == ["queued-1"] and ended == []

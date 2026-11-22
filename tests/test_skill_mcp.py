@@ -862,7 +862,7 @@ def test_registry_refuses_an_unready_skill_before_safety_and_keeps_every_other_f
     assert checked == [] and manager.listed_calls == []  # no Safety, no discovery for either refusal
     _write_settings(world, _settings(_bound_row(enabled=False, task_session=False, browser_policy=False), plain))
     code, text = outcome(skill_tool)
-    assert code == "MCP_UNAVAILABLE" and "is disabled in Settings" in text and "MCP_SKILL_UNAVAILABLE" not in text
+    assert code == "MCP_UNAVAILABLE" and "is disabled in Extensions → MCP servers" in text and "MCP_SKILL_UNAVAILABLE" not in text
     world.blockers = []
     _write_settings(world, _settings(_bound_row(task_session=False, browser_policy=False), plain))
     mcp_client.ensure_configured_from_settings()

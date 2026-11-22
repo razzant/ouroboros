@@ -21,7 +21,7 @@ from ouroboros.outcomes import (
 )
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.host_notice import notice
-from ouroboros.task_finalization import quiet_finish, send_provider_death_notice, work_label
+from ouroboros.task_finalization import quiet_finish, schedule_report_fields, send_provider_death_notice, work_label
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -540,6 +540,11 @@ def _finish_task_done_dispatch(
                 progress_meta["outcome_axes"] = task_done_event["outcome_axes"]
             if task_done_event.get("reason_code"):
                 progress_meta["reason_code"] = str(task_done_event["reason_code"])
+            # The row's CURRENT custody debt, an explicit empty list included: a stored stamp must not read as live debt.
+            for source in (effective_result, task_done_event):
+                if isinstance(source.get("delegated_runs_unreconciled"), list):
+                    progress_meta["delegated_runs_unreconciled"] = list(source["delegated_runs_unreconciled"])
+                    break
             if "review_projection" in task_done_event:
                 progress_meta["review_projection"] = task_done_event["review_projection"]
             if "model_execution" in task_done_event:
@@ -795,6 +800,7 @@ def _resolve_lifecycle_fault(
     # RUNNING/slot bookkeeping, snapshot — instead of the old private partial
     # copy (RUNNING pop + slot clear only), which resolved nothing owner-visible.
     status = str(stored.get("status") or "failed")
+    report = schedule_report_fields(stored)
     task_type = str(evt.get("task_type") or task_row.get("type") or "")
     task_done_event: Dict[str, Any] = {
         "ts": utc_now_iso(),
@@ -812,13 +818,16 @@ def _resolve_lifecycle_fault(
             default=HIDDEN_CHAT_ID,
         ),
         "status": status,
-        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name") if stored.get(key)}, **work_label(stored, task_row),
+        "wake_silent": stored.get("wake_silent") is True, **report, **work_label(stored, task_row),
+        **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name")
+           if stored.get(key) and not (report and key == "wake_summary")},
         "quiet_effective": quiet_finish(stored),
         "reason_code": str(stored.get("reason_code") or ""),
         "outcome_axes": normalize_outcome_axes(stored),
     }
     for key in ("review_projection", "review_status", "artifact_status", "artifact_bundle", "root_phase_checkpoint",
-                "execution_owner", "_is_direct_chat", "finalization_recovery", "terminal_origin"):
+                "execution_owner", "_is_direct_chat", "finalization_recovery", "terminal_origin",
+                "delegated_runs_unreconciled"):
         if key in stored:
             task_done_event[key] = stored[key]
     try:
@@ -1062,6 +1071,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     eff_cost = terminal_cost.get("accounted_upper_bound_usd")
     eff_rounds = terminal_cost.get("total_rounds")
     known_result = final_task_result if isinstance(final_task_result, dict) else {}
+    report = schedule_report_fields(known_result)
     task_done_event = {
         "ts": evt.get("ts", utc_now_iso()),
         "type": "task_done",
@@ -1081,7 +1091,9 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             default=HIDDEN_CHAT_ID,
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
-        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name") if known_result.get(key)}, **work_label(known_result, task),
+        "wake_silent": known_result.get("wake_silent") is True, **report, **work_label(known_result, task),
+        **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name")
+           if known_result.get(key) and not (report and key == "wake_summary")},
         "quiet_effective": quiet_finish(known_result),
         # The direct-turn fact rides the rebuilt terminal so the chat block keys
         # its chrome on host truth: the worker frame carries it, the durable
@@ -1104,6 +1116,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             task_done_event[name] = dict(final_task_result[name])
     if final_task_result.get("terminal_origin"):
         task_done_event["terminal_origin"] = str(final_task_result["terminal_origin"])
+    if isinstance(final_task_result.get("delegated_runs_unreconciled"), list):  # the current debt, an explicit [] included
+        task_done_event["delegated_runs_unreconciled"] = list(final_task_result["delegated_runs_unreconciled"])
     review_status = final_task_result.get("review_status") if isinstance(final_task_result, dict) else None
     if not isinstance(review_status, dict):
         review_status = evt.get("review_status")

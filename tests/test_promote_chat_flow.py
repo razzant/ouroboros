@@ -91,6 +91,48 @@ def test_promote_tool_emits_event_with_chat_and_project(tmp_path, monkeypatch):
     assert ctx._typed_routing_action_emitted == "promote_chat_to_task"
 
 
+def test_c13_explicit_project_promotion_carries_the_turn_surface_not_the_room_binding(swarm_host, monkeypatch):
+    from ouroboros import projects_registry
+    from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+    from ouroboros.tools.control import _start_task
+    from supervisor.events import _handle_promote_chat_to_task
+
+    host = swarm_host
+    pid = projects_registry.create_project(host.root, "reply-work", name="Reply work")["id"]
+    _confirm_promote(monkeypatch, pid)
+    bare = {"kind": "telegram", "host_address": "reply", "conversation_id": "42", "bot_id": "123"}
+    surface = {**bare, "exact_reply": {"owner_message_id": 55, "reply_card_message_id": 54}}
+    ctx = types.SimpleNamespace(current_chat_id=1, drive_root=host.root, is_direct_chat=True,
+                                task_metadata={TURN_ADDRESS: surface, "owner_ingress": True}, pending_events=[],
+                                event_queue=types.SimpleNamespace(put_nowait=lambda event: _handle_promote_chat_to_task(
+                                    event, host.ctx)))
+    answer = _start_task(ctx, "Check the attachment", title="Reply work", workspace="none", project_id=pid)
+    assert answer.startswith("OK: task"), answer
+    [task] = host.pending
+    assert task["project_id"] == pid and task["metadata"][TURN_ADDRESS] == surface
+    assert reply_transport_from_metadata(host.root, task["metadata"], anchor=False) == bare
+
+
+@pytest.mark.parametrize("kind", ["owner", "consciousness"])
+def test_c13_continue_project_preserves_the_reply_address_without_the_old_anchor(tmp_path, monkeypatch, kind):
+    from ouroboros.chat_references import TURN_ADDRESS
+    from supervisor import continuation_admission
+
+    bare = {"kind": "telegram", "host_address": "reply", "conversation_id": "42", "bot_id": "123"}
+    surface = {**bare, "exact_reply": {"owner_message_id": 55, "reply_card_message_id": 54}}
+    monkeypatch.setattr(continuation_admission, "_tree_note", lambda *_a: "")
+    monkeypatch.setattr(continuation_admission, "_work_identity", lambda *_a: ("root-a", "Reply work", {}))
+    result = {"metadata": {TURN_ADDRESS: surface, "work_kind": kind}}
+    task = continuation_admission._successor_task(
+        types.SimpleNamespace(DRIVE_ROOT=tmp_path), "root-a", result,
+        {"successor_task_id": "root-b", "project_id": "reply-work", "chat_id": 146},
+        {"cause": "author_stop"}, {}, {},
+    )
+    assert task["chat_id"] == 146
+    assert task["metadata"].get(TURN_ADDRESS) == (bare if kind == "owner" else None)
+    assert result["metadata"][TURN_ADDRESS] == surface
+
+
 def test_presence_promotion_preserves_ceiling_and_cannot_choose_new_scope(tmp_path, monkeypatch):
     from ouroboros.presence_authority import PresenceCapabilityCeiling, presence_ceiling_payload
     from ouroboros.tools.control import _build_child_subagent_contract, _start_task
@@ -2777,6 +2819,31 @@ def test_host_initiated_workspace_refusal_sends_one_typed_row_to_the_owner_chat(
     assert row["cause"] == "Not started: the working folder can't be used"
     assert host.bridge.acks[-1]["status"] == "needs_manual_target"
     assert host.bridge.acks[-1]["cause"] == "Not started: the working folder can't be used"
+
+
+def test_d5_promotion_refusal_keeps_admitted_telegram_destination_without_readable_quote(swarm_host, monkeypatch):
+    from ouroboros.chat_references import TURN_ADDRESS
+    from ouroboros.store import StoreBusy
+    from supervisor import message_ingress
+
+    host = swarm_host
+    bare = {"kind": "telegram", "host_address": "reply", "conversation_id": "42", "bot_id": "123"}
+
+    def quote_unavailable(*_args, **_kwargs):
+        raise StoreBusy("reading the quote")
+
+    monkeypatch.setattr(message_ingress, "accepted_chat_message", quote_unavailable)
+    evt, outcome = _host_promote(
+        host, monkeypatch, host_initiated=True, chat_id=146, client_message_id="tg:123:42:55",
+        workspace="", workspace_root=str(host.root / "missing-folder"),
+        **{TURN_ADDRESS: {**bare, "exact_reply": {"owner_message_id": 55, "card_message_id": 54}}},
+    )
+    assert outcome["status"] == "needs_manual_target"
+    ack = host.bridge.acks[-1]
+    assert ack["transport"] == bare and ack["reply_to"] == {}
+    [notice] = host.notices
+    assert notice["chat_id"] == evt["chat_id"] and notice["progress_meta"]["transport"] == bare
+    assert notice["progress_meta"]["reply_to"] == {}
 
 
 def test_tool_issued_workspace_refusal_sends_nothing(swarm_host, monkeypatch):

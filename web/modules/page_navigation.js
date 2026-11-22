@@ -15,12 +15,12 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
         for (const layer of returns) layer.returnTo.release?.();
     }
 
-    const currentPlace = () => {
+    const currentPlace = (opener) => {
         // WebKit checkpoints microtasks between click listeners without focusing the pressed button.
         const target = pressed?.eventPhase ? pressed.target : null;
-        return capture(target?.closest?.('button, a, [role="button"], [role="tab"]') || target || doc.activeElement);
+        return capture(opener || target?.closest?.('button, a, [role="button"], [role="tab"]') || target || doc.activeElement);
     };
-    async function go(key, commit, { map = false, row = '', origin = currentPlace(), current = () => true } = {}) {
+    async function go(key, commit, { map = false, row = '', opener, origin = currentPlace(opener), current = () => true } = {}) {
         const fromKey = pressed?.eventPhase ? pressed.detail === 0 : false;  // a key's click (Enter, Space) counts none
         // A source owns its claim until this commit; covering its room then transfers ownership to the destination.
         if (await canLeave(key) === false || !current()) return false;
@@ -66,21 +66,21 @@ export function capturePagePlace({ state, navState, settingsControls, dashboardC
     const page = state.activePage, projectId = navState.activeProjectId;
     const settings = page === 'settings' ? settingsControls?.capture(opener) : null;
     const dashboard = page === 'dashboard' ? dashboardControls?.capture() : null;
-    const skills = page === 'skills' ? skillsControls?.capture() : null;
+    const skills = page === 'skills' ? skillsControls?.capture(opener) : null;
     const project = projectId ? { id: projectId, name: projectPanelTitle.textContent } : null;
     const root = project ? projectInstances.get(projectId)?.page : doc.getElementById(`page-${page}`);
     const reading = restorePlaces.capture(root, opener);
     const feed = page === 'chat' ? (project ? projectInstances.get(projectId) : mainChat)?.captureReading()
         : state.dashboardActiveSubtab === 'logs' && page === 'dashboard' ? logsControls?.captureReading() : null;
-    const label = project?.name || settings?.label || dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page));
+    const label = project?.name || settings?.label || dashboard?.label || skills?.label || (page === 'chat' ? 'Main' : pageLabel(page));
     return { key: project ? `project:${projectId}` : settings ? `settings:${state.settingsPath}`
-        : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || dashboard?.title || label,
-        retains: settings?.retains, release: settings?.release,
+        : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : skills?.key || page, label, title: settings?.title || dashboard?.title || skills?.title || label,
+        retains: settings?.retains || skills?.retains, release: settings?.release || skills?.release,
         restore() {
             commitPage(page, { reveal: true, enter: () => {
                 settings?.restore();
                 dashboard?.restore();
-                skills?.();
+                skills?.restore();
                 if (project && projectInstances.has(projectId)) {
                     navState.activeProjectId = projectId;
                     projectPanelTitle.textContent = projectPanelTitle.title = project.name;

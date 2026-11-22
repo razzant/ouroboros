@@ -491,8 +491,9 @@ def test_no_history_sized_duty_runs_in_the_server_and_the_child_spawns_under_cus
 
 
 def test_the_real_child_process_runs_the_due_jobs_and_reports(data):
-    """End to end, one real ``python -m ouroboros.maintenance`` on a synthetic root: the custodied
-    spawn, the child's own facts, its jobs and its bounded report in ``logs/supervisor.jsonl``."""
+    """Both real ``python -m ouroboros.maintenance --lane`` children on a synthetic root.
+    Their reports in ``logs/supervisor.jsonl`` prove the custodied spawn and lane partition;
+    a trash removal's retirement wake is driven before every job is asserted at rest."""
     from tests.test_evidence_packs import REPO
 
     pr.create_project(data, "never-active", origin="reconcile")
@@ -504,17 +505,22 @@ def test_the_real_child_process_runs_the_due_jobs_and_reports(data):
     dialogue_import.cutover(data)  # as the boot does before the dialogue opens: the archive is planned
     assert maintenance.due(data) == ["subagent_metrics", "pending_invocations", "dialogue_import",
                                      "ended_plan_asks", "custody_trash", "runtime_retirement", "record_compression"]
-    unit = maintenance.MaintenanceChild()
-    assert unit.tick(data, REPO)
-    unit._thread.join(240)
-    assert not unit._thread.is_alive() and unit.live_children() == []
+    unit = maintenance.MaintenanceChildren()
+    for lane in (unit.ordinary, unit.trash, unit.ordinary):  # deterministic order, including the retirement wake
+        assert lane.tick(data, REPO, owed_only=True)
+        lane._thread.join(240)
+        assert not lane._thread.is_alive() and unit.live_children() == []
     rows = [json.loads(line) for line in (data / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
     finished = [row for row in rows if row.get("type") == "maintenance" and row["phase"] != "started"]
-    assert [row["phase"] for row in finished] == ["completed"], finished
-    assert finished[0]["exit_code"] == 0
-    assert "activity_backfill" not in finished[0]["jobs"]
-    assert finished[0]["jobs"]["custody_trash"] == {"state": "done", "items": 1}
-    assert finished[0]["jobs"]["dialogue_import"]["state"] == "done"
+    assert len(finished) == 3 and all(row["phase"] == "completed" and row["exit_code"] == 0 for row in finished), finished
+    ordinary, trash, retirement = finished
+    assert "lane" not in ordinary and trash.get("lane") == "trash" and "lane" not in retirement
+    assert trash["jobs"] == {"custody_trash": {"state": "done", "items": 1}}
+    assert "custody_trash" not in ordinary["jobs"] and "custody_trash" not in retirement["jobs"]
+    assert "activity_backfill" not in ordinary["jobs"]
+    assert ordinary["jobs"]["dialogue_import"]["state"] == "done"
+    assert ordinary["jobs"]["temp_sweep"]["state"] == "done"
+    assert retirement["jobs"]["runtime_retirement"]["state"] == "done"
     assert pr.projects_summary(data)[0]["has_thread_activity"] is False
     assert maintenance.due(data) == [], "the child left every job at rest"
 
@@ -779,3 +785,195 @@ def test_the_arrival_publication_never_waits_for_a_busy_store_and_lands_on_a_fre
     listings.clear()
     sm._run_drive_custody_pass()
     assert listings == [] and arrivals() == [], "the next pass looks at the published drive alone"
+
+
+def test_the_lanes_partition_the_jobs_and_a_lane_child_runs_only_its_own(data, monkeypatch):
+    assert maintenance.lane_jobs("trash") == maintenance.TRASH_JOBS == ("custody_trash",)
+    assert "custody_trash" not in maintenance.lane_jobs("ordinary")
+    assert sorted((*maintenance.lane_jobs("ordinary"), *maintenance.lane_jobs("trash"))) == sorted(maintenance.JOB_NAMES)
+    assert maintenance.lane_jobs() == maintenance.JOB_NAMES
+    with pytest.raises(ValueError):
+        maintenance.lane_jobs("other")
+    maintenance_jobs.record(data, "legacy_reconcile", state="done")  # the store exists
+    ran = []
+
+    def runner(name):
+        return lambda root, stop: ran.append(name) or {"state": "done", "items": 0}
+
+    for name in maintenance.JOB_NAMES:
+        monkeypatch.setitem(maintenance.JOBS, name, (lambda *_a: True, runner(name)))
+    facts_reads = []
+    real_facts = maintenance._store_facts
+    monkeypatch.setattr(maintenance, "_store_facts", lambda root: facts_reads.append(root) or real_facts(root))
+    assert set(maintenance.run(data, lane="trash")["jobs"]) == {"custody_trash"} and ran == ["custody_trash"]
+    assert facts_reads == [], "a trash-only pass read the store facts and would replay ordinary producers"
+    ran.clear()
+    assert "custody_trash" not in maintenance.run(data, lane="ordinary")["jobs"] and "custody_trash" not in ran
+    ran.clear()
+    maintenance.run(data)
+    assert ran == list(maintenance.JOB_NAMES)
+
+
+def test_a_busy_ordinary_lane_never_holds_the_trash_lane_and_each_lane_is_one_child(data, monkeypatch):
+    import threading
+
+    from tests.test_evidence_packs import REPO, _FakeChild
+
+    quiet = json.dumps({"status": "completed", "jobs": {}}).encode()
+    (data / "state" / "custody_trash" / "moved-0123456789ab").mkdir(parents=True)
+    (data / "logs").mkdir(exist_ok=True)
+    maintenance_jobs.record(data, "legacy_reconcile", state="pending")  # an ordinary job is due
+    release, entered, spawns = threading.Event(), threading.Event(), []
+
+    def spawn(root, repo, purpose, **kw):
+        lane = kw["args"][kw["args"].index("--lane") + 1]
+        spawns.append(lane)
+        if lane == "ordinary":
+            entered.set()
+            assert release.wait(10)
+        return _FakeChild(quiet)
+
+    monkeypatch.setattr(maintenance, "spawn_maintenance_job", spawn)
+    unit = maintenance.MaintenanceChildren()
+    assert unit.tick(data, REPO) and entered.wait(10)
+    unit.trash._thread.join(10)
+    assert not unit.trash._thread.is_alive() and "trash" in spawns, "the busy ordinary lane held the deletion"
+    assert not unit.ordinary.tick(data, REPO), "one child per lane"
+    release.set()
+    unit.ordinary._thread.join(10)
+    assert sorted(spawns) == ["ordinary", "trash"] and unit.live_children() == []
+
+
+def test_an_unchanged_hold_is_retried_only_on_the_reconcile_cadence_then_removed(data, monkeypatch):
+    from ouroboros import session_scratch
+    from tests.test_evidence_packs import REPO, _FakeChild
+
+    (data / "logs").mkdir(exist_ok=True)
+    maintenance_jobs.record(data, "legacy_reconcile", state="done")  # the store exists
+    entry = data / "state" / "custody_trash" / "held-0123456789ab"
+    entry.mkdir(parents=True)
+    holding = [True]
+    retained = [{"class": "producer_retained", "example": "its marker", "since": 1793491200.0}]
+    monkeypatch.setattr(session_scratch, "release_trash_entry",
+                        lambda root, path, owed=None, **kwargs: (holding[0], retained if holding[0] else []))
+    spawns = []
+
+    def spawn(root, repo, purpose, **kw):
+        lane = kw["args"][kw["args"].index("--lane") + 1]
+        spawns.append(lane)
+        report = maintenance.run(root, lane=lane) if lane == "trash" else {"status": "completed", "jobs": {}}
+        return _FakeChild(json.dumps(report).encode())
+
+    monkeypatch.setattr(maintenance, "spawn_maintenance_job", spawn)
+    unit = maintenance.MaintenanceChildren()
+
+    def look(**kw):
+        unit.tick(data, REPO, **kw)
+        for lane in (unit.ordinary, unit.trash):
+            if lane._thread is not None:
+                lane._thread.join(10)
+
+    look()  # a new entry: held with its recorded reason
+    row = maintenance_jobs.job(data, "custody_trash")
+    assert spawns.count("trash") == 1 and row["held"] and row["holds"][0]["class"] == "producer_retained"
+    before = _revision(data)
+    unit.trash.request()
+    look(owed_only=True)  # an event or boot look over an unchanged hold spawns nothing
+    assert spawns.count("trash") == 1
+    unit.request(retry=True)
+    look(owed_only=True)  # the cadence's retry window: tried again, still held, nothing committed
+    assert spawns.count("trash") == 2 and _revision(data) == before
+    holding[0] = False  # the producer's marker is gone
+    unit.request(retry=True)
+    look(owed_only=True)
+    row = maintenance_jobs.job(data, "custody_trash")
+    assert spawns.count("trash") == 3 and not entry.exists() and row["held"] == {} and "retire_owed" not in row
+
+
+def test_a_lost_retirement_wake_stays_owed_beside_an_unchanged_hold_and_is_scheduled_once(data, monkeypatch):
+    from ouroboros import maintenance_retirement, session_scratch
+
+    class Busy(Exception):
+        reason = "contention"
+
+    base = data / "state" / "custody_trash"
+    (base / "held-0123456789ab").mkdir(parents=True)
+    retained = [{"class": "producer_retained", "example": "its marker", "since": 1793491200.0}]
+    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda root, path, owed=None, **kwargs: (
+        path.name.startswith("held"), retained if path.name.startswith("held") else []))
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 0}  # held, nothing attempted
+    assert "retire_owed" not in maintenance_jobs.job(data, "custody_trash")
+    (base / "moved-0123456789ab").mkdir()
+    schedule = maintenance_retirement.schedule_in
+    before_removal = maintenance_jobs.job(data, maintenance_retirement.JOB)
+
+    def refuse(*_a, **_k):
+        raise Busy("the store did not answer")
+
+    monkeypatch.setattr(maintenance_retirement, "schedule_in", refuse)
+    with pytest.raises(Busy):
+        maintenance.run_job(data, "custody_trash")
+    assert [path.name for path in base.iterdir()] == ["held-0123456789ab"]
+    assert maintenance_jobs.job(data, "custody_trash")["retire_owed"] is True
+    assert maintenance_jobs.job(data, maintenance_retirement.JOB) == before_removal
+    assert maintenance.due(data, lane="trash") == ["custody_trash"], "owed beside an unchanged hold"
+    monkeypatch.setattr(maintenance_retirement, "schedule_in", schedule)
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 0}
+    row = maintenance_jobs.job(data, "custody_trash")
+    assert "retire_owed" not in row and row["held"]
+    wake = maintenance_jobs.job(data, maintenance_retirement.JOB)
+    assert wake["arrival"] != (before_removal or {}).get("arrival")
+    assert maintenance.due(data, lane="trash") == []
+    before = _revision(data)
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 0} and _revision(data) == before
+
+
+def test_stop_mid_listing_records_removals_but_keeps_the_recorded_holds(data, monkeypatch):
+    from ouroboros import maintenance_retirement, session_scratch, task_custody
+
+    base = data / "state" / "custody_trash"
+    (base / "held-0123456789ab").mkdir(parents=True)
+    retained = [{"class": "producer_retained", "example": "its marker", "since": 1793491200.0}]
+    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda root, path, owed=None, **kwargs: (
+        path.name.startswith("held"), retained if path.name.startswith("held") else []))
+    assert maintenance.run_job(data, "custody_trash")["state"] == "done"
+    recorded = maintenance_jobs.job(data, "custody_trash")
+    assert recorded["held"] and recorded["holds"]
+    (base / "moved-a-0123456789ab").mkdir()
+    (base / "moved-b-0123456789ab").mkdir()
+    stop = lambda: not (base / "moved-a-0123456789ab").exists() or not (base / "moved-b-0123456789ab").exists()
+    out = maintenance.run_job(data, "custody_trash", should_stop=stop)  # Stop after the first removal
+    row = maintenance_jobs.job(data, "custody_trash")
+    assert out == {"state": "pending", "items": 1} and row["removed"] == 1 and len(list(base.iterdir())) == 2
+    assert (row["state"], row["held"], row["holds"]) == (recorded["state"], recorded["held"], recorded["holds"])
+    assert "retire_owed" not in row
+    assert (maintenance_jobs.job(data, maintenance_retirement.JOB) or {}).get("next_due") is not None
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 1}
+    assert [path.name for path in base.iterdir()] == ["held-0123456789ab"]
+
+    # A previously stuck entry confirmed gone must wake retirement once even if Stop interrupts.
+    entry = base / "stuck-0123456789ab"
+    entry.mkdir()
+    real_remove = task_custody._remove_entry
+
+    def held_open(path):
+        raise PermissionError(13, "a file in it is held open", str(path))
+
+    monkeypatch.setattr(task_custody, "_remove_entry", held_open)
+    assert maintenance.run_job(data, "custody_trash") == {"state": "failed", "items": 0}
+    failed = maintenance_jobs.job(data, "custody_trash")
+    assert set(failed["stuck"]) == {entry.name}
+    monkeypatch.setattr(task_custody, "_remove_entry", real_remove)
+    before = maintenance_jobs.job(data, maintenance_retirement.JOB)
+    with monkeypatch.context() as ordered:
+        paths = type(base).iterdir
+        ordered.setattr(type(base), "iterdir", lambda path: (
+            iter(sorted(paths(path), reverse=True)) if path == base else paths(path)))
+        out = maintenance.run_job(data, "custody_trash", should_stop=lambda: not entry.exists())
+    row = maintenance_jobs.job(data, "custody_trash")
+    assert out == {"state": "pending", "items": 1}
+    assert not row["stuck"] and row["held"] == failed["held"] and row["holds"] == failed["holds"]
+    wake = maintenance_jobs.job(data, maintenance_retirement.JOB)
+    assert wake["arrival"] != before["arrival"]
+    maintenance.run_job(data, "custody_trash")
+    assert maintenance_jobs.job(data, maintenance_retirement.JOB) == wake

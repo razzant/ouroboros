@@ -89,7 +89,7 @@ def test_settlement_replaces_current_sources_and_keeps_historical_originals(tmp_
 
 
 def test_late_owner_settlement_keeps_the_collected_reply_call_refs(tmp_path):
-    """A left wave's reply collected by review_pause keeps its own call refs beside the dispatch prompt."""
+    """A left wave keeps the reply's call refs but cannot present its partial subtotal as a bill."""
     from ouroboros import review_pause
     from ouroboros.review_projection import ledger_record_panel
     from tests.test_review_seat_outcome import _body
@@ -102,11 +102,13 @@ def test_late_owner_settlement_keeps_the_collected_reply_call_refs(tmp_path):
     [prompt] = [s for s in record["rows"][0]["source_refs"] if s["role"] == "prompt"]
     late_call = {"call_id": "late-reply", "manifest_ref": {"path": "calls/late-reply.json", "sha256": "2" * 64}}
     seat = {"slot_id": "sol", "model": "m", "parts": list(BOTH), "operation_id": "op", "operation_state": "settled",
-            "status": "responded", "raw_text": _body(), "prompt_ref": {"call_id": "late-prompt"}, "response_ref": late_call}
+            "status": "responded", "raw_text": _body(), "prompt_ref": {"call_id": "late-prompt"}, "response_ref": late_call,
+            "usage": {"cost": 0.25, "cost_final": False, "cost_partial": True}, "cost_usd": 0.25}
     settled = review_pause._settle_left_record({"drive_root": str(tmp_path), "record_id": record["record_id"]},
                                                [seat], final=True)
     assert settled["state"] == "settled" and settled["verdict"]["aggregate"] == "PASS"
     row = settled["rows"][0]
+    assert (row["usd"], row["cost_kind"]) == (None, "unknown") and settled["cost"]["unknown"]
     current = {s["role"]: s for s in row["source_refs"]}
     assert current["prompt"] == prompt and current["response"]["status"] == "retained"
     assert current["observability_response"]["ref"] == late_call
@@ -135,6 +137,54 @@ def test_collected_answer_must_belong_to_the_recorded_operation(tmp_path, operat
                                            [_raw("a", "a", parts=BOTH, operation_id=operation)])
     assert settled["rows"][0]["operation_id"] == "a"
     assert (settled["rows"][0]["status"] == "responded") == (operation == "a")
+
+
+_RAN = {"resolved_model": "served/model", "provider": "served", "physical_dispatch_observed": True, "ledger_attempt_ids": ["sent"]}
+
+
+@pytest.mark.parametrize(("usage", "ran"), [
+    (_RAN, [{"kind": "native", "model": "served/model"}]),  # it ran and gave no answer: the executor is kept
+    ({"physical_attempt_state": "released", "ledger_attempt_ids": ["hold"]}, []),  # a released hold never left the host
+    ({"cost": 0.25, "ledger_attempt_ids": ["reserved"]}, []),  # a price or a reservation id alone is not a send
+    ({}, []),  # nothing saved about a send: an unconfirmed request, never an executor
+    (None, []),
+], ids=["ran-without-answer", "released-hold", "priced-reservation", "no-evidence", "no-usage"])
+def test_a_late_failure_keeps_the_execution_its_own_operation_proved(tmp_path, usage, ran):
+    """Late settlement reads what ran from the collected operation's own usage, and only what that
+    usage proves: the verdict, the money and the other seat stay exactly what they were."""
+    from ouroboros.review_projection import ledger_record_panel
+
+    record = _record(tmp_path)
+    failed = _raw("a", "a", "error", parts=BOTH, operation_id="a", operation_state="settled", cost_usd=0.0,
+                  raw_text="", reported_cause="the route answered nothing", **({} if usage is None else {"usage": usage}))
+    settled = ledger.settle_from_collected(tmp_path, record["record_id"], [failed])
+    seat, other = settled["rows"]
+    assert (seat["status"], seat["usd"], seat["reported_cause"]) == ("error", 0.0, "the route answered nothing")
+    assert seat["requested"] == record["rows"][0]["requested"] and other == record["rows"][1]
+    assert settled["state"] == "pending" and settled["verdict"]["per_row"] == record["verdict"]["per_row"]
+    card = ledger_record_panel(settled)["actors"][0]
+    assert card["executions"] == ran and card["requested_model"] == "a" and card["model"] == ""
+    assert card["reported_cause"] == "the route answered nothing"
+    if ran:
+        assert (seat["effective"]["model"], seat["effective"]["provider"]) == ("served/model", "served")
+        assert (seat["cost_kind"], seat["cost_usd"]) == ("measured", 0.0)
+    else:
+        assert seat["effective"] == record["rows"][0]["effective"]
+
+
+def test_a_late_execution_never_borrows_another_waves_projection(tmp_path, monkeypatch):
+    """The shared last-execution file may hold a later wave of the same seat: a late settlement never reads it."""
+    from ouroboros import reviewer_slot_config as cfg
+    from ouroboros.review_projection import ledger_record_panel
+
+    monkeypatch.setattr(cfg, "reviewer_slot_last_executions", lambda: pytest.fail("the shared projection was read"))
+    record = _record(tmp_path)
+    settled = ledger.settle_from_collected(tmp_path, record["record_id"], [_raw("a", "a", parts=BOTH, operation_id="a", usage={
+        "delegated_route": "codex", "resolved_model": "gpt-served", "delegated_run_id": "run-a"})])
+    seat = settled["rows"][0]
+    assert seat["status"] == "responded" and seat["effective"]["route"] == "agent_session:codex"
+    assert ledger_record_panel(settled)["actors"][0]["executions"] == [{"kind": "harness", "harness_id": "codex", "model": "gpt-served"}]
+    assert seat["cost_kind"] == "subscription" and seat["requested"]["route"] == "api_chat"
 
 
 def test_findings_merge_by_key_and_a_fresh_gate_block_is_kept(tmp_path):

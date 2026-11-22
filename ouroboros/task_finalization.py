@@ -32,7 +32,7 @@ import pathlib
 import stat
 from typing import Any, Dict, List
 
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
+from ouroboros.utils import json_dumps_utf8, path_for_prose, sanitize_tool_result_for_log, truncate_review_artifact
 from ouroboros.observability import stamp_finalization_enqueue
 
 log = logging.getLogger(__name__)
@@ -118,7 +118,30 @@ def terminal_custody_notice_text(result: Dict[str, Any]) -> str:
 
 def quiet_finish(row: Dict[str, Any]) -> bool:
     """A silent finish is quiet only when neither the mind nor the host sent a message."""
-    return row.get("wake_silent") is True and not row.get("owner_message_sent") and not terminal_host_notice_text(row)
+    return ((row.get("wake_silent") is True or schedule_report_run(row))
+            and not row.get("owner_message_sent") and not terminal_host_notice_text(row))
+
+
+def schedule_report_run(row: Dict[str, Any]) -> bool:
+    """A run of an older schedule that still carries its frozen Presence ceiling and speaker (#3687): its report is
+    its record (``loop_completion_schema``), so no room shows an excerpt of it, a salvage receipt included. The one
+    classifier: a live run marks its delivery candidate and ``wake_silent`` from it once, and every reader that holds
+    only the stored row (a replay, an outbox row's task, a preview) asks it of that row."""
+    metadata = row.get("metadata") if isinstance(row, dict) and isinstance(row.get("metadata"), dict) else {}
+    contract = row.get("task_contract") if isinstance(row, dict) and isinstance(row.get("task_contract"), dict) else {}
+    return all(isinstance(value, dict) for value in (
+        metadata.get("presence"), metadata.get("schedule_occurrence"), contract.get("capability_ceiling")))
+
+
+def schedule_report_ctx(ctx: Any) -> bool:
+    """``schedule_report_run`` of a live tool context's own task facts."""
+    return schedule_report_run({"metadata": getattr(ctx, "task_metadata", None) or {},
+                                "task_contract": getattr(ctx, "task_contract", None) or {}})
+
+
+def schedule_report_fields(row: Dict[str, Any]) -> Dict[str, bool]:
+    """The card has a saved report reader without a result excerpt."""
+    return {"schedule_report_only": True} if schedule_report_run(row) else {}
 
 
 def work_label(*rows: Any) -> Dict[str, str]:
@@ -185,7 +208,7 @@ def provider_terminal_body(text: str, notice: str) -> str:
 
 
 def host_operation_reply_kwargs(
-    source_ref: Any, terminal_status: str = "", client_message_id: str = "",
+    source_ref: Any, terminal_status: str = "", client_message_id: str = "", transport: Any = None,
 ) -> Dict[str, Any]:
     """Correlate a host-accepted reply without inventing a durable task result.
 
@@ -193,11 +216,14 @@ def host_operation_reply_kwargs(
     metadata. An empty status marks an acknowledgement, not completion.
     ``client_message_id`` names the owner submission a System row answers, so the
     live frame settles that submission's ``Sending...`` and no other; it is not
-    persisted and confers no finality.
+    persisted and confers no finality. ``transport``: the address its turn carries
+    (``chat_references.TURN_ADDRESS``), where the receipt is told.
     """
     from ouroboros.project_dialogue import owner_message_ref_is_valid
 
     meta: Dict[str, Any] = {"client_message_id": str(client_message_id)} if client_message_id else {}
+    if isinstance(transport, dict) and transport:
+        meta["transport"] = dict(transport)
     if owner_message_ref_is_valid(source_ref):
         meta["origin_message_ref"] = dict(source_ref)
         if terminal_status:
@@ -451,7 +477,7 @@ OWED_REGISTERED, OWED_UNREGISTERED, OWED_SKIPPED = "registered", "unregistered",
 
 
 def register_final_answer_owed(
-    task: Dict[str, Any], send_event: Dict[str, Any], *, env_drive_root: Any,
+    task: Dict[str, Any], send_event: Dict[str, Any], *, env_drive_root: Any, publication=None,
 ) -> str:
     """GR2-5 (§8-A2, ONE outbox for EVERY root): owe the final answer durably.
 
@@ -479,6 +505,7 @@ def register_final_answer_owed(
     disclosed write failure: the send still happens, without crash insurance)
     or ``skipped`` (no chat id / no canonical root: nothing to owe).
     """
+    from ouroboros.delegate_resume import AnswerHeld
     if not send_event.get("chat_id") and send_event.get("address") != PROJECT_ROOM_ADDRESS:
         return OWED_SKIPPED
     try:
@@ -494,7 +521,10 @@ def register_final_answer_owed(
         if not str(send_event.get("delivery_id") or "").strip():
             digest = hashlib.sha256(str(send_event.get("text") or "").encode("utf-8")).hexdigest()[:16]
             send_event["delivery_id"] = f"final:{tid}:{digest}"
-        registered = register_pending_delivery(pathlib.Path(outbox_root), dict(send_event))
+        registered = register_pending_delivery(pathlib.Path(outbox_root), dict(send_event),
+                                              **({"publication": publication} if publication else {}))
+    except AnswerHeld:
+        raise
     except Exception:
         log.debug("final-answer owed registration failed for %s", task.get("id"), exc_info=True)
         return OWED_UNREGISTERED
@@ -518,7 +548,7 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
     from ouroboros.observability import redact_projection
     from ouroboros.skill_readiness import acceptance_skill_lifecycle
     from ouroboros.tool_capabilities import OWNER_DELIVERY_TOOL_NAMES
-    from ouroboros.utils import utc_now_iso
+    from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
     calls = trace.get("tool_calls")
     displaced = [str(text) for text in trace.get(DISPLACED_ANSWER_KEY) or () if str(text) not in str(final_text or "")]
@@ -559,12 +589,12 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
                   "skill_state_omitted": max(0, len(skills) - _COMPLETION_SKILL_PREVIEW_ROWS)}
     if not deliveries and not skills and not displaced:
         return projection  # no full action record to store for an ordinary empty turn
-    text = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
+    text = json_dumps_utf8(snapshot, ensure_ascii=False, sort_keys=True, default=str)
     raw = text.encode("utf-8")
     if displaced:  # answers finals replaced: their bytes live in the stored source alone, apart from the final's
         answers, at = [], text.index(f'"{DISPLACED_ANSWER_KEY}": [') + len(DISPLACED_ANSWER_KEY) + 5
         for answer in snapshot[DISPLACED_ANSWER_KEY]:
-            value = json.dumps(answer, ensure_ascii=False)  # as the stored source spells it
+            value = json_dumps_utf8(answer, ensure_ascii=False)  # as the stored source spells it
             answers.append({"chars": len(answer), "source_range": [at, at + len(value)]})
             at += len(value) + 2
         projection[DISPLACED_ANSWER_KEY] = {"count": len(answers), "answers": answers}
@@ -807,7 +837,7 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
         limit=_SEALED_FINAL_TEXT_PROMPT_CHARS,
     ).strip() or "(empty final message)"
     rows = [
-        f"- {item.get('name')} ({item.get('size_bytes')} bytes)"
+        f"- {path_for_prose(str(item.get('name')))} ({item.get('size_bytes')} bytes)"
         + (f" [{item.get('status')}]" if item.get("status") not in ("", "ready", None) else "")
         for item in (sealed_final.get("artifact_manifest") or [])
         if isinstance(item, dict) and item.get("name")
@@ -816,8 +846,8 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
     if omitted:
         rows.append(f"- ... {omitted} more file(s) exist in the store (list bounded)")
     manifest_text = "\n".join(rows) if rows else "(no files in the artifact store)"
-    observations = json.dumps(sealed_final.get("completion_observations") or {"status": "unavailable"},
-                              ensure_ascii=False, default=str)
+    observations = json_dumps_utf8(sealed_final.get("completion_observations") or {"status": "unavailable"},
+                                   ensure_ascii=False, default=str)
     host_notice = truncate_review_artifact(
         str(sealed_final.get("terminal_host_notice") or ""), limit=_SEALED_FINAL_TEXT_PROMPT_CHARS,
     )

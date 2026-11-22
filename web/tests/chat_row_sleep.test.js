@@ -242,6 +242,9 @@ test('a restyle wakes every row and asks the reading owner to place the passage 
     s.run(2);
     s.fonts.get('loadingdone')();
     assert.deepEqual(placed, [[false, false], [false, false]], 'new fonts too');
+    s.run(2);
+    s.show(360);
+    assert.deepEqual(placed, [[false, false], [false, false], [false, false]], 'a new width wakes and places at once');
 });
 
 test('a row removed before its frame is never marked; the row that stays still sleeps', () => {

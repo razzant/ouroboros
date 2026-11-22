@@ -7,6 +7,7 @@ import {
     API_PROVIDER_ORDER, apiProviderLabel, cacheWriteWords, composeModelSource, connectionParts, parseModelSource, modelPriceWords,
     unavailableConnectionState,
 } from './route_editor_primitives.js';
+import { fmt } from './i18n.js';
 import { harnessPresentation } from './harness_presentation.js';
 
 export const MAIN_CHOICE = Object.freeze({ kind: 'main' });
@@ -86,13 +87,18 @@ export function compareNewerFirst(a, b) {
 /**
  * Read one `/api/model-catalog` answer into the capsule's index. The sources are the ones Settings offers the Main
  * role (model_roles.js `modelSourceGroups`, never agent sessions): the catalog's own subscription `model_sources`,
- * the API connections whose lists answered or failed (the server reads only an enabled connection holding its
- * credential), and the local model when one is configured. One row per (source, model): a subscription model many
+ * the API connections the server names (older answers name them through items and errors), and the local model
+ * when one is configured. One row per (source, model): a subscription model many
  * accounts list is one row, available when any of them can serve it, and it never names an account.
  * `connections` (`apiConnections()` of a settings read, when one was made) names an API source that cannot send.
- * A row keeps the catalog's own price (Standard's) and the processing tiers its accounts list (`modes`, null when
- * none says); a source keeps the tiers its transport advertises (`transport`, null when unsaid): who shows a row
- * decides what its context pays (`describeRoute`'s tier, processing_choice.js).
+ * A row keeps the catalog's own price (Standard's): who shows a row decides what its context pays (`describeRoute`'s
+ * tier). What the read says of processing tiers is `tiers(route)`, for processing_choice.js `tierSupport`: the
+ * route's transport ceiling (a subscription source's `processingPreferences`, an API source's `processing_transport`;
+ * null when unsaid) and, for a subscription, each account's own list for that model. That evidence is this read's
+ * alone (`catalog.current`, settings_catalog.js `mergeModelCatalog`; an answer given as it came is its own): a row a
+ * gap kept from an earlier read, or from another engine store, stays in the list and proves nothing. An account
+ * that was not read, listed nothing, or whose list is one a program ships says nothing either way, and an empty
+ * transport list is no list.
  * `cacheTier` is the cache tier the settings name: a row's cache-write figure is said only for that tier.
  * @param {{catalog?: object, connections?: ?Array, cacheTier?: ?string}} input
  */
@@ -103,6 +109,7 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
     const items = Array.isArray(catalog.items) ? catalog.items : [];
     const errors = Array.isArray(catalog.errors) ? catalog.errors : [];
     const problems = [];
+    const evidence = tierEvidence('current' in catalog ? catalog.current : catalog);
 
     function source(id, extra = {}) {
         if (!sources.has(id)) {
@@ -115,14 +122,14 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
                 label: lane === 'local' ? 'Local' : lane === 'subscription'
                     ? String(descriptor?.label || harnessPresentation(sub).label) : apiProviderLabel(id, {}, connections || []),
                 harness: lane === 'subscription' ? String(descriptor?.credentialHarness || sub) : '',
+                credentialHarness: lane === 'subscription' ? String(descriptor?.credentialHarness || '') : '',
                 kind: lane === 'api' ? kind : '', named: lane === 'api' && Boolean(name),
-                transport: Array.isArray(descriptor?.processingPreferences)
-                    ? descriptor.processingPreferences.filter((tier) => typeof tier === 'string') : null,
             });
         }
         return Object.assign(sources.get(id), extra);
     }
     for (const entry of descriptors) if (entry?.id) source(`${SUBSCRIPTION}${entry.id}`, { leads: true });
+    for (const [id, { label }] of evidence.apiSources) source(id, { leads: true, ...(label ? { label } : {}) });
 
     for (const item of items) {
         // A local model's row names its artifact in `id`; its `value` is a label, never a route (gateway/models.py).
@@ -132,11 +139,11 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
         const route = { model, use_local: local };
         const key = routeKey(route);
         const own = source(routeSource(route), { leads: true });
-        if (own.named && item?.provider_label) own.label = String(item.provider_label);  // the connection's own name
+        if (own.named && item?.provider_label && !evidence.apiSources.get(own.id)?.label) own.label = String(item.provider_label);
         if (!rows.has(key)) {
             rows.set(key, { key, route, id: modelPart(route), name: String(item?.name || '') || modelPart(route),
                 source: own.id, lane: own.lane, window: 0, available: null, states: new Set(), prices: new Map(),
-                conditions: new Set(), modes: null });
+                conditions: new Set() });
             own.count += 1;
         }
         const row = rows.get(key);
@@ -144,11 +151,6 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
         if (typeof item?.availability === 'string') row.states.add(item.availability);
         row.prices.set(JSON.stringify(item?.price ?? null), item?.price ?? null);
         row.conditions.add(String(item?.price_condition || ''));
-        // The tiers an account lists for this model: one that lists any makes the row's list known.
-        if (Array.isArray(item?.processing?.modes)) {
-            row.modes ||= new Set();
-            item.processing.modes.forEach((tier) => { if (typeof tier === 'string') row.modes.add(tier); });
-        }
     }
     let priced = false;  // whether the catalog states any price
     let cacheFigures = false;  // whether any row states a cache-write figure: only the settings' cache tier says it
@@ -208,7 +210,104 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
         rows: ordered,
         row: (route) => rows.get(routeKey(route)) || null,
         sourceRows: (id) => ordered.filter((entry) => entry.source === id),
+        storeId: evidence.storeId,
+        /** What this read says of `route`'s tiers: `{ lane, ceiling, complete, accounts: [{ id, fingerprint, modes,
+         *  absent }] }`. `modes` is an account's own list for the model (a Set), null when nothing of it can be told;
+         *  `absent` an account whose live list, read whole, does not hold the model (a shipped or partial list that
+         *  lacks it stays an account nothing is known of); `complete` whether every account of the source is here. */
+        tiers(raw) {
+            const route = normalizeRoute(raw);
+            if (!route) return null;
+            const id = routeSource(route);
+            const lane = laneOf(id);
+            if (lane !== 'subscription') {
+                const api = evidence.apiSources.get(id);
+                const ceiling = lane === 'local' ? evidence.local : api ? api.ceiling : evidence.rows.get(routeKey(route));
+                return { lane, ceiling: ceiling || null, complete: false, accounts: [] };
+            }
+            const own = evidence.sources.get(id);
+            const model = modelPart(route);
+            return { lane, ceiling: evidence.ceilings.get(id) || null, complete: Boolean(own?.complete),
+                accounts: [...(own?.accounts || [])].map(([account, said]) => ({ id: account, fingerprint: said.fingerprint,
+                    modes: said.models.get(model) || null, absent: said.whole && !said.models.has(model) })) };
+        },
     };
+}
+
+// A list a program ships or guesses is no account's word (the engine's `provenance`, `processing.source`, `origin`).
+const SHIPPED = /bundled|hint|static/i;
+// A list of tiers as it was said; an empty one says nothing (never "only the ordinary service").
+const tierList = (list) => {
+    const said = Array.isArray(list) ? list.filter((tier) => typeof tier === 'string') : [];
+    return said.length ? said : null;
+};
+
+/**
+ * One catalog answer as tier evidence: each subscription source's transport ceiling, its accounts with what each
+ * lists per model (`models`: model id to a Set, null for a model whose list is empty, shipped or marked not eligible),
+ * whether an account's list is a live one read whole (`whole`) and whose it is (`fingerprint`), whether those are
+ * every account of the source (its own envelope, not marked partial), and each API source's transport ceiling
+ * (only the exact model row on an older answer with no source descriptor). An
+ * answer without account envelopes (an older engine) names only the accounts of its own rows: never the whole of a
+ * source.
+ */
+function tierEvidence(answer) {
+    const found = { storeId: typeof answer?.store_id === 'string' ? answer.store_id : '', ceilings: new Map(),
+        sources: new Map(), apiSources: new Map(), rows: new Map(), local: null };
+    if (!answer || typeof answer !== 'object') return found;
+    for (const entry of Array.isArray(answer.api_sources) ? answer.api_sources : []) {
+        const id = entry?.id;
+        if (typeof id === 'string' && id && laneOf(id) === 'api') found.apiSources.set(id,
+            { label: typeof entry.label === 'string' ? entry.label : '', ceiling: tierList(entry.processing_transport) });
+    }
+    for (const entry of Array.isArray(answer.model_sources) ? answer.model_sources : []) {
+        const ceiling = tierList(entry?.processingPreferences);
+        if (entry?.id && ceiling) found.ceilings.set(`${SUBSCRIPTION}${entry.id}`, ceiling);
+    }
+    const modesOf = (model, shipped) => {
+        const said = model?.processing;
+        const modes = shipped || SHIPPED.test(String(said?.source || '')) || model?.origin === 'hint' || said?.eligible === false
+            ? null : tierList(said?.modes);
+        return modes ? new Set(modes) : null;
+    };
+    for (const envelope of Array.isArray(answer.account_catalogs) ? answer.account_catalogs : []) {
+        if (!envelope?.source) continue;
+        const accounts = new Map();
+        for (const account of Array.isArray(envelope.accounts) ? envelope.accounts : []) {
+            const inner = account?.catalog;
+            const catalog = (inner?.source && inner.source !== envelope.source)
+                || (inner?.credentialProfileId && inner.credentialProfileId !== account?.credentialProfileId) ? null : inner;
+            const listed = Array.isArray(catalog?.models) ? catalog.models : [];
+            const shipped = SHIPPED.test(String(catalog?.provenance || ''));
+            accounts.set(String(account?.credentialProfileId || ''), {
+                fingerprint: String(catalog?.accountFingerprint || ''),
+                whole: listed.length > 0 && !shipped && catalog.partial !== true,
+                models: new Map(listed.filter((model) => model?.id).map((model) => [String(model.id), modesOf(model, shipped)])),
+            });
+        }
+        found.sources.set(`${SUBSCRIPTION}${envelope.source}`, { complete: envelope.partial !== true, accounts });
+    }
+    for (const item of Array.isArray(answer.items) ? answer.items : []) {
+        const model = String(item?.value || '');
+        if (item?.use_local === true) {  // what the local adapter can send, said once for every local route
+            found.local ||= tierList(item.processing_transport);
+            continue;
+        }
+        if (!model) continue;
+        const route = { model, use_local: false };
+        const id = routeSource(route);
+        if (laneOf(id) !== 'subscription') {
+            const ceiling = tierList(item.processing_transport);
+            if (ceiling && !found.apiSources.has(id)) found.rows.set(routeKey(route), ceiling);
+        } else if (!Array.isArray(answer.account_catalogs)) {
+            const own = found.sources.get(id) || { complete: false, accounts: new Map() };
+            found.sources.set(id, own);
+            const account = String(item.credential_profile_id || '');
+            if (!own.accounts.has(account)) own.accounts.set(account, { fingerprint: String(item.account_fingerprint || ''), whole: false, models: new Map() });
+            own.accounts.get(account).models.set(modelPart(route), modesOf(item, SHIPPED.test(String(item.provenance || ''))));
+        }
+    }
+    return found;
 }
 
 /**
@@ -218,7 +317,7 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
  * window when the catalog knows one. A source that leads nothing keeps Settings' own words:
  * "(no key)", "(off)" or "(removed)" for an API key that cannot send.
  */
-export function describeRoute(index, raw, { tier = '' } = {}) {
+export function describeRoute(index, raw, { tier } = {}) {
     const route = normalizeRoute(raw);
     if (!route) return null;
     const id = routeSource(route);
@@ -235,15 +334,18 @@ export function describeRoute(index, raw, { tier = '' } = {}) {
     // A catalog figure is Standard's: a context on another tier is told neither its price, nor the condition its
     // published entry prices it under, nor its cache write.
     const tierPriced = tier === 'fast' || tier === 'economy' || tier === 'ultrafast';
-    const price = tierPriced ? '' : modelPriceWords(listed);
+    const listedPrice = tierPriced ? '' : modelPriceWords(listed);
+    const omitted = tier === '' && connectionParts(id).kind === 'openrouter';
+    const price = omitted && listedPrice ? fmt('Catalog rate · {price}', { price: listedPrice }) : listedPrice;
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
         // Said only while the settings name the cache tier the figure is of (`cacheTier`, model_catalog_store.js).
         sourceLabel, pay: PAY_WORDS[lane], price,
-        cacheWrite: tierPriced ? '' : cacheWriteWords(listed?.price, index?.cacheTier),
+        cacheWrite: tierPriced || omitted ? '' : cacheWriteWords(listed?.price, index?.cacheTier),
         window, listed: Boolean(listed),
         available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
+        credentialHarness: own?.credentialHarness || '',
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),
         facts: [sourceLabel, price || PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),
     };

@@ -51,6 +51,19 @@ def test_resume_preserves_the_same_ordinary_refusal_as_the_mind(monkeypatch, ref
         assert response.json()["blockers"] == outcome["blockers"]
 
 
+def test_the_http_resume_refusal_keeps_the_launch_evidence(monkeypatch):
+    from ouroboros.work_stop import resume_outcome
+
+    outcome = resume_outcome({"ok": False, "error": "dispatch_outcome_unknown", "refusal_basis": "dispatch_unconfirmed"})
+    monkeypatch.setattr("supervisor.queue.resume_budget_paused_task", lambda _id: outcome)
+    with TestClient(Starlette(routes=[Route("/api/tasks/{task_id}/resume", api_task_resume, methods=["POST"])])) as client:
+        response = client.post("/api/tasks/saved/resume")
+    assert 400 <= response.status_code < 500
+    assert response.json()["error"] == "dispatch_outcome_unknown"
+    assert response.json()["refusal_basis"] == "dispatch_unconfirmed"
+    assert response.json()["message"] == "Resume refused: An earlier assignment may already have reached a worker"
+
+
 def test_actual_authority_resume_success_matches_python_and_browser_contract(tmp_path, monkeypatch):
     import pathlib
     from typing import get_type_hints

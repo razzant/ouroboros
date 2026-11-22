@@ -908,8 +908,22 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         status = "running"
         detail = "Evolution task is running now."
     elif isinstance(queued_task, dict):
-        status = "queued"
-        detail = "Evolution task is queued."
+        from ouroboros.store_hot_facts import snapshot
+        from ouroboros.work_stop import current_stop, queue_control
+
+        status, detail = "queued", "Evolution task is queued."
+        # Only a possible money stop needs the census's addressed control read here.
+        if current_stop(queued_task, {"budget": BUDGET_ROOT_FENCES}).get("cause") == "money":
+            task_id = str(queued_task.get("id") or "")
+            root = queued_task.get("budget_drive_root") or DRIVE_ROOT
+            with snapshot(((root, task_id), (root, queued_task.get("root_task_id") or task_id))):
+                control = queue_control(root, queued_task, BUDGET_ROOT_FENCES)
+            view = control["view"]
+            if control["phase"] == "unknown":
+                status, detail = "state_unknown", "The queued cycle's pause state is unavailable."
+            elif control["phase"] == "budget_paused" and view["stop"].get("cause") == "money" and view["resumable"]:
+                status = "budget_stopped"
+                detail = "This cycle paused at the spending limit. Resume the task in Activity to continue."
     elif not accounting_available:
         status = "accounting_unavailable"
         detail = "Cost accounting is unavailable; evolution dispatch is paused without changing the campaign."

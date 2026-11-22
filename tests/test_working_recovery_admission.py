@@ -127,10 +127,16 @@ def test_original_later_attempt_needs_exact_source_and_dispatch_protocol(tmp_pat
     assert not _working_resume_granted(task, tmp_path), "a source authorizes only its exact successor"
 
 
-@pytest.mark.parametrize("damage", ["source_digest", "wrong_attempt", "malformed_ref"])
+@pytest.mark.parametrize("damage,basis", [
+    ("source_digest", "saved_work_unverified"), ("wrong_attempt", "saved_work_unverified"),
+    ("malformed_ref", "saved_work_unverified"), ("launch_record_unreadable", "resume_evidence_unavailable"),
+    ("handoff_marked", "dispatch_unconfirmed"),
+])
 def test_real_resume_keeps_saved_work_held_when_its_source_is_not_exact(
-    host, tmp_path, monkeypatch, damage,  # noqa: F811
+    host, tmp_path, monkeypatch, damage, basis,  # noqa: F811
 ):
+    from supervisor import task_admission
+
     _running(host, tmp_path, monkeypatch, "project")
     assert _stop_and_boot(queue, workers) == 1
     [restored] = host.pending
@@ -141,9 +147,15 @@ def test_real_resume_keeps_saved_work_held_when_its_source_is_not_exact(
         restored["_attempt"] += 1
     elif damage == "malformed_ref":
         restored["_working_recovery"]["source_ref"] = ["not a source handle"]
-    else:
-        restored["_working_recovery"] = {}
-    assert queue.resume_budget_paused_task("held")["ok"] is False
+    elif damage == "handoff_marked":
+        write_task_result(host.root, "held", "scheduled", admitted_dispatch_attempt=restored["_attempt"])
+    with monkeypatch.context() as read:
+        if damage == "launch_record_unreadable":
+            def unavailable(*args, **kwargs):
+                raise OSError("unreadable launch record")
+            read.setattr(task_admission, "load_task_result", unavailable)
+        refused = queue.resume_budget_paused_task("held")
+    assert (refused["ok"], refused["error"], refused["refusal_basis"]) == (False, "dispatch_outcome_unknown", basis)
     assert budget_hold_fact(restored)
     assert wc.checkpoint_path(host.root, "held", 1).read_bytes() == original_checkpoint
     sent = worker(host, monkeypatch)

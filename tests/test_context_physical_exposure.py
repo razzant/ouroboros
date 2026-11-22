@@ -20,7 +20,7 @@ def source(call_id="read", text="exact evidence " * 500):
         {"role": "tool", "tool_call_id": call_id, "content": text}]
 
 
-@pytest.mark.parametrize("dialect", ["function", "gigachat", "claudexor"])
+@pytest.mark.parametrize("dialect", ["function", "gigachat", "claudexor", "responses"])
 def test_complete_source_survives_real_transport_syntax(dialect):
     from ouroboros.llm import LLMClient
 
@@ -38,6 +38,9 @@ def test_complete_source_survives_real_transport_syntax(dialect):
     elif dialect == "claudexor":
         from ouroboros.llm_messages import project_declared_system_prefix
         physical = project_declared_system_prefix({"provider": "claudexor"}, canonical)
+    elif dialect == "responses":
+        from ouroboros.openai_responses import input_items
+        physical = input_items({"resolved_model": "m"}, canonical)
     else:
         physical = canonical
     unit = cc._atomic_units(canonical)[0]
@@ -117,13 +120,19 @@ def test_exposure_recognizes_a_sent_unit_whose_stored_projection_was_redacted(tm
     assert observed["physical_source_status"] == "observed_projection"
 
 
-def test_observation_reads_exact_physical_source_and_inspection_restores_it(tmp_path):
+@pytest.mark.parametrize("wire", ["chat", "responses"])
+def test_observation_reads_exact_physical_source_and_inspection_restores_it(tmp_path, wire):
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.context_input_selection import _historical_anchor
     from ouroboros.model_send_seal import persist_physical_candidate
+    from ouroboros.openai_responses import input_items
     from ouroboros.tools.compact_context import record_context_view, _compact_context
 
     canonical = source() + source("new", "not sent")
+    sent = canonical[:2]
+    candidate = ({"input": input_items({"resolved_model": "m"}, sent)} if wire == "responses" else {"messages": sent})
     persisted = persist_physical_candidate(tmp_path, task_id="exposure", attempt_id="attempt-one",
-        candidate={"messages": canonical[:2]}, candidate_facts={})
+        candidate=candidate, candidate_facts={})
     capture = SimpleNamespace(candidate_manifest_ref=persisted["manifest_ref"], attempt_id="attempt-one")
     ctx = SimpleNamespace(task_id="exposure", drive_root=tmp_path, budget_drive_root=tmp_path)
     record_context_view(ctx, canonical, [], physical_capture=capture)
@@ -131,6 +140,10 @@ def test_observation_reads_exact_physical_source_and_inspection_restores_it(tmp_
     assert observed["physical_source_status"] == "observed_projection"
     assert observed["exposure_basis"] == EXPOSURE_ATOMS_BASIS
     assert len(observed["exposed_units"]) == 1
+    anchor = _historical_anchor(ctx, observed, [tmp_path], "exposure", birth=True)
+    retained = json.loads(read_actor_source_bytes(tmp_path, "exposure", anchor["source_ref"]))
+    assert retained["physical_source_identity"] == persisted["manifest_ref"]
+    assert retained["physical_messages"] == candidate.get("messages", candidate.get("input"))
     inspected = json.loads(_compact_context(ctx, inspect=True))
     assert [unit["exposed"] for unit in inspected["units"]] == [True, False]
     # The inventory always names the memory view's elements (C7); this context observed none.

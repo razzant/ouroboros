@@ -9,11 +9,12 @@ interprets whether the objective was met.
 from __future__ import annotations
 
 import copy
-import json
 from collections.abc import Iterable
 from types import MappingProxyType
 from hashlib import sha256
 from typing import Any, Dict, Mapping, Optional, Tuple
+
+from ouroboros.utils import json_dumps_utf8, truncate_within_limit
 
 
 TOOL_NAME_ALIASES = MappingProxyType({
@@ -122,6 +123,7 @@ def normalize_attachment_manifest(value: Any) -> list[Dict[str, Any]]:
     allowed = (
         "ordinal", "status", "reason", "label", "root", "relpath",
         "abs_path", "mime", "is_image", "size", "sha256", "rule",
+        "path_only",  # an inherited file: read by path, never injected as pixels (artifacts.stage_task_attachments)
     )
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
@@ -768,11 +770,11 @@ def _serialized_chars(value: Any) -> Tuple[str, int]:
     """
     if isinstance(value, str):
         try:
-            return value, len(json.dumps(value, ensure_ascii=False)) - 2
+            return value, len(json_dumps_utf8(value, ensure_ascii=False)) - 2
         except (TypeError, ValueError, RecursionError):
             return value, len(value)
     try:
-        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        text = json_dumps_utf8(value, ensure_ascii=False, sort_keys=True, default=str)
     except RecursionError:
         return "<authority body too deep to serialize>", 2 ** 31
     except (TypeError, ValueError):
@@ -801,7 +803,6 @@ def bounded_continuation_envelope(
     when it was observed; the durable task_results body stays the SSOT.
     """
     from ouroboros.tool_capabilities import DEFAULT_TOOL_RESULT_LIMIT
-    from ouroboros.utils import truncate_within_limit
 
     limit = DEFAULT_TOOL_RESULT_LIMIT
 
@@ -813,10 +814,7 @@ def bounded_continuation_envelope(
         allowed = limit
         preview = truncate_within_limit(raw, limit=allowed)
         while allowed > 100:
-            try:
-                over = len(json.dumps(preview, ensure_ascii=False)) - 2 - limit
-            except (TypeError, ValueError, RecursionError):
-                break
+            over = _serialized_chars(preview)[1] - limit
             if over <= 0:
                 break
             allowed = max(100, min(allowed - 1, allowed * limit // (limit + over)))
@@ -838,7 +836,7 @@ def bounded_continuation_envelope(
 
     digest_note = digest_semantics
     try:
-        serialized = json.dumps(mapping, ensure_ascii=False, sort_keys=True, default=str)
+        serialized = json_dumps_utf8(mapping, ensure_ascii=False, sort_keys=True, default=str)
     except RecursionError:
         # No identity can be computed over a body too deep to serialize -
         # disclose that instead of presenting a placeholder digest as exact.

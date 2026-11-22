@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 from ouroboros.gateway.claudexor_contracts import ClaudexorStatusResponse
+from ouroboros.gateway.reference_contracts import ReplyExcerpt
 from ouroboros.gateway.widgets import ExtensionLiveSnapshot
 from ouroboros.gateway.contributions import UiContributionsResponse
 
@@ -939,27 +940,69 @@ class ModelCatalogItem(TypedDict, total=False):
     observed_at: Optional[str]
     availability: Any
     problem: Any
-    processing: Any
+    processing: Any  # an agent row's engine-stated tiers, raw with their provenance: no proof of the account's or the rest
+    # API rows: the host tiers their connection's transport can carry (``llm_attempt.processing_transport_modes``);
+    # absent where unknown. A transport fact, never the model's or the key's support.
+    processing_transport: List[Literal["standard", "fast", "economy", "ultrafast"]]
     use_local: bool
     price: ModelPrice  # OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
     price_condition: str  # DeepSeek rows whose published entry prices them only off-peak in USD: ``off_peak_usd``
 
 
+class ModelCatalogApiSource(TypedDict):
+    """A configured API connection, including when it returned no models. Its transport is not model or key eligibility."""
+
+    id: str
+    label: str
+    processing_transport: NotRequired[List[Literal["standard", "fast", "economy", "ultrafast"]]]
+
+
 class ModelCatalogResponse(TypedDict, total=False):
     """Subscription declarations (``view=sources``), raw models (``source_id``), a native agent inventory
     (``harness_id``) or one API/local connection (``provider_id``). A whole read keeps completed results and
-    named errors at its 20-second deadline. ``account_catalogs`` retain original per-account evidence."""
+    named errors at its 20-second deadline. ``account_catalogs`` retain per-account evidence;
+    ``partial`` marks an incomplete view; ``store_id`` names the store from the engine handshake."""
 
     items: Required[List[ModelCatalogItem]]
     errors: Required[List[Dict[str, Any]]]  # {provider_id, error, stage?, duration_ms?, source_id?, code?, ...}
     model_sources: Required[List[Dict[str, Any]]]
+    api_sources: List[ModelCatalogApiSource]
     account_catalogs: List[Dict[str, Any]]
     session_catalog: Dict[str, Any]  # Native harness row; distinct from subscription model transports.
     partial: bool
+    store_id: str
+
+
+class ModelProcessingEndpoint(TypedDict):
+    """One endpoint of an OpenRouter model: ``service_tier`` as its record states it (null = Standard; ``flex``,
+    ``priority``, ``ultrafast``; another string kept with no ``mode``; absent when the record has no such field or a
+    non-string), ``mode`` the host tier that reads as, ``price`` only where its figure is honest (USD per 1M,
+    input-length tiers, no cache tier, no fee or time condition)."""
+
+    tag: str
+    service_tier: NotRequired[Optional[str]]
+    mode: NotRequired[Literal["standard", "fast", "economy", "ultrafast"]]
+    price: NotRequired[ModelPrice]
+
+
+class ModelProcessing(TypedDict):
+    """The tiers one model's endpoints list. ``complete``: every endpoint's tier was read for this route (a catalogue
+    fact, never a price or the key's entitlement); nothing read is ``[]`` and false, never Standard-only."""
+
+    modes: List[Literal["standard", "fast", "economy", "ultrafast"]]
+    complete: bool
+    endpoints: List[ModelProcessingEndpoint]
+
+
+class ModelProcessingResponse(TypedDict):
+    """``GET /api/model-catalog?processing_model=<route>``: one OpenRouter route's tiers, ``value`` as asked."""
+
+    value: str
+    processing: ModelProcessing
 
 
 class OpenAICompatibleModelsRequest(TypedDict):
-    """``POST /api/openai-compatible/models``: list ``{baseUrl}/models`` once; nothing is saved."""
+    """``POST /api/openai-compatible/models``: read the connection's model catalog once; nothing is saved."""
 
     baseUrl: str
     apiKey: NotRequired[str]
@@ -1042,12 +1085,12 @@ class McpSignIn(TypedDict, total=False):
 
 
 class McpServerStatus(TypedDict, total=False):
-    """One configured MCP server. A configuration error row has only ``id``, ``enabled``,
-    ``tool_count``, ``last_error`` and ``code`` (MCP_CONFIG_ERROR or MCP_ID_AMBIGUOUS)."""
+    """One server identity. A rejected row reports its config error and zero tools."""
 
     id: Required[str]
     name: str
     enabled: Required[bool]
+    configured_count: int  # MCP_ID_AMBIGUOUS groups all configured entries claiming this identity
     transport: str
     url: str  # credentials redacted
     auth_header: Any
@@ -1228,7 +1271,8 @@ class UpdateLetter(TypedDict):
     author: Dict[str, Any]  # {task_id, model, requested} — host-derived
     checked_key: Optional[Dict[str, Any]]
     material: Optional[Dict[str, Any]]  # {key, collected_at, text_bytes (query_data's count), commits, bodies_read, bodies_omitted}
-    request: Optional[Dict[str, Any]]  # {task_id, current_task_id, mode, key, requested_at, status (retry/Continue), saved}
+    request: Optional[Dict[str, Any]]  # {task_id, current_task_id, mode, key, requested_at, status (retry/Continue), saved,
+    #                                    cancel_state "pending" while a Stop is carried out (status stays as read)}
 
 
 class UpdateTransactionState(TypedDict, total=False):
@@ -1298,6 +1342,8 @@ class CommandRequest(TypedDict):
     message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
 
     cmd: str
+    reply_to: NotRequired[str]
+    reply_excerpt: NotRequired[ReplyExcerpt]
     if_boot: NotRequired[str]  # optional boot.since precondition, before queueing; Panic ignores it
     client_surface: NotRequired[Dict[str, Any]]
     visible_text: NotRequired[str]
@@ -1403,7 +1449,8 @@ __all__ = [
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
     "ModelPriceTier", "ModelPrice",
-    "ModelCatalogItem", "ModelCatalogResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
+    "ModelCatalogItem", "ModelCatalogApiSource", "ModelCatalogResponse", "ModelProcessingEndpoint", "ModelProcessing",
+    "ModelProcessingResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
     "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",
     "McpRefreshRequest", "McpRefreshResponse", "McpSignInRequest", "McpSignInResponse", "McpTestRequest",

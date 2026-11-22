@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from tests._skills_page_harness import (
+    open_view,
     URL, capture, fixture, no_overflow, open_skills, refresh, skills_browser as skills_browser,
 )
 
@@ -50,7 +51,7 @@ def _card(page, name):
 
 def _contained(page):
     assert no_overflow(page)
-    assert page.locator(".marketplace-modal-body").evaluate_all(
+    assert page.locator(".ui-modal-body").evaluate_all(
         "nodes => nodes.every(el => el.scrollWidth <= el.clientWidth + 1)")
 
 
@@ -90,7 +91,7 @@ def test_rejected_updates_keep_reviewed_retry_and_current_candidate(skills_brows
         expected = {"mode": "replace", "digest": row["install"]["update_available"]["digest"], "local_digest": row["content_hash"]}
         assert skills.posted("/api/skills/rejected_newer/update") == [expected]
 
-        page.locator('[data-tab="browse"]').click()
+        open_view(page, 'browse')
         page.locator('[data-browse-search]').fill("rejected_newer")
         browse = page.locator('[data-browse-board] .marketplace-card[data-item="ouroboros/rejected_newer"]').first
         assert "v0.3.3 available" in browse.inner_text()
@@ -117,6 +118,8 @@ def test_publication_says_actual_visibility_through_confirmation_and_task(skills
     try:
         page, skills, errors = _open(browser, engine, width, theme)
         for index, target in enumerate(("origin", "hub", "public", "private"), start=1):
+            if index > 1:
+                open_view(page, "installed")
             card = _card(page, "rejected_newer")
             card.locator("[data-skill-menu-trigger]").click()
             page.locator("body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub").click()
@@ -178,6 +181,9 @@ def test_publication_says_actual_visibility_through_confirmation_and_task(skills
                 assert ("becomes public" in payload[field]) == (target != "private")
             toast = page.locator(".toast", has_text=f"publication task publish-{target} started")
             toast.wait_for()
+            # This harness mounts Extensions alone. A successful publication hands the task to chat.
+            assert page.evaluate("window.shownPage") == "chat"
+            assert page.locator("#page-skills").is_hidden()
             toast.wait_for(state="detached")
         assert errors == []
     finally:

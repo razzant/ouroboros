@@ -32,6 +32,7 @@ def test_inline_view_is_the_numbered_conversation(harness):
     progress rows, host system rows and the archive-file list stay behind the pointer, which the
     OWN ROOM SNAPSHOT section names with every per-capture value (it follows the plan).
     Reverted, the packet is the JSONL snapshot with its metadata dump."""
+    from ouroboros.gateway.task_decision import _quiz_answer_frame
     from ouroboros.tools.plan_dialogue import attach_own_dialogue, dialogue_view, render_dialogue
 
     ctx = harness.make_ctx()
@@ -41,8 +42,13 @@ def test_inline_view_is_the_numbered_conversation(harness):
     dialogue_store.append(harness.drive, "chat", {"direction": "out", "chat_id": 1, "ts": "2026-09-01T10:01:00Z", "text": "Option A is faster\nOption B keeps choices"})
     dialogue_store.append(harness.drive, "chat", {"direction": "out", "chat_id": 1, "ts": "2026-09-01T10:02:00Z", "type": "quiz", "text": "Five or six slides?",
                         "quiz": {"quiz_id": "q1", "question": "Five or six slides?", "options": ["five", "six"], "recommended_index": 0}})
-    dialogue_store.append(harness.drive, "chat", {"direction": "in", "chat_id": 1, "ts": "2026-09-01T10:03:00Z", "type": "quiz_answer", "text": "five",
-                        "quiz": {"quiz_id": "q1", "options": ["five", "six"], "answered_index": 0, "comment": "The board asked for five."}})
+    answered_at = "2026-09-01T10:03:00Z"
+    answer = {"quiz_id": "q1", "request_id": "five-slides", "state": "answered", "answered_at": answered_at,
+              "options": ["five", "six"], "answered_index": 0, "comment": "The board asked for five."}
+    frame = _quiz_answer_frame(answer, 0, answer["comment"], asker="discussion")
+    dialogue_store.append(harness.drive, "chat", {"direction": "system", "chat_id": 1, "ts": answered_at,
+                        "type": "quiz_answer", "source": "owner_quiz_answer", "task_id": "discussion",
+                        "client_message_id": "quiz_answer:discussion:q1", "text": frame, "quiz": answer})
     dialogue_store.append(harness.drive, "chat", {"direction": "system", "chat_id": 1, "ts": "2026-09-01T10:04:00Z", "type": "task_summary", "text": "HOST SUMMARY ROW"})
     for step in ("Reading notes", "Drafting slide 1", "Drafting slide 2"):
         dialogue_store.append(harness.drive, "progress", {"chat_id": 1, "ts": "2026-09-01T10:05:00Z", "content": f"PROGRESS {step}"})
@@ -57,7 +63,10 @@ def test_inline_view_is_the_numbered_conversation(harness):
         line = next(line for line in view.splitlines() if f" · {author} · " in line and text in line)
         number = int(line.split(" · ", 1)[0])
         row = json.loads(snapshot_lines[number - 1])
-        assert row["text"].startswith(text) or row.get("quiz", {}).get("question") == text
+        if text == "five":
+            assert row["type"] == "quiz_answer" and row["text"] == frame and row["quiz"] == answer
+        else:
+            assert row["text"].startswith(text) or row.get("quiz", {}).get("question") == text
         assert line.startswith(f"{number} · {row['ts']} · {author} · ")
     assert "[question q1] Five or six slides? — options: (1) five (2) six; recommended (1)" in view
     # The choice is the owner's; the option's words are the asking task's, never quoted as theirs.

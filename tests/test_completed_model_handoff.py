@@ -501,8 +501,8 @@ def test_web_search_read_that_ended_leaves_the_same_fact(tmp_path, monkeypatch, 
 
     for name in ("ddgs", "openai"):  # no real backend or SDK client can be reached from here
         monkeypatch.setitem(sys.modules, name, None)
-    monkeypatch.setattr(search, "_resolve_openai_client_settings",
-                        lambda: ("synthetic", "https://invalid.example/v1", "openai", "synthetic"))
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setattr(net_transport, "web_search_openai_client",
                         lambda **_kw: SimpleNamespace(responses=SimpleNamespace(create=create)))
     ctx = SimpleNamespace(task_id="root", pending_events=[],
@@ -560,7 +560,7 @@ def stream():  # the process ends mid-stream, after a delta: dispatched, transpo
     yield SimpleNamespace(type="response.output_text.delta", delta="partial")
     os._exit(0)
 
-search._resolve_openai_client_settings = lambda: ("synthetic", "https://invalid.example/v1", "openai", "synthetic")
+os.environ.update(OPENAI_API_KEY="synthetic", OPENAI_BASE_URL="")
 net_transport.web_search_openai_client = lambda **_kw: SimpleNamespace(
     responses=SimpleNamespace(create=lambda **_k: stream()))
 ctx = SimpleNamespace(task_id="root", pending_events=[],

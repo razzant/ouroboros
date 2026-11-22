@@ -9,18 +9,22 @@ import { accountRows, familyLabel, nextUpAccount } from './claudexor_status_stor
 import { translateString } from './i18n.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
+    catalogEntryIdentity,
     describeExecutionEvidence,
     harnessModelsKnown,
     modelsGapNote,
     routeModelFields,
     sameEngineAs,
     sourceIdentityLabel,
+    sourceIdentityParts,
     splitSessionTarget,
     accountScopedModelCatalog,
     sessionModelMatches,
     CLAUDE_BASE_QUALIFIER,
     PRICE_UNKNOWN,
     modelPriceWords,
+    parseModelSource,
+    priceWords,
     routeSupportsAccount,
     tierPriced,
 } from './route_editor_primitives.js';
@@ -40,17 +44,24 @@ export function rowIdentity(row, state = {}) {
     const fields = routeModelFields(row?.route, state.modelSources, {
         providerProfiles: state.providerProfiles, connections: state.connections,
     });
-    const label = sourceIdentityLabel(row?.route, {
+    const options = {
         modelSources: state.modelSources,
         providerProfiles: state.providerProfiles, connections: state.connections,
         harnesses: [{
             id: fields.harness,
             display_name: familyLabel(fields.harness, state.snapshot, { catalogKnown: state.catalogKnown }),
         }],
-    });
+    };
+    const parts = sourceIdentityParts(row?.route, options);
+    const label = sourceIdentityLabel(row?.route, options);
+    // A local row runs the local runtime: it has no seat and no brand, so its mark is the neutral channel one even
+    // when its model text was written with a subscription's head.
+    if (fields.local) return { harnessId: 'api', label, parts, channel: 'api' };
     return session || fields.subscription
-        ? { harnessId: fields.harness || fields.source, label, channel: '' }
-        : { harnessId: 'api', label, channel: 'api' };
+        // A subscription source's opaque id is not evidence of a native program: only its descriptor's
+        // credential harness earns a branded mark. With none, a neutral mark beside the source's own label.
+        ? { harnessId: fields.harness, label, parts, channel: '' }
+        : { harnessId: 'api', label, parts, channel: 'api' };
 }
 
 export function harnessMap(snapshot) {
@@ -254,7 +265,7 @@ export function rowStatus(row, state) {
         });
         return {
             label: 'Checked at start', tone: 'neutral', reason: '',
-            text: `${fields.subscription ? 'Subscription model' : `${fields.providerLabel} API model`} · availability is checked when a child starts`,
+            text: `${fields.local ? 'Local model' : fields.subscription ? 'Subscription model' : `${fields.providerLabel} API model`} · availability is checked when a child starts`,
         };
     }
     const live = sessionRouteVerdict(row, state);
@@ -338,18 +349,35 @@ export function rowTaskRun(row, state) {
     return [qualifier, evidence].filter(Boolean).join(' · ');
 }
 
+// An entry is the row's own route only when its source AND its model agree: `openrouter::openai::foo` is an
+// OpenRouter model whose id contains `::`, never the OpenAI key's `openai::foo` — one shared spelling would join
+// them and lend one the other's price. The built-in key's bare/`openrouter::`/`@default` forms parse to one source.
+// A modern catalog entry carries explicit `provider_id` and opaque `id` (which may itself contain `::`); those
+// fields are authoritative over reparsing `value`, which for a built-in OpenRouter row is bare — and a head that
+// names no known kind is one opaque OpenRouter id, never a connection of its own.
+function sameSourceModel(entry, right) {
+    const own = parseModelSource(right);
+    if (!own.model) return false;
+    const identity = catalogEntryIdentity(entry);
+    return Boolean(identity.model && identity.source === own.source && identity.model === own.model);
+}
+
 /** The published tariff of an API row's model, in a role line's words (USD per 1M tokens: a rate, never an estimate
  * of one review; or the condition its entry prices it under, `modelPriceWords`): `Price unknown` where its source
  * listed the model, or the whole catalog was read, and no price is stated; '' for a session or subscription row, a
  * local model, a Fast or Economy row (its calls pay another rate) and for a model no read listed while the catalog
  * is not read whole (the section says that once). The words are
- * composed through the translation seam. `catalog` is the editor's merged catalog. */
-export function modelTariffText(row, catalog = {}, processingPreference = '') {
+ * composed through the translation seam. `catalog` is the editor's merged catalog; an entry is the row's by its own
+ * source and model (`sameSourceModel`). `rate` asks for the published figures alone (a list head): a condition or an
+ * unknown price says nothing there. */
+export function modelTariffText(row, catalog = {}, processingPreference = '', { rate = false } = {}) {
     const target = String(row?.route?.target_id || '').trim();
-    const item = (Array.isArray(catalog.items) ? catalog.items : []).find((entry) => entry.value === target);
+    const item = target ? (Array.isArray(catalog.items) ? catalog.items : []).find((entry) => sameSourceModel(entry, target)) : undefined;
     if (!target || routeSupportsAccount(row.route) || item?.use_local || / \(local\)$/.test(target)
         || tierPriced(row.processing_preference || processingPreference)) return '';
-    // A row its own source listed is known even when another source of the read failed (a partial catalog).
+    if (rate) return priceWords(item?.price, { unit: true });
+    // A row its own source listed is known even when another source of the read failed (a partial catalog, or a failed
+    // read that kept the earlier rows); a model no read listed is unknown only once the catalog is read whole.
     return modelPriceWords(item, { unit: true }) || (item || catalog.read_state === 'ok' ? translateString(PRICE_UNKNOWN) : '');
 }
 

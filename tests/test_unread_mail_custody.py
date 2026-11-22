@@ -105,7 +105,7 @@ def test_unread_custody_is_a_union_at_both_replica_seams(tmp_path):
     assert sorted(_msg_ids(load_task_result(data, TASK)["unread_mailbox"])) == ["m1", "m2"]
 
 
-def test_forward_to_a_queued_task_is_read_when_it_starts_and_kept_if_it_never_does(tmp_path):
+def test_reply_to_a_previously_running_child_is_queued_until_it_checks_its_mailbox(tmp_path):
     import queue as queue_mod
 
     from ouroboros.loop_round_limits import _drain_incoming_messages
@@ -113,18 +113,22 @@ def test_forward_to_a_queued_task_is_read_when_it_starts_and_kept_if_it_never_do
 
     data = tmp_path / "data"
     drive = headless.prepare_task_drive(data, TASK, "forked")
-    write_task_result(data, TASK, "scheduled", child_drive_root=str(drive), parent_task_id="parent1",
+    write_task_result(data, TASK, "running", child_drive_root=str(drive), parent_task_id="parent1",
                       root_task_id="parent1", delegation_role="subagent")
+    assert owner_mailbox.write_task_message(data, "Which logs?", "parent1", source_task_id=TASK,
+                                           provenance=owner_mailbox.PROVENANCE_PEER_TASK, relation="parent")
+    write_task_result(data, TASK, "scheduled", reason_code="model_sleeping")
     ctx = SimpleNamespace(drive_root=data, task_id="parent1", task_metadata={})
 
     receipt = _forward_to_worker(ctx, TASK, "start with the logs")
 
-    assert "(queued)" in receipt and "has not started, so nothing has read it" in receipt
+    assert "written to its mailbox (queued). Read status is unconfirmed." in receipt
+    assert "has not started" not in receipt
     rows, complete = task_custody.unread_mail_rows(drive, TASK)
     assert complete and json.loads(rows[0])["text"] == "start with the logs"
     msg_id = json.loads(rows[0])["msg_id"]
     assert owner_mailbox.mail_read_state(drive, TASK, msg_id) is False
-    # Its first round reads (and acknowledges) it like any running delivery.
+    # The next drain supplies separate evidence that the child read the reply.
     messages: list = []
     _drain_incoming_messages(messages, queue_mod.Queue(), drive, TASK, None, set())
     assert "start with the logs" in json.dumps(messages) and owner_mailbox.mail_read_state(drive, TASK, msg_id) is True
@@ -132,7 +136,7 @@ def test_forward_to_a_queued_task_is_read_when_it_starts_and_kept_if_it_never_do
 
 def test_forward_to_a_queued_task_cancelled_before_start_is_held_unread_as_its_exact_row(tmp_path):
     """TZ-2 B5 acceptance: the real ``_forward_to_worker`` writes to a queued task and says
-    only that (queued; nothing has read it); the supervisor's pending drop then cancels the
+    only that the write was queued; the supervisor's pending drop then cancels the
     task before it ever starts; the result reader shows the message as unread mail and the
     authority carries the exact mailbox row. Nothing acknowledged it and nothing says "read"."""
     from ouroboros.tools.control_task_results import _get_task_result
@@ -146,7 +150,7 @@ def test_forward_to_a_queued_task_cancelled_before_start_is_held_unread_as_its_e
 
     receipt = _forward_to_worker(ctx, TASK, "start with the logs — then the config")
 
-    assert f"({owner_mailbox.MAIL_QUEUED})" in receipt and "has not started, so nothing has read it" in receipt
+    assert f"({owner_mailbox.MAIL_QUEUED}). Read status is unconfirmed." in receipt
     assert "delivered" not in receipt and "next checkpoint" not in receipt
     raw = owner_mailbox._mailbox_path(drive, TASK).read_text(encoding="utf-8")
     assert raw.count("\n") == 1 and raw.endswith("\n")

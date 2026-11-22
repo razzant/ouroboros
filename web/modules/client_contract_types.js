@@ -12,7 +12,13 @@
  * @property {string=} post_commit_failed
  */
 /**
+ * @typedef {Object} ReplyExcerpt
+ * @property {string} text
+ * @property {number} start_utf16
+ */
+/**
  * @typedef {Object} ChatInbound
+ * @property {ReplyExcerpt=} reply_excerpt
  * @property {string=} reply_to
  * @property {"chat"} type
  * @property {string} content
@@ -171,7 +177,7 @@
  * @property {Object} modelAccounts
  * @property {Object} modelContextWindows
  * @property {string} processingPreference
- * @property {Object} modelProcessingPreferences
+ * @property {Object} modelProcessingPreferences  Role tiers; only `.main` may also be `ultrafast`
  * @property {string[]} automaticModels Model-slot stateKeys neither the document nor an operator's variable sets.
  */
 
@@ -224,7 +230,7 @@
  * @property {import('./api_types.js').AvailableSubagentsSettingsMeta=} available_subagents
  * @property {SettingsPolicyState=} policy_state
  * @property {SettingsRestartState=} restart_state Component application and source uncertainty.
- * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
+ * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string,revision?:string}[]=} connections Every API connection as the picker shows it, with its opaque revision.
  * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
  * @property {string[]=} known_spend_gaps What spends money the limits cannot count: roles whose route has no known price.
  * @property {Array<{name: string, condition: string}>=} partly_counted_spend What they count only under a price condition (`off_peak_usd`, `usd`).
@@ -404,6 +410,7 @@
  * @property {string=} host_facts
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {string=} answer_row_address  // the answer's own row, shown on this card (DESIGN "Replies")
  * @property {string=} owner_wait_state
  * @property {string=} owner_wait_resume_reason
  */
@@ -421,9 +428,12 @@
 /**
  * A `reply_to` reference as the host resolved it; an unresolved one is `{address, unresolved: true}`.
  * @typedef {Object} ChatReplyReference
+ * @property {string=} row_sha256  // full digest of the resolved source row
+ * @property {ReplyExcerpt=} excerpt
  * @property {string=} address
  * @property {number=} chat_id
  * @property {'user'|'assistant'|'system'=} role
+ * @property {'user'=} quote_role  // the owner's ink on a recorded card answer
  * @property {string=} author_label
  * @property {string=} kind
  * @property {string=} snippet
@@ -431,30 +441,56 @@
  * @property {string=} ts
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
+ * @property {(number|null)=} telegram_room_chat_id  // the owner bot's Reply only: its Project's turn, 0 its chat's own, null refused
  * @property {boolean=} unresolved
  */
 
 /**
- * A host notice on a System row (ouroboros/host_notice.py): the row's `text` is its one phrase.
- * @typedef {Object} HostNotice
- * @property {string=} code  // the notice's stable code
- * @property {string=} step  // the owner's next step, a key of host_notice.STEPS; absent = no step
- * @property {string=} details  // the raw facts behind Details
- * @property {string=} line  // phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
+ * Facts frozen on one published ending. Its `ts` is the publication time.
+ * @typedef {Object} HistoricalTerminal
+ * @property {string} status
+ * @property {'done'|'warn'|'error'|'cancelled'} phase
+ * @property {string} ts
+ * @property {'canonical_task_result_after_finalization'} provenance
+ * @property {Object=} model_execution
+ * @property {number=} task_attempt
+ * @property {Object=} terminal_time
+ * @property {Object=} terminal_delivery
+ * @property {string=} wake_summary
+ * @property {string=} suggested_name
+ * @property {string=} schedule_name
+ * @property {Object=} place_origin
+ * @property {boolean=} wake_silent
+ * @property {boolean=} quiet_effective
+ * @property {boolean=} schedule_report_only
+ */
+
+/** Additive task-ending fields of a history row.
+ * @typedef {Object} TaskOutcomeHistoryFields
+ * @property {'working'|'done'|'warn'|'error'|'cancelled'=} outcome_phase
+ * @property {boolean=} outcome_final
+ * @property {number=} task_attempt
+ * @property {(string|Object)=} task_outcome
+ * @property {Object=} current_outcome  // its own attempt and terminal_time, never the publication's
+ * @property {HistoricalTerminal=} historical_terminal
+ * @property {Object=} model_execution
+ * @property {Object=} terminal_delivery
+ * @property {{v: 1, occurred_at: ?string, source: 'executor_terminal'|'supervisor_cancel'|'unknown', attempt: Object}=} terminal_time
  */
 
 /**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
- * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
+ * task-progress, outcome and `notice` fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
  * (`quiz_answer`, `quiz_closed`, `task_evidence`, or `summary_kind` + `historical_terminal`) are never shown.
  * @typedef {Object} ChatHistoryMessage
  * @property {PlaceHistoryFacts=} place_history
  * @property {PresenceContact=} presence_contact
  * @property {string=} wait_ended_at
  * @property {string=} row_address
+ * @property {boolean=} reply_excerpt_disabled  // a mixed or wordless card display, not one authored passage
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
  * @property {ChatReplyReference=} reply_to
- * @property {HostNotice=} notice  // a host notice: code, step, details and its line in the install's language
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
@@ -479,7 +515,10 @@
  * @property {boolean=} text_placeholder
  * @property {Object=} chat_annotation
  * @property {string=} origin_id
+ * @property {string=} source_row_address
  * @property {boolean=} origin_projected
+ * @property {('owner_press'|'owner_card_input'|'owner_quiz_answer'|'owner_mailbox')=} opening_input_kind  // retained card input, not bubble text
+ * @property {number=} chat_id  // on that copy: the room its original was written in (its receipt's room)
  * @property {('document'|'photo'|'video'|'links'|'quiz'|'card')=} msg_type
  * @property {string=} filename
  * @property {string=} mime
@@ -492,8 +531,27 @@
  * @property {ChatHistoryQuiz=} quiz
  * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
- * @property {Object=} historical_terminal
- * @property {Object=} current_outcome  // current terminal outcome projection, distinct from historical_terminal
+ * @property {boolean=} schedule_report_only  // terminal card links to a saved report, not a transcript message
+ * @property {string=} status
+ * @property {string=} task_terminal_status
+ * @property {string=} task_phase
+ * @property {number=} task_attempt
+ * @property {(string|Object)=} task_outcome
+ * @property {HistoricalTerminal=} historical_terminal
+ * @property {Object=} current_outcome  // separately scoped by its own task_attempt and terminal_time when known
+ * @property {Object=} terminal_time
+ * @property {Object=} terminal_delivery  // scope="task" for unbound debt, preserved_path=null for an unverified copy
+ * @property {string=} reason_code
+ * @property {Object=} outcome_axes
+ * @property {boolean=} _result_text_present
+ * @property {string[]=} delegated_runs_unreconciled
+ * @property {Object=} review_projection
+ * @property {string=} wake_summary
+ * @property {string=} suggested_name
+ * @property {string=} schedule_name
+ * @property {Object=} place_origin
+ * @property {boolean=} wake_silent
+ * @property {boolean=} quiet_effective
  * @property {Object=} model_waits
  * @property {boolean=} lifecycle_virtual
  * @property {Object=} review_group
@@ -752,6 +810,7 @@
  * @property {string=} model  // kind "model" only: the raw route, its source included
  * @property {boolean=} use_local  // kind "model" only
  * @property {string=} project_id
+ * @property {MainBindingConditions=} if_unchanged  // Main only: the binding read the owner chose on
  */
 /**
  * A room follows Main or chooses a route; following is a reference, never the same model pinned.
@@ -782,10 +841,21 @@
  */
 
 /**
+ * `GET /api/settings` read tokens of Main's binding as the owner was shown it, compared under the writer's lock.
+ * @typedef {Object} MainBindingConditions
+ * @property {string} OUROBOROS_MODEL
+ * @property {string} USE_LOCAL_MAIN
+ * @property {string} OUROBOROS_MODEL_ACCOUNTS
+ * @property {string} OUROBOROS_MODEL_PROCESSING_PREFERENCES
+ * @property {string=} ultrafast  // confirmed JSON [model, local, pin, store, fingerprint]; Auto binds no membership
+ * @property {string=} connection  // the shown `_meta.connections[].revision` of the route's API connection
+ */
+/**
  * A room's processing tier for its new owner work, or Main's own without `project_id`; '' is Default.
  * @typedef {Object} OwnerChatProcessingRequest
  * @property {""|"standard"|"fast"|"economy"|"ultrafast"} processing
  * @property {string=} project_id
+ * @property {MainBindingConditions=} if_unchanged  // Main Ultrafast only
  */
 /**
  * A Project's answer carries its tier; Main's own carries Main's tier, what it was, and what Default resolves to.
@@ -794,8 +864,8 @@
  * @property {string} project_id  // '' for Main
  * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} processing_choice  // Project response
  * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} previous_processing_choice
- * @property {""|"standard"|"fast"|"economy"=} main_processing  // Main response: Main's own tier (a Settings value)
- * @property {""|"standard"|"fast"|"economy"=} previous_main_processing
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} main_processing  // Main response: Main's own tier (a Settings value)
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} previous_main_processing
  * @property {""|"standard"|"fast"|"economy"=} processing_default  // what Default resolves to
  */
 
@@ -968,8 +1038,12 @@
  * @property {Object=} source_ref
  * @property {*=} origin_absent
  * @property {string=} source_text
+ * @property {boolean=} source_projectable
+ * @property {Array<Object>=} source_attachments
+ * @property {string=} source_channel
+ * @property {boolean=} source_text_placeholder
+ * @property {Object.<string,(string|Object)>=} source_input  // bound card kind, asker, label and exact submitted content/fields
  */
-
 /**
  * `handoff_id` is derived by the core from the project, the task and its origin message, so a repeat
  * for the same task answers the same id; it is not a caller key.
@@ -1110,8 +1184,8 @@
  */
 
 /**
- * The optional body of `POST /api/tasks/{task_id}/resume`: held calls whose outcome is unknown
- * (a refusal's `acceptable_unknown`) the owner goes on past, and why. Recorded, never re-run.
+ * Send back the opaque IDs offered in this saved task's refusal, with a reason. Do not reconstruct an ID.
+ * For a delegated start, external work and costs may continue.
  * @typedef {Object} TaskResumeRequest
  * @property {string[]=} accept_unknown
  * @property {string=} reason
@@ -1137,6 +1211,7 @@
  * @property {string=} released_hold
  * @property {boolean=} held  // a Continue back in its writer wait: it starts by itself once `blockers` settle
  * @property {Array<Object>=} blockers
+ * @property {Array<Object>=} accepted_start_risks
  * @property {{rows: Array<{task_id: string, reason: string}>, count: number}=} membership_gaps
  * @property {string=} message
  */
@@ -1161,6 +1236,7 @@
  * @typedef {Object} CardOutbound
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {string=} reply_author_label
  * @property {ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
@@ -1518,7 +1594,6 @@
  * @property {boolean} saved  // always true
  * @property {string} post_commit_failed
  */
-
 /** @typedef {Object} SettingsSaveRequest Open partial document of setting keys.
  * @property {Object<string, string>=} if_unchanged
  * @property {string[]=} unset

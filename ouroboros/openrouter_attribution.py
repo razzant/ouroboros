@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlsplit
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"  # the public endpoint; ``llm_routing`` re-exports it
 OPENROUTER_APP_URL = "https://ouroboros-agent.ai/"
 OPENROUTER_APP_TITLE = "Ouroboros"
 OPENROUTER_APP_CATEGORIES = ("personal-agent", "programming-app")

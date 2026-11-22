@@ -36,6 +36,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     command_timeout_notice: ['⏱️ The separate per-call ceiling'],
     review_enforcement_notice: ['⚙️ This install had reviews set to Blocking.'],
     model_cap_notice: ['⚙️ "Requests at once per model" held 3 '],
+    subagent_cap_notice: ['⚙️ "At once, for one task" held 6 '],
     light_local_box_notice: ['⚙️ An empty Light model now follows its “Use the local model for this role” box everywhere.'],
     budget_notice: ['🚫 Model budget reached. '],
     runtime_liveness_notice: ['⚠️ A chat turn looks wedged '],

@@ -1,4 +1,4 @@
-/** Import an MCP client file into the tool servers of Settings: preview, select, then Apply saves the chosen ones. */
+/** Import an MCP client file on the MCP servers page of Extensions: preview, select, then Apply saves the chosen ones. */
 import { previewMcpImport } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindDialogFocus } from './ui_interactions.js';
@@ -89,14 +89,14 @@ function renderEntry(entry, number, { checked, draftUrl }) {
 export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, onApply }) {
     return new Promise((resolve) => {
         const backdrop = document.createElement('div');
-        backdrop.className = 'marketplace-modal-backdrop';
+        backdrop.className = 'ui-modal-backdrop';
         backdrop.innerHTML = `
-            <div class="marketplace-modal mcp-import-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title">
-                <div class="marketplace-modal-head">
+            <div class="ui-modal mcp-import-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title">
+                <div class="ui-modal-head">
                     <h3 id="mcp-import-title">Import mcp.json</h3>
                     <button type="button" class="btn btn-default btn-sm" data-mcp-import-cancel aria-label="Close">Close</button>
                 </div>
-                <div class="marketplace-modal-body">
+                <div class="ui-modal-body">
                     <p class="settings-section-copy">Paste a document with a top-level <code>mcpServers</code> or <code>servers</code> object.
                         Preview shows what would change; choose the servers to apply. Apply saves the chosen servers.
                         Preview and Apply never connect or start anything; Test on a server's page checks it. New servers
@@ -110,7 +110,7 @@ export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, on
                     <div class="settings-inline-status" data-mcp-import-status role="status" hidden></div>
                     <ul class="mcp-tools-list mcp-import-preview" data-mcp-import-preview hidden></ul>
                 </div>
-                <div class="marketplace-modal-actions">
+                <div class="ui-modal-actions">
                     <button type="button" class="btn btn-default" data-mcp-import-cancel>Cancel</button>
                     <button type="button" class="btn btn-default" data-mcp-import-preview-btn>Preview</button>
                     <button type="button" class="btn" data-primary data-mcp-import-apply disabled>Apply</button>
@@ -127,7 +127,7 @@ export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, on
         let settled = false;
         let disposeFocus = () => {};
         let controller = null;
-        const pageChanged = (event) => { if (event.detail?.page !== 'settings') finish(null); };
+        const pageChanged = (event) => { if (event.detail?.page !== 'skills') finish(null); };
         const pageHidden = () => finish(null);
         const setStatus = (message, tone = 'muted') => {
             statusEl.textContent = message || '';

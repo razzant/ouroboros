@@ -142,7 +142,16 @@ class LiveConversationTurn(RealtimeTurn):
             work = _LoopWork()
             work.task = asyncio.current_task()
             with extension_work_scope(self.feature, work):
-                children = ()
+                children = []
+                completed = False
+
+                async def settle():
+                    try:
+                        # Drain both children without letting a losing child replace the call's outcome.
+                        await asyncio.gather(*children, return_exceptions=True)
+                    finally:
+                        await host.finish()
+
                 try:
                     # The host is now registered: catch a disable during ordinary
                     # preparation, while the hook covers any subsequent write.
@@ -154,12 +163,15 @@ class LiveConversationTurn(RealtimeTurn):
                         raise RealtimeSetupError("calls_disabled", "Calls (beta) are off.")
                     await host.check()
                     runner = asyncio.create_task(self.feature["handler"](host))
+                    children.append(runner)
                     controls = asyncio.create_task(host.watch_controls())
-                    children = (runner, controls)
+                    children.append(controls)
                     done, _ = await asyncio.wait((runner, controls), return_when=asyncio.FIRST_COMPLETED)
                     if controls in done:
                         await controls
-                    return await runner
+                    result = await runner
+                    completed = True
+                    return result
                 finally:
                     # No new mail once the receive loop ends, including while
                     # tool custody and terminal-result post-work still run.
@@ -167,14 +179,13 @@ class LiveConversationTurn(RealtimeTurn):
                     for child in children:
                         if not child.done():
                             child.cancel()
-                    for child in children:
-                        try:
-                            await joined(child)
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    # join any already-started tool invocation; cancellation of
-                    # its await cannot make an executing effect disappear.
-                    await host.finish()
+                    try:
+                        # A late cancellation of this waiter cannot abandon owned tool work.
+                        await joined(settle())
+                    except asyncio.CancelledError:
+                        if completed:
+                            raise  # do not turn cancellation during teardown into a normal close
+                        # A typed stop or failure already unwinding remains the primary reason.
 
         reason, status, detail = "finished", "ok", ""
         failure = None

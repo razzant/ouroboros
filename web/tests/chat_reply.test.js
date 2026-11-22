@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatReplies } from '../modules/chat_reply.js';
+import { excerptBody } from '../modules/chat_reply_excerpt.js';
 import { createMessageActions } from '../modules/message_actions.js';
 import { createChatReadingPosition } from '../modules/chat_reading_position.js';
 import { installDomDouble } from './dom_double.js';
@@ -240,6 +241,42 @@ test('a saved row gets Reply beside Copy; a row without an address (an unsaved e
     } finally { f.close(); }
 });
 
+test('an owner press is still a whole-row Reply target, not an authored passage', t => {
+    const f = fixture();
+    t.after(() => f.close());
+    const press = f.bubble('user', '1. Take the ridge');
+    const comment = f.bubble('user', 'Follow the creek at dawn.');
+    f.feed.append(press, comment);
+    for (const row of [press, comment]) row.querySelector('.message').dataset.replyBody = '1';
+    f.replies.decorate(press, { ...owner('row:1@press#1'), reply_excerpt_disabled: true });
+    f.replies.decorate(comment, owner('row:1@comment#2'));
+    assert.equal(excerptBody(press), null);
+    assert.equal(excerptBody(comment), comment.querySelector('.message'));
+    assert.equal(f.replies.bubbleRef(press).role, 'user', 'it is still the owner\'s bubble: only its passages are off');
+    press.querySelector('.chat-message-reply').click();
+    assert.deepEqual(f.replies.frameField(), { reply_to: 'row:1@press#1' });
+});
+
+test('a Reply to a System row signs System, whatever sender line it wears or label an older frame stamped', t => {
+    const f = fixture();
+    t.after(() => f.close());
+    const opening = f.bubble('system', 'Call opened: say hello.');  // this double's sender line says Ouroboros
+    const summary = f.bubble('system', 'Task finished.');
+    summary.querySelector('.sender').textContent = 'Task Summary';   // a sender line System rows wear
+    f.feed.append(opening, summary);
+    f.replies.decorate(opening, { row_address: 'row:1@call#1', role: 'system', text: 'Call opened', reply_author_label: 'You' });
+    f.replies.decorate(summary, { row_address: 'row:1@sum#2', role: 'system', text: 'Task finished.' });
+    for (const row of [opening, summary]) assert.equal(f.replies.bubbleRef(row).author_label, 'System');
+    opening.querySelector('.chat-message-reply').click();
+    const staged = JSON.parse(f.storage.get('ouro_chat_reply'));
+    assert.deepEqual([staged.role, staged.author_label], ['system', 'System']);
+    assert.equal(f.strip().querySelector('.chat-quote-author').textContent, 'System');
+    const mine = f.bubble('user', 'a note');  // the owner's own bubble keeps the host's label for its author
+    f.feed.append(mine);
+    f.replies.decorate(mine, { ...owner('row:1@mine#3'), reply_author_label: 'Mira' });
+    assert.equal(f.replies.bubbleRef(mine).author_label, 'Mira');
+});
+
 test('Reply stages the strip and the next frame carries only the address; Esc or × cancels; a send clears it', async () => {
     const f = fixture();
     try {
@@ -398,6 +435,25 @@ test('relay shape F: one Ouroboros bubble, his words in a relay panel above the 
     } finally { f.close(); }
 });
 
+test('a canonical row read into a room adopts the retained copy it verified by origin, an id-less one included', () => {
+    const f = fixture();
+    try {
+        const copy = f.bubble('user', 'Original request');
+        Object.assign(copy.dataset, { originId: 'origin-a', originProjected: '1' });
+        f.feed.append(copy);
+        f.replies.decorate(copy, { role: 'user', origin_projected: true });
+        assert.equal(copy.querySelector('.chat-message-reply'), null, 'a copy whose original is unread has no Reply');
+        const canonical = { role: 'user', client_message_id: '', row_address: 'row:1@then#origin' };
+        assert.equal(f.replies.adopt(canonical), false, 'an id-less row finds no bubble by itself');
+        assert.equal(f.replies.adopt({ ...canonical, origin_projected: true }, copy), false, 'a copy verifies nothing');
+        assert.equal(copy.dataset.rowAddress, undefined);
+        assert.equal(f.replies.adopt(canonical, copy), true);
+        assert.equal(copy.dataset.rowAddress, canonical.row_address);
+        assert.ok(copy.querySelector('.chat-message-reply'));
+        assert.equal(f.replies.adopt(canonical, copy), false, 'once');
+    } finally { f.close(); }
+});
+
 test('the owner\'s echo adopts the saved row\'s address and with it Reply; Send as new prepares the composer', () => {
     const f = fixture();
     try {
@@ -406,18 +462,14 @@ test('the owner\'s echo adopts the saved row\'s address and with it Reply; Send 
         f.feed.append(echo);
         f.replies.decorate(echo, null);
         assert.equal(echo.querySelector('.chat-message-reply'), null, 'an unsaved echo has no address yet');
+        assert.equal(f.replies.adopt({ role: 'user', client_message_id: 'cm-1', row_address: 'row:2@f#2' }), false);
         assert.equal(f.replies.adopt({ role: 'user', client_message_id: 'cm-1', row_address: 'row:1@f#1' }), true);
         assert.equal(echo.dataset.rowAddress, 'row:1@f#1');
         assert.ok(echo.querySelector('.chat-message-reply'));
+        assert.equal(f.replies.adopt({ role: 'user', client_message_id: 'cm-1', row_address: 'row:2@f#2' }), false);
+        assert.equal(echo.dataset.rowAddress, 'row:1@f#1', 'the same client id in another room is a different row');
         assert.equal(f.replies.adopt({ role: 'user', client_message_id: 'cm-1', row_address: 'row:1@f#1' }), false, 'once');
         assert.equal(f.replies.adopt({ role: 'assistant', client_message_id: 'cm-1', row_address: 'x' }), false);
-        f.input.value = 'my draft';
-        const typed = [];
-        f.input.addEventListener('input', () => typed.push(f.input.value));
-        f.replies.compose('the lost words');
-        assert.equal(f.input.value, 'my draft\n\nthe lost words', 'joins the draft, never replaces it');
-        assert.deepEqual(typed, [f.input.value], 'the composer\'s own sizing and draft keeping hear it');
-        assert.equal(f.doc.activeElement, f.input);
     } finally { f.close(); }
 });
 

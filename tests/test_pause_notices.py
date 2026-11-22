@@ -71,6 +71,24 @@ def test_confirmed_pause_persists_system_row_and_repeated_confirmation_does_not_
     assert not _owing(root) and not obligations.members(root, "pause_notice_receipts")
 
 
+def test_a_saved_tasks_start_decision_reaches_its_history_once(notices):
+    from ouroboros import delegate_custody as custody
+    from tests._owner_pause_ended_helpers import REASON, _decide, _pending
+
+    root, _sent = notices
+    start = _pending(root, "task", "lost", tree="task")
+    assert _decide(root, start)
+    assert _owing(root) == {"task"}
+    pause_notices.reconcile_pause_notices(root)
+    assert _decide(root, start)
+    pause_notices.reconcile_pause_notices(root)
+    row, = _rows(root)
+    assert row["task_id"] == "task" and row["chat_id"] == 1
+    assert row["card_row_id"] == "pause:task:delegate_start:task/task/lost"
+    assert "The owner accepted" in row["text"] and REASON in row["text"] and "spending money" in row["text"]
+    assert custody.invocation_record(root, "lost")["state"] == "pending" and not _owing(root)
+
+
 def test_resume_and_second_pause_preserve_both_owed_episodes(notices):
     root, sent = notices
     _pause(root)

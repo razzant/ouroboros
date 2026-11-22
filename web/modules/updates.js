@@ -4,7 +4,7 @@ import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, updateTarget, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, checkFailureReason, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, updateTarget, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -325,34 +325,18 @@ const LETTER_HIDDEN_VERDICTS = new Set(['unmanaged']);
 const LETTER_HIDDEN_PHASES = new Set(['restarting']);
 const LETTER_BUSY_PHASES = new Set(['preflighting', 'updating', 'restarting']);
 const LETTER_RELATIONS = new Set(['pending', 'applied', 'superseded', 'other']);
-// The request's own ordinary task statuses during which it may still save.
-const LIVE_REQUEST_STATUSES = new Set(['requested', 'scheduled', 'running', 'interrupted', 'cancel_requested']);
-// `applied` is the one relation whose label changes: the running version IS
-// the description's target, so the text is history, not a preview. With no
-// offer, text of another target than the retained material Write names reads
-// "Earlier update"; of that target from another base, "Different range".
-const LETTER_LABELS = {
-    pending: "What's new",
-    applied: 'What changed in this version',
-    superseded: "What's new",
-    other: "What's new",
-};
+// The request's own task statuses during which it may still save, and what each says: only `running` writes; the rest
+// wait to run (paused or held among them: the task's door shows which), were interrupted, or are asked to stop.
+const LIVE_REQUEST_STATUSES = new Map([['requested', 'is waiting to run'], ['scheduled', 'is waiting to run'],
+    ['running', 'is still running'], ['interrupted', 'was interrupted'], ['cancel_requested', 'has been asked to stop']]);
+// `applied` is the one relation whose label changes: the running version IS the description's target, so the text is
+// history, not a preview. Text of another range than the update the section concerns reads "Earlier update", of
+// that target from another base "Different range", whether or not an update is on offer.
+const LETTER_LABELS = { pending: "What's new", applied: 'What changed in this version', superseded: "What's new", other: "What's new" };
 
 function noLetterView() {
-    return {
-        state: 'none',
-        relation: '',
-        markdown: '',
-        meta: { authorVersion: '', targetVersion: '', writtenAt: '', ageText: '' },
-        failure: null,
-        label: '',
-        note: '',
-        covers: '',
-        writeKey: null,
-        action: null,
-        rewrite: null,
-        request: null,
-    };
+    return { state: 'none', relation: '', markdown: '', meta: { authorVersion: '', targetVersion: '', writtenAt: '', ageText: '' },
+        failure: null, label: '', note: '', covers: '', writeKey: null, action: null, rewrite: null, request: null };
 }
 
 const shortRange = (key) => (key?.base_sha && key?.target_sha
@@ -367,6 +351,7 @@ function requestView(letter) {
     return { taskId: String(request.current_task_id || request.task_id), mode: String(request.mode || ''), key: request.key || {},
         requestedAt: String(request.requested_at || ''), status, saved: request.saved === true,
         live: LIVE_REQUEST_STATUSES.has(status), unknown: status === 'unknown',
+        stopping: request.cancel_state === 'pending' || status === 'cancel_requested',
         held: LIVE_REQUEST_STATUSES.has(status) || status === 'unknown' };
 }
 
@@ -397,8 +382,23 @@ export function lastObservedAttempt(status) {
 function endedRequestNote(request) {
     if (!request || request.held || request.saved) return '';
     const how = { completed: 'finished', failed: 'failed', cancelled: 'was stopped' }[request.status];
-    return how ? `The last writing task ${how} without saving a description.`
-        : 'The last writing task left no readable result; nothing was saved.';
+    return how ? `The last description task ${how} without saving a description.`
+        : 'The last description task left no readable result; nothing was saved.';
+}
+
+// Who writes for which range: the request's task in its own state, its range named unless it writes the update the
+// section concerns. Only a running task with no Stop being carried out (`cancel_state` pending, or a legacy
+// cancel_requested beside the honest status) writes; unknown is never running, a landed save prepares nothing.
+function writerNote(request, own, replacing) {
+    if (!request?.held) return '';
+    const range = own ? '' : shortRange(request.key), of = range ? ` of ${range}` : '', id = request.taskId;
+    if (request.unknown) return `The description task’s status is unknown (task ${id}); no new author will be `
+        + `requested until its status can be read.${range ? ` That task covers ${range}.` : ''}`;
+    const state = request.stopping ? 'has been asked to stop' : LIVE_REQUEST_STATUSES.get(request.status);
+    const asked = attemptTime(request.requestedAt), what = `description${of}${asked ? ` you asked for on ${asked}` : ''}`;
+    if (request.saved) return `Ouroboros saved the description${of}; its task (${id}) ${state}.`;
+    return `${request.status === 'running' && !request.stopping ? `Ouroboros is writing the ${what}` : `The ${what} is `
+        + `not saved yet; its task ${state}`} (task ${id}).${replacing ? ' The displayed text stays until its replacement is saved.' : ''}`;
 }
 
 // A press that got no usable answer. Only an answer that establishes the refusal says nothing was asked: a 400, or the
@@ -418,9 +418,8 @@ export function requestFailureText(err) {
 // in place. The headline says it over that check's own answer; once a newer read replaced that answer, the hint keeps
 // saying it until a later check or a newer recorded one (render).
 export function checkFailure(answer, previous, error = null) {
-    const text = error?.unreadable ? 'the response to the update check could not be read'
-        : error ? String(error.message || error) : ((answer?.warnings || []).join(', ') || 'the check did not complete');
-    return { at: new Date().toISOString(), checkedAt: String(previous?.checked_at || ''), text };
+    return { at: new Date().toISOString(), checkedAt: String(previous?.checked_at || ''),
+        text: checkFailureReason(answer, error) };
 }
 
 // The headline's ordinary check (nothing applying, recovering or unread) is Check and describe: the server checks,
@@ -494,9 +493,14 @@ export function updateLetterView(data = {}, phase = '', operation = {}) {
             failedAt: String(letter.failed_at || ''), key: failedKey || null } : null;
     // The range the section concerns: the update on offer, else its retained material, else the shown text's own.
     const writeKey = offered || consumed || (markdown && letter.key?.base_sha ? letter.key : null);
-    const otherRange = Boolean(markdown && writeKey && !sameRange(letter.key, writeKey));
-    // A different starting version can change the range even when the target stays the same.
-    const otherBase = Boolean(otherRange && letter.key?.target_sha === writeKey.target_sha);
+    // Which text this is and who writes are two comparisons with the package found (the update on offer, also when only
+    // the status's own check names it, else the retained material); another start makes another range for one target.
+    // The host's description_current (the text's range is the running base to the checked target) settles the first.
+    const found = offered || consumed || (canDescribe && !unknownOffer && runningBase && latestTarget
+        && runningBase !== latestTarget ? checkedRange : null), subject = found || writeKey;
+    const otherRange = Boolean(markdown && !descriptionCurrent && subject && !sameRange(letter.key, subject));
+    const otherBase = Boolean(otherRange && letter.key?.target_sha === subject.target_sha);
+    const movedPast = Boolean(markdown && !found && !unknownOffer && !descriptionCurrent && relation !== 'applied');
     const rewriting = Boolean(writeKey && markdown && sameRange(letter.key, writeKey));
     const held = request?.held || operation.taskId;
     const busy = Boolean(operation.pending) || !(DESCRIBING_CHECKS.has(verdict.state)
@@ -512,48 +516,34 @@ export function updateLetterView(data = {}, phase = '', operation = {}) {
     // Asking again for the shown text names its own range, an earlier update's included, whatever is on offer.
     const rewrite = markdown && letter.key?.base_sha && letter.key?.target_sha && !held
         ? { mode: 'rewrite', key: letter.key, label: 'Rewrite', disabled: busy } : null;
-    let note = '';
+    // A request writes the update the section concerns only for exactly its range; an ended one speaks only of that.
+    const samePackage = Boolean(request && sameRange(request.key, subject));
+    const ended = !data.letter_unavailable && samePackage ? endedRequestNote(request) : '';
+    let textNote = '';
     if (data.letter_unavailable) {
-        note = markdown ? 'Showing the last readable description until the next successful refresh.'
+        textNote = markdown ? 'Showing the last readable description until the next successful refresh.'
             : 'The next successful refresh will show whether a description is available.';
-    } else if (request?.unknown) {
-        note = `The writing task’s status is unknown (task ${request.taskId}); no new author will be requested until its status can be read.`;
-    } else if (request?.live) {
-        // Once its own save landed, the shown text is no longer the one waiting to be replaced. The time
-        // is the owner's press, a fixed fact: the task's own card (the note's door) shows what it does.
-        const asked = attemptTime(request.requestedAt);
-        note = request.saved ? `Ouroboros saved the description; its task (${request.taskId}) is still running.`
-            : `Ouroboros is writing the description${asked ? ` you asked for on ${asked}` : ''} (task ${request.taskId}).${
-                markdown ? ' The current text stays until the new one is saved.' : ''}`;
-        // A press finishes the update it found; one found since is asked for by the next press, after this task.
-        if (canDescribe && markdown && sameRange(letter.key, checkedRange) && shortRange(request.key)
-            && !sameRange(request.key, checkedRange)) {
-            note = `This description covers the checked update. The writing task (${request.taskId}) covers ${shortRange(request.key)}.`;
-        } else if (offered && request.key?.target_sha && !sameRange(request.key, offered)) {
-            note += ` The check found a different update range (${shortRange(offered)}); describe it after this task ends.`;
-        }
     } else if (failure) {
         const when = attemptTime(failure.failedAt);
-        note = `Refresh failed${when ? ` on ${when}` : ''}. ${markdown
-            ? 'Previous description kept.' : 'No description is available yet.'}`;
+        textNote = `Refresh failed${when ? ` on ${when}` : ''}. ${markdown ? 'Previous description kept.' : 'No description is available yet.'}`;
     } else if (!markdown) {
-        note = endedRequestNote(request) || 'No description of this update yet.';
-    } else if (otherBase) {
-        note = `This description covers the same target from another starting version (${shortRange(letter.key)}).`;
+        textNote = request?.held ? '' : ended || 'No description of this update yet.';
     } else if (otherRange) {
-        note = `This description covers an earlier update (${shortRange(letter.key)}).`;
-    } else if (!unknownOffer && !offered && !descriptionCurrent && relation !== 'applied' && !sameRange(letter.key, consumed)) {
-        // Text saved for the retained material keeps the old text's ancestry until a check: not earlier, not applied.
-        note = 'This description was written for an earlier update.';
-    }
-    const ended = !data.letter_unavailable && request && sameRange(request.key, writeKey) ? endedRequestNote(request) : '';
-    if (ended && markdown && !request.live) note = note ? `${note} ${ended}` : ended;
-    if (unknownOffer) {
-        const range = request?.held ? shortRange(request.key) : '';
-        note = [note, range ? `The writing task covers ${range}.` : '', verdict.state === 'unchecked'
-            ? 'The selected channel has not been checked yet.' : 'The current update range is not known.']
-            .filter(Boolean).join(' ');
-    }
+        textNote = `This description covers ${otherBase ? 'the same target from another starting version'
+            : 'an earlier update'} (${shortRange(letter.key)}).`;
+    } else if (movedPast) {
+        textNote = 'This description was written for an earlier update.';
+    } else if (offered && request?.held && !samePackage) textNote = 'This description covers the available update.';
+    if (ended && markdown) textNote = textNote ? `${textNote} ${ended}` : ended;
+    // With no writer at all, an update on offer whose text is not the one shown is said to have none coming.
+    const writer = data.letter_unavailable ? '' : writerNote(request, samePackage && !unknownOffer,
+        Boolean(markdown && request && sameRange(letter.key, request.key))) || (offered && markdown
+        && !sameRange(letter.key, offered) ? 'No request to describe the available update is open.' : '');
+    // A writer of another range holds the door; the update on offer is asked for by a press once that task ends.
+    const after = offered && request?.live && !samePackage && !(markdown && sameRange(letter.key, offered))
+        ? `The available update (${shortRange(offered)}) can be described once that task ends.` : '';
+    const note = [textNote, writer, after, !unknownOffer ? '' : verdict.state === 'unchecked'
+        ? 'The selected channel has not been checked yet.' : 'The current update range is not known.'].filter(Boolean).join(' ');
 
     return {
         state,
@@ -563,7 +553,7 @@ export function updateLetterView(data = {}, phase = '', operation = {}) {
         failure,
         descriptionCurrent,
         label: (unknownOffer || data.letter_unavailable) && markdown ? 'Saved description' : otherBase ? 'Different range'
-            : (otherRange && !offered ? 'Earlier update' : (LETTER_LABELS[relation] || "What's new")),
+            : (otherRange || movedPast ? 'Earlier update' : (LETTER_LABELS[relation] || "What's new")),
         note,
         covers: markdown ? shortRange(letter.key) : '',
         writeKey,
@@ -603,6 +593,10 @@ export function restartStatusCanSettle(data, { afterBootNotice = false } = {}) {
     return afterBootNotice || !RESTART_BOOT_PHASES.has(txPhase);
 }
 
+// The live `log` frames of a task's own lifecycle: its start (agent.py), its end and a pause after it parked
+// (events_task_done.py, events_budget.py). A Pause or Stop request is a durable record only.
+const REQUEST_CUES = new Set(['task_started', 'task_done', 'budget_scope_paused']);
+
 // Updates is mounted for the SPA lifetime. Keep its reconnect episode local:
 // update_status_ready is transient and can arrive from the old generation, so
 // it may reconcile a restart only after the socket has actually reopened.
@@ -631,9 +625,9 @@ export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadSt
             loadStatus({ fetchRemote: false, preservePhase: true });
         }
     });
-    // The requested description task ends through the ordinary task lifecycle;
-    // its own task_done (saved or not) is the one cue to read the status again.
-    // A host retry ends under its own id, naming the request as its root.
+    // The description task's own lifecycle frames cue a status read (its save sends update_progress_changed); a host
+    // retry's run under its own id with the request as root. The words follow that read, so a running task reads as
+    // running until it actually parks, and a Stop shows at the next status read (a frame, a reopen) as the host has it.
     listen('log', (msg) => {
         const evt = msg?.data;
         const ids = getRequestTaskIds();
@@ -642,10 +636,10 @@ export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadSt
         if (!evt || evt._historical || !ids.length || getPhase() === 'restarting') return;
         const matches = (id) => Boolean(id && (ids.includes(id) || id === continuedTaskId));
         const continued = evt.type === 'owner_continue_admitted' && matches(evt.predecessor_task_id);
-        const ended = evt.type === 'task_done'
+        const lifecycle = REQUEST_CUES.has(evt.type)
             && (matches(evt.task_id) || (matches(evt.root_task_id) && !evt.parent_task_id));
         if (continued && typeof evt.task_id === 'string') continuedTaskId = evt.task_id;
-        if (continued || ended) loadStatus({ fetchRemote: false, preservePhase: true });
+        if (continued || lifecycle) loadStatus({ fetchRemote: false, preservePhase: true });
     });
     listen('update_status_ready', () => {
         const phase = getPhase();
@@ -908,7 +902,7 @@ export function initUpdates({ mount, state, ws }) {
         // the status shows keeps its note while a check runs (the button says Checking…), and a press that got no
         // answer of its own says so beside it: that writer is not the press's answer.
         const cachedTask = latestStatus?.letter_unavailable && view.request?.held && view.request.taskId !== receipt?.taskId
-            ? `Last known writing task (${view.request.taskId}).` : '';
+            ? `Last known description task (${view.request.taskId}).` : '';
         const receiptNote = receipt?.text && !pendingDescription
             ? receipt.text + ' Current status could not be refreshed.' : '';
         const note = checking && !view.request?.held
@@ -1077,7 +1071,7 @@ export function initUpdates({ mount, state, ws }) {
     // All description doors retain a known receipt and the previous view when a passive read fails.
     // A receipt identifies the task; only a later status read can establish whether it is still running.
     async function reconcileDescriptionReply(reply) {
-        const text = { queued: 'Description requested', writing: 'The request found an existing writing task',
+        const text = { queued: 'Description requested', writing: 'The request found an existing description task',
             current: 'This check found a saved description for its range', no_update: 'This check found no update to describe' }[reply?.status];
         if (text) unrefreshedReceipt = { taskId: ['queued', 'writing'].includes(reply.status) ? reply.task_id : '',
             text: `${text}${reply.task_id ? ` (task ${reply.task_id})` : ''}.` };
@@ -1236,7 +1230,8 @@ export function initUpdates({ mount, state, ws }) {
                 statusRefreshNext = null;
                 if (!options.preservePhase) setPhase(options.fetchRemote ? 'checking' : 'loading');
                 try {
-                    const status = await (options.fetchRemote ? apiClient.updateCheck() : apiClient.updateStatus());
+                    const status = await (options.fetchRemote
+                        ? apiClient.updateCheck(latestStatus?.update_channel) : apiClient.updateStatus());
                     const data = retainUnreadLetter(status, latestStatus);
                     // The explicit check's own outcome: its failure outlives a newer read queued meanwhile (render).
                     if (options.fetchRemote) letterRefreshError = data?.check_ok === false ? checkFailure(data, latestStatus) : null;

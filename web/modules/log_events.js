@@ -3,15 +3,15 @@ import { formatUsd } from './storage_format.js';
 import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
-    failedStepHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase } from './task_reason_words.js';
+    handledRefusalHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase, configuredActorCauseKey, firstAttemptClauseKey } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
-import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
-export { taskCheckpointLabel } from './task_checkpoints.js';
+import { checkpointHasProgressRow, serviceCheckpointFacts, serviceStopCardRow, taskCheckpointIdentity, taskCheckpointLabel, waitEpisode } from './task_checkpoints.js';
+export { taskCheckpointLabel, serviceOutputLinksHtml } from './task_checkpoints.js';
 import { coordinatorRouteClause, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
-import { checkFailureView, redCheckPhrase } from './verification_presentation.js';
+import { checkFailureView, redCheckPhrase, toolStepDiagnostic } from './verification_presentation.js';
 import { hostRowDisplayText, hostTaskMessage, toolErrorDisplayText } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
@@ -126,7 +126,7 @@ export function compactModel(model = '') {
 // never travels bare.
 const SUBSTRATE_NOTE = {
     harness_used: 'custody evidence confirms a harness run',
-    harness_attempted: 'harness attempted, no delegated run succeeded',
+    harness_attempted: 'harness attempted; no successful run confirmed',
     native_only: 'no harness run recorded',
 };
 
@@ -309,6 +309,39 @@ export function childReportLabel(childStatus) {
         ? tr('subagent.report_to_parent', 'Report to parent') : '';
 }
 
+// Keep Show full's cause facts separate from its saved report and trace.
+export function childCauseFacts(evt) {
+    const fields = ['status', 'task_terminal_status', 'subagent_event', 'task_id', 'subagent_task_id', 'parent_task_id', 'root_task_id',
+        'reason_code', 'reason_detail', 'outcome_axes', 'terminal_plan_review_open', 'delegated_runs_unreconciled', 'task_completion',
+        'cancel_origin', 'review_status', 'artifact_status', 'terminal_origin', 'terminal_delivery', 'finalization_recovery',
+        '_result_text_present'];
+    const facts = Object.fromEntries(fields.filter(key => evt[key] !== undefined).map(key => [key, evt[key]]));
+    if (evt.artifact_bundle?.status !== undefined) facts.artifact_bundle = { status: evt.artifact_bundle.status };
+    if (Object.hasOwn(evt, 'result')) facts._result_text_present = typeof evt.result === 'string' && Boolean(evt.result);
+    return facts;
+}
+
+export function childLineCause(evt) {
+    const event = String(evt.subagent_event || '').toLowerCase(), debt = evt.delegated_runs_unreconciled;
+    const cancelled = evt.cancel_origin && (event === 'cancelled' || (event === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'));
+    // An origin-less cancel still names its cause when the frame records the earlier stop (#1061): the child's own
+    // lineage rides along in `evt`, so this clause proves the parent relation instead of the swept root.
+    const earlier = evt.outcome_axes?.execution?.earlier_stop;
+    const originless = !evt.cancel_origin && typeof earlier === 'string' && Boolean(earlier)
+        && (event === 'cancelled' || (event === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'));
+    const stopped = (evt.task_completion ?? evt.outcome_axes?.execution?.task_completion)?.action === 'stop';
+    const composed = cancelled || originless || stopped || taskStoppedWithSummary(evt) || evt.terminal_plan_review_open === true
+        || evt.outcome_axes?.execution?.plan_review || (['completed', 'completed_warn', 'failed'].includes(event) && (evt.outcome_axes || debt !== undefined))
+        || (event === 'cancelled' && Array.isArray(debt));  // an origin-less stop folds its custody debt; a stated list, [] too, answers the stamp — no actor
+    const record = cancelled && event === 'cancelled' && taskOutcomeSeverity(evt) !== 'cancelled'
+        ? { ...evt, task_terminal_status: 'cancelled', outcome_axes: { ...evt.outcome_axes, lifecycle: { status: 'cancelled' } } } : evt;
+    const codes = [];
+    const cause = composed ? taskReasonDetail(record, codes)
+        : evt.reason_code ? taskReasonPhrase(configuredActorCauseKey(evt.reason_code, evt.outcome_axes?.execution)) : '';
+    return { detail: [cause, reasonCodesNote(codes)].filter(Boolean).join('\n\n'),
+        lead: cancelled || originless || stopped || UNSTARTED_REASONS.has(String(evt.reason_code || '')) ? cause : '' };
+}
+
 // A cost in Logs reads as every call's cost on the Dashboard (storage_format.formatUsd); a zero says nothing and is
 // not shown (an absent amount neither), so only a real cost takes a place on the event's line.
 export function formatLogMoney(value) {
@@ -351,16 +384,6 @@ function compactJson(value, maxLen = 220) {
     } catch {
         return shortText(String(value), maxLen);
     }
-}
-
-function extractCommandText(args) {
-    if (!args || typeof args !== 'object') return '';
-    const cmd = args.cmd;
-    if (Array.isArray(cmd)) {
-        return cmd.map((part) => String(part || '').trim()).filter(Boolean).join(' ');
-    }
-    if (typeof cmd === 'string') return cmd;
-    return '';
 }
 
 // Legacy observations lack host identity: retain them separately rather than
@@ -439,9 +462,13 @@ function advisoryProceduralRefusal(record) {
 // the saved copy when one exists and says so when it does not. Twin: project_dialogue.terminal_delivery_clause.
 export function terminalDeliveryClause(delivery) {
     const state = String(delivery?.state || '');
+    if (state === 'exhausted' && delivery.scope === 'task') {
+        return tr('task.delivery.unidentified', 'Delivery attempts ran out for a terminal message from this task. The affected answer is unknown.');
+    }
     if (!TASK_CAUSE_PHRASES[`terminal_delivery_${state}`]) return '';
     const path = String(delivery?.preserved_path || '');
     return taskReasonPhrase(`terminal_delivery_${state}`) + (state !== 'exhausted' ? ''
+        : delivery.preserved_path === null ? '; the saved copy for this answer could not be verified.'
         : path ? `; a copy of the answer is saved at ${path}.` : '; no copy of the answer could be saved.');
 }
 
@@ -455,8 +482,9 @@ const causePhraseLookup = (key) => (TASK_CAUSE_PHRASES[String(key || '')] ? task
 const CUSTODY_DEBT_REASON = 'delegated_custody_unreconciled';
 
 function custodyDebtReason(record) {
-    const raw = String(record?.reason_code || '');
-    const typed = String(record?.outcome_axes?.execution?.reason_code || '');  // a stamp read back names no cause
+    const word = (value) => (typeof value === 'string' ? value : '');  // an array never coerces to a matching code
+    const raw = word(record?.reason_code);
+    const typed = word(record?.outcome_axes?.execution?.reason_code);  // a stamp read back names no cause
     const debt = record?.delegated_runs_unreconciled;
     return [
         raw === CUSTODY_DEBT_REASON ? (typed === CUSTODY_DEBT_REASON ? '' : typed) : raw,
@@ -528,16 +556,17 @@ export function taskReasonCodes(evt) {
 export function taskReasonDetail(evt, codes = []) {
     const phrase = (code) => describedCause(code, codes);
     const record = normalizeTaskTerminalRecord(evt);
-    const decision = record.outcome_axes?.review?.acceptance_decision
-        ?? record.review_status?.acceptance_decision;
+    const canonicalReview = record.outcome_axes?.review, decision = canonicalReview != null
+        ? canonicalReview.acceptance_decision : record.review_status?.acceptance_decision;  // the legacy carrier is read only when the canonical axis is absent
     const severity = taskOutcomeSeverity(evt);
     const decisionCause = String(decision?.reason || '');
     const { objective, execution } = record.outcome_axes || {};
     const completion = record.task_completion ?? record.outcome_axes?.execution?.task_completion;
     const [storedReason, custody] = custodyDebtReason(record);
-    const typedReason = String(record.outcome_axes?.execution?.reason_code || '');
-    const reason = ['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON
-        ? (typedReason || storedReason) : storedReason;
+    const typedReason = typeof execution?.reason_code === 'string' ? execution.reason_code : '';
+    const earlier = severity === 'cancelled' ? execution?.earlier_stop : null;
+    const reason = ((['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON)
+        || (typedReason === 'cancelled' && storedReason === earlier)) ? (typedReason || storedReason) : storedReason;
     const origin = record.cancel_origin;
     const held = severity === 'error' && String(objective?.source || '').startsWith('plan_review_');
     const authorStop = completion?.action === 'stop' && record.outcome_axes?.execution?.status !== 'cancelled' && !Object.keys(origin || {}).length;
@@ -550,7 +579,7 @@ export function taskReasonDetail(evt, codes = []) {
         finalization_grace: 'acceptance_bypassed_deadline', deadline_local: 'acceptance_bypassed_deadline',
         provider_unavailable: 'acceptance_bypassed_provider_unavailable', context_overflow: 'acceptance_bypassed_context_overflow',
         children_unabsorbed: 'acceptance_bypassed_children_unabsorbed', owner_requested_finalization: 'acceptance_bypassed_owner_requested_finalization' };
-    let clause = '';
+    let clause = '', firstAttempt = '';  // firstAttempt: the first coding attempt's proven fact beside a different primary reason
     if (reason === 'foreign_install_root' && record.reason_detail) clause = String(record.reason_detail);
     else if (taskStoppedWithSummary(evt)) clause = '';
     else if ((severity === "cancelled" || ownerStopEnding(record)[1] === 'stop') && origin && typeof origin === "object"
@@ -558,15 +587,19 @@ export function taskReasonDetail(evt, codes = []) {
         clause = joinCauseClauses(cancelCauseClauses(origin, record));
     } else if (held) {
         clause = phrase(String(objective.reason || ''));
-    } else if (!reason || reason === 'final_message' || (authorStop && reason === 'plan_review_advisory')) {
+    } else if (!reason || reason === 'final_message' || (severity === 'cancelled' && reason === 'cancelled')
+        || (authorStop && reason === 'plan_review_advisory')) {
         // A stop is the primary cause; the plan clause its exit stamped stands among the limitations below.
         clause = authorStop ? taskReasonPhrase('author_stop')
             : severity === 'done' && record.outcome_axes?.execution?.plan_review === 'awaiting' ? taskReasonPhrase('plan_review_awaiting') : '';
+        const firstTerminal = execution?.actor_first_terminal;
+        if (firstTerminal?.reason === 'initial_execution_display_only') firstAttempt = phrase(firstAttemptClauseKey(reason, execution));
     } else {
         const receiptVeto = objective?.receipt_veto;
         clause = receiptVeto?.reason === reason && receiptVeto.detail
             ? String(receiptVeto.detail).split(/\s+/).filter(Boolean).join(' ')
-            : phrase(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : deliveredAnswerCause(record, reason) || reason);
+            : phrase(configuredActorCauseKey(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : deliveredAnswerCause(record, reason) || reason, execution));
+        firstAttempt = phrase(firstAttemptClauseKey(reason, execution));
     }
     if (reviewCause && (reason === reviewCause || bypass[reason] === reviewCause)) clause = '';
     const excluded = ['', 'delegated_custody_unreconciled', 'terminal_delivery_unknown', 'terminal_delivery_exhausted'];
@@ -586,7 +619,12 @@ export function taskReasonDetail(evt, codes = []) {
         : remainder?.state === 'known' && Number.isInteger(count) && count > 0
             ? `${count} uncommitted file${count === 1 ? '' : 's'} remain${count === 1 ? 's' : ''} in the saved candidate` : '';
     const cleanupClause = String(record.outcome_axes?.execution?.evolution_cleanup?.line || '');  // the host's stored words
-    const line = joinCauseClauses([clause, ...warningClauses, phrase(reviewCause), rationale, remainderClause, cleanupClause,
+    const context = typeof earlier === 'string' && earlier
+        ? [fmt('Earlier recorded stop: {cause}', { cause: phrase(earlier) })] : [];
+    if (severity === 'cancelled' && execution?.cancel_policy_reason === 'evolution_disabled_in_light_mode') {
+        context.unshift(phrase('evolution_disabled_in_light_mode'));
+    }
+    const line = joinCauseClauses([clause, firstAttempt, ...context, ...warningClauses, phrase(reviewCause), rationale, remainderClause, cleanupClause,
         ...acceptanceIncidentClauses(decision, reason, causePhraseLookup),
         ...terminalLimitations(record, reason, held, authorStop), custody ? taskReasonPhrase(custody) : '',
         terminalDeliveryClause(record.terminal_delivery)]);  // the host twin appends the delivery clause last too
@@ -869,11 +907,12 @@ export function summarizeLogEvent(evt) {
         // A refusal of further work cannot hide the current call's failure.
         const refusal = refusedStepPhrase(evt);
         const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusal);
+        const handled = handledRefusalHeadline(evt);
         const failed = !held && (Boolean(evt.is_error) || signalDeath);
         const finished = t === 'tool_call_finished';
         const label = signalDeath ? `killed (${evt.signal || evt.exit_code})` : evt.status === 'interrupted'
             ? `interrupted (${evt.control_reason || 'control'})` : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(refusedByStop(evt) ? 'info' : held ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || `${tool} ${label}`, {
+        return view(refusedByStop(evt) ? 'info' : held || handled ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || handled || `${tool} ${label}`, {
             body: shortText([!held && refusal,
                 toolErrorDisplayText(evt, evt.result_preview) || (finished ? '' : compactJson(evt.args, 220))].filter(Boolean).join(' '), 260),
             meta: [formatLogDuration(evt.duration_sec)],
@@ -1029,6 +1068,8 @@ function summarizeHostLogEvent(evt, t, view, about, tool) {
     }
 
     if (t === 'task_checkpoint' || t === 'context_reclaim') {
+        const stop = serviceCheckpointFacts(evt);  // a service stop's Logs row is its launch's typed receipt, links and all
+        if (stop) return { ...view('info', stop.headline, stop), serviceStop: stop };
         return view(['context_fit_low_retry', 'service_finalization_error'].includes(evt.checkpoint_kind) ? 'warn' : 'thinking', taskCheckpointLabel(evt), {
             meta: [evt.model ? compactModel(evt.model) : '', evt.round ? `r${evt.round}` : '',
                 evt.context_tokens ? `~${evt.context_tokens} tok` : '',
@@ -1126,9 +1167,8 @@ export function taskTerminalSummary(evt = {}) {
         && (evt.outcome_final === true || evt.system_type === 'task_summary'
             || taskDoneIsTerminal(evt));
     const outcome = taskTerminalPhase(evt);
-    // Terminality and outcome knowledge are two facts (#1110): the lifecycle status
-    // can settle while post-task finalization still runs. Painting the whole frame
-    // 'error' put Failed where only a terminal frame may, so the title carried it.
+    // Outcome and terminality differ (#1110): a known failure belongs in the title
+    // while post-task finalization still runs, not in the frame's phase.
     // The stamp (`task_terminal_status`/`status`) is the producer's word; a row
     // that carries only the canonical axes still knows its lifecycle, so a
     // settled `outcome_axes.lifecycle.status` counts too (as taskOutcomeSeverity
@@ -1152,6 +1192,7 @@ export function taskTerminalSummary(evt = {}) {
             ...(cause ? { activityPreview: cause } : {}),
         }),
         ...(observedOutcome ? { observedOutcome } : {}),
+        ...(terminal && evt.schedule_report_only === true && evt.task_id && { fullRef: String(evt.task_id), truncated: true, fullField: 'schedule_report' }),
         ...(typeof evt.quiet_effective === 'boolean' ? { quietEffective: evt.quiet_effective } : {}),
         ...(evt.model_execution && typeof evt.model_execution === 'object'
             ? { modelExecution: evt.model_execution } : {}),
@@ -1253,7 +1294,8 @@ function summarizeChatLiveEventView(evt) {
             model: evt.model, dedupeKey: `reasoning:${progressText.full}` }), { reasoning: true });
     }
     if ((evt.is_progress || t === 'send_message') && isSubagentEvent(evt)) {
-        const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
+        const note = evt.system_type === 'subagent_terminal_notice' ? { full: '', preview: '' }  // the supervisor's typed notice is recorded fact, never current speech
+            : describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
         const sid = subagentId(evt);
         const rawEvent = String(evt.subagent_event || '').toLowerCase();
         const role = String(evt.subagent_role || '').trim();
@@ -1261,16 +1303,7 @@ function summarizeChatLiveEventView(evt) {
         const resultText = describeText(evt.result || '', 320, { markdown: true });
         const traceText = describeText(evt.trace_summary || '', 320);
         const errorText = describeText(evt.error || '', 220);
-        const cancelDetail = evt.cancel_origin && (rawEvent === 'cancelled'
-            || (rawEvent === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'))
-            // The child's OWN lineage rides along, so the cancel clause can prove the
-            // parent relation instead of naming the swept root as an initiator (#1061).
-            ? taskReasonDetail({ status: 'cancelled', cancel_origin: evt.cancel_origin,
-                task_id: evt.subagent_task_id || evt.task_id,
-                parent_task_id: evt.parent_task_id, root_task_id: evt.root_task_id }) : '';
-        const stopDetail = (evt.task_completion ?? evt.outcome_axes?.execution?.task_completion)?.action === 'stop' ? taskReasonDetail(evt) : '';
-        const reasonDetail = cancelDetail || stopDetail || (evt.outcome_axes?.execution?.plan_review
-            ? taskReasonDetail(evt) : evt.reason_code ? taskReasonPhrase(evt.reason_code) : '');
+        const { detail, lead } = childLineCause(evt);
         // Completed frames take label and phase from their authoritative outcome axes.
         const completionSeverity = rawEvent === 'completed' ? taskOutcomeSeverity(evt) : 'done';
         const event = rawEvent === 'completed'
@@ -1280,14 +1313,12 @@ function summarizeChatLiveEventView(evt) {
                         : 'completed')
             : rawEvent;
         const report = resultText.full ? childReportLabel(event) : '';
-        const detailParts = [
+        const fullOutput = [
             note.full,
             resultText.full ? `${report ? `## ${report}` : '[RESULT]'}\n${resultText.full}` : '',  // a timeline label line
             traceText.full ? `[TRACE]\n${traceText.full}` : '',
             errorText.full ? `[ERROR]\n${errorText.full}` : '',
-            reasonDetail,
-            !cancelDetail && stopDetail ? reasonCodesNote(taskReasonCodes(evt)) : '',
-        ].filter(Boolean);
+        ].filter(Boolean).join('\n\n');
         // Cancelled is distinct; rejected/interrupted remain notices rather than
         // red failures. Interrupted is retryable and therefore non-terminal.
         const phase = event === 'completed' ? 'done'
@@ -1295,10 +1326,10 @@ function summarizeChatLiveEventView(evt) {
                 : event === 'cancelled' ? 'cancelled'
                     : event === 'failed' ? 'error'
                         : ['rejected', 'interrupted'].includes(event) ? 'warn'
-                            : event === 'scheduled' ? 'start'
+                            : event === 'scheduled' ? (evt.accepted === true ? 'queued' : 'start')
                                 : 'working';
         const terminal = ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event);
-        const terminalCause = terminal ? (cancelDetail || stopDetail || (UNSTARTED_REASONS.has(String(evt.reason_code || '')) ? reasonDetail : '')) : '';
+        const terminalCause = terminal ? lead : '';
         // A child's own note carries the same voice fact (the progress branch below): a host
         // note inside the child's turn is a visible row that never claims the card's collapsed
         // line. The lifecycle, result and error frames state no voice, so they keep leading.
@@ -1308,21 +1339,14 @@ function summarizeChatLiveEventView(evt) {
             : (SUBAGENT_CARD_LABEL[event] || 'Working');
         // The compact activity line describes the child's work/result; review
         // evidence is rendered separately by the owning card's Reviews section.
-        const activity = terminal
-            ? (phase === 'error' && errorText.full ? errorText
-                : resultText.full ? resultText
-                    : errorText.full ? errorText
-                        : traceText.full ? traceText
-                            : note)
-            : (note.full ? note
-                : resultText.full ? resultText
-                    : errorText.full ? errorText
-                        : traceText);
-        return chatView({
+        const activity = terminal && phase === 'error' && errorText.full ? errorText
+            : !terminal && note.full ? note
+                : [resultText, errorText, traceText].find(text => text.full) || (terminal ? note : traceText);
+        return Object.assign(chatView({
             phase,
             headline: subagentHeadline(sid, role, label, evt.model),
             body: terminalCause || activity.preview || '',
-            fullBody: detailParts.join('\n\n'),
+            fullBody: [fullOutput, detail].filter(Boolean).join('\n\n'),
             activityPreview: terminalCause || activity.preview || '',
             activityLead: !terminalCause && activity === resultText ? report : '',
             visible: true,
@@ -1337,7 +1361,7 @@ function summarizeChatLiveEventView(evt) {
             chip: executorChip(evt),
             model: evt.model,
             dedupeKey: `subagent:${sid}:${label}:${status}:${progressText.full || resultText.full || errorText.full || ''}`,
-        });
+        }), { fullOutput, outputPreview: activity.preview || '', childCause: terminal ? childCauseFacts(evt) : undefined });
     }
 
     if (evt.is_progress || t === 'send_message') {
@@ -1414,11 +1438,14 @@ function summarizeChatLiveEventView(evt) {
         // call is a host-stamped routing or completion act. Failures keep their own row; so does a
         // completed check whose criterion failed, while its call still counts once as `ok`. `done`
         // is the TASK's phase; a finished CALL is `ok`.
-        const status = t === 'tool_call_started' ? (evt._live_tool_frame ? 'calling' : 'unknown') : 'ok';
+        const started = t === 'tool_call_started';
+        const refusal = !started && handledRefusalHeadline(evt);
+        const status = started ? (evt._live_tool_frame ? 'calling' : 'unknown') : refusal ? evt.status : 'ok';
+        const callKey = toolCallKey(evt, groupId);
         return chatView({
             phase: status, headline: '', visible: true, dedupeKey: `tools|${groupId}`,
             receipt: Boolean(evt.routing_action) || evt.completion_control === true,
-            ...checkFailureView(evt, toolCallKey(evt, groupId)),
+            ...(!started && (refusal ? toolStepDiagnostic(evt, callKey) : checkFailureView(evt, callKey))),
             toolCall: toolObservation(evt, groupId, status),
         });
     }
@@ -1428,7 +1455,8 @@ function summarizeChatLiveEventView(evt) {
         // episodes fold into one receipt row per kind (task_checkpoints.foldWaitRow).
         const lowRetry = evt.checkpoint_kind === 'context_fit_low_retry';
         const wait = waitEpisode(evt);
-        return chatView({
+        const stopRow = serviceStopCardRow(evt);  // the checkpoint family's own card-row projection
+        return stopRow || chatView({
             phase: lowRetry || evt.checkpoint_kind === 'service_finalization_error' ? 'warn' : 'thinking',
             headline: taskCheckpointLabel(evt),
             visible: !checkpointHasProgressRow(evt) && !(evt.checkpoint_kind === 'prompt_prefix_break' && evt.reasoning_retired),
@@ -1473,23 +1501,9 @@ function summarizeChatLiveEventView(evt) {
         });
     }
     if (['tool_call_finished', 'tool_call'].includes(t) && evt.is_error) {
-        const refusal = refusedStepPhrase(evt);
-        const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusal);
-        const commandText = describeText(extractCommandText(evt.args), 120);
-        const errorResult = describeText(evt.result_preview || evt.error, 220);
-        const bodyParts = !held && refusal ? [refusal] : [];
-        const fullBodyParts = [...bodyParts];
-        if (commandText.preview) bodyParts.push(`Command: ${commandText.preview}`);
-        if (errorResult.preview) bodyParts.push(errorResult.preview);
-        if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
-        if (errorResult.full) fullBodyParts.push(errorResult.full);
+        const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusedStepPhrase(evt));
         return chatView({
-            phase: refusedByStop(evt) ? 'info' : held || evt.status === 'non_zero_exit' ? 'warn' : evt.status === 'interrupted' ? 'info' : 'error',
-            headline: failedStepHeadline(evt),
-            body: shortText(bodyParts.join(' '), 220),
-            fullBody: fullBodyParts.join('\n\n'),
-            visible: true, hostRefusedStep: Boolean(refusal),
-            dedupeKey: toolCallKey(evt, groupId),
+            ...toolStepDiagnostic(evt, toolCallKey(evt, groupId)),
             toolCall: toolObservation(evt, groupId, held ? 'held' : evt.status === 'interrupted' ? 'interrupted' : 'error'),
         });
     }

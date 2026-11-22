@@ -735,7 +735,7 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
                 agent.env.drive_root, task_id, STATUS_CANCELLED if stopped else STATUS_FAILED,
                 _field_projector=lambda current, incoming: (None if current.get("status") in _TRULY_TERMINAL_STATUSES
                                                             else incoming),
-                _terminal_observed=True, result=text, reason_code=control,
+                _terminal_observed=True, result=text, reason_code=control, metadata=metadata,
                 outcome_axes=infra_failed_axes(control, lifecycle="cancelled" if stopped else "failed",
                                                review_trigger="before_task_start"),
                 **origin, **effort_result_fields(task))
@@ -754,6 +754,8 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
     progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed"}
     if "origin_message_ref" in correlation:  # an explicit key: the outbound contract scan vouches for the set
         progress_meta["origin_message_ref"] = correlation["origin_message_ref"]
+    if "transport" in correlation:
+        progress_meta["transport"] = correlation["transport"]
     if metadata.get("initiator"):
         progress_meta["initiator"] = str(metadata["initiator"])
     if notice.get("notice"):  # its step and raw error beside the phrase (DESIGN principle 7)
@@ -925,7 +927,8 @@ def _host_operation_failure(metadata: Optional[dict]) -> dict:
 
     meta = metadata or {}
     source = meta.get("origin_message_ref") if meta.get("_host_operation") else None
-    return host_operation_reply_kwargs(source, "failed", str(meta.get("client_message_id") or ""))
+    return host_operation_reply_kwargs(source, "failed", str(meta.get("client_message_id") or ""),
+                                       meta.get("exact_reply_transport"))  # chat_references.TURN_ADDRESS
 
 
 def _rejected_rows(manifest: Any) -> list:
@@ -993,7 +996,8 @@ def _defer_chat_for_restart(task: dict, chat_id: int, metadata: Optional[dict]) 
 
     meta = metadata or {}
     ack = host_operation_reply_kwargs(meta.get("origin_message_ref") if meta.get("_host_operation") else None,
-                                     client_message_id=str(meta.get("client_message_id") or ""))
+                                     client_message_id=str(meta.get("client_message_id") or ""),
+                                     transport=meta.get("exact_reply_transport"))  # chat_references.TURN_ADDRESS
     _pool().send_with_budget(chat_id, "Saved for execution after Restart.",
                             **ack, role="system", system_type="restart_notice")
 
@@ -1045,6 +1049,8 @@ def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> Non
         progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed"}
         if "origin_message_ref" in correlation:
             progress_meta["origin_message_ref"] = correlation["origin_message_ref"]
+        if "transport" in correlation:
+            progress_meta["transport"] = correlation["transport"]
         initiator = str((task_metadata or {}).get("initiator") or "")
         if initiator:
             progress_meta["initiator"] = initiator
