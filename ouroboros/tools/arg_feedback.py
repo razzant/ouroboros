@@ -138,10 +138,20 @@ def read_end_spelling(ctx: Any, call: dict, max_lines: Any, end_line: Any, end_c
             "root", "bucket", "skill_name", "start_char", limit) if call.get(key) not in (None, "", 0))
         return f"read_file(path={json.dumps(call['path'])}{kept}, start_line={start}, "
 
-    call = {**call, "max_lines": max_lines}
+    text = str(end_line).strip() if isinstance(end_line, (int, str)) and not isinstance(end_line, bool) else ""
+    try:  # str.isdigit() also admits digits int() refuses ("²")
+        end = int(text) if text[text.startswith("-"):].isdigit() else None
+    except ValueError:
+        end = None
+    want = None if end is None else end - start + 1
     notes = [ignored_argument_note(name, None, "empty optional value")
              for name, value in (("end_line", end_line), ("end_char", end_char)) if value is None]
-    if end_char not in (None, ABSENT):
+    if end_char not in (None, ABSENT):  # the named call keeps the line window this call would have read
+        try:
+            lines = want if want and want >= 1 else None if max_lines is None else max(1, int(max_lines))
+        except (TypeError, ValueError):
+            lines = None
+        call = {**call, "max_lines": lines}
         return max_lines, notes, argument_refusal(ctx, "TOOL_ARG_ERROR", [
             f"end_char={end_char!r} could count from the window or from the file; max_chars counts the window's "
             f"characters after start_char: {ready('max_lines')}max_chars=<characters>), "
@@ -149,9 +159,6 @@ def read_end_spelling(ctx: Any, call: dict, max_lines: Any, end_line: Any, end_c
             effect="Nothing was read.")
     if end_line in (None, ABSENT):
         return max_lines, notes, ""
-    text = str(end_line).strip() if isinstance(end_line, (int, str)) and not isinstance(end_line, bool) else ""
-    end = int(text) if text[text.startswith("-"):].isdigit() else None
-    want = None if end is None else end - start + 1
     if want is None or want < 1 or max_lines not in (None, want) and not (max_lines == 2000 and want <= 2000):
         conflict = ("is not a whole line number" if want is None else f"is before start_line={start}" if want < 1
                     else f"asks for {want} lines from start_line={start}, max_lines={max_lines!r} for another number")

@@ -213,6 +213,7 @@ def test_read_file_end_line_reads_its_inclusive_window_and_an_unclear_end_names_
                        ({"end_line": 2.9}, "end_line=2.9 is not a whole line number"),
                        ({"end_line": "five"}, "end_line='five' is not a whole line number"),
                        ({"end_line": "--2", "max_chars": 1}, "end_line='--2' is not a whole line number"),
+                       ({"end_line": "\u00b2"}, "end_line='\u00b2' is not a whole line number"),
                        ({"end_line": 2001, "max_lines": 2000}, "asks for 2001 lines from start_line=1"),
                        ({"max_lines": 1, "end_char": 40}, "end_char=40 could count"),
                        ({"start_line": 2, "start_char": 4, "end_char": 40},
@@ -225,6 +226,12 @@ def test_read_file_end_line_reads_its_inclusive_window_and_an_unclear_end_names_
         other = "max_lines" if "end_char" in args else "max_chars"  # the call's other limit stays in the named call
         assert other not in args or f"{other}={args[other]}, start_line=" in refused.text, refused.text
     assert 'start_char=4, start_line=2, max_chars=<characters>)' in refused.text
+    (repo / "g.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    for window in ({"end_line": 1}, {"max_lines": 0}):  # one line, by end_line or by max_lines brought to 1
+        refused = registry.execute_result("read_file", {"path": "g.txt", "end_char": 40, **window})
+        assert 'read_file(path="g.txt", max_lines=1, start_line=1, max_chars=<characters>)' in refused.text, refused.text
+        retry = registry.execute_result("read_file", {"path": "g.txt", "max_lines": 1, "start_line": 1, "max_chars": 40})
+        assert "alpha" in retry.text and "beta" not in retry.text
     world = tmp_path / "drive" / "memory" / "WORLD.md"
     world.parent.mkdir(parents=True, exist_ok=True)
     world.write_text("".join(f"w {n}\n" for n in range(1, 2002)), encoding="utf-8")
