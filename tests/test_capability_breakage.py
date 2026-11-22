@@ -288,8 +288,10 @@ def test_an_unavailable_write_scope_stays_broken_through_an_answered_read_until_
     mcp_oauth._save(cfg, grant)
     work = _work(tmp_path)
     assert breakage.start_notice_rows(work, []) == []
-    mcp_oauth._save(cfg, {**grant, "required_scope": "files:read files:write"})  # a write answered 403 insufficient_scope
-    assert "its sign-in lacks a scope a refused call needs (files:read files:write)" in _round(work)
+    mcp_oauth._save(cfg, {**grant, "required_scope": "files:read files:write",  # a write answered 403 insufficient_scope
+                          "required_scope_since": "2026-11-22T10:00:00+00:00"})
+    assert ("its sign-in lacks a scope a refused call needs (files:read files:write) since 2026-11-22T10:00:00+00:00"
+            in _round(work))
     _call(manager, "demo", ToolResult(status="ok", code="OK", text="read"))  # a read still answers...
     read = _round(work)
     assert "lacks a scope" in read and "calls answered" in read and "no longer reported broken" not in read  # ...not a repair

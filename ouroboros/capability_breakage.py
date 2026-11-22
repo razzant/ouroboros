@@ -98,7 +98,7 @@ def _server_line(cfg: Any, catalog: dict, mcp_catalog: Any, mcp_oauth: Any) -> T
         problems.append(f"sign-in required {_since(sign_in.get('since'))} ({sign_in.get('reason')})")
     elif sign_in.get("reason") == "insufficient_scope":
         problems.append(f"its sign-in lacks a scope a refused call needs ({sign_in.get('required_scope')}) "
-                        "since: unknown")
+                        f"{_since(sign_in.get('required_scope_since'))}")
     if call.get("ok") is False:
         problems.append(f"calls not answered {_since(call.get('since'))} "
                         f"({call.get('code')}; changed at {_utc(call.get('at'))} on {call.get('method')})")
