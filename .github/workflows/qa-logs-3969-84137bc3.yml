@@ -1,0 +1,68 @@
+# Verification branch only. The product commit does not carry this file.
+name: QA 3969 Logs queue reads
+
+on:
+  push:
+    branches: [qa/logs-3969-84137bc3]
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_SHA: '84137bc3658f57e14cf16dcb9c398802ce76b3e3'
+  PRODUCT_TREE: 'a1d5ee61985ecc0e13ca9d7c1c9be3c35c4cf289'
+  MSYS_NO_PATHCONV: '1'
+  PYTHONUTF8: '1'
+
+jobs:
+  logs:
+    name: Logs queue reads (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Identify and check out the exact product parent
+        run: |
+          set -euo pipefail
+          qa_file=.github/workflows/qa-logs-3969-84137bc3.yml
+          [[ "$(git rev-list --parents -n 1 HEAD)" == "$GITHUB_SHA $PRODUCT_SHA" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT_SHA" HEAD --)" == $(printf 'A\t%s' "$qa_file") ]]
+          git checkout --detach "$PRODUCT_SHA"
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          printf 'Product %s, tree %s\n' "$PRODUCT_SHA" "$PRODUCT_TREE"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+          interpreter: shipped
+      - name: Verify Logs queue loads and finalization isolation
+        run: |
+          set -euo pipefail
+          python -m ruff check --select F tests/test_finalization_timing.py
+          timing=tests/test_finalization_timing.py
+          python -m pytest -o addopts='' -q --junitxml=qa-logs-3969.xml \
+            "$timing::test_log_scope_does_not_read_or_fill_the_finalization_children_cache" \
+            "$timing::test_finalization_keeps_delivery_and_step_order" \
+            "$timing::test_finalization_records_one_ordered_tail_on_every_task_surface" \
+            tests/test_task_reads.py
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          cases = list(ET.parse('qa-logs-3969.xml').iter('testcase'))
+          identities = {(case.get('classname'), case.get('name')) for case in cases}
+          incomplete = [case.get('name') for case in cases if list(case)]
+          if len(cases) != 29 or len(identities) != len(cases) or incomplete:
+              raise SystemExit(f'Expected 29 unique passing cases: {len(cases)=}, {len(identities)=}, {incomplete=}')
+          print('LOGS_3969_EXACT: 29 passed, none skipped')
+          PY
