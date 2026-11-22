@@ -10,10 +10,12 @@ same skill token and ``inject_chat`` grant admit it as ``/chat/inject``, which a
 first slash command it carries: the route grants no new power, it only stops the binding from needing a command
 that Strict mode never forwards and Panic never is.
 
-Answer: ``{"ok": true, "owner": "bound" | "same" | "other" | "unknown"}`` (``same``: the pair was already this
-one; ``other``: another pair holds the slot; ``unknown``: the state cannot be read, or the live door does not hold
-the pair yet, so the transport asks again). ``bound`` and ``same`` are answered only once the live emergency door,
-read after the write, holds the pair: a door the core built from an earlier read while it started is reached too.
+Answer: ``{"ok": true, "owner": "bound" | "same" | "pending" | "other" | "unknown"}``. ``bound`` (written now) and
+``same`` (already this pair) are answered only once the live emergency door, read after the write, holds the pair:
+a door the core built from an earlier read while it started is reached too. ``pending``: the slot holds this pair
+(written now or before) but no live door holds it yet; the transport binds that same owner and asks again, so the
+slot and the transport's owner never name different chats. ``other``: another pair holds the slot. ``unknown``: the
+state cannot be read, and nothing was written.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ def bind_external_owner(bridge_getter: Callable[[], Any], user_id: int, chat_id:
     if owner is not None:
         if pair != (user_id, chat_id):
             return "other"
-        return "same" if _door_holds(bridge_getter, current, pair) else "unknown"
+        return "same" if _door_holds(bridge_getter, current, pair) else "pending"
     outcome = {"value": "unknown"}
 
     def bind(live: dict) -> None:
@@ -75,7 +77,7 @@ def bind_external_owner(bridge_getter: Callable[[], Any], user_id: int, chat_id:
     except StateUnavailable:
         return "unknown"
     if outcome["value"] in ("bound", "same") and not _door_holds(bridge_getter, saved, (user_id, chat_id)):
-        return "unknown"  # saved, but the door cannot accept it yet: the transport's next ask answers "same"
+        return "pending"  # saved for this pair; the door cannot accept it yet: a later ask answers "same"
     return outcome["value"]
 
 

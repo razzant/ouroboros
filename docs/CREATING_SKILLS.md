@@ -997,9 +997,12 @@ registers that pair with `POST /owner/external` (`{user_id, chat_id}`, positive 
 token and `inject_chat` grant). It fills the core's external command owner, the pair Panic and
 external commands require, only while that slot is known to be empty, exactly as a first slash
 command would; it never replaces a bound pair (that stays until owner Reset). Answer:
-`{ok: true, owner: "bound" | "same" | "other" | "unknown"}`: `bound` and `same` only once the live
-emergency door accepts the pair's `/panic`; `unknown` (unreadable state, or a door not ready yet)
-asks to try again. Telegram asks before it binds a paired chat, and keeps its owner on `other`.
+`{ok: true, owner: "bound" | "same" | "pending" | "other" | "unknown"}`: `bound` and `same` only
+once the live emergency door accepts the pair's `/panic`; `pending` when the slot holds the pair but
+no live door does yet (bind that same owner and ask again); `unknown` when the state cannot be read
+and nothing was written. Telegram asks before it binds a paired chat, keeps its owner on `other`,
+and registers an owner it already has as it loads, so beside another owner-bound transport the one
+slot is Telegram's owner.
 
 ### Declaring a place, tool effects and an icon
 

@@ -1041,9 +1041,9 @@ def test_owner_external_binds_only_an_empty_slot_and_the_emergency_door_observes
 def test_owner_external_answers_bound_only_once_the_live_door_accepts_the_pair(tmp_path, owner_state,
                                                                              panic_bridge):
     """A registration racing the core's start: the core built its door from a read taken before the slot was
-    written, and publishes that bridge only afterwards. The route then saves the pair but answers ``unknown``,
-    never ``bound``; the transport's next ask, once the bridge is published, answers ``same`` and that very door
-    accepts the pair's first /panic."""
+    written, and publishes that bridge only afterwards. The route then saves the pair and answers ``pending``
+    (saved, so the transport binds that same owner), never ``bound``; the transport's next ask, once the bridge is
+    published, answers ``same`` and that very door accepts the pair's first /panic."""
     _seed_token(tmp_path, permissions=["inject_chat"])
     door = panic_bridge.panic
     door.observe_owner(owner_state.load_state())  # the startup read: the slot is still empty
@@ -1052,7 +1052,7 @@ def test_owner_external_answers_bound_only_once_the_live_door_accepts_the_pair(t
     headers, owner = {"X-Skill-Token": "token"}, {"user_id": 17, "chat_id": 23}
 
     first = client.post("/owner/external", headers=headers, json=owner)
-    assert first.json() == {"ok": True, "owner": "unknown"} and _external(owner_state) == (17, 23)
+    assert first.json() == {"ok": True, "owner": "pending"} and _external(owner_state) == (17, 23)
     assert door.observed_owner() is None
     published["bridge"] = panic_bridge
     again = client.post("/owner/external", headers=headers, json=owner)
