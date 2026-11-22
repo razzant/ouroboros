@@ -15,11 +15,12 @@ import pathlib
 import subprocess
 from types import SimpleNamespace
 
+from tests._workspace_git import git_repository
+
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+    git_repository(path, unborn=True)
     (path / "README.md").write_text("x\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
     subprocess.run(

@@ -40,10 +40,10 @@ def test_applied_fold_preserves_selected_host_snapshots_and_reports_only_final_r
 
     old, new = (bound_host_row(CONTEXT_FACTS_NAME, text) for text in (
         "Earlier measured condition for comparison", "Current measured condition"))
-    messages = _source()
-    messages[2:2] = [old, new]
+    messages = _source()  # the facts rows follow the first tool unit, where the fold writes its note
+    messages[4:4] = [old, new]
     units = cc.context_units(messages, scope="dialogue")
-    old_unit, new_unit, tool_unit = units
+    tool_unit, old_unit, new_unit = units
     ctx = SimpleNamespace(active_context_mode="low")
     record_context_view(ctx, messages, [])
     # This physical observation confirms only the current facts and tool result.
@@ -55,18 +55,18 @@ def test_applied_fold_preserves_selected_host_snapshots_and_reports_only_final_r
                                 keep_unit_ids=keep)
     assert "requested" in response
     current = copy.deepcopy(messages)
-    current[2]["cache_control"] = {"type": "ephemeral"}
+    current[4]["cache_control"] = {"type": "ephemeral"}
     current += [{"role": "assistant", "tool_calls": [{"id": "compact", "function": {
         "name": "compact_context", "arguments": "{}"}}]},
         {"role": "tool", "tool_call_id": "compact", "content": response}]
     result = _run_round_compaction(current, _context(tmp_path, ctx, [], monkeypatch))
     receipt = ctx._context_view_receipt
     assert receipt["status"] == "applied"
-    assert (current[2] in result) is keep_old
-    assert new in result and messages[-1] not in result
+    assert (current[4] in result) is keep_old
+    assert new in result and messages[3] not in result
     assert set(receipt["retained_unit_ids"]) == set(keep)
     assert receipt.get("retired_host_row_ids", []) == (
-        [] if keep_old else [cc._sha256(cc._canonical_json(current[2]))])
+        [] if keep_old else [cc._sha256(cc._canonical_json(current[4]))])
     assert current[-2] in result and current[-1] in result
 
 

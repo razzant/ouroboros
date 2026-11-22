@@ -22,6 +22,24 @@ from ouroboros.task_results import STATUS_REQUESTED, STATUS_SCHEDULED, load_task
 from supervisor import queue, task_lifecycle
 from supervisor import workspace_preparation as prep
 from supervisor.events import dispatch_event
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
+
+
+def _lay_fixture(folder: pathlib.Path, name: str, content: bytes) -> None:
+    """One commit ``fixture`` by Fixture (kept in the repository's configuration) holding ``name``."""
+    repo = git_repository(folder / "repo", unborn=True, identity=True)
+    (repo / name).write_bytes(content)
+    world_git(repo, "add", "-A")
+    world_git(repo, "commit", "-qm", "fixture")
+
+
+def _lay_system(folder: pathlib.Path) -> None:
+    _lay_fixture(folder, "system.txt", b"own body\n")
+
+
+def _lay_project(folder: pathlib.Path) -> None:
+    _lay_fixture(folder, "a.txt", b"base\n")
 
 
 _WAIT_SEC = 30.0  # bounds only how long a broken run takes to report; passing runs never wait on it
@@ -29,18 +47,6 @@ _WAIT_SEC = 30.0  # bounds only how long a broken run takes to report; passing r
 
 def git(root, *args):
     return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True).stdout
-
-
-def make_repo(path, files):
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "config", "user.name", "Fixture")
-    git(path, "config", "user.email", "fixture@example.invalid")
-    for name, content in files.items():
-        (path / name).write_bytes(content)
-    git(path, "add", "-A")
-    git(path, "commit", "-qm", "fixture")
-    return path
 
 
 class SupervisorCtx:
@@ -142,8 +148,9 @@ class Env(SimpleNamespace):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    system = make_repo(tmp_path / "system", {"system.txt": b"own body\n"})
-    source = make_repo(tmp_path / "project", {"a.txt": b"base\n"})
+    # Two fixed trees, each a world of the run: built once, copied per test.
+    system = clone_repository(world("workspace-preparation-system", _lay_system) / "repo", tmp_path / "system")
+    source = clone_repository(world("workspace-preparation-project", _lay_project) / "repo", tmp_path / "project")
     data, copies = tmp_path / "data", tmp_path / "copies"
     data.mkdir()
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))

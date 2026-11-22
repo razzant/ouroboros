@@ -191,6 +191,7 @@ D20 = "Presence"
 "ouroboros/local_custody_repair.py" = "D09"
 "ouroboros/custody_owed.py" = "D09"  # local custody writes a process knows but could not yet land
 "ouroboros/physical_attempt_context.py" = "D16"
+"ouroboros/capability_breakage.py" = "D04"
 "ouroboros/capability_evidence.py" = "D03"
 "ouroboros/density_probe.py" = "D03"
 "ouroboros/response_limits.py" = "D03"
@@ -328,6 +329,7 @@ D20 = "Presence"
 "ouroboros/delegate_bootstrap_identity.py" = "D07"
 "ouroboros/delegate_git_range.py" = "D07"
 "ouroboros/delegate_readonly_inputs.py" = "D07"
+"ouroboros/helper_receipt.py" = "D07"  # one receipt of what reached a helper, for every kind (owner item 50)
 "ouroboros/delegate_documents.py" = "D07"
 "ouroboros/delegate_shared.py" = "D07"
 "ouroboros/delegate_source_coverage.py" = "D07"
@@ -993,7 +995,7 @@ D20 = "Presence"
 "ouroboros/jsonl_tail.py" = "D18"
 "ouroboros/temp_sweep.py" = "D18"
 "ouroboros/utils.py" = "D18"
-"ouroboros/text_sentences.py" = "D18"  # one sentence boundary for memory and UI openings
+"ouroboros/text_sentences.py" = "D18"  # sentence boundaries: memory and UI openings, connections-map lines
 "ouroboros/shared_values.py" = "D18"  # one $shared token helper: queue documents, the observability CAS and the dialogue journal store a repeated element once
 "ouroboros/verified_download.py" = "D18"
 "ouroboros/version.py" = "D10"
@@ -1390,6 +1392,7 @@ lazy_only = [
   "D04->D03",
   "D04->D06",
   "D04->D07",
+  "D04->D08",
   "D04->D09",
   "D04->D10",
   "D04->D12",

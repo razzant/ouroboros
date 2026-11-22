@@ -12,7 +12,8 @@ from ouroboros.task_status import load_effective_task_result
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from tests._store_shared import read_result, seed_result
-from tests._workspace_git import capture_manifest_fields, publish_capture
+from tests._workspace_git import capture_manifest_fields, git_repository, publish_capture, world_git
+from tests._worlds import clone_repository, world
 
 # Actual Git subprocess fixtures follow the repository's real-process lane.
 
@@ -21,14 +22,15 @@ def git(root, *args):
     return subprocess.run(["git", *args], cwd=root, capture_output=True, check=True).stdout
 
 
-def init(root):
-    root.mkdir()
-    git(root, "init", "-q")
-    git(root, "config", "user.name", "Fixture")
-    git(root, "config", "user.email", "fixture@example.invalid")
+def _lay_base(folder):
+    root = git_repository(folder / "repo", unborn=True, identity=True)
     (root / "a.txt").write_bytes(b"one\ntwo\nthree\n")
-    git(root, "add", "a.txt")
-    git(root, "commit", "-qm", "base")
+    world_git(root, "add", "a.txt")
+    world_git(root, "commit", "-qm", "base")
+
+
+def init(root):
+    clone_repository(world("shared-result-verification-base", _lay_base) / "repo", root)
 
 
 @pytest.fixture

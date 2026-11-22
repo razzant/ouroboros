@@ -675,7 +675,6 @@ from ouroboros.tools.control_task_results import (  # noqa: E402, F401 -- intent
     _wait_attention_poll,
     _wait_for_task,
     _wait_for_tasks,
-    cache_horizon_note,
     disclosable_capability_delta,
 )
 

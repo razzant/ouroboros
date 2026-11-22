@@ -1,0 +1,20 @@
+{
+  "about": "Within one page session a room comes back as it was left: left in older history, it is on that passage with ↓ shown and a reply that arrived meanwhile below; left following, it follows the fresh end with what arrived while away.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "a": {"name": "Left reading", "rows": [{"count": 80, "words": [20, 90]}]},
+    "b": {"name": "Somewhere else", "rows": [{"count": 30, "words": [20, 60]}]}
+  },
+  "events": [
+    {"open": "a"},
+    {"wheel": -1500},
+    {"open": "b"},
+    {"arrive": "a", "words": 40},
+    {"open": "a"},
+    {"latest": true},
+    {"open": "b"},
+    {"arrive": "a", "words": 40},
+    {"open": "a"},
+    {"arrive": "a", "words": 20}
+  ]
+}

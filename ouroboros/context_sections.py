@@ -12,6 +12,7 @@ import hashlib
 import logging
 import pathlib
 import re
+from datetime import datetime
 from typing import Any, List, Optional
 
 from ouroboros.context_budget import LARGE_CONTEXT_SECTION_CHARS
@@ -467,16 +468,43 @@ def _switch_fact(root: Any, observed: Any, authority: Any) -> str:
     return f"\n\n{fact}" if fact else ""
 
 
+def _openrouter_comparison(raw: dict) -> str:
+    """The dated pair published by supervisor.state, never the moving ledger total."""
+    from ouroboros.cost_projection import usd_text
+    from supervisor.state import openrouter_spend_deltas
+
+    deltas = openrouter_spend_deltas(raw)
+    stamp = raw.get("openrouter_last_check_at")
+    if deltas is None or not isinstance(stamp, str):
+        return ""
+    try:
+        published = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if published.tzinfo is None:
+            return ""
+    except (ValueError, OverflowError):
+        return ""
+
+    def delta_text(value: float) -> str:
+        if 0 < abs(value) < 0.01:
+            magnitude = usd_text(abs(value))
+            return f"down {magnitude}" if value < 0 else magnitude
+        return f"${value or 0.0:.2f}"
+
+    local, key = map(delta_text, deltas)
+    return (f"OpenRouter changes since the paired session baseline (check published {published.isoformat()}): "
+            f"local settled spend {local} (sampled before the key request); key usage {key}.")
+
+
 @timed_section("drive_state")
 def _drive_state_section(env: Any) -> str:
-    """Typed projection of ``state/state.json`` + an on-demand pointer. Keys =
-    what the agent REASONS about; the rest is internal caches or a second spend
-    narrative build_runtime_section already renders from the usage-accounting
-    authority. P1: disclosed omission — keys NAMED, full file one read away."""
+    """Controls and the last paired key comparison, not status warnings or live spend.
+
+    Omitted keys are named beside the raw source; Runtime owns the current budget view.
+    """
     keys = ("session_id", "current_branch", "current_sha", "evolution_mode_enabled",
             "evolution_owner_stopped", "evolution_cycle", "evolution_consecutive_failures",
             "last_evolution_task_at", "bg_consciousness_enabled", "bg_consciousness_stop_source", "post_task_autostop",
-            "budget_drift_pct", "budget_drift_alert", "last_owner_message_at")
+            "last_owner_message_at")
     from supervisor.state import CONTROL_KEYS, RECOVERY_KEY, control_value, read_state
 
     root = env.drive_path("state/state.json").parent.parent
@@ -486,18 +514,20 @@ def _drive_state_section(env: Any) -> str:
     projected = {k: (raw[k] if k not in CONTROL_KEYS or control_value(authority, k)[0]
                      else {"status": "unknown"}) for k in keys if k in raw or k in observed.unconfirmed}
     omitted = sorted(set(raw) - set(projected) - {RECOVERY_KEY})
-    note = ("Projection of state/state.json (spend/budget facts live in the Runtime "
+    note = ("Projection of state/state.json (current spend/budget facts live in the Runtime "
             "section, from the usage-accounting authority)."
             + (f" State authority is {observed.quality}: {observed.reason}. "
                f"UNKNOWN controls: {', '.join(observed.unconfirmed)}." if observed.quality != "current" else "")
             + ((" Omitted keys: " + ", ".join(omitted) + ". Full raw source: "
                 "read_file(root='runtime_data', path='state/state.json').") if omitted else ""))
-    heading = "## Drive state\n\n"
-    values = json.dumps(projected, ensure_ascii=False, indent=1, sort_keys=True, default=str) + _switch_fact(root, observed, authority)
-    operative = (heading + values + f"\n\nState authority: {observed.quality}; {observed.reason}. "
+    values = json.dumps(projected, ensure_ascii=False, indent=1, sort_keys=True, default=str)
+    body = "## Drive state\n\n" + values + _switch_fact(root, observed, authority)
+    if comparison := _openrouter_comparison(raw):
+        body += "\n\n" + comparison
+    operative = (body + f"\n\nState authority: {observed.quality}; {observed.reason}. "
                  + f"Unknown controls: {', '.join(observed.unconfirmed) or 'none'}. "
                  + f"{len(omitted)} other state keys retained in the full source.")
-    return HostSection("drive_state", heading + values + "\n\n" + note, operative,
+    return HostSection("drive_state", body + "\n\n" + note, operative,
                        "read_file(root='runtime_data', path='state/state.json')")
 
 

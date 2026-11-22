@@ -4,10 +4,11 @@ from __future__ import annotations
 import threading
 import types
 
-from ouroboros.loop_tool_execution import tool_calls_can_run_parallel
 from ouroboros.tool_capabilities import (
     PARALLEL_SAFE_ENQUEUE_TOOLS,
     READ_ONLY_PARALLEL_TOOLS,
+    call_segments,
+    legacy_pool_response,
 )
 from ouroboros.tools.control import _emit_control_event, _record_scheduled_subagent
 
@@ -23,23 +24,37 @@ def test_schedule_subagent_parallel_safe_not_readonly():
 
 
 def test_burst_of_spawns_runs_parallel():
-    assert tool_calls_can_run_parallel([_call("schedule_subagent")] * 4) is True
+    """A burst of spawns is a legacy response: one pool over every call, as before."""
+    assert legacy_pool_response(["schedule_subagent"] * 4) is True
 
 
 def test_mixed_reads_and_spawns_runs_parallel():
-    assert tool_calls_can_run_parallel(
-        [_call("read_file"), _call("schedule_subagent"), _call("search_code")]
-    ) is True
+    assert legacy_pool_response(["read_file", "schedule_subagent", "search_code"]) is True
 
 
 def test_any_non_parallel_tool_forces_sequential():
-    assert tool_calls_can_run_parallel(
-        [_call("schedule_subagent"), _call("write_file")]
-    ) is False
+    """Outside the legacy pool a spawn is no inert read: it runs alone, and so does the write after it."""
+    assert legacy_pool_response(["schedule_subagent", "write_file"]) is False
+    assert call_segments(["schedule_subagent", "write_file"]) == [[0], [1]]
+    # A read in the same group would not see the child it schedules (a task-state or events-log read).
+    assert call_segments(["schedule_subagent", "tree_read", "write_file"]) == [[0], [1], [2]]
+    assert call_segments(["schedule_subagent", "recent_tasks", "write_file"]) == [[0], [1], [2]]
+
+
+def test_the_legacy_pool_reads_frozen_history_not_the_live_read_set(monkeypatch):
+    """Old+old is the legacy pool with its rows; old+new and new+new run in segments, where an escaped exception ends
+    the response as one call at a time did; naming a read in the live set later changes neither."""
+    from ouroboros import tool_capabilities
+    monkeypatch.setattr(tool_capabilities, "READ_ONLY_PARALLEL_TOOLS", READ_ONLY_PARALLEL_TOOLS | {"knowledge_read"})
+    assert legacy_pool_response(["read_file", "search_code"]) is True
+    assert legacy_pool_response(["read_file", "knowledge_read"]) is False
+    assert legacy_pool_response(["tree_read", "knowledge_read"]) is False
+    assert call_segments(["read_file", "knowledge_read"]) == call_segments(["tree_read", "knowledge_read"]) == [[0, 1]]
 
 
 def test_single_call_is_not_parallel():
-    assert tool_calls_can_run_parallel([_call("schedule_subagent")]) is False
+    assert legacy_pool_response(["schedule_subagent"]) is False
+    assert call_segments(["schedule_subagent"]) == [[0]]
 
 
 # --- WS4: parent-side thread safety (no lost updates under concurrency) ---

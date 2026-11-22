@@ -10,6 +10,7 @@ import pytest
 
 from ouroboros import artifacts
 from tests._store_shared import read_result, result_signature
+from tests._workspace_git import git_repository
 
 
 def _large_file(path):
@@ -348,15 +349,9 @@ def test_full_inputs_survive_copyback_and_child_gc(tmp_path):
 
 
 def test_large_workspace_output_is_a_file_reference_not_a_git_patch(tmp_path):
-    import subprocess
     from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
 
-    repo = tmp_path / "workspace"
-    repo.mkdir()
-    def git(*args):
-        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    git("init")
-    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "base")
+    repo = git_repository(tmp_path / "workspace")  # one empty commit "base" by Fixture
     expected = _large_file(repo / "dataset.bin")
     output, manifest = write_workspace_patch_artifacts(repo, tmp_path / "capture", task={})
     assert not manifest["errors"]
@@ -473,11 +468,9 @@ def test_large_tracked_symlink_replacement_is_not_misreported_as_deletion(tmp_pa
     import subprocess
     from ouroboros import workspace_patch_capture as capture
 
-    repo = tmp_path / "workspace"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "workspace", unborn=True)
     def git(*args):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    git("init")
     (repo / "dataset.bin").write_bytes(b"old large content")
     (repo / "target.txt").write_text("target")
     git("add", ".")
@@ -498,11 +491,9 @@ def test_large_staged_rename_keeps_both_paths_out_of_the_git_patch(tmp_path, mon
     import subprocess
     from ouroboros import workspace_patch_capture as capture
 
-    repo = tmp_path / "workspace"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "workspace", unborn=True)
     def git(*args):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    git("init")
     (repo / "dataset.bin").write_bytes(b"large captured contents")
     git("add", ".")
     git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "base")
