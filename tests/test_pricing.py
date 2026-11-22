@@ -86,7 +86,7 @@ def test_missing_cache_prices_are_not_invented():
     ):
         assert estimate_cost_optional(
             "provider/model", 1_000, 100, provider="openrouter",
-        ) == 0.0013
+        ) == pytest.approx(0.0013)
         assert estimate_cost_optional(
             "provider/model", 1_000, 100, cache_usage={"cached_tokens": 10},
             provider="openrouter", allow_live_fetch=False,
@@ -120,20 +120,20 @@ def test_cache_heavy_anthropic_usage_keeps_a_nonzero_fresh_input_component():
 
     cached_and_write = (9_000 * 0.3 + 500 * 3.75) / 1_000_000
     completion = 100 * 15.0 / 1_000_000
-    assert pre_fix == round(cached_and_write + completion, 6)  # regular_input clamped to 0
-    assert post_fix == round(500 * 3.0 / 1_000_000 + cached_and_write + completion, 6)
+    assert pre_fix == pytest.approx(cached_and_write + completion)  # regular_input clamped to 0
+    assert post_fix == pytest.approx(500 * 3.0 / 1_000_000 + cached_and_write + completion)
     assert post_fix > pre_fix
 
 
-def test_exact_prompt_tier_is_applied_without_prefix_matching():
-    row = PricingSchedule(
-        (1.0, 0.1, None, 3.0),
-        ((100_000, (2.0, 0.2, None, 5.0)),),
-    )
-    with patch("ouroboros.llm.fetch_openrouter_pricing", return_value={"x/model": row}):
-        assert estimate_cost_optional(
-            "x/model", 100_000, 1_000, provider="openrouter",
-        ) == 0.205
+def test_prompt_tier_starts_strictly_above_its_threshold(monkeypatch):
+    from ouroboros.loop_messages import cached_tariff_text
+
+    row = PricingSchedule((1.0, 0.1, None, 3.0), ((100_000, (2.0, 0.2, None, 5.0)),))
+    monkeypatch.setattr("ouroboros.pricing.get_pricing", lambda **_: {"x/model": row})
+    assert estimate_cost_optional("x/model", 100_000, 1_000) == pytest.approx(0.103)
+    assert estimate_cost_optional("x/model", 100_001, 1_000) == pytest.approx(0.205002)
+    assert "$1.00/M in" in cached_tariff_text("x/model", "openrouter", 100_000)
+    assert "$2.00/M in" in cached_tariff_text("x/model", "openrouter", 100_001)
 
 
 def test_openrouter_catalog_accepts_arbitrary_model_family():
@@ -253,13 +253,14 @@ def test_processing_prices_the_complete_eligible_endpoint_pool(endpoint_catalog,
     request.assert_called_once_with("https://openrouter.ai/api/v1/models/vendor/tier-model/endpoints", timeout=5.0)
 
 
-def test_a_dotted_router_id_reads_its_own_endpoints_not_its_shared_identity(endpoint_catalog):
+@pytest.mark.parametrize("prefix", ["", "openrouter::", "openrouter@team::"], ids=["bare", "builtin", "named"])
+def test_a_dotted_router_id_reads_its_own_endpoints_not_its_shared_identity(endpoint_catalog, prefix):
     """``anthropic/claude-opus-5.5`` shares its identity with direct ``claude-opus-5-5``, yet its
     tariffs are OpenRouter's for the slug the route names."""
     rows, request = endpoint_catalog
     slug = "anthropic/claude-opus-5.5"
     request.return_value.json.return_value = {"data": {"id": slug, "endpoints": [{**r, "model_id": slug} for r in rows]}}
-    assert estimate_cost_optional(slug, 1000, 500, processing_mode="fast") == pytest.approx(0.0115)
+    assert estimate_cost_optional(prefix + slug, 1000, 500, processing_mode="fast") == pytest.approx(0.0115)
     request.assert_called_once_with(f"https://openrouter.ai/api/v1/models/{slug}/endpoints", timeout=5.0)
 
 
@@ -268,6 +269,25 @@ def test_priority_bound_includes_a_more_expensive_standard_fallback(endpoint_cat
     rows[3]["pricing"]["completion"] = "0.0001"
     assert estimate_cost_optional("vendor/tier-model", 1000, 500, processing_mode="priority") == pytest.approx(0.055)
     assert estimate_cost_optional("vendor/tier-model", 1000, 500, processing_mode="flex") == pytest.approx(0.0025)
+
+
+def test_named_router_connection_keeps_its_identity_after_tiered_settlement(endpoint_catalog, tmp_path, monkeypatch):
+    from ouroboros import usage_accounting as ua, usage_store
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    model = "openrouter@team::vendor/tier-model"
+    request = ua.AttemptRequest(model=model, provider="openrouter", drive_root=tmp_path,
+                                processing_preference="fast", submitted_processing_mode="priority",
+                                prompt_tokens_estimate=1000, max_completion_tokens=500)
+    attempt = ua.reserve_attempt(request)
+    ua.mark_dispatched(attempt)
+    ua.settle_attempt(attempt, {"prompt_tokens": 1000, "completion_tokens": 500, "service_tier": "priority"})
+    with usage_store.read(tmp_path) as txn:
+        row = txn.attempt(attempt.attempt_id)
+    assert row["model"] == model and row["provider"] == "openrouter"
+    assert row["reservation_upper_bound_usd"] == pytest.approx(0.0115)
+    assert row["cost_estimated"] and row["cost_usd"] == pytest.approx(0.0115)
 
 
 def test_flex_without_a_flex_endpoint_routes_as_the_ordinary_route_does(endpoint_catalog):
@@ -421,7 +441,9 @@ def test_endpoint_tiers_keep_literal_cache_prices_and_original_precision(endpoin
     assert estimate_cost_optional("vendor/tier-model", 1000, 100, cache_usage=cache,
                                   processing_mode="default") == pytest.approx(0.00431)
     assert estimate_cost_optional("vendor/tier-model", 2000, 100, cache_usage=cache,
-                                  processing_mode="default") == pytest.approx(0.00831)
+                                  processing_mode="default") == pytest.approx(0.00631)
+    assert estimate_cost_optional("vendor/tier-model", 2001, 100, cache_usage=cache,
+                                  processing_mode="default") == pytest.approx(0.008313)
     schedule = get_pricing(provider="openrouter", model="vendor/tier-model")["vendor"]
     assert schedule.cache_write_1h == 7 and schedule.tiers[0][1].cache_write_1h == 9
     assert schedule.source == {"provider": "openrouter", "model": "vendor/tier-model", "endpoint_tag": "vendor",
@@ -553,10 +575,12 @@ def test_concurrent_endpoint_readers_share_one_inflight_fetch(monkeypatch):
     assert calls == ["vendor/tier-model"]
 
 
-def test_legacy_empty_mode_preserves_its_model_price_and_cache_ratio():
+def test_empty_mode_uses_the_published_price_for_each_cache_tier():
     with patch("ouroboros.llm.fetch_openrouter_pricing", return_value={"vendor/model": (2.0, None, 3.0, 8.0)}):
         assert estimate_cost_optional("vendor/model", 1000, 100,
-            cache_usage={"cache_write_tokens": 500, "prompt_cache_ttl": "1h"}) == 0.0042
+            cache_usage={"cache_write_tokens": 500, "prompt_cache_ttl": "1h"}) is None
+        assert estimate_cost_optional("vendor/model", 1000, 100,
+            cache_usage={"cache_write_tokens": 500, "prompt_cache_ttl": "5m"}) == pytest.approx(0.0033)
 
 
 @pytest.mark.parametrize("charge", [
@@ -761,3 +785,194 @@ def test_a_candidates_own_routing_fact_outranks_what_the_settings_say_now(endpoi
     _forget_prices()
     assert wrapup_screen_bound("vendor/tier-model", "priority", 1000, routing_pinned=False) == pytest.approx(0.015)
     assert wrapup_screen_bound("vendor/tier-model", "priority", 1000, routing_pinned=True) == pytest.approx(0.04)
+
+
+@pytest.fixture(params=["model", "endpoint"])
+def load_openrouter_tariff(request, monkeypatch, endpoint_catalog):
+    from ouroboros.llm_pricing import openrouter_pricing_rows
+
+    def load(fields):
+        mode = "" if request.param == "model" else "default"
+        if mode:
+            endpoints, _ = endpoint_catalog
+            endpoints[:] = [_endpoint("vendor", **fields)]
+            row = get_pricing(provider="openrouter", model="vendor/tier-model")["vendor"]
+        else:
+            rows = openrouter_pricing_rows([{"id": "vendor/tier-model", "pricing": fields}])
+            monkeypatch.setattr("ouroboros.pricing.get_pricing", lambda **_: rows)
+            row = rows["vendor/tier-model"]
+        return row, mode
+
+    return load
+
+
+def test_catalog_rates_follow_provider_order_per_key_at_each_threshold(load_openrouter_tariff):
+    from ouroboros.pricing import cost_class_weights
+
+    row, mode = load_openrouter_tariff({
+        "prompt": "0.000002", "completion": "0.000008", "input_cache_read": "0.0000005",
+        "input_cache_write": "0.000003", "input_cache_write_1h": "0.00001100049", "overrides": [
+            {"min_prompt_tokens": 3000, "prompt": "0.000004", "completion": "0.000010", "input_cache_write_1h": "0.000013"},
+            {"min_prompt_tokens": 2000, "completion": "0.000009"},
+            {"min_prompt_tokens": 2000, "input_cache_write": "0"},
+            {"min_prompt_tokens": 4000, "input_cache_write": "0.000005"},
+        ],
+    })
+    assert tuple(row) == (2, 0.5, 3, 8) and row.cache_write_1h == 11.00049
+    assert [(minimum, tuple(tier), tier.cache_write_1h) for minimum, tier in row.tiers] == [
+        (2000, (2, 0.5, 0, 9), 11.00049), (3000, (4, 0.5, 0, 9), 13), (4000, (4, 0.5, 5, 9), 13)]
+    cache = {"cached_tokens": 100, "cache_write_tokens": 500, "prompt_cache_ttl": "1h",
+             "cache_write_tokens_by_ttl": {"5m": 200, "1h": 300}}
+    for prompt, expected in [(2000, 0.007550147), (2001, 0.007052147), (3001, 0.014454), (4001, 0.019454)]:
+        assert estimate_cost_optional("vendor/tier-model", prompt, 100, cache_usage=cache,
+                                      processing_mode=mode) == pytest.approx(expected, rel=1e-12, abs=0)
+    weights = cost_class_weights(row, {**cache, "prompt_tokens": 4001, "completion_tokens": 100})
+    assert weights == pytest.approx({"cache_write": 0.0049, "cache_read": 0.00005, "output": 0.0009,
+                                     "uncached_input": 0.013604})
+
+
+@pytest.mark.parametrize("base_hour, override", [({}, {}), ({"input_cache_write_1h": "0.000011"}, {"input_cache_write_1h": None})])
+def test_a_missing_or_explicitly_unknown_hour_rate_is_not_a_short_rate(load_openrouter_tariff, base_hour, override):
+    _, mode = load_openrouter_tariff({
+        "prompt": "0.000002", "completion": "0.000008", "input_cache_write": "0.000003", **base_hour,
+        "overrides": [{"min_prompt_tokens": 1000, "input_cache_write": "0.000005", **override}],
+    })
+    for lifetime, expected in [("1h", None), ("5m", pytest.approx(0.002305))]:
+        value = estimate_cost_optional("vendor/tier-model", 1001, 0, processing_mode=mode,
+                                       cache_usage={"cache_write_tokens": 101, "prompt_cache_ttl": lifetime})
+        assert value == expected
+
+
+def test_unresolved_utc_overrides_only_erase_rates_they_could_change(load_openrouter_tariff):
+    row, mode = load_openrouter_tariff({
+        "prompt": "0.000002", "completion": "0.000008", "input_cache_read": "0.000001",
+        "input_cache_write_1h": "0.000011", "overrides": [
+            {"min_prompt_tokens": 1000, "utc_start": 1500, "utc_end": 100, "input_cache_write_1h": "0.000007"},
+            {"min_prompt_tokens": 2000, "input_cache_write_1h": "0"},
+            {"utc_start": 1500, "utc_end": 100, "input_cache_read": "0.0000005"},
+        ],
+    })
+    assert tuple(row) == (2, None, None, 8)  # time-only rule may change just the listed read rate
+    cache = {"cache_write_tokens": 100, "prompt_cache_ttl": "1h"}
+    for prompt, expected in [(1000, pytest.approx(0.0037)), (1001, None), (2001, pytest.approx(0.004602))]:
+        assert estimate_cost_optional("vendor/tier-model", prompt, 100, cache_usage=cache, processing_mode=mode) == expected
+    assert estimate_cost_optional("vendor/tier-model", 1000, 100, cache_usage={"cached_tokens": 100}, processing_mode=mode) is None
+    assert estimate_cost_optional("vendor/tier-model", 1001, 100, processing_mode=mode) == pytest.approx(0.002802)
+
+
+@pytest.mark.parametrize("short_rate,hour_rate,short_tokens,hour_tokens,expected", [
+    ("0.000003", "0.000011", 40, 60, 0.00078),
+    (None, "0.000011", 0, 100, 0.0011),
+    (None, "0", 0, 100, 0.0),
+    ("0.000003", None, 100, 0, 0.0003),
+    ("0.000003", None, 0, 100, None),
+    ("0.000003", None, 40, 60, None),
+    (None, "0.000011", 40, 60, None),
+    ("0.000003", "unreadable", 100, 0, 0.0003),
+    ("0.000003", False, 0, 100, None),
+])
+def test_only_the_rates_for_reported_writes_are_required(monkeypatch, short_rate, hour_rate, short_tokens, hour_tokens, expected):
+    from ouroboros.llm_pricing import openrouter_pricing_rows
+    from ouroboros.pricing import cost_class_weights
+
+    rows = openrouter_pricing_rows([{"id": "vendor/model", "pricing": {"prompt": "0.000002", "completion": "0.000008",
+        "input_cache_write": short_rate, "input_cache_write_1h": hour_rate}}])
+    monkeypatch.setattr("ouroboros.pricing.get_pricing", lambda **_: rows)
+    usage = {"prompt_tokens": 100, "completion_tokens": 0, "cached_tokens": 0, "cache_write_tokens": 100,
+             "prompt_cache_ttl": "default", "cache_write_tokens_by_ttl": {"5m": short_tokens, "1h": hour_tokens}}
+    estimate = estimate_cost_optional("vendor/model", 100, 0, cache_usage=usage)
+    weights = cost_class_weights(rows["vendor/model"], usage)
+    if expected is None:
+        assert estimate is None and weights is None
+    else:
+        assert estimate == pytest.approx(expected, rel=1e-12, abs=0)
+        assert weights["cache_write"] == pytest.approx(expected, rel=1e-12, abs=0)
+
+
+@pytest.mark.parametrize("ttl,split,hour_rate,expected", [
+    ("1h", {"5m": 40}, None, None),
+    ("1h", {"5m": 40}, 11, None),
+    ("1h", {"1h": 60}, 11, None),
+    ("1h", {"5m": True, "1h": 99}, 11, None),
+    ("1h", {"5m": 100, "1h": -1}, 11, None),
+    ("1h", {"2h": 100}, 11, None),
+    ("1h", [], 11, None),
+    ("1h", {"5m": 100}, None, 0.0003),
+    ("1h", {"5m": 40, "1h": 60}, 11, 0.00078),
+    ("1h", {}, 11, 0.0011),
+    ("", {"1h": 60}, 11, None),
+    ("", {"1h": 60}, None, None),
+    ("", {}, 11, 0.0003),
+    ("default", None, None, 0.0003),
+])
+def test_only_absent_bins_allow_the_requested_or_default_write_tier(monkeypatch, ttl, split, hour_rate, expected):
+    rate = PricingSchedule((2, None, 3, 8), cache_write_1h=hour_rate)
+    monkeypatch.setattr("ouroboros.pricing.get_pricing", lambda **_: {"vendor/model": rate})
+    usage = {"cache_write_tokens": 100, "prompt_cache_ttl": ttl, "cache_write_tokens_by_ttl": split}
+    estimate = estimate_cost_optional("vendor/model", 100, 0, cache_usage=usage)
+    if expected is None:
+        assert estimate is None
+    else:
+        assert estimate == pytest.approx(expected, rel=1e-12, abs=0)
+
+
+@pytest.mark.parametrize("reported,expected", [
+    pytest.param({}, 20e-6, id="absent"),
+    pytest.param({"cache_creation_input_tokens": False}, None, id="boolean"),
+    pytest.param({"cache_creation_input_tokens": -1}, None, id="negative"),
+    pytest.param({"cache_creation_input_tokens": 0}, 20e-6, id="zero"),
+])
+def test_native_and_raw_estimates_distinguish_absent_and_malformed_writes(monkeypatch, reported, expected):
+    from ouroboros.llm import LLMClient
+
+    model = "vendor/model"
+    monkeypatch.setattr("ouroboros.pricing.get_pricing", lambda **_: {model: PricingSchedule((1, 0, 3, 0))})
+    amount = estimate_cost_optional(model, 20, 0, cache_usage=reported)
+    body = {"content": [], "usage": {"input_tokens": 20, "output_tokens": 0, **reported}}
+    _, reply = LLMClient(api_key="unused")._normalize_anthropic_response(
+        body, {"provider": "anthropic", "usage_model": model, "base_url": "https://api.anthropic.com/v1"})
+    for cost in (amount, reply["cost"]):
+        assert cost == (None if expected is None else pytest.approx(expected, rel=1e-12, abs=0))
+
+
+def test_model_rates_keep_precision_at_each_prompt_tier(monkeypatch):
+    from ouroboros.llm_pricing import openrouter_catalog_price, openrouter_price_row
+
+    rates = {"prompt": "0.000000000012", "input_cache_read": "0.000000000013",
+             "input_cache_write": "0.000000000014", "completion": "0.000000000015"}
+    override = {"min_prompt_tokens": 5, "prompt": "0.000000000022", "input_cache_read": "0.000000000023",
+                "input_cache_write": "0.000000000024", "completion": "0.000000000025"}
+    record = {"id": "vendor/model", "pricing": {**rates, "overrides": [override]}}
+    row = openrouter_price_row(record)
+    monkeypatch.setattr("ouroboros.pricing.get_pricing", lambda **_: {"vendor/model": row})
+    usage = {"cached_tokens": 1, "cache_write_tokens": 1}
+    assert estimate_cost_optional("vendor/model", 3, 1, cache_usage=usage) == pytest.approx(54e-12, rel=1e-12, abs=0)
+    assert estimate_cost_optional("vendor/model", 5, 1, cache_usage=usage) == pytest.approx(78e-12, rel=1e-12, abs=0)
+    assert estimate_cost_optional("vendor/model", 6, 1, cache_usage=usage) == pytest.approx(160e-12, rel=1e-12, abs=0)
+    assert openrouter_catalog_price(record) is None  # these prices would print as zero in the picker
+
+
+@pytest.mark.parametrize("override,completion,expected", [
+    pytest.param({"completion": None}, 0, 0.0011, id="unknown-output-rate-explicit-zero-output"),
+    pytest.param({"prompt": None}, 0, 0.0011, id="unknown-input-rate-no-uncached-input"),
+    pytest.param({"completion": None}, 1, None, id="unknown-output-rate-reported-output"),
+    pytest.param({"input_cache_write_1h": None}, 0, None, id="unknown-hour-rate-hourly-writes"),
+])
+def test_a_rate_is_required_only_for_a_class_the_call_reported(load_openrouter_tariff, override, completion, expected):
+    """100 hourly writes at $11/M above a threshold whose override leaves one other rate unknown: the unknown
+    rate prices nothing the call reported, so the estimate and the Costs shares are the writes alone."""
+    from ouroboros.pricing import cost_class_weights
+
+    row, mode = load_openrouter_tariff({
+        "prompt": "0.000002", "completion": "0.000008", "input_cache_write": "0.000003",
+        "input_cache_write_1h": "0.000011", "overrides": [{"min_prompt_tokens": 50, **override}]})
+    usage = {"prompt_tokens": 100, "completion_tokens": completion, "cached_tokens": 0, "cache_write_tokens": 100,
+             "prompt_cache_ttl": "1h", "cache_write_tokens_by_ttl": {"5m": 0, "1h": 100}}
+    estimate = estimate_cost_optional("vendor/tier-model", 100, completion, cache_usage=usage, processing_mode=mode)
+    weights = cost_class_weights(row, usage)
+    if expected is None:
+        assert estimate is None and weights is None
+    else:
+        assert estimate == pytest.approx(expected, rel=1e-12, abs=0)
+        assert weights == pytest.approx({"cache_write": expected, "cache_read": 0, "output": 0, "uncached_input": 0})
+    assert cost_class_weights(row, {**usage, "completion_tokens": None}) is None  # an absent count stays unknown

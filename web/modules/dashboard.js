@@ -219,8 +219,14 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
         header.toggleAttribute('data-controls', Array.from(controls).some((node) => !node.hidden));
         const tab = DASHBOARD_TABS.find((each) => each.value === state.dashboardActiveSubtab);
         if (leadName) leadName.textContent = tab?.label || '';
+        const wasShown = paneShown;
         paneShown = panelsEl.getClientRects().length > 0;
         syncLayer();
+        // The open page lost its box while the Dashboard stays (one column's Back, the Dashboard pressed again, a
+        // window narrowed to one column): no tab or page event says it. Leaving the Dashboard is `ouro:page-shown`'s.
+        if (wasShown && !paneShown && state.activePage === 'dashboard') {
+            window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-hidden', { detail: { tab: state.dashboardActiveSubtab } }));
+        }
     }
 
     // What a row says: the answer the Settings home gives its row for the same page, from the app's last state
@@ -276,8 +282,9 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     window.addEventListener('ouro:page-shown', onPageShown);
     window.addEventListener('ouro:dashboard-subtab-shown', onShownTab);
     window.addEventListener('ouro:settings-page-shown', onShownTab);
+    // Costs reads its own limits at a reconnect, as its page is drawn (costs.js): the list may hold it selected and undrawn.
     const offReconnect = ws?.on?.('open', (event) => {
-        if (event?.previouslyConnected && state.activePage === 'dashboard' && !document.hidden
+        if (event?.previouslyConnected && state.activePage === 'dashboard' && !document.hidden && state.dashboardActiveSubtab !== 'costs'
             && rowsOf(`dashboard:${state.dashboardActiveSubtab}`).some((row) => row.keys.length)) void readSettings().catch(() => {});
     });
     // The answers follow the state the app already reads (every 20 s, faster while a room shows): no read of their own.

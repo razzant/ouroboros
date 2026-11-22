@@ -18,7 +18,8 @@ TOKEN_COUNTER_ALIASES = {
                       "input_tokens_details.cached_tokens", "prompt_cache_hit_tokens"),
     "cache_write_tokens": ("cache_write_tokens", "cache_creation_input_tokens",
                            "prompt_tokens_details.cache_write_tokens", "prompt_tokens_details.cache_creation_tokens",
-                           "prompt_tokens_details.cache_creation_input_tokens"),
+                           "prompt_tokens_details.cache_creation_input_tokens", "input_tokens_details.cache_write_tokens",
+                           "input_tokens_details.cache_creation_tokens", "input_tokens_details.cache_creation_input_tokens"),
 }
 
 
@@ -52,11 +53,17 @@ def event_token_counts(usage: Any, fallback: Any = None) -> dict[str, int | None
     if isinstance(reported, dict):
         return {name: token_count(reported.get(name)) for name in TOKEN_COUNTER_ALIASES}
     sources = [source for source in (usage, fallback) if isinstance(source, dict)]
-    return {
-        name: next((token_count(*(_field(source, key)[1] for key in aliases))
-                    for source in sources if any(_field(source, key)[0] for key in aliases)), None)
-        for name, aliases in TOKEN_COUNTER_ALIASES.items()
-    }
+    counts = {}
+    for name, aliases in TOKEN_COUNTER_ALIASES.items():
+        counts[name] = None
+        for source in sources:
+            if name == "cache_write_tokens" and source.get("cache_write_tokens_invalid"):
+                break  # An unreadable write total is no reported count.
+            fields = [_field(source, key) for key in aliases]
+            if any(present for present, _ in fields):
+                counts[name] = token_count(*(value for _, value in fields))
+                break
+    return counts
 
 
 def cumulative_reported_tokens(total: Any, usage: Any) -> dict[str, int | None]:

@@ -486,6 +486,11 @@ def review_wave_admission(
         seat_local = _per_slot(use_local, len(models))
         base_scope = ua.current_usage_scope() or ua.UsageScope()
         total = 0.0
+
+        # Disclosed values only (the decision reads the unrounded bound): six decimals as before, except that a
+        # positive estimate under 1e-6 stays exact, so the formatter can show it as `<$0.000001` instead of 0.
+        def disclosed_usd(amount: float) -> float:
+            return amount if 0.0 < amount < 1e-6 else round(amount, 6)
         needs_paid = False
         unpriced_seats = []
         for index, model in enumerate(models):
@@ -504,7 +509,7 @@ def review_wave_admission(
                 )
                 bound = ua._reservation_cost(request)
             needs_paid = needs_paid or ua.paid_admission(request.provider, bound)
-            result["slot_bounds"].append(None if bound is None else round(float(bound), 6))
+            result["slot_bounds"].append(None if bound is None else disclosed_usd(float(bound)))
             if bound is None:
                 # Unknown contributes no invented price and remains explicitly counted.
                 unpriced_seats.append((request.provider, request.model))
@@ -512,7 +517,10 @@ def review_wave_admission(
                 continue
             total += float(bound)
         if result["unpriced_slots"] < len(models):
-            result["estimated_wave_usd"] = round(total, 6)
+            result["estimated_wave_usd"] = disclosed_usd(total)
+        # The reservation's equality: no room once known spend reached the limit. A reached GLOBAL limit
+        # refuses paid admission only (``usage_accounting.paid_admission``): a wave none of whose seats
+        # needs it still fits; a root or group cap binds every seat.
         at_global_limit = result["binding_axis"] == "global" and remaining <= 1e-9
         if at_global_limit and not needs_paid and unpriced_seats:
             from ouroboros import usage_store

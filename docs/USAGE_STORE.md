@@ -179,6 +179,13 @@ recent measured waves on its current model is shown with its count and range, no
 history reads `cost unknown`, and one process keeps the table for half an hour
 so `## Review` never waits on the ledger.
 
+For known spend across the installation, read `settled`, `confirmed` and
+`estimated` from `summaries WHERE scope='global' AND key=''`; inspect
+`unknown_unmetered` separately. Do not sum across scopes: the same attempt
+contributes to several. Imported `usage_baseline_group` rows can carry a string
+amount in `extra` with NULL `attempts.cost_usd`, so summing that column alone
+can undercount even the known spend.
+
 From money to the round and its cause: a task result's `[SUBTASK_OUTCOME]`
 carries its `swarm_receipt`, whose `cost.attempts[]` names every physical
 attempt of the tree by `attempt_id` (one released before dispatch has no
@@ -391,13 +398,31 @@ without a valid upstream figure it is unknown, never $0. Every other reply keeps
 its charge (OpenRouter repeats it in that field), and settled history is not
 rewritten. `_usage_response.provider_cost_value` validates incoming cash; malformed prices
 stay unknown despite available tariffs. The host-derived `cost_invalid` fact
-survives settlement, loop and Safety telemetry. Valid alternate evidence wins.
-Absent prices permit nonfinal text-token estimates. A sealed OpenRouter request
+survives settlement, loop and Safety telemetry. Valid alternate evidence wins. Absent prices permit nonfinal
+text-token estimates, never text tariffs for media usage. A sealed OpenRouter request
 with an `unpriced_add_on` requires a reported total even after reconciliation.
 
 On the exact OpenCode Go Chat route, only a valid `usage.cost` supplies a price.
 `usage.opencode.estimated` marks an estimate; list price, plan allowance and
 billed-token split are different units, not stand-ins.
+
+When a multimodal bill has no applicable class weights, the period
+keeps the recorded amount whole. A reported count is a nonnegative integer, absent, or malformed (negative,
+fractional, not a number). Absent and malformed counts are stored unknown, never
+as zero or a truncated number; a malformed one also prices nothing
+(`cost_coverage` `partial`), while its reply and a reported price stay. The loop
+and ledger use the same cache-read resolver: an explicit `cached_tokens: 0` in
+the details block outranks a conflicting top-level alias. DeepSeek
+tariffs read the counts as reported, exact integers only. A native Messages
+prompt is fresh input plus cache reads and writes: without a reported
+`input_tokens` it is unknown and measures neither a window nor a density. A body
+error with zero text counts can settle free only without evidence of a partial
+price, non-text usage or server-tool work, such as a nonzero web search count.
+A paid `web_search` leg's `llm_usage` event mirrors its own settled attempt's
+amount (including an explicit zero), finality, estimate and `cost_invalid` flags,
+and four token counts (`_usage_settlement.attempt_money_fact`). The display
+read is bounded independently of the money wait. Without a readable settled
+row, the event has no amount or counts; it computes neither.
 Generation 404, 401, 403, 429, mismatched ID and absent/invalid money are distinct
 non-price outcomes. `Retry-After` is retained for an operator's next invocation;
 the command never schedules another lookup. A valid retained price needs no

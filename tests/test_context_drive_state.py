@@ -53,8 +53,10 @@ def test_drive_state_section_is_typed_projection_with_pointer(tmp_path):
 
     assert section.startswith("## Drive state")
     assert '"session_id": "abc123"' in section
-    assert '"budget_drift_alert": true' in section
     assert '"bg_consciousness_stop_source": "owner"' in section
+    for view in (section.full_text, section.operative_view):
+        assert '"budget_drift_alert":' not in view and '"budget_drift_pct":' not in view
+        assert "OpenRouter changes since" not in view  # the alert alone proves no pair
     # Internal caches / duplicated spend narrative are OMITTED but NAMED.
     assert '"managed_update_cache"' not in section
     assert '"usage_accounting"' not in section
@@ -68,6 +70,52 @@ def test_drive_state_section_is_typed_projection_with_pointer(tmp_path):
     empty = _drive_state_section(FakeEnv())
     assert empty.startswith("## Drive state")
     assert "read_file" not in empty
+
+
+@pytest.mark.parametrize("missing", [
+    "openrouter_checked_ledger_settled_usd", "openrouter_last_check_at", "budget_drift_pct",
+    "session_openrouter_settled_snapshot", "session_total_snapshot",
+])
+def test_drive_state_never_backfills_an_incomplete_openrouter_comparison(tmp_path, missing):
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.context import _drive_state_section
+
+    path = tmp_path / "state" / "state.json"
+    path.parent.mkdir()
+    saved = {"openrouter_checked_ledger_settled_usd": 57.0, "openrouter_ledger_settled_usd": 99.0,
+             "session_openrouter_settled_snapshot": 50.0, "openrouter_total_usd": 108.0,
+             "session_total_snapshot": 100.0, "openrouter_last_check_at": "2026-11-17T14:00:00+00:00",
+             "budget_drift_pct": 12.5, "session_id": "old-check"}
+    del saved[missing]
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    section = _drive_state_section(SimpleNamespace(drive_path=lambda rel: tmp_path / rel))
+    for view in (section.full_text, section.operative_view):
+        assert '"session_id": "old-check"' in view  # the old state really reached the projection
+        assert "OpenRouter changes since" not in view
+        assert '"budget_drift_pct":' not in view
+
+
+@pytest.mark.parametrize("local,key,local_text,key_text", [
+    pytest.param(0.00000025, -0.00000025, "<$0.0001", "down <$0.0001", id="tiny-rise-and-fall"),
+    pytest.param(-0.0025, 0, "down $0.0025", "$0.00", id="negative-subcent-and-zero"),
+    pytest.param(-1.25, 40, "$-1.25", "$40.00", id="ordinary-deltas"),
+])
+def test_drive_state_keeps_small_signed_openrouter_deltas(tmp_path, local, key, local_text, key_text):
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.context import _drive_state_section
+
+    path = tmp_path / "state" / "state.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"openrouter_checked_ledger_settled_usd": 10 + local, "session_openrouter_settled_snapshot": 10,
+                                "openrouter_total_usd": 20 + key, "session_total_snapshot": 20,
+                                "openrouter_last_check_at": "2026-11-17T14:00:00+00:00", "budget_drift_pct": 0}), encoding="utf-8")
+    section = _drive_state_section(SimpleNamespace(drive_path=lambda rel: tmp_path / rel))
+    for view in (section.full_text, section.operative_view):
+        assert f"local settled spend {local_text} (sampled before the key request); key usage {key_text}." in view
 
 
 def test_review_ledger_caps_attempts_with_omission_notes(tmp_path):

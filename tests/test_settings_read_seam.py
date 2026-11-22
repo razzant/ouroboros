@@ -391,8 +391,10 @@ def test_every_owner_endpoint_reaches_the_same_normalized_read(isolated_settings
         "_api_owner_runtime_mode_sync",
         "_api_owner_auto_grant_sync",
         "_api_owner_context_mode_sync",
-        "_api_settings_post_locked",
+        "_api_settings_post_locked",  # a follow-up writes just the resolved repository slug
     }, readers
+    # Generic Save reads the same effective/authored pair as GET, strictly before its conditional write.
+    assert "_api_settings_post_locked" in _callers(settings_mod, "settings_read_view")
     from ouroboros.gateway import safety_settings
     assert _callers(safety_settings, "_owner_update_settings") == {"_persist"}
 

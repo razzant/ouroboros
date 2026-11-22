@@ -297,9 +297,8 @@ def _post_settings(monkeypatch, body, stored=None):
             boundary.commit()
         return payload
 
-    monkeypatch.setattr(gws, "load_settings", _fake_load)
     monkeypatch.setattr(gws, "_owner_write_settings", _fake_write)
-    monkeypatch.setattr(gws, "_owner_settings_document", lambda: dict(saved))  # the document the fake write keeps
+    monkeypatch.setattr(gws, "settings_read_view", lambda **_: (_fake_load(), dict(saved)))
     monkeypatch.setattr(gws, "_unrecognised_review_models", lambda models: [])
     monkeypatch.setattr(gws, "_apply_settings_to_env", lambda *a, **k: None)
 

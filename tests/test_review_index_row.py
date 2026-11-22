@@ -399,3 +399,45 @@ def test_a_resident_row_without_decisions_is_still_a_valid_bound_row(family):
     assert view._review_index_identity(row) == (family, "/repo" if family == "commit" else "")
     current = json.loads(row["content"].partition("\n")[2])["current"]
     assert current["decision_rows"] == [] and current["addresses"] == {} and current["attachments"] == []
+
+
+def test_a_folds_refresh_leaves_every_index_before_its_note_and_retires_or_replaces_only_after_it(tmp_path, monkeypatch):
+    """Both directions of the floor: no index copy before the fold's note (``floor``) is removed or replaced; a stale
+    one there stays byte-identical and the current index is appended. A stale copy at or after the floor is still
+    replaced in place, or retired beside the current one, as without a floor."""
+    history, operative = incident_history()
+    state = {"history": history, "operative": operative}
+    monkeypatch.setattr(view, "current_plan_history", lambda ctx, state=None, shared=state: (
+        deepcopy(shared["history"]), deepcopy(shared["operative"])))
+    ctx = SimpleNamespace(task_id=TASK, drive_root=tmp_path, _pending_review_context={})
+    messages = [{"role": "user", "content": "assignment"}]
+    messages += view.review_context_updates(ctx, families={"plan": ""}, messages=messages)[0]
+    stale, = [m for m in messages if view.REVIEW_CONTEXT_INDEX_KEY in m]
+    note = {"role": "assistant", "content": "The mind's note."}
+    assert view.refresh_compacted_review_context(ctx, deepcopy([*messages, note]), floor=len(messages)) == [
+        *messages, note]  # nothing changed, nothing moves
+    state["history"]["decision_rows"][-2]["status"].update(open=False, holds=False, withdrawn_in="a4")
+    state["history"]["decision_rows"][-2].update(reason="withdrawn in a4", history_role="historical")
+
+    before = view.refresh_compacted_review_context(ctx, deepcopy([*messages, note]), floor=len(messages))
+    current = before[-1]
+    assert before[:-1] == [*messages, note] and view.REVIEW_CONTEXT_INDEX_KEY in current
+    assert current[view.REVIEW_CONTEXT_INDEX_KEY] != stale[view.REVIEW_CONTEXT_INDEX_KEY]
+    assert view.obsolete_review_index_positions(before) == (messages.index(stale),)  # the stale copy is superseded
+
+    after = [messages[0], note, *messages[1:]]  # the stale copy after the note: replaced in place
+    replaced = view.refresh_compacted_review_context(ctx, deepcopy(after), floor=1)
+    assert len(replaced) == len(after) and replaced[after.index(stale)] == current
+    retired = view.refresh_compacted_review_context(ctx, deepcopy([*after, current]), floor=1)
+    assert stale not in retired and retired.count(current) == 1 and retired[:2] == after[:2]
+    assert view.refresh_compacted_review_context(ctx, deepcopy([*messages, note]))[messages.index(stale)] == current
+
+    # The last copy of each identity ends current: [current, stale] before the note gets the current one appended,
+    # which a departure's retirement of superseded copies then keeps; [stale, current] there gets nothing.
+    rest = [m for m in messages if m is not stale]
+    last_stale = [*rest, current, stale, note]
+    appended = view.refresh_compacted_review_context(ctx, deepcopy(last_stale), floor=len(last_stale) - 1)
+    assert appended == [*last_stale, current]
+    assert view.obsolete_review_index_positions(appended) == (len(rest), len(rest) + 1)  # the appended copy stays
+    last_current = [*rest, stale, current, note]
+    assert view.refresh_compacted_review_context(ctx, deepcopy(last_current), floor=len(last_current) - 1) == last_current

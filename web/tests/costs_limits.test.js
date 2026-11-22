@@ -110,7 +110,9 @@ test('the limits card is the data module\'s Costs rows, each with its name, its 
 test('one writer: Costs posts nothing to /api/settings itself and reads nothing of a save\'s answer', () => {
     assert.ok(privateWrites(OLD_COSTS_EXCERPT).length >= 3, 'the check sees the private writer Costs used to be');
     assert.deepEqual(privateWrites(costsJs), []);
-    assert.match(costsJs, /import \{ bindSettingRows, readSettings, settingsRow \} from '\.\/settings_controls\.js'/);
+    // What Costs takes from the one writer's module: the rows it draws and binds, a read, and the painting of what the
+    // newest accepted document says (`paintWithRow`, `settingsSnapshot`); no function of it writes.
+    assert.match(costsJs, /import \{ bindSettingRows, paintWithRow, readSettings, settingsRow, settingsSnapshot \} from '\.\/settings_controls\.js'/);
     assert.doesNotMatch(costsJs, /budgetSavePresentation|btn-save-budget|budget-save-status|Saving…/);
 });
 

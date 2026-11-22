@@ -44,7 +44,6 @@ def test_named_responses_search_binds_key_model_receipt_and_event(data_root, ctx
     ctx.task_metadata["budget_drive_root"] = str(data_root)
     monkeypatch.setenv(CONNECTIONS_KEY, json.dumps([{"kind": "openai", "name": "work", "api_key": "selected-key"}]))
     monkeypatch.setenv("OPENAI_BASE_URL", "https://builtin.invalid/v1")
-    monkeypatch.setattr(search_module, "estimate_cost_optional", lambda *a, **k: None)
     monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **k: None)
     mock_openai.responses.create.return_value = _FakeStream([
         _make_event("response.output_text.delta", delta="answer"), _make_completed_event()])
@@ -393,7 +392,6 @@ def test_anthropic_search_keeps_the_selected_key_with_its_messages_endpoint(help
     monkeypatch.setenv("ANTHROPIC_API_KEY", "builtin-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://builtin.invalid/prefix")
     monkeypatch.setenv(CONNECTIONS_KEY, json.dumps([{"kind": "anthropic", "name": "work", "api_key": "selected-key"}]))
-    monkeypatch.setattr(search_module, "estimate_cost_optional", lambda *a, **k: pytest.fail("unexpected estimate"))
     selection = "anthropic@work::same" if named else "anthropic::same"
     result = json.loads(search_module._web_search(ctx, "query", model=selection))
     [sdk], [sent], [row], [event] = state.clients, state.sent, ledger(root), ctx.pending_events

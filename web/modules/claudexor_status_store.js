@@ -66,7 +66,7 @@
 //
 // Pure helpers up top are node-tested without a DOM.
 
-import { apiFetch, createAccountReset, getAccountReset, refreshAccountResources } from './api_client.js';
+import { apiFetch, createAccountReset, getAccountReset, refreshAccountResources, withinRequestLifetime } from './api_client.js';
 import { harnessPresentation } from './harness_presentation.js';
 import { createObservationReads, resourceCapabilitiesRead } from './claudexor_observation_reads.js';
 
@@ -74,6 +74,11 @@ export const STATUS_ENDPOINT = '/api/claudexor/status';
 export const WAKE_ENDPOINT = '/api/claudexor/wake';
 export const RESTART_ENDPOINT = '/api/claudexor/restart';
 export const DEFAULT_POLL_MS = 5000;
+
+// Full status may read the daemon's facets and then its model catalogs. Allow for both read rounds and the
+// response body. Expiry bounds this client's wait; it says nothing about whether the daemon is running. The passive
+// view keeps the same lifetime wherever it is read: here, Costs › Subscriptions and the Settings home's roster.
+export const STATUS_READ_LIFETIME_MS = 150_000;
 
 export const READ_OK = 'ok';
 export const READ_NOT_READ = 'not_read';
@@ -619,6 +624,7 @@ export function createClaudexorStatusStore({
     pollMs = DEFAULT_POLL_MS,
     storage = () => globalThis.localStorage,
     discoveryMs = 120000,
+    readLifetimeMs = STATUS_READ_LIFETIME_MS,
 } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const inner = {
@@ -632,6 +638,7 @@ export function createClaudexorStatusStore({
         includeModels: false,
         snapshotHasModels: false,
         inFlight: null,
+        readAbort: null,
         inFlightModels: false,
         // The store orders explicit lifecycle writes against full discovery.
         wakeInFlight: null,
@@ -651,6 +658,7 @@ export function createClaudexorStatusStore({
     // whether the engine serves, against the held lifecycle, reads that lifecycle at once.
     const observations = createObservationReads({ fetchImpl, getSnapshot: () => inner.snapshot,
         commit: payload => { inner.snapshot = payload; },
+        lifetimeMs: readLifetimeMs,
         quotaObserved: retireResourceReads,
         changed: () => {
             inner.generation += 1;
@@ -822,16 +830,20 @@ export function createClaudexorStatusStore({
         // persistently failing endpoint it flickers state every tick.
         if (!inner.everSettled) notify();
         const url = withModels ? `${STATUS_ENDPOINT}?include=models` : STATUS_ENDPOINT;
+        const abort = new AbortController();
+        inner.readAbort = abort;
         const read = (async () => {
             let payload = null;
             let error = '';
             try {
-                const resp = await fetchImpl(url, { cache: 'no-store' });
-                const data = await resp.json().catch(() => null);
+                const { resp, body } = await withinRequestLifetime(async signal => {
+                    const resp = await fetchImpl(url, { cache: 'no-store', signal });
+                    return { resp, body: await resp.json().catch(() => null) };
+                }, { lifetimeMs: readLifetimeMs, signal: abort.signal });
                 if (!resp || !resp.ok) {
-                    error = String((data && data.error) || `HTTP ${resp ? resp.status : 'error'}`);
-                } else if (statusPayloadValid(data)) {
-                    payload = data;
+                    error = String((body && body.error) || `HTTP ${resp ? resp.status : 'error'}`);
+                } else if (statusPayloadValid(body)) {
+                    payload = body;
                 } else {
                     // A 200 whose body is not a status answer is a PROTOCOL
                     // failure, not an empty world: deriving facets from it would
@@ -839,8 +851,9 @@ export function createClaudexorStatusStore({
                     error = 'the status answer could not be understood';
                 }
             } catch (err) {
-                error = String(err?.message || err);
+                error = err?.name === 'StateReadEnded' && err.reason === 'expired' ? 'timed out' : String(err?.message || err);
             }
+            inner.readAbort = null;
             if (inner.disposed) return inner.snapshot;
             inner.loading = false;
             inner.everSettled = true;
@@ -1158,6 +1171,8 @@ export function createClaudexorStatusStore({
     function dispose() {
         inner.disposed = true;
         observations.dispose();
+        if (inner.readAbort) inner.readAbort.abort();
+        inner.readAbort = null;
         clearTimer();
         const document_ = getDoc();
         if (inner.visibilityBound && document_?.removeEventListener) {
