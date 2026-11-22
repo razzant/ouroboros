@@ -60,14 +60,13 @@ def settings_client(tmp_path, monkeypatch):
     def provider_defaults(settings):
         return dict(settings), False, []
 
-    monkeypatch.setattr(gateway, "load_settings", fake_load_settings)
     # server's compatibility shim still assigns this retired module attribute.
     # Record its absence so monkeypatch removes the temporary assignment again.
     monkeypatch.setattr(gateway, "save_settings", fake_save_settings, raising=False)
     monkeypatch.setattr(gateway, "_apply_settings_to_env", lambda *a, **k: None)
     monkeypatch.setattr(gateway, "apply_runtime_provider_defaults", provider_defaults)
     monkeypatch.setattr(gateway, "_owner_read_settings_raw", fake_load_settings)
-    monkeypatch.setattr(gateway, "settings_read_view", lambda: (fake_load_settings(), {}))
+    monkeypatch.setattr(gateway, "settings_read_view", lambda **_: (fake_load_settings(), fake_load_settings()))
     monkeypatch.setattr(gateway, "_owner_write_settings", fake_save_settings)
 
     # server's compatibility wrapper copies these four globals into the gateway
@@ -141,6 +140,32 @@ def test_password_mask_is_never_persisted_with_nothing_stored(settings_client):
 
     assert resp.status_code == 200, resp.text
     assert saved["OUROBOROS_NETWORK_PASSWORD"] == ""
+
+
+@pytest.mark.parametrize("saved_password,echo_mask", [(None, False), (None, True), ("", True)])
+def test_unrelated_save_keeps_a_launch_password_effective_only(settings_client, monkeypatch, saved_password, echo_mask):
+    import server as srv
+
+    client, document, saved = settings_client
+    password_key = "OUROBOROS_NETWORK_PASSWORD"
+    host_key = "OUROBOROS_SERVER_HOST"
+    if saved_password is not None:
+        document[password_key] = saved_password
+    launch = {password_key: "synthetic-launch-password", host_key: "192.0.2.10"}
+    projected = {}
+    monkeypatch.setattr(srv._gateway_settings, "settings_read_view", lambda **_: ({**document, **launch}, dict(document)))
+    monkeypatch.setattr(srv, "_apply_settings_to_env", projected.update)
+    payload = {"EXAMPLE_API_KEY": "synthetic-new-key"}
+    if echo_mask:
+        payload[password_key] = "***set***"
+
+    response = client.post("/api/settings", json=payload)
+
+    assert response.status_code == 200, response.text
+    assert saved["EXAMPLE_API_KEY"] == payload["EXAMPLE_API_KEY"]
+    assert host_key not in saved and (password_key in saved) == (saved_password is not None)
+    assert saved.get(password_key) == saved_password
+    assert projected[password_key] == launch[password_key] and projected[host_key] == launch[host_key]
 
 
 @pytest.mark.parametrize(
