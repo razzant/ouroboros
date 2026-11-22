@@ -81,16 +81,32 @@ FLIGHT = """() => new Promise((resolve) => {
 })"""
 
 
-# Every frame from now until the flight's copy is gone: where the copy and the newest sent row stand.
-TRACK = """() => { const t = window.__flight = { samples: [], seen: false, done: false };
-    const step = () => {
+# Every frame from now until the flight's copy is gone: where the copy and the newest sent row stand as that frame is
+# painted, where the copy is flying to (`aim`, its motion's last keyframe) and how far along it is (`progress`).
+# The product re-aims the copy in its own frame callback (send_flight.js `follow`), which runs after this one, so a
+# sample read inside this callback shows the copy still aimed at where the row stood a frame ago; a task queued from
+# it runs once every callback of the frame has run, and reads what the frame paints. `frame` counts the frames, so a
+# sample whose task ran only after a later frame says so (`lag` > 0). The copy leaves as its motion ends, so the last
+# painted frame shows it short of its aim by however much of the motion that frame missed: on a slow machine whose
+# frames come 100+ ms apart that is 20 px and more, which says nothing about where it lands. Where it lands is its aim.
+TRACK = """() => { const t = window.__flight = { samples: [], seen: false, done: false, frames: 0 };
+    const sample = (frame) => {
+        if (t.done) return;
         const copy = document.querySelector('.chat-send-flight');
         const rows = document.querySelectorAll('#chat-messages .chat-bubble.user');
         const row = rows[rows.length - 1];
         if (copy && row) {
             t.seen = true;
-            t.samples.push({ copy: copy.getBoundingClientRect().top, row: row.getBoundingClientRect().top });
-        } else if (t.seen) { t.done = true; return; }
+            const motion = copy.getAnimations().find((a) => 'top' in (a.effect.getKeyframes().at(-1) || {}));
+            t.samples.push({ copy: copy.getBoundingClientRect().top, row: row.getBoundingClientRect().top,
+                aim: motion ? parseFloat(motion.effect.getKeyframes().at(-1).top) : null,
+                progress: motion ? motion.effect.getComputedTiming().progress : null, frame, lag: t.frames - frame });
+        } else if (t.seen) t.done = true;
+    };
+    const step = () => {
+        if (t.done) return;
+        t.frames += 1;
+        setTimeout(sample, 0, t.frames);
         requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
@@ -213,5 +229,9 @@ def test_a_tap_on_send_with_the_keyboard_up_lands_on_the_bubble(shell_ui, tmp_pa
     assert samples, ('a copy flew', facts)
     moved = max(s['row'] for s in samples) - min(s['row'] for s in samples)
     assert moved > 40, ('setup: the bubble moved under the flight as the keyboard went down', facts)
-    assert abs(samples[-1]['copy'] - samples[-1]['row']) <= 3, ('the copy lands on the bubble where it is now', samples[-1])
+    last = samples[-1]
+    assert last['aim'] is not None and abs(last['aim'] - last['row']) <= 3, (
+        'the copy lands on the bubble where it is now', samples)
+    assert min(samples[0]['copy'], last['aim']) - 3 <= last['copy'] <= max(samples[0]['copy'], last['aim']) + 3, (
+        'and its last frame is on its way there from the draft', samples)
     assert facts['after'] == {'copies': 0, 'opacity': '1'}, ('no copy left; the bubble shows', facts)
