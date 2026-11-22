@@ -284,13 +284,15 @@ def test_measure_judges_each_side_of_a_target_reach_by_its_pointer(engine):
     with browser(engine) as instance:
         page = open_page(instance, (FIXTURES / "touch.html").as_uri(), width=600, height=700)
         page.screenshot()
-        small = {coarse: {item["where"] for item in page.evaluate(script, {"coarse": coarse})["findings"]
+        small = {coarse: {item["where"] for item in page.evaluate(script, {"coarse": coarse, "limit": 20})["findings"]
                           if item["kind"] == "target-small"} for coarse in (False, True)}
         assert_nothing_fetched(page)
-    # A mouse: 24 px each way, so a wide control too short fails; a link in a sentence is exempt, one alone in a list not.
-    assert small[False] == {"button#short", "a#listed"}, small
+    # A mouse: 24 px each way, so a wide control too short fails, and so does one a wrapper cuts to 22 px for good (a
+    # scroller showing part of a control does not shorten it); a link in a sentence is exempt, one alone in a list not.
+    assert small[False] == {"button#short", "button#masked", "a#listed"}, small
     # A finger: 44 px each way through the reach the recipe adds, unless a scrolling strip clips it; no link is exempt.
-    assert small[True] == {"button#bare", "button#short", "button#clipped", "button#clipped-2", "a#inline", "a#listed"}, small
+    assert small[True] == {"button#bare", "button#short", "button#clipped", "button#clipped-2", "button#masked",
+                           "a#inline", "a#listed"}, small
 
 
 @pytest.mark.parametrize("engine", ENGINES)
