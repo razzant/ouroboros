@@ -650,6 +650,25 @@ def test_this_room_has_its_head_retold_records_origin_words_and_notes(tmp_path):
     assert f"note {note.record['id']} by root on " in _section(noted, "### My notes not yet sealed")
 
 
+def test_unverified_retained_opening_is_a_host_gap_in_each_project_view(tmp_path):
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    room = create_project(tmp_path, "receipt-room")
+    chat = room["chat_id"]
+    unknown = "Check the legend"
+    ref = build_owner_message_ref(chat_id=1, client_message_id="older", ts="2026-09-01T00:30:00Z", text=unknown)
+    bind_task_to_project(tmp_path, "reader", room["id"], origin={"ref": ref, "text": unknown})
+    ChronicleStore(tmp_path).ensure_activated()
+    root = {"id": "reader", "chat_id": chat}
+    child = {"id": "helper", "chat_id": chat, "delegation_role": "subagent", "parent_task_id": "reader",
+             "root_task_id": "reader"}
+    fact = "[Host fact: The visibility of a retained project opening could not be verified.]"
+    place = {**root, "metadata": PRESENCE}  # a place's work bound to the Project has no separate owner-words block
+    for text in (_view(tmp_path, root)[1], _view(tmp_path, child, origin_words=True)[1], _view(tmp_path, place)[1]):
+        assert text.count(fact) == 1 and unknown not in text
+
+
 def test_a_project_root_reads_its_humans_sealed_rows_whole_under_the_actor_frame_and_main_does_not(tmp_path):
     """In a project room (never Main) the root's own view adds one section at the origins seam: the room's rows of
     my human that left the open conversation, verbatim and dated under the actor frame, the frame line over the

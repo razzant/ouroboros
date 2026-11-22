@@ -1,4 +1,4 @@
-// Dialogs of the Skills page. Plain confirmations go through the shared
+// Dialogs of the skill views of Extensions. Plain confirmations go through the shared
 // openConfirmDialog; a choice between consequences is drawn as offered-answer
 // cards (the question card's recipe), one chosen, the confirm button's words and
 // tone following the chosen card. Cancel, Close, the backdrop, Escape and a newer
@@ -19,15 +19,15 @@ let activeClose = null;
 function mountDialog({ title, bodyHtml = '', wide = false, onSettle }) {
     if (activeClose) activeClose();
     const backdrop = document.createElement('div');
-    backdrop.className = 'marketplace-modal-backdrop confirm-dialog-backdrop';
+    backdrop.className = 'ui-modal-backdrop confirm-dialog-backdrop';
     backdrop.innerHTML = `
-        <div class="marketplace-modal confirm-dialog skills-dialog${wide ? ' is-wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="skills-dialog-title">
-            <div class="marketplace-modal-head">
+        <div class="ui-modal confirm-dialog skills-dialog${wide ? ' is-wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="skills-dialog-title">
+            <div class="ui-modal-head">
                 <h3 id="skills-dialog-title">${escapeHtml(title)}</h3>
                 <button type="button" class="btn btn-default btn-sm" data-dialog-cancel aria-label="Close">Close</button>
             </div>
-            <div class="marketplace-modal-body">${bodyHtml}</div>
-            <div class="marketplace-modal-actions"></div>
+            <div class="ui-modal-body">${bodyHtml}</div>
+            <div class="ui-modal-actions"></div>
         </div>`;
     let settled = false;
     let disposeFocus = null;
@@ -48,8 +48,8 @@ function mountDialog({ title, bodyHtml = '', wide = false, onSettle }) {
     activeClose = cancel;
     return {
         backdrop, dialog, close, cancel,
-        body: dialog.querySelector('.marketplace-modal-body'),
-        actions: dialog.querySelector('.marketplace-modal-actions'),
+        body: dialog.querySelector('.ui-modal-body'),
+        actions: dialog.querySelector('.ui-modal-actions'),
         focus(initial) { disposeFocus?.({ restoreFocus: false }); disposeFocus = bindDialogFocus(dialog, { initialFocus: initial, onEscape: cancel }); },
     };
 }
@@ -190,7 +190,7 @@ export async function connectSkillTools(skill, { dialog = openConfirmDialog, api
         // The host's blockers are readiness tokens and launch diagnostics: the body says the outcome, Details keep them.
         const blockers = preview.blockers || [];
         await dialog({ title: `${skillTitle(skill)} can’t connect its tools yet`, alert: true,
-            body: conflict ? `${conflict.conflict}. Remove or rename that server in Settings → Tools → MCP servers.`
+            body: conflict ? `${conflict.conflict}. Remove or rename that server in Extensions → MCP servers.`
                 : 'It can’t run them now, so nothing was changed.',
             details: conflict ? null : { summary: 'What stops it', rows: [
                 ...(blockers.length ? [{ label: blockers.length > 1 ? 'Reasons' : 'Reason', value: blockers.join('; ') }] : []),
@@ -231,8 +231,8 @@ export function openCompareDialog({ mine = {}, other = {} }) {
             { value: 'keep', label: 'Keep yours', detail: `${line(mine)}\n${mine.description || ''}`, confirmLabel: 'Keep mine', tone: 'primary' },
             { value: 'replace', label: 'Use this one instead', detail: `${line(other)}\n${other.description || ''}`, confirmLabel: 'Use this one', tone: 'danger' },
         ],
-        // The host replaces in one install and keeps the replaced copy as its backup.
-        note: `Keeping yours changes nothing. Using the other one replaces yours and keeps a backup of it${other.reviewed ? '; the new one is reviewed before it runs' : ''}.`,
+        // The host replaces in one install, by its source's setting as it finds it then, and keeps the replaced copy as its backup.
+        note: 'Keeping yours changes nothing. Using the other one replaces yours and keeps a backup of it; its source’s setting in Sources decides whether it is reviewed first.',
     });
 }
 
@@ -510,7 +510,7 @@ export function firstStartTrustHtml(rows = []) {
     return `<p>Ouroboros comes connected to its public hub. Confirm how its skills install — you do this once.</p>
         <div class="skills-first-rows">${rows.map(choice).join('')}</div>
         <p class="skills-dialog-note">Suggested choices apply until you choose. Official doesn’t skip the review by itself: if you choose “Review each skill” for Ouroboros, its Official skills are reviewed too. A review sends the skill’s files to your review models.</p>
-        <p class="skills-dialog-note">You choose once. You can change it later in Skills → Sources.</p>`;
+        <p class="skills-dialog-note">You choose once. You can change it later in Extensions → Sources.</p>`;
 }
 
 /** First start of the public hub (B3). Resolves {id: trust} or null (Later). */

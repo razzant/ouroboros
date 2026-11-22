@@ -68,10 +68,9 @@ def _control_schema(name: str, description: str) -> dict:
 def _accepting_schema(schema: dict) -> dict:
     schema["parameters"]["properties"]["accept_unknown"] = {
         "type": "array", "items": {"type": "string"},
-        "description": "Ids a refusal listed in acceptable_unknown: held calls whose outcome is unknown "
-                       "(their worker cannot be proven live or ended, or an outside effect is unconfirmed). "
-                       "Naming them is your decision to go on without their results, recorded on the task with "
-                       "your reason; they are never run again, and a call in a live worker is refused."}
+        "description": "IDs from this Resume refusal's acceptable_unknown. Give your reason to resume the saved task. "
+                       "Named local calls are never replayed. A delegated start may still work or spend money. "
+                       "Its request becomes lookup-only. Live senders stay held."}
     return schema
 
 
@@ -110,5 +109,7 @@ def mind_tool_entries() -> list:
              "as unfinished (finish_task action=stop), through the same Continue action as the owner's button. "
              "An ordinary finished answer, owner Stop/Panic and hard money/deadline stops refuse. A finite execution budget carries only its recorded unspent "
              "remainder; when that remainder cannot be read the request refuses as execution_budget_unknown "
-             "and starts no successor, never with fresh time. Repeated delivery of this call reuses its one "
+             "and starts no successor, never with fresh time. An interrupted deep self-review saves no midpoint "
+             "and refuses as deep_review_restart_required: request_deep_self_review starts a new one. "
+             "Repeated delivery of this call reuses its one "
              "successor. The outcome arrives in your task mailbox."), _continue_task)]

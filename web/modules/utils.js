@@ -119,7 +119,8 @@ const zoneName = (date) => {
 const minuteOf = value => Math.floor(new Date(value).getTime() / 60000);
 
 /** The host observed this end itself: the executor ending its attempt, or the supervisor recording a cancel. */
-const endObserved = (fact) => fact?.source === 'executor_terminal' || fact?.source === 'supervisor_cancel';
+export const observedTerminalDate = (fact) => fact?.source === 'executor_terminal' || fact?.source === 'supervisor_cancel'
+    ? readDate(fact.occurred_at) : null;
 
 /** A task's host-observed end and the time its notification was added are two
  * facts (#1347); an unknown end says so rather than borrowing the second.
@@ -129,16 +130,22 @@ const endObserved = (fact) => fact?.source === 'executor_terminal' || fact?.sour
  * the row's own time alone when its task ended in that minute, both facts only
  * when the minutes differ, a day only off today. */
 export function terminalTimeNote(terminalTime, addedAt, now = new Date()) {
-    const ended = endObserved(terminalTime) ? readDate(terminalTime.occurred_at) : null;
+    const ended = observedTerminalDate(terminalTime);
+    const cancelled = terminalTime?.source === 'supervisor_cancel';
     const added = readDate(addedAt);
     const zone = Boolean(ended && added) && absoluteTime(ended) === absoluteTime(added) && minuteOf(ended) !== minuteOf(added);
-    const endFact = ended ? `Task ended ${absoluteTime(ended, zone)}` : 'Task end time not recorded';
+    const endFact = ended ? fmt(cancelled ? 'Task cancelled {time}' : 'Task ended {time}', { time: absoluteTime(ended, zone) })
+        : 'Task end time not recorded';
     const full = added ? `${endFact} · Notification added ${absoluteTime(added, zone)}` : endFact;
-    if (ended && added && minuteOf(ended) === minuteOf(added)) return { short: msgTimeOf(added, now).short, full };
+    if (ended && added && minuteOf(ended) === minuteOf(added)) {
+        const end = msgTimeOf(added, now).short;
+        return { short: cancelled ? fmt('Cancelled {end}', { end }) : end, full };
+    }
     const clocks = [ended, added].map((date) => (date ? clockOf(date, now) : ''));
     const [end, at] = ended && clocks[0] === clocks[1] ? clocks.map((clock, i) => `${clock} ${zoneName([ended, added][i])}`) : clocks;
     const short = ended
-        ? (at ? fmt('Ended {end} · added {added}', { end, added: at }) : fmt('Ended {end}', { end }))
+        ? (at ? fmt(cancelled ? 'Cancelled {end} · added {added}' : 'Ended {end} · added {added}', { end, added: at })
+            : fmt(cancelled ? 'Cancelled {end}' : 'Ended {end}', { end }))
         : (at ? fmt('End time not recorded · added {added}', { added: at }) : fmt('End time not recorded'));
     return { short, full };
 }
@@ -151,8 +158,8 @@ export function terminalTimeNote(terminalTime, addedAt, now = new Date()) {
 export function savedTerminalRowNote(row) {
     const fact = row?.system_type === 'task_summary' ? row.terminal_time : null;
     if (!fact || typeof fact !== 'object' || !absoluteTime(row.ts)) return '';
-    const known = endObserved(fact) && absoluteTime(fact.occurred_at);
-    return known && minuteOf(fact.occurred_at) === minuteOf(row.ts) ? '' : terminalTimeNote(fact, row.ts).full;
+    const ended = observedTerminalDate(fact);
+    return ended && minuteOf(ended) === minuteOf(row.ts) ? '' : terminalTimeNote(fact, row.ts).full;
 }
 
 /** Bound untrusted text with a visible marker before it reaches DOM surfaces. */

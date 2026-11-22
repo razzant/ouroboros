@@ -582,7 +582,7 @@ def test_local_driver_retains_known_intent_with_omitted_effort(tmp_path, monkeyp
     client = LLMClient(api_key="unused")
     manager = SimpleNamespace(serving_context_evidence=lambda: {})
     monkeypatch.setattr(local_model, "get_manager", lambda: manager)
-    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum: (0, maximum))
+    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum, evidence=None: (0, maximum))
     monkeypatch.setattr(client, "_get_local_client", lambda: SimpleNamespace(chat=SimpleNamespace(
         completions=SimpleNamespace(create=lambda **payload: sent.append(payload) or _Response()))))
     with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="local-intent")):

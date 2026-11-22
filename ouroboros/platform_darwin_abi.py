@@ -67,10 +67,10 @@ def kernel_birth(pid: int) -> tuple[int, int, bool] | None:
     return sec, usec, raw[36] == _SZOMB
 
 
-def kept_spelling(path: str) -> str | None:
+def kept_spelling(path: str, *, directory_fd: int | None = None) -> str | None:
     """The spelling macOS keeps for the existing folder ``path``, or None.
 
-    ``fcntl(F_GETPATH)`` on a read-only directory descriptor, closed before return, names every
+    ``fcntl(F_GETPATH)`` on the borrowed directory descriptor or one opened for this call names every
     component as the volume stores it: its case and Unicode form, through symlinks and firmlinks
     (``/System/Volumes/Data/Users/a`` reads ``/Users/a``). None means absent, not a folder, unreadable
     (a folder that may be searched but not read), not macOS or any other error: never a guessed spelling.
@@ -81,7 +81,7 @@ def kept_spelling(path: str) -> str | None:
     import os
 
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK)
+        fd = directory_fd if directory_fd is not None else os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK)
     except (OSError, ValueError):
         return None
     try:
@@ -89,7 +89,8 @@ def kept_spelling(path: str) -> str | None:
     except OSError:
         return None
     finally:
-        os.close(fd)
+        if directory_fd is None:
+            os.close(fd)
     kept = os.fsdecode(raw.split(b"\0", 1)[0])
     return kept if kept.startswith("/") else None
 

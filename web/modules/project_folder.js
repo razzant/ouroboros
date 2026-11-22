@@ -152,13 +152,13 @@ export function folderEffects(view, action, selected = '') {
 export function openProjectFolderDialog({ apiClient, project }) {
     return new Promise((resolve) => {
         const backdrop = document.createElement('div');
-        backdrop.className = 'marketplace-modal-backdrop new-project-backdrop';
+        backdrop.className = 'ui-modal-backdrop new-project-backdrop';
         backdrop.innerHTML = `
-            <div class="marketplace-modal new-project-dialog project-folder-dialog" role="dialog" aria-modal="true" aria-labelledby="project-folder-title">
-                <div class="marketplace-modal-head">
+            <div class="ui-modal new-project-dialog project-folder-dialog" role="dialog" aria-modal="true" aria-labelledby="project-folder-title">
+                <div class="ui-modal-head">
                     <h3 id="project-folder-title">Working folder</h3>
                 </div>
-                <div class="marketplace-modal-body">
+                <div class="ui-modal-body">
                     <div class="new-project-field">
                         <div class="ui-field-help" data-pf-name data-i18n-skip></div>
                         <div class="project-folder-path" data-pf-path data-i18n-skip hidden></div>
@@ -181,7 +181,7 @@ export function openProjectFolderDialog({ apiClient, project }) {
                     <div class="new-project-field project-folder-effects" data-pf-effects data-i18n-skip hidden></div>
                     <div class="new-project-error ui-result" data-pf-error role="alert"></div>
                 </div>
-                <div class="marketplace-modal-actions">
+                <div class="ui-modal-actions">
                     <button type="button" class="btn btn-default" data-pf-cancel>Close</button>
                     <button type="button" class="btn" data-primary data-pf-save hidden disabled>Save</button>
                 </div>

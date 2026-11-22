@@ -26,7 +26,7 @@ from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture 
     _owned_gateway_uses_each_test_transport,
     _select_transport_access,
 )
-from tests.test_delegate_accepted_lookup import Engine, _rows, _start, _sweep
+from tests._delegated_transport_shared import Engine, _rows, _start, _sweep
 from tests.test_delegate_continuation import _snapshot_count, _start as _stub_start
 
 _REAL_GATEWAY = cx.ClaudexorGateway  # bound at import, before any test patches the name

@@ -42,6 +42,7 @@ ACTIVITY = {
     "failed_owner": (_UNKNOWN, ("Paused", "Pausing"), ["stop_now"]),
     "gateway_unknown": (_UNKNOWN, ("Paused", "Pausing"), ["stop_now"]),
     "unbound": (_UNKNOWN, ("Paused", "Pausing"), None),
+    "accepted_lookup_only": (("Done", _UNKNOWN[0], _UNKNOWN[2]), ("Paused", "Pausing", "still working"), ["stop_now"]),
     "known_live": (("Pausing…", "You paused it", "1 external run still working"), ("Paused",), ["pause", "stop_now"]),
     # An answered root whose post-task synthesis completed names its late work: its state comes from the work too.
     "failed_owner_late": (("Remaining work status unknown", *_UNKNOWN[1:]), ("work paused", "Paused"), ["stop_now"]),
@@ -93,6 +94,17 @@ def _world(tmp_path, monkeypatch, case):
     from ouroboros.task_results import write_task_result
     from supervisor.owner_pause_control import request_owner_pause
 
+    if case == "accepted_lookup_only":
+        from tests._owner_pause_ended_helpers import _decide, _pending
+
+        def accepted(root):
+            assert _decide(root, _pending(root, "child-dead", "lost"))
+
+        queue, _, _ = _tail_tree(tmp_path, monkeypatch, root_status="completed", tail=accepted, chat_id=1)
+        write_task_result(tmp_path, "root-1", "completed", title="Delivered report")
+        assert queue.persist_queue_snapshot(reason="Activity work with an accepted unbound start")
+        return
+
     ended = case not in {"settled_pause", "review_finishing"}
     owner = "failed" if case in {"failed_owner", "failed_owner_late", "unbound", "settled_pause"} else "completed"
     queue, workers, engine = _tail_tree(tmp_path, monkeypatch, root_status="completed" if ended else "running",
@@ -143,7 +155,7 @@ def _says(text, says, never):
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-@pytest.mark.parametrize("case", CASES)
+@pytest.mark.parametrize("case", CASES + ("accepted_lookup_only",))
 def test_activity_says_the_works_truth_and_offers_only_its_controls(tmp_path, monkeypatch, case, engine):
     from playwright.sync_api import sync_playwright
 
@@ -152,6 +164,8 @@ def test_activity_says_the_works_truth_and_offers_only_its_controls(tmp_path, mo
     _world(tmp_path, monkeypatch, case)
     evidence = _evidence("activity", engine)
     state = _state(tmp_path)
+    if case == "accepted_lookup_only":
+        assert not state["active_chat_activities"] and state["works"][0]["episode"]["live"] is False
     (evidence / f"{case}-state.json").write_text(json.dumps(state, indent=1, ensure_ascii=False), encoding="utf-8")
     posts, errors = [], []
 
@@ -222,7 +236,10 @@ def test_activity_says_the_works_truth_and_offers_only_its_controls(tmp_path, mo
         server.server_close()
 
     assert errors == [] and posts == [], (errors, posts)
-    [row] = shown["rows"]  # the tree's one live root: a census row once it ended, its queue row while parked
+    [row] = shown["rows"]  # one activity at the root, even when only an unresolved delegated start remains
+    if case == "accepted_lookup_only":
+        assert row["name"] == "Delivered report" and 'data-tail-work="root-1"' in row["html"]
+        assert row["trigger"]["id"] == "root-1" and not row["trigger"]["resume"]
     says, never, controls = ACTIVITY[case]
     assert _says(" · ".join([row["chip"], row["sub"]]), says, never) == ([], []), row
     assert (row["trigger"] is not None) == (controls is not None), row

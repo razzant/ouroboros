@@ -188,15 +188,14 @@ def coarse(page):
 
 
 def long_press(page, target):
-    """A finger held still on ``target`` past the long press (row_menu_gesture.js), then lifted; the lifting finger's
-    click guard has run out when this returns."""
+    """A finger held still on ``target`` past the long press (row_menu_gesture.js), then lifted. The next press acts at
+    once (gesture_tail.js): nothing waits for the lift."""
     box = target.bounding_box()
     finger = {"pointerType": "touch", "isPrimary": True, "pointerId": 41,
               "clientX": box["x"] + box["width"] / 2, "clientY": box["y"] + box["height"] / 2}
     target.dispatch_event("pointerdown", finger)
     page.clock.run_for(500)
     target.dispatch_event("pointerup", finger)
-    page.clock.run_for(500)
 
 
 def open_menu(page, pid):
@@ -534,8 +533,9 @@ def test_many_pins_order_within_groups_long_names_and_short_windows(pins_ui, tmp
     expect()(row(page, "p1").locator('.status-mark[data-shape="dot"][data-hue="unread"]')).to_be_visible()
     assert page.locator('#primary-sidebar').evaluate("e => e.scrollWidth <= e.clientWidth")
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"many-{ui['tag']}.png"), animations="disabled")
-    # A short window keeps the boundary in the whole column's scroll; the approved two-line rows keep their touch/desk heights.
-    page.set_viewport_size({"width": ui["width"], "height": 520})
+    # A short window keeps the boundary in the whole column's scroll (480 px: a desk's zones fit from 500); the approved
+    # two-line rows keep their touch/desk heights.
+    page.set_viewport_size({"width": ui["width"], "height": 480})
     page.wait_for_function("() => getComputedStyle(document.getElementById('nav-projects-list'))"
                            ".overflowY === 'visible'")
     short = page.evaluate(GROUPS)
@@ -624,7 +624,9 @@ def test_pin_real_server_updates_other_window_and_survives_reload(direct_server_
             browser.close()
 
 
-@pytest.mark.parametrize("height", [900, 500])
+# 900: the zones, the list its own scroller; 500: a desk's zones still, a 390 phone's drawer too short for Main, a row
+# and its foot together (both go with the list); 480: a desk's whole column scrolling under its two pinned bars.
+@pytest.mark.parametrize("height", [900, 500, 480])
 @pytest.mark.parametrize("keyboard", [True, False], ids=["keyboard", "pointer"])
 def test_local_pin_reveal_respects_input_and_visible_scroll_region(pins_ui, height, keyboard):
     ui, page, root = pins_ui, pins_ui["page"], pins_ui["root"]

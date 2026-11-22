@@ -14,6 +14,7 @@ a dict this process happens to still hold.
 from __future__ import annotations
 
 from ouroboros.owner_pause import run_operation, OwnerPauseRefused
+from ouroboros.delegate_resume import BUSY as START_BUSY, UNREADABLE as START_UNREADABLE, checked_start, close_unsent_start, StartHeld
 
 import datetime as _dt
 import functools
@@ -163,8 +164,28 @@ _CLAUDEXOR_MAX_SECONDS = 604_800
 # The process-local memo of the durable custody rows (the authority lives in the module
 # above); re-bound here because sibling code and tests name it on this surface.
 _CUSTODY = custody._CUSTODY
-_RETRY_HINT = ("to retry THIS start call use delegate_start(retry_of=pending_invocation_id, prompt=''), "
-               "which replays its recorded request; a plain call starts a NEW run")
+_RETRY_HINT = ("Use delegate_start(retry_of=pending_invocation_id, prompt='') for this request. "
+               "After a Resume risk decision it can only look up the start. A plain call starts a new run.")
+
+
+def _unclaimed_start_facts(refusal, recovering):
+    facts = dict(refusal or {
+        "reason": "start_request_row_unwritable",
+        "detail": "The durable start-request row could not be written. Fix the drive/event log before retrying.",
+        **({} if recovering else {"definitely_unrun": True}),
+    })
+    reason = str(facts.pop("reason", "") or "replacement_custody_unknown")
+    detail = str(facts.pop("detail", "") or "Actor start claim unavailable.")
+    return reason, detail, facts
+
+
+def _held_start(code, invocation_id):
+    """Custody held the handoff: busy or unreadable sent nothing; a changed record is read, not replayed."""
+    if code in {START_BUSY, START_UNREADABLE}:
+        return _fail("delegate_start", code, "Nothing was sent; the request stays pending.",
+                     pending_invocation_id=invocation_id, retry_hint=_RETRY_HINT)
+    return _fail("delegate_start", code, "Start custody changed before submission. Read the recorded invocation.",
+                 pending_invocation_id=invocation_id)
 
 
 def _host_instructions(authority: "DelegatedRunShape", assignment: str = "",
@@ -473,6 +494,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             authority, assignment, payload_skill=payload_skill, coordination_context="" if continuation_token else _coordination_context,
         )
     start_attempted = recovering  # Recovery may already own a physical run.
+    requested = False
     try:  # a retry or continuation keeps its recorded engine; a fresh start the domain's (``execution_domain``)
         engine, gateway = start_engine(drive, retry_token, continuation_token)
     except ClaudexorUnavailable as exc:
@@ -610,16 +632,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             processing=processing_info, **({"row_processing": row_processing} if isinstance(row_processing, str) else {}),
             prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody, **({"held_heads": held} if held else {}),
         )
-        if not requested and not claim_refusal:
-            claim_refusal = {"reason": "start_request_row_unwritable", "detail":
-                "The durable start-request row could not be written, so the run was NOT started. "
-                "Fix the drive/event log and retry; a run without custody would be unfindable.",
-                **({"definitely_unrun": True} if not recovering else {})}
-        if claim_refusal:
-            reason = str(claim_refusal.get("reason") or "replacement_custody_unknown")
-            detail = str(claim_refusal.get("detail") or "Actor start claim unavailable.")
-            facts = {key: value for key, value in claim_refusal.items()
-                     if key not in {"reason", "detail"}}
+        if not requested or claim_refusal:
+            reason, detail, facts = _unclaimed_start_facts(claim_refusal, recovering)
             return _fail(
                 "delegate_start", reason, detail, **facts,
                 **_retire_orphaned_registration(ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
@@ -631,7 +645,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             nonlocal start_attempted
             start_attempted = True  # The durable request is not physical submission.
             return gateway.start_run(request_body, idempotency_key=invocation_id)
-        handle = run_operation(ctx, submit)
+        handle = run_operation(ctx, checked_start(drive, str(ctx.task_id), invocation_id, submit))
         run_id = str(handle.get("runId") or handle.get("jobId") or "")
         if not run_id:
             return _fail("delegate_start", "queued_without_run_id",
@@ -639,12 +653,16 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                          pending_invocation_id=invocation_id, retry_hint=_RETRY_HINT,
                          **_retire_orphaned_registration(ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
                              definite_refusal=False, reason="queued_without_run_id", invocation_id=invocation_id))
+    except StartHeld as exc:
+        return _held_start(str(exc), invocation_id)
     except BaseException as exc:
         typed = isinstance(exc, (ClaudexorUnavailable, OwnerPauseRefused))
         code = getattr(exc, "code", str(exc)) if typed else f"pre_custody_exit_{type(exc).__name__}"
         # A request row is not a POST; an entered one stays unknown whatever the engine answered (its accepted
         # work is read), so only a fresh start that never entered it is definite. Recovery retains its fate.
         definite = not start_attempted
+        if definite and requested:
+            definite = close_unsent_start(drive, str(ctx.task_id), invocation_id, code)
         if (start_attempted and isinstance(exc, ClaudexorUnavailable)
                 and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body)) is not None):
             return accepted
@@ -664,7 +682,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         pending = ({} if definite or not invocation_id else
                    {"pending_invocation_id": invocation_id, "retry_hint": _RETRY_HINT})
         return _fail("delegate_start", code, str(exc), executor="blocked",
-                     **({"definitely_unrun": True} if not start_attempted else {}),
+                     **({"definitely_unrun": True} if definite else {}),
                      reset_at=getattr(exc, "reset_at", ""), **pending, **cleanup)
     finally:
         gateway.close()
@@ -674,6 +692,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         drive, run_id, ctx, route, authority,
         key=key, access=authority.access, root=root, seconds=seconds,
         invocation_id=invocation_id, project_id=project_id, daemon_store_id=custody.admitted_store_id(handle),
+        observed_state=str(handle.get("state") or ""),
         project_owned=bool(owned_project_id), project_persistent=project_persistent,
         **actor_facts, **{k: v for k, v in snapshot_facts.items() if k not in plan_facts(snapshot_facts)},
         plan_facts=plan_facts(snapshot_facts), processing=processing_info, prompt_cache_ttl=ttl_info,
@@ -1008,17 +1027,9 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
     (``delegate_supervision._publish``): its retained or newly collected terminal, a new
     question set whole, else its present state past the wake's cursor ``since_seq``.
 
-    ``gateway`` is a transport BORROWED from its caller: it replaces the per-call
-    ``ClaudexorGateway()``, is handshaken here only when it has not been yet
-    (``engine_version`` is the handshake receipt), and is never closed here; the
-    owner closes it. Absent, the call builds, handshakes and closes its own.
-
-    ONE detail read under the transport's read bound, narrowed by the real deadline: no journal
-    read and no speech (the body follows each run's speech), and the rights floor of a run whose
-    start row recorded its grant is the body's (``delegate_containment.hold_to_grant``); a row with
-    no recorded grant is held here to the live derivation. A transport failure that delivered no
-    daemon answer (``observation_read_timeout``, ``daemon_unreachable``, the engine's own
-    ``DAEMON_BUSY_CODES``) is an ``observation_pending`` fact, never a refusal.
+    Borrow an already-open gateway or close our own. One deadline-bounded detail read;
+    the body follows speech and enforces recorded grants. Rows without a grant use the live
+    derivation here. An unanswered observation remains pending.
     """
     from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
     from ouroboros.execution_domain import run_gateway
@@ -1060,6 +1071,17 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
         detail = progress.bounded_poll(gateway, rid, bound())
         summary = custody.summary_of(detail)
         state = str(summary.get("state") or "")
+        if getattr(entry, "resume_start_state", None) is not None:
+            from ouroboros.delegate_resume import observe_bound_state, recovered_cancel_detail
+            # A recovered start's first state is kept only from an answer proved to be its run in
+            # its own store (``recovered_cancel_detail``): an unnamed answer, or one served by
+            # another store, is not recognized, keeps ``unknown`` for a genuine later answer and
+            # never becomes a completion. No extra read: the answer is already in hand.
+            if not recovered_cancel_detail(gateway, entry, detail):
+                return _fail("delegate_wait", "run_identity_mismatch",
+                             "The answer does not prove this run in its own store.", run_id=rid).text
+            if observe_bound_state(custody.custody_root(ctx), entry, state) is False:
+                return _fail("delegate_wait", "custody_unavailable", "The observation could not be saved.", run_id=rid).text
         breach = None if entry.access else _containment_breach(detail, authority)
         if breach:
             return _halt_breached_run(ctx, gateway, entry, breach)
@@ -1303,11 +1325,11 @@ def get_tools() -> List[ToolEntry]:
                 **input_files_parameter("continue_from retains its own new selection; nothing is inherited. Omit with retry_of: its result returns the original receipt."),
                 "retry_of": {"type": "string", "description":
                     "pending_invocation_id from an unknown start outcome (transport failure/lost response). "
-                    "Replays that invocation's recorded request byte-identically under its original key to retrieve "
-                    "an accepted run without duplicating it; prompt may be omitted. Omit subagent_id or receive a "
-                    "typed conflict; omit the other arguments too: the recorded ones replay, and a new value is a "
-                    "typed conflict. Never use for intended new work: a plain call creates a new invocation even "
-                    "with identical prompt."},
+                    "Looks up the accepted run. A Resume risk decision makes it lookup-only. Otherwise it may replay "
+                    "the original request byte-identically under the same key. Omit subagent_id or receive a typed "
+                    "conflict: a retry keeps the actor it recorded. Prompt is optional. Other arguments keep their "
+                    "recorded values; a conflicting value is refused. Use a plain call for intended new work. "
+                    "It creates a new invocation even with identical prompt."},
                 },
             },
         }, _published_entry(_delegate_start_entry),

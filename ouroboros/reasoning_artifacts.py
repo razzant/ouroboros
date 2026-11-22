@@ -53,7 +53,7 @@ SIGNED_PORTABLE = ("anthropic/", "google/gemini-")
 _READABLE_DETAIL_TYPES = frozenset({"reasoning.text", "reasoning.summary"})
 
 
-def _roster_vouched(model: Any) -> bool:
+def sealed_reasoning_is_portable(model: Any) -> bool:
     normalized = str(model or "").strip().lstrip("~").lower()
     return normalized.startswith(SIGNED_PORTABLE)
 
@@ -114,7 +114,7 @@ def sealed_reasoning_artifact(messages: Iterable[Any], model: Any) -> Optional[s
     ``signed_block``, ``redacted_thinking``, ``unknown_type``,
     ``reasoning_details_malformed``, ``reasoning_malformed``) safe to disclose in
     usage telemetry."""
-    if _roster_vouched(model):
+    if sealed_reasoning_is_portable(model):
         # The roster vouches every form for its families: nothing here can seal.
         return None
     for msg in messages or ():

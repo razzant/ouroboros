@@ -295,3 +295,86 @@ def test_observation_prompt_is_available_before_any_retained_answer(case):
     del tool_ctx._delivery_candidate
     observation = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
     assert observation["owner_source_sha256"] in acceptance_observation_prompt(tool_ctx, observation)
+
+
+def test_changed_material_under_the_same_reply_supersedes_the_bound_result_run(case):
+    """#3304: an acceptance-subject decision over changed material (a file edit under the same reply text) is a new
+    review subject: ``apply_delivery_subject_decision`` supersedes the earlier result run — the finish door's
+    one fact turns unexamined and the record keeps ``receipt_absent`` — while a no-op decision over unchanged
+    material keeps the run current."""
+    from ouroboros.outcomes import EXECUTION_OK, apply_receipt_absent_flag, result_unexamined
+    from ouroboros.tools.review_result import _bind_review_run
+
+    tool_ctx, tools, ctx, trace, candidate, _run = case
+    trace["tool_calls"].append({"tool": "write_file", "args": {"path": "report.md"}, "status": "ok"})
+    candidate = _replace_delivery_candidate(tools, ctx, trace, candidate.full_text, control="candidate")
+    subject_sha = delivery_subject_hash(tool_ctx, trace)
+    bound = _bind_review_run(trace, {"record_id": "r1", "verdict": {"aggregate": "PASS"},
+                                     "subject": {"diff_sha": subject_sha}}, subject_sha, "advisory")
+    assert not bound.get("superseded_by_revision") and result_unexamined(trace) is False
+
+    observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
+    ok, error = apply_delivery_subject_decision(tools, ctx, trace, {"owner_source_sha256": observed["owner_source_sha256"]})
+    assert ok and not error and not bound.get("superseded_by_revision"), "unchanged material keeps the run current"
+    assert result_unexamined(trace) is False, "the no-op candidate stays examined"
+
+    trace["tool_calls"].append({"tool": "write_file", "args": {"path": "extra.md", "content": "New"}, "status": "ok"})
+    observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
+    ok, error = apply_delivery_subject_decision(tools, ctx, trace, {"owner_source_sha256": observed["owner_source_sha256"]})
+    assert ok and not error
+    assert bound.get("superseded_by_revision"), "changed material is a new review subject (#3304)"
+    assert result_unexamined(trace) is True, "the door's one fact turns unexamined again"
+    outcome = {"outcome_axes": {"objective": {"status": "not_evaluated"}, "execution": {"status": EXECUTION_OK}}}
+    apply_receipt_absent_flag(outcome, trace, tool_ctx.drive_root, "root")
+    assert "receipt_absent" in (outcome["outcome_axes"]["objective"].get("warnings") or []), "the record keeps the fact"
+
+
+def test_renominated_evidence_under_the_same_reply_unexamines_an_already_asked_review(case):
+    """#3304 binding witness: the review subject is the answer AND its nominated material, so naming different
+    evidence under unchanged words is a new subject even when nothing new was written. The earlier
+    ``review_change`` row sits after the last effect, so only the supersession of that call's own run turns the
+    finish door's fact back to unexamined and keeps ``receipt_absent`` in the record; the settled record re-bound
+    to the exact current subject is a positive again."""
+    from ouroboros.outcomes import EXECUTION_OK, apply_receipt_absent_flag, result_unexamined
+    from ouroboros.tools.review_result import _bind_review_run
+
+    tool_ctx, tools, ctx, trace, candidate, _run = case
+    trace["tool_calls"].append({"tool": "read_file", "args": {"path": "report.json"},
+                                "status": "ok", "result": '{"valid": false}'})
+    trace["tool_calls"].append({"tool": "write_file", "args": {"path": "report.md"}, "status": "ok"})
+    trace["tool_calls"].append({"tool": "review_change", "args": {"subject": "result"}, "status": "ok",
+                                "tool_result_meta": {"review_delivery": {"record_id": "r1"}}})
+    candidate = _replace_delivery_candidate(tools, ctx, trace, candidate.full_text, control="candidate")
+    subject_sha = delivery_subject_hash(tool_ctx, trace)
+    bound = _bind_review_run(trace, {"record_id": "r1", "verdict": {"aggregate": "PASS"},
+                                     "subject": {"diff_sha": subject_sha}}, subject_sha, "advisory")
+
+    def objective_warnings():
+        outcome = {"outcome_axes": {"objective": {"status": "not_evaluated"}, "execution": {"status": EXECUTION_OK}}}
+        apply_receipt_absent_flag(outcome, trace, tool_ctx.drive_root, "root")
+        return outcome["outcome_axes"]["objective"].get("warnings") or []
+
+    assert not bound.get("superseded_by_revision")
+    assert result_unexamined(trace) is False and "receipt_absent" not in objective_warnings(), \
+        "the asked review examined the result"
+
+    observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
+    ok, error = apply_delivery_subject_decision(tools, ctx, trace, {"owner_source_sha256": observed["owner_source_sha256"]})
+    assert ok and not error and not bound.get("superseded_by_revision"), "keeping the nomination changes nothing"
+    assert result_unexamined(trace) is False, "a no-op subject decision keeps the review current"
+
+    observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
+    ok, error = apply_delivery_subject_decision(tools, ctx, trace, {
+        "owner_source_sha256": observed["owner_source_sha256"], "material_tool_indices": [0]})
+    assert ok and not error
+    assert str(bound.get("superseded_by_revision") or "").startswith("subject-"), \
+        "nominated material is part of the subject (#3304)"
+    assert result_unexamined(trace) is True, "that call's superseded run no longer speaks for the answer"
+    assert "receipt_absent" in objective_warnings(), "the record keeps the fact"
+
+    current_sha = delivery_subject_hash(tool_ctx, trace)
+    reused = _bind_review_run(trace, {"record_id": "r1", "verdict": {"aggregate": "PASS"},
+                                      "subject": {"diff_sha": current_sha}}, current_sha, "advisory")
+    assert reused is bound and not reused.get("superseded_by_revision"), "the settled record is current again"
+    assert result_unexamined(trace) is False and "receipt_absent" not in objective_warnings(), \
+        "a genuinely current exact receipt is a positive"

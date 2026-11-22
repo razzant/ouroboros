@@ -1,9 +1,10 @@
 from __future__ import annotations
 import subprocess
 
+from tests._workspace_git import git_repository
+
 def _init_repo(path):
-    path.mkdir()
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    git_repository(path, unborn=True)
 
 class FakeGitHubClient:
     def __init__(self, *, repos=None, forks=None):

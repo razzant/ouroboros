@@ -176,6 +176,25 @@ def test_main_question_materials_reader_and_keyboard(wait_clone, tmp_path, width
                     page.screenshot(path=str(evidence / 'document-reader.png'), animations='disabled')
                     dialog.get_by_role('button', name='Source', exact=True).click()
                     expect(dialog.locator('.document-reader-body')).to_contain_text('# Decision brief')
+                    # Storage name, display name and save name are three things: the copy's registered name differs,
+                    # the document shows the original, the read and the download use the copy's address, and the
+                    # browser is offered the original name.
+                    brief = next(row for row in receipt['materials'] if row['label'] == 'decision-brief.md')
+                    assert brief['name'] != brief['label'] and brief['download_url'].endswith('/' + brief['name'])
+                    expect(document).to_contain_text('decision-brief.md')
+                    expect(document).not_to_contain_text(brief['name'])
+                    expect(dialog.locator('.document-reader-title')).to_have_text('decision-brief.md')
+                    requested = []
+                    page.on('request', lambda request: requested.append(request.url))
+                    with page.expect_download() as brief_download:
+                        dialog.get_by_role('button', name='Download', exact=True).click()
+                    saved = evidence / 'decision-brief-download.md'
+                    brief_download.value.save_as(str(saved))
+                    assert brief_download.value.suggested_filename == 'decision-brief.md'
+                    assert saved.read_bytes() == payloads['decision-brief.md']
+                    assert any(url.endswith(brief['download_url']) for url in requested), requested
+                    receipt['download'] = {'suggested_filename': brief_download.value.suggested_filename,
+                                           'address': brief['download_url'], 'saved': str(saved)}
                     page.keyboard.press('Escape')
                     expect(dialog).to_have_count(0)
                     expect(document).to_be_focused()

@@ -8,8 +8,8 @@ const text = (value) => String(value ?? '').trim();
 // a replayed frame therefore states the same row rather than a second incident.
 export function acceptanceIncidentFromTaskDetail(detail) {
     const fromProjection = detail?.review_projection?.acceptance_incident;
-    const decision = detail?.outcome_axes?.review?.acceptance_decision
-        || detail?.review_status?.acceptance_decision;
+    const canonicalReview = detail?.outcome_axes?.review, decision = canonicalReview != null
+        ? canonicalReview.acceptance_decision : detail?.review_status?.acceptance_decision;
     const incident = (fromProjection && typeof fromProjection === 'object' ? fromProjection : null)
         || (decision?.acceptance_incident && typeof decision.acceptance_incident === 'object'
             ? decision.acceptance_incident : null);

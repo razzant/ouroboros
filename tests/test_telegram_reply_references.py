@@ -174,14 +174,21 @@ def test_reply_to_mirrored_work_goes_through_normal_ingress_as_reference(bridge,
     assert b.api.logs == []
 
 
-def test_unmapped_or_other_chat_reply_has_no_reference_and_no_notice(bridge, monkeypatch):
+def test_a_reply_to_a_bot_message_no_map_knows_is_an_ordinary_unquoted_turn_here(bridge, monkeypatch):
+    """An evicted answer, /help or any bot text the maps never held: the Reply is this chat's ordinary turn,
+    without a quote, a guessed room or a refusal (a command sent that way keeps its dispatch, as typed)."""
     b = bridge
-    _state(b.plugin)._remember_message(b.api, "", 43, 101, {"row_address": "other-chat"})
+    _state(b.plugin)._remember_message(b.api, "", 43, 101, {"row_address": "other-chat"})  # another chat's number
     posts = _host_posts(b, monkeypatch)
     _receive(b, _owner(reply=101))
     _receive(b, _owner(51, reply=999))
-    assert all("reply_to" not in payload for _, payload in posts)
-    assert b.calls == [] and b.api.logs == []
+    _receive(b, _owner(52, "/status", reply=999))
+    assert [(path, payload["text"], payload["chat_id"], "reply_to" in payload) for path, payload in posts] == [
+        ("/chat/inject", "Explain this", 42, False), ("/chat/inject", "Explain this", 42, False),
+        ("/chat/inject", "/status", 42, False)]
+    assert [payload["client_message_id"] for _path, payload in posts] == ["tg:42:50", "tg:42:51", "tg:42:52"]
+    assert all("owner_message_id" not in payload["transport"] for _path, payload in posts), "no exact turn"
+    assert b.calls == [] and b.api.logs == [], "nothing is refused and no note is due: no old record holds them"
 
 
 def _accept_owner(b, mid, *, text="Same owner words", chat=42):
@@ -258,39 +265,6 @@ def test_every_mirrored_media_surface_retains_reference_and_native_reply(bridge,
     assert len(b.calls) == 1 and b.calls[0][1]["reply_to_message_id"] == 10
     assert _state(b.plugin)._reply_reference(b.api, "", 42, 101) == "host-media-row"
     assert b.api.logs == []
-
-
-def test_long_quiz_keeps_answer_door_and_earlier_parts_carry_references(bridge, monkeypatch):
-    b = bridge
-    event = {"chat_id": 1, "row_address": "question-row", "quiz_id": "quiz", "task_id": "task",
-             "question": "Long question " * 900, "options": [{"label": "A"}, {"label": "B"}],
-             "message_origin": {"label": "Export"}}
-    asyncio.run(b.plugin._make_quiz(b.api)(event))
-    assert len(b.calls) > 2
-    heading = "Export\n"
-    parts = []
-    for method, data in b.calls:
-        assert method == "sendMessage" and data["chat_id"] == "42"
-        assert data["text"].startswith(heading) and data["text"].count(heading) == 1
-        assert b.transport._u16len(data["text"]) <= 4096
-        if "reply_markup" not in data:
-            parts.append(data["text"][len(heading):])
-    expected = b.plugin.telegram_quiz.render_quiz_text(event["question"], ["A", "B"], "", "")
-    # Existing raw chunking makes a boundary stand in for its split whitespace.
-    assert "".join("".join(part.split()) for part in parts) == "".join(expected.split())
-    assert b.calls[-1][1]["text"] == heading + "1. A\n2. B\n" + b.plugin.telegram_quiz.hint("en")
-    last = 100 + len(b.calls)
-    state = _state(b.plugin)
-    assert all(state._reply_reference(b.api, "", 42, mid) == "question-row" for mid in range(101, last + 1))
-    assert state._message_ref(b.api, "", 42, 101)["kind"] == "question"
-    record = b.plugin.telegram_quiz.quiz_for_message(b.api, "", 42, last)
-    assert record["text"] == heading + "1. A\n2. B"
-    posts = _host_posts(b, monkeypatch)
-    _receive(b, _owner(50, "Please explain", reply=101))
-    assert posts[0][0] == "/chat/inject" and posts[0][1]["reply_to"] == "question-row"
-    _receive(b, _owner(51, "B", reply=last))
-    assert posts[1][0] == "/chat/decision"
-    assert posts[1][1]["decision_id"] == "quiz:task:quiz" and posts[1][1]["comment"] == "B"
 
 
 def _quiet(b, **settings):
@@ -647,3 +621,602 @@ def test_project_status_reply_names_work_not_the_unshown_main_answer(bridge, mon
     assert "task_id" not in posts[0][1]  # a reference, never a routing request
     assert resolve_reply(root, posts[0][1]["reply_to"])["kind"] == "work_card"
     assert resolve_reply(root, address)["snippet"] == row["completion_answer"]  # Main's separate visible answer
+
+
+# --- the owner's own words and the bridge's own maps decide what a Reply names ------------------------------------
+
+def test_a_reply_to_the_owners_own_words_is_never_refused_and_quotes_his_accepted_row(bridge, monkeypatch):
+    b = bridge
+    earlier = _accept_owner(b, 10)
+    (b.api.state_dir / "message_refs.json").unlink()  # the map let it go; the accepted row stays
+    posts = _host_posts(b, monkeypatch)
+    _receive(b, {**_owner(60, "and on Windows too"), "reply_to_message": {"message_id": 10, "from": {"id": 42}}})
+    _receive(b, _owner(11, "/help"), update_id=71)  # his own words the host never accepted
+    _receive(b, {**_owner(61, "about that"), "reply_to_message": {"message_id": 11, "from": {"id": 42}}}, update_id=72)
+    assert [payload.get("reply_to") for _path, payload in posts] == [earlier["address"], None]
+    assert [method for method, _data in b.calls] == ["sendMessage"], "only /help's own text: nothing refused"
+
+
+def test_a_reply_to_a_card_only_the_card_index_still_names_reaches_its_helper(bridge, monkeypatch):
+    b = bridge
+    _state(b.plugin)._set_subagent_msg(b.api, "", 42, "helper-1", 77)
+    posts = _host_posts(b, monkeypatch)
+    _receive(b, _owner(60, "about the helper", reply=77))
+    [(_path, payload)] = posts
+    assert payload["reply_to"] == "task:helper-1"
+    facts = payload["transport"]
+    assert (facts["reply_child_task_id"], facts["reply_card_message_id"], facts["owner_message_id"]) == ("helper-1", 77, 60)
+    assert "bot_id" not in facts and b.calls == []  # a token naming no bot
+
+
+def test_panic_names_what_the_map_holds_and_never_waits_on_the_store(bridge, monkeypatch):
+    """Panic's own door keeps its reading: a Reply on it is what this bot's map names, read without the store."""
+    b = bridge
+    state = _state(b.plugin)
+    state._remember_message(b.api, "", 42, 10, {"direction": "in", "chat_id": 42, "kind": "message",
+                                                "client_message_id": "tg:42:10"})
+    monkeypatch.setattr("supervisor.message_bus.accepted_chat_message",
+                        lambda *_args, **_kwargs: pytest.fail("Panic reads no accepted row"))
+    panic = {"message_id": 11, "text": "/panic", "chat": {"id": 42}, "from": {"id": 42},
+             "reply_to_message": {"message_id": 10, "from": {"id": 42}}}
+    assert state._owner_ingress_fields(b.api, "", 42, panic, 5) == {"client_message_id": "tg:42:11"}
+
+
+# --- the owner bot's exact Reply: its Project's own turn, its strict anchor, its refusals ---------------------------
+
+class _OwnerBotApi(Api):
+    """Bot 123 (a numeric token id, as every real token has) with its host data beside its skill state."""
+
+    def __init__(self, state_dir, data_dir):
+        super().__init__(state_dir)
+        self.data_dir = Path(data_dir)
+
+    def get_runtime_info(self):
+        return {"data_dir": str(self.data_dir)}
+
+    def get_settings(self, _keys):
+        return {"TELEGRAM_BOT_TOKEN": "123:test"}
+
+
+@pytest.fixture(params=["all", "telegram_only"])
+def owner_bot(tmp_path, monkeypatch, request):
+    """The owner's private chat 42 with bot 123 behind the real bus, ingress, owner router and room rule, in each
+    mirror mode. ``calls`` holds every Bot API request as ``(method, form, message id)``; ``replies`` queues a refusal
+    for the next one. A Project's converted root began from the owner's Telegram message; its helper is admitted."""
+    from ouroboros import projects_registry as pr
+    from ouroboros.event_bus import CHAT_OUTBOUND
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import write_task_result
+    from supervisor import message_bus, queue
+
+    from tests.test_chat_references import seed_bundled_bridge
+
+    plugin, transport = _load_skill()
+    data, skill = tmp_path / "data", tmp_path / "skill"
+    data.mkdir()
+    skill.mkdir()
+    seed_bundled_bridge(data)  # only the bundled bridge's Replies have their room decided
+    (skill / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": request.param}),
+                                         encoding="utf-8")
+    api = _OwnerBotApi(skill, data)
+    calls, replies = [], []
+
+    class Wire:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def post(self, url, *, data, files):
+            form = dict(data or {})
+            if replies:
+                status, body = replies.pop(0)
+                calls.append((url.rsplit("/", 1)[-1], form, 0))
+                return httpx.Response(status, json=body)
+            mid = int(form.get("message_id") or 0) or 100 + len(calls)  # an edit answers with its own message
+            calls.append((url.rsplit("/", 1)[-1], form, mid))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": mid}})
+
+    monkeypatch.setattr(transport.httpx, "AsyncClient", Wire)
+    handle = plugin._make_outbound(api)
+    bus = message_bus.LocalChatBridge({})
+    bus._broadcast_fn = lambda _frame: None
+
+    events = []
+
+    def publish(topic, event):
+        events.append((topic, dict(event)))
+        if topic == CHAT_OUTBOUND:
+            asyncio.run(handle(dict(event)))
+
+    for name, value in (("DATA_DIR", data), ("get_bridge", lambda: bus), ("load_state", lambda: {"owner_id": 42}),
+                        ("publish_event", publish)):
+        monkeypatch.setattr(message_bus, name, value)
+    for name, value in (("DRIVE_ROOT", str(data)), ("RUNNING", {}), ("PENDING", []),
+                        ("ADMISSION_RESERVATIONS", {}), ("ACCEPTANCE_FENCES", {})):
+        monkeypatch.setattr(queue, name, value)
+    queued, accepted = [], []
+    receiver = SimpleNamespace(enqueue_local_message=lambda text, **payload: queued.append({"text": text, **payload}))
+
+    async def inject(_api, payload):  # /chat/inject's named acceptance; the chat is bound as the supervisor's update does
+        bus.activate_update_transport({"chat_id": payload["chat_id"], "transport": payload["transport"]})
+        row, _ = message_bus.accept_local_message(
+            receiver, data, payload["text"], chat_id=payload["chat_id"], user_id=payload["user_id"],
+            source="skill:telegram", sender_label=payload["sender_label"], transport=payload["transport"],
+            client_message_id=payload["client_message_id"],
+            **({"task_metadata": {"reply_to": payload["reply_to"]}} if payload.get("reply_to") else {}))
+        accepted.append(row)
+
+    monkeypatch.setattr(plugin, "_inject", inject)
+
+    def says(mid, text, *, reply=0):
+        """One owner message in chat 42, a Reply to bot message ``reply`` when given; its accepted row or None."""
+        message = {"message_id": mid, "date": 2_000_000_000, "chat": {"id": 42, "type": "private"},
+                   "from": {"id": 42, "first_name": "Owner"}, "text": text,
+                   **({"reply_to_message": {"message_id": reply, "from": {"id": 123, "is_bot": True}}} if reply else {})}
+        before = len(accepted)
+        asyncio.run(plugin._handle_owner_message(api, plugin._telegram_client(api), {"message": message}, mid,
+                                                 "full_access", "en"))
+        return accepted[-1] if len(accepted) > before else None
+
+    project = pr.create_project(data, "export-room", name="Export room")
+    opening = says(40, "Plan the export as a project")
+    origin = build_owner_message_ref(chat_id=42, client_message_id=opening["client_message_id"], ts=opening["ts"],
+                                     text=opening["text"])
+    write_task_result(data, "project-root", "running", root_task_id="project-root", chat_id=1, origin_message_ref=origin)
+    pr.bind_task_to_project(data, "project-root", project["id"], origin={"absent": "system"})
+    write_task_result(data, "helper", "running", delegation_role="subagent", parent_task_id="project-root",
+                      root_task_id="project-root", chat_id=1)
+    return SimpleNamespace(plugin=plugin, api=api, bus=bus, data=data, calls=calls, replies=replies, says=says,
+                           queued=queued, accepted=accepted, project=project, origin=origin, state=_state(plugin),
+                           events=events, mode=request.param, receiver=receiver)
+
+
+def _helper_card(chain, event, text, *, fail_edit=False):
+    """The helper's lifecycle card as its producers frame it, from its own task record (``subagent_message_meta``:
+    lineage included), through the real send seam; its message id, or 0 when nothing reached Telegram."""
+    from ouroboros.subagent_messages import subagent_message_meta
+    from ouroboros.task_results import load_task_result
+    from supervisor.message_bus import send_with_budget
+
+    if fail_edit:  # its bubble is gone at Telegram: the card posts a fresh one below
+        chain.replies.append((400, {"ok": False, "error_code": 400, "description": "Bad Request: message to edit not found"}))
+    before = len(chain.calls)
+    meta = subagent_message_meta(load_task_result(chain.data, "helper"), task_id="helper", event=event)
+    send_with_budget(chain.project["chat_id"], text, is_progress=True, task_id="helper", progress_meta=meta)
+    return chain.calls[-1][2] if len(chain.calls) > before else 0
+
+
+def _sent_card(chain) -> dict:
+    """The last helper card event the bus published, as the bridge received it."""
+    return [event for _topic, event in chain.events if event.get("subagent_event")][-1]
+
+
+_ROOT_ADDRESS = {"kind": "telegram", "conversation_id": "42", "bot_id": "123", "host_address": "root"}
+
+
+def _dispatch(chain, row, monkeypatch):
+    """The accepted row through the owner router as server.py hands it over: the turns it started, its source."""
+    from ouroboros import server_owner_routing as routing
+
+    started = []
+
+    def elsewhere(*_args, **_kwargs):
+        pytest.fail("the owner bot's exact Reply is never a running work's input")
+
+    monkeypatch.setattr(routing, "_route_project_chat_to_running_task", elsewhere)
+    monkeypatch.setattr(routing, "_route_main_followup", elsewhere)
+    monkeypatch.setattr(routing, "addressable_roots", lambda _ctx: SimpleNamespace(rows=lambda *_a: [], gap=None))
+    monkeypatch.setattr(routing, "_decision_turn_metadata", lambda _ctx, _room, _cmid, meta, _roots, **_kw: meta)
+    [incoming] = [item for item in chain.queued if item["client_message_id"] == row["client_message_id"]]
+    source = incoming["accepted_source_ref"]
+    ctx = SimpleNamespace(DRIVE_ROOT=chain.data, handle_chat_direct=lambda *args, **kwargs: started.append((args, kwargs)))
+    routing._route_owner_message(chain.bus, ctx, {
+        "chat_id": 42, "text": row["text"], "log_text": row["text"], "image_caption": "", "image_data": None,
+        "client_message_id": row["client_message_id"], "task_constraint": None, "origin_message_ref": source,
+        "accepted_source_row": incoming["accepted_source_row"],
+        "task_metadata": {**(incoming.get("task_metadata") or {}), "_host_operation": True},
+        "source": "skill:telegram", "received_at": row["ts"]})
+    return started, source
+
+
+def _answer(chain, turn, source, text, room=None, metadata=None):
+    """That turn's own answer through the real send seam: what reached Telegram. ``metadata``: what the router
+    started the turn with (its own address among it), as its running task holds it."""
+    from supervisor import queue
+    from supervisor.message_bus import send_with_budget
+
+    queue.RUNNING[turn] = {"task": {"id": turn, "origin_message_ref": source, "metadata": dict(metadata or {})}}
+    before = len(chain.calls)
+    send_with_budget(room or chain.project["chat_id"], text, task_id=turn, progress_meta={"origin_message_ref": source})
+    return chain.calls[before:]
+
+
+def test_a_reply_about_a_helper_runs_in_its_project_and_quotes_that_helpers_card(owner_bot, monkeypatch):
+    """Both producers publish for real; the card was edited, then posted again below, then left the card index."""
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.message_bus import send_with_budget
+    from supervisor.terminal_delivery import project_terminal_result_event
+
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    old_card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    assert _sent_card(chain)["transport"] == _ROOT_ADDRESS, "its root's bot and chat, and no anchor, reach the bridge"
+    method, form, _mid = chain.calls[-1]
+    assert (method, form["chat_id"], "reply_to_message_id" in form) == ("sendMessage", "42", False)
+    assert _helper_card(chain, "running", "🟡 reviewer — running") == old_card, "an edit keeps its bubble"
+    card = _helper_card(chain, "progress", "🟡 reviewer — reading the tables", fail_edit=True)
+    assert card not in (0, old_card)
+    chain.state._save_subagent_state(chain.api, {})  # the card index let it go; the larger reply map still holds it
+    write_task_result(chain.data, "project-root", "completed", root_task_id="project-root", chat_id=1,
+                      origin_message_ref=chain.origin)  # a helper's own notice reaches the phone once its root ended
+    incident = project_terminal_result_event(chain.data, load_task_result(chain.data, "helper"), "helper",
+                                             result_text="partial tables", terminal_origin=TERMINAL_ORIGIN_HOST_SALVAGE)
+    assert (incident["chat_id"], incident["system_type"]) == (room, "terminal_incident")
+    send_with_budget(incident["chat_id"], incident["text"], task_id="helper", role="system",
+                     system_type=incident["system_type"], progress_meta=incident.get("progress_meta"))
+    method, _form, notice = chain.calls[-1]
+    assert method == "sendMessage" and notice not in (old_card, card)
+    assert chain.events[-1][1]["transport"] == _ROOT_ADDRESS, "the helper's notice too, and nothing more"
+
+    for mid, target, quoted in ((60, notice, card), (61, old_card, old_card)):
+        row = chain.says(mid, f"Question {mid} about the helper", reply=target)
+        assert row["reply_to"]["telegram_room_chat_id"] == room, "a confirmed Project target: its own turn there"
+        assert row["transport"]["reply_child_task_id"] == "helper"
+        [(args, kwargs)], source = _dispatch(chain, row, monkeypatch)
+        assert args[0] == room and kwargs["task_metadata"]["project_id"] == chain.project["id"]
+        assert kwargs["task_metadata"]["origin_message_ref"] == source
+        [(sent, form, _mid)] = _answer(chain, f"turn-{mid}", source, f"Answer to {mid}",
+                                       metadata=kwargs["task_metadata"])
+        assert form["text"].endswith(f"Answer to {mid}")
+        # On the helper's card he asked about (the notice's helper now, or the very card he replied to), strictly.
+        assert (sent, form["reply_to_message_id"], form["allow_sending_without_reply"]) == ("sendMessage", quoted, False)
+
+
+def test_a_reply_to_a_retired_project_card_is_refused_once_and_a_reply_to_that_refusal_is_ordinary(owner_bot, monkeypatch):
+    from types import SimpleNamespace
+
+    from ouroboros import projects_registry as pr
+    from ouroboros.gateway.host_service import _accepted_inbound, _operation_state
+
+    chain = owner_bot
+    card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    pr.begin_project_deletion(chain.data, chain.project["id"])
+    pr.complete_project_deletion(chain.data, chain.project["id"])
+    row = chain.says(62, "Is it still running?", reply=card)
+    assert row["reply_to"]["address"] == "task:helper" and row["reply_to"]["telegram_room_chat_id"] is None
+    later = {"kind": "telegram", "conversation_id": "42", "bot_id": "999"}  # another bot's later message in this chat
+    chain.bus.activate_update_transport({"chat_id": 42, "transport": later})
+    started, _source = _dispatch(chain, row, monkeypatch)
+    assert started == [], "never Main, never the retired room"
+    [ack] = [event for _topic, event in chain.events if event.get("annotation_type") == "routing_ack"]
+    assert ack["transport"] == {**_ROOT_ADDRESS, "host_address": "reply"}, "it answers in the bot and chat he wrote to"
+    assert chain.bus.chat_transport(42) == later, "the chat's binding stays its own"
+    method, form, refusal = chain.calls[-1]
+    assert (method, form["text"], form["reply_to_message_id"]) == (
+        "sendMessage", "Not started: the message or card you replied to is unavailable", 62)
+    # The named operation ends where it was accepted, refused as its one notice said, after any restart too.
+    host = SimpleNamespace(data_dir=chain.data)
+    state = _operation_state(host, _accepted_inbound(host, 42, row["client_message_id"]))
+    assert (state["status"], state["text"]) == ("failed", "Not started: the message or card you replied to is unavailable")
+    assert len([call for call in chain.calls if call[1].get("text") == state["text"]]) == 1, "a single visible notice"
+    before = len(chain.calls)
+    again = chain.says(63, "Then do it in Main", reply=refusal)
+    assert again is not None and not again.get("reply_to"), "the refusal names no row: this chat's ordinary turn, unquoted"
+    assert chain.calls[before:] == [], "nothing refused and nothing noted"
+
+
+def test_a_reply_to_ordinary_words_stays_this_chats_turn_with_its_usual_quote(owner_bot):
+    from ouroboros.chat_references import exact_reply_transport
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import write_task_result
+    from supervisor.message_bus import send_with_budget
+
+    chain = owner_bot
+    write_task_result(chain.data, "main-turn", "running", chat_id=42, origin_message_ref=chain.origin)
+    send_with_budget(42, "Here is the plan.", task_id="main-turn")
+    row = chain.says(64, "and on Windows too", reply=chain.calls[-1][2])
+    assert row["reply_to"]["task_id"] == "main-turn" and row["reply_to"]["telegram_room_chat_id"] == 0
+    assert exact_reply_transport(row) == {}, "its turn keeps this chat's binding and the ordinary quote"
+    write_task_result(chain.data, "next-turn", "running", chat_id=42, origin_message_ref=build_owner_message_ref(
+        chat_id=42, client_message_id=row["client_message_id"], ts=row["ts"], text=row["text"]))
+    send_with_budget(42, "On Windows too.", task_id="next-turn")
+    method, form, _mid = chain.calls[-1]
+    assert method == "sendMessage" and "reply_to_message_id" not in form  # his latest message: answered unquoted
+
+
+# --- where a turn's deliveries go: the proven address of the owner message behind them --------------------------
+
+def _began_with(chain, client_message_id, transport):
+    """The Project root now began with this owner message, as the bundled bridge's /chat/inject accepted it."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import write_task_result
+    from supervisor import message_bus
+
+    row, _ = message_bus.accept_local_message(
+        chain.receiver, chain.data, "Plan the import as a project", chat_id=42, user_id=42, source="skill:telegram",
+        sender_label="Telegram (Owner)", transport=transport, client_message_id=client_message_id)
+    origin = build_owner_message_ref(chat_id=42, client_message_id=client_message_id, ts=row["ts"], text=row["text"])
+    write_task_result(chain.data, "project-root", "running", root_task_id="project-root", chat_id=1,
+                      origin_message_ref=origin)
+
+
+@pytest.mark.parametrize("opening, bot_fact", [
+    ("tg:123:42:41", {"bot_id": "123"}),  # this bot took it
+    ("tg:999:42:41", {"bot_id": "999"}),  # another bot took it: only that bot carries the pair
+    ("tg:123:42:41", {}),                 # accepted before the bridge sent its bot: the bot-qualified id proves it
+    ("tg:42:41", {}),                     # a botless id proves no bot, and none is guessed
+])
+def test_a_helpers_pair_goes_only_through_the_bot_and_chat_that_took_its_works_first_message(owner_bot, opening,
+                                                                                           bot_fact):
+    chain = owner_bot
+    _began_with(chain, opening, {"kind": "telegram", "conversation_id": "42", "sender_label": "Telegram (Owner)",
+                                 **bot_fact})
+    card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    bot = opening.split(":")[1] if opening.count(":") == 3 else ""
+    assert _sent_card(chain)["transport"] == ({**_ROOT_ADDRESS, "bot_id": bot} if bot else {})
+    # The common mirror delivers it as before the address existed; Telegram-only carries it only where it was asked.
+    assert bool(card) is (chain.mode == "all" or bot == "123")
+
+
+@pytest.mark.parametrize("pressed, quoted", [
+    ("old_card", 90),       # a card saved before this version and no longer in the card index: that very card
+    ("notice", 90),         # a notice about its helper: the helper's card, however old its record
+    ("old_notice", 90),     # a notice saved before it named its helper, its card gone from the index: that card
+    ("lonely_notice", 66),  # no card of that helper is known any more: his own message, nothing guessed
+    ("root_row", 66),       # the root's own row beside the root's completion card: no helper, the owner's message
+])
+def test_a_reply_to_an_old_card_or_its_notice_is_answered_on_what_the_maps_still_hold(owner_bot, monkeypatch,
+                                                                                    pressed, quoted):
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    work = "project-root" if pressed == "root_row" else "helper"
+    if pressed != "lonely_notice":  # the record shape the bridge saved for a card before 1.4.18
+        chain.state._remember_message(chain.api, "123", 42, 90, {
+            "row_address": "", "chat_id": room, "task_id": work, "kind": "work_card", "reply_to": "",
+            "native_reply_id": 0})
+    chain.state._remember_message(chain.api, "123", 42, 91, {
+        "row_address": "", "chat_id": room, "task_id": work, "kind": "terminal_incident", "reply_to": "",
+        "native_reply_id": 0, **({"child_task_id": work} if pressed in ("notice", "lonely_notice") else {})})
+    row = chain.says(66, "What happened there?", reply=90 if pressed == "old_card" else 91)
+    assert row["reply_to"]["address"] == f"task:{work}" and row["reply_to"]["telegram_room_chat_id"] == room
+    [(args, kwargs)], source = _dispatch(chain, row, monkeypatch)
+    assert args[0] == room
+    [(sent, form, _mid)] = _answer(chain, f"turn-{pressed}", source, "It stopped on the tables.",
+                                   metadata=kwargs["task_metadata"])
+    assert (sent, form["reply_to_message_id"], form["allow_sending_without_reply"]) == ("sendMessage", quoted, False)
+
+
+@pytest.mark.parametrize("turn", ["live", "saved"])
+def test_an_exact_replys_turn_takes_its_own_address_first_and_leaves_the_rooms_binding(owner_bot, monkeypatch, turn):
+    from ouroboros.event_bus import CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ
+    from ouroboros.owner_quiz import record_asked
+    from ouroboros.task_results import write_task_result
+    from supervisor import queue
+    from supervisor.message_bus import send_with_budget
+
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    bound = {"kind": "slack", "conversation_id": "C1"}  # another connector's binding of the Project room
+    chain.bus.activate_update_transport({"chat_id": room, "transport": bound})
+    row = chain.says(67, "Which tables?", reply=card)
+    [(args, kwargs)], source = _dispatch(chain, row, monkeypatch)
+    assert args[0] == room
+    task_id, begun = f"turn-{turn}", dict(kwargs["task_metadata"])  # the turn carries its address from its start
+    if turn == "live":
+        queue.RUNNING[task_id] = {"task": {"id": task_id, "origin_message_ref": source, "metadata": begun}}
+    else:  # after a restart: its stored result keeps what it began with
+        write_task_result(chain.data, task_id, "completed", chat_id=room, origin_message_ref=source, metadata=begun)
+    before, published = len(chain.calls), len(chain.events)
+    origin = {"progress_meta": {"origin_message_ref": source}} if turn == "live" else {}  # the live turn's own frame
+    send_with_budget(room, "The orders tables.", task_id=task_id, **origin)
+    chain.bus.send_photo(room, b"\x89PNG\r\n\x1a\n" + b"0" * 16, caption="the tables", task_id=task_id)
+    if turn == "live":
+        record_asked(chain.data, task_id, quiz_id="q1", question="Orders or users?", options=["Orders", "Users"],
+                     assumption="orders meanwhile")
+        assert chain.bus.send_quiz(room, "q1", "Orders or users?", [{"label": "Orders"}, {"label": "Users"}],
+                                   assumption="orders meanwhile", task_id=task_id)[0]
+    exact = {**_ROOT_ADDRESS, "host_address": "reply",
+             "exact_reply": {"owner_message_id": 67, "card_message_id": card, "child_task_id": "helper"}}
+    sent = {topic: event["transport"] for topic, event in chain.events[published:]
+            if topic in (CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ)}
+    assert sent == {CHAT_OUTBOUND: exact, CHAT_PHOTO: exact, **({CHAT_QUIZ: exact} if turn == "live" else {})}
+    assert chain.bus.chat_transport(room) == bound, "the room keeps its own binding"
+    method, form, _mid = chain.calls[before]
+    assert (method, form["reply_to_message_id"], form["allow_sending_without_reply"]) == ("sendMessage", card, False)
+
+
+@pytest.mark.parametrize("root_state", ["live", "saved"])
+def test_d8_helper_uses_its_project_reply_roots_telegram_destination(owner_bot, monkeypatch, root_state):
+    from ouroboros.event_bus import CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ
+    from ouroboros.owner_quiz import record_asked
+    from ouroboros.subagent_messages import subagent_message_meta
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor import queue
+    from supervisor.message_bus import send_with_budget
+
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    slack = {"kind": "slack", "conversation_id": "C1"}
+    chain.bus.activate_update_transport({"chat_id": room, "transport": slack})
+    card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    [(_, kwargs)], source = _dispatch(chain, chain.says(67, "Which tables?", reply=card), monkeypatch)
+    metadata = dict(kwargs["task_metadata"])
+    if root_state == "live":
+        queue.RUNNING["reply-parent"] = {"task": {"id": "reply-parent", "metadata": metadata, "chat_id": room}}
+    else:
+        write_task_result(chain.data, "reply-parent", "completed", chat_id=room,
+                          origin_message_ref=source, metadata=metadata)
+    write_task_result(chain.data, "reply-child", "running", chat_id=room, delegation_role="subagent",
+                      root_task_id="reply-parent", parent_task_id="reply-parent")
+
+    chain.plugin.merge_settings(Path(chain.api.get_state_dir()), {"TELEGRAM_MIRROR_PROGRESS": "on"})
+    start, sent_before = len(chain.events), len(chain.calls)
+    send_with_budget(room, "Reading the cells.", is_progress=True, task_id="reply-child")
+    meta = subagent_message_meta(load_task_result(chain.data, "reply-child"), task_id="reply-child", event="scheduled")
+    send_with_budget(room, "🗓️ Scheduled subagent reply-child (reader): read cells", is_progress=True,
+                     task_id="reply-child", progress_meta=meta)
+    chain.bus.send_photo(room, b"\x89PNG\r\n\x1a\n" + b"0" * 16, caption="the cells", task_id="reply-child")
+    record_asked(chain.data, "reply-child", quiz_id="q-child", question="Which columns?", options=["A", "B"],
+                 assumption="A meanwhile")
+    assert chain.bus.send_quiz(room, "q-child", "Which columns?", [{"label": "A"}, {"label": "B"}],
+                               assumption="A meanwhile", task_id="reply-child")[0]
+    events = [(topic, event) for topic, event in chain.events[start:] if topic in (CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ)]
+    assert [topic for topic, _event in events] == [CHAT_OUTBOUND, CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ]
+    bare = {**_ROOT_ADDRESS, "host_address": "reply"}
+    for topic, event in events:
+        destination = event["transport"]
+        assert destination.get("telegram_root", destination) == bare
+        if topic == CHAT_PHOTO:
+            asyncio.run(chain.plugin._make_photo(chain.api)(event))
+        elif topic == CHAT_QUIZ:
+            asyncio.run(chain.plugin._make_quiz(chain.api)(event))
+    sent = chain.calls[sent_before:]
+    assert [method for method, _form, _mid in sent] == ["sendMessage", "sendMessage", "sendPhoto", "sendMessage"]
+    assert all(form["chat_id"] == "42" and "reply_to_message_id" not in form for _method, form, _mid in sent)
+    assert chain.bus.chat_transport(room) == slack
+
+
+def test_long_quiz_keeps_answer_door_and_earlier_parts_carry_references(owner_bot, monkeypatch):
+    """The question as the bus publishes it (``LocalChatBridge.send_quiz``): every part names its stored row, so a
+    Reply to an earlier part quotes the question as an ordinary reference here (its card is the answer's door),
+    and a Reply to the keyboard message is its answer."""
+    from ouroboros.event_bus import CHAT_QUIZ
+    from ouroboros.owner_quiz import record_asked
+
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    chain.bus.activate_update_transport({"chat_id": room, "transport": {"kind": "telegram", "conversation_id": "42"}})
+    question = "Long question " * 900
+    record_asked(chain.data, "project-root", quiz_id="q-long", question=question, options=["A", "B"],
+                 assumption="A meanwhile")
+    assert chain.bus.send_quiz(room, "q-long", question, [{"label": "A"}, {"label": "B"}], assumption="A meanwhile",
+                               task_id="project-root")[0]
+    [event] = [event for topic, event in chain.events if topic == CHAT_QUIZ]
+    assert event["row_address"].startswith(f"row:{room}@"), "the publication names its stored row"
+    before = len(chain.calls)
+    asyncio.run(chain.plugin._make_quiz(chain.api)(event))
+    sent = chain.calls[before:]
+    assert len(sent) > 2
+    quiz, heading = chain.plugin.telegram_quiz, chain.plugin.origin_label(event, "en") + "\n"
+    explained = []
+    for method, form, _mid in sent:  # every part: this chat, its heading once, within Telegram's UTF-16 limit
+        assert method == "sendMessage" and form["chat_id"] == "42"
+        assert form["text"].startswith(heading) and form["text"].count(heading) == 1
+        assert chain.plugin._u16len(form["text"]) <= 4096
+        if "reply_markup" not in form:
+            explained.append(form["text"][len(heading):])
+    expected = quiz.render_quiz_text(question, ["A", "B"], "", "A meanwhile")
+    assert "".join("".join(part.split()) for part in explained) == "".join(expected.split()), "the whole text"
+    assert sent[-1][1]["text"] == heading + "1. A\n2. B\n" + quiz.hint("en") and "reply_markup" in sent[-1][1]
+    parts = [mid for _method, _form, mid in sent]
+    assert quiz.quiz_for_message(chain.api, "123", 42, parts[-1])["text"] == heading + "1. A\n2. B"
+    assert {chain.state._reply_reference(chain.api, "123", 42, mid) for mid in parts} == {event["row_address"]}
+    row = chain.says(70, "Please explain", reply=parts[0])
+    assert row["reply_to"]["address"] == event["row_address"] and row["reply_to"]["kind"] == "question"
+    assert row["reply_to"]["telegram_room_chat_id"] == 0, "an earlier part is this chat's ordinary reference"
+    posts = []
+
+    async def post(_api, path, payload):
+        posts.append((path, payload))
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(chain.plugin, "_host_post", post)
+    assert chain.says(71, "B", reply=parts[-1]) is None, "the keyboard message's Reply is its answer, no turn"
+    assert [(path, payload["decision_id"], payload["comment"]) for path, payload in posts] == [
+        ("/chat/decision", "quiz:project-root:q-long", "B")]
+
+
+def test_an_exact_replys_progress_goes_where_its_answer_does_without_its_anchor(owner_bot, monkeypatch):
+    """Its room is another connector's: the turn's progress still reaches the phone through the bot and chat that took
+    the Reply, as a progress note (no strict anchor, so Silent mode's replacement and the progress toggle hold)."""
+    from ouroboros.event_bus import CHAT_OUTBOUND
+    from supervisor import queue
+    from supervisor.message_bus import send_with_budget
+
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    chain.plugin.merge_settings(Path(chain.api.get_state_dir()), {"TELEGRAM_MIRROR_PROGRESS": "on"})
+    card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    row = chain.says(68, "How far is it?", reply=card)
+    [(_args, kwargs)], source = _dispatch(chain, row, monkeypatch)
+    queue.RUNNING["turn-progress"] = {"task": {"id": "turn-progress", "origin_message_ref": source,
+                                               "metadata": dict(kwargs["task_metadata"])}}
+    chain.bus.activate_update_transport({"chat_id": room, "transport": {"kind": "slack", "conversation_id": "C1"}})
+    before, published = len(chain.calls), len(chain.events)
+    send_with_budget(room, "Reading the orders table.", is_progress=True, task_id="turn-progress")
+    [event] = [event for topic, event in chain.events[published:] if topic == CHAT_OUTBOUND]
+    assert event["transport"] == {**_ROOT_ADDRESS, "host_address": "reply"}, "its bot and chat, never the anchor"
+    [(method, form, _mid)] = chain.calls[before:]
+    assert (method, form["chat_id"], "reply_to_message_id" in form) == ("sendMessage", "42", False)
+
+
+def test_a_helpers_card_reaches_the_phone_beside_another_connectors_binding_of_its_room(owner_bot):
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    slack = {"kind": "slack", "conversation_id": "C1"}
+    chain.bus.activate_update_transport({"chat_id": room, "transport": slack})
+    card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    assert _sent_card(chain)["transport"] == {**slack, "telegram_root": _ROOT_ADDRESS}, "the binding keeps its card"
+    assert card and chain.calls[-1][1]["chat_id"] == "42", "and the phone gets it where the work's first message was"
+    assert chain.bus.chat_transport(room) == slack
+
+
+def test_an_exact_replys_completion_notice_goes_where_it_was_asked_and_never_through_another_bot(owner_bot,
+                                                                                               monkeypatch):
+    import sys
+
+    from ouroboros.task_results import write_task_result
+
+    chain = owner_bot
+    notifier = sys.modules[chain.plugin.__package__ + ".lib.telegram_notifier"]
+    card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    row = chain.says(69, "Finish it", reply=card)
+    [(_args, kwargs)], source = _dispatch(chain, row, monkeypatch)
+    write_task_result(chain.data, "turn-done", "completed", chat_id=chain.project["chat_id"], origin_message_ref=source,
+                      metadata=dict(kwargs["task_metadata"]))
+    from ouroboros import dialogue_store
+
+    dialogue_store.append(chain.data, "chat", {  # the root's terminal summary row, as the tail reads it
+        "ts": "2026-11-21T00:00:00+00:00", "type": "task_summary", "direction": "system", "task_id": "turn-done",
+        "chat_id": chain.project["chat_id"], "text": "Done.", "summary_kind": notifier._ROOT_SUMMARY_KIND,
+        "outcome_final": True})
+    pushed = []
+
+    async def push(_api, chat_id, _text, *, trust_env=False, event=None):
+        pushed.append((chat_id, event))
+        return "sent", None
+
+    real = notifier._push_notification
+    monkeypatch.setattr(notifier, "_push_notification", push)
+    asyncio.run(notifier._check_tasks_notify(chain.api, {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_NOTIFY_TASKS": "on"}, 42,
+                                             {"notified_task_ids": []}, "en"))
+    [(chat_id, event)] = pushed
+    assert (chat_id, event["transport"]) == (42, {**_ROOT_ADDRESS, "host_address": "reply"})
+    before = len(chain.calls)
+    outcome, _exc = asyncio.run(real(chain.api, 42, "Done.", event={
+        **event, "transport": {**event["transport"], "bot_id": "999"}}))
+    assert (outcome, chain.calls[before:]) == ("skipped", []), "another bot never carries that turn's notice"
+
+
+def test_typing_for_a_proven_address_shows_only_in_its_bot_and_chat(owner_bot):
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    exact = {**_ROOT_ADDRESS, "host_address": "reply", "exact_reply": {"owner_message_id": 60}}
+    targets = chain.plugin._typing_cue(chain.api)._targets
+    assert targets({"chats": [{"chat_id": room, "transport": exact}]}) == {42}
+    assert targets({"chats": [{"chat_id": room, "transport": {**exact, "bot_id": "999"}}]}) == set()
+    assert targets({"chats": [{"chat_id": room, "transport": {**exact, "conversation_id": "43"}}]}) == set()
+    ordinary = {"kind": "telegram", "conversation_id": "42"}  # an ordinary turn's binding types as before
+    assert targets({"chats": [{"chat_id": 42, "transport": ordinary}]}) == {42}
+    cue = chain.plugin._typing_cue(chain.api)
+    cue._rescope()  # as each read does: the token whose bot chose the chat
+    asyncio.run(cue._send(42))  # its own client, of that token, sends the action
+    method, form, _mid = chain.calls[-1]
+    assert (method, form["chat_id"], form["action"]) == ("sendChatAction", "42", "typing")

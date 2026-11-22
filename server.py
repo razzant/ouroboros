@@ -38,7 +38,7 @@ from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root
                                          shorten_switch_interval, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
 from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
-from ouroboros.server_web import ServedUI
+from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
 from ouroboros.task_finalization import host_operation_reply_kwargs
@@ -286,7 +286,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any, *, timeout: float = 1
 
 
 def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: list) -> int:
-    from supervisor.message_bus import coerce_chat_identity
+    from supervisor.message_bus import coerce_chat_identity, record_inbound_message
     from ouroboros.chat_uploads import attachment_placeholder
 
     for upd in updates:
@@ -300,8 +300,9 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         if hasattr(bridge, "activate_update_transport"):
             bridge.activate_update_transport(msg)
 
-        chat_id = coerce_chat_identity((msg.get("chat") or {}).get("id"), 1)
-        user_id = coerce_chat_identity((msg.get("from") or {}).get("id"), chat_id or 1)
+        sender_id, conversation_id = (msg.get("from") or {}).get("id"), (msg.get("chat") or {}).get("id")
+        chat_id = coerce_chat_identity(conversation_id, 1)
+        user_id = coerce_chat_identity(sender_id, chat_id or 1)
         text = str(msg.get("text") or "")
         source = str(msg.get("source") or "web")
         sender_session_id = str(msg.get("sender_session_id") or "")
@@ -311,9 +312,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         image_mime = str(msg.get("image_mime") or "image/jpeg")
         image_caption = str(msg.get("image_caption") or "")
         task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
-        task_metadata = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else None
         image_data = (image_base64, image_mime, image_caption) if image_base64 else None
-        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, task_metadata)
+        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, msg.get("task_metadata"))
         now_iso = utc_now_iso()
         if not client_message_id:
             # Some owner transports have no client-generated id.  Give the
@@ -361,14 +361,12 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
             return offset
 
-        from supervisor.message_bus import record_inbound_message
-
-        # The same writer mints ordinary ingress and validates preaccepted
-        # skill deliveries; the latter already have their one canonical row.
+        # The writer validates or mints the canonical row and may resolve Reply in task metadata.
         origin_message_ref = record_inbound_message(
             bridge, msg, chat_id=chat_id, user_id=user_id,
             client_message_id=client_message_id, text=log_text, ts=now_iso,
         )
+        task_metadata = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else None
         if task_metadata or msg.get("accepted_source_ref"):
             task_metadata = {k: v for k, v in (task_metadata or {}).items() if k != "_host_operation"}
             if msg.get("accepted_source_ref"):
@@ -464,8 +462,6 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 result = ctx.consciousness.start() if on else ctx.consciousness.stop(source=OWNER_STOP)
                 reply(f"🧠 {result}")
             else:
-                from supervisor.state import control_value
-
                 known, enabled = control_value(ctx.load_state(), "bg_consciousness_enabled")
                 described = _describe_bg_consciousness_state(bool(enabled) if known else None)
                 from ouroboros.consciousness_view import status_reply
@@ -487,9 +483,14 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "image_data": image_data,
                     "task_constraint": task_constraint,
                     "task_metadata": task_metadata,
-                    "log_text": log_text,
-                    "origin_message_ref": origin_message_ref,
+                    "log_text": log_text, "origin_message_ref": origin_message_ref,
+                    "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
+                    "origin_message_snapshot": msg.get("_origin_snapshot"), "origin_unkept": msg.get("_origin_unkept") is True,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
+                    # Match the bridge's positive identities, not the display defaults above.
+                    "bound_external_owner": (is_external_transport and ext_known and owner_ext_id is not None
+                                             and all(type(value) is int and value > 0 for value in (sender_id, conversation_id))
+                                             and bound_pair == (sender_id, conversation_id)),
                 },
             )
     return offset
@@ -1346,7 +1347,7 @@ async def lifespan(app):
         _shutdown_supervisor_event_bus()
 
 
-app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan), served_ui=served_ui)
+app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan, middleware=TEXT_COMPRESSION), served_ui=served_ui)
 app.app.state.drive_root = pathlib.Path(DATA_DIR)  # type: ignore[attr-defined]
 app.app.state.repo_dir = pathlib.Path(REPO_DIR)  # type: ignore[attr-defined]
 app.app.state.broadcast_ws_sync = broadcast_ws_sync  # type: ignore[attr-defined]

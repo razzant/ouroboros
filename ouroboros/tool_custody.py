@@ -368,9 +368,13 @@ def retain_unconfirmed_host_operation(reason: str) -> None:
 
 
 def record_control_handoff(event: dict) -> None:
-    """Bind the existing supervisor receipt before its event can be emitted."""
+    """Bind the existing supervisor receipt before its event can be emitted. A note's relay also keeps the room it
+    keys that receipt in and its quote's address; any other act's descriptor stays as it was."""
+    from ouroboros.routing_wait import relay_receipt_scope
+
     descriptor = {key: str(event.get(key) or "") for key in
                   ("type", "task_id", "client_message_id", "routing_token")}
+    descriptor.update(relay_receipt_scope(event))
     _update_active_claim(lambda claim: {**claim, "control_receipts":
                                       [*(claim.get("control_receipts") or []), descriptor]})
 
@@ -395,8 +399,10 @@ def claim_still_owns_effect(root: Any, claim: dict) -> bool:
             observed = wait_for_promotion_admission(Path(root), receipt.get("task_id", ""), token,
                 client_message_id=receipt.get("client_message_id", ""), timeout_sec=0)
         else:
-            observed = wait_for_routing_annotation(Path(root), receipt.get("client_message_id", ""),
-                                                   token, timeout_sec=0)
+            room = receipt.get("source_chat_id")  # a descriptor written before it names none: read by id, as before
+            observed = wait_for_routing_annotation(Path(root), receipt.get("client_message_id", ""), token,
+                                                   timeout_sec=0, source_chat_id=room if type(room) is int else None,
+                                                   source_row_address=receipt.get("source_row_address", ""))
         # ``read`` follows the receiver's durable acknowledgement: delivered and acknowledged.
         if observed.get("status") not in {"scheduled", "delivered", "read", "rejected", "needs_manual_target"}:
             return True

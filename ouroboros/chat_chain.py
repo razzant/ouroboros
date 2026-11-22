@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 from ouroboros import dialogue_store as ds, dialogue_positions as dp
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.deadline_utils import parse_deadline_ts
+from ouroboros.utils import json_dumps_utf8
 
 _TEXT_ADDRESS = re.compile(r"row:(-?\d+)@(.*)#([0-9a-f]{12,64})")
 _DIGEST = re.compile(r"[0-9a-f]{12,64}")
@@ -57,7 +58,7 @@ def source_row_id(row: Dict[str, Any]) -> str:
     stored = row.get(ds.ROW_SHA_KEY)
     if isinstance(stored, str) and _FULL_DIGEST.fullmatch(stored):
         return stored
-    payload = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload = json_dumps_utf8(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -130,7 +131,7 @@ def recorded_context(root: Any, address: Any) -> Tuple[Dict[str, Any], bytes]:
     event = whole.get("presence_provenance") if isinstance(whole.get("presence_provenance"), dict) else {}
     document = {"recorded_at": whole.get("ts"), "source_event_id": event.get("source_event_id") or whole.get("client_message_id"),
                 "text": whole.get("text"), "transport": whole.get("transport")}
-    return found["address"], json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return found["address"], json_dumps_utf8(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def stored_address(root: Any, entry: ds.Row) -> Dict[str, Any]:
@@ -367,14 +368,13 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
     names by chat and time, whether a candidate row is the room's, the frozen upper)``. ``gaps`` collects what a
     Project's chat rows read so may lack (``room_appearances.read_gaps``) once the read starts.
     ``binding`` restricts the candidates to what that binding newly admits: its tree and origin."""
-    from ouroboros.project_dialogue import room_membership, source_refs_for_project
+    from ouroboros.project_dialogue import owner_message_entries, room_membership, source_refs_for_project
     from ouroboros.projects_registry import list_reserved_projects, RoomResolver
     from ouroboros.store import open_store, store_path
 
     chat = int(room_id)
     projects = {int(project["chat_id"]) for project in list_reserved_projects(root)}
-    refs = ([binding["source_ref"]] if isinstance(binding.get("source_ref"), dict) else []) if binding is not None else (
-        source_refs_for_project(root, chat) if chat in projects else [])
+    refs = source_refs_for_project(root, chat, bindings={0: binding} if binding is not None else None) if chat in projects else []
     resolver = RoomResolver(root)
     member = room_membership(chat, projects, refs, resolver)
     keys = [] if binding is not None else [("chat_id", chat)]
@@ -384,6 +384,9 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
         keys = [("chat_id", room["chat_id"]) for room in ds.rooms(root)
                 if room["chat_id"] not in projects and room["chat_id"] >= 0]
         keys.append(("chat_id", None))
+        if stream == "chat":
+            keys.extend(("telegram_inbound_chat", p) for p in sorted(projects))
+            keys.append(("appearance", "room:1"))
     if chat in projects:
         tasks = {str(binding["task_id"])} if binding is not None else {
             str(tid) for tid, bound in resolver.bindings.items() if int(bound.get("project_chat_id") or 0) == chat}
@@ -398,20 +401,9 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
                 from ouroboros.room_appearances import read_gaps
 
                 gaps.update(read_gaps(root, chat, shown, lower, upper))
-        for ref in refs:
-            if ref.get("client_message_id"):
-                keys.append(("client_message_id", ref["client_message_id"]))
-            elif ref.get("ts"):
-                source_chat = int(ref.get("chat_id") or 1)
-                for cid in ([source_chat, None] if source_chat == 1 else [source_chat]):
-                    for entry in ds.rows_by_identity(root, cid, str(ref["ts"]), stream=stream):
-                        if lower <= entry.seq < upper:
-                            identities[entry.seq] = entry
-            else:
-                # Hash-only legacy references still name a chat; membership checks their text.
-                keys.append(("chat_id", int(ref.get("chat_id") or 1)))
-                if int(ref.get("chat_id") or 1) == 1:
-                    keys.append(("chat_id", None))
+            for entry in owner_message_entries(root, refs).values():  # every origin of the room in one read
+                if entry is not None and lower <= entry.seq < upper:
+                    identities[entry.seq] = entry
     return keys, identities, lambda row: member(_row_chat_id(row), row), upper
 
 

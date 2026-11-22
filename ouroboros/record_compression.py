@@ -272,7 +272,7 @@ class _Run:
             self.proven[task_id] = _task_proven_over(task_id, self.root, self.live)
         return self.proven[task_id]
 
-    def files(self, plane: str, key: str, base: pathlib.Path, wanted, owned=None) -> bool:
+    def files(self, plane: str, key: str, base: pathlib.Path, wanted, owned=None, serial=None) -> bool:
         """Compress KEY's files under BASE; False once the run must stop (its budget or a stop)."""
         resume, tally = self.resume, self.planes[plane]
         after = tuple(resume.get("path") or ()) if (resume.get("plane"), resume.get("key")) == (plane, key) else ()
@@ -284,7 +284,7 @@ class _Run:
             except OSError:
                 continue  # gone since the listing
             path = pathlib.Path(entry.path)
-            outcome = artifact_storage.compression_outcome(path, owned=owned, background=True)
+            outcome = artifact_storage.compression_outcome(path, owned=owned, background=True, serial=serial)
             if outcome not in artifact_storage.UNREAD_SKIPS:
                 self.left -= 1
             if outcome == "compressed":
@@ -302,6 +302,8 @@ class _Run:
 
     def evidence(self) -> Optional[List[str]]:
         """The evidence plane; the task ids still owed when the run stopped, else None."""
+        from ouroboros.task_custody import task_custody_lock
+
         artifacts, resume, waiting = self.root / "task_results" / "artifacts", self.resume, self.waiting["evidence"]
         if resume.get("plane") == "seats":  # this pass finished the plane before it stopped
             self.cursor = dict(resume)
@@ -332,8 +334,9 @@ class _Run:
                 waiting.add(task_id)
                 continue
             waiting.discard(task_id)
-            if not self.files("evidence", task_id, base, _evidence_part,
-                              owned=lambda task_id=task_id: _settled(self.root, [task_id])[task_id]):
+            if not self.files("evidence", task_id, base, _evidence_part,  # serial: the owner's release (payload_release)
+                              owned=lambda task_id=task_id: _settled(self.root, [task_id])[task_id],
+                              serial=lambda task_id=task_id: task_custody_lock(self.root, task_id, timeout_sec=0)):
                 return names[index:]
         self.cursor = {"plane": "seats", "key": "", "path": []}  # the plane is done for this pass
         return None

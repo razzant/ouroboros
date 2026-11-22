@@ -14,6 +14,7 @@ import re
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._phone_touch import touch as phone_touch
 from tests._work_projection_shared import work_fields
 from tests.test_design_system_gate_browser import PROJECTS, rest, save_evidence, seed_page, settle
 
@@ -573,21 +574,6 @@ def test_a_rows_menu_opens_by_right_click_or_keyboard_and_says_the_rows_state(na
     assert facts['kebab_closed']['kebab'] == ['menu', 'false'], facts
 
 
-def touch(page, x, y, hold_ms, move=None):
-    cdp = page.context.new_cdp_session(page)
-    try:
-        cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': x, 'y': y, 'id': 1}]})
-        if move:
-            for step in range(1, 7):
-                cdp.send('Input.dispatchTouchEvent', {'type': 'touchMove', 'touchPoints': [
-                    {'x': x + move[0] * step / 6, 'y': y + move[1] * step / 6, 'id': 1}]})
-                page.wait_for_timeout(16)
-        page.wait_for_timeout(hold_ms)
-        cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
-    finally:
-        cdp.detach()
-
-
 def test_a_long_press_opens_a_rows_menu_on_touch_where_the_dots_take_no_column(chromium_ui, tmp_path):
     ui = chromium_ui
     sending = PROJECTS[2]['id']
@@ -606,9 +592,9 @@ def test_a_long_press_opens_a_rows_menu_on_touch_where_the_dots_take_no_column(c
         box = page.locator(row).bounding_box()
         x, y = box['x'] + 60, box['y'] + box['height'] / 2
         # A finger that moves is a scroll or a drag, never a long press.
-        touch(page, x, y, 600, move=(0, 30))
+        phone_touch(page, x, y, 600, move=(0, 30))
         facts['moved'] = page.locator(MENU).count()
-        touch(page, x, y, 650)
+        phone_touch(page, x, y, 650)
         page.locator(MENU).wait_for()
         facts['menu'] = page.locator(MENU).evaluate(STATUS)
         facts['aria'] = page.evaluate(ARIA, row)

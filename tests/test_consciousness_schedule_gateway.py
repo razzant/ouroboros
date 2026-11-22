@@ -170,7 +170,7 @@ def test_schedule_ui_projects_the_opening_without_shortening_the_next_runs_cache
     _bind(monkeypatch, tmp_path)
     row = _skill_row()
     row.update(last_task_id="previous", last_outcome={"task_id": "previous", "state": "completed",
-                                                   "notice": notice, "line": line})
+                                                   "notice": notice, "line": line, "report_only": False})
     _write(tmp_path, [row])
     response = _gateway(tmp_path).get("/api/schedules")
     assert response.status_code == 200

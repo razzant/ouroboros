@@ -190,7 +190,7 @@ def test_secret_form_first_fill_and_replace_screens(engine_ui, backend, viewport
     assert ok.is_enabled()
     box = dialog.bounding_box()
     assert box["x"] >= 0 and box["x"] + box["width"] <= viewport["width"] + 0.5
-    for selector in (".marketplace-modal-head", ".marketplace-modal-actions"):
+    for selector in (".ui-modal-head", ".ui-modal-actions"):
         region = dialog.locator(selector).bounding_box()
         assert region["y"] >= 0 and region["y"] + region["height"] <= viewport["height"]
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")

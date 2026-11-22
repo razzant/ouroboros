@@ -1072,6 +1072,30 @@ test('a delivered raster card and a question image preview; SVG and a current-pa
             ['comparison.png', '/api/tasks/task-q/artifacts/comparison.png']);
         fx.media.release(question);
         assert.equal(fx.reader(), null, 'the question that holds the material takes its preview along');
+        // The host's label is display text: a projected name byte reads as a literal backslash and `udcff` and shows as
+        // stored, while the retained name stays the only address.
+        const projected = fx.doc.createElement('div');
+        fx.feed.append(projected);
+        syncQuestionMaterials(projected, [{ task_id: 'task-q', name: 'material-0.png', label: String.raw`fixture-\udcff.png`, sha256: 'x' }],
+            fx.media.buildDocumentBubble);
+        projected.querySelector('.chat-file-card').click();
+        assert.deepEqual([fx.reader().querySelector('.document-reader-title').textContent, images.at(-1).getAttribute('src')],
+            [String.raw`fixture-\udcff.png`, '/api/tasks/task-q/artifacts/material-0.png']);
+        fx.media.release(projected);
+        // A normal label with a different extension than the retained copy: the copy's extension
+        // selects the reader (Markdown here, a read it offers), the label shows in its place, and
+        // the read stays on the copy's canonical address — unawaited, like the ordinary card.
+        const typed = fx.doc.createElement('div');
+        fx.feed.append(typed);
+        syncQuestionMaterials(typed, [{ task_id: 'task-q', name: 'material-0.md', label: 'Design.txt', sha256: 'x' }],
+            fx.media.buildDocumentBubble);
+        const typedCard = typed.querySelector('.chat-file-card');
+        assert.equal(typedCard.querySelector('.chat-file-more').textContent, 'Read');
+        assert.equal(typedCard.querySelector('.chat-file-name').textContent, 'Design.txt');
+        typedCard.click();
+        assert.equal(fx.reader().querySelector('.document-reader-title').textContent, 'Design.txt');
+        assert.equal(fx.held.pending.at(-1).url, '/api/tasks/task-q/artifacts/material-0.md');
+        fx.media.release(typed);
     } finally {
         fx.restore();
     }
