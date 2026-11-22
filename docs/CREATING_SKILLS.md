@@ -1437,7 +1437,9 @@ message tool (above) the finish of the focus and of every root promoted or sched
 answer or a tool-less final alike, is its record: a send may ride in the same response, a finish with words that
 sent nothing there returns once with the facts, the next is accepted (the focus owes a Main message pending from
 the owner first, as for a silent finish); a Silent or Paused place and Advises keep the held draft. Where it has
-none, an answer after any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
+none, an answer after any send, file or reaction is new speech for the work the connector follows (the turn, and
+work the turn names); another root is told that its final speaks only if a connector follows it; started work
+stays `deferred` (empty after silence).
 Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation
 (receipts and receipt-less calls); a flag returns to the mind with the destination, those sends and silence as a valid finish.
 Silent/Paused/disconnected destinations and Advises autonomy hold the reply

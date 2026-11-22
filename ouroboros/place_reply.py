@@ -241,6 +241,13 @@ def final_is_speech(metadata) -> bool:
             and not metadata.get("schedule_occurrence") and not records_only(metadata))
 
 
+def final_followed(metadata) -> bool:
+    """Whether a connector is known to read this run's speech final (``final_is_speech``): the place's own turn,
+    whose caller awaits it. A root it handed off is read only if its connector follows that work (a turn names one
+    handoff); the host does not trace that back through the lineage, so such a root is told the condition."""
+    return final_is_speech(metadata) and _focus_turn(metadata)
+
+
 def records_only_now(ctx) -> bool:
     """``records_only`` for an Active place under Acts or Evolves. A Silent or Paused place and Advises keep today's
     held draft (the owner's rehearsal before activating a place); an unreadable place keeps it too."""
@@ -478,8 +485,11 @@ def refusal_facts(ctx) -> str:
     if not carrier or records_only_now(ctx):  # a records-only place posts no finish: the record note says so
         return ""
     label, route = _source_conversation(metadata.get("presence") or {})
-    fate = (f"A non-silent finish_task answer is posted as a new message in {label} (route {route}) to the people "
-            "there, in your own voice." if final_is_speech(metadata) else
+    posted = (f"a non-silent finish_task answer is posted as a new message in {label} (route {route}) to the people "
+              "there, in your own voice")
+    fate = (posted[0].upper() + posted[1:] + "." if final_followed(metadata) else
+            f"If a connector follows this work, {posted}; otherwise it stays this work's record and only a connector "
+            "tool reaches them." if final_is_speech(metadata) else
             f"No connector reads this run's final in {label} (route {route}): a non-silent finish_task answer stays "
             "this work's record; only a connector tool reaches the people there.")
     sends = this_turn_sends(ctx, carrier["conversation_key"])

@@ -37,6 +37,7 @@ FINAL = "Nightly check: two of the three services are degraded."
 LOCAL_ROOM = 'the local room of place "'
 NOT_THERE = "(Ouroboros side, not the place conversation)"
 SAYS_ANSWER = "Your final answer has a route there"
+SAYS_IF_FOLLOWED = "If a connector follows this work, your final answer has a route there"
 SAYS_TOOL_ONLY = "From this run only a connector tool reaches it."
 
 
@@ -78,17 +79,19 @@ def _forced(root, task):
 
 @pytest.mark.parametrize("door", [False, True], ids=["no_door", "door"])
 def test_the_forced_final_contract_names_the_finals_fate_by_the_connectors_declaration(fired_context, monkeypatch, door):
-    """The frozen layer's one forced call: speech where the connector declares no door, a record where it does; the
-    inline turn and a root it handed off read the same declaration, and no round is added."""
+    """The frozen layer's one forced call: a record where the connector declares a door; without one the place's turn
+    answers its conversation and a root it handed off does only if its connector follows that work; no round is
+    added."""
     root, _pending, _first_request = fired_context
     monkeypatch.setattr("ouroboros.presence_context.presence_send_facts", lambda *_a: "none")
     if door:
         _door(monkeypatch)
     registry, turn = _source_turn(root, THREAD)
     first = _promote(root, monkeypatch, turn, registry)
-    for contract in (_forced(root, turn), _forced(root, first)):
+    for contract, turns in ((_forced(root, turn), True), (_forced(root, first), False)):
         assert contract.count("[PRESENCE_DELIVERY]") == 1 and '"presence_finish"' in contract  # the one call, no new round
-        assert ("This task answers a Presence conversation" in contract) is not door
+        assert ("This task answers a Presence conversation" in contract) is (turns and not door)
+        assert ("if a connector follows this work" in contract) is (not turns and not door), contract
         assert ("no connector reads its final there" in contract) is door and "not settled" not in contract
 
 
@@ -206,7 +209,9 @@ def test_an_inline_place_turn_is_told_its_local_room_for_the_whole_family_with_i
 @pytest.mark.parametrize("door", [False, True], ids=["no_door", "door"])
 def test_each_runs_receipt_names_its_finals_fate_by_the_connectors_declaration(fired_context, monkeypatch, door):
     """Owner 21.11, 1A: where the connector declares a door a run's final is its record, so only a connector tool
-    reaches the place; without one its final has a route there. A schedule's run is followed by no connector."""
+    reaches the place. Without one the turn's final has a route there, and a root it handed off has one only if its
+    connector follows that work: the host does not trace the lineage, and no connector ever polls the second root.
+    A schedule's run is followed by no connector."""
     from ouroboros.tools.control_runtime import _send_user_message
 
     root, pending, _first_request = fired_context
@@ -216,12 +221,14 @@ def test_each_runs_receipt_names_its_finals_fate_by_the_connectors_declaration(f
     first = _promote(root, monkeypatch, turn, registry)
     second = _promote(root, monkeypatch, turn, registry)
     fired = _fired(root, pending, _registry_for(root, first))
-    for task, answered in ((turn, not door), (first, not door), (second, not door), (fired, False)):
+    for task, speech in ((turn, SAYS_ANSWER), (first, SAYS_IF_FOLLOWED), (second, SAYS_IF_FOLLOWED), (fired, None)):
         ctx = _registry_for(root, task)._ctx
         ctx.event_queue, ctx.pending_events = queue_module.Queue(), []
         receipt = _send_user_message(ctx, "Working on it.")
         assert LOCAL_ROOM in receipt and NOT_THERE in receipt, task["id"]
-        assert (SAYS_ANSWER in receipt) is answered and (SAYS_TOOL_ONLY in receipt) is not answered, (task["id"], receipt)
+        says = SAYS_TOOL_ONLY if door or speech is None else speech
+        assert [fate for fate in (SAYS_ANSWER, SAYS_IF_FOLLOWED, SAYS_TOOL_ONLY) if fate in receipt] == [says], (
+            task["id"], receipt)
 
 
 def test_a_project_bound_root_names_its_project_for_the_whole_family(fired_context, monkeypatch, tmp_path):

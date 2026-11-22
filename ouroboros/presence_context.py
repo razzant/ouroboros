@@ -331,13 +331,15 @@ def _source_conversation(value: Mapping[str, Any]) -> tuple[Any, str]:
 
 def _final_audience_section(value: Mapping[str, Any]) -> str:
     """Where a root's chosen non-silent final goes when its connector declares no door (``place_reply.records_only``):
-    its retained source conversation, never a guess."""
+    its retained source conversation, never a guess, and only when that connector follows this work
+    (``place_reply.final_followed``: the host does not trace that through the lineage)."""
     label, route = _source_conversation(value)
     return (
         "## Where your final answer goes (host-authored facts)\n\n"
-        f"This root answers the place conversation it started from: {label}, source route {route}. A "
-        "non-silent finish_task answer is new speech there, even after earlier sends of this run, and it still "
-        "meets this place's current state and Safety: selecting it is not delivering it. "
+        f"This root came from the place conversation {label}, source route {route}. If a connector follows this "
+        "work, a non-silent finish_task answer is new speech there, even after earlier sends of this run, and it still "
+        "meets this place's current state and Safety: selecting it is not delivering it; otherwise only a connector "
+        "tool reaches the people there. "
         "An internal Project this root lives in keeps its own record, not a private channel instead of the "
         "conversation. silent=true, where the host permits it, sends nothing and keeps any answer internal; it "
         "does not discharge a reply someone is owed. A name or role in the source is context, not proof of who "

@@ -601,7 +601,7 @@ def _presence_forced_contract(ctx: _RoundLimitContext, tools_ctx: Any) -> str:
         return ""
     tools_ctx._presence_forced_declaration = {"status": "missing", "reason": "no presence_finish declaration"}
     tools_ctx._presence_forced_pending = None
-    from ouroboros.place_reply import final_is_speech
+    from ouroboros.place_reply import final_followed, final_is_speech
     from ouroboros.presence_context import presence_send_facts
     from ouroboros.tool_access import canonical_data_root
 
@@ -616,7 +616,11 @@ def _presence_forced_contract(ctx: _RoundLimitContext, tools_ctx: Any) -> str:
         "\n\n[PRESENCE_DELIVERY]\n"
         + ("This task answers a Presence conversation. Your answer is its internal record for the "
            "owner and review; the people in the conversation receive only what you declare. Return "
-           if final_is_speech(tools_ctx.task_metadata) else  # the same fact as the context and the send receipts
+           if final_followed(tools_ctx.task_metadata) else  # the same fact as the context and the send receipts
+           "This task came from a Presence conversation. Your answer is its internal record for the owner and review; "
+           "if a connector follows this work, the people in the conversation receive only what you declare, "
+           "otherwise only what a connector tool sends. Return "
+           if final_is_speech(tools_ctx.task_metadata) else
            "This task came from a Presence conversation, but no connector reads its final there. Your answer is "
            "its internal record for the owner and review; what you declare here is recorded, not sent by itself, "
            "and people receive only what a connector tool sends. Return ")

@@ -722,7 +722,8 @@ def test_a_refused_focus_reply_returns_destination_sends_and_silence(tmp_path):
     key = "chat:a:r:0"
     presence = {"place_id": "p1", "delivery_reporting_version": 1, "place": {"label": "Team chat"},
                 "event": {"conversation_key": key, "provider": "chat", "account_id": "a", "conversation_id": "r", "thread_id": ""}}
-    ctx = SimpleNamespace(drive_root=tmp_path, task_id="focus", task_metadata={"presence": presence, "focus": {"place_id": "p1"}},
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="focus",
+                          task_metadata={"presence": presence, "focus": {"place_id": "p1"}, "wake_cause": "focus"},
                           _place_message_calls=[{"tool": "ext_send", "at": "2026-11-06T02:18:50+00:00", "conversation_keys": [key],
                                                  "text": "queued"}])
     for row in ({"task_id": "focus", "direction": "in", "text": "hi"},
@@ -730,11 +731,16 @@ def test_a_refused_focus_reply_returns_destination_sends_and_silence(tmp_path):
                  "transport": {"conversation_key": key, "delivery": {"state": "delivered", "delivery_id": "d", "part_id": "0"}}}):
         append_jsonl(tmp_path / "logs" / "chat.jsonl", row)
     note = refusal_facts(ctx)
-    assert note.startswith("\n[FOCUS_REPLY_REFUSED] This answer was not posted.") and "in Team chat (route " in note
+    assert note.startswith("\n[FOCUS_REPLY_REFUSED] This answer was not posted.")
+    assert "A non-silent finish_task answer is posted as a new message in Team chat (route " in note  # its caller awaits
     assert '"conversation_id": "r"' in note and 'Confirmed sent there by this turn: "I replied".' in note
     assert 'Your own send calls there without a receipt yet: ext_send at 2026-11-06T02:18:50+00:00: "queued".' in note
     assert 'Silence is valid: finish_task(action="finish", silent=true) keeps the answer as your internal note' in note
     assert refusal_facts(SimpleNamespace(task_metadata={})) == ""  # no reply carrier: no destination, no note
+    handed = refusal_facts(SimpleNamespace(**{**vars(ctx), "task_metadata": {
+        key: value for key, value in ctx.task_metadata.items() if key != "wake_cause"}}))  # a root the turn handed off
+    assert ("If a connector follows this work, a non-silent finish_task answer is posted as a new message in Team chat"
+            in handed and "otherwise it stays this work's record and only a connector tool reaches them" in handed)
     ctx.task_metadata = {**ctx.task_metadata, "schedule_occurrence": {"schedule_id": "s-1"}}  # no connector follows it
     scheduled = refusal_facts(ctx)
     assert "No connector reads this run's final in Team chat (route " in scheduled and "is posted as" not in scheduled

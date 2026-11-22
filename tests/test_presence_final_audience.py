@@ -94,7 +94,9 @@ def test_a_promoted_place_root_names_its_retained_conversation(fired_context, mo
     assert route.replace('"', '\\"') in body and "unrecorded" not in body
     assert promoted["metadata"]["presence"]["event"]["origin"]["conversation_id"] == "*"
     assert '\\"*\\"' not in body  # the admitting filter's wildcard is not an address
-    for words in ("new speech there, even after earlier sends", "selecting it is not delivering it",
+    # Whether a connector follows this root is a condition the host states, never traces through the lineage.
+    for words in ("If a connector follows this work", "otherwise only a connector tool reaches the people there",
+                  "new speech there, even after earlier sends", "selecting it is not delivering it",
                   "not a private channel instead of the conversation", "does not discharge a reply someone is owed",
                   "not proof of who owns this work"):
         assert words in body, words
