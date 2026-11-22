@@ -537,6 +537,26 @@ def test_requested_result_view_classifies_declared_range_parameters():
     assert requested_call_view("knowledge_read", {"topic": "x", "end_char": 2000}) == (None, None)
 
 
+def test_a_namespace_listing_is_a_chosen_view_and_an_unscoped_listing_is_not(tmp_path):
+    """The connections map sends an integrating focus to list_available_tools(namespace=...) for complete MCP
+    descriptions: that listing reaches the model whole when it fits the window, though larger than the unasked share;
+    the same text from an unscoped call keeps the bounded head and tail."""
+    from ouroboros.tool_capabilities import requested_call_view
+
+    text = "- 'tool' → mcp_docs__tool [not loaded]: " + "Read one page. " * 4_000 + "WARNING: never on prod.\n" + "z" * 60_000
+    delivered = {}
+    for case, args in (("scoped", {"namespace": "mcp_docs"}), ("unscoped", {})):
+        rows = [_row(case, "list_available_tools", text, args=args)]
+        messages, trace = _deliver(_ctx(tmp_path, f"listing-{case}"), rows, measured_fit(window=60_000, reserve=2_000))
+        delivered[case] = (messages[0]["content"], trace)
+    assert len(text) // 4 > 60_000 // 8  # past the unasked eighth, inside the window
+    assert delivered["scoped"][0] == text and not delivered["scoped"][1]["tool_calls"][0].get("result_partial")
+    assert "WARNING: never on prod." not in delivered["unscoped"][0]
+    assert delivered["unscoped"][1]["tool_calls"][0]["result_source_view"]["requested"] is False
+    assert requested_call_view("list_available_tools", {"namespace": "mcp_docs", "view_head_chars": 10}) == (10, 0)
+    assert requested_call_view("list_available_tools", {"namespace": " "}) is None
+
+
 def test_a_gateway_page_and_a_catalog_view_stay_protected_from_the_passes():
     """Size passes spare chosen reads: a page chosen inside call_mcp_tool's arguments and the schema text enable_tools
     showed are chosen; an unasked MCP result through the same gateway is not."""
