@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from ouroboros.terminal_time import terminal_time_patch
 from tests._phone_touch import touch
 from tests._shared import producer_evidence_dir
 from tests._work_projection_shared import with_work_fields
@@ -467,10 +468,15 @@ def _episode(number, span, outcome="", name=""):
                       if part)
 
 
+def _settled(task_id, status, started_at, ended_at):
+    """A settled record of one synthetic attempt; the host's producer stamps its end."""
+    row = {"task_id": task_id, "status": status, "started_at": started_at}
+    return {**row, **terminal_time_patch({}, row, status=status, task_id=task_id, observed_at=ended_at)}
+
+
 def _interrupted(**extra):
-    return {"task_id": "creation", "status": "failed", "reason_code": "model_provider_failed",
-            "terminal_time": {"occurred_at": "2026-10-08T14:09:00Z", "attempt": {"started_at": "2026-10-08T13:57:33Z"}},
-            **extra}
+    return {**_settled("creation", "failed", "2026-10-08T13:57:33Z", "2026-10-08T14:09:00Z"),
+            "reason_code": "model_provider_failed", **extra}
 
 
 def _continued():
@@ -622,7 +628,7 @@ def test_room_card_follows_a_continue_pressed_in_the_room(project_chat, chat_id,
                "text": "The model provider failed.", "ts": "2026-10-08T14:09:00Z", "history_id": "r-summary",
                "status": "failed", "task_terminal_status": "failed", "reason_code": "model_provider_failed",
                "outcome_axes": {"lifecycle": {"status": "failed"}}, "outcome_final": True,
-               "terminal_time": {"occurred_at": "2026-10-08T14:09:00Z", "attempt": {"started_at": "2026-10-08T13:57:33Z"}},
+               "terminal_time": _interrupted()["terminal_time"],
                "continuation_offer": _continued()["continuation_offer"]}
     _room_history(project_chat, [owner, {**first_line, "task_terminal_status": "failed"}, summary,
                                  _room_line(SUCCESSOR, "Continuing the audit", "2026-10-08T14:12:00Z", cancelable=True)])
@@ -725,9 +731,9 @@ def test_main_portal_follows_a_successor_that_already_finished(project_chat, jou
         continued_by={"state": "admitted", "successor_task_id": quick, "action_nonce": "n-2", "binding": binding},
         continuation_offer={"eligible": False, "refusal": "already_continued", "state": "admitted", "successor_task_id": quick})
     project_chat["details"][quick] = {
-        "task_id": quick, "status": "completed", "chat_id": 7, "project_id": "alpha",
-        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}},
-        "terminal_time": {"occurred_at": "2026-10-08T14:12:00Z", "attempt": {"started_at": "2026-10-08T14:10:00Z"}}}
+        **_settled(quick, "completed", "2026-10-08T14:10:00Z", "2026-10-08T14:12:00Z"),
+        "chat_id": 7, "project_id": "alpha",
+        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}}}
     state = project_chat["state"]
     state["task_bindings"][quick] = binding
     state["active_chat_activities"] = [row for row in state["active_chat_activities"] if row["activity_id"] != "creation"]
@@ -782,9 +788,9 @@ def test_an_already_failed_portal_follows_a_later_fast_continue(project_chat, jo
         continued_by={"state": "admitted", "successor_task_id": later, "binding": binding},
         continuation_offer={"eligible": False, "refusal": "already_continued", "state": "admitted", "successor_task_id": later})
     project_chat["details"][later] = {
-        "task_id": later, "status": "completed", "chat_id": 7, "project_id": "alpha",
-        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}},
-        "terminal_time": {"occurred_at": "2026-10-08T14:12:00Z", "attempt": {"started_at": "2026-10-08T14:10:00Z"}}}
+        **_settled(later, "completed", "2026-10-08T14:10:00Z", "2026-10-08T14:12:00Z"),
+        "chat_id": 7, "project_id": "alpha",
+        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}}}
     state["task_bindings"][later] = binding
     page.evaluate("""id => emit('chat', {chat_id: 1, task_id: id, role: 'assistant', content: 'The audit is complete.',
         project_id: 'alpha', project_name: 'Project Alpha', system_type: 'project_completion_summary',
