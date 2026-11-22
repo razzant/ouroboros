@@ -130,14 +130,33 @@ def test_headless_installs_builtin_before_any_git_read(setup, monkeypatch):
     assert marker["results"]["builtin/telegram"]["status"] == "installed"
 
 
-def test_first_start_classification_separates_new_installs_from_upgrades(tmp_path):
-    fresh, upgraded, onboarded = (tmp_path / name for name in ("fresh", "upgraded", "onboarded"))
-    for root in (fresh, upgraded, onboarded):
+def test_first_start_classification_separates_new_installs_from_upgrades(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from ouroboros.gateway import control
+    from supervisor import message_bus
+
+    fresh, upgraded, onboarded, reset = (tmp_path / name for name in ("fresh", "upgraded", "onboarded", "reset"))
+    for root in (fresh, upgraded, onboarded, reset):
         root.mkdir()
-    (upgraded / "skills" / "native").mkdir(parents=True)
-    (upgraded / "skills" / "native" / ".bootstrap-seed-complete").write_text("done")
+    for root in (upgraded, reset):  # a legacy seed's marker, kept by a Reset with the rest of the skills folder
+        (root / "skills" / "native").mkdir(parents=True)
+        (root / "skills" / "native" / ".bootstrap-seed-complete").write_text("done")
+    assert skill_starter.starter_choice_open(upgraded, {}) is False
     assert skill_starter.classify_first_start(fresh, {}) == "fresh"
     assert skill_starter.classify_first_start(upgraded, {}) == "upgrade"
+    # The owner's Reset of such a root (the real handler) is a fresh start: the step and the starter list are offered.
+    (reset / "settings.json").write_text('{"OUROBOROS_ONBOARDING_COMPLETED_AT": "2026-01-01T12:00:00Z"}', encoding="utf-8")
+    assert skill_starter.classify_first_start(reset, {"OUROBOROS_ONBOARDING_COMPLETED_AT": "x"}) == "upgrade"
+    for name, value in (("request_drive_root", lambda request: reset), ("_acquire_repo_mutation_lock", lambda: (None, None)),
+                        ("_release_repo_mutation_lock", lambda handle: None), ("_request_restart", lambda request: None)):
+        monkeypatch.setattr(control, name, value)
+    monkeypatch.setattr(message_bus, "try_get_bridge", lambda: None)
+    assert asyncio.run(control.api_reset(SimpleNamespace())).status_code == 200
+    assert (reset / "skills" / "native" / ".bootstrap-seed-complete").exists()
+    assert skill_starter.starter_choice_open(reset, {}) is True
+    assert skill_starter.classify_first_start(reset, {}) == "fresh"
     assert skill_starter.classify_first_start(onboarded, {"OUROBOROS_ONBOARDING_COMPLETED_AT": "x"}) == "upgrade"
     # The decision is durable: the seeding that follows cannot turn a new install into an "upgrade".
     (fresh / "skills" / "native").mkdir(parents=True)

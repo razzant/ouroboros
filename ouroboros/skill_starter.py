@@ -307,14 +307,24 @@ def join_starters(timeout: float = 60.0) -> bool:
 
 
 def _existing_install(drive_root: pathlib.Path, settings: Dict[str, Any]) -> bool:
-    """Evidence this data root ran before starter skills existed (an upgrade)."""
+    """Evidence this data root ran before starter skills existed (an upgrade). An owner Reset keeps the skills folder
+    and deletes the rest, so after one the old seed's marker there is no such evidence."""
     root = pathlib.Path(drive_root)
     if str(settings.get("OUROBOROS_ONBOARDING_COMPLETED_AT") or "").strip():
         return True
-    if (root / "skills" / "native" / ".bootstrap-seed-complete").exists():
+    if (root / "skills" / "native" / ".bootstrap-seed-complete").exists() and not _after_reset(root):
         return True
     state_skills = root / "state" / "skills"
     return state_skills.is_dir() and any(state_skills.iterdir())
+
+
+def _after_reset(root: pathlib.Path) -> bool:
+    """Whether this root's state is an owner Reset's: its initialization record (``origin: owner_reset``), written by
+    ``gateway.control.api_reset`` before the restart; an unreadable record is no Reset."""
+    from ouroboros.launch_roots import read_witness
+
+    status, witness = read_witness(root)
+    return status == "ok" and witness.get("origin") == "owner_reset"
 
 
 def classify_first_start(drive_root: pathlib.Path, settings: Dict[str, Any]) -> str:
