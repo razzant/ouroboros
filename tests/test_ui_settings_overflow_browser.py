@@ -1,10 +1,11 @@
 """WebKit guard: Settings never grows a horizontal scrollbar.
 
 The owner's report was a thick red horizontal scrollbar across the bottom of
-Settings -> Advanced in the packaged desktop shell (WKWebView). Blink's UA
-stylesheet clips a native ``<select>`` (``overflow: clip``); WebKit computes
-``visible``, so a long selected option paints past the control's own box, the
-``.settings-scroll`` page scroller (``overflow-x`` resolves to ``auto``) grows,
+Settings -> Advanced in the packaged desktop shell (WKWebView), where skill
+forms stood then; a skill's form is its own Settings page now
+(``skill/<skill id>``). Blink's UA stylesheet clips a native ``<select>``
+(``overflow: clip``); WebKit computes ``visible``, so a long selected option
+paints past the control's own box, the page scroller grows,
 and the scrollbar the app paints for it was UA-thick because the global
 ``::-webkit-scrollbar`` recipe sized only ``width``.
 
@@ -19,6 +20,8 @@ import pathlib
 import textwrap
 
 import pytest
+
+from tests.settings_browser_helpers import open_settings
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -125,7 +128,7 @@ def _write_long_option_settings_extension(data_dir: pathlib.Path) -> str:
 
 
 @pytest.mark.ui_browser
-def test_settings_advanced_never_scrolls_horizontally_in_webkit(direct_server_with_data):
+def test_a_skill_settings_page_never_scrolls_horizontally_in_webkit(direct_server_with_data):
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -163,8 +166,8 @@ def test_settings_advanced_never_scrolls_horizontally_in_webkit(direct_server_wi
 
                 page.wait_for_selector('[data-nav-page="settings"]', timeout=30_000)
                 page.click('[data-nav-page="settings"]')
-                page.locator('[data-settings-tab="advanced"]').click()
-                section = page.locator('.settings-extension-section').filter(
+                level = open_settings(page, f"skill/{skill}", timeout=30_000)
+                section = level.locator('.settings-extension-section').filter(
                     has_text=SECTION_TITLE
                 )
                 section.wait_for(state="visible", timeout=30_000)
@@ -175,27 +178,23 @@ def test_settings_advanced_never_scrolls_horizontally_in_webkit(direct_server_wi
                 assert select.input_value() == "full"
                 assert LONG_OPTION_LABEL in select.inner_text()
 
-                overflow = page.evaluate(
-                    """() => {
-                        const s = document.querySelector('.settings-scroll');
-                        return s.scrollWidth - s.clientWidth;
-                    }"""
-                )
+                # The skill's page is the scroller that holds its form.
+                overflow = level.evaluate("s => s.scrollWidth - s.clientWidth")
                 widths = select.evaluate(
                     """(element) => [
                         element.getBoundingClientRect().width,
                         element.parentElement.getBoundingClientRect().width,
                     ]"""
                 )
-                # `.settings-scroll` is an inner scroller, so a full-page shot
-                # would frame the top of Advanced and not the offending control.
+                # The page is an inner scroller, so a full-page shot would
+                # frame its top and not the offending control.
                 select.scroll_into_view_if_needed()
                 page.wait_for_timeout(150)
                 # Captured before the assertions so a red run leaves evidence too.
                 page.screenshot(path=str(screenshot), full_page=True)
 
                 assert overflow <= 1, (
-                    "Settings scrolls horizontally: .settings-scroll is "
+                    "Settings scrolls horizontally: the skill's page is "
                     f"{overflow}px wider than its own box. A native select's "
                     "value is not clipped by WebKit, so a long option leaks "
                     "into the page scroller and the app paints the horizontal "

@@ -45,7 +45,7 @@ def test_drain_serves_what_consecutive_gets_would_and_keeps_the_idle_index():
     by_get, by_drain = _filled(events), _filled(events)
     expected = [by_get.get_nowait()["n"] for _ in range(7)]
     taken = by_drain.drain(7)
-    assert [event["n"] for event, _stamp in taken] == expected
+    assert [event["n"] for event, _put_at, _waited in taken] == expected
     assert expected[:4] == [0, 3, 6, 9], "every control event first, in put order"
     assert by_drain.pending_idle_inputs() == by_get.pending_idle_inputs()
     assert by_drain.qsize() == by_get.qsize() == 5
@@ -65,6 +65,9 @@ def test_restore_front_returns_an_unserved_tail_as_if_never_taken(monkeypatch):
         clock[0] += 1.0
     pending_before = bus.pending_idle_inputs()
     taken = bus.drain(6)  # puts were stamped 100..105: n0 100, n1 101, n2 102, n3 103, n4 104, n5 105
+    # Each envelope's wait in the bus, on its own clock at this take (106), never a producer's ``ts``.
+    assert [(event["n"], waited) for event, _put_at, waited in taken] == [(0, 6.0), (3, 3.0), (1, 5.0), (2, 4.0),
+                                                                          (4, 2.0), (5, 1.0)]
     bus.put({"type": "send_message", "n": 99, "task_id": "late", "is_progress": True, "chat_id": 1})
     bus.put({"type": "task_heartbeat", "n": 98, "task_id": "late"})
     bus.restore_front(taken[1:])  # the first one (n0) was served; the rest were not
@@ -187,7 +190,7 @@ def test_drain_and_restore_ride_the_real_manager_proxy():
         for event in _mixed(9):
             endpoint.put(event)
         taken = endpoint.drain(4)
-        assert [event["n"] for event, _stamp in taken] == [0, 3, 6, 1]
+        assert [event["n"] for event, _put_at, waited in taken if waited >= 0] == [0, 3, 6, 1]
         endpoint.restore_front(taken[2:])
         assert endpoint.qsize() == 7
         assert [endpoint.get_nowait()["n"] for _ in range(7)] == [6, 1, 2, 4, 5, 7, 8]

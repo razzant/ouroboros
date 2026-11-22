@@ -1,17 +1,20 @@
-"""One-writer-per-project lease helpers (multi-project, v6.32.0).
+"""One-writer lanes: a Project's and a recorded external folder's (multi-project, v6.32.0).
 
-Pure functions consumed by ``supervisor/workers.py::assign_tasks`` under the
-queue lock: a PENDING task whose ``project_id`` is already RUNNING is skipped
-this assignment pass (projects serialize internally; parallelism happens
-BETWEEN projects and via subagent swarms WITHIN a task).
+Pure functions the assignment pass (``supervisor/dispatch_choice``, ``worker_assignment``) reads under the
+queue lock: a PENDING task skips this pass while another tree holds its Project's lane or its folder's.
+Parallelism happens between Projects with different folders, between folders, and through subagent swarms
+WITHIN a task; independent pooled work in one external folder waits its turn, whichever room it belongs to.
 
-``project_id == ""`` means "no lane": ordinary unscoped tasks never serialize
-against each other. Subagents carry their parent's stored ``project_id`` but
-hold no lease of their own — the parent task IS the project's writer and its
-swarm must not deadlock against itself, so only top-level (non-subagent)
-tasks count as lane occupants. A conversation-lane turn (an owner's room turn,
-a wake, a Presence body) holds no lease either: it answers beside the room's
-work, so a Resume or Continue it grants starts at once.
+``project_id == ""`` means "no lane": ordinary unscoped tasks never serialize against each other, folder or
+not (a bare workspace task is given its folder's derived Project at admission). Subagents carry their parent's
+stored ``project_id`` but hold no lease of their own — the parent task IS the writer and its swarm must not
+deadlock against itself, so only top-level (non-subagent) tasks count as lane occupants; the lane is their
+tree's (``lane_holders``). A conversation-lane turn (an owner's room turn, a wake, a Presence body) holds no
+lease either: it answers beside the room's work, so a Resume or Continue it grants starts at once.
+
+A folder lane compares the string a row records (``workspace_root`` in ``external`` mode, or a pending move's
+projection ``_placement_folder``) as admission already normalized it: no filesystem, registry or history read,
+no nested folders. It orders background starts; it promises no protection against every file race.
 """
 
 from __future__ import annotations
@@ -61,25 +64,114 @@ def running_project_ids(running: Iterable[Any]) -> Set[str]:
     return out
 
 
-def cold_project_holders(pending: Iterable[Any]) -> Dict[str, Set[str]]:
-    """Accepted cold external writers keep their original top-level project lane."""
+def _tree(task: Any) -> str:
+    """The tree a row belongs to: its logical root (a root's retry keeps the original id)."""
+    task = _as_task(task)
+    return str(task.get("root_task_id") or task.get("id") or "") if isinstance(task, dict) else ""
+
+
+def lane_folder(task: Any) -> str:
+    """The external folder whose lane a lane occupant holds, as its row records it, else ``""``. A pending move's
+    projection (``_placement_folder``, ``project_placement.placement_folder``) stands for the folder its readmission
+    will select."""
+    task = _as_task(task)
+    if not _is_lane_occupant(task):
+        return ""
+    if "_placement_folder" in task:
+        return str(task.get("_placement_folder") or "")
+    return str(task.get("workspace_root") or "") if task.get("workspace_mode") == "external" else ""
+
+
+def _lanes(task: Any) -> tuple:
+    """The lanes a lane occupant holds: its Project's id, and ``("folder", path)`` for its recorded folder."""
+    folder = lane_folder(task)
+    return ((_task_project_id(task),) + ((("folder", folder),) if folder else ())) if _is_lane_occupant(task) else ()
+
+
+def _asleep(task: Dict[str, Any]) -> bool:
+    """Parked in its own model sleep, or granted back from it and not started yet."""
+    marker = task.get("_budget_pause") or (task.get("_budget_pause_resume") or {}).get("pause")
+    return isinstance(marker, dict) and marker.get("reason") == "sleep"
+
+
+def lane_holders(running: Iterable[Any], pending: Iterable[Any]) -> Dict[Any, Set[str]]:
+    """The trees (root ids) holding each lane (a Project's id, ``("folder", path)``); the caller holds the
+    queue lock. A running top-level writer holds its lanes, and ``("folder", path, "acting")`` names the
+    trees whose running, claimed or chosen row is in that folder now. A queued one keeps its lanes while its
+    tree lives: its accepted cold custody, or, asleep (a sleep is its wait), a running or claimed member.
+    A tree whose members are only queued takes its lanes back together or not at all, the first queued such
+    tree first: only when no other tree holds any of them, so a tree that released its lanes takes them back
+    only once all are free, no two trees wait on each other, and a free folder is never kept for a tree
+    whose Project another tree holds."""
     from ouroboros.sleep_custody import carrier_receipt
 
-    holders: Dict[str, Set[str]] = {}
-    for task in pending:
-        if _is_lane_occupant(task) and carrier_receipt(task).get("retains_project_lane"):
-            holders.setdefault(_task_project_id(task), set()).add(str(task.get("id") or ""))
+    running, pending = list(running or ()), [task for task in pending or () if isinstance(task, dict)]
+    holders: Dict[Any, Set[str]] = {}
+    for item in running:
+        if not (isinstance(item, dict) and item.get("lane") == LANE_CONVERSATION):
+            for lane in _lanes(item):
+                holders.setdefault(lane, set()).add(_tree(item))
+                if isinstance(lane, tuple):
+                    holders.setdefault(lane + ("acting",), set()).add(_tree(item))
+    sleepers = [task for task in pending if _is_lane_occupant(task)
+                and (_asleep(task) or carrier_receipt(task).get("retains_project_lane"))]
+    acting, queued, returning = {_tree(item) for item in running}, {}, []  # returning: queued-only trees, in order
+    for task in pending if sleepers else ():
+        queued.setdefault(_tree(task), set()).add(str(task.get("id") or ""))
+    for task in sleepers:
+        tree = _tree(task)
+        if carrier_receipt(task).get("retains_project_lane") or tree in acting:
+            for lane in _lanes(task):
+                holders.setdefault(lane, set()).add(tree)
+        elif queued.get(tree, set()) - {str(task.get("id") or "")}:
+            returning.append((tree, _lanes(task)))
+    for tree, lanes in returning:
+        if not any(lane in holders for lane in lanes):
+            holders.update((lane, {tree}) for lane in lanes)
     return holders
 
 
+def _folder_holders(candidate: Any, holders: Dict[Any, Set[str]]) -> Set[str]:
+    """The other trees ``candidate``'s folder waits for. A tree that does not hold the folder waits for every
+    holder, a cold one included; one already holding it (a sleeper returning) waits only for those acting
+    in it now, never for another merely cold holder, so earlier holders of one folder never lock each other."""
+    folder, tree = lane_folder(candidate), _tree(candidate)
+    held = holders.get(("folder", folder), set()) if folder else set()
+    others = held - {tree}
+    return others & holders.get(("folder", folder, "acting"), set()) if tree in held else others
+
+
 def candidate_is_leasable(candidate: Dict[str, Any], running_ids: Set[str], *,
-                         cold_holders: Dict[str, Set[str]] | None = None) -> bool:
-    """True when ``candidate`` may be assigned now under the one-writer rule."""
-    if not _is_lane_occupant(candidate):
-        return True
+                         holders: Dict[Any, Set[str]] | None = None) -> bool:
+    """True when ``candidate`` may be assigned now under the one-writer rule: never beside a lane
+    another tree holds (``lane_holders``; its folder's by ``_folder_holders``), and a top-level task
+    never beside a running writer of its Project."""
     project = _task_project_id(candidate)
-    return project not in running_ids and not ((cold_holders or {}).get(project, set())
-                                               - {str(candidate.get("id") or "")})
+    if project and (holders or {}).get(project, set()) - {_tree(candidate)}:
+        return False
+    if _folder_holders(candidate, holders or {}):
+        return False
+    return not _is_lane_occupant(candidate) or project not in running_ids
+
+
+def note_folder_wait(candidate: Dict[str, Any], running: Iterable[Any], pending: Iterable[Any],
+                     holders: Dict[Any, Set[str]]) -> bool:
+    """Name on ``candidate`` the tree another room's (or its own room's) work keeps its folder for, as
+    ``_folder_wait`` ``{task_id, project_id, folder}``, or clear it; whether it changed. The queue snapshot
+    carries it to the roster the mind reads (``peer_roster``)."""
+    blockers, folder, wait = sorted(_folder_holders(candidate, holders)), lane_folder(candidate), {}
+    if blockers:
+        rows = [_as_task(item) for item in [*(running or ()), *(pending or ())]]
+        project = next((_task_project_id(row) for row in rows if _tree(row) == blockers[0]
+                        and lane_folder(row) == folder), "")
+        wait = {"task_id": blockers[0], "project_id": project, "folder": folder}
+    if (candidate.get("_folder_wait") or {}) == wait:
+        return False
+    if wait:
+        candidate["_folder_wait"] = wait
+    else:
+        candidate.pop("_folder_wait", None)
+    return True
 
 
 def task_lane_project_state(running: Any, pending: Any, tid: Any) -> dict:
@@ -146,8 +238,10 @@ def mark_task_project(running: Any, pending: Any, tid: Any, pid: Any, *, authori
 
 __all__ = [
     "candidate_is_leasable",
-    "cold_project_holders",
+    "lane_folder",
+    "lane_holders",
     "mark_task_project",
+    "note_folder_wait",
     "running_project_ids",
     "task_lane_project_state",
 ]

@@ -752,7 +752,7 @@ def test_child_terminal_survives_dead_worker_without_retry(tmp_path, monkeypatch
     assert done['type'] == 'task_done' and done['status'] == 'completed'
     assert done['_files_prepared_attempt'] == 3 and done['worker_id'] == 0
     assert W.RUNNING[job['task_id']] is job['meta'], 'normal done ingress owns release'
-    W.respawn_worker.assert_called_once_with(0)
+    W.respawn_worker.assert_called_once_with(0, expected_worker=job["worker"])
     from ouroboros.headless import remove_subagent_task_drive, retry_child_task_refs
 
     retry_child_task_refs(tmp_path, child, job['task_id'])
@@ -780,6 +780,29 @@ def test_a_crashed_child_retries_on_its_own_id_under_its_parent_and_root(tmp_pat
     assert (retry['id'], retry['_attempt']) == (job['task_id'], 2)
     assert {key: retry.get(key) for key in lineage} == lineage
     assert not retry.get('timeout_retry_from') and retry.get('original_task_id', job['task_id']) == job['task_id']
+
+
+def test_an_older_attempts_saved_result_neither_ends_nor_blocks_a_dead_attempts_retry(tmp_path, monkeypatch):
+    # Attempt 2 died while its child drive still holds attempt 1's completed result. That result is no ending of
+    # attempt 2: recovery goes on to its own crash policy (here the one retry), neither publishing it nor waiting on it.
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.worker_health import recover_confirmed_dead_worker
+
+    job, _events = _reserved_job(tmp_path, monkeypatch, child=True, exitcode=1, attempt=2)
+    tid, child = job['task_id'], Path(job['task']['drive_root'])
+    monkeypatch.setattr(W, 'QUEUE_MAX_RETRIES', 2)  # attempt 2 still owns one retry
+    monkeypatch.setattr('supervisor.terminal_delivery.deliver_miss_lane_outcome', MagicMock())
+    write_task_result(tmp_path, tid, 'running', task_attempt=2, child_drive_root=str(child))
+    write_task_result(child, tid, 'completed', task_attempt=1, result='Attempt 1 answer.', terminal_origin='model_final',
+                      loop_outcome={'usage': {'total_rounds': 3}})
+    enqueued = []
+    monkeypatch.setattr(q, 'enqueue_task', lambda task, front=False: enqueued.append(dict(task)) or task)
+    recover_confirmed_dead_worker(job)
+    current = load_task_result(tmp_path, tid, strict=True)
+    assert [row['_attempt'] for row in enqueued] == [3], 'attempt 2 takes its own retry; attempt 1 answer is not its end'
+    assert current['status'] != 'completed' and current.get('result') != 'Attempt 1 answer.'
 
 
 def test_file_preparation_runs_without_queue_or_lifecycle_lock(tmp_path, monkeypatch):
@@ -958,7 +981,7 @@ def test_retry_queue_transition_is_atomic_and_failure_retains_binding(tmp_path, 
     else:
         recover_confirmed_dead_worker(job)
         assert job['task_id'] not in W.RUNNING
-        W.respawn_worker.assert_called_once_with(0)
+        W.respawn_worker.assert_called_once_with(0, expected_worker=job["worker"])
     assert len(calls) == 1
 
 

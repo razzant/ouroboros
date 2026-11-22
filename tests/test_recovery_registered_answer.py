@@ -141,6 +141,45 @@ def test_dead_worker_recovery_finalizes_a_registered_answer_without_a_requeue(qe
     assert sent == [], "no crash toast: the answer and the honest card speak"
 
 
+@pytest.mark.parametrize("state", ["owed", "delivered"])
+def test_dead_worker_recovery_keeps_a_first_direct_launchs_answer_on_its_own_attempt(qenv, monkeypatch, state):
+    """A first direct launch ran as physical attempt 0 (its bound owner's stamp, its carrier's row) while the queue
+    counts it 1. The adopted answer's custody names that 0, so the current answer's delivery still reads the outbox's
+    own row (the same id, no new generation) while the queue's number stays the retry policy's."""
+    from ouroboros.task_status import execution_owner_record
+    from ouroboros.terminal_projection import current_answer_delivery
+    from supervisor import task_reaper, worker_health as health, workers
+
+    tid = "first-launch-answer"
+    task = _task(tid)
+    del task["_attempt"]  # admitted unnumbered, as ``conversation_lane.admit_turn`` seeds it
+    task.update(_is_direct_chat=True, _execution_owner=execution_owner_record(qenv.drive, task, "direct"))
+    write_task_result(qenv.drive, tid, "running", result="working", chat_id=1, task_attempt=0)
+    evt = {**_event(tid), "task_attempt": 0}  # its final names the attempt that authored it
+    assert td.register_pending_delivery(qenv.drive, evt)
+    if state == "delivered":
+        assert td.register_delivery(qenv.drive, evt["delivery_id"], emitted=evt)
+    monkeypatch.setattr(workers, "DRIVE_ROOT", qenv.drive)
+    monkeypatch.setattr(workers, "reconstruct_task_cost",
+                        lambda *_a, **_k: {"cost_accounting_status": "unavailable", "cost_final": False})
+    monkeypatch.setattr(health, "_dead_job_is_current", lambda job: True)
+    monkeypatch.setattr(health, "_complete_exact_budget_pause_after_death", lambda *_a, **_k: (False, False))
+    monkeypatch.setattr(task_reaper, "_finish_self_finalized_task", lambda *_a, **_k: None)
+    monkeypatch.setattr(qenv.q, "enqueue_task",
+                        lambda *_a, **_k: pytest.fail("the original prompt must not be requeued"))
+    worker = SimpleNamespace(proc=SimpleNamespace(pid=4321, is_alive=lambda: False), active_capacity=True)
+    job = {"worker": worker, "task_id": tid, "task": task, "meta": {"task": task, "attempt": 1},
+           "worker_id": 0, "exitcode": 1, "drive_root": str(qenv.drive)}
+
+    health._recover_crashed_task_without_terminal(job, qenv.q)
+
+    stored = load_task_result(qenv.drive, tid)
+    assert (stored["status"], stored["task_attempt"]) == ("failed", 0)
+    assert stored["finalization_recovery"] == {"cause": "worker_crash", "answer": state,
+                                               "delivery_id": evt["delivery_id"], "attempt": 0}
+    assert current_answer_delivery(qenv.drive, {**stored, "task_id": tid}) == {"state": state}
+
+
 def test_a_refused_finalization_write_keeps_the_job_for_the_next_health_tick(qenv, monkeypatch):
     """A registered answer with a store that refuses the write: no retry, no silent drop."""
     from supervisor import task_reaper, worker_health as health, workers
@@ -194,17 +233,25 @@ def test_registered_answer_reads_the_outbox_never_the_result_prose(tmp_path):
 
 
 @pytest.mark.parametrize("state", ["owed", "delivered", "none"])
-def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, monkeypatch, state):
+@pytest.mark.parametrize("physical_attempt", [0, 1])
+def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, monkeypatch, state, physical_attempt):
     """A hard deadline or ceiling adopts the held answer; without a registered answer the
     ordinary timeout row and salvage still happen. Either way the dead attempt's consumers retire,
     its controls reset, and nothing is queued after it."""
     from supervisor import task_reaper as reaper, worker_health, workers
 
+    from ouroboros.task_status import execution_owner_record
+
     tid = "answer-at-deadline"
     task = {**_task(tid), "_attempt": 1}
-    write_task_result(qenv.drive, tid, "running", result="working", task_attempt=1)
+    if physical_attempt == 0:
+        task["_is_direct_chat"] = True
+        task["_execution_owner"] = execution_owner_record(qenv.drive, {**task, "_attempt": 0}, "direct")
+    write_task_result(qenv.drive, tid, "running", result="working", task_attempt=physical_attempt,
+                      **({"execution_owner": task["_execution_owner"], "_is_direct_chat": True}
+                         if physical_attempt == 0 else {}))
     if state != "none":
-        evt = _event(tid, "complete authored answer")
+        evt = {**_event(tid, "complete authored answer"), "task_attempt": physical_attempt}
         assert td.register_pending_delivery(qenv.drive, evt)
         if state == "delivered":
             assert td.register_delivery(qenv.drive, evt["delivery_id"], emitted=evt)
@@ -219,7 +266,7 @@ def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, 
                         lambda _drive, _root, task_id, **_k: reset.append(task_id))
     monkeypatch.setattr(reaper, "send_with_budget", lambda *a, **k: None)
     salvage, finished = [], []
-    monkeypatch.setattr(reaper, "_deliver_reap_salvage", lambda *a: salvage.append(a))
+    monkeypatch.setattr(reaper, "_deliver_reap_salvage", lambda *a, **kw: salvage.append((a, kw)))
     monkeypatch.setattr(reaper, "_emit_reap_task_done", lambda *a, **k: None)
     monkeypatch.setattr(reaper, "_finish_self_finalized_task", lambda *a, **k: finished.append(a[5]))
     reaper.reap_timed_out_task({"worker_id": 0, "worker": None, "proc": SimpleNamespace(pid=0),
@@ -232,6 +279,7 @@ def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, 
         assert stored["reason_code"] == "hard_deadline" and len(salvage) == 1 and finished == []
     else:
         assert (stored["result"], stored["reason_code"]) == ("complete authored answer", "finalization_incomplete")
+        assert stored["finalization_recovery"]["attempt"] == physical_attempt
         assert salvage == [] and finished == ["failed"], "published as a terminal, never a second salvage message"
 
 
@@ -324,3 +372,48 @@ def test_a_timeout_keeps_the_registered_host_salvage_not_a_later_intermediate(qe
     assert stored["terminal_origin"] == "host_salvage" and stored["reason_code"] == "finalization_incomplete"
     assert stored["result"] == answer, "the history salvage replaced the registered answer's preserved bytes"
     assert preserved.read_text(encoding="utf-8") == answer and qenv.q.PENDING == []
+
+
+@pytest.mark.parametrize(("state", "word"), [("delivered", "Done"), ("owed", "Failed")])
+def test_an_adopted_answer_reads_by_its_delivery_on_every_surface_of_its_row(qenv, monkeypatch, state, word):
+    """Owner, 15.11: a model's final answer that reached the chat before its task's finalization was cut reads Done,
+    the stored row unchanged; one still owed reads Failed as before. The same fact travels with the Main row, the
+    history's terminal truth and the rebuilt ``task_done``, which the browser folds, and with the mind's result read."""
+    import asyncio
+
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.project_dialogue import completion_status_label
+    from ouroboros.terminal_projection import _project_row
+    from ouroboros.tools.control_task_results import _get_task_result
+    from ouroboros.working_checkpoint import adopt_registered_answer
+    from supervisor import events
+
+    tid = "cut-after-answer"
+    write_task_result(qenv.drive, tid, "running", result="working", task_attempt=1)
+    _register(qenv.drive, tid, state)
+    stored = adopt_registered_answer(qenv.drive, _task(tid), tid, attempt=1, cause="app_stop")
+    recovery = stored["finalization_recovery"]
+    assert (stored["status"], recovery["answer"], stored["terminal_origin"]) == ("failed", state, "model_final")
+    assert completion_status_label(stored, {}) == word
+    row = _project_row(tid, stored, {}, {})
+    assert row["text"].startswith(f"{word}. Root task {tid}.") and row["finalization_recovery"] == recovery
+    assert ("The answer was delivered." in row["text"]) is (state == "delivered")
+
+    (qenv.drive / "logs").mkdir(exist_ok=True)
+    (qenv.drive / "logs" / "progress.jsonl").write_text(json.dumps(
+        {"ts": "2026-11-13T20:47:00Z", "task_id": tid, "content": "Working"}) + "\n", encoding="utf-8")
+    response = asyncio.run(make_chat_history_endpoint(qenv.drive)(SimpleNamespace(query_params={"limit": "10"})))
+    shown = next(item for item in json.loads(response.body.decode("utf-8"))["messages"] if item.get("task_id") == tid)
+    assert (shown["finalization_recovery"], shown["terminal_origin"]) == (recovery, "model_final")
+    assert shown["outcome_phase"] == ("done" if state == "delivered" else "error")
+    from ouroboros.gateway.state import _task_activity_facts
+
+    census = _task_activity_facts(qenv.drive, tid)["display"]  # Activity folds the same record
+    assert (census["finalization_recovery"], census["terminal_origin"]) == (recovery, "model_final")
+
+    published: list = []
+    monkeypatch.setattr(events, "_finish_task_done_dispatch", lambda *_a, **kw: published.append(kw["task_done_event"]))
+    events._handle_task_done({"task_id": tid, "status": "failed"}, SimpleNamespace(DRIVE_ROOT=qenv.drive, RUNNING={}, WORKERS={}))
+    assert (published[0]["finalization_recovery"], published[0]["terminal_origin"]) == (recovery, "model_final")
+    read = _get_task_result(SimpleNamespace(drive_root=qenv.drive, task_metadata={}), tid)
+    assert json.loads(read.split("[SUBTASK_OUTCOME]\n", 1)[1].split("\n[/SUBTASK_OUTCOME]", 1)[0])["finalization_recovery"] == recovery

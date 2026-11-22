@@ -310,12 +310,12 @@ def test_a_wave_order_discloses_the_effective_weaker_level_not_the_raw_order(mon
     set_review_pool(monkeypatch, pool_roster(pool_seat("auto", "openai/gpt-5.6-terra"),
                                           pool_seat("pinned", "openai/gpt-5.6-sol", effort="xhigh")))
     panel = compose_panel(parse_request({"root": "system_repo", "subject": "index", "reviewer_effort": "none"}),
-                          body=True, strictness="blocking")
+                          body=True, strictness="advisory")
     assert [(seat.slot.slot_id, seat.slot.effort) for seat in panel.seats] == [("auto", "low"), ("pinned", "xhigh")]
     facts = panel.facts["reviewer_effort"]
     assert facts == {"order": "none", "applied": ["auto"], "not_applied": ["pinned"], "weaker_than_configured": ["auto"]}
     panel = compose_panel(parse_request({"root": "system_repo", "subject": "index", "reviewer_effort": "ultra"}),
-                          body=True, strictness="blocking")
+                          body=True, strictness="advisory")
     assert [(seat.slot.slot_id, seat.slot.effort) for seat in panel.seats] == [("auto", "high"), ("pinned", "xhigh")]
     assert panel.facts["reviewer_effort"] == {
         "order": "ultra", "applied": ["auto"], "not_applied": ["pinned"], "weaker_than_configured": []}

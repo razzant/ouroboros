@@ -129,7 +129,8 @@ def test_get_settings_blocks_core_keys_without_grant(tmp_path):
     """An extension that lists a core key in env_from_settings without
     an owner grant fails to load and ``PluginAPIImpl.get_settings``
     silently drops the key — the dual-track grant model deliberately
-    keeps the failure mode the same as the script path."""
+    keeps the failure mode the same as the script path. A custom key the
+    read document holds is withheld the same way; an ordinary setting passes."""
     plugin = (
         "def register(api):\n"
         "    api.register_tool('n', lambda ctx: 'ok', description='n', schema={})\n"
@@ -139,12 +140,13 @@ def test_get_settings_blocks_core_keys_without_grant(tmp_path):
         "envtest",
         plugin,
         permissions=["tool", "read_settings"],
-        env_from_settings=["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK"],
+        env_from_settings=["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK", "TOTAL_BUDGET"],
     )
     settings_snapshot = {
         "OPENROUTER_API_KEY": "sk-leak",
         "TIMEZONE": "UTC",
         "MY_OK": "visible",
+        "TOTAL_BUDGET": 5,
         "RANDOM_OTHER": "not-allowed",
     }
     err = extension_loader.load_extension(loaded, lambda: settings_snapshot, drive_root=drive_root)
@@ -155,16 +157,13 @@ def test_get_settings_blocks_core_keys_without_grant(tmp_path):
     impl = extension_loader.PluginAPIImpl(extension_loader._PluginAPIConfig(
         skill_name="envtest",
         permissions=["read_settings"],
-        env_allowlist=["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK"],
+        env_allowlist=["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK", "TOTAL_BUDGET"],
         state_dir=tmp_path,
         settings_reader=lambda: settings_snapshot,
         granted_keys=[],
     ))
-    got = impl.get_settings(["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK", "RANDOM_OTHER"])
-    assert "OPENROUTER_API_KEY" not in got
-    assert got["TIMEZONE"] == "UTC"
-    assert got["MY_OK"] == "visible"
-    assert "RANDOM_OTHER" not in got
+    got = impl.get_settings(["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK", "TOTAL_BUDGET", "RANDOM_OTHER"])
+    assert got == {"TOTAL_BUDGET": 5}  # custom TIMEZONE / MY_OK: secrets of the document this read sees
     impl._close_runtime_access()
     assert impl.get_settings(["TIMEZONE", "MY_OK"]) == {}
 
@@ -178,17 +177,17 @@ def test_get_settings_rechecks_runtime_close_after_reader_returns(tmp_path):
     def settings_reader():
         reader_started.set()
         assert release_reader.wait(1.0)
-        return {"MY_OK": "visible"}
+        return {"TOTAL_BUDGET": 5}  # an ordinary setting: only the close withholds it
 
     impl = extension_loader.PluginAPIImpl(extension_loader._PluginAPIConfig(
         skill_name="settings_race",
         permissions=["read_settings"],
-        env_allowlist=["MY_OK"],
+        env_allowlist=["TOTAL_BUDGET"],
         state_dir=tmp_path,
         settings_reader=settings_reader,
     ))
     result = []
-    thread = threading.Thread(target=lambda: result.append(impl.get_settings(["MY_OK"])))
+    thread = threading.Thread(target=lambda: result.append(impl.get_settings(["TOTAL_BUDGET"])))
     thread.start()
     assert reader_started.wait(1.0)
     close_done = threading.Event()
@@ -201,7 +200,7 @@ def test_get_settings_rechecks_runtime_close_after_reader_returns(tmp_path):
 
     assert close_done.is_set()
     assert result == [{}]
-    assert impl.get_settings(["MY_OK"]) == {}
+    assert impl.get_settings(["TOTAL_BUDGET"]) == {}
 
 
 def test_unload_does_not_deadlock_with_inflight_get_settings(tmp_path):
@@ -296,7 +295,7 @@ def test_get_settings_returns_core_key_with_grant(tmp_path):
         "granted_ext",
         plugin,
         permissions=["tool", "read_settings"],
-        env_from_settings=["OPENROUTER_API_KEY", "TIMEZONE"],
+        env_from_settings=["OPENROUTER_API_KEY", "TOTAL_BUDGET"],
     )
     save_skill_grants(
         drive_root,
@@ -307,7 +306,7 @@ def test_get_settings_returns_core_key_with_grant(tmp_path):
     )
     settings_snapshot = {
         "OPENROUTER_API_KEY": "sk-allowed",
-        "TIMEZONE": "UTC",
+        "TOTAL_BUDGET": 5,
     }
     err = extension_loader.load_extension(loaded, lambda: settings_snapshot, drive_root=drive_root)
     assert err is None, err
@@ -315,21 +314,21 @@ def test_get_settings_returns_core_key_with_grant(tmp_path):
     impl = extension_loader.PluginAPIImpl(extension_loader._PluginAPIConfig(
         skill_name="granted_ext",
         permissions=["read_settings"],
-        env_allowlist=["OPENROUTER_API_KEY", "TIMEZONE"],
+        env_allowlist=["OPENROUTER_API_KEY", "TOTAL_BUDGET"],
         state_dir=tmp_path,
         settings_reader=lambda: settings_snapshot,
         granted_keys=["OPENROUTER_API_KEY"],
     ))
-    got = impl.get_settings(["OPENROUTER_API_KEY", "TIMEZONE"])
+    got = impl.get_settings(["OPENROUTER_API_KEY", "TOTAL_BUDGET"])
     assert got.get("OPENROUTER_API_KEY") == "sk-allowed"
-    assert got.get("TIMEZONE") == "UTC"
+    assert got.get("TOTAL_BUDGET") == 5
 
     # Grant on the WRONG content hash must not authorise — the loader
     # builds an empty granted_keys list and drops the value.
     impl_no_grant = extension_loader.PluginAPIImpl(extension_loader._PluginAPIConfig(
         skill_name="granted_ext",
         permissions=["read_settings"],
-        env_allowlist=["OPENROUTER_API_KEY", "TIMEZONE"],
+        env_allowlist=["OPENROUTER_API_KEY", "TOTAL_BUDGET"],
         state_dir=tmp_path,
         settings_reader=lambda: settings_snapshot,
         granted_keys=[],

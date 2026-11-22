@@ -34,7 +34,7 @@ def terminal_host(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "_reconcile_confirmed_dead_review_owner", lambda *_a: None)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: respawned.append(wid))
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: respawned.append(wid))
     monkeypatch.setattr(workers, "send_with_budget", ctx.send_with_budget)
     monkeypatch.setattr(workers, "load_state", lambda: {})
     jobs = queue.Queue()

@@ -397,31 +397,21 @@ def test_a_change_brief_word_only_some_rounds_render_counts_in_every_round(forei
 
 
 @pytest.mark.parametrize("surface", ["change"])
-@pytest.mark.parametrize("case", ["obligations", "paged"])
-def test_a_counted_frame_around_host_records_reaches_its_seats(foreign, monkeypatch, surface, case):
-    """Open obligations and a paged brief are host records; the frame they are handed in is the contract. With
-    an obligation held (every seat) or a session seat's first send paged (its pointer), an edit of that frame is
-    a new wave whose seats read the new words, and the same request then replays free."""
-    from ouroboros.review_state_model import AdvisoryReviewState
-    from ouroboros.review_state_records import ObligationItem
-
+def test_a_counted_frame_around_host_records_reaches_its_seats(foreign, monkeypatch, surface):
+    """A paged brief is a host record; the frame it is handed in is the contract. With a session seat's first send
+    paged (its pointer), an edit of that frame is a new wave whose seat reads the new words, and the same request
+    then replays free."""
     ctx, sends, briefs = foreign
-    if case == "paged":
-        monkeypatch.setattr(review_brief_coupling, "SESSION_INLINE_DIFF_CEILING_CHARS", 1)
+    monkeypatch.setattr(review_brief_coupling, "SESSION_INLINE_DIFF_CEILING_CHARS", 1)
     first = run_review_change(ctx, **SURFACES[surface])
     paid = len(sends)
     assert first["aggregate"] == "PASS" and paid, first
-    if case == "obligations":
-        held = [ObligationItem(obligation_id="obl-1", item="code_quality", severity="critical", reason="still open",
-                               source_attempt_ts="", source_attempt_msg="")]
-        monkeypatch.setattr(AdvisoryReviewState, "get_open_obligations", lambda self, repo_key=None: held)
-    words = _revise(monkeypatch, *(("build_obligations_block", "text") if case == "obligations"
-                                   else ("paged_review_text", "coupling")))
+    words = _revise(monkeypatch, "paged_review_text", "coupling")
     _restart(ctx)
     briefs.clear()
     second = run_review_change(ctx, **SURFACES[surface])
     assert (second["aggregate"], second["reused"], len(sends)) == ("PASS", False, 2 * paid), second
-    assert all(words in briefs[seat] for seat in (("t1", "t2", "s1") if case == "obligations" else ("t2",)))
+    assert words in briefs["t2"]
     assert run_review_change(ctx, **SURFACES[surface])["record_id"] == second["record_id"] and len(sends) == 2 * paid
 
 
@@ -953,3 +943,30 @@ def test_content_panel_rebuttal_and_the_authors_ask_stay_material(harness):
     (h.skill_dir / "scripts" / "hello.py").write_text("print('changed bytes')\n", encoding="utf-8")
     changed = _review(h, reviewers=["t1"], reason=REASON)
     assert changed.paid and changed.content_hash != first.content_hash and len(h.sends) == 6
+
+
+def test_the_recorded_authority_is_advisory_whatever_a_leftover_setting_says(monkeypatch):
+    """Identity bytes after Blocking left (STEP4 7(iv) item 3): the commit contract records ``advisory`` on every
+    install, so a fingerprint recorded under Advisory before the change still matches and a Blocking-era one never
+    does; a leftover value of the retired setting moves no byte."""
+    import hashlib
+
+    from ouroboros.tools.commit_gate import commit_review_contract_fingerprint, commit_review_contract_material
+
+    set_review_pool(monkeypatch, shared.golden_pool())
+    seen = set()
+    for leftover in (None, "advisory", "blocking"):
+        if leftover is None:
+            monkeypatch.delenv("OUROBOROS_REVIEW_ENFORCEMENT", raising=False)
+        else:
+            monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", leftover)
+        assert commit_review_contract_material()["enforcement"] == "advisory"
+        seen.add(commit_review_contract_fingerprint())
+    [current] = seen
+    assert current
+
+    def digest(material):
+        return hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    assert digest(commit_review_contract_material()) == current, "the Advisory-era bytes are today's bytes"
+    assert digest({**commit_review_contract_material(), "enforcement": "blocking"}) != current, "a Blocking-era key lapses"

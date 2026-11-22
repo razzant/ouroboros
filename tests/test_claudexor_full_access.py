@@ -131,7 +131,7 @@ def test_source_file_refusal_skips_the_trust_list(gateway):
     assert refused.value.status_code == 403
     assert str(refused.value) == (
         "Full access is disabled for this scope; its existing choice was preserved. "
-        "Lower this call with access=workspace_write or select Working files on the actor row."
+        "Lower this call with access=workspace_write or select Workspace write on the actor row."
     )
     assert [request.method for request in requests] == ["GET"]
 

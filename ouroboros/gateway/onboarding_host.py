@@ -58,16 +58,22 @@ from ouroboros.settings_setup_contract import (
 _NO_STORE = {"Cache-Control": "no-store"}
 
 
-def _consciousness_enabled(request: Request) -> "bool | None":
-    """The consciousness control as the state shows it, read without writing; unknown when unreadable."""
+def _consciousness_control(request: Request) -> "tuple[bool | None, bool]":
+    """``(enabled, first_state)``: the consciousness control as the state shows it, read without writing, and whether
+    the next boot mints a first state (``state_initialization.first_state_pending``), the one case setup offers its
+    Consciousness step. A state that exists but cannot be read, or whose control is unknown, is ``(None, False)``."""
     try:
         from ouroboros.gateway._helpers import request_drive_root
         from supervisor.state import control_value, read_state
+        from supervisor.state_initialization import first_state_pending
 
-        known, value = control_value(read_state(request_drive_root(request)).projection(), "bg_consciousness_enabled")
+        root = request_drive_root(request)
+        if first_state_pending(root):  # before reading a copy a pending owner Reset sets aside
+            return None, True
+        known, value = control_value(read_state(root).projection(), "bg_consciousness_enabled")
+        return (bool(value) if known else None), False
     except Exception:
-        return None
-    return bool(value) if known else None
+        return None, False
 
 
 def _live_setup(request: Request) -> tuple[dict, dict]:
@@ -76,8 +82,10 @@ def _live_setup(request: Request) -> tuple[dict, dict]:
     from ouroboros.config import SETTINGS_PATH
 
     settings, _changed, _keys = apply_runtime_provider_defaults(load_settings())
+    enabled, first_state = _consciousness_control(request)
     return settings, build_setup_bootstrap(settings, "web", fresh_install=not SETTINGS_PATH.exists(),
-                                           consciousness_enabled=_consciousness_enabled(request))
+                                           consciousness_enabled=enabled, consciousness_first_state=first_state,
+                                           document=_owner_settings_document())
 
 
 async def onboarding_page(_request: Request) -> HTMLResponse:

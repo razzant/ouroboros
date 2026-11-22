@@ -18,8 +18,8 @@ export const SUBAGENT_MODES = Object.freeze(['off', 'auto', 'swarm']);
 const WORDS = Object.freeze({ off: 'Off', auto: 'Auto', swarm: 'Swarm' });
 export const SUBAGENT_MEANINGS = Object.freeze({
     off: 'Ouroboros works alone in this chat: no subagents, no Claude Code or Codex sessions. Reviews still run.',
-    auto: 'Ouroboros decides when helpers, critics and debate are worth it.',
-    swarm: "Don't economise: helpers, critics and debate on every step, as wide as your models allow. Costs more.",
+    auto: 'Ouroboros decides when subagents, critics and debate are worth it.',
+    swarm: "Don't economise: subagents, critics and debate on every step, as wide as your models go. Costs more.",
 });
 // Why only Off can be chosen (`subagents_availability` in the room's state); `available` or an unknown answer locks nothing.
 export const SUBAGENT_LOCKS = Object.freeze({
@@ -129,7 +129,7 @@ export function createSubagentsChoice({ doc = globalThis.document, onChoose = ()
 
 /**
  * The capsule in its room's composer row. `capsule(options)` is the family's open/fit machine
- * (composer_owner_controls.js), `save({ mode })` the room's owner write (it answers the room's cognition),
+ * (capsule.js), `save({ mode })` the room's owner write (it answers the room's cognition),
  * `openSettings()` Settings › Agents. Returns `{ el, capsule, syncState(values, availability), hasPendingSave,
  * pendingSave, destroy }`.
  */

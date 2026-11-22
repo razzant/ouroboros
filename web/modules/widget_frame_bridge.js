@@ -34,6 +34,8 @@ function ouroWidgetFrameBridge(config) {
     const cleanup = new Set();
     const eventListeners = new Set();
     const themeListeners = new Set();
+    // The size reporter's listeners for a Widgets card's floor and ceiling (module frames only).
+    const viewportListeners = new Set();
     let theme = ['light', 'dark'].includes(initialTheme) ? initialTheme : null;
     let themeRefreshNeeded = false;
     // The document-bound channel: this document's hello hands the parent one end; everything after it travels
@@ -96,6 +98,7 @@ function ouroWidgetFrameBridge(config) {
         externalLinks.clear();
         eventListeners.clear();
         themeListeners.clear();
+        viewportListeners.clear();
         theme = null;
         themeRefreshNeeded = false;
         port.onmessage = null;
@@ -125,6 +128,17 @@ function ouroWidgetFrameBridge(config) {
             themeRefreshNeeded = false;
             Array.from(themeListeners).forEach((listener) => {
                 if (themeListeners.has(listener)) notifyTheme(listener.callback);
+            });
+            return;
+        }
+        if (msg.type === 'ouro-widget-viewport') {
+            const floor = Number(msg.floor);
+            const ceiling = Number(msg.ceiling);
+            if (disposing || !Number.isFinite(floor) || !Number.isFinite(ceiling) || floor < 0 || ceiling <= 0) return;
+            const frame = Number(msg.frame) > 0 ? Number(msg.frame) : 0;
+            const fit = Number.isInteger(msg.fit) && msg.fit > 0 ? msg.fit : 0;
+            viewportListeners.forEach((callback) => {
+                try { callback({ floor, ceiling, frame, fit }); } catch (err) { console.error('widget viewport listener failed', err); }
             });
             return;
         }
@@ -291,6 +305,9 @@ function ouroWidgetFrameBridge(config) {
         window.addEventListener('securitypolicyviolation', onCsp);
         window.fetch = request;
         window.__ouroWidgetReport = (message) => post(message);
+        window.__ouroWidgetOnViewport = (callback) => {
+            if (typeof callback === 'function' && !disposing) viewportListeners.add(callback);
+        };
     }
     port.onmessage = onMessage;
     window.__ouroWidgetOnDispose = onDispose;

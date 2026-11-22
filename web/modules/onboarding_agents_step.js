@@ -7,6 +7,7 @@ import { ACCOUNTS_UNSUPPORTED_STATUS, claudexorStatus, accountRows, familyLabel 
 import { LOGIN_CARD_FULL, SIGN_IN_SCOPE_NOTE, createLoginCardController } from './harness_login_cards.js';
 import { familyStatus } from './harness_accounts.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
+import { bindFamilyPrograms } from './model_program.js';
 import {
     availableSubagentsEditorHost,
     createAvailableSubagentsEditor,
@@ -84,14 +85,6 @@ export function connectedHarnesses(snapshot) {
     return AGENT_FAMILIES.map((f) => f.harness).filter((harness) => passed.has(harness));
 }
 
-export function harnessAccountCount(snapshot, harness) {
-    return accountRows(snapshot).filter(
-        (row) => row.harness === harness
-            && row?.enabled !== false
-            && String(row?.status?.verification || '') === 'passed',
-    ).length;
-}
-
 export function familyLabels(harnesses, snapshot, { catalogKnown = false } = {}) {
     // ONE authority, shared with the Agents tab: prefer the engine's own
     // display_name, fall back to the bootstrap product names. Passing the
@@ -123,6 +116,52 @@ export function subscriptionDeclaration({ connected = [], skipPresets = false } 
     };
 }
 
+/**
+ * True when the engine's declared model sources (the catalog's `model_sources`) are known and none of
+ * the connected accounts is one: these accounts run agents, and no model discovery can change that.
+ * An empty list is unknown, never "none".
+ */
+export function agentsOnlyAccess(connected = [], sources = []) {
+    const serving = new Set((sources || []).map((source) => String(source?.credentialHarness || '')));
+    return connected.length > 0 && serving.size > 0 && !connected.some((harness) => serving.has(harness));
+}
+
+const READ_WORDS = { not_read: 'is not available yet', partial: 'is incomplete', stale: 'is out of date' };
+
+/**
+ * What the Accounts step's access row and its API section badge say for the current reads: facts in, words out.
+ * `continueBlocked` is the Continue button's own state, so the note never offers a step the button refuses.
+ */
+export function accessRowState({ connected = [], sources = [], read = 'ok', checking = false, readErrors = '',
+    previewError = '', configured = false, continueBlocked = false } = {}) {
+    const agentsOnly = !configured && agentsOnlyAccess(connected, sources);
+    const note = [checking ? 'Checking model sources…' : '',
+        !checking && read !== 'ok' && connected.length
+            ? `The model list ${READ_WORDS[read] || 'could not be read'}. ${readErrors} Your choices are kept.` : '',
+        previewError ? `Automatic assignments could not be prepared: ${previewError} `
+            + (continueBlocked ? 'Retry.' : 'Retry, or Continue to choose models yourself.') : ''];
+    return {
+        note: note.filter(Boolean).join(' '),
+        // A healthy read that names the connected accounts agents only leaves discovery nothing to retry.
+        retryHidden: (!connected.length || (agentsOnly && read === 'ok')) && !previewError,
+        // Accounts the engine names agents only leave this section the way forward, not "Optional"; while the list is
+        // unread it stays one of the ways the reason beside Continue names, as with nothing connected.
+        badge: configured ? 'Configured' : agentsOnly ? '' : 'Optional',
+    };
+}
+
+/** Why Accounts cannot continue while nothing connected can serve a model role, with the way forward. */
+export function mainSourceReason(connected = [], sources = [], { snapshot, catalogKnown = false } = {}) {
+    if (!connected.length) return 'Connect Codex, enter an API key, or choose a local model before continuing.';
+    if (!agentsOnlyAccess(connected, sources)) {
+        return 'Could not confirm that a connected account can run Ouroboros’s own model. '
+            + 'Retry model discovery, add an API key, or choose a local model.';
+    }
+    const serving = sources.map((source) => String(source.label || source.id)).join(' or ');
+    return `${joinLabels(familyLabels(connected, snapshot, { catalogKnown }))} can run agents; `
+        + `Ouroboros itself still needs a model. Connect ${serving}, add an API key, or choose a local model.`;
+}
+
 /** Open provider/local/model draft shared by preview and final completion. */
 export function onboardingSettingsDraft({
     state = {}, providerFields = [], budgetFields = [], modelSlots = [],
@@ -140,7 +179,6 @@ export function onboardingSettingsDraft({
         ...Object.fromEntries(budgetFields.filter((field) => state[field.stateKey] !== '').map(
             (field) => [field.settingKey, Number(state[field.stateKey] || 0)],
         )),
-        OUROBOROS_REVIEW_ENFORCEMENT: clean(state.reviewEnforcement) || 'advisory',
         OUROBOROS_SKILLS_REPO_PATH: clean(state.skillsRepoPath),
         LOCAL_MODEL_SOURCE: clean(state.localSource),
         LOCAL_MODEL_FILENAME: clean(state.localFilename),
@@ -387,9 +425,8 @@ export function agentsOutcomeText(connected = [], {
             + `${taskOnlyHarnesses.length === 1 ? 'is task-only and does' : 'are task-only and do'} `
             + 'not change reviewer routes.');
     }
-    clauses.push(connected.includes('codex')
-        ? 'Codex can also supply your model roles without an API key.'
-        : 'Main still needs Codex, an API key, or a local model.');
+    // What Main still needs is said once, beside Continue, and only while it is true (`mainSourceReason`).
+    if (connected.includes('codex')) clauses.push('Codex can also supply your model roles without an API key.');
     clauses.push(SIGN_IN_SCOPE_NOTE);
     return clauses.join(' ');
 }
@@ -481,11 +518,8 @@ export function rotationDiagramSvg() {
 // View.
 // ---------------------------------------------------------------------------
 
-// NOTE ON ELEMENTS: nothing load-bearing here is a `<p>`. The wizard's
-// short-viewport rule hides `.panel-card p` wholesale (it is how the flow stays
-// unscrolled on a laptop), and the ladder is the one thing on this step that
-// must survive that adaptation — what gets hidden instead is the ARTWORK, whose
-// every fact is in this text anyway.
+// A short viewport drops the ARTWORK (web/onboarding.css), whose every fact is
+// in this text anyway; the ladder's own words stay at every size.
 export function ladderHtml() {
     const rungs = VALUE_LADDER.map((rung) => `
         <li class="agent-rung">
@@ -505,7 +539,7 @@ export function ladderHtml() {
     `;
 }
 
-export function familyRowHtml(family, { status, connected = false, connectable = true }) {
+export function familyRowHtml(family, { status, connected = false, connectable = true, program = '' }) {
     // Equivalent rows (docs/DESIGN.md §6): no family gets extra weight for being
     // first or already connected — only its status text and its action change.
     // An engine on the retired account model gets no Connect: no connection
@@ -521,6 +555,7 @@ export function familyRowHtml(family, { status, connected = false, connectable =
                 <span class="agent-family-purpose">${family.harness === 'codex' ? 'Models + agents · Recommended' : 'Agents'}</span>
                 </span>
                 <span class="agent-family-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</span>
+                ${program}
             </span>
             ${connectable ? `<button type="button" class="btn btn-default" data-agent-connect="${escapeHtml(family.harness)}">
                 ${escapeHtml(connected ? 'Add another' : 'Connect')}
@@ -533,6 +568,7 @@ export function familyListHtml(snapshot, {
     accountsKnown = true,
     accountsUnsupported = false,
     catalogKnown = false,
+    programLine = () => '',
 } = {}) {
     const connected = new Set(accountsKnown ? connectedHarnesses(snapshot) : []);
     return AGENT_FAMILIES.map((family) => familyRowHtml({
@@ -542,6 +578,7 @@ export function familyListHtml(snapshot, {
         status: familyStatusText(snapshot, family.harness, { accountsKnown, accountsUnsupported }),
         connected: connected.has(family.harness),
         connectable: !accountsUnsupported,
+        program: programLine(family.harness),
     })).join('');
 }
 
@@ -598,11 +635,12 @@ export function createAgentsStep({
     onChange = () => {},
     previewPayload = () => ({}),
     previewTransport = (payload) => apiClient.previewOnboardingSubagents(payload),
-    onSubagentsChange = () => {},
+    onSubagentsChange = () => {}, readApiCatalog, apiCatalogAllowed, supportsScopes,
     providerProfiles = {},
     onSetupPreview = () => {},
     onPreviewStatus = () => {},
     onStatus = () => {},
+    maintenanceApi = apiClient,
 } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const state = {
@@ -641,17 +679,21 @@ export function createAgentsStep({
             mode: LOGIN_CARD_FULL,
             doc: getDoc,
             ...(fetchImpl ? { fetchImpl } : {}),
-            onSettled: () => { store.refresh(); paint(); },
+            onSettled: () => { store.refresh(); void programs.read(); paint(); },
         });
     }
 
     let login = createLogin();
+    // Each family's program line (docs/DESIGN.md §7), the same one an opened model chooser shows.
+    const programs = bindFamilyPrograms({ harnesses: AGENT_FAMILIES.map((f) => f.harness), store, api: maintenanceApi,
+        visible: () => isVisible() && Boolean(el('agents-family-list')), onChange: () => paint() });
     const subagents = createAvailableSubagentsEditor({
         hostId: 'onboarding-available-subagents',
         doc: getDoc,
         win: () => getDoc()?.defaultView,
         store,
         onChange: onSubagentsChange,
+        readApiCatalog, apiCatalogAllowed, supportsScopes,
         baseline: 'generated',
     });
 
@@ -735,11 +777,11 @@ export function createAgentsStep({
                 accountsKnown: known,
                 accountsUnsupported: unsupported,
                 catalogKnown: Boolean(store.catalogKnown),
+                programLine: programs.line,
             });
             if (html !== state.listHtml) {
                 state.listHtml = html;
-                list.innerHTML = html;
-                bindConnectButtons(list);
+                rebuildList(list, html);
             }
         }
         const note = el('agents-status-note');
@@ -762,13 +804,18 @@ export function createAgentsStep({
         login?.render();
     }
 
-    function bindConnectButtons(list) {
-        list.querySelectorAll('[data-agent-connect]').forEach((button) => {
-            button.addEventListener('click', () => {
-                if (state.disposed) return;
-                ensureLogin().start(button.getAttribute('data-agent-connect'), '');
-            });
-        });
+    // A rebuild keeps the focused Connect or Update: the same control of the same family takes it back (docs/DESIGN.md
+    // principle 6), so a line arriving for one family never drops a keyboard reader off another's button.
+    function rebuildList(list, html) {
+        const active = getDoc()?.activeElement;
+        const control = list.contains(active) && ['data-agent-connect', 'data-program-action'].find((name) => active.hasAttribute(name));
+        const family = control && active.closest('[data-agent-family]')?.dataset.agentFamily;
+        list.innerHTML = html;
+        list.querySelectorAll('[data-agent-connect]').forEach((button) => button.addEventListener('click', () => {
+            if (!state.disposed) ensureLogin().start(button.getAttribute('data-agent-connect'), '');
+        }));
+        programs.bind(list);
+        if (family) list.querySelector(`[data-agent-family="${family}"] [${control}]`)?.focus({ preventScroll: true });
     }
 
     function adopt(view) {
@@ -780,9 +827,10 @@ export function createAgentsStep({
         const statusChanged = statusSignature !== state.previewStatusSignature;
         state.previewStatusSignature = statusSignature;
         state.connected = next;
+        programs.observe();
         paint();
-        onStatus();
         if (changed) onChange([...state.connected]);
+        onStatus({ catalogChanged: changed || statusChanged });
         if (changed || statusChanged) refreshSubagentsPreview({ force: statusChanged });
     }
 
@@ -807,6 +855,7 @@ export function createAgentsStep({
         }
         // A remount rebuilds the DOM the wizard just replaced.
         state.listHtml = null;
+        programs.observe({ remount: true });
         paint();
         subagents.mount();
         // The wizard's API keys are typed on the Accounts step, so the provider
@@ -870,6 +919,7 @@ export function createAgentsStep({
         state.disposed = true;
         login?.detach();
         subagents.destroy();
+        programs.dispose();
         if (state.unsubscribe) state.unsubscribe();
         state.unsubscribe = null;
         if (state.pageHideBound && state.pageHideTarget?.removeEventListener) {
@@ -898,6 +948,8 @@ export function createAgentsStep({
         get accountsKnown() { return accountsKnown(); },
         get reads() { return store.reads; },
         refreshStatus() { return store.refresh(); },
+        adoptCatalog: subagents.adoptCatalog, adoptSources: subagents.adoptSources, refreshCatalogs: subagents.refreshCatalogs,
+        resetCatalogs() { subagents.resetCatalogs(); },
         get availableSubagents() { return subagents.setting; },
         get allowEmptyReviewPool() { return subagents.allowEmptyReviewPool; },
         setProcessingPreference(value) { subagents.setProcessingPreference(value); },

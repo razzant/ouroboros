@@ -86,13 +86,14 @@ def test_deno_reads_external_file_without_fs_and_writes_existing_state(tmp_path,
         pytest.skip('deno runtime is not installed')
     outside = tmp_path / 'selected external.txt'
     outside.write_text('owner selected input')
-    monkeypatch.setattr(skill_exec, 'load_settings', lambda: {'TEST_ENV': 'visible'})
+    # An ordinary setting the skill declared (a custom key would be a grant-bound custom secret).
+    monkeypatch.setattr(skill_exec, 'load_settings', lambda: {'OUROBOROS_UI_LANGUAGE': 'visible'})
     body = '''const text = await Deno.readTextFile(Deno.args[0]);
 const state = Deno.env.get('OUROBOROS_SKILL_STATE_DIR');
-await Deno.writeTextFile(state + '/result.txt', text + ':' + Deno.env.get('TEST_ENV'));
+await Deno.writeTextFile(state + '/result.txt', text + ':' + Deno.env.get('OUROBOROS_UI_LANGUAGE'));
 console.log(text);
 '''
-    ctx, _, script = installed_script(tmp_path, monkeypatch, runtime='deno', body=body, env_keys=['TEST_ENV'])
+    ctx, _, script = installed_script(tmp_path, monkeypatch, runtime='deno', body=body, env_keys=['OUROBOROS_UI_LANGUAGE'])
     facts = json.loads(execute(ctx, script, [str(outside)]))
     assert facts['exit_code'] == 0
     assert (ctx.drive_root / 'state/skills/runtime_fixture/result.txt').read_text() == 'owner selected input:visible'

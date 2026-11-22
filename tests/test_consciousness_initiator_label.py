@@ -134,3 +134,54 @@ def test_the_initiator_survives_the_chat_row_the_summary_row_and_replay(tmp_path
     bare: dict = {}
     _copy_task_summary_metadata(bare, {"type": "task_summary"})
     assert "initiator" not in bare
+
+
+# --- where a place's work came from and why: the same carriers ------------------------
+
+
+FOCUS_META = {
+    "initiator": "consciousness", "wake_cause": "focus", "focus_allowance": {"status": "available"},
+    "focus": {"place_id": "pl-1", "matched_wakes": ["my_thread"],
+              "actor": {"platform_actor_id": "731", "display_name": "qa-contributor", "owner_confirmed": False, "is_bot": False}},
+    "presence": {"place": {"label": "Ouroboros"}, "event": {"provider": "github"}},
+}
+
+
+def test_place_origin_is_the_admissions_focus_by_value_on_the_record_or_its_metadata():
+    import copy
+    from ouroboros.subagent_messages import initiator_meta
+
+    expected = {"place_id": "pl-1", "place_label": "Ouroboros", "provider": "github",
+                "actor": {"id": "731", "label": "qa-contributor"}, "wakes": ["my_thread"]}
+    assert initiator_meta({"metadata": FOCUS_META})["place_origin"] == expected
+    assert initiator_meta(FOCUS_META)["place_origin"] == expected  # the metadata itself, as frame producers pass it
+    owner = copy.deepcopy(FOCUS_META)
+    owner["focus"]["actor"].update(owner_confirmed=True, is_bot=True)
+    assert initiator_meta(owner)["place_origin"]["actor"] == {"id": "731", "label": "qa-contributor", "owner": True, "bot": True}
+    unnamed = copy.deepcopy(FOCUS_META)
+    unnamed["focus"].update(actor={"platform_actor_id": "", "display_name": ""}, matched_wakes=[], routed=True)
+    expected_routed = {"place_id": "pl-1", "place_label": "Ouroboros", "provider": "github", "wakes": [], "routed": True}
+    assert initiator_meta(unnamed)["place_origin"] == expected_routed  # several works read its conversation
+    del unnamed["focus"]["routed"]
+    unnamed["focus_allowance"]["route"] = True  # a focus minted before ``focus.routed``: its own allowance says it
+    assert initiator_meta(unnamed)["place_origin"] == expected_routed
+    started = {"initiator": "consciousness", "consciousness_cause": "started", "focus": FOCUS_META["focus"]}
+    assert initiator_meta(started)["place_origin"] == {"place_id": "pl-1", "actor": {"id": "731", "label": "qa-contributor"},
+                                                       "wakes": ["my_thread"]}, "a root it started, carrier not copied"
+    assert "place_origin" not in initiator_meta({"metadata": {"initiator": "consciousness"}})
+    assert "place_origin" not in initiator_meta({"metadata": {"focus": {"matched_wakes": ["mention"]}}})
+
+
+def test_place_origin_rides_the_summary_row_the_progress_row_and_terminal_truth(tmp_path):
+    from ouroboros.gateway.history import (_PROGRESS_META_FIELDS, _annotate_terminal_task_truth,
+                                           _copy_task_summary_metadata)
+    from ouroboros.subagent_messages import place_origin
+
+    origin = place_origin(FOCUS_META)
+    assert "place_origin" in _PROGRESS_META_FIELDS
+    rec: dict = {}
+    _copy_task_summary_metadata(rec, {"type": "task_summary", "place_origin": origin})
+    assert rec["place_origin"] == origin
+    summary = {"task_id": "f", "role": "system", "system_type": "task_summary", "ts": TS}
+    _annotate_terminal_task_truth([summary], tmp_path, {"f": {"status": "completed", "metadata": FOCUS_META}})
+    assert summary["place_origin"] == origin and summary["initiator"] == "consciousness"

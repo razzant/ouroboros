@@ -645,7 +645,8 @@ def test_project_shade_lists_only_its_room_and_survives_disconnect(direct_server
                 evidence.record("switched", other)
                 # A Project's title always opens its list (its whole name heads it), so the empty one stays enabled.
                 assert not other["disabled"] and not other["rows"], other
-                assert page.locator(f"#panel-pchat-{first['id']}").count() == 0
+                # The first room is kept away, whole and hidden, for its return (PR #2951, owner 2026-11-03).
+                assert page.locator(f"#panel-pchat-{first['id']}").is_hidden()
                 evidence.shot(page, "03-other-project")
 
                 # Finish, then back in the first Project: nothing current, no controls.
@@ -658,7 +659,8 @@ def test_project_shade_lists_only_its_room_and_survives_disconnect(direct_server
                 evidence.record("after_finish", after)
                 # The title still opens the list after the work finished: at most its latest root, settled, no controls.
                 assert not after["disabled"], after
-                page.locator("#project-panel .project-panel-bar .rw-trigger").click()
+                # The other Project's room is kept away too; its bar's control is hidden with it.
+                page.locator("#project-panel .project-panel-bar .rw-trigger:visible").click()
                 after = _wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the Shade after finish")
                 evidence.record("after_finish_open", after)
                 assert all(r["slot"] == "latest" or r["settled"] for r in after["rows"]), after

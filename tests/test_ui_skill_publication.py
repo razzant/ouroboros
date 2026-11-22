@@ -62,6 +62,8 @@ def test_skills_card_geometry_tracks_card_width_and_keeps_grant_on_card(direct_s
             page = browser.new_page(viewport={'width': 720, 'height': 900})
             page.goto(url, wait_until='domcontentloaded')
             page.click('[data-nav-page="skills"]')
+            # At 720 Extensions' box holds one column: its list first; the Skills row opens the installed skills.
+            page.locator('#page-skills [data-extensions-open="installed"]').click()
             page.wait_for_selector(f'.skills-card[data-skill="{names[1]}"]')
             measurements = []
             for viewport, sidebar in [(720, 280), (1100, 560), (1440, 280)]:  # 720 = the docked layout's first width (layout.js)
@@ -73,7 +75,7 @@ def test_skills_card_geometry_tracks_card_width_and_keeps_grant_on_card(direct_s
                     facts = card.evaluate('''card => {
                         const rect = card.getBoundingClientRect();
                         const title = card.querySelector('.skills-card-title').getBoundingClientRect();
-                        const actions = [...card.querySelectorAll('.skills-switch, .skills-card-menu-trigger, .skills-tray-actions button')]
+                        const actions = [...card.querySelectorAll('.ui-switch, .skills-card-menu-trigger, .skills-tray-actions button')]
                             .map(control => ({text:control.textContent.trim(), x:control.getBoundingClientRect().x,
                                 right:control.getBoundingClientRect().right}));
                         return {card:rect.width, title:title.width, x:rect.x, right:rect.right, actions,

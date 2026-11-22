@@ -831,7 +831,7 @@ def _ordinary_reads(root, monkeypatch):
     def candidates():
         with usage_store.read(root) as txn:
             txn.open_attempts()
-            txn.dirty_owner_ids()
+            txn.dirty_owners()
 
     cost_breakdown = make_cost_breakdown_endpoint(root)
     return {

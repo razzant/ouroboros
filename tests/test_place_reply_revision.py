@@ -93,7 +93,7 @@ def test_reply_advises_hold_and_acts_check_follow_the_carrier(focus, monkeypatch
     checks = []
     def check(*args, **kwargs):
         checks.append(args[0])
-        return len(checks) > 1, "Reconsider this reply"
+        return (True, "") if len(checks) > 1 else (False, "Reconsider this reply")
     monkeypatch.setattr("ouroboros.safety.check_safety", check)
     monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _: frozenset())
     if level == "act":

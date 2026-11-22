@@ -47,10 +47,13 @@ _FAULT = """() => {
 
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
 def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, browser_engine, tmp_path):
-    """Read pages back, a Project closed and opened again is at its newest message whether its read is
-    fast, slow or failed and retried, and no older page is read again; a switch away while that read is
-    slow paints nothing into the other room. In the room a live answer stays below the passage being
-    read, and a narrower window keeps that passage (owner decisions 2026-07-10, 2026-10-05)."""
+    """Read pages back, a Project opened cold (its first opening in a page session) is at its newest message
+    whether its read is fast, slow or failed and retried, and no older page is read; a switch away while that
+    read is slow paints nothing into the other room. In the room a live answer stays below the passage being
+    read, and a narrower window keeps that passage (owner decisions 2026-07-10, 2026-10-05). A return within the
+    page session finds a room as left (owner 2026-11-03, DESIGN "History edges"; tests/test_room_suspension_browser.py
+    and the retained-room cases of tests/test_history_rebase_browser.py prove it), so the cold opening here follows
+    a reload: only the page's end lets a visited room go (web/modules/room_retire.js)."""
     from ouroboros.projects_registry import create_project
     from playwright.sync_api import sync_playwright
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
@@ -75,6 +78,12 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             feed = _open_project(page, project)
             target = page.locator(f'{feed} [data-client-message-id="continuity-650"]')
 
+            def leave_for_a_cold_open():
+                page.locator('#project-panel-close').click()
+                page.reload(wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === WebSocket.OPEN)")
+                _idle(page, MAIN)
+
             def read_back():
                 for _ in range(3):
                     _step(page, feed, automatic=True)
@@ -90,8 +99,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             for mode in ("fast", "delayed", "recent", "saved"):
                 read_back()
                 _screenshot(page, tmp_path, f"continuity-before-{mode}-{browser_engine}")
-                page.locator('#project-panel-close').click()
-                page.locator(feed).wait_for(state='detached')  # the exit ends before this cold reopen
+                leave_for_a_cold_open()
                 page.evaluate("fault => { window.__continuityFault = fault; }", {
                     "chatId": project["chat_id"], "delay": 800 if mode == "delayed" else 0,
                     "fail": mode if mode in {"recent", "saved"} else None,
@@ -101,7 +109,9 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
                 if mode == "recent":
                     retry = page.locator(f'{feed} .chat-load-older button')
                     page.wait_for_function("feed => document.querySelector(`${feed} .chat-load-older button`)?.textContent === 'Retry loading messages'", arg=feed)
-                    assert 'could not be loaded' in page.locator(feed).locator('..').locator('.chat-load-older-note').inner_text()
+                    # After a reload the room may also show its saved preview's own note (DESIGN "History edges").
+                    assert page.locator(feed).locator('..').locator('.chat-load-older-note').filter(
+                        has_text='could not be loaded').count() == 1
                     # The failed read leaves the CSS-visible feed off screen until the panel's entrance.
                     page.wait_for_function("""() => {
                         const panel = document.getElementById('project-panel');
@@ -123,8 +133,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             # Switching away while the reopen read is slow paints nothing into the
             # other room; opened again, the room is at its newest message.
             read_back()
-            page.locator('#project-panel-close').click()
-            page.locator(feed).wait_for(state='detached')
+            leave_for_a_cold_open()
             page.evaluate("fault => { window.__continuityFault = fault; }", {
                 "chatId": project["chat_id"], "delay": 800})
             _click_project(page, project)
@@ -275,6 +284,118 @@ def test_project_room_terminal_lines_separate_end_and_notification(direct_server
             browser.close()
 
 
+def test_project_card_handled_git_refusal_and_cancel_times(direct_server_with_data, tmp_path, monkeypatch):
+    """A handled Git refusal stays in Done's Details; a Stop names its own cause and both clocks."""
+    from playwright.sync_api import expect, sync_playwright
+
+    from ouroboros.project_dialogue import append_terminal_task_projection
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tool_call_log import append_call_row
+    from tests.ui_console_errors import PageErrors
+
+    fixture = direct_server_with_data
+    root = fixture["data_dir"]
+    fixture["stop_server"]()
+    project = create_project(root, "inventory-cards", name="Garden inventory")
+    chat_id = project["chat_id"]
+    done, known, unknown = "inventory-checked", "inventory-stopped", "inventory-restored"
+    git_preview = "⚠️ GIT_ERROR: unknown revision inventory-before-sort"
+    known_reason = "Stopped from the app (Stop now) · The planting plan changed."
+    unknown_reason = "The server stopped while this task was still running."
+    # The unidentified end has a stored result timestamp too; it is not a cancellation clock.
+    cases = [
+        (done, "Check the inventory", "2026-09-25T15:19:01Z", "2026-09-25T15:19:09Z", {}),
+        (known, "Count the east bed", "2026-09-24T18:18:27Z", "2026-09-26T19:21:43Z",
+         {"source": "http_single", "reason": "The planting plan changed."}),
+        (unknown, "Count the west bed", "2026-09-25T12:06:00Z", "2026-09-26T19:25:00Z",
+         {"source": "snapshot_restore", "reason": "server_shutdown"}),
+    ]
+    for task_id, name, stored_at, added_at, cancel in cases:
+        bind_task_to_project(root, task_id, project["id"], chat_id, origin={"absent": "system"})
+        write_task_result(root, task_id, "running", task_attempt=1, started_at="2026-09-24T17:00:00Z",
+                          project_id=project["id"], chat_id=chat_id, suggested_name=name)
+        monkeypatch.setattr("ouroboros.task_results.utc_now_iso", lambda ts=stored_at: ts)
+        result = write_task_result(root, task_id, "cancelled" if cancel else "completed",
+                                   _terminal_observed=not cancel, _cancel_observed=task_id == known,
+                                   **({"cancel_origin": cancel, "reason_code": "cancelled"} if cancel else
+                                      {"result": "The inventory is ready.", "wake_summary": "The inventory is ready.",
+                                       "reason_code": "final_message", "tool_calls": 1, "tool_errors": 0}))
+        monkeypatch.setattr("ouroboros.terminal_projection.utc_now_iso", lambda ts=added_at: ts)
+        assert append_terminal_task_projection(root, task_id, {"id": task_id}, result, {})
+
+    # Two journal observations of ONE read-only call, not a hand-built history API response.
+    call = {"task_id": done, "task_attempt": 1, "tool": "vcs_read", "invocation_id": "inventory-git-1"}
+    for observation in (
+        {"type": "tool_call_started", "ts": "2026-09-25T15:18:02Z"},
+        {"type": "tool_call", "ts": "2026-09-25T15:18:03Z", "status": "git_error",
+         "is_error": False, "result_preview": git_preview},
+    ):
+        assert append_call_row({}, root / "logs", {**call, **observation})["task_log"]
+
+    fixture["start_server"]()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        errors = PageErrors(None, "chromium")
+        try:
+            for width in (1240, 390):
+                page = browser.new_page(viewport={"width": width, "height": 844}, locale="en-US", timezone_id="UTC",
+                                        is_mobile=width == 390, has_touch=width == 390)
+                errors.watch(page, navigates=False)
+                _open(page, fixture["url"])
+                feed = _open_project(page, project)
+                for task_id in (done, known, unknown):
+                    card = page.locator(f'{feed} .chat-live-card[data-task-id="{task_id}"]')
+                    summary = card.locator(':scope > [data-live-summary-button]')
+                    phase = summary.locator('[data-live-phase]')
+                    expect(card).to_have_attribute("data-finished", "1")
+                    timeline = card.locator(':scope > [data-live-timeline]')
+                    if task_id == done:
+                        titles = timeline.locator(':scope > .chat-live-line .chat-live-line-title')
+                        refused_title = page.locator(".chat-live-line-title", has_text=re.compile(r"^Git refused the operation$"))
+                        refusal = timeline.locator(':scope > .chat-live-line').filter(has=refused_title)
+                        expect(refusal).to_be_hidden()
+                    disclosure = summary.locator('[data-live-disclosure]')
+                    expect(disclosure).to_have_attribute("aria-expanded", "false")
+                    disclosure.click()
+                    if task_id == done:
+                        expect(refusal).to_have_count(1)
+                        expect(refusal).to_have_class(re.compile(r"\bwarn\b"))
+                        expect(refusal.locator(".chat-live-line-title")).to_be_visible()
+                        evidence = titles.filter(has_text=re.compile(r"^\d+ tool calls?\b"))
+                        expect(evidence).to_have_text(["1 tool call"], use_inner_text=True)
+                        expect(titles.filter(has_text="One of the steps failed")).to_have_count(0)
+                        body = refusal.locator(".chat-live-line-body")
+                        expect(body).to_have_text(git_preview, use_inner_text=True)
+                        shot = "handled-git-refusal"
+                    else:
+                        body = timeline.locator(':scope > .chat-live-line.cancelled .chat-live-line-body')
+                        if task_id == known:
+                            expect(body).to_contain_text(known_reason, use_inner_text=True)
+                            expect(body).to_contain_text(re.compile(
+                                r"Task cancelled Sep 24, 2026\D+06:18 PM · Notification added Sep 26, 2026\D+07:21 PM"),
+                                use_inner_text=True)
+                            expect(body).not_to_contain_text("Task end time not recorded", use_inner_text=True)
+                            shot = "cancel-known-time"
+                        else:
+                            expect(body).to_contain_text(unknown_reason, use_inner_text=True)
+                            expect(body).to_contain_text(re.compile(
+                                r"Task end time not recorded · Notification added Sep 26, 2026\D+07:25 PM"),
+                                use_inner_text=True)
+                            expect(body).not_to_contain_text(re.compile(r"Task (?:ended|cancelled) "), use_inner_text=True)
+                            shot = "cancel-unknown-time"
+                    card.scroll_into_view_if_needed()
+                    expect(phase).to_have_text("Done" if task_id == done else "Stopped")
+                    expect(phase).to_be_in_viewport()
+                    expect(body).to_be_visible()
+                    expect(body).to_be_in_viewport(ratio=1)
+                    _screenshot(page, tmp_path, f"{shot}-{width}")
+                page.close()
+            assert not errors.unexpected(), errors.report()
+        finally:
+            browser.close()
+
+
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
 def test_latest_supersedes_a_held_question_reveal_and_a_later_reveal_lands(direct_server_with_data, browser_engine, tmp_path):
     """A question opened from Main whose detail is still held yields to the reader's ↓; a later
@@ -320,7 +441,7 @@ def test_latest_supersedes_a_held_question_reveal_and_a_later_reveal_lands(direc
             }""")
             page.evaluate(_FRAMES)
             page.locator('#project-panel-close').click()
-            page.locator(feed).wait_for(state='detached')  # reopening mid-exit would keep its loaded pages
+            page.locator(feed).wait_for(state='hidden')  # the room is kept away, whole (room_retire.js)
             page.evaluate("""project => {
                 window.__holdQuestion = true;
                 window.dispatchEvent(new CustomEvent('ouro:open-project', {
@@ -328,7 +449,9 @@ def test_latest_supersedes_a_held_question_reveal_and_a_later_reveal_lands(direc
             }""", project)
             page.wait_for_function('() => Boolean(window.__releaseQuestion)')
             _idle(page, feed)
-            assert target.count() == 0, 'the passage read before closing is not restored'
+            # A return finds the room as left (owner 2026-11-03, DESIGN "History edges"): while the reveal is held
+            # the kept room still holds the passage read before closing; only the reveal's own landing replaces it.
+            assert target.count() == 1, 'the kept room shows the passage it was left on while the reveal is held'
             # Scroll up by a user gesture so the visible button can be activated.
             page.locator(feed).evaluate("n => { n.dispatchEvent(new WheelEvent('wheel', {deltaY:-1})); n.scrollTop -= 350; }")
             page.evaluate(_FRAMES)

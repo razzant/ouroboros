@@ -275,9 +275,9 @@ def test_ui_browser_marked_rich_markdown_and_security(direct_server_with_data): 
                 assert "<mark>mark</mark>" in literal
                 assert "<sub>sub</sub>" in literal
                 rich.locator("h1.md-h1").scroll_into_view_if_needed()
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "rich-markdown") / "rich-markdown-top.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "rich-markdown", publish=True) / "rich-markdown-top.png"), full_page=True)
                 rich.locator(".md-chart").scroll_into_view_if_needed()
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "rich-markdown") / "rich-markdown-bottom.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "rich-markdown", publish=True) / "rich-markdown-bottom.png"), full_page=True)
                 assert unexpected_console_errors(console_errors, failed_loads) == []
             finally:
                 browser.close()

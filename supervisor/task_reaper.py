@@ -637,23 +637,19 @@ def _respawn_after_reap(
 ) -> None:
     """Reopen a reaped slot, leaving crash recovery available on failure (a refusal that stands is logged once per
     change of its cause and once when it ends: ``_RESPAWN_REFUSALS``)."""
-    # The lifecycle serializer guards replacement; process start stays outside queue lock.
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
-
     slot = None
     try:
-        with _WORKER_LIFECYCLE_LOCK:
-            with q._queue_lock:
-                slot = workers_mod.WORKERS.get(worker_id)
-                if expected_worker is not None and slot is not expected_worker:
-                    return
-            workers_mod.respawn_worker(worker_id)
+        with q._queue_lock:
+            slot = workers_mod.WORKERS.get(worker_id)
+            if slot is None or (expected_worker is not None and slot is not expected_worker):
+                return
+        workers_mod.respawn_worker(worker_id, expected_worker=slot)
     except Exception as exc:
         _respawn_refused(worker_id, slot, exc)
         try:
             with q._queue_lock:
                 worker = workers_mod.WORKERS.get(worker_id)
-                if worker is not None and (expected_worker is None or worker is expected_worker):
+                if worker is not None and worker is slot:
                     worker.reaping = False
         except Exception:
             pass
@@ -781,10 +777,13 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                                     terminal_metadata, unreconciled, worker_id=worker_id,
                                     files_prepared_attempt=attempt)
     else:
-        # Answer first: an attempt whose answer the host already holds is finalized from the
-        # outbox BEFORE the history salvage below can replace the preserved copy
-        # a held host salvage points at (both live at salvaged/<task>.txt).
-        adopted_answer = _adopt_held_answer(_q, task, task_id, attempt, terminal_reason)
+        from ouroboros.terminal_time import captured_task_attempt
+
+        physical_attempt = captured_task_attempt(task, job.get("attempt"))
+        # The outbox owns a held answer. Reuse it before considering any intermediate response.
+        adopted_answer = _adopt_held_answer(
+            _q, task, task_id, attempt if physical_attempt is None else physical_attempt, terminal_reason,
+        )
         # 3. Reconstruct real cost/rounds from the usage ledger (the killed worker never
         #    finalized; the event would otherwise carry zeros and understate metrics).
         #    A failure here cannot abort teardown before the slot is respawned.

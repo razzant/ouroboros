@@ -41,6 +41,7 @@ from ouroboros.llm_attempt import (
 from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.llm_stream import consume_stream
 from ouroboros.llm_capability_policy import normalize_reasoning_effort
+from ouroboros.provider_models import anthropic_thinking_off_type
 from ouroboros.reasoning_artifacts import note_replay_omission, pop_replay_omission
 from ouroboros.request_wire_recovery import (
     finalize_wire_response,
@@ -452,6 +453,8 @@ class _AnthropicLaneMixin:
         stop_reason = resp_dict.get("stop_reason")
         if stop_reason:
             message["stop_reason"] = str(stop_reason)
+        if isinstance(details := resp_dict.get("stop_details"), dict):  # a refusal's category and explanation: a call fact
+            usage["stop_details"] = {key: details.get(key) for key in ("category", "explanation")}
         message = retain_native_assistant_content(message, content_blocks, target)
         if tool_calls or str(message.get("content") or "").strip():
             message = mark_replayed_receipts_consumed(message)
@@ -470,6 +473,7 @@ class _AnthropicLaneMixin:
                 temperature, tools, **remote_kwargs,
             )
         target["requested_reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+        source_messages = messages
         system, messages = self._build_anthropic_messages(messages, target)
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
@@ -477,7 +481,8 @@ class _AnthropicLaneMixin:
         }
         effort = normalize_reasoning_effort(reasoning_effort)
         if effort == "none":
-            payload["thinking"] = {"type": "disabled"}
+            # The exact model's own off state; its signed between-tool notes replay through custody.
+            payload["thinking"] = {"type": anthropic_thinking_off_type(payload["model"])}
         elif effort:
             payload["thinking"] = {"type": "adaptive"}
             payload["output_config"] = {"effort": "low" if effort == "minimal" else effort}
@@ -497,6 +502,7 @@ class _AnthropicLaneMixin:
         if remote_kwargs.get("stream"):
             payload["stream"] = True
         apply_processing_preference(target, payload)
+        self._cache_declared_system_context(source_messages, payload)
         return payload
 
     @request_wire_scoped

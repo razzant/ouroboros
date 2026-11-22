@@ -4,13 +4,12 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import queue as stdqueue
-import subprocess
 import threading
 import time
 
 import pytest
 
-from ouroboros import store, subagent_worktrees
+from ouroboros import store
 from ouroboros.task_results import STATUS_SCHEDULED
 from supervisor import queue, task_admission, workspace_preparation as prep
 from tests.test_admission_contention import database_reader
@@ -381,48 +380,79 @@ def test_closed_generation_retains_its_chosen_refusal_across_real_contention(env
     assert stored[prep.MARKER]["phase"] == prep.REFUSED
 
 
-@pytest.mark.parametrize("refusal", ["source_head", "objective"])
-@pytest.mark.parametrize("published", [False, True])
-def test_schedule_refusal_keeps_its_primary_cause_across_real_contention(env, monkeypatch, refusal, published):
-    event = env.request("typed-refusal")
-    if refusal == "source_head":
-        event["base_sha"] = subprocess.check_output(
-            ["git", "-C", str(env.source), "rev-parse", "HEAD"], text=True).strip()
-        (env.source / "a.txt").write_bytes(b"moved\n")
-        subprocess.run(["git", "-C", str(env.source), "commit", "-qam", "move HEAD"], check=True)
-        primary = "source HEAD differs from the requested base_sha"
+@pytest.mark.parametrize("gap", ["before_write", "after_write", "unknown_commit"])
+def test_schedule_gate_retries_only_its_chosen_refusal_receipt(tmp_path, monkeypatch, gap):
+    from types import SimpleNamespace
+
+    from ouroboros import _usage_wait
+    from supervisor import events_schedule_task
+
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path)
+    generation = object.__new__(prep.PreparationGeneration)  # no thread or process census
+    monkeypatch.setattr(generation, "on_executor", lambda: True)
+    monkeypatch.setattr(_usage_wait, "ACQUISITION_SLICE_SEC", 0)
+    claim = prep.PreparationClaim(task_id="refused", ctx=ctx, route={}, token="claim",
+                                  generation=generation, generation_token="generation", owner={})
+    monkeypatch.setattr(claim, "_control_refusal", lambda: pytest.fail("a chosen refusal must not recheck controls"))
+    row = {"status": "requested", prep.MARKER: {"token": claim.token, "phase": prep.READY}}
+    attempts, effects = [], []
+    busy = store.StoreBusy("synthetic contention", reason="contention")
+    busy.rollback_confirmed = gap != "unknown_commit"
+    readback_busy = False
+    reason = "invalid_subagent_request"
+    detail = "Subagent not scheduled: objective is missing."
+
+    def load(_root, _tid, *, strict):
+        nonlocal readback_busy
+        assert strict and not queue._queue_lock._is_owned()
+        if readback_busy:
+            readback_busy = False
+            raise busy
+        return dict(row)
+
+    def write(_root, _tid, status, *, _field_projector, **fields):
+        nonlocal readback_busy
+        assert not queue._queue_lock._is_owned()
+        attempts.append(fields)
+        if gap in {"before_write", "unknown_commit"} and len(attempts) == 1:
+            raise busy
+        assert not effects  # no cleanup or notice before the exact receipt is confirmed
+        incoming = _field_projector(row, {**fields, "status": status})
+        assert incoming is not None
+        row.update(incoming)
+        readback_busy = gap == "after_write"
+
+    def cleanup(remove_drive):
+        assert callable(remove_drive) and row["status"] == "failed"
+        effects.append("cleanup")
+
+    def abandon():
+        effects.append("retain")
+        return False
+
+    monkeypatch.setattr(queue, "PENDING", [])
+    monkeypatch.setattr(queue, "RUNNING", {})
+    monkeypatch.setattr(queue, "ADMISSION_RESERVATIONS", {})
+    monkeypatch.setattr(task_admission, "load_task_result", load)
+    monkeypatch.setattr(task_admission, "write_task_result", write)
+    monkeypatch.setattr(claim, "after_refusal", cleanup)
+    monkeypatch.setattr(claim, "abandon", abandon)
+    monkeypatch.setattr(events_schedule_task, "_send_subagent_rejection",
+                        lambda *_args, **kwargs: effects.append(kwargs["detail"]))
+
+    confirmed = events_schedule_task._reject_schedule_task(
+        ctx, tid="refused", chat_id=1, delegation_role="subagent", parent_id="parent",
+        root_task_id="parent", role="helper", result_fields={}, detail=detail,
+        reason_code=reason, preparation=claim)
+    assert len(attempts) == (2 if gap == "before_write" else 1)
+    assert all(fields == attempts[0] for fields in attempts), "a retry must retain the same fields and timestamp"
+    if gap == "unknown_commit":
+        assert not confirmed and row["status"] == "requested"
+        assert effects == ["retain", detail + " The refusal was not recorded (scheduled_result_authority_unknown); recovery keeps the request."]
     else:
-        event["objective"] = ""
-        primary = "schedule_subagent requires objective and expected_output"
-    copies = spy_provisions(monkeypatch)
-    original = task_admission.persist_never_admitted_refusal
-    attempts, gaps = [], []
-
-    def persist(*args, **kwargs):
-        attempts.append((kwargs["result"], kwargs["_admission_refusal_token"],
-                         queue._queue_lock._is_owned(), threading.current_thread().name))
-        if len(attempts) == 1:
-            if published:
-                original(*args, **kwargs)
-            with database_reader(env.data, exclusive=True):
-                try:
-                    return original(*args, **kwargs)
-                except store.StoreBusy as error:
-                    gaps.append((error.reason, getattr(error, "rollback_confirmed", None)))
-                    raise
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(task_admission, "persist_never_admitted_refusal", persist)
-    assert env.dispatch_returns(event) and env.gen.wait_idle(_WAIT_SEC)
-    row = env.row("typed-refusal")
-    assert row["status"] == "failed" and row["admission_outcome"] == "never_admitted"
-    assert primary in row["result"], row["result"]
-    assert gaps == [("contention", True)]
-    assert len(attempts) == 2 and all(primary in detail for detail, *_ in attempts), attempts
-    assert {token for _, token, _, _ in attempts} == {row["_admission_refusal_token"]}
-    assert all(not under_q and lane == prep.COPY_LANE for _, _, under_q, lane in attempts)
-    assert copies == ["typed-refusal"] and env.pending_ids() == []
-    assert queue.ADMISSION_RESERVATIONS == {} and not prep._LIVE
-    assert not [entry for entry in subagent_worktrees.list_worktrees() if entry.get("task_id") == "typed-refusal"]
-    notices = [text for _, text, _ in env.ctx.sent]
-    assert len(notices) == 1 and primary in notices[0]
+        assert confirmed and row["reason_code"] == reason and row["result"] == detail
+        assert row["admission_outcome"] == "never_admitted" and row["accounted_upper_bound_usd"] == 0.0
+        assert row["_admission_refusal_token"] == claim.refusal_receipt
+        assert row[prep.MARKER]["token"] == claim.token
+        assert row[prep.MARKER]["phase"] == prep.REFUSED
+        assert effects == ["cleanup", detail]

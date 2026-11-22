@@ -126,7 +126,10 @@ def test_preclaim_exception_keeps_shared_registration(start_case, tmp_path, monk
         start()
     assert caught.value is error
     assert gateway().removals == [] and gateway().start_requests == []
-    assert failures(tmp_path)[-1]["definite"] is True
+    row = failures(tmp_path)[-1]
+    # The row names its task on both start paths (review registration and the delegate tool), so
+    # the task feed can show it; the review path wrote it anonymously until the 05–08.11 audit.
+    assert row["definite"] is True and row["task_id"] == "t-b" and row["invocation_id"]
 
 
 def test_recovered_unknown_start_is_not_retired_by_new_preclaim_error(start_case, tmp_path, monkeypatch):
@@ -176,6 +179,39 @@ def test_cleanup_failure_keeps_typed_pause_refusal(start_case, monkeypatch):
     assert result["project_retired"] is False
     assert result["project_retention_reason"] == "cleanup_unconfirmed"
     assert gateway().start_requests == []
+
+
+@pytest.mark.parametrize("start_case", ["tool"], indirect=True)
+@pytest.mark.parametrize("recovering", [False, True])
+def test_pause_before_callable_reports_only_a_fresh_start_as_unrun(start_case, tmp_path, monkeypatch, recovering):
+    """The callable's refusal says nothing about a prior POST whose reply was lost."""
+    start, gateway, _shared, fail, state = start_case
+    original = None
+    if recovering:
+        fail(gateway_module.ClaudexorUnavailable("daemon_unreachable", "POST response lost"))
+        start()
+        original = custody.invocation_record(tmp_path, state["pending_invocation_id"])
+        assert original["state"] == "pending" and len(gateway().start_requests) == 1
+
+    def refuse(_source, _function, *_args, **_kwargs):
+        raise owner_pause.OwnerPauseRefused("owner_pause")
+
+    monkeypatch.setattr(delegate, "run_operation", refuse)
+    payload = json.loads(start().text)
+    assert payload["reason"] == "owner_pause"
+    assert payload.get("definitely_unrun", False) is not recovering
+    assert len(gateway().start_requests) == int(recovering), "the fenced call sends no new POST"
+    assert gateway().removals == ([] if recovering else ["proj-new"])
+    row = failures(tmp_path)[-1]
+    assert row["definite"] is not recovering
+    record = custody.invocation_record(tmp_path, row["invocation_id"])
+    if recovering:
+        assert payload["pending_invocation_id"] == row["invocation_id"] == state["pending_invocation_id"]
+        assert record["state"] == "pending" and record["request"] == original["request"]
+        assert record["project_id"] == original["project_id"] == "proj-new"
+        assert payload["project_retention_reason"] == "start_outcome_unknown_run_may_exist"
+    else:
+        assert "pending_invocation_id" not in payload and record["state"] == "failed_definite"
 
 
 @pytest.mark.parametrize("journal", ["PERSIST", "WAL"])

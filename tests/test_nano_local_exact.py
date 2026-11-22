@@ -128,3 +128,21 @@ def test_a_changed_serving_instance_is_still_a_preparation_failure(lane):
     with pytest.raises(ua.PhysicalAttemptPreparationFailed, match="instance changed"):
         _send(lane, _nano(16_384))
     assert not lane["sent"]
+
+
+def test_unbound_helper_measures_before_rejecting_an_overestimated_input(lane, monkeypatch):
+    from ouroboros import context_fit
+    monkeypatch.setattr(context_fit, "bounded_prompt_tokens_for_payload", lambda *a, **kw: 90014)
+    lane["window"], lane["count"] = 80000, lambda payload: 50000
+    _send(lane, None)
+    assert len(lane["measured"]) == 1 and len(lane["sent"]) == 1
+    assert lane["sent"][0]["max_tokens"] == 20000
+    assert lane["sent"][0]["messages"] == _prepared(lane)
+
+
+def test_unbound_helper_rejects_an_exact_overflow_after_measurement(lane):
+    lane["window"], lane["count"] = 80000, lambda payload: 79000
+    with pytest.raises(LocalContextTooLargeError) as caught:
+        _send(lane, None)
+    assert len(lane["measured"]) == 1 and not lane["sent"]
+    assert caught.value.refused_candidate["input_tokens"] == 79000

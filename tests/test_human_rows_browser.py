@@ -7,6 +7,7 @@ the real history endpoint over the same data root. No runtime, provider or Teleg
 from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
+from tests._room_browser_shared import recording_chat_bridge as _host, serve_chat_history as _serve_history
 
 import json
 import os
@@ -30,40 +31,6 @@ def _evidence(tmp_path) -> Path:
     out = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR") or tmp_path)
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-def _host(tmp_path, monkeypatch):
-    """The real bridge and send seam over a disposable data root; broadcast frames are kept."""
-    from supervisor import message_bus
-
-    (tmp_path / "logs").mkdir(exist_ok=True)
-    bridge = message_bus.LocalChatBridge({})
-    frames: list = []
-    bridge._broadcast_fn = frames.append
-    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
-    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
-    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
-    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7, "owner_chat_id": 1})
-    return bridge, frames
-
-
-def _serve_history(page, data_root):
-    """The real history endpoint over the same data root (Playwright's routes run in its loop)."""
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-
-    from ouroboros.gateway.history import make_chat_history_endpoint
-
-    client = TestClient(Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(data_root))]))
-
-    def history(route):
-        url = urlsplit(route.request.url)
-        result = client.get(url.path + ("?" + url.query if url.query else ""))
-        route.fulfill(status=result.status_code, content_type="application/json", body=result.content)
-
-    page.route("**/api/chat/history**", history)
 
 
 def _push(mounted, frames, start=0):
@@ -242,7 +209,8 @@ def test_reworded_host_rows_live_and_after_reload(engine_ui, tmp_path, monkeypat
     _record_routing_receipt(bridge, sender, chat_id=1, client_message_id=cmid, action="mailbox_delivery",
                             target="t-docs", target_label="Docs task", status="delivered")
     _push(mounted, frames, sent)
-    page.locator(".msg-routing-annotation").filter(has_text="Message saved for task · Docs task").wait_for()
+    # Words that joined Main's running turn say saved, never the turn's name (owner 12.11).
+    page.locator(".msg-routing-annotation").filter(has_text="Message saved for task").wait_for()
 
     def check(phase):
         page.evaluate(FRAMES)
@@ -254,14 +222,14 @@ def test_reworded_host_rows_live_and_after_reload(engine_ui, tmp_path, monkeypat
         page.evaluate(FRAMES)
         body = page.locator("#page-chat").inner_text()
         found = {key: text in body for key, text in texts.items()}
-        found["mailbox"] = "Message saved for task · Docs task" in body
+        found["mailbox"] = "Message saved for task" in body and "Docs task" not in body
         for gone in ("none recorded by the current audit", "Below is the last persisted", "inline yourself",
                      "/restart", "durable cancel intent", "watchdog", "Delivered to task",
                      "Stopping task t-stop", "cancel t-stop did not settle"):
             assert gone not in body, (phase, gone)
         page.screenshot(path=str(out / f"rows-{phase}-{theme}-{width}.png"), full_page=True, animations="disabled")
         # Each reworded row as painted, in its own carrier (a card or a bubble), for human inspection.
-        for key, text in {**texts, "mailbox": "Message saved for task · Docs task"}.items():
+        for key, text in {**texts, "mailbox": "Message saved for task"}.items():
             shown = page.get_by_text(text, exact=False).first
             if shown.count():
                 holder = shown.locator("xpath=ancestor-or-self::*[contains(@class,'chat-live-card') "

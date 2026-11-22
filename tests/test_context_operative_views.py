@@ -29,7 +29,12 @@ def test_world_and_subagents_keep_names_and_state(tmp_path, monkeypatch):
 
     profile = "\n\n## System\n\nmacOS 26, arm64, 128 GB.\n\n## Available Tools\n\ngit, node, python.\n\n### Shell\n\nzsh.\n"
     world = context._world_section(profile)
-    assert world.section_id == "world" and world.full_text.endswith("\n\n" + profile.strip())
+    import hashlib
+
+    # The file exactly as stored (its edges too), then the revision of those bytes.
+    revision = hashlib.sha256(profile.encode("utf-8")).hexdigest()
+    assert world.section_id == "world" and world.full_text.endswith(
+        "\n\n" + profile + f"\nRevision of this map: {revision}.\n")
     # Its heading map addresses the file's own lines (the leading blank lines included).
     assert "- System — lines 3-6" in world.operative_view and "  - Shell — lines 11-13" in world.operative_view
     assert "macOS 26" not in world.operative_view and "path='memory/WORLD.md'" in world.operative_view

@@ -548,6 +548,42 @@ def test_archive_task_service_logs_finalizes_forced_worker_leftovers(tmp_path):
     assert not child_task_dir.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="kept-service custody is read by the POSIX launch census")
+def test_archive_task_service_logs_keeps_a_kept_services_live_log_until_it_is_stopped(tmp_path, monkeypatch):
+    """A terminal task's archive (worker death, cancel, reaper) must not unlink a log its kept service still writes;
+    once that launch is stopped the same archive takes it, with nothing it wrote lost."""
+    from ouroboros.launch_custody import kept_services, stop_kept_service
+
+    _force_advanced_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-kept"
+    script = "import sys, time\nprint('first', flush=True)\nwhile True:\n    time.sleep(0.05)\n    print('tick', flush=True)\n"
+    started = json.loads(registry.execute("start_service", {
+        "name": "writer", "cmd": [sys.executable, "-c", script], "keep_alive": True,
+        "readiness": {"log_contains": "first", "timeout_sec": 20}}))
+    log = drive / "services" / "task-kept" / "writer.log"
+    try:
+        assert started["state"] == "running", started
+        report = archive_task_service_logs(drive, "task-kept", {"id": "task-kept"})
+        assert report["retained_files"] == 1 and report["archived_files"] == 0 and report["deleted_files"] == 0
+        size = log.stat().st_size
+        _wait_for_service_log(drive, "task-kept", "writer.log", lambda data: len(data) > size)
+        assert log.read_text(encoding="utf-8").startswith("first\n"), "the same live file keeps growing"
+
+        launch_id = kept_services(drive)["services"][0]["launch_id"]
+        assert stop_kept_service(drive, launch_id, reason="test over", actor="owner:test")["outcome"] == "stopped"
+        report = archive_task_service_logs(drive, "task-kept", {"id": "task-kept"})
+        assert report["archived_files"] == 1 and report["deleted_files"] == 1 and not log.exists()
+        events = [json.loads(line) for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        archived = [item for item in events if item.get("type") == "service_log_archived"][-1]
+        assert archived["task_id"] == "task-kept" and archived["full_log_ref"]["sha256"]
+    finally:
+        registry.execute("stop_service", {"name": "writer"})
+
+
 def test_stop_service_retains_live_log_when_full_blob_omitted(tmp_path, monkeypatch):
     from ouroboros.tools import services as services_mod
 
@@ -760,6 +796,10 @@ def test_user_files_service_without_outputs_reports_audit_gap(tmp_path, monkeypa
     stopped = json.loads(registry.execute("stop_service", {"name": "user_file_service"}))
 
     assert "ARTIFACT_AUDIT_GAP" in stopped["artifact_audit_gap"]
+    # The same advice as the shell tools' notes: a fact and both ways to register, no order to rerun.
+    from ouroboros.tools.shell_audit import REGISTER_OUTPUT_ADVICE
+
+    assert stopped["artifact_audit_gap"].endswith(REGISTER_OUTPUT_ADVICE) and "rerun" not in stopped["artifact_audit_gap"]
     assert stopped["artifact_output_failed"] is False
 
 
@@ -861,6 +901,44 @@ def test_service_outputs_register_artifacts_on_stop(tmp_path, monkeypatch):
     assert "ARTIFACT_OUTPUTS" in stopped["artifact_outputs"]
     artifact_path = drive / "task_results" / "artifacts" / "task-service-output" / "service.html"
     assert artifact_path.read_text(encoding="utf-8") == "<h1>ok</h1>"
+
+
+def test_service_output_left_unchanged_is_captured_at_stop_then_reused(tmp_path, monkeypatch):
+    from ouroboros.tools.services import stop_task_services
+
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-unchanged"
+    task_drive = drive / "task_drives" / "task-service-unchanged"
+    task_drive.mkdir(parents=True)
+    (task_drive / "report.md").write_text("# service report\n", encoding="utf-8")
+
+    def start(name):
+        started = registry.execute("start_service", {
+            "name": name,
+            "cmd": [sys.executable, "-c", "print('READY', flush=True)"],
+            "cwd": str(task_drive),
+            "outputs": ["report.md"],
+            "readiness": {"timeout_sec": 1},
+        })
+        assert "BLOCKED" not in started, started
+        _wait_for_service_log(drive, "task-service-unchanged", f"{name}.log", lambda b: b"READY" in b)
+
+    start("verifier")
+    stopped = registry.execute_result("stop_service", {"name": "verifier"})
+    # Declared and left unchanged by the service, the existing report is still its deliverable.
+    assert stopped.code == "OK" and stopped.meta.get("artifact_registered") is True, stopped.text
+    assert "ARTIFACT_OUTPUTS" in json.loads(stopped.text)["artifact_outputs"]
+    assert registry.execute("read_file", {"root": "artifact_store", "path": "report.md"}).count("# service report") == 1
+    start("again")
+    finalized = stop_task_services(registry._ctx)  # the ordinary task-end stop finds that capture current
+    assert [item["lifecycle"] for item in finalized] == ["stopped"]
+    assert finalized[0]["artifact_outputs"].startswith("ARTIFACT_OUTPUT_NOTE")
+    assert "unchanged output (cosmetic): report.md" in finalized[0]["artifact_outputs"]
 
 
 def test_stop_task_services_preserves_output_finalization_failure(tmp_path, monkeypatch):
@@ -987,3 +1065,97 @@ def test_default_teardown_still_stops_services(tmp_path, monkeypatch):
     finalized = stop_task_services(registry._ctx)
     assert [item["lifecycle"] for item in finalized] == ["stopped"]
     assert pid_is_alive(payload["pid"]) is False
+
+
+def test_confirmed_stop_survives_log_capture_failure_without_leaking_or_repeating_stop(tmp_path, monkeypatch):
+    import gzip
+    from ouroboros.tools import services as services_mod
+    from ouroboros.tools.registry import ToolContext
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    key, secret = "task-log-fault:demo", "synthetic-service-secret-701"
+    cwd, log_path = drive / "task_drives" / "task-log-fault", drive / "services" / "task-log-fault" / "demo.log"
+    repo.mkdir()
+    cwd.mkdir(parents=True)
+    log_path.parent.mkdir(parents=True)
+    ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="task-log-fault")
+    stops: list[tuple[str, ...]] = []
+
+    def fake_end_held(held, **_kwargs):
+        item = held[0]
+        stops.append(tuple(item.get("markers") or ()))
+        item["proc"].returncode = 0
+        return {item["key"]: {"birth": "b1", "known": [], "facts": {"exit_confirmed": True, "ended": [item["proc"].pid]}}}
+
+    def seed(pid: int, marker: str):
+        proc = SimpleNamespace(pid=pid, returncode=None)
+        proc.poll = lambda: proc.returncode
+        record = services_mod.ServiceRecord(
+            name="demo", service_id=key, task_id=ctx.task_id, cmd=["svc"], cwd=str(cwd),
+            cwd_root="task_drive", cwd_base=str(cwd), cwd_source="task_drive", log_path=log_path,
+            proc=proc, outputs=["report.txt"], before_outputs={"report.txt": (False, 0, "")},
+            secret_values=(secret,), scope_marker=marker,
+        )
+        monkeypatch.setitem(services_mod._SERVICES, key, record)
+        return record
+
+    monkeypatch.setattr("ouroboros.process_scope.end_held_processes", fake_end_held)
+    initial_bytes = f"selected={secret}\nREADY launch-1\n".encode("utf-8")
+    log_path.write_bytes(initial_bytes)
+    (cwd / "report.txt").write_text("ok-1", encoding="utf-8")
+    record_1 = seed(4101, "OURO_LAUNCH_SCOPE_1")
+    real_stat, real_read_text = pathlib.Path.stat, pathlib.Path.read_text
+
+    with monkeypatch.context() as fault:
+        fault.setattr(pathlib.Path, "stat", lambda self, *a, **k: (
+            (_ for _ in ()).throw(OSError(f"raw-exc-detail {secret}")) if self == log_path else real_stat(self, *a, **k)))
+        [stopped] = services_mod.stop_task_services(ctx)
+    dumped = json.dumps(stopped)
+    assert stops == [("OURO_LAUNCH_SCOPE_1",)]
+    assert stopped["lifecycle"] == "stopped" and stopped["process_cleanup"]["exit_confirmed"] is True
+    assert stopped["log_finalization"] == {"deleted_live_log": False, "full_log_ref": {}, "tail": "",
+                                           "errors": ["capture: OSError"], "retained_live_log_path": str(log_path)}
+    assert secret not in dumped and "raw-exc-detail" not in dumped
+    assert log_path.read_bytes() == initial_bytes
+    assert (drive / "task_results" / "artifacts" / ctx.task_id / "report.txt").read_text(encoding="utf-8") == "ok-1"
+
+    with monkeypatch.context() as read_fault:
+        read_fault.setattr(pathlib.Path, "read_text", lambda self, *a, **k: (
+            (_ for _ in ()).throw(PermissionError(f"raw-exc-detail {secret}")) if self == log_path else real_read_text(self, *a, **k)))
+        mid_fail = services_mod._finalize_service_log_for_drive(drive, record_1)
+    assert mid_fail == {"deleted_live_log": False, "full_log_ref": {}, "tail": "",
+                        "errors": ["capture: PermissionError"], "retained_live_log_path": str(log_path)}
+    assert log_path.read_bytes() == initial_bytes
+
+    with monkeypatch.context() as store_fault:
+        store_fault.setattr(services_mod, "write_blob", lambda *_a, **_k: (_ for _ in ()).throw(OSError(f"raw-exc-detail {secret}")))
+        store_fail = services_mod._finalize_service_log_for_drive(drive, record_1)
+    assert store_fail == {"deleted_live_log": False, "full_log_ref": {}, "tail": "selected=***\nREADY launch-1\n",
+                          "errors": ["capture: OSError"], "retained_live_log_path": str(log_path)}
+    assert log_path.read_bytes() == initial_bytes
+
+    absent = services_mod._finalize_service_log_for_drive(drive, record_1, log_path=log_path.with_name("absent.log"))
+    empty_path = log_path.with_name("empty.log")
+    empty_path.write_bytes(b"")
+    empty = services_mod._finalize_service_log_for_drive(drive, record_1, log_path=empty_path)
+    assert absent == {"deleted_live_log": True, "full_log_ref": {}, "tail": "", "errors": []}
+    assert empty["deleted_live_log"] is True and empty["full_log_ref"]["size"] == 0 and empty["full_log_ref"]["sha256"]
+
+    assert services_mod._service_status(ctx, "demo") == "⚠️ SERVICE_NOT_FOUND: demo"
+    assert services_mod._service_logs(ctx, "demo") == "⚠️ SERVICE_NOT_FOUND: demo"
+    assert services_mod._stop_service(ctx, "demo") == "⚠️ SERVICE_NOT_FOUND: demo"
+    assert services_mod.stop_task_services(ctx) == [] and stops == [("OURO_LAUNCH_SCOPE_1",)]
+
+    log_path.write_text(f"selected={secret}\nREADY launch-2\n", encoding="utf-8")
+    (cwd / "report.txt").write_text("ok-2", encoding="utf-8")
+    seed(4102, "OURO_LAUNCH_SCOPE_2")
+    assert json.loads(services_mod._service_status(ctx, "demo"))["state"] == "running"
+    live_logs = services_mod._service_logs(ctx, "demo")
+    assert "READY launch-2" in live_logs and secret not in live_logs and "selected=***" in live_logs
+
+    stopped_2 = json.loads(services_mod._stop_service(ctx, "demo"))
+    blob_2 = gzip.decompress(pathlib.Path(stopped_2["log_finalization"]["full_log_ref"]["path"]).read_bytes()).decode("utf-8")
+    assert stops == [("OURO_LAUNCH_SCOPE_1",), ("OURO_LAUNCH_SCOPE_2",)]
+    assert stopped_2["log_finalization"]["deleted_live_log"] is True and not log_path.exists()
+    assert not stopped_2["log_finalization"]["errors"] and "selected=***" in stopped_2["log_finalization"]["tail"]
+    assert secret not in json.dumps(stopped_2) and secret not in blob_2 and "READY launch-2" in blob_2

@@ -1,12 +1,79 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
+import { createScopedModelCatalog, modelSlotCatalogQuery, catalogReadNote, catalogReadState, mergeModelCatalog, refreshMaintenanceCatalogs, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
+import { claudexorStatus } from '../modules/claudexor_status_store.js';
 
 const first = {
     items: [{ value: 'claudexor::opaque=owner-model', source_id: 'opaque', credential_profile_id: 'personal', observed_at: 'earlier' }],
     model_sources: [{ id: 'opaque', label: 'Model service', credentialHarness: 'codex' }],
     observed_at: 'earlier', errors: [],
 };
+
+test('an editor coalesces identical reads and publishes only current evidence for each scope', async () => {
+    const replies = [];
+    const catalog = createScopedModelCatalog({ fetchCatalog: (url, init) => new Promise(resolve => replies.push({ url, resolve, signal: init.signal })) });
+    const api = modelSlotCatalogQuery('openrouter@team', 'ignored');
+    const subscription = modelSlotCatalogQuery('subscription:opaque/source', 'my account');
+    assert.equal(api, 'provider_id=openrouter%40team');
+    assert.equal(subscription, 'source_id=opaque%2Fsource&credential_profile_id=my+account');
+    const previous = catalog.read('view=sources');
+    assert.equal(catalog.read('view=sources'), previous);
+    const newer = catalog.read('view=sources', { force: true });
+    const apiRead = catalog.read(api);
+    await Promise.resolve();
+    replies[1].resolve(first);
+    await newer;
+    replies[0].resolve({ items: [], model_sources: [] });
+    await previous;
+    replies[2].resolve({ items: [{ value: 'openrouter@team::model' }], model_sources: [] });
+    await apiRead;
+    assert.deepEqual(catalog.get('view=sources').model_sources, first.model_sources);
+    assert.equal(catalog.get(api).items.length, 1);
+    const pending = catalog.read(subscription);
+    await Promise.resolve();
+    catalog.dispose();
+    replies[3].resolve(first);
+    await pending;
+    assert.equal(catalog.get(subscription), undefined);
+    assert.equal(catalog.get(api), undefined);
+});
+
+test('a client on an older core uses only previously requested evidence for unsupported scopes', async () => {
+    const calls = [];
+    let previous;
+    const catalog = createScopedModelCatalog({ supportsScopes: () => false, legacyCatalog: () => previous,
+        fetchCatalog: async url => { calls.push(url); return first; } });
+    assert.equal((await catalog.read('view=sources')).errors[0].code, 'scoped_catalog_unsupported');
+    previous = { ...first, items: [...first.items, { value: 'vendor/default' }, { value: 'openrouter@work::owner/model' }] };
+    assert.deepEqual((await catalog.read('view=sources', { force: true })).model_sources, first.model_sources);
+    assert.deepEqual((await catalog.read('provider_id=openrouter%40work')).items, [{ value: 'openrouter@work::owner/model' }]);
+    assert.deepEqual(calls, []);
+    await catalog.read('source_id=opaque&credential_profile_id=personal');
+    assert.deepEqual(calls, ['/api/model-catalog?source_id=opaque&credential_profile_id=personal']);
+    catalog.dispose();
+});
+
+test('failed settlement reads stay retryable; successful receipts refresh once', async (t) => {
+    const previousDocument = globalThis.document, previousFetch = globalThis.fetch;
+    t.after(() => { globalThis.document = previousDocument; globalThis.fetch = previousFetch; });
+    const doc = new EventTarget(); doc.getElementById = () => null; globalThis.document = doc;
+    const events = [], native = []; let raw = 0;
+    doc.addEventListener('harness-maintenance:settled', event => events.push(event.detail));
+    t.mock.method(claudexorStatus, 'refresh', async options => { native.push(options); return {harnesses: [{id: 'future', model_catalog: {partial: false}}]}; });
+    globalThis.fetch = async () => { raw++; throw new Error('general catalog unavailable'); };
+    const receipt = {id: 'one', finishedAt: '2026-11-10'};
+    await refreshMaintenanceCatalogs('future', receipt);
+    await refreshMaintenanceCatalogs('future', {...receipt});
+    assert.deepEqual(events, [{harness: 'future'}, {harness: 'future'}]);
+    assert.ok(native.every(options => options.includeModels && options.afterCurrent));
+    assert.equal(raw, 2);
+    globalThis.fetch = async () => { raw++; return {ok: true, json: async () => ({items: []})}; };
+    await refreshMaintenanceCatalogs('future', receipt);
+    await refreshMaintenanceCatalogs('future', receipt);
+    assert.equal(events.length, 3); assert.equal(raw, 3);
+    await refreshMaintenanceCatalogs('future', {...receipt, id: 'two'});
+    assert.equal(events.length, 4); assert.equal(raw, 4);
+});
 
 test('connection discovery replaces only the exact source and preserves general refresh provenance', () => {
     const general = mergeModelCatalog({}, { ...first, coverage: { complete: true },
@@ -21,6 +88,10 @@ test('connection discovery replaces only the exact source and preserves general 
     const { items: _items, ...provenance } = composed;
     const { items: _generalItems, ...originalProvenance } = general;
     assert.deepEqual(provenance, originalProvenance);
+    // A general catalog nobody has read stays unread under a connection's own list: its rows are not a whole read,
+    // so a role line says the catalog's note and never "Price unknown".
+    assert.equal(withConnectionCatalogs({}, connections).read_state, 'not_read');
+    assert.equal(catalogReadState({ items: withConnectionCatalogs({}, connections).items }), 'ok', 'the rows alone would read as a whole catalog');
     for (const incoming of [
         { read_state: 'transport', errors: [{ error: 'offline' }] },
         { items: [], model_sources: [], errors: [{ error: 'source failed' }] },
@@ -90,7 +161,7 @@ test('one unreachable source is partial, not a failed catalog: the API models th
     assert.match(note, /2 API models loaded/, 'the subscription entry is not an API model');
     assert.doesNotMatch(note, /^Model catalog could not be read/);
     assert.match(note, /selection are kept/);
-    assert.match(note, /Refresh model catalog/);
+    assert.match(note, /press Read again in Models/, 'the sentence names the button that exists');
     // One API model reads as one.
     assert.match(catalogReadNote(mergeModelCatalog({}, { items: [{ value: 'openai::only' }],
         errors: [{ error: 'daemon unreachable' }] })), /1 API model loaded/);
@@ -235,7 +306,7 @@ test('accounts sharing one cause are one clause with the profiles named, not one
         + ' The account has an active quota limit; proton4: The selected managed Codex account requires'
         + ' sign-in; gptopro6: The account has no verified current catalog credential.'
         + ' 2 API models loaded. Existing suggestions and your selection are kept.'
-        + ' Refresh model catalog in Models to retry.');
+        + ' To retry, press Read again in Models.');
     // Every cause is still named: only the repeated subjects are counted.
     for (const cause of [QUOTA_LIMIT, 'requires sign-in', 'no verified current catalog credential']) {
         assert.ok(note.includes(cause), cause);

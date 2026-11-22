@@ -160,7 +160,7 @@ def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=Fa
     if folderless:
         scratch.mkdir(parents=True)
         monkeypatch.setattr(delegate_readonly_inputs, "prepare_readonly_inputs",
-                            lambda _ctx, _invocation, *_selection, thread_turn=False: delegate_readonly_inputs.ReadonlyInputs(
+                            lambda _ctx, _invocation, *_selection, thread_folder=None: delegate_readonly_inputs.ReadonlyInputs(
                                 str(scratch), "\nREADONLY INPUTS\n", [], ""))
     engine, seen = _Engine(version, known={str(ctx.repo_dir): "prj-user"} if known else {}), {}
 

@@ -3,7 +3,7 @@
 On a real server in Chromium and WebKit: the capsule `Effort <recommended level>` after Subagents and Context
 and the context capsule (closed, no range in words) opens inline into the strip — by hover (an
 accelerator) and by press (which pins) on a desktop with a mouse, by press alone on a phone; the
-mouse may drift within 32 px and the strip closes a second after it leaves that zone; Esc closes
+mouse may drift a few px and the strip closes ~300 ms after it leaves that zone; Esc closes
 and returns focus, an outside press closes. The open strip never takes a second line and stays
 inside its row: beside the others on a wide screen, alone while they step aside on a 390 px phone
 and in a ~440 px Project pane, scrolling inside itself on a 320 px phone; the pill covers its word
@@ -161,7 +161,7 @@ def test_desktop_hover_opens_press_pins_escape_and_outside_close(direct_server_w
             assert (closed["name"], closed["value"], closed["headText"]) == ("Effort", "Medium", "EffortMedium"), closed
             assert abs(closed["top"] - closed["subTop"]) <= 2, closed
             assert closed["recTabIndex"] == -1, "closed handles are out of the tab order"
-            assert closed["ariaLabel"] == "Primary effort: Medium; helpers Low–High." and not closed["title"], \
+            assert closed["ariaLabel"] == "Primary effort: Medium; subagents Low–High." and not closed["title"], \
                 ("the button's name says the range; no hover-only title (the hint says it, DESIGN Hints)", closed)
             assert closed["extras"] == 0, "no title word of the strip's own, no separator element, no reset"
             _shot(page, tmp_path, f"composer-closed-{engine}-dark")
@@ -179,15 +179,24 @@ def test_desktop_hover_opens_press_pins_escape_and_outside_close(direct_server_w
             assert opened["recTabIndex"] == 0, opened
             _assert_strip_geometry(opened)
             _shot(page, tmp_path, f"composer-open-{engine}-dark")
-            # The mouse may drift within the 32 px zone: the strip stays open.
-            page.mouse.move(opened["right"] + 20, opened["top"] + opened["height"] / 2)
-            page.wait_for_timeout(1300)
+            # The mouse may drift a few px off the capsule: the strip stays open.
+            page.mouse.move(opened["right"] + 4, opened["top"] + opened["height"] / 2)
+            page.wait_for_timeout(700)
             assert _facts(page)["open"] == "true", "the zone keeps the strip open"
-            # Leaving the zone closes it about a second later, not at once.
+            # Leaving the zone closes it ~300 ms later, not at once: measured in the page, so a slow runner cannot
+            # read it early or late.
+            page.evaluate("""sel => {
+                const el = document.querySelector(sel);
+                addEventListener('pointermove', () => { window.__left = performance.now(); }, { once: true, capture: true });
+                new MutationObserver((_records, watcher) => {
+                    if (el.dataset.open === 'false') { window.__closed = performance.now(); watcher.disconnect(); }
+                }).observe(el, { attributes: true, attributeFilter: ['data-open'] });
+            }""", CONTROL)
             page.mouse.move(20, 200)
-            page.wait_for_timeout(500)
-            assert _facts(page)["open"] == "true", "not before the delay"
             _wait(page, "el.dataset.open === 'false'", timeout=3_000)
+            page.wait_for_function("() => window.__closed !== undefined && window.__left !== undefined")
+            delay = page.evaluate("() => window.__closed - window.__left")
+            assert 250 <= delay <= 1_000, ("closes about 300 ms after leaving the zone", delay)
             # A mouse press on a level of a hover-opened strip does not hold it open afterwards.
             page.hover(HEAD)
             _wait(page, "el.dataset.open === 'true'")
@@ -201,7 +210,7 @@ def test_desktop_hover_opens_press_pins_escape_and_outside_close(direct_server_w
             _wait(page, "el.dataset.open === 'true'")
             page.click(HEAD)
             page.mouse.move(20, 200)
-            page.wait_for_timeout(1300)  # longer than the 1 s close an unpinned strip would get
+            page.wait_for_timeout(1300)  # far longer than the close an unpinned strip would get
             assert _facts(page)["open"] == "true", "pinned: leaving does not close"
             # Esc closes and returns focus to the button.
             page.keyboard.press("Escape")
@@ -239,8 +248,11 @@ def test_a_tight_row_keeps_one_line_while_the_strip_closes(direct_server_with_da
         browser, page = _launch(pw, engine, viewport={"width": 1440, "height": 900})
         try:
             _open_chat(page, url, width=1440)
-            # Narrow the composer row until the strip only fits beside the other capsules below full padding.
-            for width in range(1120, 820, -8):
+            # Narrow the composer row until the strip only fits beside the other capsules below full padding. Where that
+            # happens depends on what the row holds (since the room's Model capsule leads it, 7d65f99394, a docked
+            # window of about 1180-1220 px), so the sweep covers every docked desktop width rather than one band: 1440 down to
+            # 720, the narrowest docked window (docs/DESIGN.md "One layout switch"; narrower is the stack layout).
+            for width in range(1440, 719, -8):
                 page.set_viewport_size({"width": width, "height": 900})
                 page.click(HEAD)
                 _wait(page, "el.dataset.open === 'true'")
@@ -251,7 +263,7 @@ def test_a_tight_row_keeps_one_line_while_the_strip_closes(direct_server_with_da
                 page.keyboard.press("Escape")
                 _wait(page, "el.dataset.open === 'false'")
             else:
-                pytest.fail("no viewport between 1120 and 828 px gave an inline strip below full padding")
+                pytest.fail("no docked viewport between 1440 and 720 px gave an inline strip below full padding")
             closed_height = page.evaluate(f"() => document.querySelector('{CONTROL}').parentElement.getBoundingClientRect().height")
             heights = page.evaluate(f"""() => new Promise((resolve) => {{
                 const row = document.querySelector('{CONTROL}').parentElement;
@@ -541,67 +553,64 @@ def test_a_change_made_before_send_lands_before_the_message(direct_server_with_d
             browser.close()
 
 
-def test_behavior_has_no_effort_section_and_ends_with_one_plain_startup_note(direct_server_with_data, tmp_path):  # noqa: F811
+def test_settings_has_no_effort_row_and_this_computer_says_one_plain_startup_note(direct_server_with_data, tmp_path):  # noqa: F811
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
+
+    from tests.settings_browser_helpers import open_settings
 
     url = direct_server_with_data["url"]
     with sync_playwright() as pw:
         browser, page = _launch(pw, "chromium", viewport={"width": 1440, "height": 900})
         try:
             _open_chat(page, url, width=1440)
-            page.locator('[data-nav-page="settings"]').click()
-            page.wait_for_selector(".settings-shell", timeout=20_000)
-            page.locator('[data-settings-tab="behavior"]').click()
-            panel = page.locator('[data-settings-panel="behavior"]')
-            # The range lives in the composer alone.
-            assert panel.locator("h3", has_text="Reasoning Effort").count() == 0
+            # The range lives in the composer alone: no row of Settings names it, and Permissions and checks draws none.
+            keys = page.evaluate("async () => (await import('/static/modules/settings_rows.js')).ROWS.flatMap((row) => row.keys)")
+            assert keys and not [key for key in keys if key.startswith("OUROBOROS_EFFORT_")], keys
+            level = open_settings(page, "permissions")
+            level.locator('[data-setting-row="OUROBOROS_RUNTIME_MODE"]').wait_for(state="visible")
+            assert level.locator(".settings-card-title", has_text="Reasoning Effort").count() == 0
             assert page.locator("[data-effort-range-summary]").count() == 0
-            assert page.locator('[data-effort-target^="s-effort-"]').count() == 0
-            # This test host is not the packaged desktop app: both switches are off and disabled,
-            # and the one reason is said once, as a note, at the label text's edge.
+            # This test host is not the packaged desktop app: both switches are off and disabled, and the one reason
+            # is said once, as a plain note under the two rows it speaks for.
+            open_settings(page, "computer")
             page.wait_for_selector("[data-autostart-settings]:not([hidden])", timeout=20_000)
             page.wait_for_selector("[data-autostart-shared-note]:not([hidden])", timeout=20_000)
             facts = page.evaluate("""() => {
-                const panel = document.querySelector('[data-settings-panel="behavior"]');
-                const sections = [...panel.querySelectorAll(':scope > .form-section')];
-                const card = panel.querySelector('[data-autostart-settings]');
+                const card = document.querySelector('#page-settings [data-autostart-settings]');
                 const note = card.querySelector('[data-autostart-shared-note]');
-                const label = card.querySelector('[data-autostart-toggle]').closest('label');
-                const text = [...label.childNodes].find((node) => node.nodeType === 3 && node.textContent.trim());
-                const range = document.createRange();
-                range.selectNodeContents(text);
-                const textLeft = range.getBoundingClientRect().left;
-                const noteStyle = getComputedStyle(note);
+                const boxes = [...card.querySelectorAll('input[role="switch"]')];
                 return {
-                    last: sections.at(-1) === card,
+                    first: card.parentElement.querySelector('.settings-card') === card,
+                    rows: [...card.querySelectorAll('[data-setting-row]')].map((row) => row.dataset.settingRow),
                     note: note.textContent,
                     noteTone: note.dataset.tone || '',
                     noteDot: getComputedStyle(note, '::before').content,
-                    noteColor: noteStyle.color,
-                    metaColor: getComputedStyle(card.querySelector('.settings-section-copy')).color,
-                    noteTextLeft: note.getBoundingClientRect().left + parseFloat(noteStyle.paddingLeft),
-                    textLeft,
+                    noteColor: getComputedStyle(note).color,
+                    metaColor: getComputedStyle(card.querySelector('[data-setting-meta]').parentElement).color,
                     rowsHidden: [...card.querySelectorAll('[data-autostart-status], [data-background-status]')].every((el) => el.hidden),
-                    describedBy: [...card.querySelectorAll('input[type="checkbox"]')].map((box) => box.getAttribute('aria-describedby')),
-                    disabled: [...card.querySelectorAll('input[type="checkbox"]')].map((box) => box.disabled),
+                    describedBy: boxes.map((box) => box.getAttribute('aria-describedby')),
+                    disabled: boxes.map((box) => box.disabled),
+                    checked: boxes.map((box) => box.checked),
                 };
             }""")
-            assert facts["last"], "Startup & background is the last card of Behavior"
+            assert facts["first"], "Start and background is the first card of This computer"
+            assert facts["rows"] == ["computer:autostart", "OUROBOROS_DESKTOP_KEEP_RUNNING"], facts
             assert facts["note"] == "Available only when the host runs the packaged desktop app.", facts
             assert facts["noteTone"] == "" and facts["noteDot"] in ("none", "normal", ""), facts
             assert facts["noteColor"] == facts["metaColor"], "a fact in meta ink, not a warning colour"
-            assert abs(facts["noteTextLeft"] - facts["textLeft"]) <= 1, facts
             assert facts["rowsHidden"] and facts["describedBy"] == ["settings-autostart-note"] * 2, facts
-            assert facts["disabled"] == [True, True], facts
+            assert facts["disabled"] == [True, True] and facts["checked"] == [False, False], facts
             page.locator("[data-autostart-settings]").scroll_into_view_if_needed()
-            _shot(page, tmp_path, "settings-behavior-startup-chromium")
+            _shot(page, tmp_path, "settings-computer-startup-chromium")
         finally:
             browser.close()
 
 
 @pytest.mark.parametrize("width", [1360, 390])
 def test_agents_rows_say_auto_or_the_level_in_the_model_name(role_ui, tmp_path, width):
+    from playwright.sync_api import expect
+
     ui = role_ui
     roles.configure_mixed(ui)
     items = ui["settings"]["OUROBOROS_SUBAGENTS"]["items"]
@@ -609,18 +618,21 @@ def test_agents_rows_say_auto_or_the_level_in_the_model_name(role_ui, tmp_path, 
     items[2]["route"] = {"kind": "agent_session", "target_id": "cursor=gpt-5.6-sol-high-fast", "credential_profile_id": "personal"}
     ui["page"].set_viewport_size({"width": width, "height": 900})
     page = roles.open_agents(ui)
-    rows = page.locator("[data-subagent-row]")
-    plain, api_named, session_named = rows.nth(0), rows.nth(1), rows.nth(2)
-    assert plain.locator('[data-subagent-field="effort"] option[value=""]').inner_text() == "Auto (reviews at the top of the chat range)"
-    plain.locator('[data-subagent-field="review_eligible"]').uncheck()
-    assert plain.locator('[data-subagent-field="effort"] option[value=""]').inner_text() == "Auto (chat range)"
-    for row, expected in ((api_named, "X-High · in the model name"), (session_named, "High · in the model name")):
-        assert row.locator("[data-subagent-effort-named]").inner_text() == expected
-        assert row.locator('[data-subagent-field="effort"]').count() == 0, "a named row offers no select"
+    plain = roles.open_agent(ui, "native", fresh=False)
+    expect(plain.locator('[data-subagent-field="effort"] option[value=""]')).to_have_text("Auto (reviews at the top of the chat range)")
+    reviewer = plain.locator('[data-subagent-field="review_eligible"]')
+    expect(reviewer).to_be_checked()
+    reviewer.press("Space")
+    expect(reviewer).not_to_be_checked()
+    expect(plain.locator('[data-subagent-field="effort"] option[value=""]')).to_have_text("Auto (chat range)")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    _shot(page, tmp_path, f"settings-agents-effort-{width}")
-    session_named.locator("[data-subagent-effort-named]").scroll_into_view_if_needed()
-    _shot(page, tmp_path, f"settings-agents-effort-named-{width}")
+    _shot(page, tmp_path, f"settings-agents-effort-auto-{width}")
+    for agent_id, expected in (("direct", "X-High · in the model name"), ("agent", "High · in the model name")):
+        row = roles.open_agent(ui, agent_id, fresh=False)
+        expect(row.locator("[data-subagent-effort-named]")).to_have_text(expected)
+        assert row.locator('[data-subagent-field="effort"]').count() == 0, "a named row offers no select"
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        _shot(page, tmp_path, f"settings-agents-effort-{agent_id}-{width}")
 
 
 @pytest.mark.parametrize("engine,touch", [("chromium", False), ("webkit", True)])

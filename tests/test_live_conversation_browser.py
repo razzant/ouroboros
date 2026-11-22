@@ -282,8 +282,7 @@ def test_beta_off_has_no_talk_or_media(subscription_ui, monkeypatch):
     assert page.locator("[data-call-entry='talk']").count() == 0
     page.locator("#chat-input").press("Enter")
     assert not posts and page.evaluate("window.__callFixture.microphones") == 0
-    navigate(page, 'settings')
-    page.locator('[data-settings-tab="advanced"]').click()
+    open_calls_settings(page)
     form = page.locator('[data-extension-settings-form][data-skill="live_conversation"]')
     expect(form.locator('[name="enabled"]')).not_to_be_checked()
     expect(form.locator('[name="provider"] option')).to_have_count(3)
@@ -443,6 +442,7 @@ def test_project_call_names_and_reveals_its_room_across_navigation(subscription_
         page.locator('.nav-project-row[data-project-id="voice-room"]').click()
     room = "#panel-pchat-voice-room"
     start_call(page, room)
+    retained = page.locator(room).element_handle()
     assert posts[-1]["chat_id"] == 71
     page.locator('[data-nav-page="settings"]').click()
     mark = page.locator(".call-mark")
@@ -464,7 +464,10 @@ def test_project_call_names_and_reveals_its_room_across_navigation(subscription_
     page.locator('[data-nav-page="settings"]').click()
     mark.locator(".call-mark-end").click()
     assert_ended(page)
-    expect(page.locator(room)).to_have_count(0)
+    # DESIGN.md:3353–3356: a visited room "stays whole and quiet for its return" until teardown or deletion.
+    expect(page.locator(room)).to_have_count(1)
+    expect(page.locator(room)).to_be_hidden()
+    assert retained.evaluate("el => el.isConnected"), "ending the call keeps the same visited room"
     expect(mark).to_be_hidden()
     assert not subscription_ui["errors"]
 
@@ -484,10 +487,19 @@ def test_composer_inserted_text_restores_send(subscription_ui, monkeypatch, widt
     expect(talk).to_be_visible()
 
 
+def open_calls_settings(page):
+    """The Calls skill's own page, in Extensions over Skills: the form it registered (settings_extension_forms.js)."""
+    page.wait_for_function("() => Boolean(window.__ouroSettings)")
+    assert page.evaluate("() => window.__ouroSettings.open('skill/live_conversation')") is not False
+
+
 def navigate(page, name):
     target = page.locator(f'[data-nav-page="{name}"]')
-    if page.viewport_size['width'] < 980 and not page.locator('body').evaluate("node => node.classList.contains('nav-drawer-open')"):
-        page.locator('[data-mobile-nav-toggle]:visible').first.click()
+    if page.locator('html').get_attribute('data-layout') == 'stack' and not page.locator('body').evaluate("node => node.classList.contains('nav-drawer-open')"):
+        toggle = page.locator('[data-mobile-nav-toggle]:visible').first
+        while not toggle.count():
+            page.locator('.page.active .app-page-header .shell-back:visible').first.click()
+        toggle.click()
     target.click()
 
 
@@ -495,13 +507,12 @@ def navigate(page, name):
 def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, width):
     from playwright.sync_api import expect
     page, _ = open_call_ui(subscription_ui, monkeypatch, width=width, scheme='light', engine='gemini')
-    navigate(page, 'settings')
-    page.locator('[data-settings-tab="advanced"]').click()
+    open_calls_settings(page)
     form = page.locator('[data-extension-settings-form][data-skill="live_conversation"]')
     catalogs = subscription_ui['call_config']['catalogs']
-    expect(page.locator('#page-settings')).to_contain_text(
+    expect(page.locator('#page-skills')).to_contain_text(
         'The call skills are on by default. To talk, turn on Calls (beta), choose an engine and add its API key in '
-        'Settings → Secrets, under the keys the skills request. Gemini and OpenAI do not serve Russia or Belarus.')
+        'Settings → Accounts and keys, under the keys the skills request. Gemini and OpenAI do not serve Russia or Belarus.')
     by_id = {catalog['id']: catalog for catalog in catalogs}
     expect(form.locator('[name="provider"] option')).to_have_count(len(catalogs))
     assert form.locator('[name="provider"] option').evaluate_all('(nodes) => nodes.map(n => n.value)') == list(by_id)
@@ -582,9 +593,104 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     page.wait_for_function('__settingsSignals.length === 1')
     assert subscription_ui['call_saves'][-1]['instructions'] == 'Speak briefly in this synthetic call.'
     assert not any('device' in key or key == 'echoCancellation' for key in subscription_ui['call_saves'][-1])
+    # Back returns to Main, retaining Extensions. Choosing another page explicitly removes the old form;
+    # another skill's mount signal and a fresh Calls form must still bind the device controls and autosave once.
+    form.locator('[data-call-processing="echoCancellation"]').check()
+    page.locator('#page-skills .app-page-header [data-shell-back]').click()
+    expect(page.locator('#page-chat')).to_be_visible()
+    page.evaluate("window.__ouroSettings.open('tools', {map: true})")
+    expect(page.locator('#page-skills [data-settings-page="skill/live_conversation"]')).to_have_count(0)
+    page.evaluate("window.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'))")
+    open_calls_settings(page)
+    expect(form.locator('[data-call-device="mic"]')).to_have_count(1)
+    expect(form.locator('[data-call-device="mic"]')).to_have_value('test-mic')
+    saves = len(subscription_ui['call_saves'])
+    form.locator('[name="provider"]').select_option(grok['id'])
+    for _ in range(100):
+        if len(subscription_ui['call_saves']) > saves and subscription_ui['call_saves'][-1].get('provider') == grok['id']:
+            break
+        page.wait_for_timeout(50)
+    assert subscription_ui['call_saves'][-1]['provider'] == grok['id'], 'the form saves itself again'
     navigate(page, 'chat')
     assert page.locator("[data-call-entry='talk']").count() == 0
     assert not subscription_ui['errors']
+
+
+def test_leaving_calls_settings_stops_the_preview_and_keeps_the_draft(subscription_ui, monkeypatch):
+    from playwright.sync_api import expect
+
+    # open_call_ui supplies synthetic tracks and a local config route; no hardware or call is opened.
+    page, calls = open_call_ui(subscription_ui, monkeypatch, width=1360, scheme='light')
+    rail = page.locator('#page-skills [data-extensions-open="tools"]')
+    form = page.locator('[data-extension-settings-form][data-skill="live_conversation"]')
+    words = form.locator('[name="instructions"]')
+    subscription_ui['call_read_error'] = True
+    open_calls_settings(page)
+    expect(words).to_be_disabled()
+    expect(form.locator('button[type="submit"]')).to_be_disabled()
+    rail.click()
+    expect(form).to_have_count(0)
+    subscription_ui['call_read_error'] = False
+    open_calls_settings(page)
+    expect(form.locator('[data-call-device="mic"]')).to_be_visible()
+    subscription_ui['call_save_error'] = True
+    words.fill('Keep this draft when I change pages.')
+    form.locator('[name="provider"]').focus()
+    expect(form.locator('[data-extension-settings-status]')).to_contain_text('Synthetic save failed')
+    form.locator('[data-call-test="mic"]').click()
+    expect(form.locator('[data-call-meter]')).to_be_visible()
+    track = page.evaluate_handle('() => window.__callFixture.tracks.at(-1)')
+    assert track.evaluate('t => t.readyState') == 'live'
+    rail.click()
+    expect(form).to_have_count(0, timeout=3000)
+    assert track.evaluate('t => t.readyState') == 'ended', 'leaving the level releases its own preview now'
+    open_calls_settings(page)
+    expect(words).to_have_value('Keep this draft when I change pages.')
+    expect(form.locator('[data-call-meter]')).to_be_hidden()
+    assert calls == []
+    page.close()
+
+
+@pytest.mark.parametrize('start_width,end_width', [(390, 1087), (1440, 390)])
+def test_retained_calls_form_keeps_autosave_and_devices_after_another_skill_mount(subscription_ui, monkeypatch, start_width, end_width):
+    from playwright.sync_api import expect
+    from tests.settings_browser_helpers import settings_page
+    from tests.settings_section_helpers import header_back
+
+    page, _ = open_call_ui(subscription_ui, monkeypatch, width=start_width, scheme='light')
+    open_calls_settings(page)
+    form = page.locator('[data-extension-settings-form][data-skill="live_conversation"]')
+    expect(form.locator('[data-call-device="mic"]')).to_have_count(1)
+    # A failed autosave keeps the existing typed words. It does not turn Calls into an explicit-Save form.
+    subscription_ui['call_save_error'] = True
+    form.locator('[name="instructions"]').fill('Keep these words for my return.')
+    form.locator('[name="provider"]').focus()
+    expect(form.locator('[data-extension-settings-status]')).to_contain_text('Synthetic save failed')
+    page.evaluate("window.__retainedCalls = document.querySelector('[data-extension-settings-form][data-skill=\"live_conversation\"]')")
+    page.evaluate("window.__ouroSettings.open('accounts')")
+    settings_page(page, 'accounts').wait_for(state='visible')
+    page.evaluate("window.__ouroSettings.open('skill/without_settings')")
+    expect(settings_page(page, 'skill/without_settings')).to_contain_text('No extension settings registered.')
+    assert page.evaluate('!window.__retainedCalls.isConnected')
+    page.set_viewport_size({'width': end_width, 'height': 844})
+    page.locator('#page-skills [data-extensions-rail]').wait_for(state='visible' if end_width == 1087 else 'hidden')
+    header_back(page).click()
+    settings_page(page, 'accounts').wait_for(state='visible')
+    header_back(page).click()
+    expect(form).to_be_visible()
+    assert form.evaluate('node => node === window.__retainedCalls'), 'Back retains the actual enhanced form'
+    expect(form.locator('[name="instructions"]')).to_have_value('Keep these words for my return.')
+    expect(form.locator('[data-call-device="mic"]')).to_have_count(1)
+    subscription_ui['call_save_error'] = False
+    saves = len(subscription_ui['call_saves'])
+    form.locator('[name="instructions"]').fill('Save once after the return.')
+    form.locator('[name="provider"]').focus()
+    expect(form.locator('[data-extension-settings-status]')).to_contain_text('Saved')
+    assert len(subscription_ui['call_saves']) == saves + 1
+    assert subscription_ui['call_saves'][-1]['instructions'] == 'Save once after the return.'
+    assert page.url.startswith(subscription_ui['url'])
+    assert not subscription_ui['errors']
+    page.close()
 
 
 @pytest.mark.parametrize('provider', ['gemini_live:gemini', 'grok_realtime:grok'])
@@ -614,8 +720,7 @@ def test_settings_engine_switch_saves_through_config_and_survives_reload(subscri
             route.fulfill(status=status, content_type='application/json', body=json.dumps(value))
 
         page.route('**/api/extensions/live_conversation/config', config_route)
-        navigate(page, 'settings')
-        page.locator('[data-settings-tab="advanced"]').click()
+        open_calls_settings(page)
         form = page.locator('[data-extension-settings-form][data-skill="live_conversation"]')
         choices = form.locator('[name="provider"]')
         save = form.locator('.settings-extension-actions > button[type="submit"]')
@@ -634,8 +739,7 @@ def test_settings_engine_switch_saves_through_config_and_survives_reload(subscri
         assert api.feature['configure']().provider == provider
         page.reload()
         page.wait_for_selector('#chat-input')
-        navigate(page, 'settings')
-        page.locator('[data-settings-tab="advanced"]').click()
+        open_calls_settings(page)
         expect(choices).to_have_value(provider)
         expect(choices.locator('option')).to_have_count(len(catalogs))
         expect(save).to_be_enabled()
@@ -647,8 +751,7 @@ def test_settings_device_change_reaches_live_call_without_stealing_its_capture(s
     from playwright.sync_api import expect
     page, _ = open_call_ui(subscription_ui, monkeypatch, width=1280, scheme='light', engine='gemini')
     start_call(page)
-    navigate(page, 'settings')
-    page.locator('[data-settings-tab="advanced"]').click()
+    open_calls_settings(page)
     form = page.locator('[data-extension-settings-form][data-skill="live_conversation"]')
     form.locator('[data-call-device="mic"]').select_option('test-mic')
     page.wait_for_function('__callFixture.microphones === 2 && __callFixture.tracks[0].readyState === "ended"')

@@ -48,7 +48,9 @@ class PlanEngine:
         self.calls.append((path, body, key))
         if path == "/v2/threads":
             tid = f"thread-{len(self.threads) + 1}"
-            self.threads[tid] = {"thread": {"id": tid, "headRunId": ""}, "turns": []}
+            scope = body.get("scope") or {}  # the engine projects its stored repo root (control-api thread-projection.ts)
+            self.threads[tid] = {"thread": {"id": tid, "headRunId": "", "repoRoot": scope.get("root")
+                                            if scope.get("kind") == "project" else None}, "turns": []}
             return {"id": tid}
         pending = custody.invocation_record(self.root, key)
         assert pending and pending["state"] == "pending", "Physical starts require durable intent first"
@@ -65,7 +67,8 @@ class PlanEngine:
         if self.fail_next:
             self.fail_next = False
             raise ClaudexorUnavailable("transport_unavailable", "Lost response after acceptance")
-        return self.accepted[key]
+        named = {"storeId": "store-plan"} if headers.get("X-Claudexor-Store-Identity") == "1" else {}
+        return {**self.accepted[key], **named}  # only an opted-in receipt names its store
 
     def get_thread(self, thread_id): return copy.deepcopy(self.threads[thread_id])
     def get_run(self, run_id, **kwargs):

@@ -21,6 +21,13 @@ log = logging.getLogger(__name__)
 # Full Accounts status classifies its own roster read with the same function.
 ACCOUNT_MODEL_UNSUPPORTED = "account_model_unsupported"
 
+# ``engine_facts._control_clause`` reads the newest ``claudexor_passive_quota_read`` record in
+# server.log. Visible views poll every 5 s, so only a change of verdict or error, and otherwise one
+# read a minute, is that dated INFO sample; the polls between log the same line at DEBUG, which
+# server.log (INFO) does not keep.
+_SAMPLE_SEC = 60.0
+_last_sample: tuple[float, str] | None = None
+
 
 def _elapsed_ms(start: float) -> int:
     return min(2_147_483_647, max(0, round((time.monotonic() - start) * 1000)))
@@ -92,6 +99,7 @@ def _quota_payload(*, model: str | None = None, request_kind: str = "text") -> d
     from ouroboros.claudexor_daemon import owned_config_dir
     from ouroboros.gateways.claudexor import ClaudexorGateway, discover_daemon_at
 
+    global _last_sample
     start = time.monotonic()
     payload: dict[str, Any] = {
         "view": "quota",
@@ -136,6 +144,11 @@ def _quota_payload(*, model: str | None = None, request_kind: str = "text") -> d
     if "discovery" not in payload["timings_ms"]:
         payload["timings_ms"]["discovery"] = _elapsed_ms(discovery_start)
     payload["timings_ms"]["total"] = _elapsed_ms(start)
-    log.info("claudexor_passive_quota_read reads=%s read_errors=%s timings_ms=%s",
-             payload["reads"], payload["read_errors"], payload["timings_ms"])
+    verdict, now = repr((payload["reads"], payload["read_errors"])), time.monotonic()
+    sample = _last_sample is None or _last_sample[1] != verdict or now - _last_sample[0] >= _SAMPLE_SEC
+    if sample:
+        _last_sample = (now, verdict)
+    log.log(logging.INFO if sample else logging.DEBUG,
+            "claudexor_passive_quota_read reads=%s read_errors=%s timings_ms=%s",
+            payload["reads"], payload["read_errors"], payload["timings_ms"])
     return payload

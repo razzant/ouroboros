@@ -30,13 +30,13 @@ def _settle(ctx, harness, request, seat, text, *, roster=2):
 
 # ---------------------------------------------------------------- C1: a quoted object in a preamble is not the reply
 
-def test_a_reply_behind_a_quoted_done_when_row_keeps_its_objection_and_holds(harness):
+def test_a_reply_behind_a_quoted_done_when_row_keeps_its_objection(harness):
     preamble = ('I re-read the bar:\n```json\n{"id": "c1", "claim": "exactly 5 slides", "support": "count them"}\n```\n'
                 + _reply("Too thin.", objections=[("o1", "no story arc")]))
     harness.install({"s1": preamble, "s2": CLEAN, "s3": CLEAN})
     ctx = harness.make_ctx()
     text, result = _write(ctx, ask="council")
-    assert result.meta["plan_holding"] == 1 and "s1 / o1" in text and "HELD" in text
+    assert result.meta["plan_open_objections"] == 1 and "s1 / o1" in text and "nothing holds it" in text
     s1 = next(p for p in _record(harness)["asks"][0]["participants"] if p["seat_id"] == "s1")
     assert s1["status"] == "answered" and s1["reply"]["prose"] == "Too thin." and s1["reply"]["objections"] == [{"id": "o1", "text": "no story arc"}]
     assert any("s1 answered" in line or "m/a answered — 1 objection" in line for line in harness.progress)
@@ -112,12 +112,12 @@ def test_the_tools_read_and_the_gate_agree_that_an_unreadable_earlier_state_hold
     text, _result = _write(ctx)
     assert "HELD: this task's earlier plan-review state cannot be read" in text and "PLAN_REVIEW_STATE_INVALID" in text
     assert "Nothing holds your final answer." not in text
-    assert oh.plan_gate_decision(ctx, {}, enforcement="blocking")["status"] == "unreadable"
+    assert oh.plan_gate_decision(ctx, {})["status"] == "unreadable"
     # The other direction: a readable, closed earlier state holds nothing, in the tool and at the gate alike.
     seed_result(harness.drive, "task-2", {"task_id": "task-2", "status": "running", "plan_review_state": _v2(closed=True)})
     other = harness.make_ctx(task_id="task-2")
     text, _result = _write(other)
-    assert "Nothing holds your final answer." in text and oh.plan_gate_decision(other, {}, enforcement="blocking")["status"] == "clear"
+    assert "Nothing holds your final answer." in text and oh.plan_gate_decision(other, {})["status"] == "clear"
 
 
 # ---------------------------------------------------------------- A3 / Fable 9: the owner's progress line speaks typed facts

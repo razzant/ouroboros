@@ -64,12 +64,14 @@ def _run_loop(
 
     holds = iter(review_holds or [])
 
-    def fake_review_at_delivery(_ctx, _content, _llm_trace, hold):
-        # The result review's host step at delivery: a hold shows its outcome to the
+    def fake_review_at_delivery(ctx, _content, _llm_trace, hold):
+        # The result review's host step at delivery: a blocking hold shows its outcome to the
         # author and retains the first answer, so the next complete answer is selected
-        # explicitly through the real completion door.
+        # explicitly through the real completion door (a non-blocking outcome shown once leaves
+        # the next prose fresh: tests/test_completion_hold_observation.py).
         held = next(holds, False)
         if held:
+            ctx._completion_hold_cause = "blocking_refusal"
             hold("[Result review] The review's findings were shown before delivery.")
         return held
 
@@ -94,13 +96,16 @@ def _run_loop(
     return result, usage, trace, calls
 
 
-def test_handoff_service_notices_cannot_erase_full_candidate(tmp_path, monkeypatch):
+def test_service_notices_after_a_review_hold_cannot_erase_full_candidate(tmp_path, monkeypatch):
+    # A hold that arms selection (here a blocking result review) keeps the full answer against later prose. One-shot
+    # finish facts (children's results, the pre-delivery notice) leave the next prose fresh instead
+    # (tests/test_completion_hold_observation.py).
     from ouroboros.outcomes import derive_loop_outcome
 
     original = "Complete original answer with all child conclusions."
     result, usage, trace, calls = _run_loop(tmp_path, monkeypatch,
         [original, "service notice: child status refreshed", "service notice again", _finish_response(original, by_hash=True)],
-        child=True, bind_child_before_second=True)
+        review_holds=[True])
     assert result == original and len(calls) == 4
     assert trace["delivery_candidate"]["content_sha256"] == hashlib.sha256(original.encode()).hexdigest()
     assert trace["delivery_candidate"]["degraded"] is False
@@ -114,11 +119,13 @@ def test_mutating_tool_acknowledgements_cannot_erase_full_candidate(tmp_path, mo
     original = "Complete original answer with all implementation and verification details."
     write = {"content": None, "tool_calls": [{"id": "write-1", "type": "function", "function": {
         "name": "write_file", "arguments": json.dumps({"path": "effect.txt", "content": "durable tool effect"})}}]}
+    selection = _finish_response(original, by_hash=True)
+    # Selection first gets the pre-delivery notice, then the old evidence notice; informed reselection delivers.
     result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch,
-        [original, write, "Review completed.", "Everything is done now.", _finish_response(original, by_hash=True)],
+        [original, write, "Review completed.", "Everything is done now.", selection, selection, selection],
         review_holds=[True, False])
     assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "durable tool effect"
-    assert result == original and len(calls) == 5
+    assert result == original and len(calls) == 7
     assert trace["delivery_candidate"]["degraded"] is False
     assert trace["delivery_candidate"]["evidence_current"] is True
     assert trace["delivery_candidate"]["acceptance_binding"]["authoritative"] is False
@@ -775,7 +782,7 @@ def test_held_complete_prose_can_be_selected_by_its_exact_hash(tmp_path, monkeyp
     invalid_json = json.dumps({"delivery_control": "finalize"})
     result, usage, trace, calls = _run_loop(tmp_path, monkeypatch,
         [original, invalid_json, final_prose, _finish_response(final_prose, by_hash=True)],
-        child=True, bind_child_before_second=True)
+        review_holds=[True])
     assert len(calls) == 4 and result == final_prose
     assert trace["delivery_candidate"]["degraded"] is False
     assert any(row.get("role") == "assistant" and row.get("content") == final_prose for row in calls[-1])
@@ -791,7 +798,7 @@ def test_short_and_long_held_prose_never_select_themselves(tmp_path, monkeypatch
     progress = []
     result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch,
         [original, interim, interim, _finish_response(original, by_hash=True)],
-        child=True, bind_child_before_second=True, progress=progress)
+        review_holds=[True], progress=progress)
     assert len(calls) == 4 and result == original
     assert trace["delivery_candidate"]["degraded"] is False
     assert sum(row.get("role") == "assistant" and row.get("content") == interim for row in calls[-1]) == 2

@@ -1,18 +1,16 @@
 """Public-consumer regressions for syntax evidence, scope, pages and fresh joins."""
 import json
-import subprocess
 
 import pytest
 
 from ouroboros.tools.query_code import _query_code
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._workspace_git import git_repository
 
 
 @pytest.fixture
 def project(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True)
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data")
     return repo, ctx
 
@@ -350,9 +348,7 @@ def test_name_field_candidate_not_universal_definition(project):
 
 def test_nested_git_symbols_and_digest_include_real_files(project):
     repo, ctx = project
-    nested = repo / "foreign"
-    nested.mkdir()
-    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    git_repository(repo / "foreign", unborn=True)
     write(repo, "foreign/.gitignore", "hidden.py\n")
     write(repo, "foreign/mod.py", "def visible(): pass\n")
     write(repo, "foreign/hidden.py", "def invisible(): pass\n")

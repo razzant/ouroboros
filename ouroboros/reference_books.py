@@ -11,13 +11,15 @@ stamps, and selected views carry physical refs separately.
 from __future__ import annotations
 
 import posixpath
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
 from ouroboros.markdown_source import MarkdownSource, SourceRange, parse_markdown_source
-from ouroboros.repo_remotes import OFFICIAL_REPO
+from ouroboros.repo_remotes import OFFICIAL_REPO, remote_fetch_urls
 from ouroboros.update_channels import UPDATE_CHANNEL_BRANCHES
 
 
@@ -144,6 +146,21 @@ def _member_paths(entrypoint: MarkdownSource, book_id: str) -> tuple[str, ...] |
     return tuple(paths)
 
 
+@lru_cache(maxsize=64)
+def _book_source(raw: bytes, source_path: str) -> MarkdownSource:
+    """Bounded parser reuse by exact bytes AND physical path, never mtime or TTL.
+
+    Only this book loader uses the memo; mutable YAML metadata is detached below before
+    a source escapes. Every load still reads current bytes and current membership.
+    """
+    return parse_markdown_source(raw, source_path)
+
+
+def _read_book_source(reader: Callable[[str], bytes], path: str) -> MarkdownSource:
+    source = _book_source(reader(path), path)
+    return replace(source, frontmatter=deepcopy(source.frontmatter)) if source.frontmatter is not None else source
+
+
 def load_reference_book(
     repo_root: Path,
     book_id: str,
@@ -154,9 +171,9 @@ def load_reference_book(
         raise ValueError(f"unknown reference book: {book_id}")
     reader = read_bytes if read_bytes is not None else lambda path: (Path(repo_root) / path).read_bytes()
     entry_path = BOOK_ENTRYPOINTS[book_id]
-    entrypoint = parse_markdown_source(reader(entry_path), entry_path)
+    entrypoint = _read_book_source(reader, entry_path)
     members = _member_paths(entrypoint, book_id)
-    chapters = tuple(parse_markdown_source(reader(path), path) for path in members or ())
+    chapters = tuple(_read_book_source(reader, path) for path in members or ())
     book = ReferenceBook(book_id, entrypoint, chapters, members is None)
     problems = validate_reference_book(book)
     if problems:
@@ -343,11 +360,22 @@ class BookBalance:
         return max(0, delta or 0)
 
 
+_OFFLINE_GIT = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
+
+
 def _git_bytes(root: Path, *args: str) -> bytes | None:
+    """stdout of one git read, ``None`` when it fails; a measurement fetches nothing.
+
+    A partial clone fetches an object it lacks once a read needs it. Here that read fails instead
+    and its measure stays unknown: Git 2.44+ starts no fetch (``GIT_NO_LAZY_FETCH``), and the fetch
+    of an older Git stops before it opens a transport, because the empty ``GIT_ALLOW_PROTOCOL`` allow-list denies every protocol.
+    """
+    import os
     import subprocess
 
     try:
-        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30)
+        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30,
+                              env={**os.environ, **_OFFLINE_GIT})
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
@@ -374,10 +402,8 @@ def _official_contribution_target(root: Path) -> str:
     Git supplies shared remotes/refs for linked worktrees too. If multiple official
     remotes have this ref, the first by name wins and is shown in every measurement.
     """
-    remotes = (_git_bytes(root, "remote", "-v") or b"").decode("utf-8", errors="replace")
-    for row in sorted(remotes.splitlines()):
-        name, _, location = row.partition("\t")
-        if location.endswith(" (fetch)") and _official_fetch_url(location[:-8]):
+    for name, url in remote_fetch_urls(lambda *args: _git_bytes(root, *args)):
+        if _official_fetch_url(url):
             ref = f"refs/remotes/{name}/{UPDATE_CHANNEL_BRANCHES['development']}"
             if _git_bytes(root, "rev-parse", "--verify", f"{ref}^{{commit}}"):
                 return ref

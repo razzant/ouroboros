@@ -17,6 +17,9 @@ import { downloadViaHostBridge, downloadBlobViaHostBridge, openExternalViaHostBr
 export const WIDGET_FRAME_DEFAULT_HEIGHT = 320;
 export const WIDGET_FRAME_MAX_HEIGHT = 8192;
 export const WIDGET_FRAME_BORDER_RESERVE = 2;
+// A Widgets card's frame has no border (style.css `#page-widgets .widgets-frame`): the content height it reports is
+// its height. Any reserve there would feed back: content that follows its frame's viewport would grow each report.
+export const WIDGET_BOARD_FRAME_BORDER_RESERVE = 0;
 // Faults one mount sends to the host log (POST /api/widgets/fault); the frame's own cap is not a bound, since the
 // widget's code can read the nonce and post directly. The kinds and clips are the frame's (widget_frame.js).
 export const WIDGET_FAULT_REPORTS_PER_MOUNT = 10;
@@ -78,6 +81,38 @@ function frameMaxHeight(render) {
     return boundedNumber(render?.max_height, WIDGET_FRAME_MAX_HEIGHT, WIDGET_FRAME_DEFAULT_HEIGHT, WIDGET_FRAME_MAX_HEIGHT);
 }
 
+/** A module frame that sizes itself: no declared `height`. */
+export function isAutoHeightFrame(render) {
+    return render?.kind === 'module' && (render.height === undefined || render.height === null);
+}
+
+/**
+ * A framed Widgets card's frame (a frame in a message has its own policy, card_frames.js): `{auto, height, ceiling,
+ * floor, hidden, expandable}`. `h` is the owner's height of the content (0: none), `expanded` the card's Show all,
+ * `natural` the content's height as the frame last reported it (its frame has no border; 0 before its first report).
+ * The owner's height is the frame's height, taller or shorter than the content, for every frame. Without one (or
+ * shown all) a self-sizing module is as tall as its content under the author's max_height; before it reports it
+ * stands at the 320 px loading height; a fixed module or route frame takes its declared height. `hidden` is the
+ * content `h` keeps out of view that Show all would bring back (px; a fixed frame's content is not known: 0),
+ * `expandable` whether Show all has more to show.
+ */
+export function boardFrameGeometry(render, { h = 0, expanded = false, natural = 0 } = {}) {
+    const owned = h > 0 && !expanded;
+    if (!isAutoHeightFrame(render)) {
+        const declared = frameHeight(render);
+        const height = owned ? h : declared;
+        return { auto: false, height, ceiling: height, floor: height, hidden: 0, expandable: h > 0 && h < declared };
+    }
+    const authorCeiling = frameMaxHeight(render);
+    if (owned) {
+        const hidden = natural > 0 ? Math.max(0, Math.min(authorCeiling, natural) - h) : 0;
+        return { auto: true, height: h, ceiling: h, floor: 0, hidden, expandable: hidden > 0 };
+    }
+    const height = Math.min(authorCeiling, natural > 0 ? natural : WIDGET_FRAME_DEFAULT_HEIGHT);
+    const hidden = h > 0 && natural > 0 ? Math.max(0, Math.min(authorCeiling, natural) - h) : 0;
+    return { auto: true, height, ceiling: authorCeiling, floor: 0, hidden, expandable: hidden > 0 };
+}
+
 // The declared frame height is the one measured value the frame (and the
 // stopped card's facade standing in for it) carries as a custom property.
 export function setFrameHeight(node, height) {
@@ -112,7 +147,16 @@ async function openRouteLease(tab, mountSignal) {
     }
 }
 
-export async function mountRouteIframeWidget(mount, tab, render, mountSignal = null, inline = null, messageHandlers = null) {
+// `board` is a Widgets card's frame policy (absent for a frame in a message): `starting()` records the start in the
+// ledger (holds.js) at the moment the frame gets its document, never during the downloads before it; `geometry()`
+// answers boardFrameGeometry for the card as it is now; `measured(natural, held, at)` hears each content height the
+// frame reports, whether its reporter stopped there (`held`, the extra its document keeps asking for) and the frame's
+// height when the report came (`at`); `held()` answers
+// that remembered extra for a new document; `attach(refit)` hands the board this mount's refit, which re-applies
+// `geometry()` after the owner changes the card's height or Show all (`refit({ fresh: true })` after Natural height
+// or Reset, so its reporter measures anew from the frame now applied) and returns the detach.
+export async function mountRouteIframeWidget(mount, tab, render, mountSignal = null, inline = null, messageHandlers = null,
+    board = null) {
     const route = cleanExtensionRoute(render.route);
     if (!route) throw new Error('invalid widget iframe route');
     // The skill's own page in a sandboxed opaque-origin frame with the same
@@ -128,11 +172,12 @@ export async function mountRouteIframeWidget(mount, tab, render, mountSignal = n
     const iframe = createWidgetFrame();
     iframe.referrerPolicy = 'no-referrer';
     mount.replaceChildren(iframe);
-    setFrameHeight(iframe, frameHeight(render));
+    setFrameHeight(iframe, board ? board.geometry().height : frameHeight(render));
     const dispose = attachFrameBridge(iframe, mount, tab, {
         accepts: (hello) => hello.lease === lease.token, rehello: true, resourceBase: lease.baseUrl,
-        inline, messageHandlers, lease,
+        inline, messageHandlers, lease, board,
     });
+    board?.starting();
     iframe.src = `${lease.baseUrl}${route}`;
     return dispose;
 }
@@ -140,9 +185,10 @@ export async function mountRouteIframeWidget(mount, tab, render, mountSignal = n
 // `messageHandlers` is the page's Set of WebSocket message handlers (fanned from
 // `ctx.ws.on('message')`); the frame's event subscription registers into it. `inline` is a
 // frame shown in a message instead (a living card, card_frames.js): `{fit(contentHeight),
-// fault(text)}` — the message's size policy replaces the board's floor and declared height,
-// and a fault is the card's to show.
-export async function mountModuleWidget(mount, tab, render, mountSignal = null, messageHandlers = null, inline = null) {
+// fault(text)}` — the message's size policy replaces the board's, and a fault is the card's
+// to show. `board`: as for mountRouteIframeWidget.
+export async function mountModuleWidget(mount, tab, render, mountSignal = null, messageHandlers = null, inline = null,
+    board = null) {
     // The parent owns API I/O and WebSocket forwarding. Native imports and
     // passive resources use the policy above; neither exposes the parent DOM
     // or session to the opaque frame.
@@ -198,30 +244,40 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
     const maxHeight = frameMaxHeight(render);
     const initialTheme = resolvedTheme();
     const bridge = moduleBridgeScript(nonce, `${window.location.origin}${expectedPrefix}`, initialTheme, assetBase, resourceBase);
-    const resizeBridge = autoHeight
-        ? moduleResizeScript(WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE)
-        : '';
+    // A Widgets card bakes its frame's floor and ceiling as they are now (the owner's height is the ceiling) and
+    // whether its reporter had stopped at this height; a later change, and one made during the downloads above,
+    // reaches the frame once it says hello.
+    const placed = board ? board.geometry() : null;
+    const resizeBridge = !autoHeight ? '' : placed
+        ? moduleResizeScript(placed.floor, placed.ceiling, WIDGET_BOARD_FRAME_BORDER_RESERVE, { wholeDocument: true, heldExcess: board.held() })
+        : moduleResizeScript(WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE);
     // The initial theme is carried inside the bridge bootstrap, not as a
     // document attribute: a module must explicitly subscribe before it gets
     // appearance data or changes its own palette.
     const base = assetBase ? `<meta name="referrer" content="no-referrer"><base href="${escapeHtml(assetBase)}">` : '';
+    // The entry, then the mark that it has run, from which a board frame's reporter measures (widget_frame.js): after a
+    // classic entry's own script, after a module entry has evaluated (top-level await included, as the importing module
+    // waits for it). What the widget draws later is the root's observer's to report.
+    const entryRan = 'window.__ouroWidgetEntryRan?.();';
+    const entryImport = escapeScript(JSON.stringify(assetBase ? new URL(render.entry, assetBase).href : ''));
     const entryScript = assetBase
-        ? `<script type="module" crossorigin="anonymous" src="${escapeHtml(new URL(render.entry, assetBase).href)}"></script>`
-        : `<script>${escapeScript(moduleSource)}</script>`;
+        ? `<script type="module" crossorigin="anonymous">import ${entryImport}; ${entryRan}</script>`
+        : `<script>${escapeScript(moduleSource)}</script><script>${entryRan}</script>`;
     const srcdoc = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}">${base}</head><body><div id="root"></div><script>${bridge}</script><script>${resizeBridge}</script>${entryScript}</body></html>`;
     // The document goes in through the `srcdoc` property (no attribute
     // escaping round-trip of a module-sized payload); the frame carries the
     // shared sandbox / permissions set — nothing that re-exposes the SPA origin.
     const iframe = createWidgetFrame();
     if (assetBase) iframe.referrerPolicy = 'no-referrer';
+    board?.starting();
     iframe.srcdoc = srcdoc;
     mount.replaceChildren(iframe);
-    const appliedHeight = frameHeight(render);
+    const appliedHeight = placed ? placed.height : frameHeight(render);
     if (inline) inline.fit(autoHeight ? 0 : appliedHeight);
     else setFrameHeight(iframe, appliedHeight);
     return attachFrameBridge(iframe, mount, tab, {
         accepts: (hello) => hello.nonce === nonce, nonce, assetBase, resourceBase, autoHeight, maxHeight,
-        appliedHeight, inline, messageHandlers, lease, leaves: true,
+        appliedHeight, inline, messageHandlers, lease, leaves: true, board, baked: placed,
         leaseEnded: esm ? 'Widget file access ended' : 'Widget access ended',
     });
 }
@@ -235,11 +291,38 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
 function attachFrameBridge(iframe, mount, tab, {
     accepts, rehello = false, nonce = '', assetBase = '', resourceBase = '', autoHeight = false,
     maxHeight = WIDGET_FRAME_MAX_HEIGHT, appliedHeight: initialHeight = 0, inline = null, messageHandlers = null,
-    lease = null, leaves = false, leaseEnded = 'Widget access ended',
+    lease = null, leaves = false, leaseEnded = 'Widget access ended', board = null, baked = null,
 }) {
     const expectedPrefix = extensionRoutePrefix(tab.skill);
     const wsPrefix = String(tab.ws_prefix || '').trim();
     let appliedHeight = initialHeight;
+    // A Widgets card's frame follows the board's geometry: the host is the one writer of its height, and a
+    // self-sizing module hears its floor and ceiling (`ouro-widget-viewport`), first baked into its document, then
+    // whenever they change. Messages travel on the port alone, so one that changed before the hello is sent with it.
+    // After Natural height or Reset (`fresh`) the message also names the frame height applied now and the number of
+    // that fresh fit: its reporter measures anew once its window has that height and carries the number from then on,
+    // so a report still on its way from the old window (an older number) is ignored rather than taken as the fit.
+    let sentViewport = baked ? `${baked.floor}/${baked.ceiling}` : '';
+    let freshFits = 0;
+    const refit = ({ fresh = false } = {}) => {
+        if (disposed || !board) return;
+        const geometry = board.geometry();
+        const content = Number(iframe.dataset.widgetContentHeight);
+        if (autoHeight && content > 0) {
+            iframe.dataset.widgetFrameCapped = String(content + WIDGET_BOARD_FRAME_BORDER_RESERVE >= geometry.ceiling);
+        }
+        if (geometry.height !== appliedHeight) {
+            appliedHeight = geometry.height;
+            setFrameHeight(iframe, appliedHeight);
+        }
+        const viewport = `${geometry.floor}/${geometry.ceiling}`;
+        if (autoHeight && port && (fresh || viewport !== sentViewport)) {
+            sentViewport = viewport;
+            if (fresh) freshFits += 1;
+            post({ type: 'ouro-widget-viewport', floor: geometry.floor, ceiling: geometry.ceiling,
+                ...(fresh ? { frame: geometry.height, fit: freshFits } : {}) });
+        }
+    };
     // The fault a card shows also reaches the host's event log once per kind+message, under this mount's own
     // identity (captured now, never the frame's words). Best effort: no retry, and a failed report changes nothing.
     const faultIdentity = { skill: String(tab.skill || ''), tab_id: String(tab.tab_id || ''),
@@ -427,6 +510,13 @@ function attachFrameBridge(iframe, mount, tab, {
             const measured = Number(msg.height);
             if (!Number.isFinite(measured) || measured <= 0) return;
             if (inline) { inline.fit(measured + WIDGET_FRAME_BORDER_RESERVE); return; }
+            if (board) {
+                if ((Number(msg.fit) || 0) < freshFits) return;
+                iframe.dataset.widgetContentHeight = String(measured);
+                board.measured(measured + WIDGET_BOARD_FRAME_BORDER_RESERVE, Number(msg.held) > 0 ? Number(msg.held) : 0, appliedHeight);
+                refit();
+                return;
+            }
             const nextHeight = Math.min(maxHeight, Math.max(WIDGET_FRAME_DEFAULT_HEIGHT, measured + WIDGET_FRAME_BORDER_RESERVE));
             // Stamped before the early return: that return fires exactly when the
             // frame is pinned at max_height, which is the one case these two
@@ -495,8 +585,10 @@ function attachFrameBridge(iframe, mount, tab, {
         port.onmessage = onMessage;
         helloSinceLoad = true;
         post({ type: 'ouro-widget-ready', routeBase: `${window.location.origin}${expectedPrefix}` });
+        refit();
     };
     window.addEventListener('message', onHello);
+    const detachBoard = board ? board.attach(refit) : () => {};
     // Ordered stop with acknowledgement: post the dispose message, keep
     // answering bridged fetches the child's hooks issue meanwhile, and tear down
     // on `ouro-widget-disposed` or after WIDGET_DISPOSE_ACK_TIMEOUT_MS —
@@ -510,6 +602,7 @@ function attachFrameBridge(iframe, mount, tab, {
                 if (disposed) return;
                 disposed = true;
                 clearTimeout(ackTimer);
+                detachBoard();
                 releaseLease();
                 stopThemeSubscription();
                 retireDocument();

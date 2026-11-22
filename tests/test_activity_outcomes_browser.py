@@ -160,7 +160,7 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                     expect(failed).to_have_attribute("aria-label", "Task status: Failed, Finalizing…")
                     expect(row("failed-root").locator(".chat-live-phase-secondary")).to_have_text("Finalizing…")
                     assert row("failed-root").inner_text().count("Finalizing…") == 1
-                    expect(row("failed-root")).to_contain_text("1 helper still working")
+                    expect(row("failed-root")).to_contain_text("1 subagent still working")
                     expect(row("done-root").locator("[data-activity-phase]")).to_have_text("Done")
                     # The queue's own wait outranks the census's generic finalization.
                     expect(row("sleep-root").locator(".chat-live-phase-secondary")).to_have_text("Waiting")

@@ -4,12 +4,13 @@ The supervisor has one consumer thread (the ``server.py`` loop) and one process-
 queue lock Q (``supervisor.queue._queue_lock``). These windows let the one compact
 ``supervisor_load`` row per busy minute (``ouroboros/server_liveness.py``) say where the
 consumer's time went: per event type, how many events its handlers served and their total
-and longest service time; per bus lane, the worst producer-stamp lag the drain saw; for Q,
+and longest service time; per bus lane, the worst lag the drain saw (an event's wait from the bus's put
+stamp to its service, never a producer's ``ts``); for Q,
 how long its outermost acquisitions waited and held it, from which code site the window's
 longest hold came, and per code site the count, total and longest hold (``hold_by_site``: the
 sites are the lexical acquisitions of Q, so the table is bounded by the code, and it is what
 says whether a minute's hold time is one long barrier or many ordinary holds slowed by the
-machine). Each window is a measurement only: nothing here touches disk,
+machine; ``machine_load`` adds the load averages and cores). Each window is a measurement only: nothing here touches disk,
 a store or the event bus, decides anything or can raise into the code it measures, and its
 one reader drains it (returns it and starts the next). Stdlib and the event taxonomy only,
 so the queue module builds Q from it at import.
@@ -207,6 +208,16 @@ class ConsumerWindow:
         }
         self.started, self._handlers, self._lag = now, {}, {}
         return facts
+
+
+def machine_load() -> Dict[str, Any]:
+    """The machine this minute, so a slow minute reads against what else ran: the 1-, 5- and 15-minute load
+    averages (None where the OS keeps none, as on Windows: unknown, never 0) and the logical CPU count."""
+    try:
+        load = [round(value, 2) for value in os.getloadavg()]
+    except (AttributeError, OSError):
+        load = None
+    return {"load_avg": load, "cpus": os.cpu_count()}
 
 
 CONSUMER = ConsumerWindow()

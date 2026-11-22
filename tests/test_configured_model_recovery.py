@@ -131,13 +131,27 @@ def test_live_hold_takes_over_an_existing_transport_episode(tmp_path, monkeypatc
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", observed)
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *a: False)
     monkeypatch.setattr(delegate_hold, "_leaf_probe_live", lambda *a: True)
-    monkeypatch.setattr(delegate_hold, "supervised_wait", lambda *a: delegate_result({
-        "status": "succeeded", "run_id": "run-leaf", "supervision_wake_id": "wake-after-hold"}))
+
+    def wake_after_hold(*_a, **_k):
+        # The wake that ends the live hold has read the leaf's end: the body records it, its money still owed.
+        from ouroboros.delegate_collection import observe_run
+        from ouroboros.delegate_custody_current import run
+
+        observe_run(tmp_path, run(tmp_path, "run-leaf"), {"summary": {"runId": "run-leaf", "state": "succeeded"},
+                                                          "lastSeq": 2})
+        return delegate_result({"status": "succeeded", "run_id": "run-leaf",
+                                "supervision_wake_id": "wake-after-hold"})
+
+    monkeypatch.setattr(delegate_hold, "hold_wake", wake_after_hold)
     monkeypatch.setattr(delegate_hold, "acknowledge_pending_wake", lambda *a, **kw: True)
     monkeypatch.setattr(custody, "release_task_runs", lambda *a: None)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     result, usage, _trace = loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
     assert result == "integrated" and len(calls) == 3 and probes == [1]
+    from ouroboros.delegate_custody_current import run
+
+    leaf = run(tmp_path, "run-leaf")
+    assert leaf.terminal_state == "succeeded" and not leaf.settled, "the first finish stands while the money is owed"
     assert sum("NEW physical model attempt" in str(row.get("content")) for row in snapshots[-1]) == 1
     assert any("[DELEGATED LEAF WAKE" in str(row.get("content")) for row in snapshots[-1])
     events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]

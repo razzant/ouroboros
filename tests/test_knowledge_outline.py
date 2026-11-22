@@ -54,6 +54,29 @@ def test_the_outline_keeps_every_active_note_and_the_summaries_of_people(tmp_pat
     assert len(outline) < len(whole)
 
 
+def test_a_helper_start_renders_the_same_outline_and_no_whole_index(tmp_path, monkeypatch):
+    """A helper starts with the outline alone (``context_sections.helper_navigation_sections``): the same outline the
+    integrating view carries, without rendering the whole index it would discard; the integrating view still does."""
+    from ouroboros import knowledge
+    from ouroboros.context_sections import helper_navigation_sections, knowledge_navigation_sections
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    _shelf(tmp_path)
+    _whole, outline = knowledge_index_views(resolve_knowledge_address(tmp_path, "overview", "global"))
+    rendered, real = [], knowledge.render_knowledge_index
+
+    def render(*args, **kwargs):
+        rendered.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge, "render_knowledge_index", render)
+    with measured_sections():  # a helper's build names this span (the integrating one, ``knowledge.navigation``)
+        assert helper_navigation_sections(tmp_path) == ["## Knowledge outline\n\n" + outline] and not rendered
+        assert "knowledge_outline" in section_spans()["sections_ms"]
+    [section] = knowledge_navigation_sections(tmp_path)
+    assert rendered and section.operative_view.endswith(outline)
+
+
 def test_a_group_or_a_topic_lists_with_its_summaries(tmp_path):
     _shelf(tmp_path)
     address = resolve_knowledge_address(tmp_path, "overview", "global")
@@ -65,7 +88,9 @@ def test_a_group_or_a_topic_lists_with_its_summaries(tmp_path):
 
 
 @pytest.mark.parametrize("kind,kept", [("person", True), ("Person", True), (" PERSON ", True),
-                                        ("personal", False), ("note", False)])
+                                        ("person-note", True), ("Person_Context", True), ("person note", True),
+                                        ("person\tcontext", True), ("person\u00a0note", True),
+                                        ("personal", False), ("personnel", False), ("note person", False), ("note", False)])
 def test_person_summary_survives_case_and_whitespace_in_authored_yaml(tmp_path, kind, kept):
     import json
 

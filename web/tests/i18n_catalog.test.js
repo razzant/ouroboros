@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { applyPayload, setMissTransport, CODE_PREFIX } from '../modules/i18n.js';
-import { taskPresentation, taskReasonPhrase } from '../modules/log_events.js';
+import { taskPresentation, taskReasonDetail, taskReasonPhrase, summarizeChatLiveEvent } from '../modules/log_events.js';
 import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
 import { questionPresentation } from '../modules/question_presentation.js';
 import { acceptanceIncidentClauses } from '../modules/acceptance_incident_presentation.js';
@@ -81,6 +81,7 @@ test('in English every catalog reading is the source text and matches the twin f
     assert.equal(en.yesterday.short, 'Yesterday, 10:05');
     assert.equal(en.older.short, 'Jan 5, 10:00');
     assert.equal(en.older.full, 'Jan 5, 2026 at 10:00');
+    assert.equal(en.older.exact, 'Jan 5, 2026 at 10:00:00', 'the full form to the second (a Logs time\'s tooltip)');
 });
 
 test('an install language reads the same tables by code; what the memory lacks stays English', () => {
@@ -109,9 +110,21 @@ test('an install language reads the same tables by code; what the memory lacks s
     assert.equal(ru.yesterday.short, 'Вчера, 10:05');
     assert.equal(ru.older.short, `${new Intl.DateTimeFormat('ru', { month: 'short' }).format(new Date('2026-01-05T10:00:00'))} 5, 10:00`);
     assert.ok(ru.older.full.includes(' 2026 в 10:00'));
+    assert.ok(ru.older.exact.endsWith(' 2026 в 10:00:00'));
     // Switching back restores every reading byte for byte.
     applyPayload(EN);
     assert.equal(JSON.stringify(englishReadings()), before);
+});
+
+test('an earlier stop translates its template and typed cause separately', t => {
+    t.after(() => applyPayload(EN));
+    applyPayload({ ...RU, entries: { ...RU.entries,
+        'Earlier recorded stop: {cause}': { text: 'Предыдущая остановка: {cause}' },
+        [CODE_PREFIX + 'task.cause.budget_exhausted']: { text: 'Бюджет исчерпан' },
+    } });
+    assert.equal(taskReasonDetail({ status: 'cancelled', reason_code: 'budget_exhausted',
+        outcome_axes: { execution: { reason_code: 'cancelled', earlier_stop: 'budget_exhausted' } },
+    }), 'Предыдущая остановка: Бюджет исчерпан.');
 });
 
 test('the raw cause table still works as the presenter lookup for callers outside the seam', () => {
@@ -131,4 +144,44 @@ test('a shortened cancel reason keeps the space before its preview note in every
     const russian = cancelCauseClauses(origin, { task_id: 't1' })[1];
     assert.equal(russian, 'x'.repeat(159) + '… (начало; полная причина хранится в задаче)');
     applyPayload(EN);
+});
+
+test('a pinned translation kept under an old configured-actor code never reaches the corrected sentence', () => {
+    const OLD = 'Ни один сеанс не удался; ответ пришёл без него.';
+    const record = { status: 'completed', reason_code: 'configured_actor_incomplete', outcome_axes: {
+        execution: { status: 'degraded', reason_code: 'configured_actor_incomplete' }, objective: { status: 'degraded' }, review: { status: 'skipped' } } };
+    applyPayload({ ...RU, entries: { ...RU.entries,
+        [CODE_PREFIX + 'task.cause.configured_actor_incomplete']: { text: OLD, provenance: 'owner' },
+        [CODE_PREFIX + 'task.cause.configured_actor_unknown']: { text: OLD, provenance: 'owner' } } });
+    for (const code of ['configured_actor_incomplete', 'configured_actor_unknown']) {
+        const detail = taskReasonDetail({ ...record, reason_code: code, outcome_axes: { ...record.outcome_axes, execution: { ...record.outcome_axes.execution, reason_code: code } } });
+        assert.equal(detail, TASK_CAUSE_PHRASES.configured_actor_first_undetermined, code);
+    }
+    applyPayload(EN);
+});
+
+test('a reason-only child frame never leaks the legacy configured-actor code into its details', () => {
+    applyPayload(EN);
+    for (const code of ['configured_actor_incomplete', 'configured_actor_unknown']) {
+        const view = summarizeChatLiveEvent({
+            type: 'send_message', is_progress: true, delegation_role: 'subagent', parent_task_id: 'root',
+            subagent_task_id: 'child', subagent_event: 'completed', status: 'completed', reason_code: code, result: 'Answer.' });
+        assert.ok(view.fullBody.includes(TASK_CAUSE_PHRASES.configured_actor_first_undetermined), code);
+        assert.doesNotMatch(view.fullBody, /configured_actor_(incomplete|unknown)/, code);
+    }
+});
+
+test('a settled child frame states an undescribed cause and its exact code in the install language', () => {
+    applyPayload({ ...RU, entries: { ...RU.entries,
+        [CODE_PREFIX + 'task.cause.reason_undescribed']: { text: 'У записанной причины ещё нет описания.' },
+        'Recorded reason: {code}': { text: 'Записанная причина: {code}' } } });
+    try {
+        const view = summarizeChatLiveEvent({
+            type: 'send_message', is_progress: true, delegation_role: 'subagent', parent_task_id: 'root',
+            subagent_task_id: 'child', subagent_event: 'failed', status: 'failed', reason_code: 'task_done_lifecycle_fault',
+            result: 'Answer.', outcome_axes: { execution: { status: 'failed', reason_code: 'task_done_lifecycle_fault' } } });
+        assert.ok(view.fullBody.endsWith('У записанной причины ещё нет описания.\n\nЗаписанная причина: task_done_lifecycle_fault'), view.fullBody);
+    } finally {
+        applyPayload(EN);
+    }
 });

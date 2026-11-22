@@ -11,33 +11,12 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from ouroboros import context_compaction as cc
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, bound_host_row
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
 from ouroboros.context_source_view import _EMERGENCY_LABELS
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+from tests._context_reclaim_fixtures import ASSISTANT, HOST, OWNER, _owner, _tool, _transcript
 from tests.test_context_reclaim_materializer import _request
 from tests.test_loop_compaction import _ctx, _failed_capture, _fit, _measure_cycle
-
-OWNER = ("Owner: keep the old API alive until the migration is verified. " * 20).strip()
-HOST = "[Context view receipt] status=applied " + "detail " * 400
-ASSISTANT = "I concluded the migration is safe because both code paths are covered. " * 30
-# _transcript() rows: 0 system, 1 assignment, 2-3 tool "one", 4 own prose, 5 owner words, 6 host prose, 7-8 tool "two"
-
-
-def _tool(call_id="read", text="exact evidence " * 400):
-    return [{"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {
-        "name": "read_file", "arguments": json.dumps({"path": f"{call_id}.py"})}}]},
-        {"role": "tool", "tool_call_id": call_id, "content": text}]
-
-
-def _owner(text):
-    """The owner's words as delivery types them (``context_budget.OWNER_WORDS_KIND``)."""
-    return {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": text}
-
-
-def _transcript():
-    return [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "Assignment: migrate the API."},
-            *_tool("one"), {"role": "assistant", "content": ASSISTANT}, _owner(OWNER),
-            {"role": "user", "content": HOST}, *_tool("two")]
 
 
 def _kinds(messages, units):
@@ -189,9 +168,12 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
         p.projection = lambda mode: SimpleNamespace(system_content_json=system, calibration_ratio=1.0)
         p.reproject_transcript = lambda messages, mode: [{"role": "system", "content": system}, *messages[1:]]
 
-        def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve,
-                                tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens):
+        def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve, admitted,
+                                tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens,
+                                reasoning_effort):
             assert measured_input_tokens is None  # this fixture has no prepared-input anchor
+            assert admitted is True  # a view under way is read at the line its own requests go out at
+            assert reasoning_effort == "high"  # the round's effort: the request shape its measurement counted
             seen.append({"window": window_tokens, "known": known_window, "mode": start_mode,
                          "messages": list(current_messages), "schemas": list(tool_schemas),
                          "reserve": output_reserve, "refused": refused_tokens})
@@ -266,10 +248,11 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
                  f"predicted free ~{free:,}", f"target room {room:,} (reply floor 65,536)",
                  "largest unit:2:3:", "own cost unknown",
                  "shared wallet $12.50 known headroom (unreserved; shared with other tasks)",
-                 "quota 3 of 10 this hour", "tariff unknown", "elapsed unknown (no recorded start)",
+                 "quota 3 of 10 this hour", "elapsed unknown (no recorded start)",
                  "no execution limit", "observed tool results 0 (0 errored)"):
         assert part in line, part
     assert "should" not in line and "compact" not in line.lower()  # facts, no advice
+    assert "tariff" not in line  # no rate is cached for this route: the slot says nothing, never a standing "unknown"
     assert append_context_facts(context) is False and len(context.messages) == len(before) + 1  # identical round/route/body/schema
     context.round_idx, context.accumulated_usage["cost"] = 2, 1.2345
     context.accumulated_usage["cost_final"] = False

@@ -1,12 +1,17 @@
 """Host-owned per-attempt terminal occurrence, separate from publication time.
 
-Only an executor's admitted live transition can observe an occurrence. Recovery
-and legacy records stay unknown. A trusted replica transfers a matching fact;
+An occurrence is observed by whoever performs the live transition: an executor ending
+its own attempt (``executor_terminal``), or the supervisor cancelling work it holds
+(``supervisor_cancel``: when it recorded the cancel, never the moment a process died).
+Recovery and legacy records stay unknown. A trusted replica transfers a matching fact;
 its receiver never becomes a new clock. No history scan or timestamp inference.
 """
 from __future__ import annotations
 
 from datetime import datetime
+
+SUPERVISOR_CANCEL = "supervisor_cancel"
+OBSERVED_SOURCES = ("executor_terminal", SUPERVISOR_CANCEL)
 
 
 def task_attempt_witness(row: dict) -> dict:
@@ -15,14 +20,53 @@ def task_attempt_witness(row: dict) -> dict:
             "metadata_attempt": metadata.get("attempt"), "metadata_task_attempt": metadata.get("task_attempt")}
 
 
+def execution_owner_attempt(task_id, owner) -> int | None:
+    """Read a host-stamped owner by exact task identity, not by lane or origin alone."""
+    if not task_id or not isinstance(owner, dict) or owner.get("task_id") != task_id:
+        return None
+    value = owner.get("task_attempt")
+    return value if type(value) is int and value >= 0 else None
+
+
+def source_task_attempt(task: dict, *, recovered: bool = False) -> int | None:
+    """Attempt of this producer's input, never the result current at publication."""
+    owner = task.get("execution_owner" if recovered else "_execution_owner")
+    value = task.get("task_attempt") if recovered else None
+    if value is None and owner is not None:
+        # A first direct turn has physical attempt 0 even when the queue tracks
+        # its first dispatch as 1. An unbound owner cannot disambiguate them.
+        return execution_owner_attempt(task.get("id") or task.get("task_id"), owner)
+    if value is None:
+        value = task.get("_attempt")
+    if value is None:
+        value = task.get("task_attempt")
+    return value if type(value) is int and value >= 0 else None
+
+
+def captured_task_attempt(task: dict, queue_attempt=None) -> int | None:
+    """Physical attempt of a captured queue actor; queue 1 is not necessarily executor 1."""
+    ordinal = task.get("_attempt") if queue_attempt is None else queue_attempt
+    owner = execution_owner_attempt(task.get("id") or task.get("task_id"), task.get("_execution_owner"))
+    if ordinal is None:
+        return owner
+    if type(ordinal) is not int or ordinal < 0:
+        return None
+    return 0 if ordinal == 1 and owner == 0 else ordinal
+
+
+def same_attempt_witness(left: dict, right) -> bool:
+    return isinstance(right, dict) and left.keys() == right.keys() and all(
+        value == right[key] and type(value) is type(right[key]) for key, value in left.items())
+
+
 def terminal_time_fact(row: dict) -> dict:
     """Validate a host record's fact; generic ts/updated_at are never evidence."""
     attempt = task_attempt_witness(row)
     unknown = {"v": 1, "occurred_at": None, "source": "unknown", "attempt": attempt}
     fact = row.get("terminal_time")
-    if not isinstance(fact, dict) or fact.get("v") != 1 or fact.get("attempt") != attempt:
+    if not isinstance(fact, dict) or fact.get("v") != 1 or not same_attempt_witness(attempt, fact.get("attempt")):
         return unknown
-    if fact.get("source") != "executor_terminal" or not isinstance(fact.get("occurred_at"), str):
+    if fact.get("source") not in OBSERVED_SOURCES or not isinstance(fact.get("occurred_at"), str):
         return unknown
     try:
         parsed = datetime.fromisoformat(fact["occurred_at"].replace("Z", "+00:00"))
@@ -30,19 +74,20 @@ def terminal_time_fact(row: dict) -> dict:
             return unknown
     except ValueError:
         return unknown
-    return {"v": 1, "occurred_at": fact["occurred_at"], "source": "executor_terminal", "attempt": attempt}
+    return {"v": 1, "occurred_at": fact["occurred_at"], "source": fact["source"], "attempt": attempt}
 
 
-def preserve_terminal_attempt(canonical: dict, incoming: dict) -> dict:
+def preserve_terminal_attempt(canonical: dict, incoming: dict, *, foreign: bool = False) -> dict:
     """An immutable terminal fact and its validating witness travel together.
 
-    Enrichment cannot turn a settled attempt into another attempt. Explicit
-    reopen/reset still owns that transition; unrelated metadata remains writable.
+    Enrichment cannot turn a settled attempt into another attempt, nor a ``foreign``
+    replica (another attempt's) a live one. Explicit reopen/reset still owns that
+    transition; unrelated metadata remains writable.
     """
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
     fields = dict(incoming)
-    if canonical.get("status") not in _TRULY_TERMINAL_STATUSES:
+    if canonical.get("status") not in _TRULY_TERMINAL_STATUSES and not foreign:
         return fields
     for key in ("task_attempt", "_attempt", "started_at"):
         if key in canonical:
@@ -62,7 +107,9 @@ def preserve_terminal_attempt(canonical: dict, incoming: dict) -> dict:
     return fields
 
 
-def terminal_time_patch(existing, incoming, *, status, task_id, observed_at=None, replica=None):
+def terminal_time_patch(existing, incoming, *, status, task_id, observed_at=None, replica=None,
+                        source="executor_terminal"):
+    """``source`` names the observer of ``observed_at``; the supervisor observes only its own cancel."""
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
     if status not in _TRULY_TERMINAL_STATUSES:
@@ -77,8 +124,8 @@ def terminal_time_patch(existing, incoming, *, status, task_id, observed_at=None
         # Compare BEFORE the replica overlay: it cannot replace the receiver's
         # attempt witness and thereby authenticate its own stale occurrence.
         fact = terminal_time_fact(replica)
-    elif observed_at:
-        fact = {"v": 1, "occurred_at": observed_at, "source": "executor_terminal",
+    elif observed_at and (source == "executor_terminal" or (source == SUPERVISOR_CANCEL and status == "cancelled")):
+        fact = {"v": 1, "occurred_at": observed_at, "source": source,
                 "attempt": task_attempt_witness(merged)}
     else:
         fact = terminal_time_fact({**merged, "terminal_time": None})

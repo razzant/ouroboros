@@ -41,32 +41,22 @@ class _PresendWait:
         self.interactive_bound = (float(get_task_idle_timeout_sec()) if self.owner is not None
                                   and self.owner.task.get("_is_direct_chat") and not before_task_start else None)
         self.started = time.monotonic()
-        self.publication_waited = 0.0
-        self.publication_started = None
         self.episode_id = uuid.uuid4().hex
         self.entered = False
 
     def delay(self, error):
         from ouroboros.store import StoreBusy, admission_acquisition
         from ouroboros.owner_pause import LaunchBusy
-        from ouroboros.queue_observation import (
-            DispatchPublicationPending, DISPATCH_PUBLICATION_WAIT_SEC, DISPATCH_PUBLICATION_POLL_SEC,
-        )
-        from ouroboros.usage_ledger import ControlAuthorityUnavailable
-
-        pending = isinstance(error, DispatchPublicationPending)
         contention = (isinstance(error, (StoreBusy, LaunchBusy)) and error.reason == "contention"
                       or isinstance(error, UsageLockUnavailable) and error.reason == "contention"
                       and getattr(error, "rollback_confirmed", False))
-        if not (pending or contention) or getattr(error, "rollback_confirmed", None) is False or _CLEANUP.get():
+        if not contention or getattr(error, "rollback_confirmed", None) is False or _CLEANUP.get():
             raise error
-        if pending and self.publication_started is None:
-            self.publication_started = time.monotonic()
         # Controls must be checked even while the storage they usually inspect is busy.
         # A positive local control wins; a transient probe gap retains this same wait.
         try:
             with admission_acquisition():
-                if self.check or self.publication_started is not None:
+                if self.check:
                     _check()
                 elif self.owner is not None:
                     from ouroboros.model_wait import dispatch_control_reason
@@ -83,35 +73,12 @@ class _PresendWait:
         if self.interactive_bound is not None and elapsed >= self.interactive_bound:
             from ouroboros.llm_attempt import PhysicalDispatchInterrupted
             raise PhysicalDispatchInterrupted("accounting_wait_expired")
-        remaining = DISPATCH_PUBLICATION_WAIT_SEC - self.publication_waited
-        if pending and remaining <= 0:
-            raise ControlAuthorityUnavailable(str(error), cause="dispatch_publication_unconfirmed") from error
         if not self.owned and elapsed >= USAGE_LOCK_TIMEOUT_SEC:
             raise error
         if not self.entered:
             self.entered = True
             _hold(self.owner, "entered", self.started, self.episode_id)
-        return min(DISPATCH_PUBLICATION_POLL_SEC, remaining) if pending else ACQUISITION_SLICE_SEC
-
-    @contextlib.contextmanager
-    def wait(self, error):
-        """Charge only a publication probe and its wait, across reacquisitions.
-
-        A contended store neither proves continuous publication absence nor resets
-        the already spent publication budget. Other elapsed bounds remain separate.
-        """
-        from ouroboros.queue_observation import DispatchPublicationPending
-
-        pending = isinstance(error, DispatchPublicationPending)
-        if pending:
-            self.publication_waited += error.probe_elapsed_sec
-        delay = self.delay(error)
-        started = time.monotonic()
-        try:
-            yield delay
-        finally:
-            if pending:
-                self.publication_waited += max(delay, time.monotonic() - started)
+        return ACQUISITION_SLICE_SEC
 
     def close(self):
         if self.entered:
@@ -139,7 +106,7 @@ def retry_presend(function, *, check=True, before_task_start=False, controls=Non
         while True:
             try:
                 with admission_acquisition():
-                    if check or episode.publication_started is not None:
+                    if check:
                         _check()
                     elif before_task_start and episode.entered and episode.owner is not None:
                         from ouroboros.model_wait import dispatch_control_reason
@@ -148,8 +115,7 @@ def retry_presend(function, *, check=True, before_task_start=False, controls=Non
                             raise PhysicalDispatchInterrupted(reason)
                     return function()
             except Exception as exc:
-                with episode.wait(exc) as delay:  # transaction/launch lock have exited
-                    queue_observation._sleep(delay)
+                queue_observation._sleep(episode.delay(exc))  # transaction/launch lock have exited
     finally:
         episode.close()
 
@@ -163,12 +129,11 @@ async def retry_presend_async(function, *, check=True):
         while True:
             try:
                 with admission_acquisition():
-                    if check or episode.publication_started is not None:
+                    if check:
                         _check()
                     return function()
             except Exception as exc:
-                with episode.wait(exc) as delay:
-                    await asyncio.sleep(delay)
+                await asyncio.sleep(episode.delay(exc))
     finally:
         episode.close()
 
@@ -476,12 +441,23 @@ def retain_unadopted(request, reservation, **facts):
     return lambda response, capture: retain_cancelled_response(target, response, capture, **facts)
 
 
+def _observe_late_outcome(capture) -> None:
+    """Tell the sender's bound observer how an abandoned attempt ended: settled or unresolved is still a send, and the
+    host's record of the work would otherwise never hear it. A release has already published itself."""
+    from ouroboros.physical_attempt_context import dispatched
+
+    if getattr(capture, "state", "") in {"settled", "unresolved"}:
+        dispatched(capture)
+
+
 def late_settler(reservation, request, extractor, manifest_ref, capture, late_owner):
     """``model_send``'s ``settle_late``: the SENDER's settlement of an answer its receiver abandoned.
 
-    The late answer or error goes through the SAME accounting as a taken one; a received
+    The late answer or error goes through the SAME accounting and capture as a taken one (so a
+    late proof that it never started publishes its release, like the async sender's); a received
     answer is retained as evidence (never adopted); the transport's ``late_owner`` then
-    acknowledges or closes it. The receiver recorded the attempt as still dispatched.
+    acknowledges or closes it. The receiver recorded the attempt as still dispatched, so a
+    send's own outcome is published too (``_observe_late_outcome``), even after its call closed.
     """
     from ouroboros import usage_accounting as ua
 
@@ -490,9 +466,12 @@ def late_settler(reservation, request, extractor, manifest_ref, capture, late_ow
     def settle_late(*, result=None, error=None) -> None:
         try:
             if error is not None:
-                ua._terminalize_failed_attempt(reservation, error)
+                state = ua._terminalize_failed_attempt(reservation, error)
+                _observe_late_outcome(ua._record_attempt_capture(
+                    reservation, request, state, candidate_manifest_ref=manifest_ref, exc=error))
             else:
                 ua._account_response(reservation, request, result, extractor, manifest_ref)
+                _observe_late_outcome(ua.last_physical_attempt_capture())
                 retain(result, ua.last_physical_attempt_capture() or capture)
         except Exception:
             log.exception("Late settlement or retention of abandoned attempt %s failed; inspect durable attempt state",
@@ -541,6 +520,7 @@ async def model_send_async(reservation, complete, *, retain_on_cancel, retain_on
         # No await separates completion from its handover. Only the event loop
         # changes this state, so Pause cannot also take a completed outcome.
         if outcome.get("abandoned"):
+            _observe_late_outcome(outcome.get("capture"))
             try:
                 if "error" not in outcome:
                     await asyncio.to_thread(retain_on_abandon, outcome["response"], outcome["capture"])

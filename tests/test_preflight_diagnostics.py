@@ -6,8 +6,7 @@ import time
 from types import SimpleNamespace
 
 
-from ouroboros import preflight_probe, preflight_runner
-from ouroboros.test_parallelism import Admission, HostRuns
+from ouroboros import preflight_runner
 from tests import stack_samples
 import json
 import pytest
@@ -67,10 +66,7 @@ def test_preflight_diagnostics_preserve_exit_and_timeout(tmp_path, monkeypatch, 
     (tests / "test_probe.py").write_text("def test_probe():\n    assert True\n", encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the probe expects two real workers
-    # This tiny diagnostics witness owns two real workers, not admission policy.
-    # A valid one-worker default must not replace its explicit test allocation.
-    monkeypatch.setattr(preflight_probe, "_preflight_admission", lambda: Admission(1, HostRuns()))
-    module = preflight_runner.install_worker_probe(root, admitted=Admission(2, HostRuns()))
+    module = preflight_runner.install_worker_probe(root)
     # Own the nested pytest temporary tree. Otherwise its controller may spend
     # teardown cleaning unrelated numbered runs instead of reaching hold_exit.
     code, output, containment = preflight_runner._execute_pytest_pass(

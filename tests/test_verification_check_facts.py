@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_process_environment import process_context as _process_context
+from tests._process_environment import process_context as _process_context
 
 process_context = _process_context
 
@@ -131,7 +131,7 @@ def test_bytes_equal_keeps_the_producers_own_detail(process_context, case, prefi
     (workspace / "a.bin").write_bytes(b"abcdef")
     if case != "missing":
         (workspace / "b.bin").write_bytes(b"abcdef" if case == "equal" else b"abcXef")
-    result = _verify(registry, workspace, check=["true"], expected_match="bytes_equal",
+    result = _verify(registry, workspace, check=[sys.executable, "-c", "pass"], expected_match="bytes_equal",
                      artifact_paths=["a.bin", "b.bin"])
     fact = result.meta["verification"]
     # A missing file is not "differing bytes": no byte verdict, so no `matched`, and the
@@ -146,10 +146,13 @@ def test_bytes_equal_keeps_the_producers_own_detail(process_context, case, prefi
     assert verification_receipt_ledger_row(receipt)["matched"] is match
 
 
-def test_receipt_custody_failure_stays_an_error_without_a_recorded_verdict(process_context, monkeypatch):
+@pytest.mark.parametrize("file_observation", [False, True])
+def test_receipt_custody_failure_stays_an_error_without_a_recorded_verdict(process_context, monkeypatch, file_observation):
     registry, ctx, workspace, data = process_context
     monkeypatch.setattr("ouroboros.tools.verify.append_verification_receipt", lambda *_a, **_k: False)
-    result = _verify(registry, workspace, check=_printing("hello"), expected="goodbye")
+    args = ({"contract_kind": "artifact_observation", "artifact_paths": ["missing.txt"]} if file_observation
+            else {"check": _printing("hello"), "expected": "goodbye"})
+    result = _verify(registry, workspace, **args)
     assert (result.status, result.code) == ("error", "TOOL_ERROR")
     assert "receipt_custody_failed" in result.text and "verification" not in result.meta
     assert _receipts(data, ctx.task_id) == []
@@ -170,13 +173,15 @@ def test_selected_secret_cannot_rewrite_the_verdict_vocabulary(process_context, 
 
 
 def test_wide_characters_stay_inside_the_result_meta_bound(process_context):
-    registry, _ctx, workspace, _data = process_context
+    registry, ctx, workspace, data = process_context
     wide = "\U0001F600" * 400
-    result = _verify(registry, workspace, check=["sh", "-c", f"echo {wide}"], expected="absent",
+    result = _verify(registry, workspace, check=[sys.executable, "-c", "pass", wide], expected="absent",
                      criterion_id=wide)
     fact = result.meta["verification"]
     assert fact["status"] == "fail" and len(fact["criterion_id"]) == 120
     assert "truncated" in fact["check"]
+    receipt = _receipts(data, ctx.task_id)[-1]
+    assert receipt["returncode"] == 0 and receipt["matched"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +288,34 @@ def test_custody_failure_through_the_loop_stays_one_error_without_a_verdict(proc
     assert finished["is_error"] is True and "verification" not in finished
     settled = next(o for o in replay_evidence(data, ctx.task_id)["observations"] if o["fact"] == "settled")
     assert settled["status"] == "error" and "verification" not in settled
+
+
+@pytest.mark.parametrize("kind", ["missing", "unnamed", "observed", "refused"])
+def test_artifact_observation_only_publishes_a_recorded_failure(process_context, kind):
+    from ouroboros.tool_call_log import replay_evidence
+
+    call, frames, logs, ctx, data = _loop(process_context)
+    (ctx.workspace_root / "report.txt").write_text("report", encoding="utf-8")
+    paths = {"missing": ["missing.txt"], "unnamed": [], "observed": ["report.txt"],
+             "refused": [str(ctx.repo_dir / "private.txt")]}[kind]
+    result = call(contract_kind="artifact_observation", artifact_paths=paths)
+    [receipt] = _receipts(data, ctx.task_id)
+    assert receipt["status"] == {"missing": "fail", "unnamed": "fail", "observed": "observed",
+                                 "refused": "refused_out_of_scope"}[kind]
+    [row] = [r for r in _tool_rows(logs) if r["type"] == "tool_call"]
+    [finished] = [r for r in frames if r.get("type") == "tool_call_finished"]
+    [seen] = [r for r in replay_evidence(data, ctx.task_id)["observations"] if r["fact"] == "settled"]
+    assert seen["key"] == f"tool:{ctx.task_id}:{row['invocation_id']}" and seen["status"] == "ok"
+    assert not result["is_error"] and not finished["is_error"]
+    fact = row["tool_result_meta"].get("verification")
+    assert fact == finished.get("verification") == seen.get("verification")
+    if receipt["status"] == "fail":
+        assert fact["status"] == "fail" and fact["contract_kind"] == "artifact_observation"
+        assert fact["paths_named"] is bool(paths) and "matched" not in fact
+        assert ("missing.txt" if paths else "no artifact_paths") in fact["detail"]
+        assert seen.get("exit_code") is None
+    else:
+        assert fact is None
 
 
 def test_replay_ignores_rows_without_a_typed_verdict():

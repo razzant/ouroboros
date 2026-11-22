@@ -36,7 +36,7 @@ def _neighbour(root):
 
 def _mind_writes_the_overview(root) -> bytes:
     ctx = ToolContext(repo_dir=root, drive_root=root, task_id="mind-turn")
-    assert "✅" in knowledge_tools._knowledge_write(ctx, "overview", _MIND_OVERVIEW)
+    assert "✅" in knowledge_tools._knowledge_write(ctx, "overview", _MIND_OVERVIEW, mode="overwrite")
     return _overview(root).path.read_bytes()
 
 
@@ -66,7 +66,8 @@ def test_the_mind_still_writes_and_revises_the_overview(tmp_path):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="mind-turn-2")
     current = store.read_knowledge_note(_overview(tmp_path))
     assert "✅" in knowledge_tools._knowledge_write(
-        ctx, "overview", "# Orientation\n\nWhat changed is now true.\n", expected_revision=current.revision)
+        ctx, "overview", "# Orientation\n\nWhat changed is now true.\n", mode="overwrite",
+        expected_revision=current.revision)
     assert "What changed is now true." in store.read_knowledge_note(_overview(tmp_path)).text
     history = [json.loads(line) for line in
                (tmp_path / "memory" / "knowledge_history.jsonl").read_text(encoding="utf-8").splitlines()]

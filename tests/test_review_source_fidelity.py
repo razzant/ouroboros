@@ -1,7 +1,7 @@
 """Model-facing review sources keep the text they quote (owner, 2026-10-29).
 
 The review stack used to rewrite secret-shaped lines (``TOKEN=…``, ``"password": "…"``)
-in file packs, prior findings, obligations and the synthesis prompt. That turned
+in file packs, prior findings and the prompts built from them. That turned
 variable-bearing code into text that no longer parses and changed what reviewers
 judged. These tests drive the real builders with such lines and require the exact
 source back; what may enter a pack is still decided by name, size and binary class.
@@ -12,7 +12,7 @@ import json
 import re
 from types import SimpleNamespace
 
-from ouroboros.tools import review_helpers, review_synthesis
+from ouroboros.tools import review_helpers
 from ouroboros.tools.plan_dialogue import _source_view
 
 TS_PROBE = (
@@ -44,37 +44,14 @@ def test_repo_pack_entries_carry_the_exact_file(tmp_path):
     assert entries == [("probe.ts", TS_PROBE, "ts", "")] and omitted == []
 
 
-def test_prior_findings_and_obligations_reach_the_reviewer_as_recorded():
-    obligation = SimpleNamespace(obligation_id="obl-1", item="secrets_check", severity="critical",
-                                 reason=REASON, source_attempt_ts="t0", source_attempt_msg="PASSWORD=x in fixture")
+def test_prior_findings_reach_the_reviewer_as_recorded():
     finding = {"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": REASON,
                "evidence": 'export const config = { "token": "abcd1234" }'}
-    attempt = SimpleNamespace(ts="t1", tool_name="repo_commit", commit_message="Read API_KEY=env",
-                              block_reason="critical_findings", critical_findings=[finding])
-
-    payload = _fenced_json(review_helpers.build_blocking_findings_json_section([obligation], [attempt]))
-    assert payload["open_obligations"][0]["reason"] == REASON
-    assert payload["open_obligations"][0]["source_attempt_msg"] == "PASSWORD=x in fixture"
-    assert payload["recent_blocking_attempts"][0]["critical_findings"] == [finding]
-    assert payload["recent_blocking_attempts"][0]["commit_message"] == "Read API_KEY=env"
-
-    [row] = _fenced_json(review_helpers.build_obligations_block([obligation]))
-    assert row["reason"] == REASON
-
-
-def test_synthesis_prompt_quotes_claims_and_obligations_as_recorded(monkeypatch):
-    prompts: list[str] = []
-    monkeypatch.setattr(review_synthesis, "_call_synthesis_llm",
-                        lambda prompt, *, ctx=None: prompts.append(prompt) or None)
-    findings = [{"item": "a", "verdict": "FAIL", "severity": "critical", "reason": REASON},
-                {"item": "b", "verdict": "FAIL", "severity": "critical", "reason": "TOKEN=abc unchecked"}]
-    obligation = SimpleNamespace(obligation_id="obl-1", item="a", reason=REASON)
-
-    assert review_synthesis.synthesize_to_canonical_issues(findings, open_obligations=[obligation]) == findings
-    [prompt] = prompts
-    assert json.dumps(findings, ensure_ascii=False, indent=2) in prompt
-    assert json.dumps(REASON, ensure_ascii=False) in prompt
-    assert "REDACTED" not in prompt
+    section = review_helpers.build_review_history_section(
+        [{"attempt": 1, "commit_message": "Read API_KEY=env", "critical": [finding]}])
+    assert f"code_quality: {REASON}" in section and "Read API_KEY=env" in section
+    assert _fenced_json(section) == {"evidence": finding["evidence"], "verdict": "FAIL"}
+    assert "REDACTED" not in section
 
 
 def test_the_pattern_redactor_is_gone_from_the_review_facade():

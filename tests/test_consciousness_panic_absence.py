@@ -19,7 +19,7 @@ from tests.test_state_authority import _prior, _windows_shaped_not_found, root a
 
 BARRED = (False, "panic_stop", "Background consciousness stays disabled while Panic controls await persistence.",
           "consciousness_disabled_or_unknown")
-PERMITTED = (True, "not_due", "Background consciousness is already enabled.", "")  # admitted to the lane
+PERMITTED = (True, "not_due", "Consciousness is already on.", "")  # admitted to the lane
 LINK = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 1, 0, 0, 1, 0, 0, 0))
 
 

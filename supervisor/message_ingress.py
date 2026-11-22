@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import dialogue_store
 from ouroboros.chat_uploads import attachment_views, same_message, stored_refs
-from ouroboros.store import StoreError
+from ouroboros.store import StoreBusy, StoreError, StoreMigrating
 from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, SUBAGENT_MESSAGE_FIELDS
 from ouroboros.utils import utc_now_iso
 
@@ -39,6 +39,12 @@ log = logging.getLogger(__name__)
 _INGRESS_LOCK = threading.Lock()
 # The dispatchers an obligation can name: replayable from the recorded input and the stored row.
 _DISPATCHERS: Dict[str, Callable[..., Any]] = {}
+
+
+class NotAccepted(RuntimeError):
+    """This attempt was refused before it wrote anything: tried again, the same delivery is decided afresh.
+    Raised only where this attempt's acceptance is known not to have begun (it says nothing of earlier
+    attempts under the same id); its cause says why."""
 
 
 def _bus_dispatch(bridge: Any, text: str, **message: Any) -> None:
@@ -157,6 +163,32 @@ def delivery_facts(row: dict, chat_id: int) -> dict:
     return {}
 
 
+# --- a pressed control: the press is my human's, the command it composed is not -----------------
+
+def ui_control_fact(raw: Any, *, pressed_at: str = "", command: str = "", owner_text: bool = True) -> Optional[Dict[str, str]]:
+    """The producer's mark that a host-drawn control composed this command (``ui_control``), or None.
+
+    Stamped only by the producer that composed the text (a Web button, a Telegram inline button), so typed
+    chat and CLI commands keep being my human's words. ``name`` says which control; ``owner_text`` is what
+    my human typed into it, exactly (an Evolution objective): the press and those words are theirs, the
+    command around them is the host's, so they ride only a slash ``command`` the host executes, and only through a
+    door that allows them (``owner_text=False``: a skill's control speaks for no one). A malformed mark raises
+    ``ValueError``: a producer's bug is refused, never logged as typed words.
+    """
+    if raw is None:
+        return None
+    name = raw.get("name") if isinstance(raw, dict) else None
+    text = raw.get("owner_text", "") if isinstance(raw, dict) else ""
+    if not isinstance(name, str) or not name.strip() or len(name) > 64 or not isinstance(text, str):
+        raise ValueError("ui_control must be {name: <control, at most 64 characters>, owner_text?: <string>}")
+    if text.strip() and not owner_text:
+        raise ValueError("ui_control.owner_text is not accepted here: a control's press carries no owner words")
+    if text.strip() and not str(command or "").lstrip().startswith("/"):
+        raise ValueError("ui_control.owner_text rides only a slash command the host executes")
+    return {"name": name.strip(), **({"owner_text": text} if text.strip() else {}),
+            **({"pressed_at": pressed_at} if pressed_at else {})}
+
+
 # --- the canonical chat writers ----------------------------------------------------------------
 
 def _chat_record(
@@ -187,6 +219,7 @@ def _chat_record(
     message_meta: Optional[Dict[str, Any]] = None,
     drive_root=None,
     require_write: bool = False,
+    room_echo: bool = False,
 ) -> Tuple[Any, Optional[dict]]:
     """``(root, the chat row as every reader expects it)``; ``(None, None)`` without a data root."""
     from supervisor import message_bus
@@ -217,8 +250,11 @@ def _chat_record(
             from ouroboros.settings_integrity import effective_subagents_mode
 
             record["message_accepted_at"] = utc_now_iso()
+            sent = (message_meta or {}).get("reply_to") if source == "skill:telegram" else None
+            room = sent.get("telegram_room_chat_id") if isinstance(sent, dict) else None  # the turn's room, not this chat
             try:
-                if effective_subagents_mode(task={"chat_id": chat_id}, drive_root=root) == "swarm":
+                if effective_subagents_mode(task={"chat_id": room if type(room) is int and room > 0 else chat_id},
+                                            drive_root=root) == "swarm":
                     record["subagents_mode"] = "swarm"
             except Exception:
                 log.debug("Subagents label unavailable for the inbound row", exc_info=True)
@@ -226,6 +262,8 @@ def _chat_record(
             # The canonical append is the proof used by the live echo. Keep it
             # on that SAME row so history can replay the fact after a reload.
             record["ingress_accepted"] = True
+            if room_echo:
+                record["kind"] = "room_echo"
         if direction == "in" and client_message_id and require_write:  # a named acceptance: which process took it
             from ouroboros.process_custody import current_custody_session_id
 
@@ -249,18 +287,28 @@ def _chat_record(
             record["system_type"] = str(meta.get("system_type") or "")
         if isinstance(meta.get("host_fact"), dict) and meta["host_fact"].get("kind") == "call_open":
             record["host_fact"] = dict(meta["host_fact"])
+        if isinstance(meta.get("ui_control"), dict) and meta["ui_control"].get("name"):
+            # The control my human typed these words into (``ui_control_fact``): a fact about the message.
+            record["ui_control"] = {"name": str(meta["ui_control"]["name"])}
         if isinstance(meta.get("execution_transport"), dict):
             record["execution_transport"] = dict(meta["execution_transport"])
+        if direction == "out" and meta.get("logical_room_chat_id") == 1:
+            record["logical_room_chat_id"] = 1
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
             meta["reply_to"] = origin_reply(root, task_id)
+        from ouroboros.chat_references import stored_reply
         for key in ("reply_to", "relay"):
             if isinstance(meta.get(key), dict) and meta[key]:
-                record[key] = dict(meta[key])
+                record[key] = stored_reply(meta[key]) if key == "reply_to" else dict(meta[key])  # no captured source
         if meta.get("reply_to_relay"):
             record["reply_to_relay"] = str(meta["reply_to_relay"])
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
+        if meta.get("card_press"):
+            from ouroboros.card_store import late_press_ref
+            if press := late_press_ref(meta["card_press"]):
+                record["card_press"] = press
         if meta.get("late_answer"):
             from ouroboros.owner_quiz import late_answer_ref
             accepted_answer = late_answer_ref(meta["late_answer"])
@@ -276,7 +324,7 @@ def _chat_record(
         if "narration" in meta:
             record["narration"] = bool(meta["narration"])
         if record_type in ("project_started", "project_handoff", "project_completion_summary"):
-            for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "completion_reason", "completion_notice", "handoff_id", "terminal_time", "outcome_axes", "wake_summary"):
+            for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "completion_reason", "completion_notice", "handoff_id", "terminal_time", "outcome_axes", "wake_summary", "place_origin"):
                 if key in meta:
                     record[key] = meta[key]
         if meta.get("delivery_id"):
@@ -383,15 +431,17 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str, *, feed: boo
 
 def _shown_elsewhere(root: Any, record: dict, feed: bool) -> Dict[str, Any]:
     """The append facts of a row some Project also shows (``room_appearances.write_facts``): its
-    derived index keys and, for work speech and private Presence contact (a question too), the
-    revision stamp and the other rooms it feeds, so one message is unread where it is shown."""
+    derived index keys, those rooms (a message dates them too) and, for work speech and private
+    Presence contact (a question too), the revision stamp and the other rooms it feeds, so one
+    message is unread where it is shown."""
     from ouroboros.presence_owner_contact import private_main_row
     from ouroboros.project_dialogue import WORK_SPEECH_ELSEWHERE_TYPES
     from ouroboros.room_appearances import write_facts
 
     keys, shown = write_facts(root, record)
     speech = record.get("type") in WORK_SPEECH_ELSEWHERE_TYPES or private_main_row(record)
-    return {"appearances": keys, **({"room_revisions": True, "also_feed": shown} if speech and feed else {})}
+    return {"appearances": keys, **({"shown_in": shown} if shown else {}),
+            **({"room_revisions": True, "also_feed": shown} if speech and feed else {})}
 
 
 def accept_chat(chat_id: int, user_id: int, text: str, *, dispatch: Optional[Dict[str, Any]] = None,
@@ -421,12 +471,16 @@ def accepted_chat_message(drive_root, chat_id: int, client_message_id: str) -> O
     return None if found is None else dict(found.row)
 
 
-def rejoin_or_refuse(row: dict, source: str, logged: str, refs: Any, reply: Optional[dict] = None,
+class ClientMessageIdConflict(ValueError):
+    """A submission id already belongs to different accepted input."""
+
+
+def rejoin_or_refuse(root, row: dict, source: str, logged: str, refs: Any, reply: Optional[dict] = None,
                     *, execution_transport: Optional[dict] = None) -> None:
     """A redelivered frame may rejoin the accepted row only as the same message of the same source
     (text, ordered attachment content and the Reply it points at)."""
     if row.get("source") != source:
-        raise ValueError("client_message_id is already bound to another source")
+        raise ClientMessageIdConflict("client_message_id is already bound to another source")
     if row.get("execution_transport") != execution_transport:
         from ouroboros.contracts.realtime import RealtimeSetupError
 
@@ -435,9 +489,10 @@ def rejoin_or_refuse(row: dict, source: str, logged: str, refs: Any, reply: Opti
         from ouroboros.contracts.realtime import RealtimeSetupError
 
         raise RealtimeSetupError("realtime_restart_required", "this call's accepting process ended; start a new call")
+    from ouroboros.chat_references import same_reply
     if (not same_message(row, logged, refs)
-            or (row.get("reply_to") or {}).get("address", "") != (reply or {}).get("address", "")):
-        raise ValueError("client_message_id was already used for a different message")
+            or not same_reply(root, row.get("reply_to") or {}, reply or {})):
+        raise ClientMessageIdConflict("client_message_id was already used for a different message")
 
 
 def hand_over(root: Path, chat_id: int, message_id: str, name: Optional[str]) -> bool:
@@ -464,21 +519,52 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     chat_id = int(message["chat_id"])
     message_id = str(message["client_message_id"])
     source = str(message["source"])
-    logged = text.strip() or str(message.get("image_caption") or "").strip() or attachment_placeholder(
+    from ouroboros.card_store import late_press_ref
+    task_metadata = message.get("task_metadata") or {}
+    press = late_press_ref(task_metadata.get("card_press"))
+    late_answer = late_answer_ref(task_metadata.get("late_answer"))
+    logged = (text if press or late_answer else text.strip()) or str(message.get("image_caption") or "").strip() or attachment_placeholder(
         message.get("image_base64"), message.get("task_metadata")
     )
     if not logged:
         raise ValueError("message is empty")
-    from ouroboros.chat_references import ingress_reply
-    reply = ingress_reply(drive_root, message.get("task_metadata") or {})
-    if reply:  # a replayed obligation dispatches the same reference
-        message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
+    from ouroboros.chat_references import delivery_reply, exact_reply_ingress, ingress_reply, telegram_reply_room, with_turn_address
+
+    exact = bool(task_metadata.get("reply_to")) and exact_reply_ingress(
+        root, source, chat_id, message_id, message.get("transport"))
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
-    late_answer = late_answer_ref((message.get("task_metadata") or {}).get("late_answer"))
     placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
-        row = accepted_chat_message(root, chat_id, message_id)
+        try:
+            row = accepted_chat_message(root, chat_id, message_id)
+        except (StoreBusy, StoreMigrating) as exc:
+            if not exact:
+                raise
+            raise NotAccepted("the store was busy before this attempt was accepted") from exc
+        try:
+            reply = ingress_reply(root, task_metadata, accepted=row, strict_transient=exact)
+        except (StoreBusy, StoreMigrating) as exc:
+            if not exact:
+                raise
+            raise NotAccepted("the store was busy before this attempt was accepted") from exc
+        if row is None:
+            if reply and exact:
+                try:
+                    room, decided = telegram_reply_room(root, reply, chat_id)
+                except (StoreBusy, StoreMigrating) as exc:
+                    raise NotAccepted("the store was busy before this attempt was accepted") from exc
+                except (OSError, ValueError, StoreError):
+                    room, decided = None, True
+                if decided:
+                    reply = {**reply, "telegram_room_chat_id": room}
+            carried = with_turn_address(task_metadata, {
+                "source": source, "direction": "in", "transport": message.get("transport"),
+                "client_message_id": message_id, "chat_id": chat_id, "reply_to": reply})
+            if reply:
+                carried["reply_reference"] = reply
+            if carried != task_metadata:
+                message["task_metadata"] = carried
         fresh = attempted = False
         if row is None:
             attempted = True
@@ -488,7 +574,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                     client_message_id=message_id, sender_label=str(message.get("sender_label") or ""),
                     transport=message.get("transport"), drive_root=root,
                     message_meta={"attachments": refs, "text_placeholder": placeholder, "reply_to": reply,
-                                  **({"late_answer": late_answer} if late_answer else {}),
+                                  **({"late_answer": late_answer} if late_answer else {}), **({"card_press": press} if press else {}),
                                   "execution_transport": (message.get("task_metadata") or {}).get("execution_transport")},
                     dispatch=obligation(name, text, message))
             finally:
@@ -501,12 +587,15 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             hand_over(root, chat_id, message_id, name)
         else:
             # The row an earlier delivery landed (or the race lost by a hair): rejoin it, or take its owed dispatch.
-            rejoin_or_refuse(row, source, logged, refs, reply,
+            rejoin_or_refuse(root, row, source, logged, refs, reply,
                             execution_transport=(message.get("task_metadata") or {}).get("execution_transport"))
+            if saved_press := late_press_ref(row.get("card_press")):
+                message["task_metadata"] = {**(message.get("task_metadata") or {}), "card_press": saved_press}
             saved_answer = late_answer_ref(row.get("late_answer"))
             if saved_answer:
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "late_answer": saved_answer}
-            if not dialogue_store.claim_dispatch(root, chat_id, message_id, process=_process()):
+            claimed, reply = dialogue_store.claim_dispatch_with_reply(root, chat_id, message_id, process=_process())
+            if not claimed:
                 return row, True
             # Its dispatch was still owed: this retry's identical copies feed it; the echo shows the row's refs.
             if retain_inputs is not None and not attempted:
@@ -514,8 +603,9 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             if (message.get("task_metadata") or {}).get("chat_attachments"):
                 message["task_metadata"] = {**message["task_metadata"], "chat_attachments": row.get("attachments")}
         ts = str(row.get("ts") or "")
-        if row.get("reply_to"):  # the reference the host resolved when it accepted the row
-            message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": row["reply_to"]}
+        if row.get("reply_to"):
+            message["task_metadata"] = with_turn_address({**(message.get("task_metadata") or {}),
+                "reply_reference": delivery_reply(row["reply_to"], reply)}, row)
         ref = build_owner_message_ref(chat_id=chat_id, client_message_id=message_id, ts=ts, text=logged)
         # record_inbound_message gets the row witness and receipt time.
         # Dispatch only schedules/queues; slow work must not hold the ingress lock.
@@ -583,14 +673,26 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         ref = dict(ref)
         ts = ref["ts"]
         placeholder = row.get("text_placeholder") is True
+        if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
+            from ouroboros.chat_references import delivery_reply
+            sent = (message.get("task_metadata") or {}).get("reply_reference")
+            message["task_metadata"] = {**(message.get("task_metadata") or {}),
+                                        "reply_reference": delivery_reply(row["reply_to"], sent)}
     elif message.get("suppress_chat_log"):
         return None
     else:
         metadata = message.get("task_metadata") or {}
+        control = metadata.get("ui_control") if isinstance(metadata, dict) and isinstance(metadata.get("ui_control"), dict) else None
+        if control is not None and not str(control.get("owner_text") or "").strip():
+            # A press composed every word here: no row speaks as my human; the command's own System reply
+            # (``command_reply``) or the work it starts is the one receipt.
+            return None
+        if control is not None:
+            text = str(control["owner_text"])  # exactly what my human typed into the control, not its command
         # no words or caption from the sender: TEXT is the host's placeholder
         placeholder = not str(message.get("text") or "").strip() and not str(message.get("image_caption") or "").strip()
         from ouroboros.chat_references import ingress_reply
-        reply = ingress_reply(message_bus.DATA_DIR, metadata)
+        reply = message.get("accepted_reply") or ingress_reply(message_bus.DATA_DIR, metadata)
         if reply:
             metadata["reply_reference"] = reply
             message["task_metadata"] = metadata
@@ -602,7 +704,8 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
             client_surface=(metadata.get("client_surface") if isinstance(metadata, dict)
                             and isinstance(metadata.get("client_surface"), dict) else None),
             message_meta={"attachments": metadata.get("chat_attachments") if isinstance(metadata, dict) else None,
-                          "text_placeholder": placeholder, "reply_to": reply},
+                          "text_placeholder": placeholder, "reply_to": reply,
+                          **({"ui_control": control} if control is not None else {})},
         )
         ref = build_owner_message_ref(chat_id=chat_id, client_message_id=client_message_id, ts=ts, text=text)
     from ouroboros.chat_references import projection_fields
@@ -613,14 +716,15 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         views = attachment_views((message.get("task_metadata") or {}).get("chat_attachments"))
         bridge.broadcast({
             "type": "photo" if message.get("image_base64") and not views else "chat", "role": "user",
-            "content": text if views and placeholder else str(message.get("text") or ""),
+            "content": text if views else str(message.get("text") or ""),
             "caption": str(message.get("image_caption") or ""), **({"text_placeholder": True} if views and placeholder else {}),
             "image_base64": "" if views else str(message.get("image_base64") or ""), **({"attachments": views} if views else {}),
             "mime": str(message.get("image_mime") or "image/jpeg"), "ts": ts, "source": source,
             "sender_label": str(message.get("sender_label") or ""),
             "sender_session_id": str(message.get("sender_session_id") or ""),
             "client_message_id": client_message_id, "transport": message.get("transport") or {},
-            "chat_id": chat_id, **(projection_fields(row) if row else {}), **frame_rooms(message_bus.DATA_DIR, row),
+            "chat_id": chat_id, **(projection_fields(row, message_bus.DATA_DIR) if row else {}),
+            **frame_rooms(message_bus.DATA_DIR, row),
             **({"subagents_mode": "swarm"} if row and row.get("subagents_mode") == "swarm" else {}),
         })
     return ref
@@ -642,7 +746,8 @@ def handle_web_message(
 ) -> None:
     from supervisor import message_bus as bus
     from ouroboros.chat_uploads import claim_refs
-    from ouroboros.chat_references import ingress_reply, projection_fields
+    from ouroboros.chat_references import delivery_reply, ingress_reply, projection_fields
+    from ouroboros.projects_registry import project_thread_chat_ids
     from ouroboros.room_appearances import frame_rooms
 
     # Web ownership stays user_id=1; positive chat_id selects Main/Project.
@@ -668,11 +773,9 @@ def handle_web_message(
     metadata = dict(task_metadata or {})
     host_fact = metadata.get("host_fact") or {}  # host call admission; browser ingress constructs its own metadata
     call_open = isinstance(host_fact, dict) and host_fact.get("kind") == "call_open"
-    reply = ingress_reply(bus.DATA_DIR, metadata)
-    if reply:  # the obligation of a fresh acceptance replays the same reference
-        metadata["reply_reference"] = reply
-    if str(project_id or "").strip():
-        metadata.setdefault("project_id", str(project_id).strip())
+    project_id = str(project_id or "").strip()
+    if project_id:
+        metadata.setdefault("project_id", project_id)
     from ouroboros.chat_uploads import attachment_placeholder
 
     log_text = clean_text or str(image_caption or "").strip() or attachment_placeholder(image_base64, metadata)
@@ -683,6 +786,9 @@ def handle_web_message(
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
         row = accepted_chat_message(bus.DATA_DIR, thread_id, client_message_id) if client_message_id else None
+        reply = ingress_reply(bus.DATA_DIR, metadata, accepted=row)
+        if reply:  # the obligation of a fresh acceptance replays the same reference
+            metadata["reply_reference"] = reply
         fresh = False
         if row is None:
             attachments = claim_refs(metadata.get("chat_attachments"), bus.DATA_DIR)  # DELETE refuses them now
@@ -695,6 +801,10 @@ def handle_web_message(
             receipt = bus.accept_chat(
                 thread_id, 1, log_text, ts=ts, source="web",
                 sender_session_id=sender_session_id, client_message_id=message_id,
+                # The Project form pairs its chosen chat with a project_id. That request can narrow
+                # its own echo. An id-only sender needs a registry witness for the same restriction.
+                room_echo=not call_open and thread_id != 1 and (
+                    bool(project_id) or thread_id in project_thread_chat_ids(bus.DATA_DIR)),
                 client_surface=(metadata.get("client_surface") if isinstance(metadata.get("client_surface"), dict) else None),
                 message_meta={"attachments": attachments, "text_placeholder": placeholder, "reply_to": reply,
                               "execution_transport": metadata.get("execution_transport"),
@@ -709,15 +819,17 @@ def handle_web_message(
             # attachment content and the same Reply rejoin it (no second row); anything else under
             # that id is refused, claiming none of its uploads. A rejoin dispatches only by taking
             # the row's still-owed dispatch (once); a dispatch that began is never replayed.
-            rejoin_or_refuse(row, "web", log_text, stored_refs(metadata.get("chat_attachments")), reply,
+            rejoin_or_refuse(bus.DATA_DIR, row, "web", log_text, stored_refs(metadata.get("chat_attachments")), reply,
                             execution_transport=metadata.get("execution_transport"))
             ts, attachments = str(row.get("ts") or ts), row.get("attachments")
             log_text, placeholder = str(row.get("text") or log_text), row.get("text_placeholder") is True
-            if handed := dialogue_store.claim_dispatch(bus.DATA_DIR, thread_id, message_id, process=current_custody_session_id()):
+            handed, reply = dialogue_store.claim_dispatch_with_reply(bus.DATA_DIR, thread_id, message_id,
+                                                                    process=current_custody_session_id())
+            if handed:
                 claim_refs(metadata.get("chat_attachments"), bus.DATA_DIR)  # the copies it stages are kept
-        if row.get("reply_to"):  # the reference the host resolved when it accepted the row
-            metadata["reply_reference"] = row["reply_to"]
         if handed:
+            if row.get("reply_to"):  # an owed dispatch carries the first acceptance's capture, not the retry's identity
+                metadata["reply_reference"] = delivery_reply(row["reply_to"], reply)
             ref = build_owner_message_ref(chat_id=thread_id, client_message_id=message_id, ts=ts, text=log_text)
             message = dict(
                 chat_id=thread_id, user_id=1, source="web",
@@ -741,6 +853,8 @@ def handle_web_message(
                 "sender_session_id": sender_session_id, "client_message_id": message_id,
                 "ingress_accepted": True,  # Canonical row exists; execution is not promised.
             }
+            if row.get("kind") == "room_echo":
+                echo["kind"] = row["kind"]
             if row.get("subagents_mode") == "swarm":
                 echo["subagents_mode"] = "swarm"
             if placeholder:
@@ -749,7 +863,7 @@ def handle_web_message(
                 echo["system_type"] = row["system_type"]
             # Positive call-entry evidence, never the acceptance stamp alone; a deferred dispatch is still pending.
             echo.update(delivery_facts(row, thread_id))
-            echo.update(projection_fields(row), **frame_rooms(bus.DATA_DIR, row))  # a Reply a Project also shows
+            echo.update(projection_fields(row, bus.DATA_DIR), **frame_rooms(bus.DATA_DIR, row))  # a Reply a Project also shows
             bus.stamp_project_thread(bus.DATA_DIR, echo)
             self._broadcast_fn(echo)
     finally:

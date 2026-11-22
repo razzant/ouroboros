@@ -1,6 +1,9 @@
-import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { accountedUpperBound, accountedUpperBoundWithChildren, isoMicros, machineWords, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { formatUsd } from './storage_format.js';
+import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
-import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase } from './task_reason_words.js';
+import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
+    handledRefusalHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase, configuredActorCauseKey, firstAttemptClauseKey } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel } from './task_checkpoints.js';
@@ -8,8 +11,8 @@ import { coordinatorRouteClause, formatCoordinatorProvenance, harnessPresentatio
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
-import { checkFailureView } from './verification_presentation.js';
-import { hostRowDisplayText } from './host_notice_text.js';
+import { checkFailureView, redCheckPhrase, toolStepDiagnostic } from './verification_presentation.js';
+import { hostRowDisplayText, hostTaskMessage, toolErrorDisplayText } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
 import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
@@ -25,17 +28,11 @@ const REVIEW_LIFECYCLE_ERROR_STATUSES = new Set([
 
 export { formatReviewProjection } from './review_presentation.js';
 
-export const LOG_CATEGORIES = {
-    tools: { label: 'Tools', color: 'var(--blue)' },
-    llm: { label: 'LLM', color: 'var(--accent)' },
-    errors: { label: 'Errors', color: 'var(--red)' },
-    tasks: { label: 'Tasks', color: 'var(--amber)' },
-    system: { label: 'System', color: 'var(--text-muted)' },
-    consciousness: { label: 'Consciousness', color: 'var(--accent)' },
-};
+// The Logs kinds and their filter labels. A kind is a filter, never a hue: only a failure is coloured (logs.js).
+export const LOG_CATEGORIES = { tools: 'Tools', llm: 'LLM', errors: 'Errors', tasks: 'Tasks', system: 'System', consciousness: 'Consciousness' };
 
-// The Errors filter follows the same typed failure phases on live and replay rows.
-const ERROR_LOG_PHASES = new Set(['error', 'timeout', 'lifecycle_error']);
+// The Errors filter follows the same typed failure phases on live and replay rows; they are the only coloured ones.
+export const ERROR_LOG_PHASES = new Set(['error', 'timeout', 'lifecycle_error']);
 
 export function categorizeLogEvent(evt, view = summarizeLogEvent(evt)) {
     const t = evt.type || evt.event || '';
@@ -48,7 +45,7 @@ export function categorizeLogEvent(evt, view = summarizeLogEvent(evt)) {
     // name substrings below only pick the domain family of a non-error row.
     if (ERROR_LOG_PHASES.has(String(view?.phase || ''))) return 'errors';
     if (wake) return 'consciousness';
-    if (t.includes('llm') || t.includes('model')) return 'llm';
+    if (t.includes('llm') || t.includes('model') || t === 'provider_content_refusal') return 'llm';
     if (t.includes('tool') || evt.tool) return 'tools';
     if (t === 'history_retention' || t.includes('task') || t.includes('evolution') || t.includes('review')) return 'tasks';
     if (t.includes('consciousness') || t.includes('bg_')) return 'consciousness';
@@ -129,7 +126,7 @@ export function compactModel(model = '') {
 // never travels bare.
 const SUBSTRATE_NOTE = {
     harness_used: 'custody evidence confirms a harness run',
-    harness_attempted: 'harness attempted, no delegated run succeeded',
+    harness_attempted: 'harness attempted; no successful run confirmed',
     native_only: 'no harness run recorded',
 };
 
@@ -195,7 +192,7 @@ export function executorChip(evt) {
         // Checked before the evidence branches — an empty custody read would
         // otherwise print "no run yet" over a child never dispatched at all.
         // Evidence-grade so a later dispatch-shaped frame cannot downgrade it.
-        return chip(true, 'blocked', `Pinned to ${name}, but this helper could not start — the task was NOT run (no metered API spend, no delegated run)`);
+        return chip(true, 'blocked', `Pinned to ${name}, but this subagent could not start — the task was NOT run (no metered API spend, no delegated run)`);
     }
     if (!evidence) {
         const record = normalizeTaskTerminalRecord(evt);
@@ -312,8 +309,43 @@ export function childReportLabel(childStatus) {
         ? tr('subagent.report_to_parent', 'Report to parent') : '';
 }
 
+// Keep Show full's cause facts separate from its saved report and trace.
+export function childCauseFacts(evt) {
+    const fields = ['status', 'task_terminal_status', 'subagent_event', 'task_id', 'subagent_task_id', 'parent_task_id', 'root_task_id',
+        'reason_code', 'reason_detail', 'outcome_axes', 'terminal_plan_review_open', 'delegated_runs_unreconciled', 'task_completion',
+        'cancel_origin', 'review_status', 'artifact_status', 'terminal_origin', 'terminal_delivery', 'finalization_recovery',
+        '_result_text_present'];
+    const facts = Object.fromEntries(fields.filter(key => evt[key] !== undefined).map(key => [key, evt[key]]));
+    if (evt.artifact_bundle?.status !== undefined) facts.artifact_bundle = { status: evt.artifact_bundle.status };
+    if (Object.hasOwn(evt, 'result')) facts._result_text_present = typeof evt.result === 'string' && Boolean(evt.result);
+    return facts;
+}
+
+export function childLineCause(evt) {
+    const event = String(evt.subagent_event || '').toLowerCase(), debt = evt.delegated_runs_unreconciled;
+    const cancelled = evt.cancel_origin && (event === 'cancelled' || (event === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'));
+    // An origin-less cancel still names its cause when the frame records the earlier stop (#1061): the child's own
+    // lineage rides along in `evt`, so this clause proves the parent relation instead of the swept root.
+    const earlier = evt.outcome_axes?.execution?.earlier_stop;
+    const originless = !evt.cancel_origin && typeof earlier === 'string' && Boolean(earlier)
+        && (event === 'cancelled' || (event === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'));
+    const stopped = (evt.task_completion ?? evt.outcome_axes?.execution?.task_completion)?.action === 'stop';
+    const composed = cancelled || originless || stopped || taskStoppedWithSummary(evt) || evt.terminal_plan_review_open === true
+        || evt.outcome_axes?.execution?.plan_review || (['completed', 'completed_warn', 'failed'].includes(event) && (evt.outcome_axes || debt !== undefined))
+        || (event === 'cancelled' && Array.isArray(debt));  // an origin-less stop folds its custody debt; a stated list, [] too, answers the stamp — no actor
+    const record = cancelled && event === 'cancelled' && taskOutcomeSeverity(evt) !== 'cancelled'
+        ? { ...evt, task_terminal_status: 'cancelled', outcome_axes: { ...evt.outcome_axes, lifecycle: { status: 'cancelled' } } } : evt;
+    const codes = [];
+    const cause = composed ? taskReasonDetail(record, codes)
+        : evt.reason_code ? taskReasonPhrase(configuredActorCauseKey(evt.reason_code, evt.outcome_axes?.execution)) : '';
+    return { detail: [cause, reasonCodesNote(codes)].filter(Boolean).join('\n\n'),
+        lead: cancelled || originless || stopped || UNSTARTED_REASONS.has(String(evt.reason_code || '')) ? cause : '' };
+}
+
+// A cost in Logs reads as every call's cost on the Dashboard (storage_format.formatUsd); a zero says nothing and is
+// not shown (an absent amount neither), so only a real cost takes a place on the event's line.
 export function formatLogMoney(value) {
-    return formatUsd4(value);
+    return value !== null && value !== undefined && value !== '' && Number(value) ? formatUsd(value) : '';
 }
 
 export function formatLogDuration(sec) {
@@ -323,44 +355,35 @@ export function formatLogDuration(sec) {
     return `${num < 10 ? num.toFixed(1) : Math.round(num)}s`;
 }
 
+// A token flow, input → output, in the Costs page's counts (cost_period.js compactTokens): "545k → 391 tokens".
+const tokenFlow = (prompt, completion) => `${prompt} \u2192 ${completion} tokens`;
+
 // task_done ledger totals: a sum no row reported (null) is '?', never 0.
 function formatLogTokens(evt) {
     const count = (n) => (n === null ? '?' : Number(n || 0));
     const prompt = count(evt.prompt_tokens), completion = count(evt.completion_tokens);
     if (![prompt, completion].some((n) => n !== '?' && n)) return '';
-    return `${prompt}\u2192${completion} tok`;
+    return tokenFlow(...[prompt, completion].map((n) => (n === '?' ? n : compactTokens(n))));
 }
 
 // Usage rows only (#1578): v2 null = not reported, 0 = a reported zero; an unstamped/v1 zero stays ambiguous (LEGACY_RULE).
 // A session's input_token_usage total is its whole input, as a direct call's prompt_tokens; its harness's own
 // prompt_tokens may count only the uncached rest, so a split without a total shows the input as unknown.
 function formatUsageTokens(evt) {
-    const count = (n) => (!Number.isSafeInteger(n) || n < 0 ? '?' : n === 0 && evt.record_contract_version !== 2 ? '0?' : String(n));
+    const count = (n) => (!Number.isSafeInteger(n) || n < 0 ? '?' : n === 0 && evt.record_contract_version !== 2 ? '0?' : compactTokens(n));
     const split = evt.input_token_usage && typeof evt.input_token_usage === 'object' ? evt.input_token_usage : null;
     const prompt = count(split ? split.total_tokens : evt.prompt_tokens), completion = count(evt.completion_tokens);
     if (prompt === '?' && completion === '?') return 'tokens not reported';
-    return `${prompt}\u2192${completion} tok${[prompt, completion].includes('0?') ? ' (legacy 0 may be unreported)' : ''}`;
+    return `${tokenFlow(prompt, completion)}${[prompt, completion].includes('0?') ? ' (legacy 0 may be unreported)' : ''}`;
 }
 
 function compactJson(value, maxLen = 220) {
     if (value == null) return '';
-    let txt = '';
     try {
-        txt = JSON.stringify(value);
+        return shortText(JSON.stringify(value), maxLen);
     } catch {
-        txt = String(value);
+        return shortText(String(value), maxLen);
     }
-    return shortText(txt, maxLen);
-}
-
-function extractCommandText(args) {
-    if (!args || typeof args !== 'object') return '';
-    const cmd = args.cmd;
-    if (Array.isArray(cmd)) {
-        return cmd.map((part) => String(part || '').trim()).filter(Boolean).join(' ');
-    }
-    if (typeof cmd === 'string') return cmd;
-    return '';
 }
 
 // Legacy observations lack host identity: retain them separately rather than
@@ -439,9 +462,13 @@ function advisoryProceduralRefusal(record) {
 // the saved copy when one exists and says so when it does not. Twin: project_dialogue.terminal_delivery_clause.
 export function terminalDeliveryClause(delivery) {
     const state = String(delivery?.state || '');
+    if (state === 'exhausted' && delivery.scope === 'task') {
+        return tr('task.delivery.unidentified', 'Delivery attempts ran out for a terminal message from this task. The affected answer is unknown.');
+    }
     if (!TASK_CAUSE_PHRASES[`terminal_delivery_${state}`]) return '';
     const path = String(delivery?.preserved_path || '');
     return taskReasonPhrase(`terminal_delivery_${state}`) + (state !== 'exhausted' ? ''
+        : delivery.preserved_path === null ? '; the saved copy for this answer could not be verified.'
         : path ? `; a copy of the answer is saved at ${path}.` : '; no copy of the answer could be saved.');
 }
 
@@ -455,8 +482,9 @@ const causePhraseLookup = (key) => (TASK_CAUSE_PHRASES[String(key || '')] ? task
 const CUSTODY_DEBT_REASON = 'delegated_custody_unreconciled';
 
 function custodyDebtReason(record) {
-    const raw = String(record?.reason_code || '');
-    const typed = String(record?.outcome_axes?.execution?.reason_code || '');  // a stamp read back names no cause
+    const word = (value) => (typeof value === 'string' ? value : '');  // an array never coerces to a matching code
+    const raw = word(record?.reason_code);
+    const typed = word(record?.outcome_axes?.execution?.reason_code);  // a stamp read back names no cause
     const debt = record?.delegated_runs_unreconciled;
     return [
         raw === CUSTODY_DEBT_REASON ? (typed === CUSTODY_DEBT_REASON ? '' : typed) : raw,
@@ -465,14 +493,14 @@ function custodyDebtReason(record) {
 }
 
 // The headline's objective warning: a nonempty current debt list warns, and an older row's custody warning
-// stops counting once that list is known empty; other warnings, and one beside an absent list, keep the word.
-// Twin: outcomes.objective_warned.
+// stops counting once that list is known empty; other warnings, and one beside an absent list, keep the word;
+// a detail-only fact asks nothing of the owner (9 Nov 2026). Twin: outcomes.objective_warned.
 function objectiveWarned(record) {
     const objective = record?.outcome_axes?.objective || {};
     const debt = record?.delegated_runs_unreconciled;
     if (Array.isArray(debt) && debt.length) return true;
-    if (!Array.isArray(debt) || objective.warning !== CUSTODY_DEBT_REASON) return Boolean(objective.warning);
-    return (Array.isArray(objective.warnings) ? objective.warnings : []).some((code) => code && code !== CUSTODY_DEBT_REASON);
+    return [objective.warning, ...(Array.isArray(objective.warnings) ? objective.warnings : [])].some((code) => code
+        && !DETAIL_ONLY_WARNINGS.includes(code) && !(Array.isArray(debt) && code === CUSTODY_DEBT_REASON));
 }
 
 // outcome_axes.execution.plan_review picks its sentence by lookup, never by its spelling; absent classes keep fallback.
@@ -498,8 +526,8 @@ function joinCauseClauses(clauses) {
 // cause when the review rounds ran out. The twin of review_records.recorded_author_stop.
 const explicitAuthorStop = (d) => d?.reason === 'author_stop' || (d?.reason === 'review_cycles_exhausted'
     && d.author_action === 'stop' && d.author_disposition?.action === 'stop');
-// Its AUTHOR's reason beside the typed sentence (never a finish's or reviewer prose). Twin: project_dialogue._author_stop_rationale.
-const authorStopRationale = (d) => (explicitAuthorStop(d) ? String(d.author_disposition?.rationale || '').split(/\s+/).filter(Boolean).join(' ') : '');
+// Its AUTHOR's reason (a stop's, or an acceptance the reviewers did not approve; never reviewer prose). Twin: project_dialogue._author_stop_rationale.
+const authorStopRationale = (d) => (explicitAuthorStop(d) || ['author_finish', 'author_finish_pending'].includes(d?.reason) ? String(d.author_disposition?.rationale || '').split(/\s+/).filter(Boolean).join(' ') : '');
 
 // Recorded standing limitations: deferred children and terminal_plan_review_open, worded by its class when present.
 // Twin: project_dialogue._terminal_limitations. Open classes exclude the merely awaited case; all but unreadable (an
@@ -528,16 +556,17 @@ export function taskReasonCodes(evt) {
 export function taskReasonDetail(evt, codes = []) {
     const phrase = (code) => describedCause(code, codes);
     const record = normalizeTaskTerminalRecord(evt);
-    const decision = record.outcome_axes?.review?.acceptance_decision
-        ?? record.review_status?.acceptance_decision;
+    const canonicalReview = record.outcome_axes?.review, decision = canonicalReview != null
+        ? canonicalReview.acceptance_decision : record.review_status?.acceptance_decision;  // the legacy carrier is read only when the canonical axis is absent
     const severity = taskOutcomeSeverity(evt);
     const decisionCause = String(decision?.reason || '');
-    const objective = record.outcome_axes?.objective;
+    const { objective, execution } = record.outcome_axes || {};
     const completion = record.task_completion ?? record.outcome_axes?.execution?.task_completion;
     const [storedReason, custody] = custodyDebtReason(record);
-    const typedReason = String(record.outcome_axes?.execution?.reason_code || '');
-    const reason = ['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON
-        ? (typedReason || storedReason) : storedReason;
+    const typedReason = typeof execution?.reason_code === 'string' ? execution.reason_code : '';
+    const earlier = severity === 'cancelled' ? execution?.earlier_stop : null;
+    const reason = ((['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON)
+        || (typedReason === 'cancelled' && storedReason === earlier)) ? (typedReason || storedReason) : storedReason;
     const origin = record.cancel_origin;
     const held = severity === 'error' && String(objective?.source || '').startsWith('plan_review_');
     const authorStop = completion?.action === 'stop' && record.outcome_axes?.execution?.status !== 'cancelled' && !Object.keys(origin || {}).length;
@@ -550,7 +579,7 @@ export function taskReasonDetail(evt, codes = []) {
         finalization_grace: 'acceptance_bypassed_deadline', deadline_local: 'acceptance_bypassed_deadline',
         provider_unavailable: 'acceptance_bypassed_provider_unavailable', context_overflow: 'acceptance_bypassed_context_overflow',
         children_unabsorbed: 'acceptance_bypassed_children_unabsorbed', owner_requested_finalization: 'acceptance_bypassed_owner_requested_finalization' };
-    let clause = '';
+    let clause = '', firstAttempt = '';  // firstAttempt: the first coding attempt's proven fact beside a different primary reason
     if (reason === 'foreign_install_root' && record.reason_detail) clause = String(record.reason_detail);
     else if (taskStoppedWithSummary(evt)) clause = '';
     else if ((severity === "cancelled" || ownerStopEnding(record)[1] === 'stop') && origin && typeof origin === "object"
@@ -558,22 +587,26 @@ export function taskReasonDetail(evt, codes = []) {
         clause = joinCauseClauses(cancelCauseClauses(origin, record));
     } else if (held) {
         clause = phrase(String(objective.reason || ''));
-    } else if (!reason || reason === 'final_message' || (authorStop && reason === 'plan_review_advisory')) {
+    } else if (!reason || reason === 'final_message' || (severity === 'cancelled' && reason === 'cancelled')
+        || (authorStop && reason === 'plan_review_advisory')) {
         // A stop is the primary cause; the plan clause its exit stamped stands among the limitations below.
         clause = authorStop ? taskReasonPhrase('author_stop')
             : severity === 'done' && record.outcome_axes?.execution?.plan_review === 'awaiting' ? taskReasonPhrase('plan_review_awaiting') : '';
+        const firstTerminal = execution?.actor_first_terminal;
+        if (firstTerminal?.reason === 'initial_execution_display_only') firstAttempt = phrase(firstAttemptClauseKey(reason, execution));
     } else {
         const receiptVeto = objective?.receipt_veto;
         clause = receiptVeto?.reason === reason && receiptVeto.detail
             ? String(receiptVeto.detail).split(/\s+/).filter(Boolean).join(' ')
-            : phrase(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : reason);
+            : phrase(configuredActorCauseKey(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : deliveredAnswerCause(record, reason) || reason, execution));
+        firstAttempt = phrase(firstAttemptClauseKey(reason, execution));
     }
     if (reviewCause && (reason === reviewCause || bypass[reason] === reviewCause)) clause = '';
     const excluded = ['', 'delegated_custody_unreconciled', 'terminal_delivery_unknown', 'terminal_delivery_exhausted'];
     const warnings = [...(Array.isArray(objective?.warnings) ? objective.warnings : []), objective?.warning || ''];
-    const named = residualToolErrorsPhrase(record.outcome_axes?.execution);  // the failure the record holds, in owner words
-    const warningClauses = warnings.filter(w => !excluded.includes(w))
-        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w));
+    // The failure the record holds, in owner words; a record without the fact keeps its code's sentence.
+    const named = { residual_tool_errors_without_review: residualToolErrorsPhrase(execution), verification_red_unreconciled: redCheckPhrase(objective) };
+    const warningClauses = warnings.filter(w => !excluded.includes(w)).map(w => (Object.hasOwn(named, w) && named[w]) || taskReasonPhrase(w));
     const artifacts = record.artifact_bundle?.status || record.artifact_status || record.outcome_axes?.artifacts?.status;
     if (['failed', 'missing'].includes(artifacts)) warningClauses.push(taskReasonPhrase('artifacts_unavailable'));
     if (decision?.open_obligations?.length) warningClauses.push(taskReasonPhrase('open_obligations'));
@@ -586,7 +619,12 @@ export function taskReasonDetail(evt, codes = []) {
         : remainder?.state === 'known' && Number.isInteger(count) && count > 0
             ? `${count} uncommitted file${count === 1 ? '' : 's'} remain${count === 1 ? 's' : ''} in the saved candidate` : '';
     const cleanupClause = String(record.outcome_axes?.execution?.evolution_cleanup?.line || '');  // the host's stored words
-    const line = joinCauseClauses([clause, ...warningClauses, phrase(reviewCause), rationale, remainderClause, cleanupClause,
+    const context = typeof earlier === 'string' && earlier
+        ? [fmt('Earlier recorded stop: {cause}', { cause: phrase(earlier) })] : [];
+    if (severity === 'cancelled' && execution?.cancel_policy_reason === 'evolution_disabled_in_light_mode') {
+        context.unshift(phrase('evolution_disabled_in_light_mode'));
+    }
+    const line = joinCauseClauses([clause, firstAttempt, ...context, ...warningClauses, phrase(reviewCause), rationale, remainderClause, cleanupClause,
         ...acceptanceIncidentClauses(decision, reason, causePhraseLookup),
         ...terminalLimitations(record, reason, held, authorStop), custody ? taskReasonPhrase(custody) : '',
         terminalDeliveryClause(record.terminal_delivery)]);  // the host twin appends the delivery clause last too
@@ -639,8 +677,8 @@ export function taskOutcomeSeverity(evt) {
     const artifacts = String(record.outcome_axes?.artifacts?.status || record.artifact_bundle?.status || record.artifact_status || '').toLowerCase();
     const artifactStatus = String(record.artifact_bundle?.status || record.artifact_status || '').toLowerCase();
     if (
-        ((lifecycle === 'failed' || execution === 'failed') && !unanswered)
-        || execution === 'infra_failed'
+        ((lifecycle === 'failed' && !deliveredAnswerCause(record) || execution === 'failed') && !unanswered)
+        || (execution === 'infra_failed' && !deliveredAnswerCause(record))
         || (objective === 'fail' && !authorStopped)
         || (review === 'fail' && !authorFinished)
         || ['failed', 'missing'].includes(artifacts)
@@ -657,7 +695,7 @@ export function taskOutcomeSeverity(evt) {
         lifecycle === 'rejected_duplicate'
         || ['degraded', 'best_effort'].includes(execution)
         || ['degraded', 'best_effort'].includes(objective)
-        || (review === 'degraded' && !authorFinished)
+        || review === 'degraded' || (authorFinished && ['fail', 'awaiting'].includes(review))  // an unapproved author acceptance is always flagged
         || objectiveWarned(record)
     ) {
         return 'warn';
@@ -733,40 +771,42 @@ function taskOutcomeMeta(evt) {
 
 export function summarizeLogEvent(evt) {
     const t = evt.type || evt.event || 'unknown';
-    const view = (phase, headline, { body = '', meta = [], typeLabel = t } = {}) => ({
-        typeLabel,
-        phase,
-        headline,
-        body,
-        meta: meta.filter(Boolean),
+    // An event's name (`headline`: what it is, in words, `about` the model or tool it concerns; empty where its words
+    // say it), its words (`body`; `full` their whole text where the list shows a cut, `markdown` for authored prose) and
+    // its facts (`meta`). A machine reference (an id, a hash, a path, a run's source) is neither: its record has it.
+    const view = (phase, headline, { body = '', full = '', meta = [], markdown = false } = {}) => ({
+        phase, headline, body, full, meta: meta.filter(Boolean), markdown,
     });
-    const taskMeta = (...items) => [evt.task_id ? `task=${evt.task_id}` : '', ...items];
+    const about = (name, subject) => [name, subject].filter(Boolean).join(' · ');
 
     if (evt.is_progress || t === 'send_message') {
-        const narration = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240, { markdown: true });
+        // A delegated run's observation reads from its typed fields (delegated_activity.js), never from its text: what
+        // its executor said (or its count of technical events) is the words; who said it (an attempt's id), the run,
+        // its range, its journal's sequence numbers and its source stay in its record.
+        const delegated = delegatedActivityView(evt, { seq: false });
+        if (delegated) {
+            return view('progress', '', { body: delegated.body || 'Progress update', markdown: true,
+                full: delegated.fullBody === delegated.body ? '' : delegated.fullBody });
+        }
+        // A host note loses only the opening its producer marks it with (host_notice_text.js), as in a chat's timeline.
+        const narration = describeText(hostRowDisplayText({ ...evt, text: String(evt.content || evt.text || '').replace(/^💬\s*/, '') }),
+            240, { markdown: true });
+        const words = { body: narration.preview || 'Progress update', full: narration.full === narration.preview ? '' : narration.full, markdown: true };
         if (isSubagentEvent(evt)) {
             const sid = subagentId(evt);
             const event = String(evt.subagent_event || 'update').toLowerCase();
             const role = String(evt.subagent_role || '').trim();
-            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', subagentHeadline(sid, role, event, evt.model, { full: true }), {
-                body: narration.preview,
-                meta: [
-                    sid ? `task=${sid}` : '',
-                    role ? `role=${role}` : '',
-                    evt.model ? `model=${evt.model}` : '',
-                    evt.write_surface ? `write=${evt.write_surface}` : '',
-                    evt.parent_task_id ? `parent=${evt.parent_task_id}` : '',
-                    evt.root_task_id ? `root=${evt.root_task_id}` : '',
-                ],
-            });
+            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress',
+                subagentHeadline(sid, role, event, evt.model, { full: true }), { ...words, body: narration.preview,
+                    meta: [evt.write_surface ? `write surface ${evt.write_surface}` : ''] });  // its role and model: its name
         }
-        return view('progress', narration.preview || 'Progress update', { meta: taskMeta() });
+        return view('progress', '', words);
     }
 
     if (t === 'task_started') {
         return view('start', `Started ${evt.task_type || 'task'}`, {
             body: shortText(evt.task_text, 220),
-            meta: taskMeta(evt.direct_chat ? 'chat' : 'queued'),
+            meta: [evt.direct_chat ? 'chat' : 'queued'],
         });
     }
 
@@ -774,104 +814,108 @@ export function summarizeLogEvent(evt) {
         const task = evt.task || {};
         return view('queued', `Received ${task.type || 'task'}`, {
             body: shortText(task.text, 220),
-            meta: [task.id ? `task=${task.id}` : '', task.text_len ? `${task.text_len} chars` : ''],
+            meta: [task.text_len ? `${task.text_len} chars` : ''],
         });
     }
 
     if (t === 'context_building_started') {
-        return view('context', 'Building context', { meta: taskMeta(evt.task_type || '') });
+        return view('context', 'Building context');
     }
 
     if (t === 'context_building_finished') {
         return view('ready', 'Context ready', {
-            meta: taskMeta(
+            meta: [
                 evt.message_count != null ? `${evt.message_count} msgs` : '',
                 Number.isFinite(Number(evt.budget_remaining_usd)) ? `$${Number(evt.budget_remaining_usd).toFixed(2)} left` : '',
-            ),
+            ],
         });
     }
 
     if (t === 'task_heartbeat') {
-        return view(evt.phase || 'alive', 'Still working', {
-            meta: taskMeta(evt.task_type || '', formatLogDuration(evt.runtime_sec)),
-        });
+        return view(evt.phase || 'alive', 'Still working', { meta: [formatLogDuration(evt.runtime_sec)] });
     }
 
     if (t === 'llm_round_started') {
-        return view('calling', `Calling ${evt.model || 'model'}`, {
-            meta: taskMeta(
+        return view('calling', `Calling ${compactModel(evt.model) || 'model'}`, {
+            meta: [
                 evt.round ? `r${evt.round}` : '',
                 evt.attempt ? `try ${evt.attempt}` : '',
                 evt.reasoning_effort || '',
                 evt.use_local ? 'local' : '',
-            ),
+            ],
         });
     }
 
     if (t === 'llm_round_finished' || t === 'llm_round') {
-        return view('done', `LLM round ${evt.round || ''} finished`.trim(), {
+        return view('done', about(`LLM round ${evt.round || ''} finished`.trim(), compactModel(evt.model)), {
             body: effortEvidenceText(evt),
-            meta: taskMeta(
-                evt.model || '',
+            meta: [
                 formatUsageTokens(evt),
                 // Backfill uses accounted upper bounds; live frames may carry cost.
                 formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
                 evt.response_kind === 'tool_calls' ? `${evt.tool_call_count || 0} tool calls` : evt.response_kind || '',
-            ),
+            ],
         });
     }
 
-    if (t === 'llm_round_empty' || t === 'llm_empty_response') {
-        return view('empty', 'Model returned empty response', {
-            meta: taskMeta(evt.model || '', evt.round ? `r${evt.round}` : ''),
+    if (t === 'llm_round_empty' || t === 'llm_empty_response' || t === 'provider_content_refusal') {
+        const refused = t === 'provider_content_refusal';  // no content, the filter's finish; its words are the provider's
+        const name = refused ? "The provider's content filter stopped this request" : 'Model returned empty response';
+        return view('empty', about(name, compactModel(evt.model)), {
+            body: refused && evt.provider_message ? `The provider said: "${shortText(evt.provider_message, 260)}"` : '',
+            meta: [evt.round ? `r${evt.round}` : '', refused ? evt.response_provider || '' : ''],
         });
     }
 
     if (t === 'llm_round_error' || t === 'llm_api_error') {
-        return view('error', 'LLM call failed', {
+        return view('error', about('LLM call failed', compactModel(evt.model)), {
             body: shortText(evt.error, 260),
-            meta: taskMeta(evt.model || '', evt.round ? `r${evt.round}` : ''),
+            meta: [evt.round ? `r${evt.round}` : ''],
         });
     }
 
     if (t === 'llm_usage') {
-        return view('usage', 'LLM usage recorded', {
+        return view('usage', about('LLM usage recorded', compactModel(evt.model)), {
             body: effortEvidenceText(evt),
-            meta: taskMeta(
-                evt.model || '',
+            meta: [
                 formatUsageTokens(evt),
                 formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
-                evt.category || '',
-            ),
+            ],
         });
     }
 
+    const tool = machineWords(evt.tool || 'tool');  // a tool's name in words, as an event's: "Run command started"
     if (t === 'tool_call_started') {  // processing began; a replayed start alone is no liveness claim
-        return view('start', `Started ${evt.tool || 'tool'}`, {
+        return view('start', `${tool} started`, {
             body: compactJson(evt.args, 260),
-            meta: taskMeta(evt.timeout_sec ? `timeout ${evt.timeout_sec}s` : ''),
+            meta: [evt.timeout_sec ? `timeout ${evt.timeout_sec}s` : ''],
         });
     }
 
     if (t === 'tool_call_timeout' || t === 'tool_timeout') {
-        return view('timeout', `${evt.tool || 'tool'} timed out`, {
+        return view('timeout', `${tool} timed out`, {
             body: compactJson(evt.args, 220),
-            meta: taskMeta(evt.timeout_sec ? `limit ${evt.timeout_sec}s` : '', formatLogDuration(evt.duration_sec)),
+            meta: [evt.timeout_sec ? `limit ${evt.timeout_sec}s` : '', formatLogDuration(evt.duration_sec)],
         });
     }
 
-    if (t === 'tool_call' || t === 'tool_call_finished' || evt.tool) {
+    if (t === 'tool_call' || t === 'tool_call_finished' || (evt.tool && t === 'unknown')) {
         // The durable tools.jsonl row (replay/backfill) carries the same typed
         // failure facts as the live tool_call_finished frame — is_error plus the
         // signal/exit facts — so a failed call reads the same after a reload.
         const signalDeath = Boolean(evt.signal) || (typeof evt.exit_code === 'number' && evt.exit_code < 0);
-        const failed = Boolean(evt.is_error) || signalDeath;
+        // A refusal of further work cannot hide the current call's failure.
+        const refusal = refusedStepPhrase(evt);
+        const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusal);
+        const handled = handledRefusalHeadline(evt);
+        const failed = !held && (Boolean(evt.is_error) || signalDeath);
         const finished = t === 'tool_call_finished';
-        const label = signalDeath ? `killed (${evt.signal || evt.exit_code})`
-            : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(failed ? 'error' : finished ? 'done' : 'result', `${evt.tool || 'tool'} ${label}`, {
-            body: shortText(evt.result_preview || (finished ? '' : compactJson(evt.args, 220)), 260),
-            meta: taskMeta(formatLogDuration(evt.duration_sec)),
+        const label = signalDeath ? `killed (${evt.signal || evt.exit_code})` : evt.status === 'interrupted'
+            ? `interrupted (${evt.control_reason || 'control'})` : failed ? 'failed' : finished ? 'finished' : 'result';
+        return view(refusedByStop(evt) ? 'info' : held || handled ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || handled || `${tool} ${label}`, {
+            body: shortText([!held && refusal,
+                toolErrorDisplayText(evt, evt.result_preview) || (finished ? '' : compactJson(evt.args, 220))].filter(Boolean).join(' '), 260),
+            meta: [formatLogDuration(evt.duration_sec)],
         });
     }
 
@@ -880,13 +924,13 @@ export function summarizeLogEvent(evt) {
         // previously applied configuration — a warning, not an unresolved error.
         return view('warn', 'Settings reload failed at task start', {
             body: shortText(evt.error, 260),
-            meta: taskMeta('runs on the previously applied configuration'),
+            meta: ['runs on the previously applied configuration'],
         });
     }
 
     if (t === 'history_retention') {
         const retention = historyRetentionView(evt);
-        if (retention) return view(retention.phase, retention.headline, { body: retention.body, meta: taskMeta(...retention.meta) });
+        if (retention) return view(retention.phase, retention.headline, { body: retention.body, meta: retention.meta });
     }
 
     if (t === 'owner_hurry') {
@@ -896,12 +940,7 @@ export function summarizeLogEvent(evt) {
         const proj = ownerHurryProjection(evt);
         return view('info', proj.label, {
             body: shortText(evt.detail, 220),
-            meta: taskMeta(
-                evt.request_id ? `request=${evt.request_id}` : '',
-                evt.attempt_key != null ? `attempt=${evt.attempt_key}` : '',
-                evt.effect ? `effect=${evt.effect}` : '',
-                evt.status ? `status=${evt.status}` : '',
-            ),
+            meta: [evt.effect ? `effect ${evt.effect}` : '', evt.status || ''],
         });
     }
 
@@ -911,12 +950,9 @@ export function summarizeLogEvent(evt) {
         // provenance says how it was framed (ancestor / relayed peer /
         // independent task / system / escalation).
         const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
-        return view('info', `Message from task ${source}`, {
+        return view('info', hostTaskMessage(evt) ? 'System message' : `Message from task ${source}`, {
             body: shortText(evt.text_preview, 200),
-            meta: taskMeta(
-                evt.provenance ? `provenance=${evt.provenance}` : '',
-                evt.relayed_from_task_id ? `relayed=${evt.relayed_from_task_id}` : '',
-            ),
+            meta: [evt.provenance ? `provenance ${evt.provenance}` : ''],
         });
     }
 
@@ -927,14 +963,13 @@ export function summarizeLogEvent(evt) {
         const written = String(evt.status || '') === 'written';
         return view(written ? 'info' : 'warn', written ? `Message sent to task ${target}` : `Message to task ${target} refused`, {
             body: written ? '' : shortText(evt.reason, 160),
-            meta: taskMeta(`target=${target}`, evt.status ? String(evt.status) : ''),
+            meta: [evt.status ? String(evt.status) : ''],
         });
     }
 
     if (t === 'task_metrics_event' || t === 'task_eval') {
         return view('metrics', 'Task metrics', {
-            meta: taskMeta(
-                evt.task_type || '',
+            meta: [
                 ...taskOutcomeMeta(evt),
                 modelExecutionLabel(evt.model_execution),
                 evt.reason_code || '',
@@ -942,7 +977,7 @@ export function summarizeLogEvent(evt) {
                 evt.tool_calls != null ? `${evt.tool_calls} tools` : '',
                 evt.tool_errors ? `${evt.tool_errors} errors` : '',
                 evt.response_len ? `${evt.response_len} chars` : '',
-            ),
+            ],
         });
     }
 
@@ -957,12 +992,11 @@ export function summarizeLogEvent(evt) {
         // C13: the SHARED accessor and its null policy — same alias precedence as
         // chat.js and the Python seams, and a REAL $0 prints instead of vanishing.
         const ownValue = accountedUpperBound(evt) ?? (evt.cost ?? null);
-        const ownCost = unavailable
-            ? 'cost unavailable'
-            : (ownValue != null ? `${formatLogMoney(ownValue)}${evt.cost_final === false ? ' (pending)' : ''}` : '');
+        const money = formatLogMoney(ownValue);
+        const ownCost = unavailable ? 'cost unavailable' : money && `${money}${evt.cost_final === false ? ' (pending)' : ''}`;
         return view(presentation.phase, presentation.headline, {
             body: reviewDetails,
-            meta: taskMeta(
+            meta: [
                 ...taskOutcomeMeta(evt),
                 modelExecutionLabel(evt.model_execution),
                 // №8/Q3: the owner-requested soft stop shows the honest marker
@@ -973,11 +1007,11 @@ export function summarizeLogEvent(evt) {
                 // v6.57.0 (P6b): show the recursive cost incl. children when it adds up to
                 // more than this task's own spend, so a parent isn't under-reported.
                 (accountedUpperBoundWithChildren(evt) ?? -1) > (ownValue ?? 0)
-                    ? `+children=${formatLogMoney(accountedUpperBoundWithChildren(evt))}${evt.cost_with_children_partial ? ' (partial)' : ''}`
+                    ? `with children ${formatLogMoney(accountedUpperBoundWithChildren(evt))}${evt.cost_with_children_partial ? ' (partial)' : ''}`
                     : '',
                 evt.total_rounds ? `${evt.total_rounds} rounds` : '',
                 formatLogTokens(evt),
-            ),
+            ],
         });
     }
 
@@ -986,14 +1020,18 @@ export function summarizeLogEvent(evt) {
         const ownCost = unavailable ? 'cost unavailable' : formatLogMoney(accountedUpperBound(evt));
         const subtreeCost = unavailable ? '' : formatLogMoney(accountedUpperBoundWithChildren(evt));
         return view(unavailable ? 'warn' : 'metrics', 'Task cost finalized', {
-            meta: taskMeta(ownCost, subtreeCost ? `subtree=${subtreeCost}` : '', evt.post_task_status || ''),
+            meta: [ownCost, subtreeCost ? `with children ${subtreeCost}` : '', evt.post_task_status || ''],
         });
     }
 
+    return summarizeHostLogEvent(evt, t, view, about, tool);
+}
+
+function summarizeHostLogEvent(evt, t, view, about, tool) {
     if (t === 'startup_verification') {
         return view(Number(evt.issues_count || 0) > 0 ? 'warn' : 'ok', 'Startup verification', {
             body: describeStartupChecks(evt.checks),
-            meta: [evt.git_sha ? String(evt.git_sha).slice(0, 8) : '', `${evt.issues_count || 0} issues`],
+            meta: [`${evt.issues_count || 0} issues`],
         });
     }
 
@@ -1013,8 +1051,7 @@ export function summarizeLogEvent(evt) {
         return view(result.phase, result.headline, result);
     }
 
-    if (t === 'worker_boot') return view('boot', 'Worker booted', {
-        meta: [evt.pid ? `pid ${evt.pid}` : '', evt.git_sha ? String(evt.git_sha).slice(0, 8) : ''] });
+    if (t === 'worker_boot') return view('boot', 'Worker booted', { meta: [evt.pid ? `pid ${evt.pid}` : ''] });
 
     if (t === 'deps_sync_ok') {
         return view('ok', 'Dependencies in sync', { meta: [evt.reason || '', shortText(evt.source, 60)] });
@@ -1032,16 +1069,14 @@ export function summarizeLogEvent(evt) {
 
     if (t === 'task_checkpoint' || t === 'context_reclaim') {
         return view(['context_fit_low_retry', 'service_finalization_error'].includes(evt.checkpoint_kind) ? 'warn' : 'thinking', taskCheckpointLabel(evt), {
-            meta: taskMeta(evt.model ? compactModel(evt.model) : '', evt.round ? `r${evt.round}` : '',
+            meta: [evt.model ? compactModel(evt.model) : '', evt.round ? `r${evt.round}` : '',
                 evt.context_tokens ? `~${evt.context_tokens} tok` : '',
-                formatLogMoney(evt.task_cost)),
+                formatLogMoney(evt.task_cost)],
         });
     }
 
     if (t === 'swarm_fanout') {
-        const n = (evt.requested_count != null)
-            ? evt.requested_count
-            : (Array.isArray(evt.task_ids) ? evt.task_ids.length : 0);
+        const n = evt.requested_count ?? (Array.isArray(evt.task_ids) ? evt.task_ids.length : 0);
         // #318: a delegated harness run rides the same telemetry with the host
         // constant role="delegated_run"; it is not a subagent.
         const headline = evt.role === 'delegated_run'
@@ -1049,10 +1084,9 @@ export function summarizeLogEvent(evt) {
             : `swarm fan-out: ${n} subagent(s) requested`;
         return view('info', headline, {
             meta: [
-                evt.task_group_id ? `group=${evt.task_group_id}` : '',
-                evt.role ? `role=${evt.role}` : '',
-                evt.requested_model_lane ? `lane=${evt.requested_model_lane}` : '',
-                evt.depth != null ? `depth=${evt.depth}` : '',
+                evt.role ? `role ${evt.role}` : '',
+                evt.requested_model_lane ? `lane ${evt.requested_model_lane}` : '',
+                evt.depth != null ? `depth ${evt.depth}` : '',
                 ('fanout_interval_sec' in evt ? evt.fanout_interval_sec : evt.inter_wave_latency_sec) != null
                     ? `since previous fan-out ${'fanout_interval_sec' in evt ? evt.fanout_interval_sec : evt.inter_wave_latency_sec}s` : '',
             ],
@@ -1064,27 +1098,17 @@ export function summarizeLogEvent(evt) {
     // unknown name that carries no typed fact: it keeps a genuine producer-side failure with
     // only a name visible under Errors, and it is pinned as a remainder, not a taxonomy.
     const level = String(evt.level || '').toLowerCase();
+    const name = about(machineWords(t), evt.tool ? tool : compactModel(evt.model));  // its subject: the tool, else the model
     const body = shortText(
         evt.error || evt.message || evt.text || evt.result_preview || effortEvidenceText(evt)
             || compactJson(evt.args || evt.task || evt.checks, 260), 260,
     );
-    if (evt.ok === true) {
-        return view('ok', shortText(t, 120), { body, meta: taskMeta() });
-    }
-    if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') {
-        return view('error', shortText(t, 120), { body, meta: taskMeta(evt.tool ? `tool=${evt.tool}` : '') });
-    }
-    if (level === 'warning' || level === 'warn') {
-        return view('warn', shortText(t, 120), { body, meta: taskMeta() });
-    }
-    if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
-        return view('error', t, { body, meta: taskMeta(evt.tool ? `tool=${evt.tool}` : '') });
-    }
-
-    return view('info', shortText(t, 120), {
-        body,
-        meta: taskMeta(evt.model || '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)),
-    });
+    if (evt.ok === true) return view('ok', name, { body });
+    if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') return view('error', name, { body });
+    if (level === 'warning' || level === 'warn') return view('warn', name, { body });
+    if (['extension_companion_exhausted', 'extension_companion_restart_failed', 'extension_companion_refresh_failed'].includes(t)) return view('error', name, { body });
+    if (t.includes('error') || t.includes('crash') || t.includes('fail')) return view('error', name, { body });
+    return view('info', name, { body, meta: [evt.tool ? compactModel(evt.model) : '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)] });
 }
 
 function chatView({
@@ -1106,12 +1130,14 @@ function chatView({
     chip = null,
     model = '',
     receipt = false,
+    hostRefusedStep = false,
     toolCall = null,
     waitEpisode = null,
 } = {}) {
     const out = { phase, headline, body, visible, promote, terminal, human, dedupeKey };
     // Receipt rows render inside existing blocks but cannot create one.
     if (receipt) out.receipt = true;
+    if (hostRefusedStep) out.hostRefusedStep = true;
     if (toolCall) out.toolCall = toolCall;  // folded into the block's one evidence row
     if (waitEpisode) out.waitEpisode = waitEpisode;  // folded into the block's one row per wait kind
     if (fullBody) out.fullBody = fullBody;
@@ -1153,7 +1179,8 @@ export function taskTerminalSummary(evt = {}) {
     const quiet = terminal && evt.quiet_effective === true;
     const presentation = taskPresentation(terminal ? outcome : 'working', quiet);
     const body = quiet ? '' : [taskStoppedWithSummary(evt) ? OWNER_STOP_DETAIL_MARKER : '', taskReasonDetail(evt),
-        reasonCodesNote(taskReasonCodes(evt)), terminal ? savedTerminalRowNote(evt) : ''].filter(Boolean).join('\n');
+        reasonCodesNote(taskReasonCodes(evt)), heldCallsLine(record?.outcome_axes?.execution),  // here alone (owner 11.11, A)
+        terminal ? savedTerminalRowNote(evt) : ''].filter(Boolean).join('\n');
     const cause = terminal && !quiet ? taskReasonDetail(evt) : '';
     return {
         ...chatView({
@@ -1168,7 +1195,7 @@ export function taskTerminalSummary(evt = {}) {
         ...(evt.model_execution && typeof evt.model_execution === 'object'
             ? { modelExecution: evt.model_execution } : {}),
         ...(Number.isInteger(evt.tool_calls) ? { toolCalls: evt.tool_calls } : {}),
-        ...(evt.initiator ? { initiator: String(evt.initiator) } : {}),
+        ...originLabels(evt),
     };
 }
 
@@ -1199,13 +1226,13 @@ export function modelExecutionLabel(fact) {
     return !view ? '' : view.label ? `${view.label}: ${view.value}` : view.value;
 }
 
-// The turn's origin label rides every projected frame of the turn (progress,
-// tool, heartbeat, terminal) so the block's meta line can name it whichever
-// frame minted the card; the projection branches below stay label-blind.
+// The turn's origin label, the place that called it and its Continue's requester ride every frame of the turn, so
+// whichever frame minted the card names them; the projection branches below stay label-blind.
+const originLabels = (evt) => ({ ...(evt?.initiator && { initiator: String(evt.initiator) }), ...(evt?.place_origin && { placeOrigin: evt.place_origin }),
+    ...(evt?.continue_requester && { continueRequester: String(evt.continue_requester) }) });
 export function summarizeChatLiveEvent(evt) {
     const view = summarizeChatLiveEventView(evt);
-    if (view && evt?.initiator) view.initiator = String(evt.initiator);
-    return view;
+    return view && Object.assign(view, originLabels(evt));
 }
 
 function summarizeChatLiveEventView(evt) {
@@ -1265,7 +1292,8 @@ function summarizeChatLiveEventView(evt) {
             model: evt.model, dedupeKey: `reasoning:${progressText.full}` }), { reasoning: true });
     }
     if ((evt.is_progress || t === 'send_message') && isSubagentEvent(evt)) {
-        const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
+        const note = evt.system_type === 'subagent_terminal_notice' ? { full: '', preview: '' }  // the supervisor's typed notice is recorded fact, never current speech
+            : describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
         const sid = subagentId(evt);
         const rawEvent = String(evt.subagent_event || '').toLowerCase();
         const role = String(evt.subagent_role || '').trim();
@@ -1273,16 +1301,7 @@ function summarizeChatLiveEventView(evt) {
         const resultText = describeText(evt.result || '', 320, { markdown: true });
         const traceText = describeText(evt.trace_summary || '', 320);
         const errorText = describeText(evt.error || '', 220);
-        const cancelDetail = evt.cancel_origin && (rawEvent === 'cancelled'
-            || (rawEvent === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'))
-            // The child's OWN lineage rides along, so the cancel clause can prove the
-            // parent relation instead of naming the swept root as an initiator (#1061).
-            ? taskReasonDetail({ status: 'cancelled', cancel_origin: evt.cancel_origin,
-                task_id: evt.subagent_task_id || evt.task_id,
-                parent_task_id: evt.parent_task_id, root_task_id: evt.root_task_id }) : '';
-        const stopDetail = (evt.task_completion ?? evt.outcome_axes?.execution?.task_completion)?.action === 'stop' ? taskReasonDetail(evt) : '';
-        const reasonDetail = cancelDetail || stopDetail || (evt.outcome_axes?.execution?.plan_review
-            ? taskReasonDetail(evt) : evt.reason_code ? taskReasonPhrase(evt.reason_code) : '');
+        const { detail, lead } = childLineCause(evt);
         // Completed frames take label and phase from their authoritative outcome axes.
         const completionSeverity = rawEvent === 'completed' ? taskOutcomeSeverity(evt) : 'done';
         const event = rawEvent === 'completed'
@@ -1292,14 +1311,12 @@ function summarizeChatLiveEventView(evt) {
                         : 'completed')
             : rawEvent;
         const report = resultText.full ? childReportLabel(event) : '';
-        const detailParts = [
+        const fullOutput = [
             note.full,
             resultText.full ? `${report ? `## ${report}` : '[RESULT]'}\n${resultText.full}` : '',  // a timeline label line
             traceText.full ? `[TRACE]\n${traceText.full}` : '',
             errorText.full ? `[ERROR]\n${errorText.full}` : '',
-            reasonDetail,
-            !cancelDetail && stopDetail ? reasonCodesNote(taskReasonCodes(evt)) : '',
-        ].filter(Boolean);
+        ].filter(Boolean).join('\n\n');
         // Cancelled is distinct; rejected/interrupted remain notices rather than
         // red failures. Interrupted is retryable and therefore non-terminal.
         const phase = event === 'completed' ? 'done'
@@ -1307,10 +1324,10 @@ function summarizeChatLiveEventView(evt) {
                 : event === 'cancelled' ? 'cancelled'
                     : event === 'failed' ? 'error'
                         : ['rejected', 'interrupted'].includes(event) ? 'warn'
-                            : event === 'scheduled' ? 'start'
+                            : event === 'scheduled' ? (evt.accepted === true ? 'queued' : 'start')
                                 : 'working';
         const terminal = ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event);
-        const terminalCause = terminal ? (cancelDetail || stopDetail || (UNSTARTED_REASONS.has(String(evt.reason_code || '')) ? reasonDetail : '')) : '';
+        const terminalCause = terminal ? lead : '';
         // A child's own note carries the same voice fact (the progress branch below): a host
         // note inside the child's turn is a visible row that never claims the card's collapsed
         // line. The lifecycle, result and error frames state no voice, so they keep leading.
@@ -1320,21 +1337,14 @@ function summarizeChatLiveEventView(evt) {
             : (SUBAGENT_CARD_LABEL[event] || 'Working');
         // The compact activity line describes the child's work/result; review
         // evidence is rendered separately by the owning card's Reviews section.
-        const activity = terminal
-            ? (phase === 'error' && errorText.full ? errorText
-                : resultText.full ? resultText
-                    : errorText.full ? errorText
-                        : traceText.full ? traceText
-                            : note)
-            : (note.full ? note
-                : resultText.full ? resultText
-                    : errorText.full ? errorText
-                        : traceText);
-        return chatView({
+        const activity = terminal && phase === 'error' && errorText.full ? errorText
+            : !terminal && note.full ? note
+                : [resultText, errorText, traceText].find(text => text.full) || (terminal ? note : traceText);
+        return Object.assign(chatView({
             phase,
             headline: subagentHeadline(sid, role, label, evt.model),
             body: terminalCause || activity.preview || '',
-            fullBody: detailParts.join('\n\n'),
+            fullBody: [fullOutput, detail].filter(Boolean).join('\n\n'),
             activityPreview: terminalCause || activity.preview || '',
             activityLead: !terminalCause && activity === resultText ? report : '',
             visible: true,
@@ -1349,7 +1359,7 @@ function summarizeChatLiveEventView(evt) {
             chip: executorChip(evt),
             model: evt.model,
             dedupeKey: `subagent:${sid}:${label}:${status}:${progressText.full || resultText.full || errorText.full || ''}`,
-        });
+        }), { fullOutput, outputPreview: activity.preview || '', childCause: terminal ? childCauseFacts(evt) : undefined });
     }
 
     if (evt.is_progress || t === 'send_message') {
@@ -1385,11 +1395,11 @@ function summarizeChatLiveEventView(evt) {
     }
 
     if (t === 'task_started' || t === 'task_received') {
-        return chatView({ headline: tr('task.progress.working_on_it', 'Working on it'), promote: true, dedupeKey: key() });
+        return chatView({ headline: tr('task.progress.working_on_it', 'Working on it'), dedupeKey: key() });
     }
 
     if (t === 'context_building_started') {
-        return chatView({ headline: tr('task.progress.getting_ready', 'Getting ready'), promote: true, dedupeKey: key() });
+        return chatView({ headline: tr('task.progress.getting_ready', 'Getting ready'), dedupeKey: key() });
     }
 
     if (t === 'context_building_finished') {
@@ -1411,7 +1421,7 @@ function summarizeChatLiveEventView(evt) {
         const preview = String(evt.text_preview || '');
         return chatView({
             phase: 'info',
-            headline: fmt('Message from task {source}', { source }),
+            headline: hostTaskMessage(evt) ? tr('task.progress.system_message', 'System message') : fmt('Message from task {source}', { source }),
             body: shortText(preview, 200),
             fullBody: preview,
             visible: true,
@@ -1425,11 +1435,14 @@ function summarizeChatLiveEventView(evt) {
         // call is a host-stamped routing or completion act. Failures keep their own row; so does a
         // completed check whose criterion failed, while its call still counts once as `ok`. `done`
         // is the TASK's phase; a finished CALL is `ok`.
-        const status = t === 'tool_call_started' ? (evt._live_tool_frame ? 'calling' : 'unknown') : 'ok';
+        const started = t === 'tool_call_started';
+        const refusal = !started && handledRefusalHeadline(evt);
+        const status = started ? (evt._live_tool_frame ? 'calling' : 'unknown') : refusal ? evt.status : 'ok';
+        const callKey = toolCallKey(evt, groupId);
         return chatView({
             phase: status, headline: '', visible: true, dedupeKey: `tools|${groupId}`,
             receipt: Boolean(evt.routing_action) || evt.completion_control === true,
-            ...checkFailureView(evt, toolCallKey(evt, groupId)),
+            ...(!started && (refusal ? toolStepDiagnostic(evt, callKey) : checkFailureView(evt, callKey))),
             toolCall: toolObservation(evt, groupId, status),
         });
     }
@@ -1459,7 +1472,6 @@ function summarizeChatLiveEventView(evt) {
             dedupeKey: key(evt.round || ''),
         });
     }
-
     if (t === 'task_start_settings_reload_failed') {
         // #285 loud disclosure: the task runs on the previously applied
         // configuration — the owner must see that in the chat timeline, not
@@ -1475,7 +1487,6 @@ function summarizeChatLiveEventView(evt) {
             dedupeKey: key(),
         });
     }
-
     if (t === 'tool_call_timeout' || t === 'tool_timeout') {
         return chatView({
             phase: 'warn',
@@ -1485,34 +1496,17 @@ function summarizeChatLiveEventView(evt) {
             toolCall: toolObservation(evt, groupId, 'wait_ended'),
         });
     }
-
     if (['tool_call_finished', 'tool_call'].includes(t) && evt.is_error) {
-        const failed = toolObservation(evt, groupId, 'error');
-        const commandText = describeText(extractCommandText(evt.args), 120);
-        const errorResult = describeText(evt.result_preview || evt.error, 220);
-        const bodyParts = [];
-        const fullBodyParts = [];
-        if (commandText.preview) bodyParts.push(`Command: ${commandText.preview}`);
-        if (errorResult.preview) bodyParts.push(errorResult.preview);
-        if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
-        if (errorResult.full) fullBodyParts.push(errorResult.full);
-        const commandFailed = evt.status === 'non_zero_exit';
-        const exitCode = commandFailed ? Number(evt.exit_code) : NaN;
+        const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusedStepPhrase(evt));
         return chatView({
-            phase: commandFailed ? 'warn' : 'error',
-            headline: commandFailed
-                ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
-                : `One of the steps failed${evt.tool ? ` · ${evt.tool}` : ''}`,
-            body: shortText(bodyParts.join(' '), 220),
-            fullBody: fullBodyParts.join('\n\n'),
-            visible: true,
-            dedupeKey: toolCallKey(evt, groupId),
-            toolCall: failed,
+            ...toolStepDiagnostic(evt, toolCallKey(evt, groupId)),
+            toolCall: toolObservation(evt, groupId, held ? 'held' : evt.status === 'interrupted' ? 'interrupted' : 'error'),
         });
     }
 
     if (t === 'task_done') return taskTerminalSummary(evt);
-
+    // A late review that resolved its ended task carries the CURRENT outcome a reload reads (late_review_marks).
+    if (t === 'review_late_result' && evt.current_outcome) return { ...taskTerminalSummary({ ...evt.current_outcome, task_id: evt.task_id, outcome_final: true }), currentOutcome: true };
     if (t === 'task_cost_finalized') {
         const unavailable = evt.cost_accounting_status === 'unavailable';
         const ownCost = unavailable ? 'cost unavailable' : formatLogMoney(accountedUpperBound(evt));
@@ -1567,6 +1561,9 @@ export function getLogTaskGroupId(evt) {
     return '';
 }
 
+// A late review's current outcome is as old as the row it read (its revision), not its later publication; it repaints only a shown, finished card, never over a newer frame of it (the card clock, chat.js, read to the microsecond).
+export const lateOutcomeIsCurrent = (record, evt) => Boolean(record?.finished) && !(isoMicros(evt?.current_outcome?.revision || evt?.ts) < isoMicros(record.latestSourceTs));
+
 export function isGroupedTaskEvent(evt) {
     const groupId = getLogTaskGroupId(evt);
     if (!groupId) return false;
@@ -1576,9 +1573,8 @@ export function isGroupedTaskEvent(evt) {
         || t.startsWith('task_')
         || t.startsWith('llm_')
         || t.startsWith('tool_')
-        || t === 'context_building_started'
-        || t === 'context_building_finished'
-        || t === 'send_message'
+        || t === 'context_building_started' || t === 'context_building_finished' || t === 'send_message'
+        || (t === 'review_late_result' && Boolean(evt.current_outcome))  // only one that carries its task's outcome
     );
 }
 

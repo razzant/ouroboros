@@ -43,7 +43,7 @@ def cognitive_parent_context(ctx: Any = None, task: Any = None) -> Any:
 
 def validate_cognitive_route(raw: Any) -> dict:
     """Copy historical bindings unchanged; validate the complete v2 carrier."""
-    from ouroboros.model_slots import normalize_processing_preference
+    from ouroboros.model_slots import normalize_call_tier
     from ouroboros.subagent_runtime import SubagentSelectionError, validate_subagent_snapshot
 
     route = copy.deepcopy(raw) if isinstance(raw, dict) else {}
@@ -58,7 +58,7 @@ def validate_cognitive_route(raw: Any) -> dict:
                 or route.get("chosen_by") not in ("inherited", "parent_fallback", "parent_switch", "delegator")
                 or not isinstance(route.get("follows_role", ""), str)):
             raise ValueError("The complete schema-2 cognitive binding is required")
-        route["processing_preference"] = normalize_processing_preference(route["processing_preference"])
+        route["processing_preference"] = normalize_call_tier(route["processing_preference"])
         if route["chosen_by"] == "delegator":
             selected = validate_subagent_snapshot(route.get("selected_supervisor_snapshot"))
             if selected["route"]["kind"] != "api_model":
@@ -95,7 +95,8 @@ def capture_cognitive_route(ctx: Any, actor: dict, settings: dict, *, supervisor
         if actor["route"]["kind"] != "agent_session":
             raise SubagentSelectionError("supervisor_inapplicable", "Only an Agent-session child has a separate supervisor.")
         try:
-            selected, _ = select_subagent_snapshot(settings, subagent_id=supervisor)
+            # A named supervisor row is a new helper too: without a tier of its own it takes the work's.
+            selected, _ = select_subagent_snapshot(settings, subagent_id=supervisor, work_tier=work_tier(ctx, settings))
         except SubagentSelectionError as exc:
             raise SubagentSelectionError(exc.code.replace("subagent", "supervisor"), exc.detail) from exc
         return _selected_cognition(ctx, selected, settings)
@@ -107,7 +108,7 @@ def _selected_cognition(ctx: Any, selected: dict, settings: dict) -> dict:
     from ouroboros.route_spec import RouteSpec, model_named_effort
     from ouroboros.runtime_mode_policy import effort_range_binds
     from ouroboros.settings_scales import choose_effort, effort_range
-    from ouroboros.subagent_runtime import SubagentSelectionError
+    from ouroboros.subagent_runtime import SubagentSelectionError, run_processing
 
     route = selected["route"]
     if route["kind"] != "api_model":
@@ -124,7 +125,7 @@ def _selected_cognition(ctx: Any, selected: dict, settings: dict) -> dict:
         "effort": effort, "use_local_model": local,
         "source_role": f"subagent:{selected['selected_subagent_id']}",
         "credential_profile_id": str(route.get("credential_profile_id") or ""),
-        "processing_preference": selected["processing_preference"],
+        "processing_preference": run_processing(selected),  # its calls' tier; the row's own stays its identity
         "chosen_by": "delegator", "selected_supervisor_snapshot": selected,
     })
 
@@ -133,10 +134,10 @@ def _inherited_cognition(ctx: Any, settings: dict) -> dict:
     """The parent's actual send binding, with its route choice: a parent following its role hands the role
     down (``follows_role``, the nanny follows it live); a parent on its own route (``switch_model``, a
     wait-card choice) hands a frozen ``parent_switch``. An emergency fallback answers the parent only:
-    children follow its role. Historical ``parent_fallback`` bindings remain readable."""
+    children inherit its primary (or follow its role). Historical ``parent_fallback`` bindings remain readable."""
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, task_model_binding, task_processing_preference
     from ouroboros.provider_models import provider_for_model
-    from ouroboros.route_choice import following_route, follows, opening_role
+    from ouroboros.route_choice import following_route, follows, opening_choice
 
     ctx = cognitive_parent_context(ctx)
     metadata = getattr(ctx, "task_metadata", None) or {}
@@ -149,12 +150,18 @@ def _inherited_cognition(ctx: Any, settings: dict) -> dict:
     followed = follows(choice)
     # Older parents can carry only the fit role; current parents record the
     # adopted fallback as an explicit choice. Neither is a child's own route.
+    primary = None
     if ((isinstance(choice, dict) and choice.get("source") == "fallback")
             or (not isinstance(choice, dict) and role.startswith("fallback:"))):
-        followed = opening_role(ctx)
+        followed = follows(opening_choice(ctx))
+        if not followed:
+            primary = getattr(ctx, "primary_route", None)
     if followed:
         role, pin = followed, None
         model, local = following_route(role)
+    elif primary and primary.get("model"):
+        role, pin = task_model_binding(task, overrides=overrides)
+        model, local = str(primary["model"]), bool(primary.get("use_local"))
     else:
         live = overrides.get(role) or {}
         model = str(live.get("model", getattr(ctx, "active_model", "") or metadata.get("model") or ""))
@@ -172,6 +179,33 @@ def _inherited_cognition(ctx: Any, settings: dict) -> dict:
         "processing_preference": task_processing_preference(task, model_role=role),
         "chosen_by": chosen_by, "follows_role": followed if chosen_by == "inherited" else "",
     })
+
+
+def work_tier(ctx: Any, settings: dict) -> str | None:
+    """The tier a new helper without one of its own takes (owner 13.11, 17:22): the work's own carrier, else what
+    the work's calls ask by the default resolution (Main's tier for a work that follows Main, a helper's own run
+    tier, a fallback row's while the work runs on it; a nanny's model still inherits the primary). A resolved
+    ``""`` (calls asking no tier) is inherited too; ``None`` when the work's binding cannot be read: the helper
+    keeps its row's resolution."""
+    from ouroboros.model_slots import task_model_binding, task_processing_preference
+    from ouroboros.route_choice import task_processing
+
+    carried = task_processing(getattr(ctx, "task_metadata", None))
+    if carried:
+        return carried
+    try:
+        acting = cognitive_parent_context(ctx)
+        task = {"task_metadata": getattr(acting, "task_metadata", None) or {}}
+        role, _pin = task_model_binding(task, context_fit_plan=getattr(acting, "context_fit_plan", None),
+                                        overrides=getattr(getattr(acting, "model_wait_context", None), "overrides", None))
+        if role.startswith("fallback:"):
+            return task_processing_preference(task, model_role=role)
+        return str(_inherited_cognition(ctx, settings).get("processing_preference") or "")
+    except Exception:  # an unreadable binding never blocks a start; it only inherits nothing
+        import logging
+
+        logging.getLogger(__name__).debug("The work's tier was unreadable for a new helper", exc_info=True)
+        return None
 
 
 def cognitive_route_provenance(route: Any) -> str:

@@ -23,9 +23,9 @@ an ordinary setting, so the host admits only an owner-defined custom secret key.
 records the mapping it was given; a save writes only while the installed skill still maps the
 same ids to the same keys, so an old request never gains a target from a changed skill.
 
-Saving grants nothing, enables nothing, reloads nothing and contacts no provider; the outcome
-reports what the skills that read the key can read after it (``key_consumers``), or that this
-could not be read (``consumers_unknown``). The form
+The save writer grants, enables and reloads nothing and contacts no provider; enabled consumers may apply
+new values themselves. The outcome names their access (``key_consumers``), or an unreadable consumer list
+(``consumers_unknown``). The form
 stays usable after the asking task ends, until it is saved or explicitly cancelled; a late
 save is recorded on the card and in history, never as the owner's words or new work.
 

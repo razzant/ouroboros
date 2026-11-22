@@ -222,7 +222,7 @@ class PlaceMixin:
             return [], err.strip() or out.strip() or f"wmctrl exit {rc}"
         return parse_wmctrl_rows(out), ""
 
-    def _x11_activate(self, query: str, wait_ms: int) -> dict[str, Any]:
+    def _x11_activate(self, query: str, wait_ms: int, *, ask_stop: bool = False) -> dict[str, Any]:
         rows, err = self._x11_windows()
         if err:
             return {"ok": False, "reason": "unsupported", "error": err}
@@ -237,6 +237,8 @@ class PlaceMixin:
         if not self._which_tool("xdotool"):
             return {"ok": False, "reason": "unsupported", "target": target, "front_before": before,
                     "error": "xdotool is not installed, so a switch cannot be verified"}
+        if ask_stop and (stopped := self._stop_before_activation(query, before, target)):
+            return stopped
         rc, _out, err2 = self._try(["wmctrl", "-i", "-a", target["window_id"]], timeout=10)
         if rc != 0:
             return {"ok": False, "reason": "activate_failed", "error": err2.strip() or f"wmctrl exit {rc}", "target": target, "front_before": before}
@@ -299,6 +301,8 @@ class PlaceMixin:
     def _ctx_from_activation(self, app: str, res: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """An activation result (helper, X11 or remote) -> (refusal, context). ``delivered_to`` is only ever the
         verified front read, never the requested target."""
+        if res.get("reason") == "stopped":
+            return res, {}
         target: dict[str, Any] = {"requested": app, "resolved": res.get("target"), "activated": res.get("activated"),
                                   "verified": bool(res.get("verified"))}
         if res.get("already_front"):
@@ -321,7 +325,7 @@ class PlaceMixin:
         return None, ctx
 
     def _begin(self, app: str, wait_ms: int = 2000, *, raise_policy: str = "allow",
-               connection: tuple[str, dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+               connection: tuple[str, dict[str, Any]] | None = None, ask_stop: bool = False) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """Before an input: resolve and bring ``app`` forward (launch-free) and verify it is in front.
 
         Returns ``(refusal, context)``: a refusal sends nothing. With no ``app`` the context only records who
@@ -338,7 +342,8 @@ class PlaceMixin:
         if name != "local":
             if not app:
                 return None, {}
-            return self._ctx_from_activation(app, self._remote_activate_dict(conn, app, int(wait_ms), raise_policy=raise_policy))
+            res = self._remote_activate_dict(conn, app, int(wait_ms), raise_policy=raise_policy, ask_stop=ask_stop)
+            return self._ctx_from_activation(app, res)
         ctx: dict[str, Any] = {}
         if not app:
             ctx["front_before"] = ctx["delivered_to"] = self._front_local()
@@ -356,6 +361,8 @@ class PlaceMixin:
                     res = {"ok": same, "target": target, "front_before": front, "front": front,
                            "activated": False, "already_front": same, "verified": same,
                            "reason": "target_lost" if front else "front_unread", "resolved": target}
+            elif ask_stop and (stopped := self._stop_before_activation(app)):
+                return stopped, {}
             else:
                 res = self._native("activate", app, int(wait_ms), timeout=max(12, 3 * int(wait_ms) // 1000 + 10))
         elif plat == "linux" and self._session() != "wayland":
@@ -370,7 +377,7 @@ class PlaceMixin:
                            "activated": False, "already_front": same, "verified": same,
                            "reason": "target_lost" if front else "front_unread", "resolved": target}
             else:
-                res = self._x11_activate(app, int(wait_ms))
+                res = self._x11_activate(app, int(wait_ms), ask_stop=ask_stop)
         else:
             res = {"ok": False, "reason": "unsupported", "error": f"no application targeting on {plat}/{self._session()}"}
         return self._ctx_from_activation(app, res)
@@ -396,6 +403,38 @@ class PlaceMixin:
                 res = {"reason": "target_lost", "front": front, "resolved": target, **facts}
                 return {"ok": False, "reason": "target_lost", "error": self._target_error(app, res), "target": ctx["target"], "front": front}, step
         return None, step
+
+    def _stop_before_activation(self, app: str, front: dict[str, Any] | None = None,
+                                resolved: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """The native Mac helper resolves and may raise in one call. Other transports already read the target and front."""
+        target = {"requested": app, "resolved": resolved, "activated": False, "verified": False}
+        return self._stop_refusal({"target": target, "delivered_to": front}, first=True, after=front)
+
+    def _stop_refusal(self, step: dict[str, Any], *, first: bool, after: Any = _UNREAD) -> dict[str, Any] | None:
+        """Read Stop before a possible switch and again before each chord. For a chord this follows the local
+        front re-read and precedes the remote guest's front probe. PluginAPI 2.6 ``get_stop_state``: only
+        ``continue`` lets the chord start; any other answer sends nothing more and never resumes the rest. A refused
+        first chord is its own receipt (a switch that ran before it keeps its mark); a later one leaves the receipts of
+        the chords that ran to the sequence. What makes one action (a held key and its release, a drag) never asks. A
+        host without the method keeps the earlier contract: this skill declares plugin_api 2.0. ``after``: the front a
+        remote input has not read (None) instead of the local one."""
+        read = getattr(self.api, "get_stop_state", None)
+        state = read() if read is not None else {"status": "continue"}
+        if state.get("status") == "continue":
+            return None
+        refusal: dict[str, Any] = {"ok": False, "reason": "stopped", "dispatched": False,
+                                   "error": f"the host refused this step ({state.get('reason')}): {state.get('note')}"}
+        if (step.get("target") or {}).get("activated"):
+            refusal.update(observed_effect=True, activation_done=True)  # the switch ran before the input was withheld
+        return self._finish(refusal, step, after=after) if first else refusal
+
+    def _key_result(self, payload: dict[str, Any]) -> str:
+        """Serialize a control stop after the loop and _finish read its internal ok:false receipt."""
+        if payload.get("reason") == "stopped" and payload.get("dispatched") is False:
+            payload = {**payload, "status": "stopped"}
+            payload.pop("ok", None)
+            payload["note"] = f"{payload['note']}; {payload.pop('error')}"
+        return self._json_text(payload)
 
     def _finish(self, payload: dict[str, Any], ctx: dict[str, Any], stderr: str = "", *, after: Any = _UNREAD) -> dict[str, Any]:
         """Compose the place facts of an input receipt (any transport) and demote a dispatch the helper itself
@@ -462,7 +501,20 @@ class PlaceMixin:
         if untyped or dropped:
             payload.pop("observed_effect", None)
             payload["ok"] = False
-            if untyped:
+            chord = payload.get("method") == "command_chord"
+            if chord:
+                # The Command chord program refuses before it makes an event: nothing was posted, a known fact.
+                payload["dispatched"] = False
+                if isinstance(payload.get("delivered_to"), dict):
+                    payload["front"] = payload.pop("delivered_to")
+                else:
+                    payload.pop("delivered_to", None)
+            if untyped and chord:
+                error = (f"no key of the active keyboard layout gives {untyped[0]} under Command, with or without Shift, so "
+                         "the shortcut was not sent: name it by its Command-plane character (cmd+g, not the layout's own "
+                         "letter), switch the layout or use the app's own commands")
+                payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
+            elif untyped:
                 # cliclick types through key codes of the ACTIVE keyboard layout and exits 0 when it cannot find
                 # one (measured 27.10.2026: Latin text under a Cyrillic layout typed nothing). Partial typing is unknown.
                 # The paste chord program says the same when no key of the layout gives V under Command: it sent nothing.
@@ -478,8 +530,9 @@ class PlaceMixin:
             else:  # the paste chord program refuses to post rather than have macOS drop it
                 payload.update({"reason": "permission_denied",
                                 "permission": {"accessibility": "untrusted", "source": "helper stderr"},
-                                "error": ("this process may not post input events (the Accessibility grant), so the paste "
-                                          "chord was not sent" if payload.get("method") == "paste" else
+                                "error": ("this process may not post input events (the Accessibility grant), so the "
+                                          + ("shortcut was not sent" if chord else "paste chord was not sent")
+                                          if payload.get("method") in ("paste", "command_chord") else
                                           "macOS drops synthetic input from a process without the Accessibility grant: "
                                           "the helper exited 0 but nothing reached the screen")})
             effects = []
@@ -493,6 +546,8 @@ class PlaceMixin:
                 effects.append("the clipboard write")
             if payload.get("method") == "paste":
                 dropped_text = "the paste chord was not sent (see error)"
+            elif chord:
+                dropped_text = "the shortcut was not sent (see error)"
             elif untyped:
                 dropped_text = "the characters without a key code were dropped (see error); those with one may have been typed"
             else:
@@ -580,7 +635,7 @@ class PlaceMixin:
         return self._backend_unavailable("window listing")
 
     def ax_tree(self, *, app: str = "", max_nodes: int = 150, timeout_ms: int = 3000, root: str = "window",
-                include_web: bool = False, text_limit: int = 200, window: Any = "") -> str:
+                include_web: bool = False, text_limit: int = 200, window: Any = "", until_text: str = "") -> str:
         """Bounded accessibility read of one window (the frontmost app's, or ``app``'s, without bringing it forward):
         the application is resolved and read in ONE helper process (``macos_native.py observe``)."""
         plat = self._plat()
@@ -593,25 +648,33 @@ class PlaceMixin:
             _name, conn = self._active_connection()
             if conn.get("disabled"):
                 return self._disabled_connection_error(_name, conn)
-            if text_limit != 200 or window not in (None, ""):
+            if text_limit != 200 or window not in (None, "") or until_text:
                 return self._json_text({"ok": False, "backend": str(conn.get("backend") or ""), "reason": "unsupported_option",
-                                        "error": "text_limit and window apply to the local macOS reader only; a remote answers its own tree"})
+                                        "error": "text_limit, window and until_text apply to the local macOS reader only; a remote answers its own tree"})
             return self._remote_ax_tree(conn)
         if plat == "macos":
             spec = {"app": app, "max_nodes": max_nodes, "timeout_ms": timeout_ms, "root": root, "include_web": bool(include_web),
                     "text_limit": text_limit, "window": window if window is not None else ""}
+            if until_text:
+                spec["until_text"] = until_text
             tree = self._native("observe", json.dumps(spec, ensure_ascii=False), timeout=timeout_ms // 1000 + 15)
             target = tree.pop("target", None)
             if tree.get("stage") == "resolve":
                 error = self._target_error(app, tree) if app else (tree.get("error") or "the frontmost application could not be read")
                 return self._json_text({"ok": False, "platform": plat, "reason": tree.get("reason") or "unresolved",
-                                        "error": error, "candidates": tree.get("candidates") or []})
+                                        "error": error, "candidates": tree.get("candidates") or [],
+                                        **({"until_text": tree.get("until_text") or {"status": "unknown", "reason": "resolve_failed", "reads": 0}}
+                                           if until_text else {})})
             if not tree.get("ok"):
-                failed = {"ok": False, "platform": plat, "app": target, "reason": tree.get("reason") or "ax_unavailable",
+                failed = {**(tree if until_text else {}), "ok": False, "platform": plat, "app": target,
+                          "reason": tree.get("reason") or "ax_unavailable",
                           "error": tree.get("error") or f"the accessibility read failed ({tree.get('reason')})"}
-                for key in ("errors", "windows", "ax_exposure"):
-                    if tree.get(key):
-                        failed[key] = tree[key]
+                if not until_text:
+                    for key in ("errors", "windows", "ax_exposure"):
+                        if tree.get(key):
+                            failed[key] = tree[key]
+                if until_text and "until_text" not in failed:
+                    failed["until_text"] = {"status": "unknown", "reason": failed["reason"], "reads": 0}
                 return self._json_text(failed)
             tree.update({"platform": plat, "app": target, "coordinate_note": "node and mark coordinates are INPUT-space "
                          "(macOS logical points): click them with raw=true; a mark is a position, not proof the element reacts"})
@@ -625,7 +688,7 @@ class PlaceMixin:
 
     def element_act(self, *, app: str, do: str, select: dict[str, Any] | None = None, text: str | None = None,
                     window: Any = "", max_nodes: int = 600, timeout_ms: int = 3000, include_web: bool = False,
-                    observe: bool = False, text_limit: int = 200) -> str:
+                    observe: bool = False, text_limit: int = 200, until_text: str = "") -> str:
         """Act on ONE element of ``app`` through the element's own Accessibility action (macOS): ``press`` or
         ``set_value``. The element is named by identity (the window as ``window_list`` prints it, role, exact label,
         AXIdentifier, nth), never by a mark or node id of an earlier read; the application is resolved, the element
@@ -658,6 +721,9 @@ class PlaceMixin:
         if text_limit != 200 and not observe:
             return self._json_text({"ok": False, "platform": plat, "reason": "bad_option", "dispatched": False, **asked,
                                     "error": "text_limit shapes the read after the action: pass observe=true or leave text_limit out"})
+        if until_text and not observe:
+            return self._json_text({"ok": False, "platform": plat, "reason": "bad_option", "dispatched": False, **asked,
+                                    "error": "until_text needs observe=true"})
         selector: dict[str, Any] = {**asked["select"], "include_web": bool(include_web)}
         if window is not None and window != "":
             selector["window"] = window
@@ -668,6 +734,8 @@ class PlaceMixin:
         spec = {"app": app, "do": do, "select": selector, "max_nodes": max_nodes, "timeout_ms": timeout_ms, "observe": bool(observe)}
         if observe:
             spec["text_limit"] = text_limit
+        if until_text:
+            spec["until_text"] = until_text
         res = self._native("element", json.dumps(spec, ensure_ascii=False), timeout=timeout_ms // 1000 + 10)
         target = res.pop("target", None)
         if res.get("stage") == "resolve":
@@ -678,6 +746,9 @@ class PlaceMixin:
             res["observation"] = {"ok": False, "reason": "helper_stopped",
                                   "error": "the helper stopped before the window read finished (its time ran out or it crashed); "
                                            "the saved receipt above stands: read the window with ax_tree before acting again"}
+        if until_text and "observation" in res and "until_text" not in res["observation"]:
+            res["observation"]["until_text"] = {"status": "unknown", "reason": res["observation"].get("reason") or "read_failed",
+                                                "reads": 0}
         out: dict[str, Any] = {"platform": plat, "app": target if target is not None else app, "do": do, **res}
         if "dispatched" not in res:
             # Every answer of ``act`` says whether the action call was made; one without that fact is a helper that
@@ -686,4 +757,7 @@ class PlaceMixin:
                         "action_outcome": "unknown", "select": asked["select"],
                         "note": "the helper that carried the action did not answer, so whether it found the element and acted "
                                 "is unknown (do not assume it did not): read the window with ax_tree before acting again"})
+        if until_text and "observation" not in out:
+            out["observation"] = {"ok": False, "reason": "no_read",
+                                  "until_text": {"status": "unknown", "reason": "no_read", "reads": 0}}
         return self._json_text(out)

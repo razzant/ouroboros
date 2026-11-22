@@ -13,7 +13,9 @@ import os
 import pathlib
 import shutil
 import stat
+import threading
 import uuid
+from contextlib import contextmanager
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_capture_attempt import POLICY, failure_retry
@@ -46,93 +48,219 @@ def _raise(error):
     raise error  # a skipped subtree is not a complete inventory
 
 
-def retain_files(area, paths, files_dir, *, preserve_mode=True):
-    """Copy regular files byte-exact and whole into the evidence store."""
+@contextmanager
+def _killed_after(seconds, process):
+    deadline = threading.Timer(seconds, process.kill)
+    deadline.start()
+    try:
+        yield
+    finally:
+        deadline.cancel()
+
+
+def private_review_paths(area, trees, env):
+    """Scan the immutable old and new sides of a review delta once per blob, through one Git reader."""
+    import subprocess
+    from ouroboros.review_checking import CheckingAreaUnavailable, _git
+    from ouroboros.secret_masking import SecretScan, installation_secret_bytes
+
+    secrets = installation_secret_bytes()
+    if not secrets:
+        return {}
+    raw = _git(area, "diff", "--no-renames", "--raw", "--no-abbrev", "-z", *trees, env=env).stdout.split(b"\0")
+    names = {}
+    for change, path in zip(raw[::2], raw[1::2]):
+        old_mode, new_mode, old, new, _ = change.lstrip(b":").split()
+        for mode, oid in ((old_mode, old), (new_mode, new)):
+            if mode not in {b"000000", b"160000"}:
+                names.setdefault(oid, set()).add(os.fsdecode(path))
+    gaps = {}
+    if not names:
+        return gaps
+    # Request one object at a time. Neither pipe can fill while the parent is writing the list.
+    # The reader keeps _git's 600 s bound: a stuck Git is killed, and its short read fails the capture.
+    with subprocess.Popen(["git", "cat-file", "--batch"], cwd=area, env=env,
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as git, _killed_after(600, git):
+        for oid, paths in names.items():
+            git.stdin.write(oid + b"\n")
+            git.stdin.flush()
+            header = git.stdout.readline().split()
+            if len(header) != 3 or header[:2] != [oid, b"blob"]:
+                raise CheckingAreaUnavailable("Git could not read an evidence blob")
+            size = int(header[2])
+            scan = SecretScan(secrets)
+            while scan.size < size:
+                chunk = git.stdout.read(min(1 << 20, size - scan.size))
+                if not chunk:
+                    raise CheckingAreaUnavailable("Git truncated an evidence blob")
+                scan.write(chunk)
+            if git.stdout.read(1) != b"\n":
+                raise CheckingAreaUnavailable("Git did not finish an evidence blob")
+            if scan.found:
+                for path in paths:
+                    gaps[path] = {"path": path, "reason": "installation_settings", "size": size}
+        git.stdin.close()
+        if git.wait():
+            raise CheckingAreaUnavailable("Git failed to read the evidence blobs")
+    return gaps
+
+
+def _private_evidence_paths(root, paths):
+    """Only named evidence returning through the patch fallback still needs the evidence floor."""
+    from ouroboros import work_domain
+    from ouroboros.workspace_patch_rules import _patch_exclude_reason
+    from ouroboros.review_checking import _open_regular
+    from ouroboros.secret_masking import SecretScan, installation_secret_bytes
+
+    values = installation_secret_bytes()
+    private = {}
+    for rel in sorted(paths) if values else ():
+        if _patch_exclude_reason(rel):
+            continue
+        path = root / rel
+        scan = SecretScan(values)
+        kind = work_domain.kind(path)
+        if kind == "file":
+            if work_domain.is_work(path):
+                work_domain.measure(path, scan, strict=True)
+            else:
+                with _open_regular(path) as handle:
+                    scan.read_from(handle)
+        elif kind == "link":
+            scan.write(os.fsencode(work_domain.readlink(path)))
+        if scan.found:
+            private[rel] = {"path": rel, "reason": "installation_settings", "size": scan.size}
+    return private
+
+
+def _held_named_evidence(root, host_evidence, paths, products, destination, previous):
+    """Retain new named evidence. A failed capture returns public files to the patch."""
+    prefix = pathlib.PurePosixPath(EVIDENCE_DIRNAME if destination is not None else (host_evidence or EVIDENCE_DIRNAME).strip("/"))
+    held = {name for name in paths - products if pathlib.PurePosixPath(name).is_relative_to(prefix)}
+    if not held or destination is None:
+        return held, None
+    summary = retain_workspace_evidence(root, destination, previous=previous, product_paths=products)
+    if summary["status"] == "retained":
+        return held, summary
+    private = _private_evidence_paths(root, held)
+    seen = {gap["path"] for gap in summary["gaps"]}
+    summary["gaps"].extend(gap for name, gap in private.items() if name not in seen)
+    return set(private), summary
+
+
+def workspace_evidence_exclusions(root, host_evidence, paths, products, destination, previous):
+    """Keep retained evidence out of the product patch and carry its exact exclusions into the receipt."""
+    from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
+
+    held, summary = _held_named_evidence(root, host_evidence, paths, products,
+                                        destination, previous)
+    excluded = {name: {"path": name, "reason": NAMED_EVIDENCE_EXCLUSION} for name in held}
+    excluded.update((gap["path"], gap) for gap in (summary or {}).get("gaps", []) if gap["reason"] == "installation_settings")
+    return excluded, summary
+
+
+def retain_files(area, paths, files_dir, *, gaps, preserve_mode=True):
+    """Stream regular evidence and inspect the exact copy before publishing its receipt."""
+    from ouroboros import work_domain
     from ouroboros.review_checking import _open_regular, _sha
 
+    from ouroboros.secret_masking import SecretScan, installation_secret_bytes
+    secrets = installation_secret_bytes()
+    work = work_domain.is_work(area)
     kept = []
     for relative in paths:
-        source = area / relative
-        if source.is_symlink() or not source.is_file():
+        source, target = area / relative, files_dir / relative
+        regular = work_domain.kind(source) == "file" if work else not source.is_symlink() and source.is_file()
+        if not regular:
             continue
-        size = source.stat().st_size
-        target = files_dir / relative
+        info = work_domain.lstat(source) if work else source.stat()
         private_directory(target.parent, files_dir.parent)
-        # Fresh regular files: ordinary delegates keep writable copies; reviewers preserve modes. Streamed from
-        # the descriptor that proved the file regular, and never a clone: the record compression refuses one.
-        with _open_regular(source) as src, target.open("xb") as dst:
-            shutil.copyfileobj(src, dst, 1 << 20)
-        mode = stat.S_IMODE(source.stat().st_mode)
+        with target.open("xb") as dst:
+            scan = SecretScan(secrets, dst)
+            if work:
+                measured = work_domain.measure(source, scan, strict=True)
+            else:
+                with _open_regular(source) as src:
+                    shutil.copyfileobj(src, scan, 1 << 20)
+        if scan.found:
+            target.unlink()
+            gaps.append({"path": relative, "reason": "installation_settings", "size": scan.size})
+            continue
+        if not work:
+            measured = {"size": scan.size, "sha256": _sha(target)}
+        mode = stat.S_IMODE(info.st_mode)
         if preserve_mode:
             target.chmod(mode)
-        kept.append({"path": relative, "size": size, "sha256": _sha(target), "mode": mode})
+        kept.append({"path": relative, **measured, "mode": mode})
     return kept
 
 
-def named_evidence_witness(area):
-    """Stat identity of the copy's evidence folder (paths, types, sizes, times); "" when it cannot be
-    listed. A retained summary is reused only while it is unchanged. Not a byte proof: it assumes the
-    run's processes stopped writing, so a same-size rewrite within one timestamp tick, or a write
-    after the final check, goes unseen."""
-    rows = []
-    try:
-        declared = area / EVIDENCE_DIRNAME
-        seen = declared.lstat()
-        rows.append(f"{EVIDENCE_DIRNAME}\0{seen.st_mode}\0{seen.st_size}\0{seen.st_mtime_ns}\0{seen.st_ctime_ns}")
-        if declared.is_symlink() or not declared.is_dir():
-            return hashlib.sha256(rows[0].encode()).hexdigest()  # never walk a linked root
-        for current, dirs, files in os.walk(declared, onerror=_raise, followlinks=False):
+def _evidence_entries(area, declared, work):
+    """Relative names and kinds below the evidence directory, without following links."""
+    from ouroboros import work_domain
+
+    if work:
+        for folder, _, _ in work_domain.walk(declared, strict=True):
+            for name, kind in work_domain.entries(folder):
+                yield (pathlib.Path(folder) / name).relative_to(area).as_posix(), kind
+    else:
+        for folder, dirs, files in os.walk(declared, onerror=_raise, followlinks=False):
             for name in sorted(dirs + files):
-                seen = (pathlib.Path(current) / name).lstat()
-                rows.append(f"{(pathlib.Path(current) / name).relative_to(area).as_posix()}\0{seen.st_mode}\0"
-                            f"{seen.st_size}\0{seen.st_mtime_ns}\0{seen.st_ctime_ns}")
+                path = pathlib.Path(folder) / name
+                kind = "link" if path.is_symlink() else "file" if path.is_file() else "dir" if name in dirs else "other"
+                yield path.relative_to(area).as_posix(), kind
+
+
+def named_evidence_witness(area):
+    """Stat identity of the evidence tree after its writer stopped. An unreadable tree has no witness."""
+    from ouroboros import work_domain
+
+    declared = area / EVIDENCE_DIRNAME
+    work = work_domain.is_work(area)
+    observe = work_domain.lstat if work else os.lstat
+
+    def stamp(name):
+        seen = observe(area / name)
+        return f"{name}\0{seen.st_mode}\0{seen.st_size}\0{seen.st_mtime_ns}\0{seen.st_ctime_ns}"
+
+    try:
+        rows = [stamp(EVIDENCE_DIRNAME)]
+        if stat.S_ISDIR(observe(declared).st_mode):
+            rows.extend(stamp(name) for name, _ in _evidence_entries(area, declared, work))
     except OSError:
         return ""
     return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8", "surrogateescape")).hexdigest()
 
 
 def retain_named_evidence(area, files_dir, gaps, *, product_paths=(), preserve_mode=True):
-    """Retain a copy's ``.review-evidence/`` whole, independently of product-patch filters.
+    """Keep the named regular files independently of product filters. A link or special file is a named gap."""
+    from ouroboros import work_domain
 
-    Links are not dereferenced: a linked output is a named gap, never a receipt claiming
-    its target's bytes were retained. So is an entry that is neither a file nor a folder;
-    a folder that cannot be listed raises. Baseline-owned ``product_paths`` belong to
-    capture, including symlinks; never retain them here.
-    """
     declared = area / EVIDENCE_DIRNAME
-    if EVIDENCE_DIRNAME in product_paths and (declared.is_symlink() or not declared.is_dir()):
+    work = work_domain.is_work(area)
+    try:
+        info = work_domain.lstat(declared) if work else declared.lstat()
+    except FileNotFoundError:
         return []
-    if declared.is_symlink():
-        gaps.append({"path": EVIDENCE_DIRNAME, "reason": "evidence_symlink"})
-        return []
-    if declared.exists() and not declared.is_dir():
-        gaps.append({"path": EVIDENCE_DIRNAME, "reason": "evidence_root_not_directory"})
+    if not stat.S_ISDIR(info.st_mode):
+        if EVIDENCE_DIRNAME not in product_paths:
+            reason = "evidence_symlink" if stat.S_ISLNK(info.st_mode) else "evidence_root_not_directory"
+            gaps.append({"path": EVIDENCE_DIRNAME, "reason": reason})
         return []
     paths = []
-    if declared.is_dir():
-        for current, dirs, files in os.walk(declared, onerror=_raise, followlinks=False):
-            for name in sorted(dirs + files):
-                path = pathlib.Path(current) / name
-                relative = path.relative_to(area).as_posix()
-                if relative in product_paths:
-                    continue
-                if path.is_symlink():
-                    gaps.append({"path": relative, "reason": "evidence_symlink"})
-                elif path.is_file():
-                    paths.append(relative)
-                elif name in files:
-                    gaps.append({"path": relative, "reason": "unsupported_entry_type"})
-    return retain_files(area, sorted(paths), files_dir, preserve_mode=preserve_mode)
+    for relative, kind in _evidence_entries(area, declared, work):
+        if relative in product_paths:
+            continue
+        if kind == "file":
+            paths.append(relative)
+        elif kind in {"other", "link"}:
+            gaps.append({"path": relative, "reason": "evidence_symlink" if kind == "link" else "unsupported_entry_type"})
+    return retain_files(area, sorted(paths), files_dir, gaps=gaps, preserve_mode=preserve_mode)
 
 
 def retain_workspace_evidence(area, destination, *, product_paths=(), previous=None):
-    """Retain a copy's evidence folder ONCE for a capture no run retains it for (a task's own workspace at
-    finalization, #2711): ``destination/files/`` byte-exact through ``retain_named_evidence``, beside a
-    ``summary.json`` carrying the folder's witness. ``previous`` is the last published summary of the same
-    workspace: an unchanged folder (same witness, files still there) is not copied again and that summary
-    stands, never a second copy; a changed one replaces this capture's own earlier generation whole. A
-    raised copier leaves no partial files and a ``capture_failed`` summary: the caller then keeps the
-    folder's files in its own capture, so the bytes are never zero copies either."""
+    """Retain one witnessed workspace generation, reusing it while unchanged. A failed copy leaves
+    its typed gap for the workspace patch, whose fallback also excludes private settings."""
     destination = pathlib.Path(destination)
     witness = named_evidence_witness(area)
     if (isinstance(previous, dict) and previous.get("status") == "retained" and witness
@@ -147,7 +275,7 @@ def retain_workspace_evidence(area, destination, *, product_paths=(), previous=N
         shutil.rmtree(staging, ignore_errors=True)
         return {"status": "capture_failed", "files": [], "gaps": gaps, "error": f"{type(exc).__name__}: {exc}",
                 "witness": witness, "evidence_dir": str(destination)}
-    summary = {"status": "retained", "files": files, "gaps": gaps, "witness": witness,
+    summary = {"status": "retained", "files": files, "retained_bytes": sum(f["size"] for f in files), "gaps": gaps, "witness": witness,
                "evidence_dir": str(destination), "summary_path": str(destination / "summary.json")}
     atomic_write_json(staging / "summary.json", summary)
     if destination.exists():  # only this capture's own earlier generation of the same workspace
@@ -190,6 +318,9 @@ def saved_named_evidence(root, entry, *, observe=True):
         custody.emit(root, custody.NAMED_EVIDENCE_RETAINED,
                      {"run_id": entry.run_id, "task_id": entry.task_id, "outcome": outcome})
         entry.named_evidence = outcome
+    files = saved.get("files")
+    if isinstance(files, list) and all(isinstance(f, dict) and type(f.get("size")) is int for f in files):
+        saved["retained_bytes"] = sum(f["size"] for f in files)
     return path, saved
 
 
@@ -281,7 +412,7 @@ def retain_named(root, entry, *, whole=False, recapture=False, reread=False, pub
         files = retain_named_evidence(area, staging / "files", gaps, product_paths=products, preserve_mode=False)
         # Links and special entries are recorded, never followed: nothing more can be
         # retained, so they do not hold the copy.
-        summary = {"status": "retained", "files": files, "gaps": gaps}
+        summary = {"status": "retained", "files": files, "retained_bytes": sum(f["size"] for f in files), "gaps": gaps}
     except Exception as exc:
         # A raised copier has no complete inventory. Keep the source, not unlisted
         # partial copies in every immutable retry generation.

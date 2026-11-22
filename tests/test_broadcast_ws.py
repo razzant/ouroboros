@@ -2,11 +2,47 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
+from types import SimpleNamespace
 
 
 class _DeadWebSocket:
     async def send_text(self, _text):
         raise RuntimeError("dead client")
+
+
+def test_task_done_broadcast_preserves_posix_artifact_names(tmp_path, monkeypatch):
+    from ouroboros.gateway import ws
+    from supervisor import message_bus
+
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(ws, "_ws_clients", [])
+    monkeypatch.setattr(ws, "_pending", deque())
+    monkeypatch.setattr(ws, "_flush_scheduled", False)
+    artifacts = [{"name": name} for name in ("report-\udcff.txt", r"report-\udcff.txt", "файл🪶.txt")]
+    terminal = {"type": "task_done", "status": "completed", "task_id": "done", "chat_id": 1,
+                "artifact_bundle": {"status": "ready", "artifacts": artifacts}}
+    bridge, frames = message_bus.LocalChatBridge(), []
+    bridge._broadcast_fn = frames.append
+    bridge.push_log(terminal)
+    [frame] = frames
+
+    async def receive():
+        inbox = asyncio.Queue()
+
+        async def send_text(text):
+            inbox.put_nowait(text.encode("utf-8"))
+
+        connection = ws._register(SimpleNamespace(send_text=send_text))
+        try:
+            await ws.broadcast_ws(frame)
+            return await asyncio.wait_for(inbox.get(), timeout=5)
+        finally:
+            ws._unregister(connection)
+
+    wire = asyncio.run(receive()).decode("utf-8")
+    assert r'"report-\udcff.txt"' in wire and r'"report-\\udcff.txt"' in wire and "файл🪶.txt" in wire
+    assert json.loads(wire)["data"] == terminal
 
 
 def test_broadcast_partial_failure_uses_module_data_dir(tmp_path, monkeypatch):

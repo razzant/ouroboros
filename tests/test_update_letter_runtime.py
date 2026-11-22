@@ -53,6 +53,27 @@ def test_the_runtime_letter_keeps_its_text_and_summarizes_the_qualification(tmp_
     assert json.loads((tmp_path / "state" / "update_letter.json").read_text(encoding="utf-8")) == record
 
 
+def test_a_letterless_record_brings_only_the_applied_update_s_material_pointer(tmp_path):
+    """After apply a level check names no range. A record that never held a description still names the material it
+    retained, so the Runtime carries the same small pointer the panel's Write uses: no text, no material body, and
+    no description sources while nothing is on offer."""
+    material = {"key": {"base_sha": BASE, "target_sha": TARGET, "update_channel": "stable", "target_ref": "managed/main"},
+                "collected_at": "2026-11-17T08:00:00Z", "text_bytes": 152000, "commits": 17, "bodies_read": 17,
+                "bodies_omitted": 0}
+    level = {"base_sha": TARGET, "target_sha": TARGET, "update_channel": "stable", "target_ref": "managed/main"}
+    path = tmp_path / "state" / "update_letter.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": 1, "state": "none", "text": "", "last_good": None, "key": level,
+                                "checked_key": level, "material": material}), encoding="utf-8")
+    state = {"managed_update_cache": {"latest_sha": TARGET, "available": False, "checked_at": "2026-11-17T08:05:00Z",
+                                      "checked_head_sha": TARGET}}
+    fact = update_letter.official_update_projection(TARGET, drive_root=tmp_path, state=state)
+    letter = fact["letter"]
+    assert fact["status"] == "up_to_date" and "description_sources" not in fact
+    assert (letter["state"], letter["text"], letter["key"], letter["checked_key"]) == ("none", "", {}, None)
+    assert letter["material"] == material, "the pointer, never the material's text"
+
+
 def test_a_letter_without_qualification_is_unchanged(tmp_path):
     from ouroboros.update_qualification import runtime_letter
 

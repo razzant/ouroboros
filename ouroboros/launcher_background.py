@@ -38,6 +38,7 @@ import re
 import signal
 import sys
 import threading
+import urllib.parse
 import urllib.request
 
 from ouroboros.config import PANIC_EXIT_CODE, read_version
@@ -49,6 +50,7 @@ from ouroboros.launcher_window_chrome import WindowChrome
 from ouroboros.platform_layer import request_native_attention, signal_pid
 
 log = logging.getLogger("launcher.background")
+_MACOS = sys.platform == "darwin"
 
 CONSENT_TITLE = "Keep Ouroboros running?"
 CONSENT_MESSAGE = ("Ouroboros will keep working in the background: tasks, schedules, Telegram. "
@@ -60,6 +62,7 @@ PERSISTENT_WEBVIEW_STORAGE = True
 _SHELL_VERSION = read_version()  # the loaded code; a later in-place Update is not a new shell
 STATUS_POLL_SEC = 15.0
 _active = None  # the started indicator, for the exit and Panic paths (a Windows icon outlives its process)
+_bindings_seen = ""  # the task-bindings revision of the last state answer (``status_line`` echoes it)
 
 
 def indicator_class():
@@ -85,11 +88,15 @@ def status_line(port: int) -> str:
     """The indicator's state line from the server's own ``/api/state`` work projection: a work is working,
     pausing, paused or waiting as the server classified it, an incomplete projection is said as unknown, and
     what waits for the owner is counted (gateway/work_status.py)."""
+    global _bindings_seen
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/api/state", timeout=5) as response:
+        # The line reads no task bindings: it names the revision the server last sent, so that map stays home.
+        seen = f"?bindings_since={urllib.parse.quote(_bindings_seen)}" if _bindings_seen else ""
+        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/api/state{seen}", timeout=5) as response:
             state = json.loads(response.read().decode("utf-8"))
         works = [work for work in state["works"] if isinstance(work, dict)]
         summary = state["work_summary"]
+        _bindings_seen = str(state.get("task_bindings_revision") or "")
     except Exception:
         return "Ouroboros: not responding"
     if state.get("supervisor_error"):
@@ -123,7 +130,9 @@ def status_line(port: int) -> str:
         line = f"Ouroboros: {unconfirmed} task{'' if unconfirmed == 1 else 's'} unconfirmed"
     else:
         line = "Ouroboros: waiting"
-    waits = sum(bool(work.get("turn")) for work in works)
+    # What waits for the owner, as the server counts it: each work with a turn, and each unanswered question whose
+    # work has ended (``work_status.roll_up_summary``).
+    waits = int(summary.get("turn") or 0)
     if waits:
         line += f" · {waits} {'waits' if waits == 1 else 'wait'} for you"
     if unconfirmed and known:  # after what waits for the owner, which a cut line must keep
@@ -272,9 +281,12 @@ class Indicator:
 
         ``hide()`` runs outside the state lock: on Windows it is a synchronous Invoke onto the UI
         thread, which may itself be waiting for this lock in a second close. The hidden state is
-        committed under the lock only if the icon is still live; otherwise the close quits."""
+        committed under the lock only if the icon is still live; otherwise the close quits. A macOS window in or
+        moving through full screen leaves it first and hides at its DidExit (``WindowChrome.hide_when_windowed``)."""
         if not self.ready.is_set() or self.background.shutdown.is_set():
             return False
+        if not self.background.chrome.hide_when_windowed(lambda: self._hide_later(window)):
+            return True
         try:
             window.hide()
         except Exception:
@@ -285,6 +297,33 @@ class Indicator:
                 return False  # the icon went away while hiding: never a hidden window without it
             self._hidden = True
             return True
+
+    def _hide_later(self, window) -> None:
+        """macOS main thread, the closed window out of full screen: hidden only behind a live icon, committed first so
+        an icon that goes away afterwards shows it again (``_stopped``). An open is a main-thread turn of its own
+        (``Background.show_window``), never inside this one. pywebview queues ``hide`` and ``show`` as main-thread turns
+        in call order, so a stop between the commit and ``hide()`` queued its show before this hide: it is shown once
+        more, after it, unless a quit runs."""
+        with self._state_lock:
+            if not self.ready.is_set() or self.background.shutdown.is_set():
+                log.info("The indicator went away while the window left full screen; it stays open.")
+                return
+            self._hidden = True
+        try:
+            window.hide()
+        except Exception:
+            with self._state_lock:
+                self._hidden = False
+            raise
+        with self._state_lock:
+            again = not self.background.shutdown.is_set() and (not self._hidden or not self.ready.is_set())
+            if again:
+                self._hidden = False
+        if again:
+            try:
+                window.show()
+            except Exception:
+                log.warning("Could not show the window again after its hide; the request can be repeated.", exc_info=True)
 
     def show_if_unavailable(self, window) -> None:
         """Quiet start: the window stays hidden only if the icon actually came up."""
@@ -300,6 +339,16 @@ class Indicator:
         with self._state_lock:
             self._hidden = False
         self._shown()
+
+    def stop_if_visible(self) -> bool:
+        """Background turned off: remove the icon unless the window is hidden. ``ready`` clears under the lock a hide
+        commits under, so no close hides behind an icon this removes."""
+        with self._state_lock:
+            if self._hidden:
+                return False
+            self.ready.clear()
+        self.stop()
+        return True
 
     def stop(self, *, wait: float = 0.0) -> None:
         self.ready.clear()
@@ -323,7 +372,7 @@ class Indicator:
                     if attempt == 0 and not self.background.shutdown.wait(0.1):
                         continue
                     if not self.background.shutdown.is_set():
-                        self.background.exit_launcher()  # no usable UI: never a hidden process without a way back
+                        self.background.exit_launcher(owner=False)  # no usable UI: never hidden without a way back
                 else:
                     with self._state_lock:
                         self._hidden = False
@@ -340,13 +389,16 @@ class Indicator:
             self._idle.set()
         if must_restore:
             if self.background.window is None:
-                self.background.exit_launcher()
+                self.background.exit_launcher(owner=False)
             else:
                 self._show_or_exit(self.background.window)
 
     # Platform half.
     def attach_native(self, window) -> None:
         raise NotImplementedError
+
+    def attach_app(self) -> None:
+        """App-level quit requests before the main window exists (macOS Cmd+Q, Dock Quit, logout); none elsewhere."""
 
     def _launch(self) -> bool:
         raise NotImplementedError
@@ -371,16 +423,22 @@ class Indicator:
 class Background:
     """The desktop window's close policy, its indicator (None where there is none) and the way back."""
 
-    def __init__(self, exit_launcher, read_port, shutdown_event, *, panic_child=lambda: (None, None)) -> None:
+    def __init__(self, exit_launcher, read_port, shutdown_event, *, panic_child=lambda: (None, None),
+                 owner_exit=None) -> None:
         cls = indicator_class()
         self._close = exit_launcher  # the launcher's close body: stop the agent, clean up, ``leave``
         self._closing = False  # that body runs now, on the one closer thread
+        self._owner_late = False  # an owner's exit met that running body: it decides Quit again before it ends
+        self._sealed = False  # the terminal exit made its last Quit decision: no exit is admitted after it
+        self._admitted = False  # an exit reached the close body, which decides Quit (``ended_before_main``)
         self._closer_lock = threading.Lock()
         self._terminal = threading.Lock()  # orders the ordinary exit against an accepted Panic; held for no I/O
         self.read_port = read_port
         self.panic_child = panic_child  # snapshot of this launcher's Popen and optional Job, not a PID scan
         self.shutdown = shutdown_event
         self.quit = threading.Event()  # a quit request: never asked, never cancelled
+        self.app_quit = threading.Event()  # AppKit's terminate before the main window waits for this process's exit
+        self.owner_exit = owner_exit or threading.Event()  # set when an owner gesture, not a lost UI, exits
         self.panic = threading.Event()
         self.window = None
         self.native_ready = False
@@ -442,6 +500,37 @@ class Background:
             window.events.before_show += self._attach_native
         return window
 
+    def attach_setup(self, window):
+        """A Git-setup, onboarding or Startup Failed window: the app's Quit is this launcher's Quit (``request_quit``),
+        while the window's own close keeps its meaning (no ``closing`` policy, no ``native_ready``)."""
+        if self.indicator is not None:
+            window.events.before_show += self._attach_app
+        return window
+
+    def quit_app(self) -> None:
+        """AppKit's terminate before the main window (Cmd+Q, Dock Quit, logout), answered ``NSTerminateLater``: the
+        owner's Quit, whose startup close body ends the process (``end_setup``); that exit answers AppKit, so a
+        logout goes on, as the main window's closer answers it through ``leave``."""
+        self.app_quit.set()  # before the body is admitted: it reads this at its end
+        self.request_quit()
+
+    def end_setup(self, release_lock, windows) -> None:
+        """A startup close body's end, after its stops. A pending AppKit terminate is answered by this process's exit
+        (``leave``: lock, then exit); destroying the windows first would stop pywebview's loop (``app.stop_``,
+        ``abortModal``) inside AppKit's wait. Otherwise, or under an accepted Panic, the setup windows close so
+        their ``webview.start`` returns to main."""
+        if self.app_quit.is_set():
+            self.leave(release_lock)  # returns only when an accepted Panic owns the exit
+        for window in list(windows):
+            window.destroy()
+
+    def _attach_app(self) -> None:
+        try:
+            self.indicator.attach_app()
+        except Exception:
+            log.warning("App quit hooks unavailable before the main window: an app quit there is no Quit.",
+                        exc_info=True)
+
     def run(self) -> None:
         """``webview.start(func=...)``: keep Windows' early icon; start other indicators for background."""
         if self.indicator is None or (not self.indicator.carries_notifications and keep_running_choice() != "true"
@@ -453,19 +542,30 @@ class Background:
 
     def closing(self):
         """pywebview ``closing``; False keeps the window (hidden, asking, or quitting through the closer)."""
-        if self.indicator is None or not self.native_ready or self.quit.is_set():
-            return self.exit_launcher()
+        if self.quit.is_set():
+            return self.exit_launcher()  # an explicit Quit (Cmd+Q, the indicator's, sign-out) is the owner's
+        if self.indicator is None or not self.native_ready:  # no close hooks: closing exits, Quit unless kept
+            return self.exit_launcher(owner=keep_running_choice() != "true")
         if self.indicator.decides_natively:
             return None  # Windows: its FormClosing handler holds the close reason
         return self.window_closed()
 
-    def exit_launcher(self):
+    def exit_launcher(self, *, owner: bool = True):
         """Quit: latch shutdown now and run the close body, off the calling UI/STA thread and never twice
         at once. False: the caller's window and event loop stay, so Panic keeps its ingress until the
-        body's exit. A body that returned without exiting (a startup close) lets a later quit run it again."""
-        self.shutdown.set()
+        body's exit. A body that returned without exiting (a startup close) lets a later quit run it again.
+        ``owner=False``: no owner Quit, only a window or indicator lost or a hide failed. An owner's exit is
+        marked and admitted in one step, so a running body reads it at its last decision (``_run_close``, ``leave``);
+        once ``leave`` made that decision, this exit is already leaving and admits none."""
         with self._closer_lock:
+            if self._sealed:
+                return False
+            if owner:
+                self.owner_exit.set()
+            self.shutdown.set()
+            self._admitted = True
             if self._closing:
+                self._owner_late |= owner
                 return False
             self._closing = True
         try:  # not a daemon: a main() that returns meanwhile still lets the body finish its stop
@@ -475,25 +575,68 @@ class Background:
         return False
 
     def _run_close(self) -> None:
+        done = False
         try:
-            self._close()
+            while not done:  # a body that returned (a startup close) runs again for an owner's exit it met
+                self._close()
+                with self._closer_lock:
+                    done = not self._owner_late or self.panic.is_set()
+                    self._owner_late, self._closing = False, not done
         finally:
-            with self._closer_lock:
-                self._closing = False
+            if not done:  # the body raised: a later quit may run it again
+                with self._closer_lock:
+                    self._closing = self._owner_late = False
 
-    def leave(self, release_lock, code: int = 0) -> None:
-        """The close body's terminal exit: remove the icon, release the lock, then exit, unless an accepted
-        Panic owns persistence and the exit (it is decided under the lock Panic is accepted under)."""
-        stop_tray_before_exit(release_lock)
+    def leave(self, release_lock, code: int = 0, *, decide=lambda: None) -> None:
+        """The close body's terminal exit: make the Quit decision (``decide``: Quit's engine stop, ``"not_requested"``
+        without one) while the icon and its Panic stay, remove the icon, release the lock, then exit, unless an accepted
+        Panic owns persistence and the exit (decided under Panic's acceptance lock). An owner's exit the first decision
+        met, until the icon is gone, is decided again, at most once, since a stop is final; the last decision and the
+        end of admission are one step under the closer lock, none is admitted after it. No lock is held for the
+        icon's removal or the engine stop."""
+        made = []  # this exit's decisions, True for a stop
+
+        def decided(removed: bool) -> None:
+            while not self.panic.is_set():
+                with self._closer_lock:
+                    owed = not made or (self._owner_late and not made[-1] and len(made) < 2)
+                    self._owner_late = False
+                    if not owed:
+                        self._sealed = removed or made[-1] or len(made) == 2
+                        return
+                made.append(decide() != "not_requested")
+
+        def last_decision_then_release() -> None:
+            decided(removed=True)  # an owner's exit that met the icon's removal
+            release_lock()
+
+        decided(removed=False)
+        stop_tray_before_exit(last_decision_then_release)
         with self._terminal:
             if not self.panic.is_set():
                 os._exit(code)
+        with self._closer_lock:  # Panic owns the exit: this one did not leave, so admission is no longer closed
+            self._sealed = False
+
+    def ended_before_main(self, decide) -> None:
+        """A pre-main window whose close ends the app returned its loop: with no exit admitted, the owner closed it,
+        a Quit by ``closing``'s rule without close hooks (unless keep-running is saved), then ``decide`` (Quit's engine
+        stop). An admitted exit's body decided already; an accepted Panic owns the exit, so nothing waits here."""
+        owner = keep_running_choice() != "true"
+        with self._closer_lock:
+            if self._admitted or self.panic.is_set():
+                return
+            if owner:
+                self.owner_exit.set()
+        decide()
 
     def window_closed(self):
         """The owner closed the window (never a quit request). False cancels the close."""
         choice = keep_running_choice()
-        if choice == "true" and self._indicator_up() and self.indicator.hide_on_close(self.window):
-            return False
+        if choice == "true":  # the owner chose to keep running: a failed indicator or hide is no Quit
+            if self._indicator_up() and self.indicator.hide_on_close(self.window):
+                return False
+            return self.exit_launcher(owner=False)
         if choice == "":
             if self._asking.acquire(blocking=False):
                 threading.Thread(target=self._ask, name="ouroboros-background-consent", daemon=True).start()
@@ -566,11 +709,25 @@ class Background:
     def show_window(self) -> None:
         """Open the window: the icon or its Open, a banner, the Dock, a second launch.
 
-        Before pywebview has shown the window (hidden or not) the request is kept, never dropped."""
+        Before pywebview has shown the window (hidden or not) the request is kept, never dropped. On macOS a request
+        from another thread (a notification click, the boot's kept one) opens in a main-thread turn, the thread every
+        close is decided and hidden on: the open comes wholly before or after a hide, never between its steps."""
         with self._opening:
             if not self._can_show:
                 self._open_pending = True
                 return
+        if _MACOS and threading.current_thread() is not threading.main_thread():
+            try:
+                from PyObjCTools import AppHelper
+
+                AppHelper.callAfter(self._open)
+                return
+            except Exception:
+                log.warning("The main thread cannot take the open; opening from here.", exc_info=True)
+        self._open()
+
+    def _open(self) -> None:
+        self.chrome.keep()  # a close still waiting for full screen to end hides nothing
         if self.indicator is not None:
             self.indicator.restore(self.window)
             return
@@ -580,10 +737,11 @@ class Background:
             log.warning("Could not show the window.", exc_info=True)
 
     def attention(self, sound: bool = True, title: str = "", body: str = "", cue_when_visible: bool = True) -> dict:
-        """The bridge's alert cue (D7): never raises a window the owner hid on purpose. A page that
+        """The bridge's alert cue (D7): never raises a window the owner hid on purpose, or one a close is taking out
+        of full screen to hide (``WindowChrome.hiding``; only an open cancels that close). A page that
         will show its own browser banner asks first with ``cue_when_visible=False``: a visible
         window then gets nothing from here (that banner owns the sound) and answers "visible"."""
-        if self.indicator is not None and self.indicator.hidden:
+        if self.indicator is not None and (self.indicator.hidden or self.chrome.hiding):
             banner = self.indicator.notify(title or "Ouroboros", body or "Something needs your attention.",
                                            bool(sound))
             cue = request_native_attention(None, sound=bool(sound) and not banner)
@@ -633,7 +791,7 @@ class Background:
                 keep = bool(self.indicator.confirm(self.window, CONSENT_TITLE, CONSENT_MESSAGE))
             except Exception:
                 log.error("The background question could not be shown; quitting as before.", exc_info=True)
-                self.exit_launcher()
+                self.exit_launcher(owner=False)  # the owner's answer is unknown: no engine stop on a guess
                 return
             try:
                 set_keep_running(keep)
@@ -643,7 +801,7 @@ class Background:
                 return
             if keep and self._indicator_up() and self.indicator.hide_on_close(self.window):
                 return
-            self.exit_launcher()
+            self.exit_launcher(owner=not keep)  # the owner chose to keep running: a failed hide is no Quit
         finally:
             self._asking.release()
 
@@ -654,9 +812,9 @@ class Background:
 
     def _poll(self) -> None:
         while self.indicator.ready.is_set() and not self.shutdown.is_set():
-            if not self.indicator.carries_notifications and keep_running_choice() != "true" and not self.indicator.hidden:
-                self.indicator.stop()  # the owner turned background off: no icon while the window is visible
-                return
+            if (not self.indicator.carries_notifications and keep_running_choice() != "true"
+                    and self.indicator.stop_if_visible()):
+                return  # the owner turned background off: no icon while the window is visible
             self.indicator.set_status("Ouroboros: starting" if self.window is None else status_line(self.read_port()))
             if self.shutdown.wait(STATUS_POLL_SEC):
                 return

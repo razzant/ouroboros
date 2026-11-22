@@ -227,9 +227,9 @@ def test_raw_usage_events_do_not_turn_malformed_into_known_money(subtests, tmp_p
 def test_review_continuation_uses_each_runs_typed_cash_and_collects_once(tmp_path, monkeypatch, fake_route, last_cost):
     """A legacy chain (an older host's automatic successor, now only joined) folds each run's own cash once."""
     from ouroboros.delegate_custody_usage import observe_session_usage
-    from tests.test_review_session_continuation import _engine, _run, legacy_successor
+    from tests.test_review_session_continuation import _engine, _run, accept_legacy_successor, legacy_successor
 
-    _engine(monkeypatch)
+    posts = _engine(monkeypatch)
     original = FakeGateway.get_run
     evidence = {}
 
@@ -244,7 +244,8 @@ def test_review_continuation_uses_each_runs_typed_cash_and_collects_once(tmp_pat
 
     monkeypatch.setattr(FakeGateway, "get_run", detail)
     checkpoints = []
-    legacy_successor(tmp_path, checkpoints)
+    token = legacy_successor(tmp_path, checkpoints)
+    accept_legacy_successor(monkeypatch, tmp_path, token)
     facts = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, [], [], reconcile=True)
     rows = ledger_rows(tmp_path)
     expected = 2.0 + (last_cost if type(last_cost) in (int, float) else 0)
@@ -266,6 +267,7 @@ def test_review_continuation_uses_each_runs_typed_cash_and_collects_once(tmp_pat
     assert observed == per_run
     replay = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, [], [], reconcile=True)
     assert replay["spend"] == expected and ledger_rows(tmp_path) == rows
+    assert len(posts) == 2 and FakeGateway.lookup_requests == [({"continueFrom": "run-1"}, token)]
 
 
 @pytest.mark.parametrize("amounts,expected", [([2, None], 2), ([0, None], 0), ([1e308, 1e308], None)])
@@ -306,9 +308,9 @@ def test_review_actor_reports_the_typed_cash_the_collector_settled(tmp_path, fak
 
 def test_review_failed_successor_keeps_prior_evidence_on_its_original_run(tmp_path, monkeypatch, fake_route):
     from ouroboros import review_execution
-    from tests.test_review_session_continuation import _engine, _run, legacy_successor
+    from tests.test_review_session_continuation import _engine, _run, accept_legacy_successor, legacy_successor
 
-    _engine(monkeypatch)
+    posts = _engine(monkeypatch)
     original_detail = FakeGateway.get_run
     attempts = [{"usageCost": {"cashUsd": 2, "cashKnowledge": "exact"}}]
 
@@ -327,7 +329,8 @@ def test_review_failed_successor_keeps_prior_evidence_on_its_original_run(tmp_pa
 
     monkeypatch.setattr(review_execution, "_poll_session_terminal", fail_successor)
     checkpoints = []
-    legacy_successor(tmp_path, checkpoints)
+    token = legacy_successor(tmp_path, checkpoints)
+    accept_legacy_successor(monkeypatch, tmp_path, token)
     with pytest.raises(OSError) as error:
         _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, [], [], reconcile=True)
     usage = error.value.delegated_usage
@@ -336,6 +339,7 @@ def test_review_failed_successor_keeps_prior_evidence_on_its_original_run(tmp_pa
     assert first["cost_disclosed_usd"] == 2
     assert last["delegated_run_id"] == "run-2" and last["cost_disclosed_usd"] is None
     assert "attempt_execution" not in last
+    assert len(posts) == 2 and FakeGateway.lookup_requests == [({"continueFrom": "run-1"}, token)]
 
 
 def test_image_result_survives_price_validation_without_text_tariff(subtests, tmp_path, monkeypatch):

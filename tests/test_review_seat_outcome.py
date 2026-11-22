@@ -62,7 +62,10 @@ def test_producer_consumer_and_cas_have_one_contract_truth(tmp_path, monkeypatch
     manifest, payload, _ = read_call_payload(tmp_path, **outcome["source_ref"])
     assert manifest["producer_complete"] is True
     assert payload["producer_outcome"]["outcome"] == outcome
-    assert ctx._last_review_slot_executions["seat"]["effective"]["model"] == "requested/model"
+    # What ran is the reply's own route; the configured row stays the request.
+    execution = ctx._last_review_slot_executions["seat"]
+    assert (execution["effective"]["model"], execution["effective"]["provider"]) == ("observed/model", "openai")
+    assert execution["requested"]["model"] == "requested/model"
     assert len(_errors(tmp_path)) == errors
 
     def no_parse(*_a, **_kw):

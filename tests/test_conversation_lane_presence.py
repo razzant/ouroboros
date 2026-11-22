@@ -281,6 +281,33 @@ def test_a_server_before_its_pool_arms_refuses_the_turn_typed_and_touches_no_sav
         assert not path.exists()
 
 
+def test_an_owner_turns_intake_follows_its_own_loop_and_never_another_writers(tmp_path):
+    """An owner turn's fact (``owner:<chat>``, its carrier's) moves with its loop's admission whatever the loop's
+    metadata says; a fact another attempt or another process wrote stays as its writer left it."""
+    import json
+
+    from ouroboros.conversation_lease import (
+        _intake_path,
+        author_intake_accepting,
+        follow_loop_admission,
+        open_author_intake,
+    )
+
+    (tmp_path / "memory" / "owner_mailbox").mkdir(parents=True)
+    loop = SimpleNamespace(task_id="main-turn", drive_root=tmp_path, task_metadata={}, task_attempt=None)
+    assert open_author_intake(tmp_path, "main-turn", "owner:1", attempt=1)
+    follow_loop_admission(loop, False)  # the final drain is about to read
+    assert author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1) is False
+    follow_loop_admission(loop, True)  # a follow-up reopened its loop
+    assert author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1) is True
+    follow_loop_admission(SimpleNamespace(**{**vars(loop), "task_attempt": 2}), False)  # not this attempt's loop
+    assert author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1) is True
+    path = _intake_path(tmp_path, "main-turn")
+    path.write_text(json.dumps({**json.loads(path.read_text()), "pid": 1}))
+    follow_loop_admission(loop, False)  # another process's fact is its own
+    assert json.loads(path.read_text())["accepting"] is True
+
+
 def test_a_dead_carriers_intake_accepts_nothing_and_the_rows_end_closes_it(tmp_path):
     """A carrier that died before its release leaves ``accepting: true`` behind: the fact is its writer's, so a
     dead writer accepts nothing (an arrival would be swallowed), and the row's end in the server closes it."""
@@ -391,7 +418,46 @@ def test_the_carrier_takes_the_hosts_admitted_signal_facts_by_value():
     assert readmitted.facts == ("mention", "signal.words")
     with pytest.raises(PresenceTurnError) as refused:
         presence_turn_event(seed[PRESENCE_RUN_KEY]["event"], _admission())
-    assert refused.value.code == "presence_event_invalid"
+    assert refused.value.code == "presence_payload_invalid"
+
+
+def test_the_carrier_takes_the_words_the_host_read_for_its_facts_by_value(tmp_path, monkeypatch):
+    """A focus names its kinds in its connector's declared words (``focus.matched_labels``): the Host's door reads them
+    onto its admission and the seed carries that map whole, by value, since attention also matches kinds the event
+    never names (``from_bot`` from its author, ``any_message``). The carrier's re-admission, whose process has no
+    registry, takes the map; its focus keeps the words of the kinds it matched, explicit or implicit, and no others."""
+    from dataclasses import replace
+
+    from ouroboros import presence_admission
+    from ouroboros.places import Place, WakeItem
+    from ouroboros.presence_context import focus_metadata
+
+    place = Place(place_id="place-1", connector="telegram-bot", provider="telegram", account_id="bot-1",
+                  conversation_id="room-1", thread_id="topic-1",
+                  wakes=tuple(WakeItem(fact, "owner") for fact in ("signal.words", "from_bot", "any_message")))
+    monkeypatch.setattr(presence_admission, "admit_presence_turn",  # its place, and no words of its own
+                        lambda **_kw: replace(_admission(), place=place))
+    seen = {}
+
+    def module_runner(*, admission, event, **_kw):  # what the runner's focus reads (``presence_runner._build_task``)
+        seen["words"], seen["focus"] = admission.fact_labels, focus_metadata(admission, event, "t", 1)["focus"]
+        return PresenceTurnResult(outcome="silent", text="", task_id="t")
+
+    monkeypatch.setattr(presence_carrier, "run_presence_turn", module_runner)
+    words = {"signal.words": "Words you chose appear", "from_bot": "Written by a bot",
+             "any_message": "Anything said here", "direct_message": "Mail to you"}
+    declared = dict(words)
+    event = replace(_event(), facts=("mention", "signal.words"), actor={**_event().actor, "is_bot": True})
+    seed = presence_seed_task(admission=replace(_admission(), fact_labels=words), event=event,
+                              skill_name="telegram-bot", event_payload={**_payload(event), "facts": list(event.facts)},
+                              staged_files=[], gate_wait=False)
+    words.clear()  # the door's own map: the seed already holds its copy
+    frames = stdqueue.Queue()
+    presence_carrier.carry_presence_turn(json.loads(json.dumps(seed)), frames, tmp_path, tmp_path)
+    assert frames.get_nowait()["error"] is None
+    assert seen["focus"]["matched_wakes"] == ["signal.words", "from_bot", "any_message"], seen["focus"]
+    assert seen["focus"].get("matched_labels") == {fact: declared[fact] for fact in seen["focus"]["matched_wakes"]}
+    assert seen["words"] == seed[PRESENCE_RUN_KEY]["fact_labels"] == declared
 
 
 def test_a_version_2_event_finding_the_gate_busy_is_refused_before_any_lane_admission(lane, monkeypatch):

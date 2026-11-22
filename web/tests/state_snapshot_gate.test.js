@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createStateSnapshotSequencer } from '../modules/chat_activity.js';
+import { heldProjectChatIds } from '../modules/state_snapshots.js';
 
 // The reader below keeps the page readers' shape (chat.js::refreshHeaderControlState,
 // app.js::refreshProjectsNav): admission through gate(force), then one read,
@@ -202,6 +203,34 @@ test('only an actual failed read fans out, and a throwing fan-out still releases
     assert.equal(unavailable.length, 2);
 });
 
+test('a watcher is told after each change of latest(): an applied body, a failed read, a retire; never a stale answer', async (t) => {
+    const logged = t.mock.method(console, 'error', () => {});
+    let painting = true;
+    const sequencer = createStateSnapshotSequencer(() => { if (painting) throw new Error('a consumer failed to paint'); });
+    const seen = [];
+    sequencer.watch(() => { throw new Error('one watcher fails'); });  // told first: its fault must not skip the next
+    const off = sequencer.watch(() => seen.push(sequencer.latest()));
+    const first = await sequencer.gate(false);
+    assert.throws(() => sequencer.apply(first, { supervisor_ready: true }), /failed to paint/);
+    assert.deepEqual(seen, [{ supervisor_ready: true }], 'told even when the apply callback threw, and past the failing watcher');
+    painting = false;
+    const stale = sequencer.begin();
+    sequencer.apply(await sequencer.gate(false), { supervisor_ready: false });
+    assert.equal(sequencer.apply(stale, { old: true }), false);
+    sequencer.fail(stale);
+    assert.deepEqual(seen.slice(1), [{ supervisor_ready: false }], 'a stale apply or fail changes nothing and tells nobody');
+    sequencer.fail(await sequencer.gate(false));
+    sequencer.retire();
+    assert.deepEqual(seen.slice(2), [null, null], 'a failed read and a retire clear latest(), and say so');
+    off();
+    sequencer.apply(await sequencer.gate(false), { supervisor_ready: true });
+    assert.equal(seen.length, 4, 'a removed watcher hears nothing more');
+    // The failing watcher said so each of the five times it was told; the quiet one never did.
+    assert.equal(logged.mock.callCount(), 5);
+    assert.ok(logged.mock.calls.every((call) => call.arguments[0] === 'A state snapshot watcher failed:'
+        && /one watcher fails/.test(call.arguments[1]?.message)), 'the console names the failing watcher\'s error');
+});
+
 // The bindings map is held with its revision; `?bindings_since` lets the server answer "unchanged".
 const bound = { t1: { project_id: 'alpha', chat_id: 5, project_name: 'Alpha' } };
 
@@ -222,15 +251,28 @@ test('a held bindings map fills an unchanged body for its own revision only', ()
     assert.equal(sequencer.begin().path, '/api/state', 'and the next read asks for the whole map');
 });
 
-test('an old server, a failed bindings read or a retire hold nothing', () => {
-    const sequencer = createStateSnapshotSequencer(() => {});
+test('an old server or a failed bindings read holds nothing; a retire keeps the map for the server to vouch', () => {
+    const applied = [];
+    const sequencer = createStateSnapshotSequencer((data) => applied.push(data));
     sequencer.apply(sequencer.begin(), { task_bindings: bound });
     assert.equal(sequencer.begin().path, '/api/state');
     sequencer.apply(sequencer.begin(), { task_bindings: {}, task_bindings_revision: '', task_bindings_unchanged: false });
     assert.equal(sequencer.begin().path, '/api/state');
     sequencer.apply(sequencer.begin(), { task_bindings: bound, task_bindings_revision: 'r1' });
+    // A socket change or a confirmed mutation retires older bodies, never the map: its revision is its own digest,
+    // so the next read asks by it and the server says whether it still stands.
     sequencer.retire();
-    assert.equal(sequencer.begin().path, '/api/state', 'a socket change or a confirmed mutation reads the map whole');
+    assert.equal(sequencer.latest(), null, 'no body survives a retire');
+    const after = sequencer.begin();
+    assert.equal(after.path, '/api/state?bindings_since=r1');
+    sequencer.apply(after, { task_bindings: null, task_bindings_revision: 'r1', task_bindings_unchanged: true });
+    assert.deepEqual(applied.at(-1).task_bindings, bound, 'an unchanged answer is filled from the kept map');
+    // A mutation that did change the map: the server sends it whole under its new revision.
+    sequencer.retire();
+    const moved = { ...bound, t2: { project_id: 'alpha', chat_id: 5, project_name: 'Alpha' } };
+    sequencer.apply(sequencer.begin(), { task_bindings: moved, task_bindings_revision: 'r2', task_bindings_unchanged: false });
+    assert.deepEqual(applied.at(-1).task_bindings, moved);
+    assert.equal(sequencer.begin().path, '/api/state?bindings_since=r2');
 });
 
 test('an older answer can neither fill nor replace the held map', () => {
@@ -242,4 +284,33 @@ test('an older answer can neither fill nor replace the held map', () => {
     assert.equal(sequencer.apply(older, { task_bindings: {}, task_bindings_revision: 'r1' }), false);
     assert.equal(sequencer.begin().path, '/api/state?bindings_since=r2');
     assert.equal(applied.length, 1);
+});
+
+test('a failed bindings read (an empty revision) is unknown: never applied, and the whole map is asked again', () => {
+    const applied = [];
+    const sequencer = createStateSnapshotSequencer((data) => applied.push(data));
+    sequencer.apply(sequencer.begin(), { task_bindings: bound, task_bindings_revision: 'r1' });
+    assert.deepEqual(applied.at(-1).task_bindings, bound);
+    sequencer.apply(sequencer.begin(), { task_bindings: {}, task_bindings_revision: '', task_bindings_unchanged: false });
+    assert.equal(applied.at(-1).task_bindings, null, 'the empty map of a failed read is not handed to the page');
+    assert.equal(sequencer.begin().path, '/api/state', 'the next read asks for the whole map');
+    // An older server sends no revision field: its map applies as before, an empty one included.
+    sequencer.apply(sequencer.begin(), { task_bindings: {} });
+    assert.deepEqual(applied.at(-1).task_bindings, {});
+    sequencer.apply(sequencer.begin(), { task_bindings: bound });
+    assert.deepEqual(applied.at(-1).task_bindings, bound);
+});
+
+// #3067: the page decides which frames are Main's by the Project room set it holds.
+test('a state body that cannot name the Project rooms keeps the complete set the page holds', () => {
+    const page = { projectChatIds: new Set() };
+    const rows = [{ chat_id: 5 }];
+    assert.equal(heldProjectChatIds({ projects: rows }, page), undefined, 'first load: the caller falls back to the rows');
+    assert.deepEqual(heldProjectChatIds({ projects: rows, project_chat_ids: [5, 9] }, page), [5, 9]);
+    page.projectChatIds = new Set([5, 9]);
+    assert.deepEqual(heldProjectChatIds({ projects: rows, project_chat_ids: null }, page), [5, 9],
+        'an unreadable registry (null) keeps the held set, not the capped rows');
+    assert.deepEqual(heldProjectChatIds({ projects: rows }, page), [5, 9], 'an absent field keeps it too');
+    assert.deepEqual(heldProjectChatIds({ projects: rows, project_chat_ids: [] }, page), [], '[] is no Projects: it replaces');
+    assert.deepEqual(heldProjectChatIds({ project_chat_ids: [7] }, page), [7]);
 });

@@ -53,6 +53,21 @@ def _story(root, task=MAIN):
     return mv.render_story(_snapshot(root, task))
 
 
+def _mapped_citations(snapshot, account_id):
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    parts = ordinary_composition(snapshot)["blocks"]["story"]["parts"]
+    account = next(s for p in parts if p["kind"] == "account" for s in p["sources"] if s["id"] == account_id)
+    return {s["id"]: s for s in account["cited_sources"]}
+
+
+def _mapped_changes(snapshot, account_id):
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    parts = ordinary_composition(snapshot)["blocks"]["story"]["parts"]
+    return next(p for p in parts if p["kind"] == "account" and p["sources"][0]["id"] == account_id).get("changes", [])
+
+
 def _page(root, room, first, last, *, author=shared.MIND, text=None):
     from ouroboros.tools.chronicle import page_covers
 
@@ -121,7 +136,7 @@ def test_publishing_an_account_freezes_its_sources_and_changes_no_local_fact(tmp
     assert story.replace("\nMy accounts across rooms: 1 written, 0 in the common view (the rest one memory_read away).", "") == story_before
     # Read back through the actual reader: who wrote it, which versions, how to read the originals.
     read = _memory_read(_ctx(tmp_path), node_id=g.record["id"])
-    assert read.startswith(f"[account {g.record['id']}; room 1; mind (root t1); based on 2 sources, ")
+    assert read.startswith(f"[account {g.record['id']}; room 1; mind (root, task t1); based on 2 sources, ")
     assert f"source page {a1} (room {alpha}): revision {a1} used" in read and "changed since" not in read.split("\n")[0]
     assert f"memory_read(node_id={a1}, revision={a1}) reads that version" in read
     assert "shown in the common view only by my selection" in read and G_TEXT in read
@@ -324,6 +339,9 @@ def test_two_accounts_cite_one_source_and_a_local_fold_over_it_still_works(tmp_p
     assert f"part {local.record['id']}" in story and "Alpha, told once." in story  # the new local part is new, whole
     assert "Beta asked and I answered." not in story and "1 story records told through this account" in _block(story, g2.record["id"])
     assert f"replaces 1: {c1};" in _memory_read(_ctx(tmp_path), node_id=g2.record["id"])
+    edge = _mapped_citations(_snapshot(tmp_path), g)[a1]
+    assert edge["status_now"] == edge["status"] == "final"
+    assert edge["folded_into"] == local.record["id"]
 
 
 # --- C. a later correction of a source, and a changed or missing source identity ---------------------
@@ -356,9 +374,23 @@ def test_a_correction_after_the_account_keeps_its_basis_and_is_shown_as_not_inco
     old = _memory_read(_ctx(tmp_path), node_id=a1, revision=a1)
     assert f"as of revision {a1}: the original alone; later corrections not shown: {fix.record['id']}" in old
     assert "I counted twice" not in old and "text:\nAlpha asked again and I counted." in old
+    edge = _mapped_citations(_snapshot(tmp_path), g)[a1]
+    assert edge["current_revision"] == fix.record["id"] and edge["revision"] == a1
+    assert edge["read"]["tool"] == "memory_read" and _memory_read(_ctx(tmp_path), **edge["read"]["arguments"]) == old
     assert f"informs account {g} (revision {a1} read;" in old
     current = _memory_read(_ctx(tmp_path), node_id=a1, revision=fix.record["id"])
     assert "the original and its corrections up to that one; none later" in current and "I counted twice" in current
+    later = [c for c in _mapped_changes(_snapshot(tmp_path), g) if c["target"] == a1]
+    assert [(c["kind"], c["id"]) for c in later] == [("correction", fix.record["id"])]
+    assert later[0]["read"]["arguments"] == {"node_id": fix.record["id"], "revision": fix.record["id"]}
+    assert _memory_read(_ctx(tmp_path), **later[0]["target_read"]["arguments"]) == current
+    assert "I counted twice" not in json.dumps(later)
+    old = json.loads(mv.snapshot_json(_snapshot(tmp_path)))
+    for entry in old["story"]:
+        for src in entry.get("sources") or ():
+            src.pop("later_corrections", None)  # a capture without the ids the printed corrections need
+    gap = next(c for c in _mapped_changes(mv.snapshot_from_json(json.dumps(old)), g) if c["target"] == a1)
+    assert gap["read_gap"] and "read" not in gap and gap["target_navigation"]["arguments"] == {"node_id": a1}
     assert "TOOL_ARG_ERROR" in _memory_read(_ctx(tmp_path), node_id=a1, revision=b1)
     assert "TOOL_ARG_ERROR" in _memory_read(_ctx(tmp_path), revision=a1)
 
@@ -387,6 +419,9 @@ def test_a_source_missing_from_a_copied_journal_is_a_gap_not_text(tmp_path):
     story = mv.render_story(snapshot)
     assert f"- source: page {a1} of room {alpha}, revision {a1}; not in this chronicle: its words are not here" in story
     assert "Alpha asked again" not in story and G_TEXT in story
+    mapped = _mapped_citations(snapshot, g)
+    assert mapped[a1]["missing"] and mapped[a1]["read_gap"] and "read" not in mapped[a1]
+    assert mapped[b1]["read"]["arguments"] == {"node_id": b1, "revision": b1}
     assert mi.record_period(other, other.get(g), {}).span["incomplete"] is True
     read = _memory_read(_ctx(copy), node_id=g)
     assert f"source page {a1} (room {alpha}): revision {a1} used; NOT in this chronicle: its words cannot be read here" in read
@@ -407,22 +442,51 @@ def test_rejecting_a_cited_draft_follows_local_authority_and_the_account_shows_i
     rejected = store.decide(h1, False, shared.MIND, "not what happened in Beta")
     assert rejected.ok and all(r["id"] != h1 for r in store.room_records(beta)) and store.sealed_row_refs(beta) == set()
     assert store.decide(h1, True, shared.MIND, "changed my mind").reason == "invalid"  # one-shot, as before
-    assert store.decide(b1, False, shared.MIND, "mine").reason == "invalid"  # my own page takes no decision
-    src = store.accounts()[0]["sources"][1]
+    # Commit 5: my own page is withdrawn like a draft, its rows reopen; accepting it or deciding again stays refused.
+    assert store.decide(b1, True, shared.MIND, "accept mine").reason == "invalid"  # only an undecided draft is accepted
+    sealed = store.sealed_row_refs("1")
+    assert sealed and store.decide(b1, False, shared.MIND, "mine").ok
+    assert store.sealed_row_refs("1") == set() and all(r["id"] != b1 for r in store.room_records("1"))
+    assert store.decide(b1, False, shared.MIND, "again").reason == "invalid"  # a withdrawn record stays withdrawn
+    own, src = store.accounts()[0]["sources"]
     assert (src["status"], src["status_now"]) == ("draft", "rejected")
+    assert (own["status"], own["status_now"]) == ("final", "rejected")
     story = _story(tmp_path)
     block = _block(story, synthetic["id"])
+    assert f"- my later rejection of its source {b1} (not in this account):\n  mine" in block
     assert f"- my later rejection of its source {h1} (not in this account):\n  not what happened in Beta" in block
     assert f"- source: page {h1} of Project Beta [chat_id={beta}], revision {h1}, a draft then;" in block
     assert "told through this account" not in block  # a rejected draft is no entry of the story
     read = _memory_read(_ctx(tmp_path), node_id=synthetic["id"])
     assert f"revision {h1} used, draft then; now rejected;" in read
+    edge = _mapped_citations(_snapshot(tmp_path), synthetic["id"])[h1]
+    assert (edge["status"], edge["status_now"]) == ("draft", "rejected")
+    rejections = {c["target"]: c for c in _mapped_changes(_snapshot(tmp_path), synthetic["id"]) if c["kind"] == "rejection"}
+    assert set(rejections) == {b1, h1} and all(c.get("id") for c in rejections.values())
+    assert rejections[h1]["read"]["arguments"] == {"node_id": rejected.record["id"], "revision": rejected.record["id"]}
+    assert rejections[h1]["target_navigation"]["arguments"] == {"node_id": h1}
+    assert "TOOL_ARG_ERROR" not in _memory_read(_ctx(tmp_path), **rejections[h1]["read"]["arguments"])
+    assert "not what happened in Beta" not in json.dumps(rejections)
     # An accepted draft is said so too, and an account over a draft the mind accepts stays as written.
     h2 = _page(tmp_path, beta, 14, 14, author=HELPER, text="A better draft about Beta.")
     later = store.publish_account(room_id="1", text="Over the better draft.", sources=[h2], author=shared.MIND).record["id"]
-    assert store.decide(h2, True, shared.MIND, "right").ok
+    accepted = store.decide(h2, True, shared.MIND, "right")
+    assert accepted.ok
     assert store.select_account(later, replaces=[], author=shared.MIND, reason="shown").ok
     assert f"- its source {h2}, a draft then, I have since accepted" in _block(_story(tmp_path), later)
+    acceptances = {c["target"]: c for c in _mapped_changes(_snapshot(tmp_path), later) if c["kind"] == "acceptance"}
+    assert set(acceptances) == {h2} and acceptances[h2]["id"] == accepted.record["id"]
+    assert acceptances[h2]["read"]["arguments"] == {"node_id": accepted.record["id"], "revision": accepted.record["id"]}
+    assert acceptances[h2]["target_navigation"]["arguments"] == {"node_id": h2}
+    assert "right" not in json.dumps(acceptances)  # the decision's reader, never its reason
+    stale = json.loads(mv.snapshot_json(_snapshot(tmp_path)))
+    for entry in stale["story"]:
+        if entry.get("id") == later:
+            for src in entry.get("sources") or ():
+                src.pop("acceptance_id", None)  # a capture from before the id was recorded
+    gaps = {c["target"]: c for c in _mapped_changes(mv.snapshot_from_json(json.dumps(stale)), later)
+            if c["kind"] == "acceptance"}
+    assert not gaps[h2].get("id") and gaps[h2]["read_gap"] and gaps[h2]["target_navigation"]
 
 
 # --- E. new records after the account stay new; a later account replaces explicitly ------------------
@@ -568,12 +632,12 @@ def test_chronicle_write_publishes_and_selects_an_account_and_a_child_is_refused
     assert chosen["ok"] and chosen["kind"] == "selection" and chosen["replaces"] == 1 and chosen["shown"] is True
     assert "A helper's draft" in _story(tmp_path) and G_TEXT in _story(tmp_path) and "Alpha asked again and I counted." not in _story(tmp_path)
     listing = _memory_read(_ctx(tmp_path))
-    assert re.search(rf"^\[account {written['node_id']}; room 1; mind \(root turn0001\); based on 2 sources, ", listing, re.M)
+    assert re.search(rf"^\[account {written['node_id']}; room 1; mind \(root, task turn0001\); based on 2 sources, ", listing, re.M)
     read = _memory_read(_ctx(tmp_path), node_id=written["node_id"])
-    assert f"selection {chosen['node_id']} by mind (root turn0001) (seq {chosen['sequence']}):\nshown=True; replaces 1: {a1}; through it" in read
+    assert f"selection {chosen['node_id']} by mind (root, task turn0001) (seq {chosen['sequence']}):\nshown=True; replaces 1: {a1}; through it" in read
     withdrawn = _write(tmp_path, kind="selection", target_id=written["node_id"], replaces=[], shown=False, reason="later")
     assert withdrawn["ok"] and withdrawn["shown"] is False and G_TEXT not in _story(tmp_path)
     # The selection record itself reads back with its target and list.
     sel = _memory_read(_ctx(tmp_path), node_id=chosen["node_id"])
-    assert sel.startswith(f"[selection {chosen['node_id']}; room 1; mind (root turn0001); replaces 1; shown in the common view; target {written['node_id']};")
+    assert sel.startswith(f"[selection {chosen['node_id']}; room 1; mind (root, task turn0001); replaces 1; shown in the common view; target {written['node_id']};")
     assert f"account: memory_read(node_id={written['node_id']}); replaces: {a1}; shown=True" in sel

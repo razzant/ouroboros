@@ -1,0 +1,1 @@
+{"type": "error", "error": {"type": "invalid_request_error", "message": "prompt is too long: 90000 tokens > 80000 maximum"}, "request_id": "req_x"}

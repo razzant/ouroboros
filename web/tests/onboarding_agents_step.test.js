@@ -14,6 +14,8 @@ import {
     LADDER_FOOTNOTE,
     MALFORMED_RECEIPT_CODE,
     VALUE_LADDER,
+    accessRowState,
+    agentsOnlyAccess,
     agentsOutcomeText,
     agentsStepHtml,
     completionFailureNotice,
@@ -22,6 +24,7 @@ import {
     familyListHtml,
     familyStatusText,
     ladderHtml,
+    mainSourceReason,
     onboardingSettingsDraft,
     readCompletionAnswer,
     rotationDiagramSvg,
@@ -167,6 +170,60 @@ test('nothing connected: no declaration, and no outcome sentence repeating the r
     assert.equal(agentsOutcomeText([]), '');
 });
 
+test('agent-only subscriptions are told what they run and what Main needs; an unread or serving source is not', () => {
+    const codex = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    const blank = mainSourceReason([], codex);
+    assert.match(blank, /^Connect Codex, enter an API key/);
+
+    // The engine named its model sources and none of the connected accounts is one: a fact, with the way forward.
+    for (const [connected, names] of [[['claude'], /^Claude Code can run agents; /], [['claude', 'cursor'], /^Claude Code and Cursor can run agents; /],
+        [['claude', 'cursor', 'agy'], /^Claude Code, Cursor and Antigravity can run agents; /]]) {
+        assert.equal(agentsOnlyAccess(connected, codex), true);
+        const reason = mainSourceReason(connected, codex, { snapshot: snapshotWith(connected) });
+        assert.match(reason, names);
+        assert.match(reason, /Ouroboros itself still needs a model\. Connect Codex, add an API key, or choose a local model\./);
+        assert.doesNotMatch(reason, /Retry|discovery|confirm/i, 'nothing here can be retried');
+    }
+    // The sources in the sentence are the engine's own names for them, and several are alternatives.
+    const two = [{ id: 'managed', label: 'Managed models', credentialHarness: 'claude' }, { id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    assert.match(mainSourceReason(['cursor'], two), /Connect Managed models or Codex,/);
+
+    // Unknown sources (an unread list) and a connected account that IS a source keep the retryable reason.
+    for (const [connected, sources] of [[['claude'], []], [['claude'], undefined], [['codex'], codex], [['claude', 'codex'], codex]]) {
+        assert.equal(agentsOnlyAccess(connected, sources), false);
+        assert.match(mainSourceReason(connected, sources), /^Could not confirm that a connected account can run .*Retry model discovery,/);
+    }
+    assert.equal(agentsOnlyAccess([], codex), false, 'nothing connected is not an agents-only install');
+});
+
+test('the access row never offers what Continue refuses, and calls the API section Optional only when it is', () => {
+    const codex = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    const row = (facts) => accessRowState({ sources: codex, ...facts });
+    // A preview that failed while Continue is blocked asks for a Retry alone; with Continue open it offers both.
+    assert.match(row({ connected: ['claude'], previewError: 'Down.', continueBlocked: true }).note, /prepared: Down\. Retry\.$/);
+    assert.match(row({ connected: ['codex'], previewError: 'Down.' }).note, /Retry, or Continue to choose models yourself\.$/);
+    // Agents-only accounts: no badge; nothing connected, an unread or a failed list: one of the ways forward the
+    // reason names, so Optional; a known model account: Optional; entered access: Configured.
+    assert.equal(row({ connected: [] }).badge, 'Optional');
+    assert.equal(row({ connected: ['claude'] }).badge, '');
+    assert.equal(row({ connected: ['claude'], sources: [], read: 'not_read' }).badge, 'Optional');
+    assert.equal(row({ connected: ['codex'], sources: [], read: 'failed' }).badge, 'Optional');
+    assert.equal(row({ connected: ['codex'] }).badge, 'Optional');
+    assert.equal(row({ connected: ['claude'], configured: true }).badge, 'Configured');
+    // Retry: hidden with nothing connected and after a healthy agents-only read; a failed preview brings it back.
+    assert.equal(row({ connected: [] }).retryHidden, true);
+    assert.equal(row({ connected: ['claude'] }).retryHidden, true);
+    assert.equal(row({ connected: ['claude'], previewError: 'Down.' }).retryHidden, false);
+    assert.equal(row({ connected: ['codex'] }).retryHidden, false, 'a healthy read can still be read again');
+    // The read state in a person's words, never its internal name ("failed", "transport").
+    for (const [read, words] of [['failed', 'could not be read'], ['transport', 'could not be read'],
+        ['partial', 'is incomplete'], ['stale', 'is out of date'], ['not_read', 'is not available yet']]) {
+        assert.equal(row({ connected: ['codex'], sources: [], read, readErrors: 'Offline.' }).note,
+            `The model list ${words}. Offline. Your choices are kept.`, read);
+    }
+    assert.equal(row({ connected: ['codex'], checking: true }).note, 'Checking model sources…');
+});
+
 test('the limits warning stands under the rows in every state, before any connection', () => {
     const html = agentsStepHtml({ compact: true, showRoster: false });
     const [rows, warning, login] = ['id="agents-family-list"', 'Subscription limits still apply.', 'id="agents-login-host"'].map((part) => html.indexOf(part));
@@ -188,7 +245,8 @@ test('one connected account declares the preset request and promises nothing cer
     assert.match(text, /Available subagents/);
     // Conditional by construction: the compiler may still refuse a seat.
     assert.match(text, /will try to/);
-    assert.match(text, /Main still needs Codex, an API key, or a local model/);
+    // What Main still needs is said once, beside Continue, and only while true: this paragraph cannot know of a key.
+    assert.doesNotMatch(text, /Main still needs|still needs a model/);
     assert.doesNotMatch(text, /guarantee|always/i);
 });
 
@@ -315,7 +373,7 @@ test('the owner skip produces a declaration that asks for NO preset', () => {
 test('preview and completion can share one open provider/local/model draft', () => {
     const draft = onboardingSettingsDraft({
         state: {
-            openaiKey: ' key ', totalBudget: '25', reviewEnforcement: 'blocking',
+            openaiKey: ' key ', totalBudget: '25', reviewEnforcement: 'blocking',  // a stale draft field writes nothing
             localSource: '', localRoutingMode: 'cloud', mainModel: 'openai/gpt-5.6-sol',
             runtimeMode: 'advanced',
             connections: [{ kind: 'openai-compatible', name: 'local', base_url: 'http://127.0.0.1:41001/v1' }],
@@ -329,7 +387,7 @@ test('preview and completion can share one open provider/local/model draft', () 
     assert.deepEqual(draft.OUROBOROS_CONNECTIONS, [{ kind: 'openai-compatible', name: 'local', base_url: 'http://127.0.0.1:41001/v1' }]);
     assert.equal(draft.OUROBOROS_TOTAL_BUDGET_USD, 25);
     assert.equal(draft.OUROBOROS_MODEL, 'openai/gpt-5.6-sol');
-    assert.equal(draft.OUROBOROS_REVIEW_ENFORCEMENT, 'blocking');
+    assert.equal('OUROBOROS_REVIEW_ENFORCEMENT' in draft, false);
     assert.equal(draft.OUROBOROS_RUNTIME_MODE, 'advanced');
     assert.equal('OUROBOROS_MODEL_HEAVY' in draft, false);
 });
@@ -790,6 +848,82 @@ test('Connect starts the login through the shared card controller', async (t) =>
     store.dispose();
 });
 
+test('each family row carries its program line, read only while the engine runs and again after a sign-in settles', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const asked = [];
+    const program = (harness) => ({ harness, selection: { path: `/vendor/${harness}`, version: '0.50.0' },
+        newest: { status: 'available', version: '0.60.0', observedAt: 'now', source: 'registry' }, updateAvailable: 'yes',
+        actions: { update: { available: true, reason: null } }, operation: null });
+    const maintenanceApi = { harnessMaintenanceInventory: async (query) => {
+        asked.push(query);
+        return { harnesses: [program('codex')].filter((row) => !query.harness || row.harness === query.harness) };
+    } };
+    let daemon = 'stale';
+    const fetchImpl = async (url, init) => {
+        if (String(url).startsWith('/api/claudexor/login')) {
+            return json(200, { job_id: 'j1', job: { state: 'failed', outcome: { reason: 'vendor_program_failed' } } });
+        }
+        return json(200, { ...snapshotWith([]), daemon: { state: daemon } });
+    };
+    const store = createClaudexorStatusStore({
+        fetchImpl, doc: { hidden: false, addEventListener() {}, removeEventListener() {} }, pollMs: 5000,
+    });
+    const dom = fakeDom();
+    const list = dom.nodes.get('agents-family-list');
+    const connect = [];
+    list.buttons = [{ getAttribute: () => 'codex', addEventListener: (_type, fn) => connect.push(fn) }];
+    const step = createAgentsStep({ doc: dom.doc, store, fetchImpl, maintenanceApi });
+    step.mount();
+    await flush();
+    assert.deepEqual(asked, [], 'a stopped engine is not asked, and nothing is said about it');
+    assert.doesNotMatch(list.innerHTML, /harness-model-program/);
+
+    daemon = 'running';
+    await store.refresh();
+    await flush();
+    assert.deepEqual(asked.map((query) => [query.harness, query.checkLatest]), [['', false], ['codex', true]]);
+    const codexRow = list.innerHTML.slice(list.innerHTML.indexOf('data-agent-family="codex"'),
+        list.innerHTML.indexOf('data-agent-family="claude"'));
+    assert.match(codexRow, /<span>Program 0\.50\.0\u00a0· <span class="harness-model-latest">0\.60\.0 available<\/span><\/span>/);
+    assert.match(codexRow, /data-program-action="latest"[^>]*>Update</);
+    assert.equal((list.innerHTML.match(/harness-model-program/g) || []).length, 1, 'only the family with something to act on');
+
+    connect.at(-1)();
+    for (let tick = 0; tick < 5; tick += 1) { t.mock.timers.tick(2000); await flush(); }
+    assert.ok(asked.length >= 4, 'a settled sign-in, failed here, asks the engine again');
+
+    const count = asked.length;
+    await step.dispose();
+    step.detach();
+    await store.refresh();
+    await flush();
+    assert.equal(asked.length, count, 'the disposed step reads nothing more');
+    store.dispose();
+});
+
+test('the Models step mounts the same step without family rows, and asks the engine nothing about programs', async () => {
+    const asked = [];
+    const maintenanceApi = { harnessMaintenanceInventory: async (query) => { asked.push(query); return { harnesses: [] }; } };
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, snapshotWith(['codex'])),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} }, pollMs: 5000,
+    });
+    const dom = fakeDom();
+    const rows = dom.nodes.get('agents-family-list');
+    dom.nodes.delete('agents-family-list');  // the Models step: the editor, no Accounts rows
+    const step = createAgentsStep({ doc: dom.doc, store, maintenanceApi });
+    try {
+        step.mount();
+        await store.refresh();
+        await flush();
+        assert.deepEqual(asked, [], 'no program line here, so no inventory or newest-release read');
+        dom.nodes.set('agents-family-list', rows);  // back on Accounts: the remount reads for its rows
+        step.mount();
+        await flush();
+        assert.deepEqual(asked.map((query) => [query.harness, query.checkLatest]), [['', false]]);
+    } finally { step.detach(); store.dispose(); }
+});
+
 test('unknown sign-in cleanup stays retryable until explicit local detach', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     let cancels = 0;
@@ -915,15 +1049,16 @@ test('pagehide binds to Window, preserves bfcache, and detaches late work synchr
 
     assert.equal(dom.documentListeners.some(([event]) => event === 'pagehide'), false,
         'Document is not the pagehide target');
-    assert.equal(dom.windowListeners.length, 3,
-        'pagehide plus the shared status surface activation hooks are bounded');
+    assert.equal(dom.windowListeners.length, 4,
+        'pagehide, the shared status surface activation hooks and the Agents list language listener are bounded');
+    assert.ok(dom.windowListeners.some(([type]) => type === 'ouro:language-changed'), 'the Agents list says its prices again on a language change');
     const [type, onPageHide] = dom.windowListeners[0];
     assert.equal(type, 'pagehide');
     handlers[handlers.length - 1]();
     await flush();
 
     onPageHide({ persisted: true });
-    assert.equal(dom.windowListeners.length, 3, 'bfcache keeps the live step mounted');
+    assert.equal(dom.windowListeners.length, 4, 'bfcache keeps the live step mounted');
 
     const lifecycleBefore = calls.filter(([url]) => url.startsWith('/api/claudexor/login')).length;
     onPageHide({ persisted: false });

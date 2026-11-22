@@ -88,10 +88,10 @@ def test_startup_recovers_intent_only_after_worker_custody_proof(roots, monkeypa
         claim_promotion_intent(root, evt)
     monkeypatch.setattr(queue, "enqueue_task", lambda *a, **k: pytest.fail("boot must not enqueue new work"))
     unknown = server_maintenance._run_startup_task_recovery(root, repo, skip_live_data=False)
-    assert unknown["errors"] == ["prior_worker_ownership_unconfirmed"]
+    assert unknown["errors"] == ["prior_worker_ownership_unconfirmed"] and "prior_workers_ended" not in unknown
     assert load_task_result(root, "new")["promotion_admission"]["status"] == "emitted"
     report = server_maintenance._run_startup_task_recovery(root, repo, skip_live_data=False, prior_worker_pids=set())
-    assert report["errors"] == []
+    assert report["errors"] == [] and report["prior_workers_ended"] is True, "the PID check passed: said positively"
     stored = load_task_result(root, "new")
     assert stored["promotion_admission"]["status"] == ("unconfirmed" if claimed else "not_started")
     result = _get_task_result(SimpleNamespace(drive_root=root, budget_drive_root=root), "new")

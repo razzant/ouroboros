@@ -13,6 +13,44 @@ import { fetchJson } from './api_client.js';
 let spans = {};  // {chat_id: [[from, to], ...]}: the host's answers, joined (a later answer may arrive first)
 const listeners = new Set();
 
+// The observer mode (DESIGN "Unread"): a view opened with `?observer=1` (the builtin browser on this installation's
+// own UI page, or a script that asks for it) shows unread as it is and moves no read cursor. Its tab keeps the mode in
+// session storage (a same-origin window it opens with an opener gets a copy) until it opens `?observer=0`; without
+// storage, in this document only.
+const OBSERVER_KEY = 'ouroboros.observer';
+let observing = false;
+
+const observerField = (field) => {
+    try { return decodeURIComponent(field.split('=', 1)[0].replace(/\+/g, ' ')) === 'observer'; } catch { return false; }
+};
+
+/** Take `observer` from this view's address once, before any read: `1` starts the observer mode (beside a `0` too),
+ * `0` ends it for the tab. Only that parameter leaves the address (the others, the hash and the history entry's state
+ * stay as they were); an address without `observer=1` or `observer=0` is left as it is. */
+export function captureObserverMode(where = globalThis.location, history = globalThis.history) {
+    const href = String(where?.href || '');
+    let asked = [];
+    try { asked = new URL(href).searchParams.getAll('observer'); } catch {}
+    if (!asked.includes('1') && !asked.includes('0')) return;
+    observing = asked.includes('1');
+    try {
+        if (observing) globalThis.sessionStorage.setItem(OBSERVER_KEY, '1');
+        else globalThis.sessionStorage.removeItem(OBSERVER_KEY);
+    } catch {}
+    const hashAt = href.indexOf('#'), head = hashAt < 0 ? href : href.slice(0, hashAt);
+    const queryAt = head.indexOf('?');
+    const kept = head.slice(queryAt + 1).split('&').filter((field) => !observerField(field));
+    const address = head.slice(0, queryAt) + (kept.some(Boolean) ? `?${kept.join('&')}` : '')
+        + (hashAt < 0 ? '' : href.slice(hashAt));
+    try { history.replaceState(history.state, '', address); } catch {}
+}
+
+/** Whether this view's automatic reads are the owner's: never in the observer mode. */
+export function ownerReads() {
+    if (observing) return false;
+    try { return globalThis.sessionStorage?.getItem(OBSERVER_KEY) !== '1'; } catch { return true; }
+}
+
 /** Unread standalone messages: the revisions past `seen`, less those read elsewhere. */
 export function unreadCount(visible, seen, read = []) {
     const top = Math.max(0, Number(visible) || 0), floor = Math.max(0, Number(seen) || 0);
@@ -176,7 +214,7 @@ export function createSharedReadTracker({ chatId, feed, band, shown, post = post
         }
     }
     function sample() {
-        if (!feed || !shown()) return;
+        if (!feed || !shown() || !ownerReads()) return;
         const { rows, over } = visibleRows(feed, band());
         const shared = [];
         for (const node of feed.querySelectorAll('[data-room-revisions][data-row-address]')) {

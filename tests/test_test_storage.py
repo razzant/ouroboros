@@ -196,6 +196,56 @@ def _repo(root, source):
     return root
 
 
+@pytest.mark.parametrize("red", [False, True], ids=["passing-lane", "failing-lane"])
+def test_git_remove_timeout_preserves_completed_gate_and_raw_evidence(tmp_path, monkeypatch, capsys, red):
+    from ouroboros import preflight_runner
+    from tests._shared import retire_synthetic_gate_hold
+    from ouroboros.test_environment import RETENTION_MARKER
+
+    source = f"def test_probe():\n    print('completed lane')\n    assert {not red}\n"
+    repo = _repo(tmp_path.resolve() / "repo", source)
+    (repo / "input.bin").write_bytes(b"unique input")
+    root = tmp_path.resolve() / "gate"
+    root.mkdir()
+    monkeypatch.setattr(preflight_runner, "gate_root", lambda **kwargs: root)
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_KEEP", raising=False)
+    remove = ["git", "worktree", "remove", "--force", str(root / "repo")]
+    real_run = subprocess.run
+    timeout = subprocess.TimeoutExpired(remove, 30)
+    reason = f"scratch release failed: {timeout}"
+
+    def timeout_on_remove(command, *args, **kwargs):
+        if command == remove and kwargs.get("cwd") == str(repo) and kwargs.get("timeout") is not None:
+            raise timeout
+        return real_run(command, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "run", timeout_on_remove)
+            verdict = preflight_runner.run_hermetic_pytest(
+                repo, pytest_args=["tests", "-q", "-s"], phase="pre_commit", timeout=60)
+        stderr = capsys.readouterr().err
+        evidence = Path(next(line.removeprefix("PREFLIGHT_EVIDENCE ") for line in stderr.splitlines()
+                             if line.startswith("PREFLIGHT_EVIDENCE ")))
+        record = json.loads((evidence / "result.json").read_text(encoding="utf-8"))
+        if red:
+            assert verdict and "pass, exit 1" in verdict
+        else:
+            assert verdict is None
+        assert record["verdict"] == verdict
+        [lane] = [lane for lane in record["lanes"] if lane["lane"] == "pytest"]
+        assert (record["execution"], lane["returncode"], lane["containment_error"]) == ("executed", int(red), "")
+        assert record["cleanup"] == "retained" and reason == record["retention_reason"]
+        assert record["kept"] == [{"path": str(root), "reasons": [reason]}]
+        assert "PREFLIGHT_RETAINED" in stderr and reason in stderr
+        assert (root / RETENTION_MARKER).read_text(encoding="utf-8").splitlines() == [reason]
+        assert (root / "repo" / "input.bin").read_bytes() == b"unique input"
+        assert (evidence / "source/untracked/input.bin").read_bytes() == b"unique input"
+        assert b"completed lane" in next(evidence.glob("pytest-*/stdout.bin")).read_bytes()
+    finally:
+        retire_synthetic_gate_hold(repo, root, reason)
+
+
 @pytest.mark.parametrize("red", [False, True])
 def test_native_ctxless_green_red_keep_full_source_and_logs(tmp_path, capsys, red):
     from ouroboros.preflight_runner import run_hermetic_pytest

@@ -135,8 +135,9 @@ Use the exact target-base SHA when verifying a frozen range. Without a base,
 the reference-book comparison is skipped. `python scripts/run_tests.py tests/test_x.py`
 forwards a focused run. Inside Ouroboros a reviewed commit (`commit_reviewed` /
 `vcs_commit_reviewed`) runs a selected set in its hermetic gate unless `skip_tests`
-is set: the contract floor, changed tests, direct importers of changed code and
-your `extra_tests`; `full_tests` asks for the whole battery. A selected pass is
+is set: the contract floor, changed tests, direct importers of changed code, the
+interface's static tests when a file under `web/` changes and your `extra_tests`;
+`full_tests` asks for the whole battery. A selected pass is
 not the full battery. Ordinary PR/branch cloud CI is disabled: local verification
 and independent review remain.
 Maintainers may dispatch CI for a reviewed candidate; review outside code before

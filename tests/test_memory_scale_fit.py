@@ -41,9 +41,14 @@ def test_same_ordinary_plan_holds_five_resident_tools(tmp_path, monkeypatch):
     plan = scale.build(tmp_path, monkeypatch)
     plan = plan.reproject_for_route(window_tokens=92000, known_window=True, ratio=1.0,
         output_reserve=plan.output_reserve_tokens, tool_schemas=scale.tools(), start_mode=plan.initial_mode)
-    tokens = plan.projection('nano').calibrated_tokens + cf.tool_schema_tokens(scale.tools())
+    # Price messages and all resident schemas through the same estimator as the fitter.
+    tokens = cf.estimate_context_prompt_tokens(plan.messages_for('nano'), scale.tools(), provider=plan.provider)
     margin = 92000 - 10000 - tokens
     assert margin >= 0, f'5 tools: input={tokens}, reserve=10000, window=92000, margin={margin}'
+    # Once the receipt fits, an identical route must preserve its bytes, including its floor note.
+    again = plan.reproject_for_route(window_tokens=92000, known_window=True, ratio=1.0,
+        output_reserve=plan.output_reserve_tokens, tool_schemas=scale.tools(), start_mode=plan.initial_mode)
+    assert again.messages_for('nano') == plan.messages_for('nano')
     print(f'FIVE_TOOLS input={tokens}, reserve=10000, window=92000, margin={margin}')
 
 

@@ -3,10 +3,20 @@
 The companion is the only caller. It keeps the pre-Mini-App button so a normal
 disable can restore it, and records every URL rotation before touching
 Telegram so a restart can reconcile an ambiguous remote result.
+
+Each bot keeps its own ledger, named by the id Telegram's getMe reports for the
+token (a rotated token of the same bot keeps it): a replacement bot neither reads
+nor clears a ledger another bot could not restore. The older chat-only ledger is
+never changed or removed. A bot whose current menu shows a Mini App button it
+records derives its own ledger from it and notes that basis with the source's
+digest: an inference from the menu now, not proof of which bot wrote that file.
+When the chat-only ledger names an earlier owner, the companion reads that chat's
+menu once before exposing a new owner, so a ledger derived there is restored like any other.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -21,8 +31,9 @@ from platform_support import fsync_directory, path_is_link_or_reparse
 from telegram_settings import TelegramSettingsError, telegram_api_base, telegram_proxy
 
 
-_SNAPSHOT_NAME = "menu_button_snapshot.json"
-_SNAPSHOT_SCHEMA = 2
+_LEGACY_NAME, _LEGACY_SCHEMA = "menu_button_snapshot.json", 2  # chat-only, written before ledgers named a bot
+_SNAPSHOT_SCHEMA = 3
+_BOT_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 _TUNNEL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com$")
 
 
@@ -85,11 +96,27 @@ def web_app_button(url: str, text: str = "Ouroboros") -> dict[str, Any]:
     }
 
 
-def snapshot_owner_chat_id(state_dir: str | Path) -> int | None:
-    """Read only the durable menu owner before constructing an owner-bound manager."""
+def _ledger_name(bot: str) -> str:
+    if not _BOT_ID_RE.fullmatch(str(bot or "")):
+        raise TelegramMenuError("The Telegram bot identity is not verified.")
+    return f"menu_button_snapshot.bot-{bot}.json"
 
-    root = Path(state_dir).expanduser().resolve()
-    path = root / _SNAPSHOT_NAME
+
+def _bot_identity(me: Any) -> str:
+    """The bot id Telegram's getMe reported, which names its ledger; never read from the token's text."""
+    raw = me.get("id") if isinstance(me, dict) else None
+    try:
+        bot = "" if isinstance(raw, bool) else str(int(raw))
+    except (TypeError, ValueError):
+        bot = ""
+    if not _BOT_ID_RE.fullmatch(bot):
+        raise TelegramMenuError("Telegram returned an invalid bot identity.")
+    return bot
+
+
+def _read_ledger(path: Path, *, raw: bool = False) -> Any:
+    """One ledger file's JSON (its exact bytes with ``raw``), or None when absent; an unsafe, oversized or
+    unreadable file is a conflict."""
     if not path.exists():
         return None
     if path_is_link_or_reparse(path):
@@ -97,15 +124,44 @@ def snapshot_owner_chat_id(state_dir: str | Path) -> int | None:
     try:
         if path.stat().st_size > 16_384:
             raise TelegramMenuConflictError("Menu rollback snapshot is oversized.")
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        owner = int(payload.get("chat_id")) if isinstance(payload, dict) else 0
-    except TelegramMenuConflictError:
-        raise
+        data = path.read_bytes()
+        return data if raw else json.loads(data.decode("utf-8"))
     except (OSError, ValueError, TypeError) as exc:
+        raise TelegramMenuConflictError("Menu rollback snapshot is unreadable.") from exc
+
+
+def _installed_by(record: dict[str, Any], observed: dict[str, Any]) -> bool:
+    """``observed`` is a Mini App button ``record`` lists as installed: a tunnel URL is specific to one install,
+    so the match is strong evidence, though not proof of which bot wrote ``record``."""
+    ours = [record.get("owned"), *([record.get("to")] if record.get("to") != record.get("original") else [])]
+    return observed.get("type") == "web_app" and observed in ours
+
+
+def snapshot_owner_chat_id(state_dir: str | Path, bot: str) -> int | None:
+    """Read only the durable menu owner of ``bot``'s ledger before constructing an owner-bound manager."""
+
+    payload = _read_ledger(Path(state_dir).expanduser().resolve() / _ledger_name(bot))
+    if payload is None:
+        return None
+    try:
+        owner = int(payload.get("chat_id")) if isinstance(payload, dict) else 0
+    except (TypeError, ValueError) as exc:
         raise TelegramMenuConflictError("Menu rollback snapshot owner is unreadable.") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != _SNAPSHOT_SCHEMA or owner <= 0:
+    if owner <= 0 or payload.get("schema") != _SNAPSHOT_SCHEMA or payload.get("bot") != bot:
         raise TelegramMenuConflictError("Menu rollback snapshot owner is invalid.")
     return owner
+
+
+def chat_only_owner_chat_id(state_dir: str | Path) -> int | None:
+    """The owner the chat-only ledger names; None when it is absent, unreadable or invalid. It names no bot, so it
+    proves nothing until a bot's menu in that chat shows a button it records (``derive_from_chat_only``)."""
+    try:
+        payload = _read_ledger(Path(state_dir).expanduser().resolve() / _LEGACY_NAME)
+        legacy = isinstance(payload, dict) and payload.get("schema") == _LEGACY_SCHEMA
+        owner = int(payload.get("chat_id")) if legacy else 0
+    except (TelegramMenuError, TypeError, ValueError):
+        return None
+    return owner if owner > 0 else None
 
 
 class TelegramMenuManager:
@@ -117,6 +173,7 @@ class TelegramMenuManager:
         *,
         api_root: str | None = None,
         client: httpx.AsyncClient | None = None,
+        bot: str = "",
     ) -> None:
         self._token = str(token or "").strip()
         self.chat_id = int(chat_id)
@@ -131,10 +188,14 @@ class TelegramMenuManager:
         self._api_root = str(api_root).rstrip("/") if api_root else None
         self._client = client
         self.last_rejected_api_root: str | None = None
+        # The bot getMe reported for this token (verify_private_owner or the first ledger access);
+        # a caller that already verified the same token passes it on.
+        self.bot = _bot_identity({"id": bot}) if bot else ""
 
     @property
     def snapshot_path(self) -> Path:
-        path = self.state_dir / _SNAPSHOT_NAME
+        """This bot's own ledger."""
+        path = self.state_dir / _ledger_name(self.bot)
         try:
             path.relative_to(self.state_dir)
         except ValueError as exc:
@@ -195,8 +256,13 @@ class TelegramMenuManager:
             raise TelegramMenuRejectedError(f"Telegram API rejected {method}.")
         return body.get("result")
 
+    async def _identify(self, *, request_timeout_sec: float | None = None) -> None:
+        if not self.bot:
+            self.bot = _bot_identity(await self._call("getMe", {}, request_timeout_sec=request_timeout_sec))
+
     async def verify_private_owner(self) -> str:
         bot = await self._call("getMe", {})
+        self.bot = _bot_identity(bot)
         chat = await self._call("getChat", {"chat_id": self.chat_id})
         if not isinstance(chat, dict) or str(chat.get("type") or "") != "private":
             raise TelegramMenuError("The configured Telegram owner chat is not private.")
@@ -229,16 +295,18 @@ class TelegramMenuManager:
             request_timeout_sec=request_timeout_sec,
         )
 
-    def _load(self) -> dict[str, Any] | None:
-        path = self.snapshot_path
-        if not path.exists():
-            return None
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError) as exc:
-            raise TelegramMenuError("Menu rollback snapshot is unreadable.") from exc
-        if not isinstance(raw, dict) or raw.get("schema") != _SNAPSHOT_SCHEMA:
+    def _record(self, phase: str, original: dict[str, Any], owned: dict[str, Any] | None, *,
+                adopted_from: dict[str, Any] | None = None, **transition: dict[str, Any]) -> dict[str, Any]:
+        """One ledger state; ``adopted_from`` (a ledger derived from the chat-only one) stays on every later state."""
+        return {"schema": _SNAPSHOT_SCHEMA, "bot": self.bot, "chat_id": self.chat_id, "phase": phase,
+                "original": original, "owned": owned, **transition,
+                **({"adopted_from": adopted_from} if adopted_from else {})}
+
+    def _parse(self, raw: Any, schema: int) -> dict[str, Any]:
+        if not isinstance(raw, dict) or raw.get("schema") != schema:
             raise TelegramMenuError("Menu rollback snapshot has an unsupported schema.")
+        if schema == _SNAPSHOT_SCHEMA and raw.get("bot") != self.bot:
+            raise TelegramMenuError("Menu rollback snapshot belongs to another bot.")
         try:
             chat_id = int(raw.get("chat_id"))
         except (TypeError, ValueError) as exc:
@@ -248,21 +316,39 @@ class TelegramMenuManager:
         phase = str(raw.get("phase") or "")
         if phase not in {"installed", "mutating"}:
             raise TelegramMenuError("Menu rollback snapshot has an invalid phase.")
-        original = menu_button(raw.get("original"))
         owned = raw.get("owned")
-        if owned is not None:
-            owned = menu_button(owned)
-        result: dict[str, Any] = {
-            "schema": _SNAPSHOT_SCHEMA,
-            "chat_id": chat_id,
-            "phase": phase,
-            "original": original,
-            "owned": owned,
-        }
-        if phase == "mutating":
-            result["from"] = menu_button(raw.get("from"))
-            result["to"] = menu_button(raw.get("to"))
-        return result
+        transition = ({"from": menu_button(raw.get("from")), "to": menu_button(raw.get("to"))}
+                      if phase == "mutating" else {})
+        adopted = raw.get("adopted_from") if schema == _SNAPSHOT_SCHEMA else None
+        return self._record(phase, menu_button(raw.get("original")), None if owned is None else menu_button(owned),
+                            adopted_from=adopted if isinstance(adopted, dict) else None, **transition)
+
+    def _load(self, observed: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """This bot's ledger; else one derived from the chat-only ledger when ``observed`` shows a Mini App button
+        it records. The chat-only file is left byte for byte as it is."""
+        raw = _read_ledger(self.snapshot_path)
+        if raw is not None:
+            return self._parse(raw, _SNAPSHOT_SCHEMA)
+        try:
+            data = _read_ledger(self.state_dir / _LEGACY_NAME, raw=True) if observed else None
+            legacy = None if data is None else self._parse(json.loads(data), _LEGACY_SCHEMA)
+        except (TelegramMenuError, ValueError):
+            return None  # unreadable or another owner's: nothing proves whose it is, so it stays as it is
+        if legacy is None or not _installed_by(legacy, observed):
+            return None
+        # The basis is this bot's menu now, not a proven past writer; the digest names the exact source bytes.
+        legacy["adopted_from"] = {"ledger": _LEGACY_NAME, "schema": _LEGACY_SCHEMA, "basis": "current_menu_match",
+                                  "sha256": hashlib.sha256(data).hexdigest()}
+        self._write(legacy)
+        return legacy
+
+    async def derive_from_chat_only(self, *, request_timeout_sec: float | None = None) -> bool:
+        """For a bot without a ledger of its own: read this chat's menu once and derive the ledger (``_load``) only
+        when it shows a Mini App button the chat-only ledger records. True when this bot now holds one to restore."""
+        await self._identify(request_timeout_sec=request_timeout_sec)
+        if self.snapshot_path.exists() or not (self.state_dir / _LEGACY_NAME).exists():
+            return False
+        return self._load(await self.current(request_timeout_sec=request_timeout_sec)) is not None
 
     def _write(self, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
@@ -288,9 +374,9 @@ class TelegramMenuManager:
                 pass
             raise TelegramMenuError("Could not persist Telegram rollback state.") from exc
 
-    def _delete(self) -> None:
+    def _delete(self, path: Path | None = None) -> None:
         try:
-            self.snapshot_path.unlink(missing_ok=True)
+            (path or self.snapshot_path).unlink(missing_ok=True)
             fsync_directory(self.state_dir)
         except OSError as exc:
             raise TelegramMenuError("Could not remove Telegram rollback state.") from exc
@@ -299,14 +385,9 @@ class TelegramMenuManager:
         self,
         original: dict[str, Any],
         owned: dict[str, Any],
+        adopted_from: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {
-            "schema": _SNAPSHOT_SCHEMA,
-            "chat_id": self.chat_id,
-            "phase": "installed",
-            "original": original,
-            "owned": owned,
-        }
+        return self._record("installed", original, owned, adopted_from=adopted_from)
 
     async def _reconcile(self, snapshot: dict[str, Any], observed: dict[str, Any]) -> dict[str, Any] | None:
         if snapshot["phase"] == "installed":
@@ -325,7 +406,7 @@ class TelegramMenuManager:
         before = snapshot["from"]
         after = snapshot["to"]
         if observed == after:
-            stable = self._installed_snapshot(snapshot["original"], after)
+            stable = self._installed_snapshot(snapshot["original"], after, snapshot.get("adopted_from"))
             self._write(stable)
             return stable
         if observed == before:
@@ -333,7 +414,7 @@ class TelegramMenuManager:
                 # First install did not reach Telegram.
                 self._delete()
                 return None
-            stable = self._installed_snapshot(snapshot["original"], before)
+            stable = self._installed_snapshot(snapshot["original"], before, snapshot.get("adopted_from"))
             self._write(stable)
             return stable
         raise TelegramMenuConflictError(
@@ -345,7 +426,8 @@ class TelegramMenuManager:
 
         target = web_app_button(url, text)
         observed = await self.current()
-        loaded = self._load()
+        await self._identify()
+        loaded = self._load(observed)
         if loaded is None:
             raise TelegramMenuConflictError("Telegram menu ownership snapshot is missing.")
         snapshot = await self._reconcile(loaded, observed)
@@ -356,7 +438,8 @@ class TelegramMenuManager:
         """Confirm the durable owned button without knowing its prior URL."""
 
         observed = await self.current()
-        loaded = self._load()
+        await self._identify()
+        loaded = self._load(observed)
         if loaded is None:
             raise TelegramMenuConflictError("Telegram menu ownership snapshot is missing.")
         snapshot = await self._reconcile(loaded, observed)
@@ -367,23 +450,17 @@ class TelegramMenuManager:
         """Install or rotate the button. Return True only after a remote mutation."""
         target = web_app_button(url, text)
         observed = await self.current()
-        loaded = self._load()
+        await self._identify()
+        loaded = self._load(observed)
         snapshot = await self._reconcile(loaded, observed) if loaded else None
         if snapshot is not None and snapshot["owned"] == target:
             return False
 
         original = snapshot["original"] if snapshot else observed
         previous_owned = snapshot["owned"] if snapshot else None
-        transaction = {
-            "schema": _SNAPSHOT_SCHEMA,
-            "chat_id": self.chat_id,
-            "phase": "mutating",
-            "original": original,
-            "owned": previous_owned,
-            "from": observed,
-            "to": target,
-        }
-        self._write(transaction)
+        adopted_from = snapshot.get("adopted_from") if snapshot else None
+        self._write(self._record("mutating", original, previous_owned, adopted_from=adopted_from,
+                                 **{"from": observed, "to": target}))
         try:
             await self._set(target)
             confirmed = await self.current()
@@ -393,32 +470,25 @@ class TelegramMenuManager:
             raise
         if confirmed != target:
             raise TelegramMenuError("Telegram did not confirm the installed menu button.")
-        self._write(self._installed_snapshot(original, target))
+        self._write(self._installed_snapshot(original, target, adopted_from))
         return True
 
     async def restore(self, *, request_timeout_sec: float | None = None) -> bool:
         """Restore the exact pre-Mini-App button without clobbering external changes."""
-        snapshot = self._load()
-        if snapshot is None:
+        await self._identify(request_timeout_sec=request_timeout_sec)
+        if not self.snapshot_path.exists() and not (self.state_dir / _LEGACY_NAME).exists():
             return False
         observed = await self.current(request_timeout_sec=request_timeout_sec)
-        snapshot = await self._reconcile(snapshot, observed)
+        snapshot = self._load(observed)
+        snapshot = await self._reconcile(snapshot, observed) if snapshot else None
         if snapshot is None:
             return False
         original = snapshot["original"]
         if observed == original:
             self._delete()
             return False
-        transaction = {
-            "schema": _SNAPSHOT_SCHEMA,
-            "chat_id": self.chat_id,
-            "phase": "mutating",
-            "original": original,
-            "owned": snapshot["owned"],
-            "from": observed,
-            "to": original,
-        }
-        self._write(transaction)
+        self._write(self._record("mutating", original, snapshot["owned"], adopted_from=snapshot.get("adopted_from"),
+                                 **{"from": observed, "to": original}))
         await self._set(original, request_timeout_sec=request_timeout_sec)
         confirmed = await self.current(request_timeout_sec=request_timeout_sec)
         if confirmed != original:
@@ -433,6 +503,7 @@ __all__ = [
     "TelegramMenuManager",
     "TelegramMenuRejectedError",
     "TelegramMenuTransportError",
+    "chat_only_owner_chat_id",
     "menu_button",
     "normalize_public_url",
     "snapshot_owner_chat_id",

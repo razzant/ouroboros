@@ -35,7 +35,7 @@ READERS = {
     "question status": ('[data-palette="quiz-open"] .chat-quiz-status', ("color",)),
     "Project reference": ('[data-palette="quiz-open"] .chat-bubble-voice .chat-live-project-card-btn', (*CAPSULE, "backgroundImage")),
     "Send": ('[data-palette="quiz-open"] .chat-quiz-send', CAPSULE),
-    "answer frame": ('[data-palette="quiz-open"] .chat-quiz-comment-box', ("backgroundColor", "borderTopColor")),
+    "answer frame": ('[data-palette="quiz-open"] .chat-quiz-comment', ("backgroundColor", "borderTopColor")),
     "chosen answer": ('[data-palette="quiz-answered"] .chosen', CAPSULE),
     "chosen detail": ('[data-palette="quiz-answered"] .chosen .chat-quiz-option-detail', ("color",)),
     "chosen recommendation": ('[data-palette="quiz-chosen-recommended"] .chosen .chat-quiz-option-recommended',
@@ -104,9 +104,11 @@ LIGHT = {
         "backgroundImage": "linear-gradient(rgba(232, 121, 249, 0.08), rgba(232, 121, 249, 0.08)), none",
         "boxShadow": REST,
         "opacity": "1"},
+    # Send is the question's primary action: the strong crimson, solid with white ink in either theme (the approved
+    # shell, PR #3369; docs/DESIGN.md "strong for where you are and for the primary action").
     "Send": {
-        "color": "rgb(181, 43, 59)",
-        "backgroundColor": "rgba(201, 53, 69, 0.1)",
+        "color": "rgb(255, 255, 255)",
+        "backgroundColor": "rgb(211, 45, 67)",
         "boxShadow": REST,
         "opacity": "1"},
     "answer frame": {"backgroundColor": "rgba(32, 35, 43, 0.03)", "borderTopColor": "rgba(32, 35, 43, 0.08)"},

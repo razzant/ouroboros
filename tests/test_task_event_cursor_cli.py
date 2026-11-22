@@ -1,6 +1,8 @@
 """CLI negotiation and consumption of additive task-event cursors."""
+import http.client
 import io
 import json
+import time
 import urllib.error
 
 import pytest
@@ -114,3 +116,88 @@ def test_watch_dedup_is_bounded_and_synthetic_results_are_always_consumed(capsys
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert len(rows) == 4099
     assert rows[-2]["event_id"] == "row-1" and rows[-1]["type"] == "task_result"
+
+
+class _Response:
+    """What ``urlopen`` answers: an SSE body of ``frames`` that then fails with ``failure`` (or ends)."""
+
+    def __init__(self, frames, failure=None, pause=0.0):
+        self.frames, self.failure, self.pause = frames, failure, pause
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        for frame in self.frames:
+            yield ("data: " + json.dumps(frame) + "\n").encode()
+            yield b"\n"
+        time.sleep(self.pause)
+        if self.failure is not None:
+            raise self.failure
+
+
+def transport(monkeypatch, *responses):
+    """The real client over a scripted network: each request takes the next answer; returns the bodies sent."""
+    bodies, answers = [], list(responses)
+
+    def urlopen(request, timeout):
+        bodies.append(json.loads(request.data))
+        return answers.pop(0)
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+    return bodies
+
+
+BREAKS = [TimeoutError("timed out"), ConnectionResetError("reset by peer"), http.client.IncompleteRead(b"")]
+
+
+@pytest.mark.parametrize("failure", BREAKS)
+def test_client_stream_names_a_response_that_broke_off(monkeypatch, failure):
+    """A read timeout, a reset or a truncated body after the server answered: the stream says it broke off (a
+    connection error with its cause), after the frames that did arrive, never a bare traceback."""
+    transport(monkeypatch, _Response([event(1)], failure))
+    received = []
+    with pytest.raises(cli.ConnectionCLIError, match="broke off") as raised:
+        for item in cli.OuroborosHTTPClient("http://test").stream_sse("/events", body={"v": 2}):
+            received.append(item)
+    assert received == [event(1)] and raised.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("failure", BREAKS[:2])
+def test_watch_resumes_a_stream_that_broke_off_after_events_from_the_last_one_consumed(monkeypatch, capsys, failure):
+    """#808: a connection that broke off after delivering events is not the end of the task: the next request
+    resumes from the last event consumed, and every row is printed once."""
+    bodies = transport(monkeypatch, _Response([event(1, "before the break")], failure),
+                       _Response([event(2, "after the break"), terminal(3)]))
+    cli._watch_task(cli.OuroborosHTTPClient("http://test"), "task", jsonl=True, quiet=False, timeout_sec=0)
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [row["data"]["content"] for row in rows if row["type"] == "progress"] == ["before the break", "after the break"]
+    assert rows[-1]["type"] == "task_result"
+    assert [body["cursor"] for body in bodies] == [None, cursor(1)]
+
+
+def test_watch_reports_a_stream_that_broke_off_before_any_event(monkeypatch):
+    """A server that answers and then sends nothing before the read timeout is a connection failure, said once."""
+    bodies = transport(monkeypatch, _Response([], TimeoutError("timed out")))
+    with pytest.raises(cli.ConnectionCLIError, match="broke off"):
+        cli._watch_task(cli.OuroborosHTTPClient("http://test"), "task", jsonl=False, quiet=True, timeout_sec=0)
+    assert len(bodies) == 1
+
+
+def test_watch_does_not_retry_a_break_that_recurs_without_progress(monkeypatch):
+    """Each connection resends a diagnostic that leaves the cursor where it was, then breaks off at the same place:
+    the first one moved the stream (it set the view), the second did not, so the CLI reports it instead of looping."""
+    notice = event(1, type="history_gap", event_id="", data={})
+    bodies = transport(monkeypatch, *[_Response([notice], TimeoutError("timed out")) for _ in range(4)])
+    with pytest.raises(cli.ConnectionCLIError, match="broke off"):
+        cli._watch_task(cli.OuroborosHTTPClient("http://test"), "task", jsonl=False, quiet=True, timeout_sec=0)
+    assert [body["cursor"] for body in bodies] == [None, cursor(1)]
+
+
+def test_watch_past_its_timeout_reports_the_timeout_when_the_stream_breaks_off(monkeypatch):
+    transport(monkeypatch, _Response([event(1)], TimeoutError("timed out"), pause=0.2))
+    with pytest.raises(cli.TaskTimeoutCLIError, match="did not finish"):
+        cli._watch_task(cli.OuroborosHTTPClient("http://test"), "task", jsonl=False, quiet=True, timeout_sec=0.1)

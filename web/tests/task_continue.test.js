@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 
 import { continueNonce, continueOfferView, continueTaskAction, syncContinueAction } from '../modules/task_continue.js';
 import { taskReasonDetail, taskReasonPhrase, taskTerminalPhase } from '../modules/log_events.js';
+import { historicalTerminalFacts } from '../modules/settled_card.js';
 import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 
 function memoryStorage() {
@@ -82,6 +83,9 @@ test('the card offers Continue only as the server says, and otherwise points to 
     assert.deepEqual(continueOfferView({ continuation_offer: { eligible: false, successor_task_id: 's-1' } }),
         { kind: 'successor', successorId: 's-1' });
     assert.deepEqual(continueOfferView({}), { kind: 'none' });
+    // A deep self-review keeps no saved midpoint: no Continue, and its reason in plain words.
+    assert.deepEqual(continueOfferView({ continuation_offer: { eligible: false, refusal: 'deep_review_restart_required',
+        cause: 'deep_self_review' } }), { kind: 'refusal', refusal: 'deep_review_restart_required' });
 });
 
 test('a lost answer is retried under the SAME nonce; an already accepted press names its successor', async () => {
@@ -140,8 +144,21 @@ test('chat reaches the Continue action through the one settled-card seam', () =>
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
     assert.match(chat, /import \{[^}]*\bsyncSettledItems\b[^}]*\} from '\.\/settled_card\.js';/);
     const seam = readFileSync(new URL('../modules/settled_card.js', import.meta.url), 'utf8');
-    assert.match(seam, /syncContinueAction\(record, detail, options\)/);
+    assert.match(seam, /syncContinueAction\(record, detail, \{ \.\.\.options, read: /);
     assert.match(seam, /return syncResultFilesItem\(record, detail\)/);
+});
+
+// The card this settles through chat.js is replayed in task_origin.test.js («evidence row»); here, the facts it keeps.
+test('a replayed row keeps every terminal fact it froze, the current outcome\'s phase first', () => {
+    const origin = { place_id: 'github:example-org/lanternworks', place_label: 'GitHub · Lanternworks', wakes: ['my_thread'] };
+    const row = { task_id: 'replayed', text: 'not a terminal fact', wake_summary: 'Filed the report.',
+        suggested_name: 'Look at the export report', schedule_name: 'Daily check', place_origin: origin,
+        historical_terminal: { status: 'completed', phase: 'warn', ts: '2026-11-17T07:00:00Z', quiet_effective: true },
+        current_outcome: { outcome_phase: 'done', revision: '2026-11-17T07:01:00Z' } };
+    assert.deepEqual(historicalTerminalFacts(row), { status: 'completed', phase: 'done', ts: '2026-11-17T07:00:00Z',
+        quiet_effective: true, wake_summary: 'Filed the report.', suggested_name: 'Look at the export report',
+        schedule_name: 'Daily check', place_origin: origin });
+    assert.equal(historicalTerminalFacts({ ...row, current_outcome: undefined }).phase, 'warn', 'no current outcome: the durable phase');
 });
 
 function settledRootCard(taskId, { isSubagent = false } = {}) {
@@ -234,6 +251,17 @@ test('a canonical hard-bound refusal remains one readable fact beside the existi
             refusal: 'hard_limit_reached', cause: 'budget_exhausted' } });
         assert.equal(card.root.querySelector('[data-continue-refusal]'), note);
         assert.equal(note.textContent, `Continue unavailable. ${taskReasonPhrase('budget_exhausted')}`);
+        syncContinueAction(card, { continuation_offer: { eligible: false,
+            refusal: 'deep_review_restart_required', cause: 'deep_self_review' } });
+        assert.equal(note.textContent,
+            'Continue unavailable. A deep self-review keeps no saved point to continue from; send /review to start a new one.');
+        assert.equal(card.root.querySelector('[data-continue-task]'), null);
+        // A finished review is answered author_finished by the server (no refusal note, no Continue).
+        const finished = settledRootCard('finished-review');
+        syncContinueAction(finished, { status: 'completed',
+            continuation_offer: { eligible: false, refusal: 'author_finished', cause: 'finished' } });
+        assert.equal(finished.root.querySelector('[data-continue-refusal]'), null);
+        assert.equal(finished.root.querySelector('[data-continue-task]'), null);
         const reloaded = settledRootCard('expired-root');
         syncContinueAction(reloaded, detail);
         assert.equal(reloaded.root.querySelector('[data-continue-refusal]').textContent,
@@ -459,12 +487,23 @@ test('a live best-effort completion reads its detail once (a technical limit may
 
 test('chat replays settled rows through the one seam, not a card-opening detail read', () => {
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
+    // One seam: a single call site feeds Continue/Files from a settled row or a detail, and it
+    // writes through the caller's viewport seam (a late offer read on an unclean root included).
+    assert.equal((chat.match(/syncSettledItems\(/g) ?? []).length, 1, 'one settled-items seam in chat.js');
+    assert.match(chat, /syncSettledItems\(record, detail, \{ write: withStableViewport/);
+    // The replayed-summary path keeps no seam of its own and reads no detail just to show the
+    // card: the row itself funnels through the same path that owns the seam.
     const summary = chat.slice(chat.indexOf('function appendTaskSummaryToLiveCard'),
         chat.indexOf('function renderLiveCardMeta'));
-    assert.match(summary, /syncSettledItems\(record, msg, \{ write: withStableViewport \}\);/);
+    assert.doesNotMatch(summary, /syncSettledItems\(/, 'no second seam beside the replayed row');
+    assert.doesNotMatch(summary, /fetchTaskDetail/, 'showing a finished history card reads no detail');
+    const seamOwner = chat.slice(chat.lastIndexOf('function ', chat.indexOf('syncSettledItems(')));
+    const ownerName = seamOwner.slice('function '.length, seamOwner.indexOf('('));
+    assert.match(summary, new RegExp(`${ownerName}\\(\\s*record, msg\\)`), 'the replayed row reaches the seam-owning path');
+    assert.match(summary, /\bnoteTaskDetails\(record, msg\)/);
     // A task detail can start the late Continue read (an unclean root): its write goes through the same seam.
     const details = chat.slice(chat.indexOf('function noteTaskDetails'), chat.indexOf('function noteTaskDetails') + 300);
-    assert.match(details, /syncSettledItems\(record, detail, \{ write: withStableViewport \}\);/);
+    assert.match(details, /syncSettledItems\(record, detail, \{ write: withStableViewport, stored \}\);/);
 });
 
 

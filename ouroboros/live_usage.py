@@ -14,8 +14,11 @@ on the audio path.
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import math
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Mapping
 
@@ -361,6 +364,91 @@ def settle_connection_usage(*, engine: str, model: str, call_id: str, connection
     accounting.record_received_attempt(accounting.AttemptRequest(
         model=model, provider=engine, task_id=task_id, drive_root=drive_root, source="live_connection_usage",
         physical_context=physical_context, cost_evidence=evidence), normalized, cost_usd=cost)
+
+
+def _mergeable_seconds(value) -> bool:
+    """A connected-seconds growth that merges: a malformed one stays a receipt of its own, priced as before."""
+    return type(value) in (int, float) and 0 <= value < math.inf
+
+
+class ConnectionLedger:
+    """A call's connected-time receipts, written to the ledger by their own thread (#3633).
+
+    xAI bills connected seconds and its session reports them every idle second. Each receipt is a ledger transaction:
+    on Windows CI under load one took up to 32 s, and written on the call loop it froze the owner's microphone input,
+    the page's played receipts and a held tool's delivery for as long. The call loop only hands a receipt over to one
+    writer thread that lives as long as the call (the store keeps a connection per thread). A connection keeps one
+    valid receipt waiting: its next takes that one in where it stands (the growth adds; the newest watermark and
+    evidence stand), so a slow ledger builds no backlog even while a prepared successor reports beside the serving
+    connection. A connection's close ``flush``es its own receipts, so they are on the ledger once it has closed, and
+    raises its own write that failed (``failures``); another connection's writes do not fail it, and hold it only as
+    earlier work on the one writer. Nothing on
+    the call's way waits for a write: the money check reads what is written (a receipt in flight is counted at its
+    next reading) and raises ``failure``, the call's first write that failed."""
+
+    def __init__(self):
+        self._changed = threading.Condition()
+        self._waiting = []      # (context, receipt), at most one per connection
+        self._writing = None    # the connection whose receipt is being written
+        self._draining = False  # the writer has receipts to write
+        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="call-connection-ledger")
+        self.failure = None
+        self.failures = {}
+
+    def add(self, **receipt):
+        receipt = copy.deepcopy(receipt)  # the quote and context as they are now; the host may replace them later
+        context = contextvars.copy_context()  # the call's usage scope attributes the receipt
+        with self._changed:
+            for index, (_, waiting) in enumerate(self._waiting):
+                if waiting["connection_key"] == receipt["connection_key"] and all(
+                        _mergeable_seconds(item["usage"]["connected_seconds"]) for item in (waiting, receipt)):
+                    seconds = waiting["usage"]["connected_seconds"] + receipt["usage"]["connected_seconds"]
+                    receipt["usage"] = {"connected_seconds": seconds}
+                    self._waiting[index] = (context, receipt)
+                    break
+            else:
+                self._waiting.append((context, receipt))
+            start, self._draining = not self._draining, True
+        if start:
+            try:
+                self._writer.submit(self._write)
+            except RuntimeError:  # the call has ended: write it here rather than lose it
+                self._write()
+
+    def _write(self):
+        while True:
+            with self._changed:
+                if not self._waiting:
+                    self._draining = False
+                    self._changed.notify_all()
+                    return
+                context, receipt = self._waiting.pop(0)
+                key = self._writing = receipt["connection_key"]
+            try:
+                context.run(settle_connection_usage, **receipt)
+            except Exception as exc:  # noqa: BLE001 - kept for the money check and the connection's close
+                with self._changed:
+                    self.failure = self.failure or exc
+                    self.failures.setdefault(key, exc)
+            with self._changed:
+                self._writing = None
+                self._changed.notify_all()
+
+    def _pending(self, key):
+        if key is None:
+            return self._draining
+        return self._writing == key or any(waiting["connection_key"] == key for _, waiting in self._waiting)
+
+    def flush(self, key=None) -> None:
+        """Wait until the receipts handed over, of one connection or of the whole call, are written or have failed.
+        A write has no deadline of its own: one measured 32 s on Windows CI."""
+        with self._changed:
+            self._changed.wait_for(lambda: not self._pending(key))
+
+    def close(self) -> None:
+        """At the call's end: write what is waiting, then let the writer thread go."""
+        self._writer.shutdown(wait=True)
+        self.flush()
 
 
 def abandon_live_response(attempt: LiveAttempt, *, reason: str) -> None:

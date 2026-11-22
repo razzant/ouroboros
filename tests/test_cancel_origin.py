@@ -127,6 +127,13 @@ def test_history_terminal_row_retains_cancel_origin(tmp_path):
     assert row["cancel_origin"] == origin
 
 
+def _split_outcome(text):
+    """``(text outside the [SUBTASK_OUTCOME] block, the block's JSON)`` of a full result read."""
+    head, rest = text.split("[SUBTASK_OUTCOME]\n", 1)
+    block, tail = rest.split("\n[/SUBTASK_OUTCOME]", 1)
+    return head + tail, json.loads(block)
+
+
 def test_cancel_origin_is_current_fact_even_on_a_conditional_result_read(tmp_path):
     stored = write_task_result(tmp_path, "task", "cancelled", result="Stopped.")
     ctx = SimpleNamespace(drive_root=tmp_path, task_metadata={})
@@ -135,7 +142,12 @@ def test_cancel_origin_is_current_fact_even_on_a_conditional_result_read(tmp_pat
     write_task_result(tmp_path, "task", "cancelled", cancel_origin=origin)
     marker = f"\n\n[CANCELLED_BY] {json.dumps(origin, ensure_ascii=False)}"
 
-    assert _get_task_result(ctx, "task") == before + marker
+    (before_text, before_outcome), (after_text, after_outcome) = map(_split_outcome, (before, _get_task_result(ctx, "task")))
+    assert after_text == before_text + marker
+    # The root's Continue offer is a current fact of the same read (``owner_continue.offer_view``): it names the
+    # origin now recorded, and nothing else in the outcome moves.
+    offer = before_outcome["continuation_offer"]
+    assert after_outcome == {**before_outcome, "continuation_offer": {**offer, "cause": "agent_tool"}}
     conditional = _get_task_result(ctx, "task", known_result_sha256=_child_result_sha256(stored))
     assert '"result_unchanged": true' in conditional
     assert conditional.endswith(marker)

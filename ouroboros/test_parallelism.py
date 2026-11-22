@@ -1,7 +1,8 @@
 """Physical admission budget shared by the test entrypoints and nested runners.
 
 This bounds initial fan-out, not later allocation: the process owner separately
-watches its tree for overload. A failed memory probe admits one worker.
+watches its tree for overload. The tree is admitted within the room above the host
+reserve (``host_memory.physical_memory``); a failed probe admits one worker.
 
 Honest workers (owner 10.10, 2026-11-05): a run admits the CPU default (or the
 documented request) within measured memory, minus what the OTHER live test runs
@@ -11,13 +12,22 @@ one ``<pid>.json`` row each: pid, birth token, admitted workers; ``SlotLease``)
 and one conservative slot per unleased ``pytest``/``node --test`` root the
 process census sees. ``reserve`` reads the ledger, admits and publishes the row
 under the ledger's one lock, so two runs started at once never both take the
-whole machine. Floor one; a run never waits for a free slot. A child with a
-parent allocation reads neither: its parent accounted for its slots.
+whole machine. Floor one; a run never waits for a free slot. It waits only while
+the macOS kernel confirms critical memory pressure (owner choice, 2026-11-14):
+``reserve`` then holds neither the lock nor a row, says why with the reading's
+date, re-reads the machine every ``config.TEST_PROCESS_SAMPLE_SEC`` and reserves
+at the first reading that is not critical; the caller's interrupt (Ctrl-C, a pooled
+task's Stop: its worker's kill) or its ``stop`` reader (an in-process turn's controls)
+ends the wait, and an unread verdict admits as before, said as unknown.
+Each ``scripts/run_tests.py`` pass reserves on its own, so a battery may wait at a
+pass boundary, never inside a running pass; the hermetic gate reserves once, before
+its first lane. A child with a parent allocation reads neither and never waits:
+its parent accounted for its slots, and its run is work already running.
 """
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -25,90 +35,17 @@ import re
 import stat
 import subprocess
 import sys
-from typing import Mapping, Optional, Sequence
+import time
+from typing import Callable, Mapping, Optional
+
+from ouroboros.host_memory import physical_memory
+from ouroboros.utils import utc_now_iso
 
 # Transport state must survive the OUROBOROS_ runtime-settings scrub, just like
 # ProcessContainer's membership token. A test explicitly allocates extra slots
 # to a child by supplying this key in that child's environment.
 NESTED_WORKERS_ENV = "OURO_TEST_WORKER_BUDGET"
 WORKERS_ENV = "OUROBOROS_PREFLIGHT_TEST_WORKERS"
-
-
-@dataclass(frozen=True)
-class MemorySnapshot:
-    total_bytes: int
-    available_bytes: int
-    pressure: bool = False  # the kernel itself reports memory pressure (macOS)
-
-
-def _native_output(argv: Sequence[str]) -> str:
-    # Bounded, same-call OS probes; no test process or daemon is started here.
-    return subprocess.run(argv, check=True, capture_output=True, text=True,
-                          encoding="utf-8", timeout=2).stdout
-
-
-def _darwin_pressure() -> bool:
-    """The kernel's own critical verdict (levels: 1 normal, 2 warn, 4 critical). Free + inactive
-    + speculative barely moves under pressure: XNU keeps refilling the inactive queue with
-    anonymous pages that it then compresses. Warn is routine on a busy 8 GB Mac running a
-    healthy battery, so only critical counts. An unreadable level reads as normal, silently;
-    the free-memory reading still applies."""
-    try:
-        return int(_native_output(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).strip()) >= 4
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return False
-
-
-def physical_memory() -> Optional[MemorySnapshot]:
-    """Read total and reclaimable physical memory using native OS facilities."""
-    pressure = False
-    try:
-        if sys.platform == "win32":
-            import psutil  # The packaged Windows runtime includes psutil.
-            memory = psutil.virtual_memory()
-            total, available = memory.total, memory.available
-        elif sys.platform == "darwin":
-            total = int(_native_output(["/usr/sbin/sysctl", "-n", "hw.memsize"]).strip())
-            vm = _native_output(["/usr/bin/vm_stat"])
-            page_size = int(re.search(r"page size of (\d+) bytes", vm).group(1))
-            pages = {name.strip(): int(value.strip().rstrip("."))
-                     for name, value in (line.split(":", 1) for line in vm.splitlines()[1:] if ":" in line)}
-            # Admission counts inactive pages as room, anonymous ones included, which
-            # overstates it under pressure; the overload stop also reads the kernel's
-            # verdict. Purgeable is already inside active/inactive, so it is not added.
-            available = page_size * sum(pages[name] for name in
-                                        ("Pages free", "Pages inactive", "Pages speculative"))
-            pressure = _darwin_pressure()
-        elif sys.platform.startswith("linux"):
-            fields = {name: int(value.split()[0]) * 1024 for name, value in
-                      (line.split(":", 1) for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines())}
-            total, available = fields["MemTotal"], fields["MemAvailable"]
-            # Inside a container, its cgroup v2 limit is the physical room, not the host's RAM;
-            # reclaimable file cache counts as room, as MemAvailable counts it on the host.
-            limit = Path("/sys/fs/cgroup/memory.max")
-            if limit.is_file() and (cap := limit.read_text(encoding="ascii").strip()) != "max":
-                used = int(Path("/sys/fs/cgroup/memory.current").read_text(encoding="ascii"))
-                try:
-                    stat = dict(line.split() for line in Path("/sys/fs/cgroup/memory.stat").read_text(
-                        encoding="ascii").splitlines() if len(line.split()) == 2)
-                except OSError:
-                    stat = {}
-                used = max(0, used - int(stat.get("inactive_file", 0)))
-                total, available = min(total, int(cap)), min(available, max(0, int(cap) - used))
-        else:
-            return None
-        if total <= 0 or available < 0:
-            return None
-        return MemorySnapshot(total, min(total, available), pressure)
-    except (OSError, ValueError, KeyError, AttributeError, ImportError, subprocess.SubprocessError):
-        return None
-
-
-def memory_budget(memory: MemorySnapshot) -> int:
-    """Leave the configured physical reserve outside the admitted test tree."""
-    from ouroboros.config import TEST_MEMORY_RESERVE_FRACTION
-
-    return max(0, memory.available_bytes - int(memory.total_bytes * TEST_MEMORY_RESERVE_FRACTION))
 
 
 def _positive(value: object, default: int) -> int:
@@ -163,21 +100,25 @@ class HostRuns:
 class Admission:
     workers: int
     host: HostRuns
+    critical_at: str = ""  # the reading's date when the kernel confirmed critical pressure: no run starts on it
+    waited: tuple = ()     # (first critical reading, the reading that ended it, how: ``WAIT_ENDED``) when one preceded
 
 
 def admission(cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, str]] = None) -> Admission:
     """The workers this run may start: the request within physical room, minus what other runs hold.
 
     An ``env`` carrying a parent allocation (``NESTED_WORKERS_ENV``) is a child whose slots its parent
-    already accounted for on the host, so it reads no ledger and runs no census."""
+    already accounted for on the host, so it reads no ledger, runs no census and is never held for pressure.
+    ``workers`` keeps its floor of one under critical pressure too: ``critical_at`` says no run starts now."""
     from ouroboros.config import TEST_WORKER_PEAK_RSS_BYTES
 
     env = os.environ if env is None else env
     memory = physical_memory()
-    capacity = max(1, memory_budget(memory) // TEST_WORKER_PEAK_RSS_BYTES) if memory else 1
+    capacity = max(1, memory.room_bytes // TEST_WORKER_PEAK_RSS_BYTES) if memory else 1
     own = min(requested_workers(cpu_workers, env=env), capacity)
     host = HostRuns() if NESTED_WORKERS_ENV in env else other_runs()
-    return Admission(max(1, own - host.held), host)
+    critical = memory is not None and memory.pressure is True and NESTED_WORKERS_ENV not in env
+    return Admission(max(1, own - host.held), host, utc_now_iso() if critical else "")
 
 
 # ── The host ledger and the census ──────────────────────────────────────────────────────
@@ -225,7 +166,7 @@ def _owned_ledger() -> Optional[Path]:
 def _ledger_lock(directory: Optional[Path]):
     """The ledger's one lock while a run reads it, admits and publishes its row: two runs started at once
     would otherwise both see an empty ledger and both take the whole machine. Held for the milliseconds of
-    one census and one write, never while a run waits for a slot (owner 10.10: a run never waits)."""
+    one census and one write, never while a run waits (owner 10.10: never for a slot; critical pressure: outside)."""
     if directory is None:
         yield
         return
@@ -248,17 +189,85 @@ def _ledger_lock(directory: Optional[Path]):
 
 
 def reserve(command: str, cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, str]] = None,
-            slots=None) -> tuple[Admission, "SlotLease"]:
+            slots=None, say: Optional[Callable[[str], None]] = None,
+            tell: Optional[Callable[[str], None]] = None,
+            stop: Optional[Callable[[], Optional[bool]]] = None) -> tuple[Admission, "SlotLease"]:
     """Admit this run's workers and publish its row as ONE reservation under the ledger lock: no other run's
     census, admission or write comes between this run's. ``slots`` maps the admission to the count the row
     holds, within the admitted workers (default: all of them; a one-process pass holds one, a Node lane its
-    concurrency). A child with a parent allocation reads no ledger and holds no row."""
+    concurrency). A child with a parent allocation reads no ledger and holds no row.
+
+    An admission that confirms critical pressure starts nothing: the lock is released with no row written,
+    ``say`` (default: stderr) tells the wait and its end with each reading's date, ``tell`` the same two moments
+    in the owner's words (``OWNER_WAIT``), and the machine alone is re-read outside the lock until a reading is
+    not critical; the reservation then admits as usual and its admission carries ``waited``. ``stop``, read only
+    while it waits, ends the wait with ``WaitStopped`` when it answers True (an unknown ``None`` stops nothing):
+    nothing was admitted, leased or started."""
     env = os.environ if env is None else env
+    say = say or (lambda text: print(text, file=sys.stderr, flush=True))
     directory = None if NESTED_WORKERS_ENV in env else _owned_ledger()
-    with _ledger_lock(directory):
-        admitted = admission(cpu_workers, env=env)
-        held = admitted.workers if slots is None else max(1, min(int(slots(admitted)), admitted.workers))
-        return admitted, SlotLease(held, command, locked=True)
+    since, ended = "", ()
+    while True:
+        with _ledger_lock(directory):
+            admitted = admission(cpu_workers, env=env)
+            if not admitted.critical_at:
+                admitted = replace(admitted, waited=(since, *ended)) if since else admitted
+                held = admitted.workers if slots is None else max(1, min(int(slots(admitted)), admitted.workers))
+                return admitted, SlotLease(held, command, locked=True)
+        since = since or admitted.critical_at
+        say(f"waiting to start: the kernel reports critical memory pressure (read {admitted.critical_at}); work "
+            "already running continues; this run starts when a reading is no longer critical; Ctrl-C or Stop ends "
+            "the wait")
+        if tell:
+            tell(OWNER_WAIT["waiting"])
+        try:
+            ended = _until_not_critical(stop)
+        except WaitStopped as stopped:
+            say(str(stopped))
+            raise
+        say(WAIT_ENDED[ended[1]].format(at=ended[0], since=since))
+        if tell:
+            tell(OWNER_WAIT[ended[1]])
+
+
+# How a wait ended, said as such: only a read verdict is "no longer critical"; an unknown admits as it always did.
+WAIT_ENDED = {
+    "not_critical": "memory pressure no longer critical (read {at}); starting after waiting since {since}",
+    "pressure_unknown": "critical memory pressure no longer confirmed: the kernel's level is unreadable (read {at}), "
+                        "an unknown that admits as before; starting after waiting since {since}",
+    "memory_unknown": "critical memory pressure no longer confirmed: the machine's memory is unreadable (read {at}), "
+                      "an unknown that admits as before; starting after waiting since {since}",
+}
+
+
+# The same moments on an owner's progress line: what happens and what they can do; the readings stay in ``say``.
+OWNER_WAIT = {
+    "waiting": "waiting for memory: the computer is critically short of it. Running work continues; the tests "
+               "start by themselves once memory recovers. Stop ends the wait",
+    "not_critical": "starting: memory recovered",
+    "pressure_unknown": "starting as usual: memory pressure can no longer be read",
+    "memory_unknown": "starting as usual: memory can no longer be read",
+}
+
+
+class WaitStopped(Exception):
+    """A ``stop`` reader ended a wait for critical memory pressure: nothing was admitted, leased or started."""
+
+
+def _until_not_critical(stop: Optional[Callable[[], Optional[bool]]] = None) -> tuple:
+    """Sleep a sample interval and re-read the machine until a reading is not critical: ``(its date, how)``, how a
+    ``WAIT_ENDED`` key (a read verdict, or an unknown one). No lock, row or child is held meanwhile. ``stop`` is
+    read once a sample; True raises ``WaitStopped``."""
+    from ouroboros import config
+
+    while True:
+        time.sleep(config.TEST_PROCESS_SAMPLE_SEC)
+        if stop is not None and stop() is True:
+            raise WaitStopped(f"a stop of this work ended the wait for memory (read {utc_now_iso()}); nothing started")
+        memory = physical_memory()
+        if memory is None or memory.pressure is not True:
+            return utc_now_iso(), ("memory_unknown" if memory is None else
+                                   "pressure_unknown" if memory.pressure is None else "not_critical")
 
 
 def _read_lease(path: Path) -> Optional[dict]:

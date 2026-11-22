@@ -1,4 +1,5 @@
 """Main question authority survives terminality, delivery failure and stale routing."""
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -301,7 +302,7 @@ def test_late_answer_accepted_metadata_rebuilds_full_frame_after_canonical_gc(tm
     ref = late_answer_ref(queued["task_metadata"]["late_answer"])
     frame = late_answer_model_text(tmp_path, ref, queued["text"])
     assert "Question was: Which approach?" in frame
-    assert "The owner chose option 2: Second" in frame
+    assert "The owner pressed option 2 and wrote no words. The label «Second» is the text of task t" in frame
     assert "Research meanwhile" in frame and "could not be read" not in frame
     # Snapshot identity cannot silently point at another question or task.
     mismatched = {**ref, "task_id": "other"}
@@ -321,6 +322,113 @@ def test_materials_capture_explicit_registered_bytes_before_ask(tmp_path):
     assert material["sha256"] == stored["sha256"] and material["label"] == "choice.txt"
     assert material["download_url"].startswith("/api/tasks/root-1/artifacts/")
     assert ctx.pending_events[0]["materials"] == block["materials"]
+
+
+def test_a_question_with_materials_records_the_bytes_it_puts_up_and_one_without_none(tmp_path):
+    """Both directions: the card's decision materials are named by their bytes, as any send of them would be; a
+    question without materials adds no line."""
+    from ouroboros.artifacts import store_task_artifact_bytes
+    from ouroboros.tools.core_artifacts import _escalate
+
+    ctx = _tool_ctx(tmp_path)
+    stored = store_task_artifact_bytes(tmp_path, "root-1", name="choice.txt", data=b"Exact decision evidence")
+    receipt = _escalate(ctx, question="Choose?", options=["A"], assumption="Research", materials=[{"name": "choice.txt"}])
+    assert receipt.startswith("OK:") and receipt.splitlines()[-1] == (
+        f"Host fact: queued for delivery: choice.txt, sha256 {stored['sha256'][:12]}, 23 B. "
+        "Reviews on record naming these bytes: none in this task's recent records.")
+    assert "Host fact" not in _escalate(ctx, question="Choose again?", options=["B"], assumption="Research")
+
+
+# Built without asking the fixture volume to store files of these names (APFS refuses non-UTF-8 names).
+BYTE_NAMES = [b"report-\xff.txt".decode("utf-8", "surrogateescape"), b"report-\xfe.txt".decode("utf-8", "surrogateescape")]
+# What a card shows for them: the Unicode escape path_for_prose spells, without its quotes. A name with a backslash
+# is refused, so the two labels stay distinct from each other and from every admitted name.
+BYTE_LABELS = [r"report-\udcff.txt", r"report-\udcfe.txt"]
+posix_bytes = pytest.mark.skipif(os.name != "posix", reason="native POSIX filename bytes")
+
+
+def registered_byte_named_materials(monkeypatch, tmp_path, owner):
+    """Synthetic metadata for two already registered artifacts named by distinct POSIX bytes, and the retained
+    records the immutable copy mints for them (host-minted: sanitized stem, sha256, suffix); returns the records."""
+    import hashlib
+
+    from ouroboros import artifacts
+
+    store = artifacts.task_artifact_dir_path(tmp_path, owner, create=True)
+    registered, retained = {}, {}
+    for name, data in zip(BYTE_NAMES, (b"Exact decision evidence", b"A second, longer piece of decision evidence")):
+        digest = hashlib.sha256(data).hexdigest()
+        registered[name] = {"kind": "task_artifact", "name": name, "path": str(store / name), "size": len(data),
+                            "sha256": digest, "status": "ready", "errors": [], "immutable": True}
+        retained[str(store / name)] = {"name": f"report-_-{digest}.txt", "size": len(data), "sha256": digest}
+    monkeypatch.setattr(artifacts, "registered_task_artifact",
+                        lambda _drive, task, name: dict(registered[name]) if task == owner and name in registered else None)
+    monkeypatch.setattr(artifacts, "copy_file_to_task_artifacts",
+                        lambda _ctx, source, **_kwargs: dict(retained[source]) if source in retained else None)
+    return [retained[str(store / name)] for name in BYTE_NAMES]
+
+
+@posix_bytes
+def test_a_registered_byte_name_labels_the_card_as_text_while_the_retained_copy_keeps_identity(tmp_path, monkeypatch):
+    """Two distinct byte names make two distinct rows. The label is what a person reads, so every UTF-8 boundary it
+    reaches takes it (the host fact, the stored block, the ask's request fingerprint, the event and the strict encoder
+    behind /api/state); the retained copies' name, size, sha256 and link are the identity a download uses, and none
+    of them is derived from it."""
+    from urllib.parse import quote
+
+    from ouroboros.gateway.state_publication import encode
+    from ouroboros.tools.core_artifacts import _escalate
+
+    retained = registered_byte_named_materials(monkeypatch, tmp_path, "root-1")
+    ctx = _tool_ctx(tmp_path)
+    receipt = _escalate(ctx, question="Choose?", options=["A"], assumption="Research",
+                        materials=[{"name": name} for name in BYTE_NAMES], request_id="ask-1")  # a request id keys the ask by fingerprint
+    assert receipt.startswith("OK:"), receipt
+    receipt.encode("utf-8")
+    [block] = quiz_states(tmp_path, "root-1").values()
+    assert block["materials"] == [
+        {"task_id": "root-1", "name": item["name"], "label": label, "size": item["size"], "sha256": item["sha256"],
+         "download_url": f"/api/tasks/root-1/artifacts/{quote(item['name'], safe='')}"}
+        for item, label in zip(retained, BYTE_LABELS)]
+    assert len({row["label"] for row in block["materials"]}) == 2 == len({item["name"] for item in retained})
+    assert block["request_fingerprint"] and ctx.pending_events[0]["materials"] == block["materials"]
+    encode({"quiz": block, "events": ctx.pending_events})
+    shown = "; ".join(f"{label}, sha256 {item['sha256'][:12]}, {item['size']} B" for item, label in zip(retained, BYTE_LABELS))
+    assert receipt.splitlines()[-1].startswith(f"Host fact: queued for delivery: {shown}.")
+
+
+@posix_bytes
+def test_a_childs_decision_material_reaches_its_parent_as_text_with_the_retained_name(tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.tools.core_artifacts import _escalate
+
+    monkeypatch.setattr("ouroboros.task_status.load_effective_task_result",
+                        lambda _root, _tid: {"status": "running", "drive_root": str(tmp_path)})
+    retained = registered_byte_named_materials(monkeypatch, tmp_path, "child-9")
+    ctx = _tool_ctx(tmp_path, task_id="child-9", parent="root-1")
+    receipt = _escalate(ctx, question="Keep these reports?", options=[{"label": "keep"}], assumption="Keep them",
+                        materials=[{"name": name} for name in BYTE_NAMES])
+    assert receipt.startswith("OK: escalated to parent task root-1"), receipt
+    [entry] = drain_owner_entries(tmp_path, "root-1", set())
+    entry["text"].encode("utf-8")
+    for item, label in zip(retained, BYTE_LABELS):
+        assert f"Decision material: task_id=child-9, name={item['name']} ({label})" in entry["text"]
+
+
+@pytest.mark.parametrize("name", [
+    "choice.txt", "отчёт-雪.txt",
+    pytest.param('"quoted" notes.md', marks=pytest.mark.skipif(os.name == "nt", reason="NTFS refuses a quote in a name"))])
+def test_an_ordinary_registered_name_stays_its_own_label_and_the_ask_keeps_its_fingerprint(tmp_path, name):
+    from ouroboros.artifacts import store_task_artifact_bytes
+    from ouroboros.tools.core_artifacts import _escalate
+
+    ctx = _tool_ctx(tmp_path)
+    store_task_artifact_bytes(tmp_path, "root-1", name=name, data=b"Exact decision evidence")
+    ask = dict(question="Choose?", options=["A"], assumption="Research", materials=[{"name": name}], request_id="ask-1")
+    assert _escalate(ctx, **ask).startswith("OK:")
+    [block] = quiz_states(tmp_path, "root-1").values()
+    assert [item["label"] for item in block["materials"]] == [name]
+    assert "QUIZ_REQUEST_CONFLICT" not in _escalate(ctx, **ask) and len(quiz_states(tmp_path, "root-1")) == 1
 
 
 def test_material_reference_uses_descendant_inventory_and_rejects_forged_path(tmp_path):

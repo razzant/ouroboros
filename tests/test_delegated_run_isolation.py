@@ -448,19 +448,31 @@ class TestProtectedPathScope:
         assert (target / ".github" / "workflows" / "ci.yml").exists()
         custody._CUSTODY.clear()
 
-    def test_system_repo_target_still_refuses(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(("mode", "grant"), [
+        ("advanced", False), ("advanced", True), ("pro", False), ("cyber_pro", False), ("pro", True),
+    ])
+    def test_system_repo_target_still_refuses(self, tmp_path, monkeypatch, mode, grant):
         import ouroboros.tools.subagent_integration as si
 
         target, ctx, _ = self._ready(tmp_path, monkeypatch, ".github/workflows/ci.yml")
         # The SAME patch, but the task's own surface says this tree is a checkout
-        # of the Ouroboros body: the protected-path policy applies again.
+        # of the Ouroboros body: the protected-path policy applies again. Its
+        # refusal names the cause that holds (#2734): the mode, or this acting
+        # caller's own protected_paths_grant, which no mode switch supplies.
         ctx.task_constraint = {"mode": "acting_subagent", "surface": "self_worktree",
-                               "write_root": str(target)}
-        monkeypatch.setattr(si, "get_runtime_mode", lambda: "advanced")
+                               "write_root": str(target), "protected_paths_grant": grant}
+        monkeypatch.setattr(si, "get_runtime_mode", lambda: mode)
         out = si._integrate_delegated_patch(ctx, "run-1", "apply", "")
-        assert "✅ Integrated" not in out
-        assert ".github/workflows/ci.yml" in out
-        assert not (target / ".github" / "workflows" / "ci.yml").exists()
+        written = (target / ".github" / "workflows" / "ci.yml").exists()
+        if mode == "pro" and grant:
+            assert "✅ Integrated" in out and written, out
+        else:
+            assert "✅ Integrated" not in out and not written, out
+            assert out.startswith("⚠️ CORE_PROTECTION_BLOCKED") and ".github/workflows/ci.yml" in out, out
+            assert ("protected_paths_grant" in out) != grant and ("Switch to runtime_mode" in out) == grant, out
+            entry = custody._CUSTODY["run-1"]  # the captured result stays: its patch, and no disposition
+            cap = custody.delegated_capture_dir(custody.custody_root(ctx), entry.task_id, custody.capture_key(entry))
+            assert (cap / "workspace.patch").is_file() and not entry.patch_disposed
         custody._CUSTODY.clear()
 
 
@@ -482,6 +494,11 @@ class TestLegacyRetry:
                 "execution": {"isolation": "live", "delegated": True},
                 "primaryHarness": "some-route",
             }, project_id="p", project_owned=False, route="some-route")
+        # #3138: the retry first asks its recorded engine what it accepted; this one declares no such
+        # lookup, so the C1 refusal below still answers, and nothing is sent.
+        from types import SimpleNamespace
+        monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway",
+                            lambda **_kw: SimpleNamespace(operations=lambda: [], close=lambda: None))
         out = _delegate_start(ctx, "do the thing", retry_of="inv-legacy")
         assert "retry_binding_absent" in out.text, out
         custody._CUSTODY.clear()
@@ -550,6 +567,8 @@ class _TerminalSweepGateway:
     """A daemon for the orphan sweep: recovery re-POSTs bind a run; every asked
     run is already terminal-succeeded; controls are accepted."""
 
+    store_identity = "fixture-store"
+
     def __init__(self, run_id="run-rec", state="succeeded"):
         self.run_id, self.state = run_id, state
 
@@ -586,7 +605,7 @@ def _binding_request_row(task_id, invocation_id, handle):
         root_task_id="", parent_task_id="",
         snapshot_id=handle.snapshot_id, execution_root=handle.path,
         baseline_sha=handle.baseline_sha, target_root=handle.target_root,
-        authority_source="acting_constraint")
+        authority_source="acting_constraint", daemon_store_id="fixture-store")
 
 
 class TestOrphanReconciliation:
@@ -784,9 +803,9 @@ class _AbsentGateway:
         return {"compatible": True}
 
     def get_run(self, rid, **_kw):
-        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+        from tests._shared import run_absent_in
 
-        raise ClaudexorUnavailable("not_found", "no such run", status_code=404)
+        raise run_absent_in(self.store_identity)
 
     def cancel_run(self, rid, reason=""):
         from ouroboros.gateways.claudexor import ClaudexorUnavailable

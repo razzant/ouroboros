@@ -56,7 +56,8 @@ def test_ticks_only_write_liveness_and_derive_durations_on_read(published, monke
     now[0] += 60
     queue.RUNNING["task"]["last_heartbeat_at"] = now[0] - 1
     assert queue.persist_queue_snapshot("main_loop")
-    assert [name for name, _ in writes] == ["queue.alive"] and writes[0][1] < 250
+    # The certificate alone, a few hundred bytes (generation, time, one heartbeat, the pool's counts), not the 100 KB row.
+    assert [name for name, _ in writes] == ["queue.alive"] and writes[0][1] < 500
     assert (root / "state/queue_snapshot.json").read_bytes() == before
     assert _read(root, "queue.alive")["generation"] == generation
     observed = task_status._load_queue_snapshot(root)
@@ -97,8 +98,12 @@ def test_failed_publish_never_refreshes_liveness_and_retries(published, monkeypa
     assert not (root / "state/queue.alive").exists()
     assert task_status.queue_snapshot_observation(task_status._load_queue_snapshot(root))["freshness"] == "unknown"
     assert task_status.task_has_live_queue_ownership(root, "missing")
-    with pytest.raises(usage.UsageAccountingError):
-        usage._check_dispatch_fences(usage.UsageScope(task_id="child", root_task_id="root"), root)
+    scope = usage.UsageScope(task_id="child", root_task_id="root")
+    if failed == "queue_dispatch.json":
+        usage._check_dispatch_fences(scope, root)
+    else:
+        with pytest.raises(usage.BudgetExceeded):
+            usage._check_dispatch_fences(scope, root)
     assert queue.persist_queue_snapshot()
     generation = _read(root, "queue.alive")["generation"]
     assert all(_read(root, name)["generation"] == generation for name in ("queue_snapshot.json", "queue_dispatch.json"))
@@ -152,7 +157,7 @@ def test_stamp_revocation_retries_before_writing_documents(published, monkeypatc
         usage._check_dispatch_fences(scope, root)  # disclosed residual: old fences remain in force
         assert queue.persist_queue_snapshot()
     else:
-        assert writes == list(before)
+        assert writes == ["queue_dispatch.json", "queue_snapshot.json", "queue.alive"]
     assert _read(root, "queue.alive")["generation"] != old[2]
     with pytest.raises(usage.BudgetExceeded):
         usage._check_dispatch_fences(scope, root)
@@ -185,7 +190,7 @@ def test_dispatch_projection_preserves_selection_and_missing_member_refuses(publ
 
 
 @pytest.mark.parametrize("stamp", [None, {"generation": "foreign", "ts": "2099-01-01T00:00:00+00:00"}])
-def test_missing_or_mismatched_stamp_is_unknown_for_all_documents(published, stamp):
+def test_missing_or_mismatched_stamp_leaves_dispatch_readable(published, stamp):
     root, _now = published
     assert queue.persist_queue_snapshot()
     path = root / "state/queue.alive"
@@ -196,33 +201,8 @@ def test_missing_or_mismatched_stamp_is_unknown_for_all_documents(published, sta
     for name in ("queue_snapshot.json", "queue_dispatch.json"):
         seen = task_status.queue_snapshot_observation(queue_observation.load_queue_document(root, name))
         assert seen["freshness"] == "unknown" and seen["age_sec"] is None
-    with pytest.raises(usage.UsageAccountingError):
-        usage._check_dispatch_fences(usage.UsageScope(task_id="child", root_task_id="root"), root)
+    usage._check_dispatch_fences(usage.UsageScope(task_id="child", root_task_id="root"), root)
 
-
-
-def test_controls_are_checked_while_waiting_and_never_before_the_first_read(published, monkeypatch):
-    from ouroboros import _usage_wait
-
-    root, _now = published
-    assert queue.persist_queue_snapshot()
-
-    def refuse():
-        raise RuntimeError("controls checked")
-
-    monkeypatch.setattr(_usage_wait, "_check", refuse)
-    def read():
-        return _usage_wait.retry_presend(lambda: queue_observation.dispatch_probe(root), check=False)
-
-    # A certified publication answers on its first read: the caller's controls are not consulted.
-    assert read()["generation"]
-    # A publication in flight is re-read, and every re-read honours the caller's controls.
-    stamp = root / "state/queue.alive"
-    saved = stamp.read_bytes()
-    stamp.unlink()
-    with pytest.raises(RuntimeError, match="controls checked"):
-        read()
-    stamp.write_bytes(saved)
 
 @pytest.mark.parametrize("structural_age,stamp_age,matching,stale", [
     (2000, 1, True, False), (1, 901, True, True), (1, 1, False, True),

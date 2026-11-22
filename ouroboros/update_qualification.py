@@ -163,9 +163,10 @@ def post_merge_reds(repo_url: str, *, get_json=None) -> dict:
     and on each manual check).
 
     Each is a test or lint finding that stayed red after merges into the development branch, with the
-    merge it was bisected to when the bisection finished, and is still open: unfixed work on the body
-    this install runs or will run. One public page, no credential; a full page stays ``partial``. A
-    failed read is ``unavailable`` and lists nothing; ``kept_reds`` keeps the stored observation.
+    merge it was bisected to when the bisection finished, and is still open: a report still tracked on
+    the body this install runs or will run, whose fix or its confirmation may not yet be reflected in
+    the issue. One public page, no credential; a full page stays ``partial``. A failed read is
+    ``unavailable`` and lists nothing; ``kept_reds`` keeps the stored observation.
     """
     repo = _github_repo(repo_url)
     if repo is None:
@@ -200,7 +201,7 @@ def range_qualification(material: dict, repo_url: str) -> dict:
     return {"base_sha": material["base_sha"], "target_sha": material["target_sha"],
             "commits": [{"sha": c["sha"], "subject": c["subject"], "date": c.get("date"),
                          "receipt": c.get("qualification", commit_qualification(c.get("body") or "")),
-                         "body_read": c.get("body_read", True)}
+                         "body_read": bool(c.get("receipt_read") or c.get("body_read", True))}
                         for c in commits],
             "github": post_merge_checks(commits, repo_url)}
 
@@ -308,7 +309,8 @@ def qualification_summary(qualification: dict | None) -> dict | None:
     The panel, preflight and the letter's author keep the full record (owner 8B); a task sees the range, how
     many commits carry a receipt, each check's outcomes by their source (``author_declared``: the author's
     word, not a host run), each review combination as one row (observed verdict, record state, request-time
-    relation, declaration; ``not_recorded`` for older receipts, unknown fields kept), the post-merge read.
+    relation, declaration; ``not_recorded`` for older receipts, unknown fields kept), the post-merge read, and
+    how many of this install's own commits in the range it recorded over a review FAIL or no verdict.
     """
     if not isinstance(qualification, dict):
         return qualification
@@ -334,9 +336,11 @@ def qualification_summary(qualification: dict | None) -> dict | None:
     for run in github.get("runs") or []:
         key = str(run.get("conclusion") or run.get("status") or "unknown")
         conclusions[key] = conclusions.get(key, 0) + 1
+    landed = qualification.get("landed_over_review")  # absent when this install's rows were not read: unknown
     return {"base_sha": qualification.get("base_sha"), "target_sha": qualification.get("target_sha"),
             "commits": len(commits), "with_receipt": len(receipts), "checks": checks,
             "reviews": _review_summary_rows(reviews),
+            **({"landed_over_review": len(landed)} if isinstance(landed, list) else {}),
             "post_merge": {"read": github.get("status", "unknown"), "reason": github.get("reason"),
                            "runs": conclusions, "missing": len(github.get("missing_shas") or [])},
             "full": "query_data(op='json', kind='update_letter')"}

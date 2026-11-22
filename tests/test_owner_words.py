@@ -23,6 +23,8 @@ from ouroboros.tools.tool_context import ToolContext
 REPO = pathlib.Path(__file__).resolve().parents[1]
 ROOT = "root0001"
 TS = "2026-09-30T05:41:45+00:00"
+# How every reader's set shows a press without words: the host's record of the act, its card on the next row.
+PRESSED = "(host record: my human pressed «{}» and wrote no words; the label is the asking task's text)"
 MIND = {"kind": "mind", "task_id": ROOT, "focus": {"role": "root", "task_id": ROOT}}
 
 
@@ -144,9 +146,12 @@ def test_main_turn_origin_is_carried_byte_for_byte(tmp_path):
     rows = ow.governing_words_for_schedule(ctx)[ow.FIELD]
     assert rows == [{"text": message, "source": "initial_user", "carrier": "ctx", "task_id": ROOT, "ts": TS,
                      "ref": "chat 1 / msg-1790746905659-12"}]
+    assert ow.safety_sources(ctx) == [{"source": "initial_user", "content": message, "ts": TS}]  # dated by its door
+    assert ctx._owner_directives == [{"source": "initial_user", "content": message}]
     unstamped = _ctx(tmp_path)
     _initialize_owner_directives(unstamped, [{"role": "user", "content": message}])
     assert ow.FIELD not in ow.governing_words_for_schedule(unstamped)
+    assert ow.safety_sources(unstamped) == [{"source": "initial_text", "content": message}]
 
 
 def test_project_first_message_is_never_added_to_the_words(tmp_path):
@@ -263,7 +268,9 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
             "options": ["Publish it", "Not now"], "delivery": {"answer_row": answer}}
     write_owner_message(tmp_path, "[Owner quiz answer] quiz q7", "main0001", msg_id="qa-7", kind=KIND_QUIZ_ANSWER,
                         quiz_delivery={"task_id": "asker", "quiz_id": "q7", "answer_snapshot": card})
-    write_owner_message(tmp_path, "[Card] typed into the card", "main0001", msg_id="card-1", kind=KIND_CARD_INPUT)
+    write_owner_message(tmp_path, "[Card] a submitted form", "main0001", msg_id="card-1", kind=KIND_CARD_INPUT,
+                        card_press={"task_id": "chart-maker", "card_id": "card_7777777777777777", "request_id": "chart-form",
+                                    "submission": {"title": "Charts", "label": "Save", "values": {"caption": "typed into the card"}}})
     write_task_message(tmp_path, "[Place event]", "main0001", source_task_id="place-run", provenance="place_event",
                        msg_id="pl-1", sender_origin={"conversation_key": "tg:123"},
                        place_arrival={"owner_words": "Place words mid-turn", "source_event_id": "ev-2", "message": {}})
@@ -276,7 +283,7 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     inject_relay(root, {"owner_rows": [quoted], "text": "note", "relay": {"relay_id": "r1"}, "source_task_id": "t"}, messages)
     received = {row["content"]: row.get("received") for row in root._owner_directives}
     assert all(received[text] for text in ("Undated payload", "Plain direct text", "Mailbox only",
-                                           "[Card] typed into the card", "Place words mid-turn"))
+                                           "typed into the card", "Place words mid-turn"))
     from ouroboros.presence_runner import presence_chat_id
     rows = [row for row in ow.work_words(root)[0] if row["source"] != ow.REPLY_TARGET]
     assert _stamps(rows) == [
@@ -286,8 +293,8 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
         ("ctx", "", f"received {received['Plain direct text']}", "Plain direct text"),
         ("ctx", "chat 1 / cm-mail", _at(2), "Add charts"),
         ("ctx", "msg mail-2", f"received {received['Mailbox only']}", "Mailbox only"),
-        ("ctx", "chat 1 / cm-ans", _at(3), "1. Publish it"),
-        ("ctx", "msg card-1", f"received {received['[Card] typed into the card']}", "[Card] typed into the card"),
+        ("ctx", "chat 1 / cm-ans", _at(3), PRESSED.format("1. Publish it")),  # a press: an act, never words
+        ("ctx", "msg card-1", f"received {received['typed into the card']}", "typed into the card"),
         ("ctx", "chat 1 / cm-relay", _at(5), "Quoted by the teller")]
     assert ow.render_owner_words(rows, audience="child").count("[received ") == 4
     place = [item for item in root._owner_directives if item.get("content") == "Place words mid-turn"]
@@ -308,7 +315,7 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     late = _ctx(tmp_path, task_id="late0001", metadata={"late_answer": {
         "task_id": "asker", "quiz_id": "q9", "answer_snapshot": {"task_id": "asker", "quiz": late_card}}})
     _initialize_owner_directives(late, [{"role": "user", "content": "[late answer frame]"}])
-    assert _stamps(ow.work_words(late)[0]) == [("ctx", "", _at(6), "2. Yes"),
+    assert _stamps(ow.work_words(late)[0]) == [("ctx", "", _at(6), PRESSED.format("2. Yes")),
                                                ("ctx", "quiz q9 of task asker", "", "Go?\n1. No\n2. Yes\n(host record: my human pressed option 2)")]
     before = _ctx(tmp_path, task_id="pre0001", metadata={"objective_author": {"kind": "task", "task_id": ROOT}, "owner_corpus": [
         {"source": "owner_mailbox", "content": "Add charts", "msg_id": "mail-1", "client_message_id": "cm-mail"},
@@ -318,6 +325,113 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     assert _stamps(ow.work_words(before)[0]) == [("ctx", "chat 1 / cm-mail", _at(2), "Add charts"),
                                                  ("ctx", "msg mail-9", "", "Never held")]
     assert ow._earlier_refs(before) == {"chat 1 / cm-mail": "msg mail-1"}
+
+
+def test_birth_capture_keeps_known_row_coordinates_without_changing_governing_text(tmp_path):
+    from ouroboros import memory_view as mv
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.owner_relay import task_words_text
+    from ouroboros.chat_chain import row_address, format_address
+    from ouroboros.tools.chronicle import _memory_read
+
+    row = _in_row("BODY_ONLY governing", "known-row", chat_id=1)
+    origin = build_owner_message_ref(chat_id=1, client_message_id="known-row", ts=TS, text=row["text"])
+    room = _project(tmp_path, origin={"ref": origin, "text": row["text"]})
+    _chat(tmp_path, row)
+    inherited = ow._row(row["text"], source="owner_mailbox", carrier="ctx", task_id=ROOT,
+                        ts=TS, ref="chat 1 / known-row")
+    child = {"id": "birth-child", "parent_task_id": ROOT, "root_task_id": ROOT,
+             "metadata": {"delegation_role": "subagent", ow.FIELD: [inherited]}}
+    metadata = {}
+    plain = task_words_text(tmp_path, child, indent=mv.INDENT)
+    observed = task_words_text(tmp_path, child, indent=mv.INDENT, source_metadata=metadata)
+    assert observed == plain and observed.count(row["text"]) == 1
+    source = next(s for s in metadata["rows"] if s["ref"] == inherited["ref"])
+    assert source["address"] == format_address(row_address(row))
+    assert source["source"] == "owner_mailbox" and source["carrier"] == "ctx"
+    assert "BODY_ONLY" not in json.dumps(metadata) and "text" not in source
+    spec = mv.view_spec_for_task(child, tmp_path)
+    snap = mv.capture_memory_view(tmp_path, child, spec)
+    assert snap.owner_words == plain and snap.owner_words_sources == metadata
+    restored = mv.snapshot_from_json(mv.snapshot_json(snap))
+    part = next(p for p in ordinary_composition(restored)["blocks"]["room"]["parts"] if p["kind"] == "owner_words")
+    assert "source_gap" not in part
+    exact = next(s for s in part["sources"] if s["ref"] == inherited["ref"])
+    assert exact["read"]["arguments"] == {"room_id": str(room), "rows": True,
+        "from": source["address"], "to": source["address"]}
+    assert exact["address"].startswith("row:1@") and exact["origin_ref"] == origin
+    assert row["text"] in _memory_read(_ctx(tmp_path, chat_id=room), **exact["read"]["arguments"])
+    assert "BODY_ONLY" not in json.dumps(part)
+    old = json.loads(mv.snapshot_json(snap))
+    old.pop("owner_words_sources")
+    legacy = mv.snapshot_from_json(json.dumps(old))
+    assert mv.render_room(legacy) == mv.render_room(snap)
+    legacy_part = next(p for p in ordinary_composition(legacy)["blocks"]["room"]["parts"] if p["kind"] == "owner_words")
+    assert legacy_part["source_gap"] and not legacy_part["sources"]
+    # Empty governing coordinates keep exactly the canonical bytes the view had before they were captured.
+    assert mv.snapshot_json(legacy) == json.dumps(old, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    changed = {**child, "metadata": {**child["metadata"], ow.FIELD: [{**inherited, "text": "Earlier captured words"}]}}
+    old_sources = {}
+    old_text = task_words_text(tmp_path, changed, source_metadata=old_sources)
+    assert "Earlier captured words" in old_text and "BODY_ONLY governing" not in old_text
+    old_source = next(s for s in old_sources["rows"] if s["ref"] == inherited["ref"])
+    assert "address" not in old_source  # same client id is not proof that today's row has the old words
+
+
+def test_governing_capture_keeps_a_held_replys_author_and_unresolved_memberships(tmp_path):
+    from ouroboros import dialogue_store as ds, memory_view as mv
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.owner_relay import task_words_text
+
+    room = _project(tmp_path)
+    marked = _in_row("Remember this", "marked", ts=_at(2))
+    _chat(tmp_path, marked)
+    marked = ds.accepted_row(tmp_path, 1, "marked").row
+    assert ChronicleStore(tmp_path).mark(row_address(marked), "A reminder", MIND, room_id=str(room)).ok
+    foreign = tmp_path / "other-store"
+    reply = {**_in_row("Earlier reply", "reply"), "direction": "out"}
+    reply_ref = format_address(row_address(reply))
+    held = _in_row("Continue", "held", ts=_at(3), reply_to={"address": reply_ref})
+    _chat(foreign, reply, held)
+    held_ref = format_address(row_address(held))
+    child = {"id": "helper", "parent_task_id": ROOT, "root_task_id": ROOT,
+             "metadata": {"delegation_role": "subagent"},
+             "held_owner_messages": {held_ref: {**held, "_owner_source_root": str(foreign)}}}
+    snap = mv.capture_memory_view(tmp_path, child, mv.view_spec_for_task(child, tmp_path))
+    assert snap.owner_words == task_words_text(tmp_path, child, indent=mv.INDENT)
+    sources = next(p["sources"] for p in ordinary_composition(snap)["blocks"]["room"]["parts"]
+                   if p["kind"] == "owner_words")
+    by_ref = {s["ref"]: s for s in sources}
+    assert by_ref["chat 1 / held"]["address"] == held_ref
+    assert by_ref["chat 1 / marked"]["address"] == format_address(row_address(marked))
+    assert by_ref[reply_ref]["source"] == ow.REPLY_TARGET
+    assert by_ref[reply_ref]["author"] == ow.reply_target(foreign, {"address": reply_ref})["author"]
+    assert by_ref[reply_ref]["address"] == reply_ref
+    assert all(s.get("read_gap") and "read" not in s for s in by_ref.values())
+
+
+def test_carried_coordinates_do_not_enter_the_shared_governing_field_or_its_fallback(tmp_path):
+    from ouroboros import memory_view as mv
+    from ouroboros.owner_relay import task_words_text
+
+    plain = ow._row("Keep the first line", source="initial_user", carrier="ctx", ts=TS)
+    evidence = build_owner_message_ref(chat_id=1, client_message_id="", ts=TS, text=plain["text"])
+    carried = {**plain, "origin_ref": {**evidence, "text": "Unrelated body"}}
+    other = {**plain, "text": "Keep  the first line", "address": "row:1@elsewhere#0123456789ab"}
+    child = {"id": "helper", ow.FIELD: [carried, other]}
+    assert ow.task_governing_words(child)[0] == [plain, {**plain, "text": other["text"]}]
+    assert ow.task_owner_words(tmp_path, "helper", task=child)[0] == [plain]
+    source = {}
+    rendered = task_words_text(tmp_path, child, indent=mv.INDENT, source_metadata=source)
+    assert rendered == task_words_text(tmp_path, child, indent=mv.INDENT)
+    assert len(source["rows"]) == 1 and source["rows"][0]["origin_ref"] == evidence
+    assert "address" not in source["rows"][0]
+    original = {"origin_message_text": plain["text"], "origin_message_ref": evidence}
+    fallback, absence = ow.task_owner_words(tmp_path, "helper", task=original)
+    assert absence == "" and fallback == [ow._row(plain["text"], source="origin_message",
+        carrier="origin_message", task_id="helper", ts=TS, ref="chat 1")]
 
 
 def test_a_helper_in_the_room_shows_a_drained_message_once_and_one_message_is_one_row_under_any_carrier(tmp_path):
@@ -389,7 +503,7 @@ def test_a_helper_in_the_room_shows_a_drained_message_once_and_one_message_is_on
     # A room answer read live (no focus holds it): once, its card beside it under the asking task's name.
     _chat(tmp_path, answer)
     rows = ow.work_words(helper)[0]
-    assert _stamps(rows)[-2:] == [("room", f"chat {room} / cm-ans", _at(3), "1. Publish it"), (
+    assert _stamps(rows)[-2:] == [("room", f"chat {room} / cm-ans", _at(3), PRESSED.format("1. Publish it")), (
         "room", "quiz q7 of task asker", "", "Publish?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)")]
     assert rows[-1]["author"] == "Ouroboros, task asker" and rows[-1]["source"] == ow.REPLY_TARGET
     assert [row["ref"] for row in rows].count(f"chat {room} / cm-ans") == 1
@@ -561,3 +675,28 @@ def test_module_imports_no_model_client():
     assert _llm_imports(source) == []
     assert _llm_imports("def f():\n    from ouroboros.llm import LLMClient\nimport ouroboros.llm_openai_compatible\n") == [
         "ouroboros.llm", "ouroboros.llm_openai_compatible"]
+
+
+def test_live_speech_is_citable_but_not_an_owner_source(tmp_path):
+    from ouroboros.owner_continue import CORPUS_INITIAL_SOURCES, CORPUS_OWNER_SOURCES
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.safety import _owner_yes
+
+    ctx = _ctx(tmp_path, directives=[{"source": "live_call", "content": "Keep all these words. Choose the other model.", "msg_id": "spoken"}])
+    before = [dict(row) for row in ctx._owner_directives]
+    assert ow.cited_owner_basis(ctx, "Choose the other model.")[0] is None
+    basis, error = ow.cited_owner_basis(ctx, "Choose the other model.", call_speech=True)
+    assert not error and basis == {"source": "live_call", "cited": "Choose the other model.", "msg_id": "spoken"}
+    assert ctx._owner_directives == before
+    assert "live_call" not in ow.OWNER_SOURCES | CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES
+    assert ow.carried_owner_corpus(ctx) == [] and ow.directive_owner_rows(ctx) == []
+    assert not owner_reply_owed(ctx)
+    assert _owner_yes(ctx, lambda: pytest.fail("a caption never supplies an answered approval card")) == ""
+    assert ow.cited_owner_basis(ctx, "invented", call_speech=True)[0] is None
+    # Even a caption alongside a card is not the answered-card approval channel.
+    ctx._owner_directives[0]["reply_to"] = {"address": "quiz q1", "text": "Publish these words.\nroom-a"}
+    subject = lambda: ("Publish these words.", ["room-a"], False, [])
+    assert _owner_yes(ctx, subject) == ""
+    ctx._owner_directives[0]["source"] = "owner_mailbox"
+    assert _owner_yes(ctx, subject) == "spoken"
+    assert owner_reply_owed(ctx)

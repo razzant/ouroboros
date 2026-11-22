@@ -4,7 +4,7 @@ import test from 'node:test';
 import { apiClient } from '../modules/api_client.js';
 import {
     HEADER_PLACEHOLDER as MASK, bindHeaderFields, canonicalServerId, credentialPayload, headerDraftRows, headerImportFacts,
-    headerKeepsSavedValues, keptHeaderNames, renderHeaderFields, serverIdentity, validateHeaderFields,
+    headerKeepsSavedValues, headerSubmission, keptHeaderNames, renderHeaderFields, serverIdentity, settleHeaderRows, validateHeaderFields,
 } from '../modules/mcp_header_fields.js';
 import { endpointChange } from '../modules/mcp_import_dialog.js';
 
@@ -195,6 +195,38 @@ test('a spelling of the same canonical server keeps every masked value; another 
     assert.deepEqual(view.errors(), []);
     named.id = 'other_docs';  // the explicit ID now decides, and it is another server
     assert.match(view.errors()[0], /belongs to server My Docs/);
+});
+
+test('values a Save stored become kept masks once read back; rows typed, renamed, removed or added since keep their drafts', async () => {
+    const server = { id: 'docs', url: 'https://docs.example/mcp', headers: { 'X-A': MASK, 'X-B': MASK, 'X-C': MASK, 'X-D': MASK } };
+    const view = mount(server, 'docs');
+    for (const [row, text] of [[0, 'synthetic-a'], [1, 'synthetic-b'], [2, 'synthetic-c'], [3, 'synthetic-d']]) await view.type(row, 'value', text);
+    const sent = headerSubmission(server);
+    // While that Save is on its way: B is typed again, C renamed, D removed and a new row added.
+    await view.type(1, 'value', 'synthetic-b2');
+    await view.type(2, 'name', 'X-Renamed');
+    await view.rows[3].remove.emit('click');
+    await view.addButton.emit('click');
+    await view.type(3, 'name', 'X-New');
+    await view.type(3, 'value', 'synthetic-new');
+    settleHeaderRows(server, sent, { id: 'docs', headers: { 'X-A': MASK, 'X-B': MASK, 'X-C': MASK, 'X-D': MASK } });
+    assert.deepEqual(credentialPayload(server).headers, { 'X-A': MASK, 'X-B': 'synthetic-b2', 'X-Renamed': MASK, 'X-New': 'synthetic-new' },
+        'no stored literal is sent again');
+    assert.deepEqual(keptHeaderNames(server), ['X-A', 'X-Renamed']);
+    assert.deepEqual(view.errors(), ['The saved value belongs to header X-C. Restore that name, or enter a new value.']);
+    await view.type(2, 'name', 'X-C');
+    assert.deepEqual(view.errors(), []);
+});
+
+test('an edited legacy row beside malformed headers settles to the legacy mask it was stored under', async () => {
+    const server = { id: 'docs', url: 'https://docs.example/mcp', auth_header: 'X-Legacy', auth_token: 'legacy-t...', headers: 'malformed' };
+    const view = mount(server, 'docs');
+    await view.type(0, 'value', 'synthetic-rotated');
+    const sent = headerSubmission(server);
+    assert.equal(credentialPayload(server).auth_token, 'synthetic-rotated');
+    settleHeaderRows(server, sent, { id: 'docs', auth_header: 'X-Legacy', auth_token: 'synthe...', headers: 'malformed' });
+    assert.deepEqual(credentialPayload(server), { auth_header: 'X-Legacy', auth_token: 'synthe...', headers: 'malformed' });
+    assert.deepEqual(view.errors(), []);
 });
 
 test('re-typing the mask is a value edit to dirty tracking and import freshness', async () => {

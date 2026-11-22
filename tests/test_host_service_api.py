@@ -17,9 +17,11 @@ from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
 @pytest.fixture(autouse=True)
 def _host_lane_roots(tmp_path, monkeypatch):
     """A Host-only process: its turns run on the disclosed degraded executor in this process (no pool generation)."""
-    from tests.conversation_carrier_support import host_lane
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
 
     host_lane(monkeypatch, tmp_path)
+    yield
+    join_host_lane_carriers()  # its carriers settle after the waiters: that tail stays in this world
 
 
 @pytest.fixture(autouse=True)
@@ -132,11 +134,14 @@ def _seed_token(
     review_status: str = "pass",
     subscribe_events=None,
     manifest_permissions=None,
+    bundled=False,
 ) -> None:
     topics = list(subscribe_events or ["chat.outbound"])
     manifest_perms = list(manifest_permissions or ["inject_chat", "subscribe_event"])
-    skill_dir = data_dir / "skills" / "external" / skill
+    skill_dir = data_dir / "skills" / ("native" if bundled else "external") / skill
     skill_dir.mkdir(parents=True, exist_ok=True)
+    if bundled:
+        (skill_dir / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     (skill_dir / "SKILL.md").write_text(
         f"""---
 name: {skill}
@@ -857,9 +862,19 @@ def test_chat_inject_rejects_disabled_skill_token(tmp_path: pathlib.Path) -> Non
     assert response.status_code == 403
 
 
-def test_chat_inject_rejects_failed_review_token(tmp_path: pathlib.Path, monkeypatch) -> None:
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    _seed_token(tmp_path, skill="failed", token="token", permissions=["inject_chat"], review_status="blockers")
+def _seed_blocker_token(data_dir: pathlib.Path, strict_source: bool) -> None:
+    """A token of a skill whose review found blockers; a source that reviews each skill keeps them for the owner."""
+    from ouroboros.skill_install_record import write_install_record
+
+    _seed_token(data_dir, skill="failed", token="token", permissions=["inject_chat"], review_status="blockers")
+    if strict_source:
+        write_install_record(data_dir, "failed", {"basis": "review", "release": {"digest": "d"}, "source": {"id": "hub"}})
+
+
+@pytest.mark.parametrize("strict_source,status", [(False, 202), (True, 403)])
+def test_chat_inject_follows_the_review_gate_of_a_token_with_blocker_findings(tmp_path: pathlib.Path, strict_source,
+                                                                              status) -> None:
+    _seed_blocker_token(tmp_path, strict_source)
     app = create_host_service_app(tmp_path, bridge_getter=FakeBridge)
     client = TestClient(app)
 
@@ -869,18 +884,19 @@ def test_chat_inject_rejects_failed_review_token(tmp_path: pathlib.Path, monkeyp
         json={"text": "hello", "chat_id": 1},
     )
 
-    assert response.status_code == 403
+    assert response.status_code == status
 
 
-def test_identity_rejects_failed_review_token(tmp_path: pathlib.Path, monkeypatch) -> None:
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    _seed_token(tmp_path, skill="failed", token="token", permissions=["inject_chat"], review_status="blockers")
+@pytest.mark.parametrize("strict_source,status", [(False, 200), (True, 403)])
+def test_identity_follows_the_review_gate_of_a_token_with_blocker_findings(tmp_path: pathlib.Path, strict_source,
+                                                                           status) -> None:
+    _seed_blocker_token(tmp_path, strict_source)
     app = create_host_service_app(tmp_path, bridge_getter=FakeBridge)
     client = TestClient(app)
 
     response = client.get("/identity", headers={"X-Skill-Token": "token"})
 
-    assert response.status_code == 403
+    assert response.status_code == status
 
 
 def test_events_websocket_receives_granted_topic(tmp_path: pathlib.Path) -> None:

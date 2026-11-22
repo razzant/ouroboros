@@ -1145,7 +1145,8 @@ def test_control_inside_successful_strict_budget_read_prevents_body(lane, monkey
 @pytest.mark.parametrize("restart", [False, True], ids=["resume", "restart_resume"])
 def test_inline_image_prestart_pause_survives_real_queue_consumers(lane, monkeypatch, restart):
     """Public inline-image ingress, accepted Pause, snapshot restore, Resume and
-    assignment feed the original pixels to the actual model-content builder.
+    assignment feed the original pixels to the actual model-content builder. My human's
+    resumed turn continues on its conversation carrier, never the idle project slot.
     """
     import base64
     import io
@@ -1205,7 +1206,10 @@ def test_inline_image_prestart_pause_survives_real_queue_consumers(lane, monkeyp
     granted = queue.resume_budget_paused_task("S")
     assert granted["ok"] and granted["owner_pause_released"], granted
     lane.workers.assign_tasks()
-    [resumed] = _dispatched(sent)
+    from tests.conversation_carrier_support import dispatched_tasks
+
+    [resumed] = dispatched_tasks(lane.spare)
+    assert not _dispatched(sent) and lane.workers.RUNNING["S"]["lane"] == "conversation"
     assert resumed["id"] == "S" and resumed["text"] == original["text"]
     assert resumed["origin_message_ref"] == metadata["origin_message_ref"]
     assert resumed["origin_message_text"] == original["text"]
@@ -1218,4 +1222,4 @@ def test_inline_image_prestart_pause_survives_real_queue_consumers(lane, monkeyp
     assert actual_images == expected_images and len(actual_images) == 1
     assert base64.b64decode(actual_images[0]["url"].split(",", 1)[1]) == pixels
     lane.workers.assign_tasks()
-    assert len(_dispatched(sent)) == 1 and not lane.workers.PENDING
+    assert not _dispatched(sent) and not dispatched_tasks(lane.spare) and not lane.workers.PENDING

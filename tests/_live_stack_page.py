@@ -1,7 +1,7 @@
 """A device-free page socket: real gateway codecs and sample-counted playback.
 
-Mirrors call.js / PlaybackBuffer: 48 kHz, 20 ms capture, 40 ms jitter,
-100 ms played receipts (also at drain/flush), monotonic receipts per item.
+Mirrors call.js / PlaybackBuffer: 48 kHz (or the rate a test names), 20 ms capture,
+40 ms jitter, 100 ms played receipts (also at drain/flush), monotonic receipts per item.
 No device, browser, window or operator state is opened.
 """
 import asyncio
@@ -21,7 +21,8 @@ def jpeg(label='synthetic'):
 
 
 class Page:
-    def __init__(self):
+    def __init__(self, rate=48000):
+        self.rate, self.chunk = rate, rate // 50  # the samples of one 20 ms capture or playback tick
         self.incoming = asyncio.Queue()
         self.closed, self.controls, self.frames = [], [], []
         self.items, self.played, self.dirty = {}, {}, set()
@@ -30,7 +31,7 @@ class Page:
         self.queued = self.waited = self.since_report = 0
         self.playing = self.muted = False
         self.send({'type': 'hello', 'protocol': 1, 'role': 'owner', 'mic': True,
-                   'speaker': True, 'video': True, 'rate': 48000, 'label': 'Owner'})
+                   'speaker': True, 'video': True, 'rate': rate, 'label': 'Owner'})
 
     async def accept(self): pass
 
@@ -49,7 +50,7 @@ class Page:
 
     def acknowledge(self):
         for item in self.dirty:
-            self.send({'type': 'played', 'item_id': item, 'played_ms': self.played[item] * 1000 // 48000})
+            self.send({'type': 'played', 'item_id': item, 'played_ms': self.played[item] * 1000 // self.rate})
         self.dirty.clear()
         self.since_report = 0
 
@@ -78,7 +79,7 @@ class Page:
         self.flush(frame.epoch)
         if frame.epoch != self.epoch:
             return
-        assert frame.rate == 48000 and frame.stream in self.items
+        assert frame.rate == self.rate and frame.stream in self.items
         samples = len(frame.pcm) // 2
         self.queue.append([self.items[frame.stream], samples])
         self.queued += samples
@@ -88,21 +89,24 @@ class Page:
         state = next((v['state'] for v in reversed(self.controls) if 'state' in v), '')
         return state == 'live' and not self.muted
 
+    def microphone(self):
+        return b'\x01\x00' * self.chunk
+
     def tick(self, *, capture=True):
         if capture:
-            self.send(cp.encode_frame(cp.AudioFrame(cp.FRAME_AUDIO_IN, self.epoch, self.seq, 48000, 0,
-                                                   b'\x01\x00' * 960)))
+            self.send(cp.encode_frame(cp.AudioFrame(cp.FRAME_AUDIO_IN, self.epoch, self.seq, self.rate, 0,
+                                                   self.microphone())))
             self.seq += 1
         if not self.queue:
             self.playing = False
             self.waited = 0
             return
         if not self.playing:
-            self.waited += 960
-            if max(self.queued, self.waited) < 1920:
+            self.waited += self.chunk
+            if max(self.queued, self.waited) < 2 * self.chunk:
                 return
             self.playing = True
-        left = 960
+        left = self.chunk
         while left and self.queue:
             item, count = self.queue[0]
             count = min(left, count)
@@ -114,7 +118,7 @@ class Page:
             self.dirty.add(item)
             if not self.queue[0][1]:
                 self.queue.popleft()
-        if not self.queue or self.since_report >= 4800:
+        if not self.queue or self.since_report >= 5 * self.chunk:
             self.acknowledge()
 
     def video(self, data):

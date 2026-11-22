@@ -2,6 +2,7 @@
 import re
 
 from ouroboros import memory_view as mv
+from ouroboros.memory_floor import drawn_tokens, story_measure
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.tools import chronicle
 from tests.test_chronicle_store import page, MIND
@@ -19,7 +20,7 @@ def test_story_directory_pages_all_ids_and_their_exact_records(tmp_path, monkeyp
     while True:
         text = chronicle._memory_read(ctx, story=True, start=start)
         head, continuation, body = text.split('\n', 2)
-        assert head == 'My story: 10 pages, parts and accounts' and len(text) <= 600
+        assert head.startswith('My story: 10 pages, parts and accounts; drawn whole ~') and len(text) <= 600
         chunks.append(body)
         if 'complete' in continuation:
             break
@@ -27,13 +28,39 @@ def test_story_directory_pages_all_ids_and_their_exact_records(tmp_path, monkeyp
         assert next_start > start and f'memory_read(story=true, start={next_start})' in continuation
         start = next_start
     listing = ''.join(chunks)
-    expected, _, _ = mv.capture_story(store, tmp_path, mv.room_labeler(tmp_path))
-    assert listing == '\n'.join(mv._page_pointer(item) for item in expected if not item.get('told_by'))
+    expected, status, refusals = mv.capture_story(store, tmp_path, mv.room_labeler(tmp_path))
+    measure = story_measure(expected, status, refusals)
+    shown = [item for item in expected if item.get('kind') != 'legacy' and not item.get('told_by')]
+    total = sum(drawn_tokens(item) for item in shown)
+    # One group per room the records already carry, its drawn weight, kinds and reader; then each record exactly.
+    assert listing.split('\n')[0] == f"## Main [room 1]: ~{total:,} tokens; 9 pages, 1 part; memory_read(room_id='1')"
+    revisions = {item['id']: item['revision'] for item in store.interpret([store.get(i['id']) for i in shown], sources=False)}
+    assert listing.split('\n')[1:] == [f"{mv._page_pointer(item)}; revision {revisions[item['id']]}; "
+                                       f"~{drawn_tokens(item):,} tokens" for item in shown]
+    assert head == (f"My story: 10 pages, parts and accounts; drawn whole ~{measure['tokens']:,} tokens, "
+                    f"{measure['unfolded']['pages']} pages no part or account holds yet ~{measure['unfolded']['tokens']:,}; "
+                    "0 records told by accounts, not drawn")
+    # The unfolded weight is the start's Max-room measure of the same pages (``memory_floor.unfolded_pages``).
+    assert measure['unfolded']['tokens'] == sum(drawn_tokens(item) for item in shown if item['kind'] == 'page')
     for record in [part, *records[3:]]:
         assert record['id'] in listing
         assert record['text'] in chronicle._memory_read(ctx, node_id=record['id'])
     for arguments in ({'rows': True}, {'room_id': '1'}, {'node_id': records[0]['id']}):
         assert 'TOOL_ARG_ERROR' in chronicle._memory_read(ctx, story=True, **arguments)
+    # The directory interprets every listed record inside one capture: one index read, never one per record.
+    import contextlib
+
+    opened, index = [], ChronicleStore._index
+
+    @contextlib.contextmanager
+    def counted(self):
+        opened.append(1)
+        with index(self) as db:
+            yield db
+
+    monkeypatch.setattr(ChronicleStore, '_index', counted)
+    assert chronicle._read_story(tmp_path, store, 0, 600) == chronicle._read_story(tmp_path, store, 0, 600)
+    assert len(opened) == 2, opened
 
 
 def test_aggregate_row_range_includes_interleaved_verbatim_rows(tmp_path):

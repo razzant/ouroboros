@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 from ouroboros.server_process import (
     DATA_DIR, _owner_restart_requested, _request_restart_exit, _restart_requested, end_task_runs, log,
+    restart_gate_line,
 )
 
 _RESTARTABLE_UPDATE_PHASES = frozenset({"pending_boot_smoke", "applying_replace"})
@@ -592,13 +593,11 @@ def _managed_update_pending_kwargs() -> dict:
 
 
 def _safe_restart_serialized(safe_restart_fn, *, reason: str, unsynced_policy: str):
-    """Serialize checkout/reset with update apply; only a landed update may restart."""
+    """Serialize checkout/reset with update apply; only a landed update may restart. A managed deployment's
+    restart neither applies nor clears an update intent recorded before it was managed (it waits, untouched)."""
+    from ouroboros.deployment_policy import body_replacement_refusal
     from supervisor import git_ops
-    from supervisor.update_merge import (
-        acquire_update_lock,
-        read_update_tx_strict,
-        release_update_lock,
-    )
+    from supervisor.update_merge import acquire_update_lock, read_update_tx_strict, release_update_lock
 
     try:
         lock_fh = acquire_update_lock(restart=True)
@@ -619,13 +618,14 @@ def _safe_restart_serialized(safe_restart_fn, *, reason: str, unsynced_policy: s
                 "or restart the server process for a web deployment. Restart was deferred "
                 "to preserve the current files."
             )
-        if status == "absent" and not git_ops._clear_update_intent():
+        if status == "absent" and not body_replacement_refusal() and not git_ops._clear_update_intent():
             return False, (
                 "An update intent marker with no update transaction could not be removed; "
                 "restart was deferred rather than applying an orphaned update."
             )
         if status == "valid" and str(tx.get("phase") or "") not in _RESTARTABLE_UPDATE_PHASES:
-            return False, "Managed update merge is still being resolved; restart was deferred."
+            managed = " It began before this deployment was managed; its administrator resolves it." if body_replacement_refusal() else ""
+            return False, f"Managed update merge is still being resolved; restart was deferred.{managed}"
         return safe_restart_fn(reason=reason, unsynced_policy=unsynced_policy)
     finally:
         release_update_lock(lock_fh)
@@ -671,28 +671,24 @@ def _begin_task_teardown(restart_requested: bool) -> tuple[str, str]:
     return _shutdown_task_cleanup_args(restart_requested)
 
 
-def _shutdown_task_cleanup_args(restart_requested: bool) -> tuple[str, str]:
-    """Return ``(terminal_status, result_reason)`` for tasks torn down by a
-    graceful server shutdown.
-
-    A graceful shutdown — a requested restart (exit 42) or an external
-    stop/restart signal (SIGTERM/SIGINT) — is not a worker death, so a
-    still-running task is finalized as ``cancelled`` with an honest reason
-    instead of the stopped-worker text the pool writes for a death it recovers;
-    its callers pass ``stop_source="server_shutdown"``, the typed cause that
-    makes it a technical interruption the owner may Continue.
+def _shutdown_task_cleanup_args(restart_requested: bool, stop_source: str | None = None) -> tuple[str, str]:
+    """Return ``(terminal_status, result_reason)`` for tasks torn down by a graceful server shutdown: a requested
+    restart (exit 42), the application's Quit, the launcher's end or an external SIGTERM/SIGINT is not a worker
+    death, so a still-running task is finalized as ``cancelled`` with a reason naming that stop (``stop_source``,
+    default the live ingress ``server_process.server_stop_source``), not the stopped-worker text the pool writes
+    for a death it recovers. Its callers pass ``stop_source="server_shutdown"``, the typed cause that makes it a
+    technical interruption the owner may Continue; the text never changes that source.
     """
     if restart_requested:
-        reason = (
-            "Server restarted before this task finished; the task was "
-            "interrupted by the restart, not a worker crash."
-        )
-    else:
-        reason = (
-            "Server shut down (external stop/restart signal) before this task "
-            "finished; the task was interrupted, not a worker crash."
-        )
-    return "cancelled", reason
+        return "cancelled", ("Server restarted before this task finished; the task was "
+                             "interrupted by the restart, not a worker crash.")
+    if stop_source is None:
+        from ouroboros.server_process import server_stop_source
+        stop_source = server_stop_source()
+    words = {"launcher_quit": "the application was quit", "launcher_gone": "the application that started it ended",
+             "external_signal": "external stop/restart signal"}.get(stop_source, "the server stopped")
+    return "cancelled", (f"Server shut down ({words}) before this task finished; "
+                         "the task was interrupted, not a worker crash.")
 
 
 def _shutdown_supervisor_event_bus() -> None:
@@ -710,15 +706,12 @@ def _restart_current_process(server, host: str, port: int) -> None:
     # native waits were already moved to PENDING before its resolver ran.
     try:
         from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV, arm_active_planned_restart_transaction
-        from ouroboros.server_restart import _RESTARTABLE_UPDATE_PHASES
         from supervisor.update_merge import read_update_tx_strict
 
         from ouroboros.server_control import _restart_stop_requested
         if _restart_stop_requested:
             server.os.environ.pop(PLANNED_RESTART_TRANSACTION_ENV, None)
         elif server.DATA_DIR == DATA_DIR and _OWNER_STOP_BEGAN.is_set():
-            from ouroboros.server_restart import arm_owner_restart_transaction
-
             arm_owner_restart_transaction()  # only the work THIS owner Restart named returns
         elif getattr(server, "_planned_delegate_restart_transaction_id", ""):
             own = server._planned_delegate_restart_transaction_id
@@ -797,10 +790,8 @@ def _handle_restart_in_supervisor(server, evt: Dict[str, Any], ctx: Any) -> None
         return  # preparation/delivery stays executable until this host consumes the exact ready event
     st = ctx.load_state()
     if st.get("owner_chat_id"):
-        ctx.send_with_budget(
-            int(st["owner_chat_id"]),
-            f"♻️ Restart requested by agent: {evt.get('reason')}",
-            role="system", system_type="restart_notice")
+        notice = f"♻️ Restart requested by agent: {evt.get('reason')}" + restart_gate_line(ctx.REPO_DIR, ctx.DRIVE_ROOT)
+        ctx.send_with_budget(int(st["owner_chat_id"]), notice, role="system", system_type="restart_notice")
     from ouroboros.config import get_restart_drain_max_sec
 
     max_wait = get_restart_drain_max_sec()
@@ -950,6 +941,7 @@ def _perform_supervisor_restart(server,
     server._planned_delegate_restart_transaction_id = ""
     planned_handoffs: set[str] = set()
     restart_transaction_id = server.uuid.uuid4().hex
+    named = ""  # the transaction this door named its returns into; a failed naming adds no late names either
     try:
         from ouroboros.delegate_recovery import prepare_planned_restart_handoffs
         from ouroboros.owner_wait import prepare_owner_wait_handoffs
@@ -968,7 +960,7 @@ def _perform_supervisor_restart(server,
         prepare_restart_returns(ctx.DRIVE_ROOT, ctx.RUNNING, name_queue_returns(ctx.PENDING, "planned_restart"),
                                 transaction_id=restart_transaction_id,
                                 direct=direct_chat_turns(), owner_wait_ids=owner_waits)
-        server._planned_delegate_restart_transaction_id = restart_transaction_id
+        server._planned_delegate_restart_transaction_id = named = restart_transaction_id
     except Exception:
         server.log.debug("Planned self-restart delegate handoff preparation failed", exc_info=True)
     try:
@@ -985,13 +977,17 @@ def _perform_supervisor_restart(server,
             retain_saved_work=True,
             **restart_kill_kwargs,
         )
+        from supervisor.restart_retention import name_late_returns  # a helper started after the returns were named
+
+        name_late_returns(ctx.DRIVE_ROOT, named)  # returns with them (#3192)
         try:  # a field update: a stale snapshot never erases a control written meanwhile (#1307)
             ctx.update_state(lambda live: live.__setitem__("session_id", server.uuid.uuid4().hex))
         except Exception:
             server.log.warning("Restart session id not rotated: runtime state unavailable", exc_info=True)
         from supervisor.queue import publish_queue_snapshot
 
-        publish_queue_snapshot(reason="pre_restart_exit")  # embedded rows: an older body restores it after a rollback
+        if publish_queue_snapshot(reason="pre_restart_exit") is False:
+            raise OSError("The final rollback-readable queue snapshot could not be saved")
     except BaseException:
         from supervisor.queue import reopen_queue_returns
 

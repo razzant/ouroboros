@@ -252,7 +252,7 @@ def test_registry_filters_schema_dispatch_and_resolved_targets(tmp_path):
     # comes with it, in the schemas or in dispatch.
     assert "PRESENCE_CAPABILITY_BLOCKED" not in registry.execute(
         "knowledge_write",
-        {"topic": "presence-note", "content": "what this exchange taught me", "scope": "global"},
+        {"topic": "presence-note", "mode": "overwrite", "content": "what this exchange taught me", "scope": "global"},
     )
     assert (data / "memory" / "knowledge" / "presence-note.md").exists()
     for blocked in ("write_file", "run_command", "send_user_message"):

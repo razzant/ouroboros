@@ -324,7 +324,92 @@ def test_tree_exclusions_follow_only_addressed_links_and_own_child_results(tmp_p
     monkeypatch.setattr(results, "load_task_result", addressed)
     monkeypatch.setattr(results, "list_task_results", own_results)
     expected = {"running", "child", *fields}
-    assert startup_tree_exclusions(tmp_path) == set(seen) == expected
+    assert startup_tree_exclusions(tmp_path) == (expected, "") and set(seen) == expected
+    _set_aside(tmp_path, "quarantined")  # the import kept its file apart: no canonical record to read
+    seen.clear()
+    assert startup_tree_exclusions(tmp_path)[0] == expected | {"quarantined"} and set(seen) == expected, "held by its own id, never read"
+    seed_result(tmp_path, "aside-root", {"_schema_version": 1, "task_id": "aside-root", "status": "completed"})
+    seed_result(tmp_path / "task_drives/quarantined", "quarantined",  # its own drive still names its root
+                {"_schema_version": 1, "task_id": "quarantined", "status": "completed", "root_task_id": "aside-root"})
+    seen.clear()
+    expected |= {"quarantined", "aside-root"}
+    assert startup_tree_exclusions(tmp_path)[0] == expected and "quarantined" not in seen, "its own child store is followed"
+    import errno
+    import os
+    import pathlib
+
+    from ouroboros import confined_files
+    opened = confined_files.confined_directory
+    with monkeypatch.context() as patch:  # that store is its only link: there and unopenable is unknown, never empty
+        patch.setattr(confined_files, "confined_directory", lambda root, parts=(): (
+            (_ for _ in ()).throw(PermissionError("busy")) if tuple(parts)[-1:] == ("quarantined",) else opened(root, parts)))
+        assert startup_tree_exclusions(tmp_path) == (None, "quarantined: PermissionError")
+        # ... whatever pathlib's own predicate would answer (from Python 3.14 it reads a failed lookup as "no") ...
+        is_dir = pathlib.Path.is_dir
+        patch.setattr(pathlib.Path, "is_dir", lambda self: self.name != "quarantined" and is_dir(self))
+        assert startup_tree_exclusions(tmp_path) == (None, "quarantined: PermissionError")
+        # ... and a lookup that fails for any reason but absence is as unknown as the open was
+        lstat = os.lstat
+        patch.setattr(os, "lstat", lambda path, *a, **kw: (_ for _ in ()).throw(OSError(errno.EIO, "unreadable")) if (
+            isinstance(path, (str, os.PathLike)) and os.path.basename(os.fspath(path)) == "quarantined") else lstat(path, *a, **kw))
+        assert startup_tree_exclusions(tmp_path) == (None, "quarantined: OSError")
+    _set_aside(tmp_path, "unrelated")  # a refused file beside an older row: the row is still served
+    seen.clear()
+    assert results.set_aside(tmp_path) == {"quarantined": "quarantined_before_import"}
+    assert "unrelated" in startup_tree_exclusions(tmp_path)[0] and "unrelated" in seen, "read and followed like any member"
+    o.add(tmp_path, "pending_drives", "absent")  # merely absent: its links are unknown, and the refusal names it
+    assert startup_tree_exclusions(tmp_path) == (None, "absent: no record")
+
+
+def _set_aside(root, task_id):
+    """TASK_ID as the import leaves a result it could not admit: occupied, no row, still a pending drive."""
+    from ouroboros import store, store_import
+
+    with store.open_store(root, write=True) as txn:
+        txn.set_meta(store_import.OCCUPIED, {**(txn.meta(store_import.OCCUPIED) or {}), task_id: "quarantined_before_import"})
+    o.add(root, "pending_drives", task_id, {"task_id": task_id})
+
+
+def test_a_result_the_import_set_aside_is_no_recovery_gap_and_keeps_only_its_own_tree(tmp_path, monkeypatch):
+    """Startup recovery rests such a pending drive instead of failing on it at every boot, so settled trees and
+    service logs retire; a strict read of it still refuses, and its own tree stays with its quarantined file."""
+    import os
+    migrations.prepare_startup_state(tmp_path)
+    monkeypatch.setattr(maintenance, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(maintenance, "_STARTUP_RECOVERY_GAPS", [False])
+    monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "1")
+    results.write_task_result(tmp_path, "settled", "completed", ts="2000-01-01T00:00:00+00:00")
+    _set_aside(tmp_path, "quarantined")
+    for task in ("settled", "quarantined"):
+        (tmp_path / "task_trees" / task).mkdir(parents=True)
+        os.utime(tmp_path / "task_trees" / task, (1, 1))
+    service = tmp_path / "services/settled/service.log"
+    service.parent.mkdir(parents=True)
+    service.write_text("retained service output", encoding="utf-8")
+    os.utime(service, (1, 1))
+    with pytest.raises(ValueError, match="unreadable or invalid"):
+        results.load_task_result(tmp_path, "quarantined", strict=True)
+    for boot in range(2):  # the first pass examines the member, the second finds it resting
+        report = maintenance._run_startup_task_recovery(tmp_path, tmp_path, skip_live_data=False, prior_worker_pids=set())
+        assert (report["errors"], report["unresolved"]) == ([], []), boot
+        assert "quarantined" in o.members(tmp_path, "pending_drives"), "a rest never retires the debt"
+        assert o.members(tmp_path, "duty_rest")["drive_recovery:quarantined"]["waits_on"] == ["result_set_aside"]
+    maintenance._startup_prune_sweeps(preserve_task_sources=bool(report["unresolved"] or report["protected"] or report["errors"]),
+                                      recovery_report=report)
+    _retire(tmp_path)
+    assert not (tmp_path / "task_trees/settled").exists() and not service.exists()
+    assert (tmp_path / "task_trees/quarantined").exists()
+    from ouroboros import store, store_import
+    from ouroboros.maintenance_jobs import job
+    assert "holds" not in job(tmp_path, "runtime_retirement")
+    read, asked = results.load_task_result, []
+    monkeypatch.setattr(results, "load_task_result", lambda root, task_id, **kw: asked.append(task_id) or read(root, task_id, **kw))
+    maintenance._run_startup_task_recovery(tmp_path, tmp_path, skip_live_data=False, prior_worker_pids=set())
+    assert "quarantined" not in asked, "at rest while it stays set aside"
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.set_meta(store_import.OCCUPIED, {})
+    maintenance._run_startup_task_recovery(tmp_path, tmp_path, skip_live_data=False, prior_worker_pids=set())
+    assert "quarantined" in asked, "no longer set aside: examined again"
 
 
 def _retire(root):

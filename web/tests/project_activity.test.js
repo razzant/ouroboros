@@ -8,6 +8,7 @@ import {
     MARK_RANK,
     buildProjectActivityIndex,
     markWords,
+    pictureOwner,
     reconcileProjectRooms,
     summarizeRoom,
     waitingModel,
@@ -15,6 +16,9 @@ import {
 import { MARK_SHAPES } from '../modules/status_mark.js';
 import { clock } from '../modules/work_status.js';
 import { SERVER_CASES } from './work_fixture.js';
+import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
+import { rowLine } from '../modules/projects_nav.js';
+import { questionWords } from '../modules/question_presentation.js';
 
 // One server body whose case room is re-keyed to a Project chat id.
 function body(name, chatId = 42, extra = {}) {
@@ -64,7 +68,7 @@ test('the owner\'s move is the room\'s turn alone: questions and owner actions, 
 });
 
 test('the label is the room word and its first work\'s line: the episode\'s reason, then what still runs beside it', () => {
-    assert.equal(summary('held_continue').label, 'Working · Continue starts when 3 helpers of the earlier attempt finish');
+    assert.equal(summary('held_continue').label, 'Working · Continue starts when 3 subagents of the earlier attempt finish');
     assert.equal(summary('paused_by_owner').label, `Paused · You paused it · ${PRESSED}`);
     assert.equal(summary('paused_by_mind').label, 'Paused · Ouroboros paused it: pause before the update you asked for');
     assert.equal(summary('paused_unattributed').label, 'Paused', 'a Pause that declared nobody names nobody');
@@ -123,7 +127,46 @@ test('a partial body marks only its omissions unknown; a room it lists describes
     assert.equal(restored.rooms.has('43'), false, 'a complete body proves the paused room idle once it is not listed');
 });
 
-test('the index reads Project rooms only; the header\'s one mark is the strongest shape and the owner\'s move', () => {
+test('a question read with a gap keeps its room amber in the sidebar; the complete read that drops it turns it off', () => {
+    // Every reader takes the body the sequencer hands it, so the sidebar's rooms see what the pill keeps.
+    let rooms = new Map();
+    const snapshots = createStateSnapshotSequencer((data) => { rooms = reconcileProjectRooms(rooms, data).rooms; });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const read = (rooms_, extra = {}) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: rooms_, ...extra });
+    apply(read({ 42: { activity: 'idle', transition: 'none', call: '', turn: [item], amber: true, mark: 'none',
+        confirmed: true, works: [] } }, { current_questions_complete: true }));
+    assert.equal(rooms.get('42').owner, true);
+    apply(read({}, { current_questions_complete: false, current_questions_gaps: [{ task_id: 't' }] }));
+    assert.deepEqual([rooms.get('42')?.owner, rooms.get('42')?.note], [true, 'An unanswered question is here']);
+    // Across a failed read too: the next gap still keeps it.
+    snapshots.fail(snapshots.begin());
+    apply(read({}, { current_questions_gaps: [{ reason: 'question_index_unavailable' }] }));
+    assert.equal(rooms.get('42')?.owner, true);
+    apply(read({}, { current_questions_complete: true }));
+    assert.equal(rooms.has('42'), false);
+});
+
+test('a known question survives a room whose works are unconfirmed; an owner turn is never invented', () => {
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const served = { activity: 'unknown', transition: 'none', call: '', turn: [item], amber: true, mark: 'ring',
+        confirmed: false, works: [] };
+    assert.deepEqual(summarizeRoom(served), { mark: 'ring', owner: true, word: 'Activity unconfirmed',
+        note: 'An unanswered question is here', line: '', name: '', focus: '',
+        label: 'Activity unconfirmed · An unanswered question is here' });
+    assert.equal(summarizeRoom({ ...served, turn: [], amber: false }).owner, false);
+    // The works' census incomplete and the question unreadable: the room keeps the question it had, drawn unconfirmed.
+    let rooms = new Map();
+    const snapshots = createStateSnapshotSequencer((data) => { rooms = reconcileProjectRooms(rooms, data).rooms; });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    apply({ supervisor_ready: true, works: [], works_complete: true, current_questions_complete: true,
+        rooms: { 42: { ...served, activity: 'idle', mark: 'none', confirmed: true } } });
+    apply({ supervisor_ready: true, works: [], works_complete: false, rooms: {},
+        current_questions_gaps: [{ task_id: 't' }] });
+    assert.deepEqual(['mark', 'owner', 'word'].map((key) => rooms.get('42')[key]), ['ring', true, 'Activity unconfirmed']);
+});
+
+test('the index reads Project rooms only; its aggregate is the strongest shape and the owner\'s move', () => {
     const rooms = new Map([
         ['42', summary('paused_by_owner')], ['43', summary('spending_limit')], ['1', summary('held_continue')],
     ]);
@@ -144,6 +187,177 @@ test('the index reads Project rooms only; the header\'s one mark is the stronges
     }
     assert.equal(buildProjectActivityIndex(new Map(), [42]).aggregate, IDLE_SUMMARY);
     assert.equal(buildProjectActivityIndex().aggregate, IDLE_SUMMARY);
+});
+
+test('an amber picture always has an amber row: what waits counts only the rooms the feed can show', () => {
+    const rooms = new Map([['42', summary('held_continue')], ['43', summary('spending_limit')]]);
+    // The room that waits has its row: the header is the owner's turn.
+    const fed = buildProjectActivityIndex(rooms, [42, 43], [{ chat_id: 42 }, { chat_id: 43 }]);
+    assert.deepEqual([fed.aggregate.mark, fed.aggregate.owner], ['moving', true]);
+    // It has none: the work part still stands for every room, the owner part does not.
+    const unfed = buildProjectActivityIndex(rooms, [42, 43], [{ chat_id: 42 }]);
+    assert.deepEqual([unfed.aggregate.mark, unfed.aggregate.owner, unfed.aggregate.note], ['moving', false, '']);
+    assert.equal(unfed.byChat.get('43').owner, true, 'the room itself still says it');
+    // Without the reserved ids, the rows name the rooms.
+    assert.deepEqual([...buildProjectActivityIndex(rooms, undefined, [{ chat_id: 43 }]).byChat.keys()], ['43']);
+});
+
+test('a carried amber room keeps its feed row and the picture its amber; a complete read, or a room set that no longer names the room, drops them', () => {
+    // The page as app.js applies each body: the rooms, then the index over the feed's rows.
+    let rooms = new Map();
+    let index = buildProjectActivityIndex();
+    let feed = [];
+    const snapshots = createStateSnapshotSequencer((data) => {
+        rooms = reconcileProjectRooms(rooms, data).rooms;
+        feed = data.projects;
+        index = buildProjectActivityIndex(rooms, data.project_chat_ids, data.projects);
+    });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const recent = { id: 'recent', chat_id: 41 };
+    const old = { id: 'old', chat_id: 42 };
+    const asked = { activity: 'idle', transition: 'none', call: '', turn: [{ kind: 'open_question', task_id: 't', quiz_id: 'q' }],
+        amber: true, mark: 'none', confirmed: true, works: [] };
+    const read = (extra) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: {}, projects: [recent],
+        project_chat_ids: [41, 42], ...extra });
+    // The old Project is in the feed only because its room is the owner's turn.
+    apply(read({ rooms: { 42: asked }, projects: [recent, old], current_questions_complete: true }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['recent', 'old'], true]);
+    // A gap over its question: the server keeps neither the room nor its row; the page keeps both, the row after the
+    // body's own rows, and the header stays amber over a row it can show.
+    const gap = { current_questions_gaps: [{ task_id: 't' }] };
+    apply(read(gap));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, index.byChat.get('42')?.owner], [['recent', 'old'], true, true]);
+    // A complete room set that no longer names the room: its row is not brought back. (A deleted Project's tombstone
+    // stays named, so its row can return until a read vouches against its question.)
+    apply(read({ ...gap, project_chat_ids: [41] }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['recent'], false]);
+    // The complete read that drops the question drops both.
+    apply(read({ rooms: { 42: asked }, projects: [recent, old], current_questions_complete: true }));
+    apply(read({ current_questions_complete: true }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, rooms.has('42')], [['recent'], false, false]);
+});
+
+test('a feed the server could not read keeps the rows the page showed; a read that names the feed replaces them', () => {
+    let rooms = new Map();
+    let index = buildProjectActivityIndex();
+    let feed = [];
+    let revision = null;
+    const snapshots = createStateSnapshotSequencer((data) => {
+        rooms = reconcileProjectRooms(rooms, data).rooms;
+        feed = data.projects;
+        revision = data.project_messages_revision;
+        index = buildProjectActivityIndex(rooms, data.project_chat_ids, data.projects);
+    });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const old = { id: 'old', chat_id: 42 };
+    // The work still stands on its question: the room is amber in every body, carried or not.
+    const asked = { activity: 'waiting', transition: 'none', call: '', turn: [{ kind: 'question', task_id: 't', quiz_id: 'q' }],
+        amber: true, mark: 'still', confirmed: true, works: [] };
+    const read = (extra) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: { 42: asked },
+        projects: [old], project_listable_count: 1, project_chat_ids: [42], current_questions_complete: true,
+        project_messages_revision: 'r1', ...extra });
+    apply(read());
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [['old'], true, 'r1']);
+    // The registry unreadable: the feed comes empty with an unknown count, the room set unknown, the question still held.
+    apply(read({ projects: [], project_listable_count: null, project_chat_ids: null, current_questions_complete: false,
+        current_questions_gaps: [{ reason: 'project_registry_unavailable' }], project_messages_revision: null }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [['old'], true, 'r1'],
+        'unknown is not empty: the rows stay with the revision they were read at');
+    // Rows a body carries are the feed even while its count is unknown (the rooms read, the registry's count not).
+    const fresh = { id: 'fresh', chat_id: 43 };
+    apply(read({ projects: [fresh, old], project_listable_count: null, project_messages_revision: 'r2' }));
+    assert.deepEqual([feed.map((row) => row.id), revision], [['fresh', 'old'], 'r2'], 'carried rows are the feed');
+    // A read that names the feed again is the feed, empty included.
+    apply(read({ rooms: {}, projects: [], project_listable_count: 0, project_chat_ids: [], project_messages_revision: 'r0' }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [[], false, 'r0']);
+});
+
+test('the picture counts a room the feed shows even when the reserved set the page holds does not name it yet', () => {
+    const rooms = new Map([['41', summary('held_continue')], ['43', summary('spending_limit')]]);
+    // The page holds [41]; a new Project 43 is the owner's turn and has its row: it counts.
+    const held = buildProjectActivityIndex(rooms, [41], [{ chat_id: 41 }, { chat_id: 43 }]);
+    assert.deepEqual([held.aggregate.owner, held.byChat.has('43')], [true, true]);
+    // Without its row it is not counted by the owner part (no row to reach), as before.
+    const unfed = buildProjectActivityIndex(rooms, [41], [{ chat_id: 41 }]);
+    assert.deepEqual([unfed.aggregate.owner, unfed.byChat.has('43')], [false, false]);
+});
+
+test('Ouroboros\'s picture says one answer: Main or a Project the feed shows waits for the owner, and nothing else', () => {
+    const [working, waiting] = [summary('held_continue'), summary('spending_limit')];
+    assert.deepEqual([working.owner, waiting.owner], [false, true]);
+    const index = (rooms, rows) => buildProjectActivityIndex(rooms, [42, 43], rows);
+    // A Project waits and the feed holds its row (wherever in the list): the dot, and the words can name a Project.
+    const project = new Map([['1', working], ['42', working], ['43', waiting]]);
+    assert.deepEqual(pictureOwner(project, index(project, [{ chat_id: 42 }, { chat_id: 43 }])),
+        { main: false, projects: true, any: true });
+    // The feed cannot show that room: no dot, as there is no amber row to reach.
+    assert.deepEqual(pictureOwner(project, index(project, [{ chat_id: 42 }])), { main: false, projects: false, any: false });
+    // Main's own wait: the dot (Main's mark says it beside it), without a Project's words.
+    const main = new Map([['1', waiting], ['42', working]]);
+    assert.deepEqual(pictureOwner(main, index(main, [{ chat_id: 42 }])), { main: true, projects: false, any: true });
+    // Work alone, and nothing at all: no dot.
+    const none = new Map([['1', working], ['42', working]]);
+    assert.deepEqual(pictureOwner(none, index(none, [{ chat_id: 42 }])), { main: false, projects: false, any: false });
+    assert.deepEqual(pictureOwner(), { main: false, projects: false, any: false });
+});
+
+test('a waiting Project\'s line says its question in the question\'s own opening words, kept across a gap by its address', () => {
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const room = (turn, extra = {}) => ({ activity: 'idle', transition: 'none', call: '', turn, amber: turn.length > 0,
+        mark: 'none', confirmed: true, works: [], ...extra });
+    const body = (rooms, questions, extra = {}) => ({ supervisor_ready: true, works: [], works_complete: true, rooms,
+        current_questions: questions, current_questions_complete: true, ...extra });
+    const row = { task_id: 't', quiz_id: 'q', question: '**The line is up.**\n\nOne step is `yours`:   switch it on.' };
+    const words = 'The line is up. One step is yours: switch it on.';
+    const sentence = 'An unanswered question is here';
+    const line = (rooms) => rowLine(rooms.get('42'));
+
+    let rooms = reconcileProjectRooms(new Map(), body({ 42: room([item]) }, [row])).rooms;
+    assert.deepEqual(rooms.get('42').ask, { key: 't:q', words });
+    assert.deepEqual(line(rooms), { kind: 'ask', text: words });
+    assert.equal(rooms.get('42').label, sentence, 'the state\'s short words stay the label (a row menu says them)');
+    // The next body lists the question without its row (a read with a gap): its words stay while its item stands.
+    const gap = { current_questions_complete: false, current_questions_gaps: [{ task_id: 't' }] };
+    rooms = reconcileProjectRooms(rooms, body({ 42: room([item]) }, [], gap)).rooms;
+    assert.equal(line(rooms).text, words);
+    // A body that does not list the room keeps it unconfirmed with no line; the words return with the question.
+    rooms = reconcileProjectRooms(rooms, { supervisor_ready: true, works: [], works_complete: false, rooms: {} }).rooms;
+    assert.deepEqual([rooms.get('42').owner, line(rooms).text], [false, '']);
+    rooms = reconcileProjectRooms(rooms, body({ 42: room([item]) }, [], gap)).rooms;
+    assert.equal(line(rooms).text, words);
+    // Another question never borrows them, and a row that arrives without words says none: the sentence stands.
+    const other = reconcileProjectRooms(rooms, body({ 42: room([{ ...item, quiz_id: 'other' }]) }, [], gap)).rooms;
+    assert.deepEqual([other.get('42').ask, line(other).text], [undefined, sentence]);
+    for (const blank of ['  ', '**   **', '` `']) {  // markers around nothing are no words either
+        const wordless = reconcileProjectRooms(rooms, body({ 42: room([item]) }, [{ ...row, question: blank }])).rooms;
+        assert.deepEqual([wordless.get('42').ask, line(wordless).text], [undefined, sentence], JSON.stringify(blank));
+    }
+    assert.equal(line(reconcileProjectRooms(new Map(), body({ 42: room([item]) }, [])).rooms).text, sentence, 'never read: the sentence');
+    // What only the owner can do outranks an unanswered question, and an answer whose delivery is unknown is no
+    // question to answer: each keeps its own sentence though the body carries the question's row.
+    const action = reconcileProjectRooms(new Map(), body({ 42: room([{ kind: 'action', code: 'sign_in' }, item]) }, [row])).rooms;
+    assert.deepEqual([action.get('42').ask, line(action).text], [undefined, 'Something here waits for you']);
+    const delivery = reconcileProjectRooms(new Map(),
+        body({ 42: room([{ ...item, code: 'delivery_unknown' }]) }, [row])).rooms;
+    assert.equal(line(delivery).text, 'An answer here was recorded; its delivery is unknown');
+    // Beside a question still unanswered, the answered one never lends its words: the line says the unanswered one.
+    const mixed = reconcileProjectRooms(new Map(), body(
+        { 42: room([{ ...item, code: 'delivery_unknown' }, { ...item, quiz_id: 'q2' }]) },
+        [row, { task_id: 't', quiz_id: 'q2', question: 'Which of the two?' }])).rooms;
+    assert.deepEqual(mixed.get('42').ask, { key: 't:q2', words: 'Which of the two?' });
+    // A task standing on its question says the question; without its row, the room's own word.
+    const stands = room([{ kind: 'question', task_id: 't', quiz_id: 'q', work_id: 'w' }], { activity: 'waiting', mark: 'still', works: ['w'] });
+    assert.equal(line(reconcileProjectRooms(new Map(), body({ 42: stands }, [row])).rooms).text, words);
+    assert.equal(line(reconcileProjectRooms(new Map(), body({ 42: stands }, [])).rooms).text, 'Waiting for your answer');
+    // The complete read that drops the room drops its words with it.
+    assert.equal(reconcileProjectRooms(rooms, body({}, [])).rooms.has('42'), false);
+    // A long question is cut for a name with a visible ellipsis; the row's own line is cut by its width.
+    const long = questionWords('word '.repeat(80), 160);
+    assert.deepEqual([long.length, long.endsWith('…'), questionWords('word '.repeat(80)).length], [160, true, 399]);
+    assert.equal(questionWords('x'.repeat(200), 160), `${'x'.repeat(159)}…`, 'the cut keeps max characters, the ellipsis one of them');
+    assert.equal(questionWords('x'.repeat(160), 160), 'x'.repeat(160), 'a line that fits is not cut');
+    assert.equal(questionWords(null), '');
+    assert.equal(questionWords('** Step 1:** check ` x ` '), 'Step 1: check x', 'a marker leaves no space behind');
 });
 
 test('a mark\'s words: its place\'s label and new messages, in one phrase', () => {

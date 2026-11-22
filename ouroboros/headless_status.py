@@ -1,7 +1,8 @@
 """Artifact and task lifecycle vocabulary shared by the headless owners.
 
 The artifact-status values a task result may carry, the terminal subset the
-pruners and the copy-back gate test against, the lifecycle fields a late child
+pruners and the copy-back gate test against (and its ready part a decision may
+judge), the lifecycle fields a late child
 copy-back must preserve, and the two literals headless mirrors instead of
 importing (settled task statuses, the local-readonly subagent mode) because a
 module-level import of their SSOT would close an import cycle. Constants only:
@@ -27,6 +28,10 @@ ARTIFACT_TERMINAL_STATUSES = {
     ARTIFACT_STATUS_MISSING,
     ARTIFACT_STATUS_FAILED,
 }
+# Its ready subset: a capture a decision may judge, with or without changes.
+ARTIFACT_READY_STATUSES = frozenset({
+    ARTIFACT_STATUS_READY, ARTIFACT_STATUS_READY_WITH_CHANGES, ARTIFACT_STATUS_READY_NO_CHANGES,
+})
 
 
 # Mirrors task_status.SETTLED_STATUSES; a module-level import would close the

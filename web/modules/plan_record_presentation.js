@@ -57,6 +57,102 @@ function planRoomLine(participant) {
     return facts.length ? `Participant ${text(participant.seat_id)} room: ${facts.join(' · ')}` : '';
 }
 
+// One ask's evidence as its row recorded it (attach, attached, omissions; the host's plan_record.ask_evidence): each
+// locator attached whole or in part, which means prepared for the participants, never that one was sent it (its own
+// status says that) or read it, or not attached, each with every reason recorded for it. A cut, a repeat or a history
+// gap stays beside content that attached. A field an older writer did not record is not recorded, never none.
+const PART_REASONS = ['truncated_to_', 'chat_history_gap:'];
+
+export function askEvidence(ask) {
+    const listed = (key) => (Array.isArray(ask?.[key]) ? ask[key] : null);
+    const declared = listed('attach');
+    const attached = listed('attached');
+    const omissions = listed('omissions');
+    const rows = new Map((attached || []).filter((row) => row && typeof row === 'object').map((row) => [text(row.locator), row]));
+    const reasons = new Map();
+    for (const row of omissions || []) {
+        if (!row || typeof row !== 'object') continue;
+        reasons.set(text(row.locator), [...(reasons.get(text(row.locator)) || []), text(row.reason)]);
+    }
+    const items = [];
+    for (const locator of new Set([...(declared || []).map(text), ...rows.keys(), ...reasons.keys()])) {
+        const row = rows.get(locator);
+        const why = reasons.get(locator) || [];
+        let state;
+        if (!locator) continue;
+        if (row) state = !omissions ? 'attached_unknown' : why.some((reason) => PART_REASONS.some((prefix) => reason.startsWith(prefix))) ? 'part' : 'whole';
+        else if (!attached) state = 'unknown';
+        else if (why.length || !omissions) state = 'not_attached';
+        else state = 'unknown';
+        items.push({ locator, state, reasons: why, bytes: row?.bytes ?? null, sha256: text(row?.sha256) });
+    }
+    const count = (state) => items.filter((item) => item.state === state).length;
+    return {
+        recorded: { attach: declared !== null, attached: attached !== null, omissions: omissions !== null },
+        items, counts: { whole: count('whole'), part: count('part'), attached_unknown: count('attached_unknown'), not_attached: count('not_attached'), unknown: count('unknown') },
+    };
+}
+
+// Owner words for the reasons the host records; Record facts keep each code beside them, and an unlisted code is shown
+// as it is.
+const REASON_WORDS = [
+    ['duplicate_locator', 'listed more than once'], ['url_not_fetched', 'a link: links are listed, never fetched'],
+    ['denied_path', 'settings or runtime data outside this task\'s own stores'],
+    ['outside_allowed_roots', 'outside the folders this task can read'], ['sensitive', 'a credential-like file name'],
+    ['missing', 'not found'], ['directory', 'a folder, not a file'], ['binary', 'not text'], ['unreadable', 'could not be read'],
+    ['symlink_loop', 'a link that loops'], ['budget_exhausted', 'the ask\'s evidence budget was already spent'],
+    ['task_not_found', 'no saved result for that task'], ['chat_not_found', 'no such conversation'],
+    ['unsupported_locator', 'not a locator plan_task reads'], ['read_target_differs', 'that address reads another file'],
+    ['too_large:', 'too large to attach'], ['read_blocked:', 'refused by the read rules'],
+    ['task_unreadable:', 'could not be read'], ['chat_unreadable:', 'could not be read'],
+    ['chat_history_gap:', 'the conversation history has a gap'], ['source_unretained:', 'its whole source was not kept'],
+    ['invalid_selector', 'the selection is not valid'], ['selector_out_of_range', 'the selection is outside the source'],
+    ['symbol_', 'the symbol could not be selected'],
+];
+const byteCount = (value) => Number(value).toLocaleString('en-US');
+
+function reasonWords(reason, item) {
+    const cut = /^truncated_to_(\d+)$/.exec(reason);
+    if (cut) return `the first ${byteCount(cut[1])}${item.bytes != null ? ` of ${byteCount(item.bytes)}` : ''} bytes (${reason})`;
+    const words = REASON_WORDS.find(([code]) => (code.endsWith(':') || code.endsWith('_') ? reason.startsWith(code) : reason === code))?.[1];
+    return words ? `${words} (${reason})` : reason;
+}
+
+function planEvidenceLines(ask) {
+    const id = text(ask.ask_id);
+    const { recorded, items, counts } = askEvidence(ask);
+    if (!items.length) {
+        return recorded.attach || (recorded.attached && recorded.omissions) ? [] : [`Ask ${id} evidence: not recorded`];
+    }
+    const describe = (item) => [item.locator, item.state === 'attached_unknown' ? 'completeness not recorded' : '',
+        item.bytes != null && !item.reasons.some((reason) => reason.startsWith('truncated_to_')) ? `source ${byteCount(item.bytes)} bytes` : '',
+        ...item.reasons.map((reason) => `${item.state === 'part' && PART_REASONS.some((prefix) => reason.startsWith(prefix))
+            ? 'in part: ' : ''}${reasonWords(reason, item)}`),
+        item.sha256 ? `sha256 ${item.sha256}` : ''].filter(Boolean).join(' · ');
+    const group = (label, states) => {
+        const rows = items.filter((item) => states.includes(item.state)).map(describe);
+        return rows.length ? [`Ask ${id} ${label}: ${rows[0]}`, ...rows.slice(1).map((row) => `  ${row}`)] : [];
+    };
+    return [
+        `Ask ${id} evidence: prepared for its participants: ${evidenceCounts(counts, items.length)}`,
+        ...group('attached', ['whole', 'part', 'attached_unknown']), ...group('not attached', ['not_attached']),
+        ...group('declared, attachment not recorded', ['unknown']),
+        recorded.omissions ? '' : `Ask ${id} evidence cuts and absences: not recorded`,
+    ].filter(Boolean);
+}
+
+const evidenceCounts = (counts, total) => [`${counts.whole} of ${total} attached whole`, counts.part ? `${counts.part} in part` : '',
+    counts.attached_unknown ? `${counts.attached_unknown} attached, completeness not recorded` : '',
+    counts.not_attached ? `${counts.not_attached} not attached` : '', counts.unknown ? `${counts.unknown} not recorded` : '']
+    .filter(Boolean).join(', ');
+
+// The ask's one evidence sentence on its opened row, only when what was prepared for the participants is incomplete;
+// which locators and why stay in Record facts.
+function planEvidenceNotice(ask) {
+    const { items, counts } = askEvidence(ask);
+    return counts.part || counts.attached_unknown || counts.not_attached || counts.unknown ? `Evidence for this ask: ${evidenceCounts(counts, items.length)}.` : '';
+}
+
 function planDoneWhenLines(revision) {
     const rows = Array.isArray(revision?.done_when) ? revision.done_when : [];
     if (!rows.length) return ['done_when: (none stated yet)'];
@@ -110,6 +206,7 @@ export function planRecordGroup(owner, record, detail) {
             ...(Array.isArray(ask.host_added) && ask.host_added.length
                 ? [`${ask.revision == null ? 'a reading about Ouroboros\'s own body' : 'first ask on a body plan'}: the host added ${
                     ask.host_added.join(', ')}`] : []),
+            ...planEvidenceLines(ask),
             ...participants.map((p) => {
                 const who = `${text(p.seat_id)} (${text(p.model) || '?'}${p.owner_marked ? '' : ', added — never holds'})`;
                 if (p.status === 'answered') {
@@ -141,7 +238,7 @@ export function planRecordGroup(owner, record, detail) {
             summary: text(ask.message), superseded: false, compact: false, replayed: false, revised: false,
             // The host's fold for this ask (which objections stand), or null when the detail did not project it.
             initiatorTaskId: '', executions: [], execution: null, detailRef: null, participants, objections: known ? raised : null,
-            detailText: lines.join('\n'),
+            evidenceNotice: planEvidenceNotice(ask), detailText: lines.join('\n'),
         });
     });
     const awaiting = asks.some((ask) => (Array.isArray(ask.participants) ? ask.participants : []).some((p) => p?.status === 'pending'));

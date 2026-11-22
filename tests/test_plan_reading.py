@@ -2,8 +2,8 @@
 reading. It travels the ordinary ask — participants, the intention ledger, the mailbox — carrying
 the objective with its author, the owner's words and the room but no plan; its replies are advice
 that move no objection in any mode, while the same participant objecting to a stored revision holds
-as before. A reading of declared own-body work hears every marked reviewer under Blocking without
-spending the first body revision's ask. Each rule is pinned both ways through the real ToolContext,
+as before. A reading of declared own-body work is seated like a body plan's first ask (a counted
+reviewer, and a reason when it narrows the pool) without spending the first body revision's ask. Each rule is pinned both ways through the real ToolContext,
 the real plan record and the fake review substrate of ``tests/test_plan_task_tool.py``; the last two
 tests pin the cached prefix of a participant's packet."""
 from __future__ import annotations
@@ -55,22 +55,23 @@ def test_a_reading_on_an_empty_record_asks_the_council_and_records_one_ask_witho
     assert _record(harness, "task-2") == plan_record.empty_record()
 
 
-def test_a_readings_objection_never_holds_and_the_same_objection_on_a_revision_holds(harness):
+def test_a_readings_objection_never_stands_and_the_same_objection_on_a_revision_stands_disclosed(harness):
     sub = harness.install({"s1": _reply("Wrong direction.", objections=[("o1", "the owner asked for a story, not slides")]),
                            "s2": CLEAN, "s3": CLEAN})
-    ctx = harness.make_ctx()  # Blocking (the harness's enforcement)
+    ctx = harness.make_ctx()
     text, result = _call(ctx, ask="council")
-    assert result.meta["plan_holding"] == 0 and result.meta["plan_open_objections"] == 0
+    assert result.meta["plan_open_objections"] == 0
     assert "listed as objections in this reading — advice, never a standing objection: s1/o1" in text
     assert "Nothing holds your final answer." in text
-    decision = oh.plan_gate_decision(ctx, {}, enforcement="blocking")
-    assert decision["allow"] is True and decision["holding"] == [] and decision["open_objections"] == []
-    # The same seat and the same objection, stated about a stored revision, holds under Blocking.
+    decision = oh.plan_gate_decision(ctx, {})
+    assert decision["allow"] is True and decision["open_objections"] == []
+    # The same seat and the same objection, stated about a stored revision, stands: disclosed, never held.
     text, result = _write(ctx, ask=["s1"], message="Here is the plan.")
-    assert result.meta["plan_holding"] == 1 and "HELD" in text
+    assert result.meta["plan_open_objections"] == 1 and "nothing holds it" in text
     [objection] = plan_record.open_objections(_record(harness))
-    assert (objection["id"], objection["revision"], objection["holds"]) == ("o1", 1, True)
-    assert oh.plan_gate_decision(ctx, {}, enforcement="blocking")["allow"] is False
+    assert (objection["id"], objection["revision"], objection["owner_marked"]) == ("o1", 1, True)
+    decision = oh.plan_gate_decision(ctx, {})
+    assert decision["allow"] is True and decision["status"] == "objections_open"
     assert len(sub.calls) == 2
 
 
@@ -89,24 +90,26 @@ def test_after_a_reading_the_first_plan_ask_sends_the_plan_whole_and_continues_t
     assert _record(harness)["asks"][1]["revision"] == 1
 
 
-def test_a_declared_body_reading_hears_every_marked_reviewer_and_spends_no_first_body_ask(harness):
+def test_a_declared_body_reading_is_seated_like_a_first_body_ask_and_spends_none(harness):
     sub = harness.install({})
     ctx = harness.make_ctx(active_workspace=False)
     ctx.task_contract["context_requires_self_body_docs"] = True
-    text, _ = _call(ctx, ask=["s2"], message="Read it first.")
-    assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2", "s1", "s3"]
+    text, result = _call(ctx, ask=["s2"], message="Read it first.")
+    assert "REVIEW_PANEL_REASON_REQUIRED" in text and result.code == "TOOL_ARG_ERROR" and sub.calls == []
+    text, _ = _call(ctx, ask=["s2"], message="Read it first.", reason="the reading is about one area")
+    assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2"]
     ask = _record(harness)["asks"][0]
-    assert ask["revision"] is None and ask["body_first_ask"] is True and ask["host_added"] == ["s1", "s3"]
-    assert "This reading concerns Ouroboros's own body" in text
+    assert ask["revision"] is None and ask["body_first_ask"] is True and ask["host_added"] == []
+    assert "the host added" not in text  # the narrowed reading is sent to exactly the named seat
     system_prompt = _user_text(sub.calls[0]["request"].slot_messages["s2"][0]["content"])
     assert "## BIBLE.md (constitution" in system_prompt and "## ARCHITECTURE.md" in system_prompt
     # A later reading names its participants like any later ask: the first reading heard everyone.
     _call(ctx, ask=["s2"], message="One more question about the request.")
     assert [s.slot_id for s in sub.calls[1]["slots"]] == ["s2"] and _record(harness)["asks"][1]["body_first_ask"] is False
-    # The first ask about a body revision still widens: the readings spent nothing.
-    _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"])
-    assert [s.slot_id for s in sub.calls[2]["slots"]] == ["s2", "s1", "s3"] and _record(harness)["asks"][2]["body_first_ask"] is True
-    # The other direction: without the declaration a reading carries no pack and widens nothing.
+    # The first ask about a body revision is still a first body ask: the readings spent nothing.
+    _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"], reason="the plan touches one module")
+    assert [s.slot_id for s in sub.calls[2]["slots"]] == ["s2"] and _record(harness)["asks"][2]["body_first_ask"] is True
+    # The other direction: without the declaration a reading carries no pack and owes no reason.
     _call(harness.make_ctx(active_workspace=False, task_id="task-2"), ask=["s2"])
     assert [s.slot_id for s in sub.calls[3]["slots"]] == ["s2"] and _record(harness, "task-2")["asks"][0]["body_first_ask"] is False
     assert "## BIBLE.md" not in _user_text(sub.calls[3]["request"].slot_messages["s2"][0]["content"])

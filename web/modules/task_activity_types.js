@@ -1,6 +1,31 @@
 /**
+ * The usage ledger row's physical context of a task's latest sent Main attempt (``physical_attempt_context.ContextAttemptFact``).
+ * ``dispatched`` is the host's commitment, not provider acceptance; ``released`` retracts that exact attempt.
+ * @typedef {Object} ContextAttemptFact
+ * @property {string} attempt_id
+ * @property {'dispatched'|'settled'|'unresolved'|'released'} ledger_state
+ * @property {string} round_id
+ * @property {''|'max'|'low'|'nano'} preferred_at_send  // the task plan's owner mode when it sent
+ * @property {'max'|'low'|'nano'} applied  // the mode the send is named in: Max for Max's chapter maps (shown_mode)
+ * @property {'whole'|'maps'} books  // the books' form in this send
+ * @property {string} profile  // owner_max | owner_low | owner_nano | task_local_low | task_local_nano
+ * @property {''|'memory'|'route'|'window'|'after_start'} cause  // why applied is lower than preferred_at_send, or Max's books are maps
+ * @property {boolean} target_missed  // this send exceeded the owner's mode target
+ * @property {?number} no_memory_tokens  // Low's missed target: the start's request with no memory, else null
+ * @property {string} observed_at
+ * @property {number} task_attempt
+ * @property {string} llm_call_id
+ * @property {string} execution_id
+ * @property {number} call_attempt
+ * @property {ContextAttemptObservation=} previous  // the next-newest attempt not proven unsent while this one is dispatched or released; never a chain
+ */
+/** @typedef {Omit<ContextAttemptFact, 'previous'>} ContextAttemptObservation */
+/**
  * @typedef {Object} ActiveDirectTurn
+ * @property {import('./work_types.js').WorkLead=} lead  // the model it runs on and whose choice that is
+ * @property {import('./work_types.js').WorkProcessing=} processing  // its own tier and the newest call's receipt
  * @property {Object=} model_activity  // exact-call transport observation; no request/account content
+ * @property {ContextAttemptFact=} context_attempt  // its task attempt's latest sent attempt, kept past the call
  * @property {Object.<string,Object>=} model_waits
  * @property {number=} task_attempt
  * @property {string=} turn_phase  // direct turn: the last start fact it passed (accepted … dispatched); display only
@@ -17,6 +42,9 @@
 /** Shared census facts from the gateway; phase and outcome are independent. */
 /**
  * @typedef {Object} ActiveChatActivity
+ * @property {import('./work_types.js').WorkLead=} lead  // the model it runs on and whose choice that is
+ * @property {import('./place_contract_types.js').PlaceOrigin=} place_origin  // the place that called this work, as on its frames; a Main portal reads it here
+ * @property {import('./work_types.js').WorkProcessing=} processing  // its own tier and the newest call's receipt
  * @property {string=} executor  // where the turn runs: worker, inline_call or inline_degraded
  * @property {string=} carrier  // a lane row: awaiting (no carrier holds it yet) or worker
  * @property {string=} last_line Visible model narration; empty when not recorded.
@@ -28,6 +56,8 @@
  * @property {Object=} outcome_axes
  * @property {string=} reason_code
  * @property {Object=} cancel_origin  // the stored stop origin the status fold reads (an owner-stopped turn's typed stop)
+ * @property {Object=} finalization_recovery The stored result's adopted answer, read by that fold.
+ * @property {string=} terminal_origin
  * @property {string[]=} delegated_runs_unreconciled  // the stored result's current custody debt, read by that fold
  * @property {Object=} root_phase_checkpoint  // compact post_task_synthesis fact only
  * @property {string=} timeout_retry_from  // explicit automatic-retry predecessor, never owner Continue
@@ -44,6 +74,7 @@
  * @property {boolean=} required_question_unavailable  // a recorded owner-question wait whose detail could not be read: possibly blocked, never "no question"
  * @property {Object.<string,{requires_owner_action?:boolean,revision:number,task_attempt:number}>=} model_waits Current owner facts; missing action evidence is unavailable.
  * @property {Object=} model_activity  // exact-call transport observation; never quota wait or task liveness
+ * @property {ContextAttemptFact=} context_attempt  // its task attempt's latest sent attempt, kept past the call
  * @property {number=} task_attempt
  * @property {string=} turn_phase  // direct turn: the last start fact it passed (accepted … dispatched); display only
  * @property {string} activity_id
@@ -61,15 +92,16 @@
  * `status`/`is_error` stay its execution outcome; exit, signal and timeout stay process facts.
  * @typedef {Object} ToolVerificationFact
  * @property {"pass"|"fail"} status  // the durable receipt's verdict
- * @property {string} contract_kind  // visible_verifier | explicit_command | explicit_metric
+ * @property {string} contract_kind  // visible_verifier | explicit_command | explicit_metric | artifact_observation
  * @property {string} expected_match  // substring | exact | exact_line | json_equals | bytes_equal
  * @property {boolean=} matched  // present only where a comparison was evaluated (never on timeout)
+ * @property {boolean=} paths_named  // a failed artifact observation had at least one named path
  * @property {string} check  // the receipt's check rendering, bounded for transport
- * @property {string} check_rendering
+ * @property {string=} check_rendering
  * @property {string=} criterion_id
  * @property {string} criterion_source  // task_stated | agent_defined
  * @property {string} receipt_ts  // the receipt's own timestamp; no separate receipt id exists
- * @property {string=} detail  // the producer's sentence for a timeout or a bytes_equal comparison
+ * @property {string=} detail  // bounded diagnostic from the producer, including missing paths
  */
 /**
  * @typedef {Object} TaskPauseRequest
@@ -90,6 +122,10 @@
  * @property {boolean=} latch_pending
  * @property {string=} error
  * @property {string=} reason_code
+ */
+/**
+ * @typedef {Object} TaskContinueRequest
+ * @property {string} action_nonce
  */
 /**
  * @typedef {Object} TaskContinueResponse
@@ -119,4 +155,42 @@
  * @property {string=} successor_task_id
  * @property {'bound'|'admitted'=} state
  * @property {string=} action_nonce
+ */
+/**
+ * Mirrors `launch_custody.py`, which states what each field means: a service a task kept running, read now.
+ * @typedef {Object} KeptService
+ * @property {string=} launch_id  // the durable launch a Stop names
+ * @property {string=} name
+ * @property {string=} task_id
+ * @property {string=} task_title
+ * @property {('running'|'unknown'|'capture_owed')=} state  // capture_owed: ended, declared outputs not captured
+ * @property {string=} since
+ * @property {string=} address  // first loopback URL its log printed; '' when none
+ * @property {string=} log_path
+ * @property {('host'|'local_executor'|'docker'|'')=} backend  // '' on a capture_owed row: no live launch to name
+ * @property {number=} pid
+ */
+/**
+ * @typedef {Object} KeptServicesResponse
+ * @property {KeptService[]} services
+ * @property {boolean} complete  // false: a custody store was unreadable; the list may miss one
+ * @property {string} note
+ */
+/**
+ * @typedef {Object} KeptServiceStopRequest
+ * @property {string} reason
+ */
+/**
+ * @typedef {Object} KeptServiceStopResponse
+ * @property {boolean=} ok  // true only when it ended and its outputs were captured or none declared (a not_found capture-only retry included)
+ * @property {('stopped'|'not_confirmed'|'unknown'|'not_found'|'refused')=} outcome
+ * @property {string=} launch_id
+ * @property {string=} name
+ * @property {string=} task_id
+ * @property {string=} actor
+ * @property {string=} reason
+ * @property {string=} detail
+ * @property {string=} log_path
+ * @property {string=} stopped_at
+ * @property {Object=} outputs  // {task_id, state: captured|incomplete|none_declared|unavailable|not_attempted, detail}
  */

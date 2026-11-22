@@ -158,7 +158,7 @@ def test_pending_council_keeps_session_source_loose_until_its_last_reply(harness
     [attached] = _record(harness)["asks"][0]["attached"]
     file = task_artifact_dir_path(harness.drive, ctx.task_id) / attached["ref"]["path"]
     assert all(f"`{file}`" in str(request.slot_session_tasks[slot.slot_id]) for slot in slots)
-    assert plan_record.gate_projection(_record(harness), enforcement="blocking", cyber_pro=False, hurry=False)["allow"]
+    assert plan_record.gate_projection(_record(harness), cyber_pro=False)["allow"]
     write_task_result(harness.drive, ctx.task_id, "completed", result="author finished")
     with store.open_store(harness.drive, write=False) as txn:
         assert txn.row(ctx.task_id, "review_collection_pending", "plan_collection_pending") == (0, 1)
@@ -214,6 +214,8 @@ def test_a_whole_source_that_could_not_be_kept_is_named_and_never_claimed(harnes
     packet = _user_text(sub.calls[0]["request"].slot_messages["s1"][-1]["content"])
     assert raw[:EVIDENCE_PER_ITEM_BYTES].decode() in packet
     assert f"| {locator} | source_unretained:OSError |" in packet and "plan-evidence-" not in packet
-    assert f"{locator} (source_unretained:OSError)" in text
+    # The part attached; its cut and the unkept whole source stay beside it, never as "not attached".
+    assert (f"evidence attached (prepared for the participants): {locator} (in part; source {len(raw)} bytes; "
+            f"truncated_to_{EVIDENCE_PER_ITEM_BYTES}; source_unretained:OSError)") in text and "evidence not attached" not in text
     held = task_artifact_dir_path(harness.drive, "task-1") / "source_handles" / "context_checkpoints"
     assert not list(held.glob("plan-evidence-*"))

@@ -43,7 +43,7 @@ def test_a_cost_or_wait_revision_keeps_the_binding_and_the_informed_finish():
     _finished(trace, _record(STOPPED, "FAIL"))
     run = _bind_review_run(trace, _record(copy.deepcopy(STOPPED), "FAIL", revision=9, usd=0.75), "subject-1", "advisory")
     assert run["informed_finish"] is True and run["aggregate"] == "FAIL"
-    assert _review_axis(trace)["author_finish"] is True
+    assert _review_axis(trace)["author_finish"] == "author_finish"  # a legacy ``True`` finish stays readable
 
 
 def test_a_continued_seat_refreshes_the_binding_and_withdraws_the_old_informed_finish():

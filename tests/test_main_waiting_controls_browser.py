@@ -29,6 +29,7 @@ from tests.test_main_consumer_journeys_browser import (
 from tests.test_main_materials_browser import _m1660_material_question
 from tests.test_main_results_browser import _nf_observe, _nf_retain
 from tests.test_owner_wait_integration import wait_clone as wait_clone
+from tests.settings_browser_helpers import settings_page, top_path
 
 
 pytestmark = [pytest.mark.browser]
@@ -215,7 +216,7 @@ def test_webkit_main_material_reader_then_model_wait_settings_entry(wait_clone, 
     marker, resumed = "MAIN1660_SETTINGS", []
     with _ControlsAuthRefusalStub(marker, resumed) as stub:
         with _session(wait_clone, tmp_path, stub, "webkit-main-material-settings", [
-            "manual wait visible", "PNG decoded", "Markdown reader read", "Settings Providers reached",
+            "manual wait visible", "PNG decoded", "Markdown reader read", "Settings Accounts reached",
             "navigation did not resume task",
         ], engine="webkit", seed=lambda root: _m1660_material_question(root)[0]) as (page, server, oracle, facts, evidence):
             task_id = _start(server, facts, marker)
@@ -240,11 +241,11 @@ def test_webkit_main_material_reader_then_model_wait_settings_entry(wait_clone, 
             expect(control.get_by_role("button", name="Sign in again", exact=True)).to_be_hidden()
             control.get_by_role("button", name="Settings", exact=True).click()
             expect(page.locator("#page-settings.active")).to_be_visible()
-            expect(page.locator('[data-settings-tab="providers"]')).to_have_attribute("aria-selected", "true")
-            expect(page.locator('[data-settings-panel="providers"]')).to_be_visible()
+            expect(settings_page(page, "accounts")).to_be_visible()
+            assert top_path(page) == "accounts"
             _controls_project_closed(page)
-            _controls_capture(page, evidence, "webkit-settings-providers")
-            facts["reached"].append("Settings Providers reached")
+            _controls_capture(page, evidence, "webkit-settings-accounts")
+            facts["reached"].append("Settings Accounts reached")
             latest = oracle.task_result(task_id)["model_waits"][waiting["wait_id"]]
             assert latest["state"] == "waiting" and latest["revision"] == waiting["revision"]
             assert not resumed and len(stub.refused_requests) == 1

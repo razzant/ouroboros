@@ -19,6 +19,6 @@ export async function chooseAndSendReview({ openConfirmDialog, ws, readSettings 
                 ? [{ value: row.subagent_id, label: `Subagent ${index + 1} — ${handles.get(row.subagent_id) || row.subagent_id}` }] : [])],
     });
     if (!answer?.confirmed) return false;
-    ws.send({ type: 'command', cmd: `/review ${answer.value || ''}`.trim() });
+    ws.send({ type: 'command', cmd: `/review ${answer.value || ''}`.trim(), ui_control: { name: 'deep_review' } });
     return true;
 }

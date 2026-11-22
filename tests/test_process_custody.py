@@ -52,6 +52,8 @@ _SPAWN_ALLOWLIST = {
     "ouroboros/cli.py",                   # dev CLI (foreground)
     "ouroboros/server_control.py",        # restart exec path
     "ouroboros/workspace_patch_capture.py",  # waited synchronous child
+    # One review delta's blob reader: waited in the call, killed at the same 600 s bound as review Git reads.
+    "ouroboros/delegate_named_evidence.py",
     # One raw-blob fast-import per staging call: reaped before the call returns,
     # killed on any early exit (stage_raw_payload_inventory).
     "ouroboros/subagent_worktrees.py",
@@ -70,13 +72,11 @@ _SPAWN_ALLOWLIST = {
     "ouroboros/tools/skill_exec.py",      # bounded skill run (waited + tracked)
     "ouroboros/tools/skill_preflight.py", # waited preflight child
     "ouroboros/marketplace/isolated_deps.py",  # waited installer child
-    # Connect's vendor-CLI install (domain op, extracted from the owned-daemon
-    # module): ONE waited child published through shell_process.tracked_start, so
-    # /panic's lock-free sweep or a begun stop that misses it is met by its own
-    # publication (isolated_deps._run template).
-    "ouroboros/claudexor_harness_install.py",
     "ouroboros/extension_process_runner.py",  # waited calls and session-owned response streams
     "ouroboros/workspace_executor.py",    # custody write-through added at spawn
+    # One work-domain effect's docker CLI: published through shell_process.tracked_start, its container group
+    # under the executor's foreground record (execution_domain.attached_launch), waited and settled before return.
+    "ouroboros/work_domain.py",
     "ouroboros/local_model.py",           # custody record added at spawn
     "ouroboros/extension_companion.py",   # custody write-through added at spawn
     "ouroboros/tools/services.py",        # routed through spawn_supervised
@@ -474,11 +474,8 @@ def test_lifeline_kills_child_when_parent_dies(tmp_path):
         "import time; time.sleep(60)"
     ) % str(REPO_ROOT)
     parent_src = (
-        "import subprocess, sys, pathlib, os;"
-        f"sys.path.insert(0, {str(REPO_ROOT)!r});"
-        "from ouroboros.process_custody import lifeline_parent_env;"
-        f"child = subprocess.Popen([sys.executable, '-c', {child_src!r}], "
-        "env={**os.environ, **lifeline_parent_env()});"
+        "import subprocess, sys, pathlib;"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_src!r}]);"
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid));"
     )
     pid_file = tmp_path / "child_pid"
@@ -489,10 +486,10 @@ def test_lifeline_kills_child_when_parent_dies(tmp_path):
     child_pid = int(pid_file.read_text())
     deadline = time.time() + 10
     while time.time() < deadline:
-        # A container init may leave an exited orphan unreaped. Use the same
-        # death observation as the supervisor-lifeline cases below, not PID presence.
-        if _process_gone(child_pid):
-            return
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            return  # lifeline fired
         time.sleep(0.2)
     try:
         os.kill(child_pid, 9)

@@ -829,8 +829,8 @@ def test_inline_governance_satisfies_only_the_exact_candidate_source(tmp_path, m
 
 
 def test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured(tmp_path):
-    """The two-part brief's size on the REAL repository, without the staged
-    diff, with its composition printed. The number is the whole reason the
+    """The two-part brief's size on the REAL repository with an explicit three-file
+    subject, excluding its diff slot. The number is the whole reason the
     packet is gone: the retired scope packet's fixed part alone was 1.21 MB.
     """
     from ouroboros.tools.review_brief_coupling import BriefInputs, build_retrieving_brief
@@ -845,6 +845,8 @@ def test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured(tmp_path)
     rows = scope_required_sources(REPO_ROOT, touched)
     task, manifest = build_retrieving_brief(REPO_ROOT, BriefInputs(
         commit_message="one brief, two parts",
+        diff_text="\n".join(f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+                            "@@ -1 +1 @@\n-old\n+new\n" for _status, path in touched),
         touched_paths=tuple(path for _status, path in touched),
         touched_manifest=touched_manifest(REPO_ROOT, touched),
         required_sources=rows,

@@ -1,3 +1,4 @@
+import { fmtInto } from './i18n.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindDialogFocus } from './ui_interactions.js';
 
@@ -7,7 +8,8 @@ let activeClose = null;
 /**
  * Render one caller-supplied typed detail disclosure. Values are always text;
  * callers cannot inject markup into the shared dialog.
- * @param {{summary?: string, rows?: Array<{label?: string, value?: string}>}|null} details
+ * @param {{summary?: string, rows?: Array<{label?: string, value?: string, authored?: boolean}>}|null} details
+ *   `authored`: the value is someone's own words (a place's name), which the page's translator leaves as written.
  */
 export function renderConfirmDialogDetails(details) {
     if (!details || typeof details !== 'object') return '';
@@ -18,7 +20,7 @@ export function renderConfirmDialogDetails(details) {
     const renderedRows = rows.map((row) => `
         <div class="confirm-dialog-detail-row">
             <dt>${escapeHtml(String(row.label ?? 'Detail'))}</dt>
-            <dd>${escapeHtml(String(row.value ?? ''))}</dd>
+            <dd${row.authored ? ' data-i18n-authored' : ''}>${escapeHtml(String(row.value ?? ''))}</dd>
         </div>`).join('');
     return `<details class="confirm-dialog-details ui-disclosure">
         <summary>${escapeHtml(String(details.summary ?? 'Show details'))}</summary>
@@ -31,9 +33,12 @@ export function openConfirmDialog({
     title,
     body,
     details = null,
-    // Caller-rendered rich content above the body: `mount(container)` fills the
+    // Caller-rendered rich content above the body: `mount(container, dialog)` fills the
     // container (the caller's own sanitizing renderer) and may return a disposer,
     // run when the dialog closes. `label` names the region for assistive tech.
+    // `dialog.setConfirmLabel(words, params)` renames the confirming button while the
+    // dialog is open, where what confirming does depends on what the content holds
+    // (ticks, a choice): plain words, or with `params` a template `fmt` fills.
     content = null,
     input = false,
     initialValue = '',
@@ -112,7 +117,14 @@ export function openConfirmDialog({
         document.addEventListener('keydown', onKey);
         document.body.appendChild(backdrop);
         if (content?.mount) {
-            const disposer = content.mount(backdrop.querySelector('[data-confirm-content]'));
+            const ok = backdrop.querySelector('[data-confirm-ok]');
+            const disposer = content.mount(backdrop.querySelector('[data-confirm-content]'), {
+                setConfirmLabel(words, params = null) {
+                    if (params) { fmtInto(ok, words, params); return; }
+                    delete ok.dataset.i18nFmt;  // plain words again: the overlay's, as the first label was
+                    ok.textContent = String(words || confirmLabel);
+                },
+            });
             if (typeof disposer === 'function') disposeContent = disposer;
         }
         activeDialog = backdrop;

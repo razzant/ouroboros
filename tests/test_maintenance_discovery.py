@@ -3,9 +3,13 @@ child slot (no stamp walk on a server thread) while the child keeps its lifetime
 packing authority."""
 from __future__ import annotations
 
+import contextlib
 import json
+import pathlib
+import sqlite3
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -75,9 +79,7 @@ def test_reconcile_pass_reserves_the_child_and_walks_no_stamp_in_the_server(root
 def test_changed_discovery_short_circuits_but_quiet_install_still_scans(root, monkeypatch, count):
     for n in range(count):
         _task(root, f"task-{n:04}", blobs=1)
-    # Publish a valid cache before measuring; no packing child required to read it.
-    with packs.open_index(root):
-        pass
+    packs.ensure_index(root)  # a valid cache, as the packing pass leaves it, before measuring
     calls, original = [], packer._stamp
 
     def stamp(*args, **kwargs):
@@ -119,9 +121,128 @@ def test_archive_only_spawns_the_child_without_a_task_census_in_the_server(root,
 def test_discovery_does_not_rebuild_a_missing_index(root, monkeypatch):
     _task(root, "candidate", blobs=1)
     packs.packs_dir(root).mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(packs, "_rebuild_index", lambda *a: pytest.fail("discovery rebuilt cache"))
+    monkeypatch.setattr(packs, "ensure_index", lambda *a: pytest.fail("discovery rebuilt cache"))
     assert packer.packing_pending(root, lambda: False)
     assert not (packs.packs_dir(root) / packs.INDEX_NAME).exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "garbage"])
+def test_a_resting_install_owes_its_pass_the_index_rebuild_and_the_pass_streams_it_once(root, monkeypatch, damage):
+    """Only the packing pass rebuilds the cache, and the maintenance look opens nothing of the packs (on the
+    name tier no SQLite read may run beside a writer without the index lock): once the packer rests, an index
+    file gone makes its job due at once (a stat), an unreadable one only when a reader first needs it, which
+    answers ``evidence_unavailable`` (damaged) and leaves the damage mark. The pass rebuilds it from the
+    sidecars one at a time, checks its own private file whole before publishing it (never the live one),
+    records one ``storage_pack`` row of it, removes the mark and rests. The restore walks stream the sidecars
+    the same way."""
+    from tests._cost_meter import CostMeter, tagged
+
+    refs = [_task(root, task, blobs=1)[0][0] for task in ("a", "b", "c", "d")]
+    for _ in range(2):  # packs, then the one more look that records the moved stamps
+        maintenance.run_job(root, "evidence_packing")
+    assert "evidence_packing" not in maintenance.due(root)
+    index, mark = packs.packs_dir(root) / packs.INDEX_NAME, packs.packs_dir(root) / packs.DAMAGED_MARK
+    index.unlink() if damage == "missing" else index.write_bytes(b"not a database")
+    with CostMeter(root) as meter:
+        due = tagged("look", lambda: maintenance.due(root))
+    opened = {key: amount for key, amount in meter.snapshot("look")["counts"].items()
+              if key.split(":")[0] in ("open", "os_open", "read_bytes", "connect") and key.endswith(":packs")}
+    assert not opened and ("evidence_packing" in due) == (damage == "missing"), (opened, due)
+    if damage == "garbage":  # its first reader meets it and marks it for the pass
+        with pytest.raises(packs.EvidenceUnavailable) as met:
+            packs.blob_bytes(root, refs[0])
+        assert met.value.reason == "damaged" and mark.exists() and "evidence_packing" in maintenance.due(root)
+    alive, peak, checked, read, connect = [0], [0], [], packs.read_sidecar, store.connect
+
+    class Parsed(dict):
+        pass
+
+    def counted(path, **kwargs):
+        parsed = Parsed(read(path, **kwargs))
+        alive[0] += 1
+        peak[0] = max(peak[0], alive[0])
+        weakref.finalize(parsed, lambda: alive.__setitem__(0, alive[0] - 1))
+        return parsed
+
+    def traced(path, *args, **kwargs):
+        conn = connect(path, *args, **kwargs)
+        conn.set_trace_callback(lambda sql: checked.append(pathlib.Path(path).name) if "quick_check" in sql else None)
+        return conn
+
+    monkeypatch.setattr(packs, "read_sidecar", counted)
+    monkeypatch.setattr(store, "connect", traced)
+    log = root / "logs" / "supervisor.jsonl"
+    seen = len(log.read_text(encoding="utf-8").splitlines())  # the first pass built the cache once, empty
+    assert maintenance.run_job(root, "evidence_packing")["state"] == "done"
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()[seen:]]
+    rebuilt = [row for row in rows if row.get("type") == "storage_pack" and row.get("phase") == "index_rebuilt"]
+    assert [(row["sidecars"], row["unreadable"]) for row in rebuilt] == [(4, 0)]
+    assert checked and all(name.startswith(".index.sqlite.tmp.") for name in checked), checked
+    with packs.open_index(root) as conn:
+        assert conn.execute("SELECT count(*) FROM packs").fetchone()[0] == 4
+    assert not mark.exists() and "evidence_packing" not in maintenance.due(root) and peak[0] <= 2, peak
+    peak[0] = 0
+    assert packs.pending_restore_bytes(root) > 0 and packs.restore_checkpoint_handles(root)["handles"] == 4
+    assert peak[0] <= 2, peak
+
+
+def test_page_damage_behind_a_sound_header_is_marked_where_it_is_met_and_healed_by_the_pass(root, monkeypatch):
+    """Damage no O(1) fact sees surfaces as the SQLite error of the read that meets it: a read by sha alone
+    answers ``evidence_unavailable`` (damaged) and leaves the damage mark beside the index, which makes the
+    packing job owe a rebuild; the pass rebuilds the cache, checks its own file, publishes it and removes the
+    mark, and the same read answers again. A read naming its task answers from that task's sidecars
+    throughout; a sound index, a merely held lock, a caller's failed statement and a reader's own failure to
+    open the file (a non-busy ``OperationalError``: no descriptor left, an I/O error) leave no mark, so the
+    pass rebuilds nothing and the next read answers."""
+    from tests._store_journal_shared import use_journal
+
+    use_journal(monkeypatch, "PERSIST")  # the damaged page lies in the file itself, not in a WAL
+    refs = {task: _task(root, task, blobs=1)[0][0] for task in ("a", "b", "c")}
+    for _ in range(2):  # packs, then the one more look that records the moved stamps
+        maintenance.run_job(root, "evidence_packing")
+    index, mark = packs.packs_dir(root) / packs.INDEX_NAME, packs.packs_dir(root) / ".index.sqlite.damaged"
+    whole = packs.blob_bytes(root, refs["a"], task_id="a")
+    assert packs.blob_bytes(root, refs["a"]) == whole
+    with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
+        with pytest.raises(packs.EvidenceUnavailable) as held:
+            packs.blob_bytes(root, refs["a"])
+    assert held.value.reason == "busy" and not mark.exists() and "evidence_packing" not in maintenance.due(root)
+    for failed in ("SELEC 1", "SELECT nope FROM members", None):  # a caller's statement, as query_data runs the mind's
+        with pytest.raises(sqlite3.DatabaseError), packs.open_index(root):
+            with contextlib.closing(sqlite3.connect(index)) as other:
+                if failed is None:  # refused by its authorizer: exactly ``DatabaseError``, as damage is
+                    other.set_authorizer(lambda *facts: sqlite3.SQLITE_DENY)
+                other.execute(failed or "SELECT 1")
+    assert not mark.exists() and "evidence_packing" not in maintenance.due(root)  # no fact about the file
+    connect, failed, built = store.connect, [], index.stat().st_ino
+
+    def once(path, *args, **kwargs):  # this process cannot open the file once: no descriptor left
+        if pathlib.Path(path).name == packs.INDEX_NAME and not failed:
+            failed.append(path)
+            raise sqlite3.OperationalError("unable to open database file")
+        return connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(store, "connect", once)
+    with pytest.raises(packs.EvidenceUnavailable):
+        packs.blob_bytes(root, refs["a"])
+    assert failed and not mark.exists() and "evidence_packing" not in maintenance.due(root)
+    assert packs.ensure_index(root) is None and index.stat().st_ino == built  # the pass's builder finds it usable
+    assert packs.blob_bytes(root, refs["a"]) == whole
+    with contextlib.closing(sqlite3.connect(index)) as conn:  # the members' key, behind a sound header and meta row
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='sqlite_autoindex_members_1'").fetchone()[0]
+        size = conn.execute("PRAGMA page_size").fetchone()[0]
+    with open(index, "r+b") as handle:
+        handle.seek((page - 1) * size)
+        handle.write(b"\0" * size)
+    assert "evidence_packing" not in maintenance.due(root)  # no O(1) fact sees it
+    with pytest.raises(packs.EvidenceUnavailable) as damaged:
+        packs.blob_bytes(root, refs["a"])
+    assert damaged.value.reason == "damaged" and mark.exists()
+    assert packs.blob_bytes(root, refs["a"], task_id="a") == whole  # its own sidecars still answer
+    assert "evidence_packing" in maintenance.due(root)
+    assert maintenance.run_job(root, "evidence_packing")["state"] == "done"
+    assert not mark.exists() and packs.blob_bytes(root, refs["a"]) == whole
+    assert "evidence_packing" not in maintenance.due(root)
 
 
 @pytest.mark.parametrize("busy", ["facts", "packs", "packs_sql"])
@@ -129,20 +250,14 @@ def test_real_contention_never_waits_and_discovery_defers_without_recording(root
     """The server's look never waits on a held store (it defers the spawn); in the child,
     discovery under contention defers too and records nothing, so the job stays due."""
     _task(root, "candidate", blobs=1)
-    with packs.open_index(root):
-        pass
-    if busy == "packs_sql_cached":
-        with packs.open_index(root):
-            pass
-        assert str(packs.packs_dir(root) / packs.INDEX_NAME) in packs._VALIDATED
+    packs.ensure_index(root)
     spawns = []
     monkeypatch.setattr(maintenance, "spawn_maintenance_job", lambda *a: spawns.append(a) or _FakeChild(_QUIET))
     unit = maintenance.MaintenanceChild()
 
     def held():
-        if busy in {"facts", "packs_sql", "packs_sql_cached"}:
-            path = {"facts": root / "state/current.sqlite",
-                    "packs_sql": packs.packs_dir(root) / packs.INDEX_NAME}[busy.removesuffix("_cached")]
+        if busy in {"facts", "packs_sql"}:
+            path = {"facts": root / "state/current.sqlite", "packs_sql": packs.packs_dir(root) / packs.INDEX_NAME}[busy]
             return exclusive_hold(path)  # reads busy too, under WAL as under the rollback journal
         return None
 

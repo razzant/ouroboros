@@ -20,7 +20,7 @@ from ouroboros.owner_mailbox import (
 from ouroboros.owner_quiz import mark_wait_ended, quiz_states, record_answered, record_asked
 from ouroboros.owner_wait import (
     _fresh_wake, announce_wait_ended, append_wake_notice, classify_wake, owner_wait_ended_notice,
-    owner_wait_timeout_notice, wait_after_tools, worker_owner_wait,
+    wait_after_tools, worker_owner_wait,
 )
 from ouroboros.task_results import load_task_result
 from tests.test_native_owner_wait import native_context
@@ -230,13 +230,13 @@ def test_a_peer_wake_leaves_the_question_open_and_a_new_wait_ends_on_the_answer(
     assert len(_quiz_frames(frames)) == 1  # the answered card was not re-announced as open
 
 
-def test_owner_wait_ended_notice_keeps_the_timeout_text_under_both_names(tmp_path):
+def test_owner_wait_ended_notice_keeps_timeout_as_its_default(tmp_path):
     ctx = native_context(tmp_path)
     record_asked(tmp_path, ctx.task_id, quiz_id="q1", question="?", options=[],
                  wait_for_answer=True, assumption="keep going")
     checkpoint = {"quiz_id": "q1", "wait_max_minutes": 5}
     timeout = owner_wait_ended_notice(ctx, checkpoint, "timeout")
-    assert timeout == owner_wait_timeout_notice(ctx, checkpoint) == owner_wait_ended_notice(ctx, checkpoint)
+    assert timeout == owner_wait_ended_notice(ctx, checkpoint)
     assert "No owner answer arrived within 5 minutes" in timeout["content"]
     assert "Proceed under your stated assumption: keep going" in timeout["content"]
     ended = owner_wait_ended_notice(ctx, checkpoint, "not_answered", woke_by="task mail from peer-1")
@@ -411,3 +411,29 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     else:
         assert len(messages) == 3 and expects in messages[2]["content"]
         assert messages[2]["content"].startswith("[SYSTEM NOTICE]")
+
+
+@pytest.mark.parametrize("wake", ["hurry", "answer"])
+def test_after_an_owner_wait_the_first_round_carries_the_hurry_words_only_for_a_hurry(tmp_path, monkeypatch, wake):
+    """STEP4 4.5, at the owner-question wait: the Hurry that woke the wait reaches the next round's messages as one
+    typed row of the owner's act (``HURRY_WORDS``), never as an answer; an answer wake carries no such row."""
+    import ouroboros.loop as loop
+    from ouroboros import owner_hurry as oh
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    ctx = native_context(tmp_path)
+    ctx.current_chat_id = 1
+    record_asked(tmp_path, ctx.task_id, quiz_id="q1", question="Which path?", options=["a", "b"],
+                 wait_for_answer=True, chat_id=1, assumption="a meanwhile")
+    _bridge(monkeypatch)
+    wake_with = _hurry if wake == "hurry" else _answer
+    monkeypatch.setattr("ouroboros.owner_wait.time.sleep", lambda _seconds: wake_with(tmp_path, ctx.task_id))
+    messages = []
+    wait_after_tools(ctx, messages, {}, {}, 1, [], set())
+    loop._drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id,
+                                  SimpleNamespace(put_nowait=lambda _event: None), set(), owner_ctx=ctx)
+    rows = [message for message in messages if message.get("content") == oh.HURRY_WORDS]
+    if wake == "hurry":
+        assert len(rows) == 1 and rows[0][HOST_CONTEXT_KIND_KEY] == OWNER_WORDS_KIND
+    else:
+        assert rows == [] and not oh.latched(ctx)

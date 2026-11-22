@@ -1658,6 +1658,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -1809,6 +1810,7 @@
           "usage": {
             "prompt_tokens": 200,
             "completion_tokens": 10,
+            "cost": 0.0042,
             "effort": {
               "requested": "medium",
               "sent": {
@@ -1825,7 +1827,6 @@
             "response_finish_reason": "stop",
             "provider": "openrouter",
             "resolved_model": "x-ai/grok-4.5",
-            "cost": 0.0042,
             "cost_estimated": true,
             "cost_final": false,
             "request_wire": {
@@ -1859,6 +1860,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -1986,6 +1988,7 @@
           "usage": {
             "prompt_tokens": 200,
             "completion_tokens": 10,
+            "cost": null,
             "effort": {
               "requested": "medium",
               "sent": {
@@ -2000,7 +2003,6 @@
               "report_source": null
             },
             "response_finish_reason": "stop",
-            "cost": null,
             "provider": "openrouter",
             "resolved_model": "x-ai/grok-4.5",
             "cost_final": false,
@@ -2035,6 +2037,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2064,21 +2067,6 @@
             "payload_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1"
           }
         ],
-        "physical_attempts": [
-          {
-            "source": "llm.chat",
-            "model": "x-ai/grok-4.5",
-            "provider": "openrouter",
-            "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
-            "candidate_raw_size_bytes": 271,
-            "candidate_measurement_kind": "canonical_json_v1",
-            "state": "settled",
-            "transitions": 4,
-            "prompt_cache_ttl": "",
-            "cost_final": false
-          }
-        ],
-        "unused_script_steps": 0,
         "pricing_calls": [
           {
             "model": "x-ai/grok-4.5",
@@ -2093,7 +2081,22 @@
             "allow_live_fetch": true,
             "provider": "openrouter"
           }
-        ]
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+            "candidate_raw_size_bytes": 271,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "state": "settled",
+            "transitions": 4,
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
       }
     },
     {
@@ -2215,6 +2218,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2420,6 +2424,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2625,6 +2630,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2715,6 +2721,7 @@
             "response_id": "gen-fixture-429"
           },
           "usage": {
+            "cost": null,
             "effort": {
               "requested": "medium",
               "sent": {
@@ -2732,11 +2739,26 @@
               "code": 429,
               "type": null,
               "message": "Provider returned error: rate limit exceeded",
-              "kind": "rate_limit"
+              "kind": "rate_limit",
+              "answer": {
+                "sentence": "Provider returned error: rate limit exceeded",
+                "said": [
+                  [
+                    "",
+                    "Provider returned error: rate limit exceeded",
+                    false
+                  ]
+                ],
+                "codes": [
+                  [
+                    "",
+                    "429"
+                  ]
+                ]
+              }
             },
             "provider": "openrouter",
             "resolved_model": "x-ai/grok-4.5",
-            "cost": null,
             "cost_final": false,
             "request_wire": {
               "requested_effort": "medium",
@@ -2769,6 +2791,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -3003,6 +3026,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -3238,6 +3262,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -3425,6 +3450,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,

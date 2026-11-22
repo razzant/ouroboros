@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.tool_policy import (
+    NANO_RESIDENT_SCHEMA_NAMES,
+    NANO_RESIDENT_SCHEMA_TOKENS,
     NANO_SCHEMA_META_NAMES,
     compact_tool_catalog,
     format_capability_omissions,
@@ -27,7 +29,7 @@ def _schema(name, description=None):
 class Registry:
     def __init__(self):
         self.canonical = [_schema(name) for name in (
-            "read_file", "list_available_tools", "write_file", "enable_tools", "compact_context",
+            "web_search", "list_available_tools", "send_user_message", "enable_tools", "compact_context",
         )]
 
     def schemas(self):
@@ -45,8 +47,8 @@ def test_only_nano_selects_schemas_and_never_changes_shared_canonical_bytes():
     registry = Registry()
     before = json.dumps(registry.schemas())
     full = initial_tool_schemas(registry)
-    nano = initial_tool_schemas(registry, "nano", ["write_file"])
-    assert _names(nano) == ("list_available_tools", "write_file", "enable_tools", "compact_context")
+    nano = initial_tool_schemas(registry, "nano", ["send_user_message"])
+    assert _names(nano) == ("list_available_tools", "send_user_message", "enable_tools", "compact_context")
     for mode in ("low", "max"):
         assert initial_tool_schemas(registry, mode, []) == full
         assert list_non_core_tools(registry, mode) == []
@@ -57,27 +59,27 @@ def test_only_nano_selects_schemas_and_never_changes_shared_canonical_bytes():
 
 def test_parent_selection_is_not_an_allowlist_and_meta_transport_survives_replacement():
     registry, ctx = Registry(), SimpleNamespace()
-    current = initial_tool_schemas(registry, "nano", ["read_file"])
-    request = request_tool_schema_selection(ctx, registry, ["write_file"],
+    current = initial_tool_schemas(registry, "nano", ["web_search"])
+    request = request_tool_schema_selection(ctx, registry, ["send_user_message"],
                                             context_mode="nano", current_schemas=current)
     assert request.status == "pending"
-    assert "write_file" in request.selection.chosen and "read_file" not in request.selection.chosen
+    assert "send_user_message" in request.selection.chosen and "web_search" not in request.selection.chosen
     assert NANO_SCHEMA_META_NAMES <= set(request.selection.chosen)
-    assert _names(current) == ("read_file", "list_available_tools", "enable_tools", "compact_context")
+    assert _names(current) == ("web_search", "list_available_tools", "enable_tools", "compact_context")
     assert ctx._pending_tool_schema_names == request.selection.chosen
-    assert "write_file" in _names(registry.schemas())
+    assert "send_user_message" in _names(registry.schemas())
 
 
 def test_two_enable_requests_compose_pending_selection_and_no_op_keeps_bytes():
     registry, ctx, sibling = Registry(), SimpleNamespace(), SimpleNamespace()
     current = initial_tool_schemas(registry, "nano")
-    first = request_tool_schema_selection(ctx, registry, ["read_file"], context_mode="nano",
+    first = request_tool_schema_selection(ctx, registry, ["web_search"], context_mode="nano",
                                          current_schemas=current, extend=True)
-    second = request_tool_schema_selection(ctx, registry, ["write_file"], context_mode="nano",
+    second = request_tool_schema_selection(ctx, registry, ["send_user_message"], context_mode="nano",
                                           current_schemas=current, extend=True)
     assert set(first.selection.chosen) < set(second.selection.chosen)
     assert not hasattr(sibling, "_pending_tool_schema_names")
-    repeated = request_tool_schema_selection(ctx, registry, ["write_file"], context_mode="nano",
+    repeated = request_tool_schema_selection(ctx, registry, ["send_user_message"], context_mode="nano",
                                             current_schemas=current, extend=True)
     assert repeated.selection == second.selection
     # The loop owns the real completed-tool-boundary apply; these are its bytes.
@@ -116,7 +118,7 @@ def test_catalog_has_every_permitted_name_and_only_purpose_is_bounded():
 
 @pytest.mark.parametrize("mode", ["low", "max"])
 def test_full_modes_do_not_queue_a_selection_or_retain_old_nano_pending(mode):
-    registry, ctx = Registry(), SimpleNamespace(_pending_tool_schema_names=("read_file",))
+    registry, ctx = Registry(), SimpleNamespace(_pending_tool_schema_names=("web_search",))
     request = request_tool_schema_selection(ctx, registry, [], context_mode=mode,
                                             current_schemas=initial_tool_schemas(registry))
     assert request.status == "full_envelope_unchanged"
@@ -144,7 +146,8 @@ def test_actual_registry_dynamic_tools_keep_canonical_order_and_permissions(tmp_
     ))
     full = registry.schemas()
     selected = initial_tool_schemas(registry, "nano", ["mcp_example__lookup", name])
-    assert _names(selected) == tuple(n for n in _names(full) if n in NANO_SCHEMA_META_NAMES or n in (name, "mcp_example__lookup"))
+    assert _names(selected) == tuple(n for n in _names(full)
+                                     if n in NANO_RESIDENT_SCHEMA_NAMES or n in (name, "mcp_example__lookup"))
     # An unpinned MCP server starts on demand in every mode; a pinned one keeps its schemas (#2332).
     assert initial_tool_schemas(registry, "max") == [s for s in full if s["function"]["name"] != "mcp_example__lookup"]
     mcp_rows[0]["schemas_at_start"] = True
@@ -165,3 +168,31 @@ def test_actual_registry_dynamic_tools_keep_canonical_order_and_permissions(tmp_
 def test_pure_selection_rejects_a_string_instead_of_interpreting_its_characters():
     with pytest.raises(ValueError, match="collection"):
         select_tool_schemas(Registry().schemas(), context_mode="nano", schema_names="read_file")
+
+
+def test_nano_standing_set_is_resident_where_permitted_and_within_its_budget(tmp_path):
+    """Nano's standing set (finish_task included) is in the very first request of every actor, each name where its
+    registry permits it, and its schemas stay within the agreed estimate: a turn can read, edit, run, note and
+    finish without changing the schema prefix a local server caches."""
+    from ouroboros.context_fit import tool_schema_tokens
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    root = initial_tool_schemas(registry, "nano")
+    assert set(_names(root)) == NANO_RESIDENT_SCHEMA_NAMES - {"presence_finish"} and len(root) == 12  # no frozen door
+    assert tool_schema_tokens(root) <= NANO_RESIDENT_SCHEMA_TOKENS
+    assert "memory_read" in _names(root)  # a Nano view is mostly memory_read addresses: its reader is loaded
+    from ouroboros.memory_floor import memory_read_path
+    assert memory_read_path(_names(root)) == ""  # so the floor note names no loader path for it
+    assert not {"send_user_message", "update_scratchpad"} & set(_names(root))  # on demand (enable_tools)
+    for index, mode in enumerate((LOCAL_READONLY_SUBAGENT_MODE, ACTING_SUBAGENT_MODE)):
+        child = ToolRegistry(repo_dir=tmp_path / f"repo{index}", drive_root=tmp_path / f"data{index}")
+        child._ctx.task_constraint = TaskConstraint(mode=mode)
+        names = set(_names(initial_tool_schemas(child, "nano")))
+        permitted = set(_names(child.schemas()))
+        assert names == NANO_RESIDENT_SCHEMA_NAMES & permitted and "finish_task" in names
+    # Low and Max are unchanged: the whole permitted envelope.
+    assert _names(initial_tool_schemas(registry, "max")) == _names(initial_tool_schemas(registry, "low"))
+    assert len(initial_tool_schemas(registry, "max")) > 3 * len(root)

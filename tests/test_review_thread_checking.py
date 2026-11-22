@@ -425,6 +425,25 @@ def test_lost_turn_response_rejoins_original_copy_and_invocation(author, tmp_pat
         assert (root / "f.txt").read_bytes() == b"A staged\n"
 
 
+def test_a_turn_failing_before_any_start_request_keeps_its_threads_copy(author, tmp_path, thread_gateway, monkeypatch):  # noqa: F811
+    """A sticky thread owns its copy (made after its trust grant): no turn's unsent failure retires it."""
+    from ouroboros import review_execution
+
+    drive = tmp_path / "drive"
+    source = rc.freeze_checking_source(author, data_root=drive, subject=rc.SUBJECT_INDEX)
+
+    def refuse(*_args, **_kwargs):
+        raise ReviewRouteUnavailable("input too large", code="review_input_too_large")
+
+    monkeypatch.setattr(review_execution, "prepare_review_session_request", refuse)
+    with pytest.raises(ReviewRouteUnavailable) as caught:
+        _run(author, drive, source)
+    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex"
+    assert caught.value.delegated_start_unrequested is True and not thread_gateway.turn_requests
+    assert area.is_dir() and not getattr(caught.value, "checking_evidence", None)
+    assert thread_gateway.trust == [str(author)]
+
+
 def test_pre_floor_writable_thread_refuses_without_a_fresh_run(author, tmp_path, thread_gateway):  # noqa: F811
     drive = tmp_path / "drive"
     source = rc.freeze_checking_source(author, data_root=drive, subject=rc.SUBJECT_INDEX)

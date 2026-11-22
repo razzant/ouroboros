@@ -22,7 +22,7 @@ THREE_SYSTEMS = ["ubuntu-latest", "macos-latest", "windows-latest"]
 # release run, which the next release run's `shard-plan` packs by.
 # (owner 6A/7A, 2026-11-05). Every other job keeps the release graph a tag or a plain dispatch runs.
 BATTERY = ("shard-plan", "lint", "full-test-runs", "journal-persist", "full-test", "test-verdict")
-DISPATCH_ONLY = ("quick-test", "sqlite-floor", "betterleaks-platform-smoke")
+DISPATCH_ONLY = ("sqlite-floor", "betterleaks-platform-smoke")
 TAG_ONLY = ("android-build", "release-preflight", "build", "windows-proof", "vendor-package-smoke", "release")
 
 
@@ -123,7 +123,8 @@ def test_ordinary_ci_triggers_only_on_request_or_release(name, event, ref):
     ("push", "refs/heads/ouroboros", "", "", "", False, []),
     ("push", "refs/heads/main", "", "", "", False, []),
     ("push", "refs/heads/ouroboros-stable", "", "", "", False, []),
-    ("push", "refs/tags/v7.0.0", "", "", "", False, THREE_SYSTEMS),
+    # quick-test runs on tags too: apps up to 7.11.0 update on Python 3.10 (owner 2026-11-17).
+    ("push", "refs/tags/v7.0.0", "", "", "", True, THREE_SYSTEMS),
     ("workflow_dispatch", "refs/heads/candidate", "", "release", "false", True, THREE_SYSTEMS),
     # The operators' battery: Ubuntu + Windows (their post-merge red lists are disjoint), macOS on request.
     ("workflow_dispatch", "refs/heads/candidate", "", "tests", "false", False, ["ubuntu-latest", "windows-latest"]),
@@ -179,7 +180,7 @@ def test_the_tests_scope_runs_the_battery_and_nothing_else(event, ref, scope, ma
     assert admitted == expected
 
 
-@pytest.mark.parametrize("name", ["quick-test", "sqlite-floor", "betterleaks-platform-smoke"])
+@pytest.mark.parametrize("name", ["sqlite-floor", "betterleaks-platform-smoke"])
 @pytest.mark.parametrize("event,ref,expected", [
     ("workflow_dispatch", "refs/heads/candidate", True),
     ("push", "refs/tags/v7.7.0", False),

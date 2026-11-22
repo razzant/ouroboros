@@ -148,13 +148,14 @@ def _error_facts(value: Any) -> Tuple[int, str, str, str]:
 
 def exact_tool_dialect_rejection(
     value: Any,
-    candidate: WireCandidateManifest,
+    candidate: "WireCandidateManifest | str",
 ) -> bool:
-    """Narrow 4xx classifier for the exact function/custom physical dialect."""
+    """Narrow 4xx classifier for the exact function/custom physical dialect: a bound candidate's, or the dialect
+    name of a request sent outside the wire seam (Provider Test's one-shot forms, ``llm_probe``)."""
     status, code, param, message = _error_facts(value)
     if status not in {400, 422}:
         return False
-    dialect = candidate.accepted_profile.tool_dialect
+    dialect = candidate if isinstance(candidate, str) else candidate.accepted_profile.tool_dialect
     dialect_word = "custom" if dialect == "openai_chat_custom" else "function"
     tool_param = bool(
         param in {"tools", "tool_choice"}
@@ -217,8 +218,9 @@ def plan_direct_openai_dialect_candidate(
     error: Any,
     body_error: bool,
 ) -> Optional[WireCandidateManifest]:
-    """Advance one cognition-preserving rung, or create the final task-local none."""
-    if not is_direct_openai_ladder_candidate(current):
+    """Advance one cognition-preserving rung, or create the final task-local none; that last rung's own refusal ends
+    the ladder (the same request is never sent again)."""
+    if not is_direct_openai_ladder_candidate(current) or current.candidate_spec.task_local:
         return None
     value = _BodyError({"error": dict(error)}) if body_error and isinstance(
         error, Mapping
@@ -403,10 +405,12 @@ def custom_tool_argument_error(
     tool_name: str,
     receipt: CustomArgumentValidationReceipt,
 ) -> str:
+    """The refusal of a call the custom schema rejected before any handler ran; names what failed where."""
+    detail = f": {receipt.detail}" if receipt.detail else ""
     return (
         "⚠️ TOOL_ARG_ERROR: Arguments for "
         f"'{str(tool_name or receipt.tool_name)}' failed the exact custom-tool schema "
-        f"({receipt.error_code}). Correct the arguments and call the tool again."
+        f"({receipt.error_code}){detail}. Correct the arguments and call the tool again."
     )
 
 

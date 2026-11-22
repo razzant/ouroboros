@@ -23,6 +23,24 @@ from ouroboros.review_execution import ReviewRouteKind, delivery_retrieves
 # author's final stance explicit and hash-bound when a review is advisory.
 AUTHOR_DISPOSITION_VALUES = frozenset({"accepted", "rejected", "partial", "deferred"})
 AUTHOR_ACTION_VALUES = frozenset({"finish", "stop"})
+# Every review informs and none forbids (BIBLE P3); the value Advisory-era records also carry,
+# so fingerprints and reuse keys keep their bytes. Older records keep "blocking" as history.
+RECORDED_REVIEW_AUTHORITY = "advisory"
+
+
+def reported_review_cost(usage: Mapping[str, Any], headers: Mapping[str, Any] | None = None) -> float | None:
+    """Measured-only review receipts; raw usage keeps estimates and known subtotals."""
+    from ouroboros._usage_response import provider_cost_value
+
+    if usage.get("cost_final") is False or any(usage.get(key) is True for key in (
+        "cost_estimated", "cost_partial", "cost_invalid",
+    )):
+        return None
+    for key in ("cost", "total_cost"):
+        if key in usage:  # explicit unknown outranks an older carrier
+            return provider_cost_value(usage[key])
+    return next((provider_cost_value(value) for key, value in (headers or {}).items()
+                 if key.lower() == "x-openrouter-cost"), None)
 
 
 def build_author_disposition(

@@ -12,6 +12,19 @@ function withDom(run) {
 }
 const fixedTime = () => ({ short: '00:37', full: 'Oct 12, 00:37' });
 
+test('a sender selection names its source separately in the bubble and composer', () => withDom(() => {
+    for (const composer of [true, false]) {
+        const panel = createReplyQuote({ address: 'row:1@a#1', role: 'assistant',
+            excerpt: { text: 'North quay', start_utf16: 12 } }, { composer });
+        const main = panel.children[0];
+        const [head, words] = main.children;
+        assert.equal(head.children[0].textContent, 'Selected by sender · Source:');
+        assert.equal(head.children[1].textContent, 'Ouroboros');
+        assert.equal(words.textContent, 'North quay');
+        assert.equal(main.getAttribute('aria-label'), 'Selected by sender · Source: Ouroboros: North quay');
+    }
+}));
+
 test('a reply quote is one jump button in the QUOTED author\'s voice, words set as text', () => withDom(() => {
     const jumps = [];
     const panel = createReplyQuote({ address: 'row:1@a#1', role: 'user', snippet: '<b>not markup</b>', ts: 't' },
@@ -125,6 +138,28 @@ test('the clamp puts its toggle into the row it is given, never a row of its own
     assert.ok(text.classList.contains('chat-clamp'));
     assert.deepEqual(row.children, [toggle]);
     assert.equal(clampWithToggle(null, row), null);
+}));
+
+test('a CSS-only fit keeps authored child nodes intact through Show all and Show less', () => withDom(() => {
+    const host = document.createElement('div');
+    const line = document.createElement('p');
+    const authored = document.createElement('span');
+    authored.textContent = '  My EXACT words\n<as typed> 🙂  ';
+    authored.dataset.i18nAuthored = '';
+    line.append(authored);
+    host.append(line);
+    const fits = [];
+    const toggle = clampWithToggle(line, host, { fit: (node, _text, lines, onFit) => {
+        fits.push(lines);
+        assert.equal(node.children[0], authored);
+        onFit(lines > 0);
+    } });
+    assert.equal(toggle.hidden, false);
+    toggle.click();
+    toggle.click();
+    assert.deepEqual(fits, [6, 0, 6]);
+    assert.equal(authored.textContent, '  My EXACT words\n<as typed> 🙂  ');
+    assert.equal(authored.dataset.i18nAuthored, '');
 }));
 
 test('a quoted photo leads the panel with its thumbnail; only a safe upload URL becomes one', () => withDom(() => {

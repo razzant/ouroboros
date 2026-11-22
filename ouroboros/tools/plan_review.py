@@ -8,13 +8,15 @@
   the current revision (the one this call wrote, or the latest) to exactly the named
   participants (``plan_ask``); before any revision it is a reading of the request
   (``revision: None``), whose replies never move an objection. Answers settle into the
-  record and wake the mailbox; under Blocking, a body plan's first ask includes every
-  owner-marked reviewer.
+  record and wake the mailbox; a body plan's first ask outside Cyber Pro names a counted
+  reviewer and a reason when it narrows the pool.
 * READ: no arguments → the free state: the current revision, every participant's open
   objections (``not_adjudicated`` flagged), who last saw which revision, the latest
   contributions and the pending asks; pending seats whose producer finished while
-  nobody listened are settled at $0 first. Each ask names the evidence it recorded as
-  not attached in full (``omissions``: locator and reason), in the read and the ask's result.
+  nobody listened are settled at $0 first. Each ask lists, in the read and the ask's result,
+  the evidence it attached (whole or in part) apart from what it did not, each locator with
+  every recorded reason (``plan_record.ask_evidence``); an older ask's unrecorded field reads
+  as not recorded.
 
 Every refusal — a schema error, an old-form call (``spec``, ``review_disposition``,
 ``author_action``, …: a typed $0 refusal naming the new form, no shim), a missing first
@@ -35,7 +37,6 @@ from ouroboros import plan_record
 from ouroboros.config import (
     get_finalization_grace_sec,
     get_llm_transport_read_timeout_sec,
-    get_review_enforcement,
     get_task_abs_ceiling_sec,
 )
 from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
@@ -93,20 +94,21 @@ _SCHEMA = {
         "first revision ([] = the work changes no files; a path under Ouroboros's own body makes it a body plan, whose "
         "participants receive the constitutional pack). ASK (the only paid act): ask='council' sends the current revision "
         "to the review pool (Main alone when no reviewer is marked), ask=[ids] to exactly those participants — pool seats "
-        "or any enabled catalog row (unticked advisers never hold); Blocking adds all ticked reviewers to a body plan's "
-        "first ask; Advisory requires a ticked reviewer and a reason when narrowed; Cyber Pro is free. Later asks use the named rows. "
+        "or any enabled catalog row (unticked advisers are heard, not counted); a body plan's first ask outside Cyber Pro "
+        "requires a ticked reviewer and a reason when narrowed; Cyber Pro is free. Later asks use the named rows. "
         "Asked before any revision, an ask is a reading: participants receive my human's words, the objective with its author, "
         "the room and my message — no plan — and say how they read the request; nothing they raise then holds, and the "
         "first reading of declared body work is seated like a body plan's first ask. "
         "Participants answer in parallel the first time and see each other's answers on later "
         "asks; each receives the plan or its delta, the council so far, its own open objections, your message and your "
-        "attachments. Each answer reaches you at your next step and before an unhurried finish; the mailbox gets one frame "
+        "attachments. Each answer that arrives while this task runs reaches you at your next step; a pending ask holds no "
+        "ending, and a reply after the task ends is kept in its plan record and shows as late feedback in this room when "
+        "the room is known; the mailbox gets one frame "
         "when every counted participant has settled, answered or not. READ (no arguments, free) shows the current revision, every open "
         "objection with who raised it, who saw which revision, the latest contributions and the pending asks. An "
         "objection stands until the participant who raised it withdraws it (ask that participant again after you "
-        "revise or argue); nobody votes and there is no verdict. Under Blocking, outside Cyber Pro, an open objection of an owner-marked "
-        "reviewer holds your final answer; under Advisory and in Cyber Pro it is disclosed. The old spec/"
-        "review_disposition form is refused at $0."
+        "revise or argue); nobody votes and there is no verdict. An open objection is disclosed in your final answer; nothing "
+        "holds it. The old spec/review_disposition form is refused at $0."
     ),
     "parameters": {
         "type": "object",
@@ -126,13 +128,17 @@ _SCHEMA = {
                 "description": ("Whom to ask now: 'council' = the review pool; or participant ids (pool seat ids, catalog row ids/handles). "
                                 "Named recipients only — nothing is sent unless you ask. Before any revision, they read the request."),
             },
-            "reason": {"type": "string", "description": "Why these reviewers: required when an Advisory first ask about your own code names fewer than all ticked reviewers. Blocking adds missing ticked reviewers; later asks name any enabled rows. Advisers are heard, not counted."},
+            "reason": {"type": "string", "description": "Why these reviewers: required outside Cyber Pro when a first ask about your own code names fewer than all ticked reviewers; later asks name any enabled rows. Advisers are heard, not counted."},
             "message": {"type": "string", "description": "What you want from the asked participants now (what changed, what you decided and why, what to look at)."},
             "attach": {"type": "array", "items": {"type": "string"},
-                       "description": ("Evidence locators for the asked participants (paths with optional "
-                                       "::lines=A-B, task:<id>, chat:<id>); files attach as read_file may read them, your "
-                                       "own task_drive/artifact_store included, other runtime data never; bounded, every "
-                                       "absence named. Use task:<id> for a helper's saved result.")},
+                       "description": ("Evidence locators for the asked participants: a file path (relative to the subject "
+                                       "root, absolute or file://), task:<id> for a task's saved result (a helper's included), "
+                                       "or chat:<id>; any of them may end in ::lines=A-B (1-based), ::bytes=A-B (0-based), "
+                                       "::tail=N (last N bytes), or for a .py file ::symbol=Name (dotted when nested), ranges "
+                                       "inclusive. URLs are listed, never fetched. Files attach as read_file may read them, "
+                                       "your own task_drive/artifact_store included, other runtime data never. Each item and "
+                                       "the ask are bounded; the ask's result and every read list what attached and each "
+                                       "locator cut or not attached, with its reason.")},
             "reviewer_effort": {**_REVIEWER_EFFORT_SCHEMA, "description": "Optional panel strength for THIS ask (Auto rows, clamped into the owner's effort range)."},
             "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": (
                 "Alone: continue stopped session participants of an EARLIER ask, each named as the read's continuable "
@@ -379,19 +385,23 @@ def _ask_summary(prepared: Any, record: Mapping[str, Any]) -> str:
              + ("; not sent: " + "; ".join(f"{p['seat_id']} — {p.get('not_dispatched_reason') or p.get('error') or 'not sendable'}"
                                              for p in rows if not p.get("dispatched")) if any(not p.get("dispatched") for p in rows) else "")
              + "."]
-    if ask.get("host_added"):
-        lines.append(("This reading concerns Ouroboros's own body" if ask.get("revision") is None
-                      else "This is the first ask on a body plan")
-                     + ", so every owner-marked reviewer was included: the host added "
-                     + ", ".join(ask["host_added"]) + " beside the participants you named.")
+    evidence = plan_record.ask_evidence(ask)
+    if evidence["items"]:
+        counts, total = evidence["counts"], len(evidence["items"])
+        lines.append("Evidence prepared for the participants: " + ", ".join(
+            [f"{counts['whole']} of {total} attached whole"] + [f"{counts[state]} {words}" for state, words in (
+                ("part", "in part"), ("attached_unknown", "attached, completeness not recorded"),
+                ("not_attached", "not attached"), ("unknown", "not recorded")) if counts[state]])
+            + "; the ask below lists each locator and every reason.")
     unknown = [p["seat_id"] for p in sent if p.get("status") == "pending" and p.get("unresolved")]
     pending = [p["seat_id"] for p in sent if p.get("status") == "pending" and not p.get("unresolved")]
     if unknown:
         lines.append(f"Dispatch outcome unknown for {', '.join(unknown)} ({next(p.get('error') for p in sent if p['seat_id'] == unknown[0])}): "
                      "the substrate held them when the host lost track, so a reply may still arrive through custody; a new ask to them may pay twice.")
     if pending:
-        lines.append("Answers settle in the background and reach you at your next step and before your final; plan_task() reads them. "
-                     f"Still working: {', '.join(pending)}.")
+        lines.append("Answers settle in the background and reach you at your next step while this task runs; plan_task() reads "
+                     "them; a pending ask holds no ending, and a reply after the task ends is kept in its plan record and "
+                     f"shows as late feedback in this room when the room is known. Still working: {', '.join(pending)}.")
     return "\n".join(lines)
 
 
@@ -399,12 +409,9 @@ def _ask_summary(prepared: Any, record: Mapping[str, Any]) -> str:
 
 def _decision(ctx: ToolContext, record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None, *,
               unreadable: bool = False) -> Dict[str, Any]:
-    from ouroboros.owner_hurry import latched
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.tools.review_helpers import cyber_review_authority
 
-    return plan_record.gate_projection(
-        record, enforcement=str(get_review_enforcement() or ""), cyber_pro=not review_enforcement_blocks("blocking"),
-        hurry=latched(ctx) is not None, legacy=legacy, unreadable=unreadable)
+    return plan_record.gate_projection(record, cyber_pro=cyber_review_authority(), legacy=legacy, unreadable=unreadable)
 
 
 def _render_done_when(rows: List[Mapping[str, Any]]) -> str:
@@ -432,6 +439,33 @@ def _room_facts(participant: Mapping[str, Any]) -> str:
     if isinstance(read, Mapping) and read.get("provenance") and read.get("status") in {"complete", "incomplete"}:
         facts.append(f"file reads covered {read.get('covered_chars', 0)} of {read.get('complete_chars', 0)} chars ({read['provenance']})")
     return f" [room: {'; '.join(facts)}]" if facts else ""
+
+
+_EVIDENCE_GROUPS = ((("whole", "part", "attached_unknown"), "evidence attached (prepared for the participants)"),
+                    (("not_attached",), "evidence not attached"),
+                    (("unknown",), "evidence declared, whether it attached not recorded"))
+
+
+def _evidence_lines(ask: Mapping[str, Any]) -> List[str]:
+    """One ask's evidence under it (``plan_record.ask_evidence``): what attached, whole or in part, apart from what
+    did not, each locator with every reason recorded for it (a cut, a repeat or a history gap stays beside content
+    that attached). A field an older ask did not record reads as not recorded, never as nothing."""
+    evidence = plan_record.ask_evidence(ask)
+    items, recorded = evidence["items"], evidence["recorded"]
+    if not items:
+        return [] if recorded["attach"] or (recorded["attached"] and recorded["omissions"]) else ["  evidence: not recorded for this ask"]
+
+    def named(item: Mapping[str, Any]) -> str:
+        facts = ({"part": ["in part"], "attached_unknown": ["completeness not recorded"]}.get(item["state"], [])) + (
+            [f"source {item['bytes']} bytes"] if item.get("bytes") is not None else []) + list(item["reasons"])
+        return str(item["locator"]) + (f" ({'; '.join(facts)})" if facts else "")
+
+    lines = [f"  {label}: " + "; ".join(named(item) for item in items if item["state"] in states)
+             for states, label in _EVIDENCE_GROUPS if any(item["state"] in states for item in items)]
+    if not recorded["omissions"]:
+        lines.append("  evidence cuts and absences: not recorded for this ask")
+    hint = plan_packet.omission_hint(ask.get("omissions") or [])
+    return lines + ([f"  {hint}"] if hint else [])
 
 
 def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None,
@@ -476,11 +510,7 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
             parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}{_room_facts(p)}")
         lines.append(f"- ask {ask['ask_id']} on {plan_record.ask_subject(ask['revision'])}"
                      + (f" — «{ask['message']}»" if ask.get("message") else "") + ": " + "; ".join(parts))
-        if stored.get("omissions"):  # recorded by plan_evidence when the ask was prepared; the ask's result shows it too
-            lines.append("  evidence omitted: " + "; ".join(f"{o.get('locator')} ({o.get('reason')})" for o in stored["omissions"]))
-            hint = plan_packet.omission_hint(stored["omissions"])
-            if hint:
-                lines.append(f"  {hint}")
+        lines.extend(_evidence_lines(stored))
         if ask["revision"] is None:  # a reading's listed objections are advice: they never enter the fold
             points = [f"{p.get('seat_id')}/{item.get('id')}: {item.get('text')}" for p in stored.get("participants") or []
                       if isinstance(p.get("reply"), dict) for item in p["reply"].get("objections") or []]
@@ -500,12 +530,7 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
     if not open_rows:
         lines.append("none")
     for row in open_rows:
-        flags = []
-        if row.get("holds"):
-            flags.append("holds your final answer under Blocking" if decision.get("enforcement") == "blocking" and not decision.get("decision_authority")
-                         else "owner-marked reviewer — disclosed, not held under " + ("Cyber Pro" if decision.get("decision_authority") else "Advisory"))
-        else:
-            flags.append("added participant — never holds")
+        flags = ["owner-marked reviewer" if row.get("owner_marked") else "added participant"]
         if row.get("not_adjudicated"):
             flags.append("NOT ADJUDICATED in its raiser's last reply")
         if row.get("legacy"):
@@ -546,9 +571,6 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
         lines.append("HELD: this task's earlier plan-review state cannot be read"
                      + (f" ({(legacy_error or {}).get('error')})" if (legacy_error or {}).get("error") else "")
                      + ", so the gate holds until it can; finish_task(action='stop') ends honestly with unfinished work.")
-    elif status == "held":
-        lines.append("HELD: under Blocking the open objections marked above hold your normal final answer until their raisers withdraw "
-                     "them, the owner hurries or changes enforcement, or you stop honestly with unfinished work (finish_task action=stop).")
     elif status == "objections_open":
         lines.append("Open objections are disclosed in your final answer; nothing holds it.")
     elif status == "awaiting":
@@ -580,7 +602,6 @@ def _publish(ctx: ToolContext, record: Mapping[str, Any], *, effect: str, notes:
         "plan_effect": effect,
         "plan_revision": int(latest.get("n") or 0) if latest else 0,
         "plan_open_objections": len(decision.get("open_objections") or []),
-        "plan_holding": len(decision.get("holding") or []),
         "plan_pending_asks": len(decision.get("pending_asks") or []),
     }))
 

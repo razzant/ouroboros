@@ -45,3 +45,20 @@ def test_entry_progress_precedes_extensions_and_logging_failure_does_not_block_r
         ["worker_ready"] if progress_write_fails else ["worker_starting", "worker_ready"]
     )
     assert rows[-1]["pid"] == os.getpid() and rows[-1]["git_sha"] == "test-sha"
+
+
+def test_ready_row_carries_the_birth_receipt_and_its_window_ends_there(worker, monkeypatch):
+    """``worker_ready`` names the birth's steps (wall and thread CPU) and the work they counted (K5's catalog and
+    hash counts come from ``reload_all``); the window ends with readiness, so no task's work joins it."""
+    import ouroboros.extension_loader as extensions
+    from ouroboros import context_timing
+
+    worker.task["type"] = "shutdown"
+    monkeypatch.setattr(extensions, "reload_all", lambda *_a, **_kw: context_timing.counted("catalog_reused", 6))
+    worker.run()
+
+    ready = json.loads((worker.root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert (ready["type"], ready["work"], worker.crashes) == ("worker_ready", {"catalog_reused": 6}, [])
+    for spans in (ready["sections_ms"], ready["sections_cpu_ms"]):
+        assert set(spans) == {"import", "reload_all", "make_agent", "total"}
+    assert context_timing.section_spans() == {}

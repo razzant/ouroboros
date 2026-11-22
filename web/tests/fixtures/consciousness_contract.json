@@ -61,7 +61,9 @@
         }
       ],
       "appointment_at": "2026-10-24T09:30:00+00:00",
-      "live_wake_held": false
+      "live_wake_held": false,
+      "position": "Also on its own and in places",
+      "gloss": "When Ouroboros acts"
     }
   },
   "places": {
@@ -334,6 +336,8 @@
     ],
     "appointment_at": "2026-10-24T09:30:00+00:00",
     "live_wake_held": false,
+    "position": "Also on its own and in places",
+    "gloss": "When Ouroboros acts",
     "recent_wakes": [
       {
         "task_id": "w-unknown",
@@ -530,6 +534,7 @@
         "chat_id": 1,
         "conversation": "mail:account:inbox:0",
         "place_label": "mail",
+        "place_id": "mail",
         "started_at": "2026-10-23T07:44:23.208947+00:00",
         "first_reply_at": null,
         "ended_at": "2026-10-23T07:49:41.071005+00:00",
@@ -573,6 +578,7 @@
         "chat_id": 1,
         "conversation": "mail:account:inbox:0",
         "place_label": "mail",
+        "place_id": "mail",
         "started_at": "2026-10-23T07:44:23.208947+00:00",
         "first_reply_at": null,
         "ended_at": "2026-10-23T07:49:41.071005+00:00",
@@ -762,6 +768,7 @@
           "source": "chat",
           "offset": 0
         },
+        "reply_author_label": "System",
         "model_execution": {
           "requested_model": "claudexor::codex=gpt-6-astra",
           "requested_use_local": false,
@@ -850,8 +857,8 @@
             "archives_bounded": false,
             "matched": 1,
             "gaps": [],
-            "live_size": 633,
-            "live_window": 633,
+            "live_size": 588,
+            "live_window": 588,
             "shown": 1,
             "unit": "calls",
             "quota_met": false
@@ -859,6 +866,7 @@
         },
         "_is_direct_chat": true,
         "initiator": "consciousness",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -903,6 +911,7 @@
           "source": "chat",
           "offset": 3880
         },
+        "reply_author_label": "System",
         "model_execution": {
           "requested_model": "claudexor::codex=gpt-6-astra",
           "requested_use_local": false,
@@ -991,8 +1000,8 @@
             "archives_bounded": false,
             "matched": 1,
             "gaps": [],
-            "live_size": 633,
-            "live_window": 633,
+            "live_size": 588,
+            "live_window": 588,
             "shown": 1,
             "unit": "calls",
             "quota_met": false
@@ -1002,6 +1011,7 @@
         "_is_direct_chat": true,
         "initiator": "consciousness",
         "wake_summary": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1046,6 +1056,7 @@
           "source": "chat",
           "offset": 8308
         },
+        "reply_author_label": "System",
         "model_execution": {
           "requested_model": "claudexor::codex=gpt-6-astra",
           "requested_use_local": false,
@@ -1134,8 +1145,8 @@
             "archives_bounded": false,
             "matched": 1,
             "gaps": [],
-            "live_size": 633,
-            "live_window": 633,
+            "live_size": 588,
+            "live_window": 588,
             "shown": 1,
             "unit": "calls",
             "quota_met": false
@@ -1143,6 +1154,7 @@
         },
         "_is_direct_chat": true,
         "initiator": "consciousness",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1202,6 +1214,7 @@
           "source": "chat",
           "offset": 1832
         },
+        "reply_author_label": "System",
         "wake_silent": true,
         "quiet_effective": true,
         "suggested_name": "Ouroboros Autonomous Exploration"
@@ -1239,6 +1252,7 @@
           "source": "chat",
           "offset": 5833
         },
+        "reply_author_label": "System",
         "wake_silent": true,
         "quiet_effective": true,
         "suggested_name": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
@@ -1277,6 +1291,7 @@
           "source": "chat",
           "offset": 10142
         },
+        "reply_author_label": "System",
         "wake_silent": true,
         "quiet_effective": false,
         "suggested_name": "Ouroboros Autonomous Exploration"
@@ -1329,6 +1344,7 @@
           "source": "progress",
           "offset": 0
         },
+        "reply_author_label": "System",
         "status": "running",
         "initiator": "consciousness",
         "tool_evidence": {
@@ -1348,8 +1364,8 @@
             "archives_bounded": false,
             "matched": 0,
             "gaps": [],
-            "live_size": 633,
-            "live_window": 633,
+            "live_size": 588,
+            "live_window": 588,
             "shown": 0,
             "unit": "calls",
             "quota_met": false
@@ -1367,6 +1383,7 @@
           "status": "available",
           "open_run_ids": [],
           "unrecorded_run_ids": [],
+          "closed_unrecorded_run_ids": [],
           "pending_invocation_ids": []
         },
         "cost_presentation": {
@@ -1434,6 +1451,7 @@
             "source": "chat",
             "offset": 0
           },
+          "reply_author_label": "System",
           "model_execution": {
             "requested_model": "claudexor::codex=gpt-6-astra",
             "requested_use_local": false,
@@ -1522,8 +1540,8 @@
               "archives_bounded": false,
               "matched": 1,
               "gaps": [],
-              "live_size": 211,
-              "live_window": 211,
+              "live_size": 196,
+              "live_window": 196,
               "shown": 1,
               "unit": "calls",
               "quota_met": false
@@ -1531,6 +1549,7 @@
           },
           "_is_direct_chat": true,
           "initiator": "consciousness",
+          "terminal_origin": "model_final",
           "rounds": 9,
           "continuation_offer": {
             "eligible": false,
@@ -1590,6 +1609,7 @@
             "source": "chat",
             "offset": 1832
           },
+          "reply_author_label": "System",
           "wake_silent": true,
           "quiet_effective": true,
           "suggested_name": "Ouroboros Autonomous Exploration"
@@ -1646,6 +1666,7 @@
             "source": "chat",
             "offset": 0
           },
+          "reply_author_label": "System",
           "model_execution": {
             "requested_model": "claudexor::codex=gpt-6-astra",
             "requested_use_local": false,
@@ -1734,8 +1755,8 @@
               "archives_bounded": false,
               "matched": 1,
               "gaps": [],
-              "live_size": 211,
-              "live_window": 211,
+              "live_size": 196,
+              "live_window": 196,
               "shown": 1,
               "unit": "calls",
               "quota_met": false
@@ -1743,6 +1764,7 @@
           },
           "_is_direct_chat": true,
           "initiator": "consciousness",
+          "terminal_origin": "model_final",
           "rounds": 9,
           "continuation_offer": {
             "eligible": false,
@@ -1802,6 +1824,7 @@
             "source": "chat",
             "offset": 1839
           },
+          "reply_author_label": "System",
           "wake_silent": true,
           "quiet_effective": false,
           "suggested_name": "Ouroboros Autonomous Exploration"

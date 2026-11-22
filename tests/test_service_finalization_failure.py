@@ -88,7 +88,6 @@ def _ordinary_completion(tmp_path, monkeypatch, rows, answer):
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery",
                         lambda _ctx, content, _trace, _hold: reviewed.append(content) or False)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
-    monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
 
     held = loop._no_tool_final_answer("The service is stopped.", ctx, trace, registry,
@@ -239,7 +238,12 @@ def _assert_retained_tails_by_ref(read, rows, size):
     oversized, failed = shown["parent1:oversized"]["log_finalization"], shown["parent1:failed"]["log_finalization"]
     assert "OVERSIZED-LAST" in oversized["tail"] and "blob cap" in oversized["full_log_omitted"]
     assert oversized["retained_live_log_path"] and not oversized["full_log_ref"] and "source_ref" not in oversized
-    assert "FAILED-LAST" in failed["tail"] and "blob store full" in failed["errors"][0] and "source_ref" not in failed
+    assert (
+        "FAILED-LAST" in failed["tail"]
+        and failed["errors"] == ["capture: OSError"]
+        and "blob store full" not in json.dumps(failed)
+        and "source_ref" not in failed
+    )
     assert "log_finalization" not in shown["parent1:docker"]  # an in-container path is no retained source
     assert "ouroboros-service-docker.log" not in json.dumps(rows)
     assert size < 40_000  # twelve 80k tails would be 960k
@@ -308,3 +312,32 @@ def test_display_drops_a_tail_only_for_a_readable_source_and_identity_sees_hidde
     assert shown["full_log_ref"] == {"kind": "txt", "sha256": log["full_log_ref"]["sha256"], "encoding": "gzip",
                                      "size": log["full_log_ref"]["size"], "availability": "unavailable",
                                      "reason": "FileNotFoundError"}
+
+
+def test_a_log_whose_place_cannot_be_learned_now_keeps_its_tail_and_address(tmp_path, monkeypatch):
+    """A retained log whose bytes cannot be located now (``EvidenceUnavailable``: the packs catalog cannot
+    answer) is neither missing nor unreadable: the display keeps the row as it is, tail and the complete log's
+    address included, so a later display makes it readable; a gone blob keeps its own marked gap (the test
+    above). The read names the task."""
+    from ouroboros import evidence_packs
+
+    log = _finalized_log(tmp_path, "svc", "HEAD\n" + "x" * 90_000 + "\nLAST\n")
+    trace = {"verification_events": [{"kind": "services_stopped", "services": [
+        {"service_id": "parent1:svc", "lifecycle": "stopped", "log_finalization": log}]}]}
+    display, store = loop_forced_finalization._service_finalization_text, {"drive_root": tmp_path, "task_id": "parent1"}
+    real, tasks = evidence_packs.blob_bytes, []
+
+    def unlocatable(root, ref, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if ref.get("sha256") == log["full_log_ref"]["sha256"]:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        [row] = json.loads(display(trace, **store))
+    assert row["services"][0]["log_finalization"] == log and tasks == ["parent1"], tasks
+    [row] = json.loads(display(trace, **store))
+    shown = row["services"][0]["log_finalization"]
+    assert "tail" not in shown and shown["source_ref"]["sha256"] == log["full_log_ref"]["sha256"]

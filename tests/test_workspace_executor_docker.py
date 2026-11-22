@@ -108,7 +108,7 @@ def test_docker_executor_run_script_uses_backend_script_path(tmp_path, monkeypat
     data.mkdir()
     captured: dict[str, object] = {}
 
-    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None, stop=None):
+    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None, stop=None, memory=False):
         backend = str(cmd[1])
         host = workspace / backend.removeprefix("/workspace/")
         assert host.name == "script.py"
@@ -160,7 +160,7 @@ def test_docker_executor_accepts_backend_absolute_write_targets_and_outputs(tmp_
     data.mkdir()
     captured: dict[str, object] = {}
 
-    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None, executor=None, stop=None):
+    def fake_execute(ctx, cmd, cwd, timeout_sec, env_overlay=None, executor=None, stop=None, memory=False):
         assert executor.container_name == "pinned-container-id"
         captured["cmd"] = list(cmd)
         captured["env_overlay"] = env_overlay
@@ -231,23 +231,16 @@ def test_docker_executor_enforces_network_none_before_exec(tmp_path, monkeypatch
         calls.append([str(part) for part in cmd])
         if cmd[:3] == ["docker", "inspect", "-f"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="none\n", stderr="")
+        if cmd[:3] == ["docker", "exec", "--workdir"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
+        if cmd[:3] == ["docker", "exec", "pb-container"]:
+            if cmd[-1].startswith("case "):
+                return subprocess.CompletedProcess(cmd, 0, stdout="completed", stderr="")
+            if cmd[-1].startswith("rm -f -- "):
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(cmd)
 
-    class FakePopen:
-        pid = 999991
-        returncode = 0
-
-        def __init__(self, cmd, **kwargs):
-            calls.append([str(part) for part in cmd])
-            self.args = cmd
-
-        def communicate(self, timeout=None):
-            return "ok\n", ""
-
-    import ouroboros.workspace_executor as workspace_executor
-
-    monkeypatch.setattr(workspace_executor.subprocess, "run", fake_run)
-    monkeypatch.setattr(workspace_executor.subprocess, "Popen", FakePopen)
+    fake_docker_cli(monkeypatch, fake_run)
     result = execute(ctx, ["echo", "ok"], workspace, 30)
 
     assert result.returncode == 0
@@ -284,7 +277,7 @@ def test_docker_executor_timeout_cleans_backend_process(tmp_path, monkeypatch):
         raise AssertionError(cmd)
 
     class FakePopen:
-        pid = 999992
+        pid = None
         returncode = None
 
         def __init__(self, cmd, **kwargs):
@@ -298,13 +291,13 @@ def test_docker_executor_timeout_cleans_backend_process(tmp_path, monkeypatch):
             self.returncode = -9
             return self.returncode
 
-    import ouroboros.workspace_executor as workspace_executor
-
-    monkeypatch.setattr(workspace_executor.subprocess, "run", fake_run)
-    monkeypatch.setattr(workspace_executor.subprocess, "Popen", FakePopen)
+    stopped = []
+    fake_docker_cli(monkeypatch, fake_run, docker_popen=FakePopen, on_docker_stop=stopped.append)
     with pytest.raises(subprocess.TimeoutExpired):
         execute(ctx, ["sleep", "30"], workspace, 1)
 
+    proc, = stopped
+    assert isinstance(proc, FakePopen)
     assert any("cat /tmp/ouroboros-exec-" in call[-1] for call in calls if call[:2] == ["docker", "exec"])
     assert any("kill -TERM -$pid" in call[-1] for call in calls if call[:2] == ["docker", "exec"])
 
@@ -339,9 +332,7 @@ def test_docker_executor_rejects_network_none_when_container_has_network(tmp_pat
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout="bridge\n", stderr="")
 
-    import ouroboros.workspace_executor as workspace_executor
-
-    monkeypatch.setattr(workspace_executor.subprocess, "run", fake_run)
+    fake_docker_cli(monkeypatch, fake_run)
     try:
         execute(ctx, ["echo", "ok"], workspace, 30)
     except RuntimeError as exc:
@@ -598,7 +589,7 @@ def test_docker_durable_cleanup_keeps_record_until_kill_zero_terminal(tmp_path, 
             return subprocess.CompletedProcess(cmd, 0, stdout="running\n", stderr="")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(workspace_executor.subprocess, "run", fake_run)
+    fake_docker_cli(monkeypatch, fake_run)
     result = workspace_executor._kill_durable_service_records(data)
 
     assert result[0]["state"] == "cleanup_pending"
@@ -634,12 +625,60 @@ def test_docker_durable_cleanup_keeps_record_on_unknown_kill_zero(tmp_path, monk
             return subprocess.CompletedProcess(cmd, 7, stdout="", stderr="daemon unavailable")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(workspace_executor.subprocess, "run", fake_run)
+    fake_docker_cli(monkeypatch, fake_run)
     result = workspace_executor._kill_durable_service_records(data)
 
     assert result[0]["state"] == "cleanup_pending"
     assert result[0]["cleanup_dispatched"] is False
     assert path.exists()
+
+
+def test_fake_docker_cli_leaves_other_subprocess_consumers_native(monkeypatch):
+    import sys
+
+    from ouroboros import platform_layer, workspace_executor
+    from ouroboros.tools import shell_process
+
+    native_run, native_popen = subprocess.run, subprocess.Popen
+    inspect = ["docker", "inspect", "-f", "{{.HostConfig.NetworkMode}}", "test-box"]
+    start = ["docker", "exec", "test-box", "test-command"]
+    calls = []
+
+    def docker(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == inspect:
+            return subprocess.CompletedProcess(cmd, 0, "none\n", "")
+        assert cmd == start
+        return subprocess.CompletedProcess(cmd, 19, "from docker", "docker stderr")
+
+    fake_docker_cli(monkeypatch, docker)
+    assert platform_layer.subprocess.run is native_run
+    assert shell_process.subprocess.Popen is native_popen
+    workspace_executor._assert_docker_network_none("test-box")
+    scripted = workspace_executor._submit_service_command(
+        start, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert (scripted.returncode, scripted.stdout, scripted.stderr) == (19, "from docker", "docker stderr")
+
+    cmd = [sys.executable, "-c", "import sys; print('local'); print('warning', file=sys.stderr); sys.exit(7)"]
+    local = platform_layer._hidden_run(cmd, capture_output=True, text=True, timeout=5)
+    assert (local.returncode, local.stdout, local.stderr) == (7, "local\n", "warning\n")
+    assert calls == [inspect, start]
+
+
+def test_scripted_docker_process_never_reaches_host_stop(monkeypatch):
+    from ouroboros import workspace_executor
+
+    host_stops = []
+    # Install an inert recorder first: even a broken fixture cannot send an OS signal in this test.
+    monkeypatch.setattr(workspace_executor, "kill_process_tree", host_stops.append)
+    fake_docker_cli(monkeypatch, lambda args: subprocess.CompletedProcess(args, 0, "", ""))
+    simulated = workspace_executor.subprocess.Popen(["docker", "version"])
+    assert simulated.pid is None
+    with pytest.raises(AssertionError, match="unexpected stop of a simulated Docker CLI"):
+        workspace_executor.kill_process_tree(simulated)
+    other = object()
+    workspace_executor.kill_process_tree(other)
+    assert host_stops == [other]
 
 
 def test_service_submission_spawns_a_real_process_inside_the_pause_gate_and_waits_after(monkeypatch):
@@ -663,17 +702,25 @@ def test_service_submission_spawns_a_real_process_inside_the_pause_gate_and_wait
             finally:
                 held[0] = False
 
-    class ObservedPopen(subprocess.Popen):
-        def __init__(self, *args, **kwargs):
-            events.append(("spawn", held[0]))
-            super().__init__(*args, **kwargs)
+    fake_docker_cli(monkeypatch, lambda cmd, **_: pytest.fail(f"unexpected Docker call {cmd}"))
+    cli = workspace_executor.subprocess
+    assert cli is not subprocess
+    popen = cli.Popen
 
-        def communicate(self, *args, **kwargs):
+    def observed_popen(*args, **kwargs):
+        events.append(("spawn", held[0]))
+        proc = popen(*args, **kwargs)
+        communicate = proc.communicate
+
+        def observed_wait(*args, **kwargs):
             events.append(("wait", held[0]))
-            return super().communicate(*args, **kwargs)
+            return communicate(*args, **kwargs)
+
+        proc.communicate = observed_wait
+        return proc
 
     monkeypatch.setattr(owner_pause, "operation_start", observed_start)
-    monkeypatch.setattr(workspace_executor.subprocess, "Popen", ObservedPopen)
+    monkeypatch.setattr(cli, "Popen", observed_popen)
     completed = workspace_executor._submit_service_command(
         [sys.executable, "-c", "import sys; print('12345'); sys.stderr.write('warn'); sys.exit(3)"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,

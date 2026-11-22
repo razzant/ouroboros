@@ -559,9 +559,9 @@ _SUMMARY = {"ts": "2026-10-01T05:00:00Z", "direction": "system", "chat_id": 1, "
 
 
 class TestSavedTargetRecovery:
-    """A saved target not found is a fact of the store it was read under, never of the process: once the
-    store gains rows (an import, a repair) the next read decides it again, in every reader, and a gap it
-    disclosed closes. A found target row is immutable and read once."""
+    """A saved target's decision is a fact of the store it was read under, never of the process: once the
+    store gains rows (an import, a repair) or a text is revised the next read decides it again, in every
+    reader, and a gap it disclosed closes. Until then a found target is read once."""
 
     def test_an_unreadable_target_made_readable_joins_its_project_in_the_same_process(self, tmp_path):
         from ouroboros import room_appearances
@@ -595,35 +595,44 @@ class TestSavedTargetRecovery:
         assert "Owner words torn" in _texts(tmp_path, nova)
         assert ds.row_at(tmp_path, "chat", stored.seq).row == stored.row  # the owner's row is unchanged
 
-    def test_an_absent_target_imported_later_joins_its_project_in_the_same_process(self, tmp_path):
+    @pytest.mark.parametrize("target_stream", ["chat", "progress"])
+    @pytest.mark.parametrize("elsewhere", [False, True], ids=["reply-in-main", "reply-in-project"])
+    def test_an_absent_target_imported_later_joins_its_project_in_the_same_process(self, tmp_path, target_stream, elsewhere):
         """Proven absent is no gap; a backup segment restored into the archive and imported brings the target,
         and the same process shows the Reply in its Project, in history, room reads and memory."""
-        from ouroboros import memory_inventory as mi, room_appearances
+        from ouroboros import memory_inventory as mi, room_appearances, room_messages
         from tests._dialogue import import_all, seed
 
         nova = _project(tmp_path, "nova")
         _born_in(tmp_path, "nova-root", nova)
-        _legacy, reply = _legacy_reply(_SUMMARY, "2026-10-02T06:00:00Z", "restored")
+        written = _project(tmp_path, "other") if elsewhere else 1
+        _legacy, reply = _legacy_reply(_SUMMARY, "2026-10-02T06:00:00Z", "restored", chat_id=written)
         seed(tmp_path, archives={"chat_20261002T000000.jsonl": [reply]})
         import_all(tmp_path)
         assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
-        stored = ds.rows_by_identity(tmp_path, 1, reply["ts"])[0]
+        assert room_messages.run(tmp_path, lambda: False)["state"] == "done"
+        assert not room_messages.read(tmp_path)[0].get(nova)
+        stored = ds.rows_by_identity(tmp_path, written, reply["ts"])[0]
         assert "Owner words restored" not in _texts(tmp_path, nova)
         assert "chat_reply_target_unreadable" not in _read(tmp_path, nova)[1]["window"]["truncated_by"]
-        assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {"1"}
-        seed(tmp_path, archives={"chat_20261001T000000.jsonl": [dict(_SUMMARY)]})
+        assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {str(written)}
+        seed(tmp_path, archives={f"{target_stream}_20261001T000000.jsonl": [dict(_SUMMARY)]})
         import_all(tmp_path)  # the replan finds the restored segment and imports it
-        assert ds.rows_by_identity(tmp_path, 1, _SUMMARY["ts"])
+        assert ds.rows_by_identity(tmp_path, 1, _SUMMARY["ts"], stream=target_stream)
+        assert room_appearances.due(tmp_path, {}, {}, False)
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+        assert room_messages.read(tmp_path)[0][nova] == reply["ts"]
         assert "Owner words restored" in _texts(tmp_path, nova)
         assert "Owner words restored" in _room_rows(tmp_path, nova)
-        assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {"1", str(nova)}
+        assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {str(written), str(nova)}
         assert ds.row_at(tmp_path, "chat", stored.seq).row == stored.row
 
-    def test_a_target_in_a_planned_segment_is_never_cached_absent_and_is_found_once_imported(self, tmp_path):
+    def test_a_target_in_a_planned_segment_is_never_cached_absent_and_is_found_once_imported(self, tmp_path, monkeypatch):
         """The stream ends are the cache's change counter, and the archive import fills intervals planned before it
         without moving them. While such a segment waits no read can decide its rows absent (the store answers
-        importing and nothing is kept), so its import finds no stale decision. A segment restored later is placed past
-        the ends and imported by the replan itself: the ends move then."""
+        importing and nothing is kept), and a read whose lookup the import's end overtakes looks again before it
+        keeps an absence, so the import leaves no stale decision. A segment restored later is placed past the ends
+        and imported by the replan itself: the ends move then."""
         from ouroboros import dialogue_import, room_membership
         from ouroboros.projects_registry import RoomResolver
         from ouroboros.store import StoreMigrating
@@ -640,7 +649,19 @@ class TestSavedTargetRecovery:
         with pytest.raises(StoreMigrating):
             room_membership._saved_target(RoomResolver(tmp_path), legacy)
         assert (str(tmp_path), legacy["address"]) not in room_membership._SAVED_TARGETS
-        import_all(tmp_path)
+        looked, overtaken = ds.rows_by_identity, []
+
+        def lookup(*args, **kwargs):  # the job imports the last segment right after this read's first lookup
+            rows = looked(*args, **kwargs)
+            if not overtaken:
+                overtaken.append(True)
+                import_all(tmp_path)
+            return rows
+
+        with monkeypatch.context() as racing:
+            racing.setattr(ds, "rows_by_identity", lookup)
+            assert room_membership._saved_target(RoomResolver(tmp_path), legacy)[0] == room_membership.TARGET_WORK
+        assert overtaken and not dialogue_import.pending_segments(tmp_path)
         assert room_membership._stream_ends(tmp_path) == planned  # the import filled the planned interval in place
         assert room_membership._saved_target(RoomResolver(tmp_path), legacy)[0] == room_membership.TARGET_WORK
 
@@ -683,8 +704,9 @@ class TestSavedTargetRecovery:
         assert "Owner words inside" not in _texts(tmp_path, other)
 
     def test_a_target_not_found_is_read_again_only_after_the_store_moved(self, tmp_path, monkeypatch):
-        """The bound of the recovery: a found target is read once; one not found is read again only when a
-        stream's end moved since (an append, a planned segment), never on every read."""
+        """The bound of the recovery: a found target is read again only when a chat text was revised since;
+        one not found, also when a stream's end moved (an append, a planned segment): never on every read.
+        A miss looks twice in each stream (an import may end during its first look)."""
         from ouroboros import chat_chain, room_membership
         from ouroboros.projects_registry import RoomResolver
 
@@ -700,12 +722,82 @@ class TestSavedTargetRecovery:
         for _ in range(3):
             assert room_membership._saved_target(rooms, found)[0] == room_membership.TARGET_WORK
             assert room_membership._saved_target(rooms, missing)[0] == room_membership.TARGET_ABSENT
-        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 2  # chat, then progress
-        ds.append(tmp_path, "chat", {"ts": "2026-10-01T07:00:00Z", "direction": "out", "chat_id": 1, "text": "later"})
+        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 4  # chat, progress: twice
+        later = ds.append(tmp_path, "chat", {"ts": "2026-10-01T07:00:00Z", "direction": "out", "chat_id": 1, "text": "later"})
         for _ in range(3):
             room_membership._saved_target(rooms, found)
             room_membership._saved_target(rooms, missing)
-        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 4
+        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 8
+        ds.revise_text(tmp_path, "chat", later.seq, "later, as corrected")  # any row's address may answer anew
+        for _ in range(3):
+            assert room_membership._saved_target(rooms, found)[0] == room_membership.TARGET_WORK
+            assert room_membership._saved_target(rooms, missing)[0] == room_membership.TARGET_ABSENT
+        assert reads.count(found["address"]) == 2 and reads.count(missing["address"]) == 12
+
+    def test_a_revised_target_is_decided_at_its_exact_address_now_by_a_running_and_a_new_process(self, tmp_path):
+        """Owner decision 2026-11-11: a Reply whose room its target row decides (one saved without
+        ``target_home``, or with a private contact's old "none") is shown where that exact address answers now.
+        A target whose text was revised answers another address, so its Reply stays only where it was written
+        (Main here); one whose text is back puts it in its Project again; a target no one revised keeps it there.
+        This process decided every target before the revisions and answers as an interpreter started after them."""
+        from ouroboros import memory_inventory as mi, room_appearances
+        from ouroboros.chat_references import reference_from_row
+
+        nova = _project(tmp_path, "nova")
+        _born_in(tmp_path, "nova-root", nova)
+        private = {"direction": "out", "type": "main_notice",
+                   "presence_contact": {"task_id": "nova-root", "binding_id": "b", "source_event_id": "e"}}
+        targets, replies = {}, {}
+        for minute, (name, fields) in enumerate((("kept", {}), ("revised", {}), ("restored", {}), ("contact", private))):
+            row = {**_SUMMARY, "ts": f"2026-10-01T05:0{minute}:00Z", "text": f"Nova said {name}.", **fields}
+            targets[name] = ds.append(tmp_path, "chat", row, appearances=None)
+            _legacy, reply = _legacy_reply(row, f"2026-10-01T06:0{minute}:00Z", name)
+            if fields:  # the stamp an older rule gave a Reply to private contact
+                reply["reply_to"] = {**reference_from_row(row), "target_home": "none"}
+            replies[name] = ds.append(tmp_path, "chat", reply, appearances=None).seq
+        ds.revise_text(tmp_path, "chat", targets["restored"].seq, "Nova said restored, as corrected.")
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+
+        def here():
+            facts = mi.membership_facts(tmp_path)
+            return {name: sorted(mi.rooms_of_row(mi.row_meta(ds.row_at(tmp_path, "chat", seq).row), facts))
+                    for name, seq in replies.items()}
+
+        def shown(chat):
+            return {name for name in replies if f"Owner words {name}" in _texts(tmp_path, chat)}
+
+        main, both = ["1"], sorted(["1", str(nova)])
+        assert here() == {"kept": both, "revised": both, "restored": main, "contact": both}
+        assert shown(nova) == {"kept", "revised", "contact"}
+        # Text revisions alone: no row is stored, no cache is cleared and nothing restarts.
+        for name in ("revised", "contact"):
+            ds.revise_text(tmp_path, "chat", targets[name].seq, f"Nova said {name}, as corrected.")
+        ds.revise_text(tmp_path, "chat", targets["restored"].seq, targets["restored"].row["text"])
+        now = {"kept": both, "revised": main, "restored": both, "contact": main}
+        assert _fresh_rooms(tmp_path, replies) == now
+        assert here() == now
+        assert shown(nova) == {"kept", "restored"} and shown(1) == set(replies)  # Main keeps every one
+        assert {name for name in replies if f"Owner words {name}" in _room_rows(tmp_path, nova)} == {"kept", "restored"}
+
+
+def _fresh_rooms(root, seqs):
+    """The rooms an interpreter started now puts the chat rows at ``seqs`` in: it remembers nothing this
+    process decided (``memory_inventory.rooms_of_row``, the rule every reader shares)."""
+    import pathlib
+    import sys
+
+    from tests.group_run import run_in_group
+
+    script = ("import json, sys\n"
+              "from ouroboros import dialogue_store as ds, memory_inventory as mi\n"
+              "root, seqs = sys.argv[1], json.loads(sys.argv[2])\n"
+              "facts = mi.membership_facts(root)\n"
+              "print(json.dumps({name: sorted(mi.rooms_of_row(mi.row_meta(ds.row_at(root, 'chat', seq).row), facts))"
+              " for name, seq in seqs.items()}))\n")
+    done = run_in_group([sys.executable, "-c", script, str(root), json.dumps(seqs)], timeout=300,
+                        cwd=pathlib.Path(__file__).resolve().parents[1])
+    assert done.returncode == 0, done.stderr[-4000:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
 
 
 def test_a_saved_reply_in_memory_agrees_with_history_and_evidence(tmp_path):
@@ -732,6 +824,395 @@ def test_a_saved_reply_in_memory_agrees_with_history_and_evidence(tmp_path):
     evidence = [row.get("text") for row in read_room_source(tmp_path, nova)["rows"]]
     for readers in (_texts(tmp_path, nova), _room_rows(tmp_path, nova), evidence):
         assert "Owner words summary" in readers and "Owner words refusal" not in readers
+
+
+def test_memory_uses_one_reply_version_for_many_legacy_targets_and_rechecks_a_race(tmp_path, monkeypatch):
+    from ouroboros import memory_inventory as mi, room_membership as membership
+    from ouroboros.chronicle_store import ChronicleStore
+
+    nova = _project(tmp_path, "nova")
+    _born_in(tmp_path, "nova-root", nova)
+    ChronicleStore(tmp_path).ensure_activated()
+    count = 15
+    targets = []
+    for minute in range(count):
+        row = {**_SUMMARY, "ts": f"2026-10-01T05:{minute:02d}:00Z", "text": f"Nova said {minute}."}
+        targets.append(ds.append(tmp_path, "chat", row, appearances=None))
+        _legacy, reply = _legacy_reply(row, f"2026-10-01T06:{minute:02d}:00Z", str(minute))
+        ds.append(tmp_path, "chat", reply, appearances=None)
+
+    def view():
+        return [entry[0] for entry in mi.open_rows_by_room(tmp_path, gaps={})[str(nova)]
+                if entry[1].get("reply_to")]
+
+    original = membership._text_revision
+    reads = []
+    monkeypatch.setattr(membership, "_text_revision", lambda root: reads.append(root) or original(root))
+    original_ends = membership._stream_ends
+    end_reads = []
+    monkeypatch.setattr(membership, "_stream_ends",
+                        lambda root: end_reads.append(root) or original_ends(root))
+    lookup = membership._target_facts
+    progress = []
+
+    def append_after_first_lookup(rooms, ref):
+        result = lookup(rooms, ref)
+        if not progress:
+            progress.append(ds.append(tmp_path, "progress", {
+                "ts": "2026-10-01T06:59:00Z", "chat_id": 1, "text": "Unrelated progress.",
+            }))
+        return result
+
+    with monkeypatch.context() as overlap:
+        overlap.setattr(membership, "_target_facts", append_after_first_lookup)
+        both = view()
+    assert len(progress) == 1
+    assert len(both) == count and len(reads) == 2
+    assert len(end_reads) == 1  # one shared pair of stream-end reads for the whole batch
+    with monkeypatch.context() as override:
+        override.setattr(membership, "capture_reply_targets", lambda _rooms, read: read())
+        reads.clear()
+        end_reads.clear()
+        assert view() == both and len(reads) == 2 * count and not end_reads  # found: no pair at all
+
+    raced = []
+
+    def edit_after_first_lookup(rooms, ref):
+        result = lookup(rooms, ref)
+        if not raced:
+            raced.append(True)
+            ds.revise_text(tmp_path, "chat", targets[0].seq, "Different target bytes.")
+        return result
+
+    monkeypatch.setattr(membership, "_target_facts", edit_after_first_lookup)
+    assert view() == both[1:]
+    assert len(raced) == 1
+
+
+def test_an_append_during_a_missed_pass_costs_no_second_read_and_a_late_target_joins_the_next_one(
+        tmp_path, monkeypatch):
+    """A row appended during a whole-view pass is not that read's: the pass's own list is fixed,
+    so an unrelated append costs no second read, and only a moved store identity or chat text
+    revision re-reads a pass once it has answered. A miss is remembered under the stream ends it
+    was read with, so the next read decides it again: a target stored meanwhile joins its work's
+    Project then, never a stale absence."""
+    from ouroboros import memory_inventory as mi, room_membership as membership
+    from ouroboros.chronicle_store import ChronicleStore
+
+    nova = _project(tmp_path, "nova")
+    _born_in(tmp_path, "nova-root", nova)
+    ChronicleStore(tmp_path).ensure_activated()
+    missing = {**_SUMMARY, "ts": "2026-10-01T04:00:00Z", "text": "Initially absent target."}
+    legacy, reply = _legacy_reply(missing, "2026-10-01T07:00:00Z", "torn")
+    ds.append(tmp_path, "chat", reply, appearances=None)
+
+    def view():
+        gaps, quiet = {}, {}
+        return mi.open_rows_by_room(tmp_path, gaps=gaps, quiet=quiet), gaps, quiet
+
+    passes = 0
+    capture = membership.capture_reply_targets
+
+    def counted_capture(rooms, read):
+        def counted():
+            nonlocal passes
+            passes += 1
+            return read()
+        return capture(rooms, counted)
+
+    monkeypatch.setattr(membership, "capture_reply_targets", counted_capture)
+    lookup, missed, appended = membership._target_facts, [], []
+
+    def progress_after_miss(rooms, ref):
+        result = lookup(rooms, ref)
+        if ref.get("address") == legacy["address"]:  # strictly the missed ref's own address
+            missed.append(result[0])
+            if not appended:
+                appended.append(ds.append(tmp_path, "progress", {
+                    "ts": "2026-10-01T06:59:00Z", "chat_id": 1, "text": "Unrelated progress.",
+                }))
+        return result
+
+    with monkeypatch.context() as overlap:
+        overlap.setattr(membership, "_target_facts", progress_after_miss)
+        cold = view()
+    assert len(appended) == 1 and passes == 1  # one read call: an append is not this read's
+    assert set(missed) == {membership.TARGET_ABSENT}  # the proven miss, at its exact address
+    warm = view()
+    assert warm == cold and passes == 2  # the warm repeat: the same rows, gaps and quiet
+
+    created = []
+
+    def create_after_miss(rooms, ref):
+        result = lookup(rooms, ref)
+        if ref.get("address") == legacy["address"] and not created:
+            created.append(ds.append(tmp_path, "chat", missing, appearances=None))
+        return result
+
+    with monkeypatch.context() as overlap:
+        overlap.setattr(membership, "_target_facts", create_after_miss)
+        assert view() == cold and passes == 3  # the stored target is no same-read promise
+    fresh = view()
+    assert passes == 4 and fresh[1] == {}  # the next read decides the miss under the moved ends
+    assert "torn" in {meta.get("client_message_id") for _a, meta, _p in fresh[0][str(nova)]}
+    facts = mi.membership_facts(tmp_path)
+    assert membership._target_facts(facts.rooms, legacy)[0] == membership.TARGET_WORK
+
+
+def test_a_target_imported_between_two_lookups_of_one_pass_is_not_left_absent_by_a_warm_miss(
+        tmp_path, monkeypatch):
+    """The cached miss is a fact of the stream ends it was decided under: a planned segment
+    imported between two of one pass's lookups moves them and stores the target at its exact
+    address, so the later lookup reads the ends again before reusing the miss and finds it --
+    as a cold pass and an independent lookup already did."""
+    from ouroboros import memory_inventory as mi, room_membership as membership
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.projects_registry import RoomResolver
+    from tests._dialogue import import_all, seed
+
+    nova = _project(tmp_path, "nova")
+    _born_in(tmp_path, "nova-root", nova)
+    ChronicleStore(tmp_path).ensure_activated()
+    later = {**_SUMMARY, "ts": "2026-10-01T05:30:00Z", "text": "Target imported between the lookups."}
+    _legacy, reply = _legacy_reply(_SUMMARY, "2026-10-01T06:00:00Z", "first")
+    later_legacy, later_reply = _legacy_reply(later, "2026-10-01T06:30:00Z", "second")
+    for row in (dict(_SUMMARY), reply, later_reply):
+        ds.append(tmp_path, "chat", row, appearances=None)
+    seed(tmp_path, archives={"progress_20261001T000000.jsonl": [later]})  # planned, not yet imported
+    rooms = RoomResolver(tmp_path)
+    membership._SAVED_TARGETS.clear()
+    assert membership.reply_target(rooms, later_legacy)[0] == membership.TARGET_ABSENT  # the warm miss
+
+    lookup, imported = membership._target_facts, []
+
+    def import_after_the_first_lookup(pass_rooms, ref):
+        result = lookup(pass_rooms, ref)
+        if ref.get("address") == reply["reply_to"]["address"] and not imported:
+            imported.append(True)
+            import_all(tmp_path)  # between the two lookups: the target at its exact address
+        return result
+
+    monkeypatch.setattr(membership, "_target_facts", import_after_the_first_lookup)
+    shown = {meta.get("client_message_id") for _a, meta, _p
+             in mi.open_rows_by_room(tmp_path, gaps={})[str(nova)]}
+    assert imported and {"first", "second"} <= shown
+
+
+def test_a_discarded_race_pass_keeps_its_gap_out_of_the_report_and_finishes_quiet_once(tmp_path, monkeypatch):
+    """The batching/text-edit race made to bite. A mid-pass ``revise_text`` moves the marks a whole-view
+    pass read under. The repair and edit land after ``unknown_target_rooms`` decides a gap but
+    before ``capture_reply_targets`` compares the marks. The discarded pass must contribute
+    neither its rows nor its gap. The retry already sees the exact target, collects the quiet
+    finish once, and the recovered row itself joins the next view."""
+    from ouroboros import memory_inventory as mi, room_appearances, room_membership as membership
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.chronicle_store import ChronicleStore
+    from tests._dialogue import import_all, seed
+
+    nova = _project(tmp_path, "nova")
+    _born_in(tmp_path, "nova-root", nova)
+    target = {**_SUMMARY, "client_message_id": "repaired-target"}
+    legacy = {key: value for key, value in reference_from_row(target).items() if key != "target_home"}
+    reply = {"ts": "2026-10-01T06:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "torn",
+             "text": "Owner words torn", "reply_to": legacy}
+    seed(tmp_path, archives={"chat_20261001T000000.jsonl": [json.dumps(target)[:48] + "\n", reply]})
+    import_all(tmp_path)
+    ChronicleStore(tmp_path).ensure_activated()
+    assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+    ds.append(tmp_path, "chat", {"ts": "2026-10-01T05:30:00Z", "direction": "system", "chat_id": 1,
+                                 "task_id": "nova-root", "type": "task_summary", "text": "Done quietly.",
+                                 "client_message_id": "quiet-done", "wake_silent": True,
+                                 "quiet_effective": True})
+    decoy = ds.append(tmp_path, "chat", {"ts": "2026-10-01T06:30:00Z", "direction": "in", "chat_id": 1,
+                                         "client_message_id": "decoy", "text": "An editable Main row."})
+
+    def view():
+        gaps, quiet = {}, {}
+        return mi.open_rows_by_room(tmp_path, gaps=gaps, quiet=quiet), gaps, quiet
+
+    def ids(view, room):
+        return [meta.get("client_message_id") for _address, meta, _pos in view.get(str(room), [])]
+
+    cold, gaps, _quiet = view()
+    assert gaps == {str(nova): {"reply_target_unreadable"}}  # the standing gap of the unreadable target
+    assert ids(cold, nova) == ["quiet-done"]  # its Project holds the quiet Done, not the Reply
+    assert "torn" in ids(cold, 1) and "torn" not in ids(cold, nova)
+
+    real_unknown, moved, passes = membership.unknown_target_rooms, [], []
+    real_capture = membership.capture_reply_targets
+
+    def repair_and_edit_after_gap(row, project_chat_ids, rooms):
+        # A repair before this lookup would be visible to the gap check even within the pass.
+        result = real_unknown(row, project_chat_ids, rooms)
+        if not moved and (row.get("reply_to") or {}).get("address") == legacy["address"]:
+            assert result == {nova}
+            moved.append(True)
+            ds.append(tmp_path, "chat", dict(target), appearances=None)  # the repair: its exact row again
+            ds.revise_text(tmp_path, "chat", decoy.seq, "An edited Main row.")  # the edit that discards the pass
+        return result
+
+    def recording_capture(rooms, read):
+        def recording():
+            result = read()
+            passes.append(result)
+            return result
+        return real_capture(rooms, recording)
+
+    with monkeypatch.context() as race:
+        race.setattr(membership, "unknown_target_rooms", repair_and_edit_after_gap)
+        race.setattr(membership, "capture_reply_targets", recording_capture)
+        raced, raced_gaps, raced_quiet = view()
+    assert len(moved) == 1 and len(passes) == 2  # one discarded pass, one retry under the moved marks
+    assert passes[0][2] == {nova}  # the discarded pass decided its gap before the repair landed
+    assert "repaired-target" not in ids(passes[0][0], nova)  # its row list was fixed at its start
+    assert "torn" in ids(raced, nova)  # the report is the retry's own, never the discarded pass's
+    assert raced_gaps == {}  # the retry resolves live: the repair is honored, no stale gap survives it
+    assert [meta.get("client_message_id") for _a, meta, _p in raced_quiet[str(nova)]] == ["quiet-done"]
+    fresh, gaps, quiet = view()
+    assert gaps == {}  # the recovered exact address closes the gap for the fresh read
+    assert "torn" in ids(fresh, nova) and "torn" in ids(fresh, 1)
+    assert "repaired-target" in ids(fresh, 1)  # the recovered row stands where every reader finds it
+    assert [meta.get("client_message_id") for _a, meta, _p in quiet[str(nova)]] == ["quiet-done"]  # once
+
+
+def test_a_same_path_store_replacement_is_decided_by_identity_alone_not_by_stale_cached_answers(tmp_path):
+    """A backup restored over the live path is a different store at the same address: a saved target's
+    decision is a fact of the file it was read from (``store.file_identity``), never of the path. The
+    replacement keeps every other mark equal -- the same chat text revision, the same ends of both
+    streams -- so the identity is the only thing that moved: the target's exact address answers before
+    the swap and no longer after, while the cache still holds the found answer under the old file,
+    which is exactly what a stale cache would have returned."""
+    import os
+
+    from ouroboros import chat_chain, room_membership as membership, store
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.projects_registry import RoomResolver
+
+    target_text, filler_text = "Target of the live store.", "Backup filler row stands."
+    assert len(target_text) == len(filler_text)  # the streams' ends are byte coordinates: equal rows, equal ends
+
+    def a_store(root, first_row):
+        nova = _project(root, "nova")
+        _born_in(root, "nova-root", nova)
+        target = {**_SUMMARY, "text": target_text}
+        legacy = {key: value for key, value in reference_from_row(target).items() if key != "target_home"}
+        reply = {"ts": "2026-10-01T06:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "swap",
+                 "text": "Owner words swap", "reply_to": legacy}
+        ds.append(root, "chat", first_row, appearances=None)
+        ds.append(root, "chat", reply, appearances=None)
+        return legacy
+
+    live, backup = tmp_path / "live", tmp_path / "backup"
+    live.mkdir()
+    backup.mkdir()
+    target = {**_SUMMARY, "text": target_text}
+    filler = {**_SUMMARY, "ts": "2026-10-01T04:00:00Z", "text": filler_text}
+    legacy = a_store(live, dict(target))
+    assert a_store(backup, filler) == legacy
+    rooms = RoomResolver(live)
+    membership._SAVED_TARGETS.clear()
+    identity = membership._store_identity(live)
+    assert membership.reply_target(rooms, legacy) == (membership.TARGET_WORK, "nova-root", 1)
+    assert chat_chain.resolve_row(live, legacy["address"], stream="chat")[0]["text"] == target_text
+    revision, ends = membership._text_revision(live), membership._stream_ends(live)
+    assert (membership._text_revision(backup), membership._stream_ends(backup)) == (revision, ends)
+    store.close_connections_under(tmp_path)  # Windows: no cached handle stays open over a replaced file
+    live_path, backup_path = ds.path(live), ds.path(backup)
+    os.replace(backup_path, live_path)
+    assert membership._store_identity(live) != identity  # a different file at the same path
+    assert (membership._text_revision(live), membership._stream_ends(live)) == (revision, ends)  # only identity moved
+    held = membership._SAVED_TARGETS[(str(live), legacy["address"])]
+    assert held[0][0] == membership.TARGET_WORK and held[1] == identity  # the stale answer is still cached
+    assert not chat_chain.resolve_row(live, legacy["address"], stream="chat")[0]  # the address answers no more
+    assert membership.reply_target(rooms, legacy) == (membership.TARGET_ABSENT, "nova-root", 1)
+
+
+def test_a_store_replaced_inside_a_captured_pass_is_answered_from_the_replaced_file(
+        tmp_path, monkeypatch):
+    """A backup restored over the live path between two of one pass's lookups keeps the text
+    revision and both streams' ends equal: the file identity is the only mark that moved, and
+    the pass is discarded -- its row list never reaches a reader -- so the retry answers live
+    off the replaced store and the Project's returned rows reflect the replacement."""
+    import os
+
+    from ouroboros import memory_inventory as mi, room_membership as membership, store
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.projects_registry import RoomResolver
+
+    target_text, filler_text = "Target of the live store.", "Backup filler row stands."
+    assert len(target_text) == len(filler_text)  # the ends are byte coordinates: equal rows, equal ends
+    live, backup = tmp_path / "live", tmp_path / "backup"
+    live.mkdir()
+    backup.mkdir()
+    nova = _project(live, "nova")
+    _born_in(live, "nova-root", nova)
+    ChronicleStore(live).ensure_activated()
+    target = {**_SUMMARY, "text": target_text}
+    legacy = {key: value for key, value in reference_from_row(target).items() if key != "target_home"}
+    reply = {"ts": "2026-10-01T06:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "swap",
+             "text": "Owner words swap", "reply_to": legacy}
+    filler = {**_SUMMARY, "ts": "2026-10-01T04:00:00Z", "text": filler_text}
+    for root, first in ((live, dict(target)), (backup, filler)):
+        ds.append(root, "chat", first, appearances=None)
+        ds.append(root, "chat", dict(reply), appearances=None)
+    membership._SAVED_TARGETS.clear()
+    assert membership.reply_target(RoomResolver(live), legacy)[0] == membership.TARGET_WORK  # cached live
+    revision, ends = membership._text_revision(live), membership._stream_ends(live)
+    assert (membership._text_revision(backup), membership._stream_ends(backup)) == (revision, ends)
+
+    lookup, swapped = membership._target_facts, []
+
+    def restore_after_the_first_lookup(pass_rooms, ref):
+        result = lookup(pass_rooms, ref)
+        if ref.get("address") == legacy["address"] and not swapped:
+            swapped.append(True)
+            store.close_connections_under(tmp_path)  # Windows: no cached handle over a replaced file
+            os.replace(ds.path(backup), ds.path(live))  # a restore: the same rooms, another store
+        return result
+
+    with monkeypatch.context() as race:
+        race.setattr(membership, "_target_facts", restore_after_the_first_lookup)
+        raced = mi.open_rows_by_room(live, gaps={})
+    assert swapped
+    shown = {meta.get("client_message_id") for _a, meta, _p in raced.get(str(nova), [])}
+    assert "swap" not in shown  # the returned rows reflect the replaced store, never the stale pass
+    assert "swap" in {meta.get("client_message_id") for _a, meta, _p in raced["1"]}
+    assert (membership._text_revision(live), membership._stream_ends(live)) == (revision, ends)  # only identity moved
+
+
+def test_two_legacy_references_to_one_unreadable_address_use_only_their_own_fallbacks_in_either_order(tmp_path):
+    """Two Replies an older body saved to the same unreadable exact address -- one reference carrying
+    its target's task, the other naming only a room -- share one decision at that address, but each
+    reference's own fallback is the only thing it may join: the task's room for one, the named chat
+    for the other, never the other's, whichever is decided first and in either order."""
+    from ouroboros import memory_inventory as mi, room_membership as membership
+    from ouroboros.chat_references import reference_from_row
+    from tests._dialogue import import_all, seed
+
+    nova, beta = _project(tmp_path, "nova"), _project(tmp_path, "beta")
+    _born_in(tmp_path, "nova-root", nova)
+    target = {**_SUMMARY}
+    legacy = {key: value for key, value in reference_from_row(target).items() if key != "target_home"}
+    with_task = {**legacy, "task_id": "nova-root", "chat_id": 1}
+    without_task = {key: value for key, value in legacy.items() if key != "task_id"}
+    without_task["chat_id"] = beta
+    reply = {"ts": "2026-10-01T06:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "shared",
+             "text": "Owner words shared", "reply_to": with_task}
+    seed(tmp_path, archives={"chat_20261001T000000.jsonl": [json.dumps(target)[:48] + "\n", reply]})
+    import_all(tmp_path)
+    facts = mi.membership_facts(tmp_path)
+
+    def could_join(ref):
+        row = {"ts": "2026-10-01T06:30:00Z", "direction": "in", "chat_id": 1, "text": "Owner words",
+               "reply_to": ref}
+        return membership.unknown_target_rooms(row, facts.project_chat_ids, facts.rooms)
+
+    assert membership._saved_target(facts.rooms, with_task)[0] == membership.TARGET_UNKNOWN
+    cases = ((with_task, frozenset({nova})), (without_task, frozenset({beta})))
+    for first, second in (cases, tuple(reversed(cases))):
+        membership._SAVED_TARGETS.clear()  # each order is decided from a cold cache
+        assert could_join(first[0]) == first[1] and could_join(second[0]) == second[1]
 
 
 def test_an_unreadable_target_is_a_gap_of_its_projects_memory_and_evidence_reads(tmp_path):
@@ -1011,3 +1492,66 @@ class TestContactRepliesPass:
         monkeypatch.setattr(room_appearances, "_BATCH", 500)
         assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
         assert not gap(0, end) and not window(50)
+
+
+class TestStampedRoomEchoKeepsItsDisplayAddress:
+    """An accepted web echo's persisted ``kind: "room_echo"`` stamp is its display address, replay
+    included (CLIENT_CONTRACT §5): a reservation lost after the acceptance leaves the row in the room
+    it was written in — Main never guesses it back — while unstamped transport rows keep their
+    implicit Main mirror and an explicit Reply appearance survives the stamp."""
+
+    ECHO = {"direction": "in", "user_id": 1, "source": "web", "ingress_accepted": True, "kind": "room_echo"}
+
+    def test_a_stamped_echo_keeps_its_written_room_when_its_reservation_is_lost(self, tmp_path):
+        from ouroboros import memory_inventory as mi
+        from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
+        from ouroboros.room_membership import row_rooms
+
+        nova = _project(tmp_path, "nova")
+        echo = ds.append(tmp_path, "chat", {"ts": "2026-11-18T05:00:00Z", "chat_id": nova,
+                                            "text": "Owner words stamped", "client_message_id": "echo-1",
+                                            **self.ECHO})
+        transport = ds.append(tmp_path, "chat", {"ts": "2026-11-18T05:01:00Z", "direction": "in", "chat_id": 987654,
+                                                 "user_id": 42, "text": "Via the transport",
+                                                 "source": "skill:telegram", "client_message_id": "tg-1"})
+        projects, rooms = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
+        assert row_rooms(nova, echo.row, projects, rooms) == {nova}
+        assert "Owner words stamped" in _texts(tmp_path, nova) and "Owner words stamped" not in _texts(tmp_path, 1)
+
+        # The reservation is lost; the registry itself stays readable.
+        registry = tmp_path / "state" / "projects.json"
+        registry.write_text(json.dumps({**json.loads(registry.read_text()), "projects": []}))
+        projects, rooms = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
+        assert nova not in projects
+        assert row_rooms(nova, echo.row, projects, rooms) == {nova}  # the stamp holds; no guessed Main
+        assert row_rooms(987654, transport.row, projects, rooms) == {987654, 1}  # the unstamped mirror is the old rule
+        facts = mi.membership_facts(tmp_path)  # canonical membership reads the same stamp from the row's metadata
+        assert mi.rooms_of_row(mi.row_meta(echo.row), facts) == {str(nova)}
+        assert mi.rooms_of_row(mi.row_meta(transport.row), facts) == {"987654", "1"}
+        assert "Owner words stamped" not in _texts(tmp_path, 1)  # Main's history honors the stamp on replay
+        assert "Via the transport" in _texts(tmp_path, 1)  # the genuine transport mirror replays as before
+        assert "Owner words stamped" in _texts(tmp_path, nova)  # its written room still reads it
+
+    def test_a_stamped_echo_keeps_its_explicit_reply_appearance(self, tmp_path):
+        from ouroboros import room_appearances
+        from ouroboros.chat_references import reference_from_row
+        from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
+        from ouroboros.room_membership import row_rooms
+
+        nova, vega = _project(tmp_path, "nova"), _project(tmp_path, "vega")
+        # The accepted echo is already in the store before any key was derived (appearances=None:
+        # an older body's rows, the mark left behind), so the job below is the replay that owes
+        # the Reply its explicit appearance.
+        target = ds.append(tmp_path, "chat", {"ts": "2026-11-18T04:00:00Z", "direction": "out", "chat_id": vega,
+                                              "text": "A word in Vega", "client_message_id": "vega-1"},
+                           appearances=None)
+        echo = ds.append(tmp_path, "chat", {"ts": "2026-11-18T05:00:00Z", "chat_id": nova,
+                                            "text": "Owner words replying", "client_message_id": "echo-2",
+                                            "reply_to": reference_from_row(dict(target.row)), **self.ECHO},
+                         appearances=None)
+        projects, rooms = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
+        assert row_rooms(nova, echo.row, projects, rooms) == {nova, vega}
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+        assert "Owner words replying" in _texts(tmp_path, vega)  # the Reply appearance reaches vega's reader
+        assert "Owner words replying" in _texts(tmp_path, nova)
+        assert "Owner words replying" not in _texts(tmp_path, 1)

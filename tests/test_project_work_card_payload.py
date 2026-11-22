@@ -78,6 +78,36 @@ def test_live_census_carries_the_rows_current_custody_debt(tmp_path, activity_qu
         assert row["delegated_runs_unreconciled"] == debt
 
 
+def test_pooled_root_and_child_show_their_own_start_steps_in_one_work(tmp_path, activity_queue):
+    from tests._work_projection_shared import state_fields
+
+    activity_queue.RUNNING["root"] = {"task": {"id": "root", "root_task_id": "root", "chat_id": 1}, "started_at": 1,
+                                      "attempt": 1, "worker_id": 2, "turn_phase": "context_building"}
+    activity_queue.RUNNING["child"] = {"task": {"id": "child", "root_task_id": "root", "parent_task_id": "root",
+                                                "delegation_role": "subagent", "chat_id": 1},
+                                       "started_at": 1, "attempt": 1, "worker_id": 3, "turn_phase": "context_built"}
+    body = state_fields(tmp_path, direct_turns=[])
+    [root] = body["active_chat_activities"]
+    assert (root["activity_id"], root["phase"], root["carrier"], root["turn_phase"]) == (
+        "root", "working", "worker", "context_building")
+    [work] = body["works"]
+    assert (work["call"], work["because"]) == ("preparing", [{"code": "turn_context_building", "text": "Building context"}])
+    child = work["members"]["states"]["child"]
+    assert (child["activity"], child["call"], child["live"], child["because"]) == (
+        "working", "preparing", True, [{"code": "turn_context_built", "text": "Context ready"}])
+
+    # An observed call takes precedence even before the child's frame-fed step catches up.
+    activity_queue.RUNNING["child"]["active_llm_call"] = {"model_activity": {"task_attempt": 1, "phase": "dispatching"}}
+    activity_queue.RUNNING["root"]["turn_phase"] = "requested"
+    activity_queue.RUNNING["root"]["worker_id"] = None
+    body = state_fields(tmp_path, direct_turns=[])
+    [root] = body["active_chat_activities"]
+    [work] = body["works"]
+    assert "carrier" not in root and work["call"] == "working"
+    child = work["members"]["states"]["child"]
+    assert (child["call"], child["because"]) == ("sending", [])
+
+
 def test_census_result_memo_refreshes_without_inventing_a_missing_outcome(tmp_path, activity_queue, monkeypatch):
     from ouroboros import task_store
 

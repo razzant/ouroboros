@@ -244,14 +244,17 @@ def test_latch_final_answer_marker_captures_explicit_marker_only():
     assert trace["best_valid_final_answer"] == "123"
 
 
-def test_latch_final_answer_marker_counts_same_turn_tool_calls():
+def test_latch_final_answer_marker_goes_stale_once_its_rounds_tool_calls_complete():
+    from ouroboros.outcomes import selected_final_answer
+
     trace = {"tool_calls": [{"tool": "read_file"}]}
-    current = [{"function": {"name": "run_command"}}, {"function": {"name": "verify_and_record"}}]
-    _latch_final_answer_marker(trace, "FINAL ANSWER: draft", current_tool_calls=current)
+    _latch_final_answer_marker(trace, "FINAL ANSWER: draft")
     assert trace["best_valid_final_answer"] == "draft"
+    assert trace["best_valid_final_answer_tools"] == 1 and selected_final_answer("", trace) == "draft"
     # Same-turn tool calls are newer grounding and must invalidate this latch unless
     # the model re-emits the marker after those tools complete.
-    assert trace["best_valid_final_answer_tools"] == 1
+    trace["tool_calls"] += [{"tool": "run_command"}, {"tool": "verify_and_record"}]
+    assert selected_final_answer("", trace) == ""
 
 
 def test_server_web_allowed_respects_task_resource_contract():
@@ -584,8 +587,9 @@ def test_an_owner_answer_is_recorded_with_the_card_it_answers_beside_never_insid
 
 def test_a_late_answer_keeps_my_humans_words_with_its_card_on_a_fresh_head_and_on_a_reading_one(tmp_path):
     """Audit 05.11 item 37, the late paths: an answer that arrives after the asking task finished opens a fresh head
-    whose first text is the host's frame, or reaches a head still reading. Either way the corpus keeps my human's words
-    with the card beside them, never the frame as their words and never the bare label; a plain head keeps its text."""
+    whose first text is the host's frame, or reaches a head still reading. Either way the corpus keeps my human's input
+    with the card beside them, never the frame as their words; a press without words is their act (``owner_press``),
+    never the label as their words; a plain head keeps its text."""
     from ouroboros.owner_mailbox import write_owner_message
 
     card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
@@ -597,7 +601,7 @@ def test_a_late_answer_keeps_my_humans_words_with_its_card_on_a_fresh_head_and_o
     frame = "[Late answer to a question asked by task asker, which had finished]\nQuestion was: Publish exactly this reply?"
     _initialize_owner_directives(head, [{"role": "user", "content": frame}])
     assert [(row["source"], row["content"], row.get("reply_to")) for row in head._owner_directives] == [
-        ("initial_user", "1. Publish it", replied)]
+        ("owner_press", "1. Publish it", replied)]
     plain = SimpleNamespace(task_metadata={"origin_suppressed": True})
     _initialize_owner_directives(plain, [{"role": "user", "content": "Hello"}])
     assert plain._owner_directives == [{"source": "initial_user", "content": "Hello"}]
@@ -607,4 +611,4 @@ def test_a_late_answer_keeps_my_humans_words_with_its_card_on_a_fresh_head_and_o
     assert write_owner_message(tmp_path, "1. Publish it", task_id="head", msg_id="m-9", late_answer=late)
     _drain_incoming_messages(messages, queue.Queue(), tmp_path, "head", None, set(), owner_ctx=reading)
     assert [(row["source"], row["content"], row.get("reply_to")) for row in reading._owner_directives[1:]] == [
-        ("owner_mailbox", "1. Publish it", replied)]
+        ("owner_press", "1. Publish it", replied)]

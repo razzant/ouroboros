@@ -137,7 +137,7 @@ test('Accounts on an unsupported model lists nothing and offers no Connect or Ad
     const failed = await storeOver(refused('daemon_unreachable', { state: 'ready', target_version: '4.7.0' }, '4.7.0'));
     const failedGroups = accounts.accountGroups(failed.snapshot, { accountsRead: 'failed', catalogKnown: true,
         accountsUnsupported: failed.accountsUnsupported });
-    assert.equal(failedGroups[0].status.label, 'Not checked — the daemon did not answer this read');
+    assert.equal(failedGroups[0].status.label, 'Not checked: the daemon did not answer this read');
     assert.match(accounts.harnessFamilyMarkup(failedGroups[0], failed.snapshot, { accountsRead: 'failed', quotaRead: 'ok' }),
         /data-family-add>Connect</);
     failed.dispose();

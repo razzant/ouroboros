@@ -61,15 +61,17 @@ def test_descendant_is_informational_and_problem_stays_warning(width, tmp_path):
                 page.evaluate("emitWorker('non_descendant', 'c', 102)")
                 page.evaluate("emitWorker('unavailable', 'd', 103)")
                 descendant = page.locator('.log-entry').filter(has_text='Worker checkout descends from baseline')
-                assert descendant.locator('.log-phase').inner_text() == 'info'
+                # Logs colours only a failure: a warning is said in its words, never a hue or a level chip.
+                assert descendant.locator('.log-failure').is_hidden()
                 problem = page.locator('.log-entry').filter(has_text='Worker checkout is not a descendant of baseline')
-                assert problem.locator('.log-phase').inner_text() == 'warn'
-                assert page.locator('.log-entry').filter(has_text='comparison unavailable').locator('.log-phase').inner_text() == 'warn'
-                descendant.get_by_role('button', name='Raw', exact=True).click()
-                assert 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' in descendant.locator('.log-raw').inner_text()
+                assert problem.locator('.log-failure').is_hidden()
+                assert page.locator('.log-entry').filter(has_text='comparison unavailable').locator('.log-failure').is_hidden()
+                descendant.locator(':scope > summary').click()
+                # The record reads a Blob asynchronously (logs_raw.js); the click opens it before its bytes arrive.
+                playwright.expect(descendant.locator('.log-raw')).to_contain_text('b' * 40)
                 assert 'Worker SHA mismatch' not in page.locator('#page-logs').inner_text()
                 assert not errors, errors
-                output = diagnostic_directory(tmp_path, "worker-sha") / f'worker-sha-{width}.png'
+                output = diagnostic_directory(tmp_path, "worker-sha", publish=True) / f'worker-sha-{width}.png'
                 page.screenshot(path=str(output), full_page=True)
                 print(f'WORKER_SHA_SCREENSHOT={output}')
             finally:

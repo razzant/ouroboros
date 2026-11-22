@@ -11,7 +11,6 @@ import json
 import os
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +18,7 @@ from ouroboros import delegate_custody_current as current
 from ouroboros import review_checking as rc
 from ouroboros import review_checking_prune as rp
 from ouroboros import server_maintenance as sm
+from ouroboros.delegate_custody import RunCustody
 from ouroboros.utils import utc_now_iso
 from tests.test_review_checkout_lifecycle import (
     EDIT, LOG, TASK, _boom, _frozen, _seat, _thread, _work, directory_source,
@@ -30,9 +30,9 @@ LATER = 400 * 86400  # past any retention period
 def _custody(monkeypatch, *, running=(), settled=(), pending=(), unreadable=False, calls=None, started=None):
     """Runs that executed in ``running`` (not settled) or ``settled`` copies (started now, or at
     ``started``), and invocations pending for ``pending`` copies, whatever the task id."""
-    runs = {f"run-{index}": SimpleNamespace(execution_root=str(path), settled=False, terminal_state="", started_ts="")
+    runs = {f"run-{index}": RunCustody(run_id=f"run-{index}", execution_root=str(path), settled=False, terminal_state="", started_ts="")
             for index, path in enumerate(running)}
-    runs.update({f"done-{index}": SimpleNamespace(execution_root=str(path), settled=True, terminal_state="succeeded",
+    runs.update({f"done-{index}": RunCustody(run_id=f"done-{index}", execution_root=str(path), settled=True, terminal_state="succeeded",
                                                   started_ts=started or utc_now_iso())
                  for index, path in enumerate(settled)})
 
@@ -442,7 +442,7 @@ def test_unreadable_live_ownership_prunes_nothing(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize('door', ['live_task', 'ended_task', 'skills_api'])
-@pytest.mark.parametrize('window', ['unbounded', 'open', 'spent'])
+@pytest.mark.parametrize('window', ['unbounded', 'open', 'spent', 'recovered_spent', 'recovered_unknown'])
 def test_continuation_copy_follows_an_available_continuation_door(tmp_path, monkeypatch, door, window):
     from tests.test_review_checkout_lifecycle import _seat as make_seat
     root, source = _frozen(tmp_path)
@@ -451,13 +451,18 @@ def test_continuation_copy_follows_an_available_continuation_door(tmp_path, monk
     rc.terminal_seat_evidence(root, task, 'stopped', {'summary': {'id':'run', 'state':'failed'}}, hold=True)
     marker_path = area.parent / 'checking.json'
     marker = json.loads(marker_path.read_text())
-    marker_path.write_text(json.dumps({**marker, 'created_at': '2000-01-01T00:00:00+00:00'}))
     from datetime import datetime, timedelta, timezone
-    start = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    now = datetime.now(timezone.utc)
+    marker_path.write_text(json.dumps({**marker, 'created_at': (now - timedelta(seconds=180)).isoformat()}))
+    start = (now - timedelta(seconds=120)).isoformat()
     _custody(monkeypatch, settled=[area], started=start)
     for entry in current.task_snapshot(root, task)['runs'].values():
-        entry.max_seconds = {'unbounded': 0, 'open': 3600, 'spent': 60}[window]
+        entry.max_seconds = {'unbounded': 0, 'open': 3600, 'spent': 60,
+                             'recovered_spent': 3600, 'recovered_unknown': 60}[window]
+        if window.startswith('recovered_'):
+            # The request predates this copy, but custody was published after it was prepared.
+            entry.window_started_at = (now - timedelta(seconds=7200)).isoformat() if window == 'recovered_spent' else ''
     result = rp.prune_review_checkouts(root, {task} if door == 'live_task' else set())
-    retained = door != 'ended_task' and window != 'spent'
+    retained = door != 'ended_task' and window not in ('spent', 'recovered_spent')
     assert result['released'] == (0 if retained else 1)
     assert area.exists() is retained

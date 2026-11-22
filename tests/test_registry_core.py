@@ -167,7 +167,6 @@ def test_registry_core_extraction_preserves_only_proven_facades():
 
 
 def test_registry_core_uses_canonical_managed_update_resolver(tmp_path, monkeypatch):
-    import ouroboros.config as config
     import ouroboros.safety as safety
     from ouroboros.tools import registry, registry_guards
 
@@ -183,7 +182,7 @@ def test_registry_core_uses_canonical_managed_update_resolver(tmp_path, monkeypa
 
     tools.override_handler("write_file", handler)
 
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     monkeypatch.setattr(safety, "check_safety", lambda *_args, **_kwargs: (True, ""))
     monkeypatch.setattr(
         registry_guards,
@@ -401,7 +400,6 @@ def test_stable_host_predispatch_denials_are_native_and_keep_legacy_projection(
 ):
     import json
 
-    import ouroboros.config as config
     import ouroboros.safety as safety
     import ouroboros.tools.registry_core as registry_core
     from ouroboros.contracts.task_constraint import TaskConstraint
@@ -453,11 +451,7 @@ def test_stable_host_predispatch_denials_are_native_and_keep_legacy_projection(
             else (lambda _ctx: "")
         ),
     )
-    monkeypatch.setattr(
-        config,
-        "get_runtime_mode",
-        lambda: "light" if scenario.startswith("light_") else "advanced",
-    )
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light" if scenario.startswith("light_") else "advanced")
     if scenario == "light_repo_mutation":
         monkeypatch.setattr(
             registry_core,
@@ -521,7 +515,6 @@ def test_binding_failures_cut_over_only_the_exact_native_families(
 ):
     import json
 
-    import ouroboros.config as config
     import ouroboros.tools.registry_core as registry_core
     import ouroboros.tools.tool_resolution as tool_resolution
     from ouroboros.loop_tool_execution import _execute_single_tool
@@ -539,7 +532,7 @@ def test_binding_failures_cut_over_only_the_exact_native_families(
         tool_name,
         lambda *_args, **_kwargs: downstream.append("handler") or "unreachable",
     )
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setattr(
         "ouroboros.safety.check_safety",
         lambda *_args, **_kwargs: downstream.append("safety") or (True, ""),
@@ -603,7 +596,6 @@ def test_light_binding_root_redirect_is_native_without_invented_metadata(
 ):
     import json
 
-    import ouroboros.config as config
     import ouroboros.tools.registry_core as registry_core
     import ouroboros.tools.tool_resolution as tool_resolution
     from ouroboros.loop_tool_execution import _execute_single_tool
@@ -623,7 +615,7 @@ def test_light_binding_root_redirect_is_native_without_invented_metadata(
         "write_file",
         lambda *_args, **_kwargs: calls.append("handler") or "unreachable",
     )
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setattr(
         registry_core,

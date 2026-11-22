@@ -84,7 +84,9 @@ def test_apply_discloses_before_post_and_applied_card_restores_locally(engine, w
                     dialog = page.get_by_role("dialog")
                     dialog.wait_for()
                     text = dialog.inner_text()
-                    for fact in ["4.5.0 → 4.6.0", "end all its active runs", "work: unknown",
+                    for fact in ["Running tasks stop and continue by themselves after the restart",
+                                 "Tasks already paused or held stay so until they are resumed",
+                                 "4.5.0 → 4.6.0", "end all its active runs", "work: unknown",
                                  "forward-only", "3.10.19", "3.50.4", "3.10.22", "3.53.1"]:
                         assert fact in text
                     before = len([path for path, _body in calls if path == "/api/update/apply"])
@@ -92,7 +94,7 @@ def test_apply_discloses_before_post_and_applied_card_restores_locally(engine, w
                     assert len([path for path, _body in calls if path == "/api/update/apply"]) == before
                     page.locator(button).click()
                     dialog.wait_for()
-                    output = diagnostic_directory(tmp_path, "update-effects") / f"{strategy}-{engine}-{width}.png"
+                    output = diagnostic_directory(tmp_path, "update-effects", publish=True) / f"{strategy}-{engine}-{width}.png"
                     page.screenshot(path=str(output), full_page=True)
                     print(f"UPDATE_EFFECTS_SCREENSHOT={output}")
                     dialog.locator("[data-confirm-ok]").click()

@@ -231,7 +231,8 @@ def _read_status(api: Any) -> dict[str, Any]:
     return result
 
 
-def register(api: Any) -> None:
+def register(api: Any) -> bool:
+    """Register the Mini App companion; False when this platform has none (the text bridge stays)."""
     _write_runtime_config(api)
     platform_error = _platform_error()
     if platform_error:
@@ -248,13 +249,14 @@ def register(api: Any) -> None:
             },
         )
         api.log("warning", platform_error + " Text bridge remains active.")
-        return
+        return False
     _seed_starting_status(api)
     api.register_companion_process("miniapp_gateway")
     api.log(
         "info",
         "telegram registered automatic owner-only Mini App gateway",
     )
+    return True
 
 
 __all__ = ["ConfigurationError", "_read_status", "register"]

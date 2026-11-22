@@ -51,7 +51,7 @@ def pool(tmp_path, monkeypatch):
     for module in (workers, git_ops):
         monkeypatch.setattr(module, "REPO_DIR", tmp_path / "repo")
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(1))
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "_repo_writer_gate_reason", "")
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
@@ -68,7 +68,7 @@ def pool(tmp_path, monkeypatch):
     monkeypatch.setattr(queue, "_reap_queue", jobs)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(task_reaper, "_deferred_reap_jobs", [])
-    monkeypatch.setattr(workers, "respawn_worker", respawns.append)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: respawns.append(wid))
     proc = SimpleNamespace(pid=2147483100, alive=True, exitcode=None)  # no OS process has it
     proc.is_alive = lambda: proc.alive
     slot = affirm_ready(workers.Worker(0, proc, stdqueue.Queue()))

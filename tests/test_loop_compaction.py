@@ -82,7 +82,8 @@ def _lowered_from_max(plan, messages, *, measured_input_tokens=None):
     plan.reproject_for_route.assert_called_once_with(
         window_tokens=500_000, known_window=True, ratio=1.0, output_reserve=65_536,
         tool_schemas=[], start_mode="max", current_messages=messages, select_mode="low",
-        measured_input_tokens=measured_input_tokens)
+        measured_input_tokens=measured_input_tokens, admitted=True,  # the line this work's own requests go out at
+        reasoning_effort="high")  # the round's effort (``_ctx``): the request shape its measurement counted
     assert plan.reproject_for_route.call_args.kwargs["current_messages"] is messages  # actual transcript, not a copy
 
 
@@ -472,7 +473,8 @@ def test_a_fallbacks_reentry_reads_whether_the_round_already_changed_the_candida
         return None, 0
 
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
-    lmc._recover_context_overflow(context, _failed_capture(), 0, prepared=first_entry == "wake_retry")
+    lmc._recover_context_overflow(context, _failed_capture(), 0,
+                                  prepared=lmc.WAKE_DELIVERY_STEP if first_entry == "wake_retry" else "")
     assert not rescues
     lmc._recover_context_overflow(replace(context, active_model="fallback"), _failed_capture(size=900), 0)
     assert rescues == ([] if changes else ["chosen_bodies"])

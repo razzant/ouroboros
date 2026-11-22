@@ -32,7 +32,8 @@ def _dispatch(briefs, marker):
     return run
 
 
-def _run(ctx, surface, rebuttal):
+def _run(ctx, surface, rebuttal, *, handed_back=False):
+    """The record of one wave; a review-only commit cycle hands a material outcome back for the author's decision."""
     if surface == "change":
         from ouroboros.tools.review_change import run_review_change
 
@@ -44,12 +45,16 @@ def _run(ctx, surface, rebuttal):
 
     result = _run_non_committing_review_cycle(ctx, "fix: update bounded file design", skip_advisory_review=True,
         goal="Ship the bounded file design", review_rebuttal=rebuttal)
-    assert result["status"] == "passed", result
-    return result["review_record_id"]
+    assert result["status"] == ("reviewed" if handed_back else "passed"), result
+    return result["review_reference"]["review_record_id"] if handed_back else result["review_record_id"]
 
 
-@pytest.mark.parametrize("surface", ["change", "commit"])
-def test_three_versions_recover_sources_and_author_facts_in_every_delivery(staged_body, tmp_path, monkeypatch, surface):
+@pytest.mark.parametrize(("surface", "own_folder"), [("change", False), ("commit", False), ("change", True), ("commit", True)])
+def test_three_versions_recover_sources_and_author_facts_in_every_delivery(staged_body, tmp_path, monkeypatch, surface,
+                                                                           own_folder):
+    """``own_folder``: a project-room task has its own data folder. The commit gate writes its attempt rows there,
+    ``review_change`` keeps its rows and every record in the install's canonical folder; on both surfaces each
+    later round still receives the earlier ones."""
     from ouroboros import capability_evidence, reviewer_window
     from ouroboros.review_state import load_state, save_state
 
@@ -57,10 +62,12 @@ def test_three_versions_recover_sources_and_author_facts_in_every_delivery(stage
     monkeypatch.setattr(reviewer_window, "reviewer_context_window", lambda *a, **k: 1_000_000)
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "6")
     root, drive = Path(staged_body["repo"]), tmp_path / "history-data"
+    own = drive / "state" / "headless_tasks" / TASK / "data" if own_folder else drive
     records, versions, given = [], [], []
     for version in range(3):
         # New context for each round: no _review_history survives in memory.
-        ctx = ToolContext(repo_dir=root, drive_root=drive, task_id=TASK)
+        ctx = ToolContext(repo_dir=root, drive_root=own, task_id=TASK, budget_drive_root=str(drive) if own_folder else "",
+                          task_metadata={"budget_drive_root": str(drive)} if own_folder else {})
         (root / "ouroboros/tools/review.py").write_text(f"RULES = 'proposal version {version}'\n", encoding="utf-8")
         shared.git(root, "add", "-A")
         briefs = []
@@ -87,13 +94,27 @@ def test_three_versions_recover_sources_and_author_facts_in_every_delivery(stage
         assert "Recorded review dispute index" in text
         indexes.append(json.loads(text.split("### Recorded review dispute index\n\n```json\n", 1)[1].split("\n```", 1)[0]))
     assert all(index == indexes[0] for index in indexes)
+    if surface == "commit":
+        # The task's own resident index and its note options read the same attempt rows as the next wave's brief.
+        from types import SimpleNamespace
+
+        from ouroboros.context import _task_authority_projection
+        from ouroboros.review_history_view import review_context_updates, review_note_options
+
+        env = SimpleNamespace(drive_root=own, budget_drive_root=str(drive), repo_dir=root)
+        shown = _task_authority_projection(env, {"id": TASK})["commit_review_authority"]
+        assert [r["review_record_id"] for r in shown[0]["dispute_history"]["rounds"]] == records
+        updates, identities = review_context_updates(ctx, families={"commit": str(root)})
+        assert identities["commit"] and all(rid in json.dumps(updates) for rid in records)
+        assert review_note_options(ctx)["entries"]
 
     # The newest exact link carries predecessors even without their hot attempt rows.
-    state = load_state(drive)
-    assert all(a.review_record_id for a in state.attempts)
+    held = own if surface == "commit" else drive  # the folder that holds this surface's attempt rows
+    state = load_state(held)
+    assert len(state.attempts) >= 3 and all(a.review_record_id for a in state.attempts)
     state.attempts = [a for a in state.attempts if a.review_record_id == records[-1]]
-    save_state(drive, state)
-    history = review_dispute_history(drive_root=drive, repo_root=root, task_id=TASK)
+    save_state(held, state)
+    history = review_dispute_history(drive_root=drive, attempts_root=own, repo_root=root, task_id=TASK)
     assert history["status"] == "complete", history["gaps"]
     assert [r["review_record_id"] for r in history["rounds"]] == records
     assert history["record_heads"] == [records[-1]]
@@ -112,10 +133,18 @@ def test_three_versions_recover_sources_and_author_facts_in_every_delivery(stage
 
     source = original_sources[0]["source"]
     (task_artifact_dir_path(drive, source["task_id"], create=False) / source["ref"]["path"]).unlink()
-    missing = review_dispute_history(drive_root=drive, repo_root=root, task_id=TASK)
+    missing = review_dispute_history(drive_root=drive, attempts_root=own, repo_root=root, task_id=TASK)
     assert missing["status"] == "source_unavailable" and missing["gaps"]
     assert len(missing["rounds"]) == 3
     assert REASON in [r["reason"] for r in missing["decision_rows"] if r["remark"] == "Explicit author decision"]
+    if own_folder:
+        # The folder that holds none of this surface's rows cannot be read: the gap names it, the other's rounds stay.
+        broken = drive if surface == "commit" else own
+        (broken / "state").mkdir(parents=True, exist_ok=True)
+        (broken / "state" / "advisory_review.json").write_text("{broken", encoding="utf-8")
+        partial = review_dispute_history(drive_root=drive, attempts_root=own, repo_root=root, task_id=TASK)
+        assert [r["review_record_id"] for r in partial["rounds"]] == records
+        assert [gap["source"].get("folder") for gap in partial["gaps"] if "attempt bindings" in gap["reason"]] == [str(broken)]
 
 
 def test_legacy_missing_binding_is_a_gap_and_other_tasks_are_not_swept_in(tmp_path):

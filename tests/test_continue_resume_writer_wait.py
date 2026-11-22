@@ -71,11 +71,15 @@ def test_a_paused_continue_waits_for_its_earlier_writers_then_starts_exactly_onc
     [resumed] = _events(tmp_path, "owner_pause_resumed")
     assert resumed["held"] is True and resumed["blockers"] == LEAF
     # Waiting, saying what it waits for (the interrupted attempt's run, which nobody can confirm ended), with no
-    # Resume or Pause: only Stop, and Stop of what the earlier attempt left running.
+    # Resume or Pause: Stop, Stop of the earlier attempt, and a primary choice before starting.
     work = _work(tmp_path, successor)
     assert (work["activity"], work["because"][0]["code"]) == ("waiting", "earlier_work_unconfirmed")
     assert [(tail["code"], tail["ids"]) for tail in work["tails"]] == [("external_runs_unconfirmed", ["run-leaf"])]
-    assert _actions(work) == {"stop", "stop_earlier"} and work["turn"] == [] and "last_resume" not in work
+    assert _actions(work) == {"stop", "stop_earlier", "model"} and work["turn"] == [] and "last_resume" not in work
+    from ouroboros.gateway.task_model import api_task_model
+    status, chosen = _http(api_task_model, successor, {"request_id": "while-held", "action": "set", "model": "owner/chosen"})
+    assert status == 200 and chosen["applied"] == "at_start"
+    assert row["metadata"]["lead"]["model"] == load_task_result(tmp_path, successor)["metadata"]["lead"]["model"] == "owner/chosen"
     sent = []
     _idle_worker(workers, sent)
     workers.assign_tasks()
@@ -88,6 +92,7 @@ def test_a_paused_continue_waits_for_its_earlier_writers_then_starts_exactly_onc
     workers.assign_tasks()
     workers.assign_tasks()
     assert [task["id"] for task in sent] == [successor], "it starts exactly once"
+    assert sent[0]["metadata"]["lead"]["model"] == "owner/chosen"
 
 
 def test_a_newer_pause_while_it_waits_replaces_the_wait(tmp_path, monkeypatch):
@@ -273,7 +278,12 @@ def test_a_start_refused_after_its_writers_settle_is_said_in_place_of_the_wait_a
     work = _work(tmp_path, successor)
     assert (work["activity"], [reason["code"] for reason in work["because"]]) == ("waiting", ["start_refused"])
     assert work["last_resume"]["by"] == {"actor": "host"} and work["last_resume"]["error"] == "accounting_unavailable"
-    assert _actions(work) == {"stop"} and work["turn"] == [], "it tries again by itself: no Resume, not the owner's turn"
+    assert _actions(work) == {"stop", "model"} and work["turn"] == [], "it tries again by itself: no Resume, not the owner's turn"
+    from ouroboros.gateway.task_model import api_task_model
+    from ouroboros.task_results import load_task_result
+    status, chosen = _http(api_task_model, successor, {"request_id": "before-start", "action": "set", "model": "owner/chosen"})
+    assert status == 200 and chosen["applied"] == "at_start"
+    assert load_task_result(tmp_path, successor)["metadata"]["lead"]["model"] == "owner/chosen"
     # Without that kept answer the work would still say the wait its settled writers no longer explain.
     assert _work(tmp_path, successor, attempts=False)["because"][0]["code"] == "earlier_work_unconfirmed"
     version, history = task_versions(tmp_path, [successor]), len(_events(tmp_path, "task_resume_outcome"))

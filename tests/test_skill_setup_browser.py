@@ -44,7 +44,7 @@ def test_pending_enable_and_failed_retry_keep_truth_and_removal(skills_browser, 
         facts.answers[target] = enable
         page.goto(URL, wait_until='networkidle')
         card = page.locator('.skills-card[data-skill="setup_demo"]')
-        card.locator('label.skills-switch').click()
+        card.locator('label.ui-switch').click()
         page.wait_for_function("document.querySelector('.skills-card-status').textContent.includes('Installing packages')")
         assert card.locator('.skills-toggle').is_disabled()
         assert len(facts.posted(target)) == 1
@@ -96,7 +96,7 @@ def test_old_native_bridge_keeps_confirmation_and_server_owned_enable(skills_bro
 
         facts.answers['/api/skills/setup_demo/toggle'] = toggle
         page.goto(URL, wait_until='networkidle')
-        page.locator('.skills-card[data-skill="setup_demo"] label.skills-switch').click()
+        page.locator('.skills-card[data-skill="setup_demo"] label.ui-switch').click()
         page.get_by_role('dialog').get_by_role('button', name='Grant access', exact=True).click()
         text = 'setup_demo is on' if confirmed else 'Skill grant cancelled.'
         page.wait_for_function('(text) => document.body.textContent.includes(text)', arg=text)
@@ -126,7 +126,7 @@ def test_grant_setup_failure_or_pending_does_not_post_enable(skills_browser, bro
         facts.answers['/api/skills/setup_demo/grants'] = grant
         page.goto(URL, wait_until='networkidle')
         card = page.locator('.skills-card[data-skill="setup_demo"]')
-        card.locator('label.skills-switch').click()
+        card.locator('label.ui-switch').click()
         page.get_by_role('dialog').get_by_role('button', name='Grant access', exact=True).click()
         message = 'Installing packages' if pending else 'Access granted, but'
         page.wait_for_function('(text) => document.body.textContent.includes(text)', arg=message)

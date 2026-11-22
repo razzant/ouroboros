@@ -10,13 +10,16 @@ from typing import Any, Dict, Optional, Tuple
 
 from .telegram_api import (
     TELEGRAM_RETRY_INITIAL_SEC,
+    TelegramBindingChanged,
     TelegramClient,
     TelegramRequestRejected,
+    TelegramTokenMissing,
     TelegramTransportError,
     next_telegram_retry_delay,
     _LOCALIZED_TEXTS,
 )
 from .telegram_poll_binding import bot_id
+from .telegram_token import accepted_token, binding_for
 from .telegram_state import (
     _data_dir,
     _jsonl_tail,
@@ -25,6 +28,7 @@ from .telegram_state import (
     _read_json_file,
     _state_file,
     _mirror_options,
+    TelegramDestinationUnavailable,
 )
 from ..scripts.telegram_settings import telegram_api_base, telegram_files_dir, telegram_proxy
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_project_chat_id
@@ -73,18 +77,31 @@ async def _push_notification(
     recovered transition warning (which carries the exception) is the one
     owner-visible line per episode.
     """
-    token = api.get_settings(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN", "")
+    binding = binding_for(api)
+    accepted_token(api)
+    token, generation = binding.snapshot()  # one identity: its references and its requests are one bot's
     state_dir = Path(api.get_state_dir())
-    client = TelegramClient(
-        token, trust_env=trust_env,
-        proxy=telegram_proxy(state_dir),
-        **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
-        api_base_url=telegram_api_base(state_dir),
-        files_dir=telegram_files_dir(state_dir),
-    )
     try:
+        if not token:
+            raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
+        client = TelegramClient(
+            token, trust_env=trust_env,
+            proxy=telegram_proxy(state_dir),
+            **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
+            api_base_url=telegram_api_base(state_dir),
+            files_dir=telegram_files_dir(state_dir),
+            binding=binding, generation=generation,
+        )
         await client.send_message(int(chat_id), text, parse_mode="")
         return "sent", None
+    except TelegramTokenMissing as exc:
+        # The token was cleared after the loop looked: this notification waits unsent, like a transient
+        # one, so the batch keeps what was already delivered and nothing is sent twice.
+        return "transient", exc
+    except TelegramBindingChanged as exc:
+        # Before a part, or a part's failure answered after the change: parts the old bot already took stay
+        # there and are not resent through the new one; a notification it never took is sent next cycle by the new token's client.
+        return ("skipped" if exc.accepted else "transient"), exc
     except TelegramTransportError as exc:
         api.log("debug", f"Telegram notify failed: {exc}")
         return "transient", exc
@@ -93,6 +110,9 @@ async def _push_notification(
             api.log("debug", f"Telegram notify failed: {exc}")
             return "transient", exc
         api.log("error", f"Telegram notification permanently rejected; skipping it: {exc}")
+        return "skipped", exc
+    except TelegramDestinationUnavailable as exc:  # its turn's bot or chat is not this one: it stays in Ouroboros
+        api.log("info", f"Telegram notification not sent: {exc}")
         return "skipped", exc
 
 
@@ -324,7 +344,8 @@ def _completion_text(row: Dict[str, Any], tid: str, lang: str, parts=()) -> str:
     key += "_details" if notice is not None and notice["neutral"] else ""
     message = _NOTIFY[lang].format(key, label=label, icon=icon, id=tid[:8], word=word, tail=tail)
     reason = notice["detail"] if notice is not None else str(row.get("reason_detail") or "")
-    return "\n".join(part for part in (message, reason, str((notice or {}).get("salvage") or "")) if part)
+    gate = str((notice or {}).get("review_gate") or "")  # the work card's review-gate field, no message of its own
+    return "\n".join(part for part in (message, reason, gate, str((notice or {}).get("salvage") or "")) if part)
 
 
 async def _check_tasks_notify(
@@ -370,8 +391,15 @@ async def _check_tasks_notify(
             parts.append(cost)
         msg = _completion_text(e, tid, lang, parts)
         from ouroboros.chat_chain import format_address, row_address
+        from ouroboros.chat_references import turn_reply_transport
 
-        event = {**e, "row_address": format_address(row_address(e))}
+        # An exact Reply's turn tells its end where it was asked (its bot and chat, no anchor); any other, as before.
+        try:
+            exact = turn_reply_transport(_data_dir(api), tid, anchor=False, strict=True)
+        except Exception as exc:  # its record unreadable now: it waits for the next cycle, never a guessed chat
+            transient = exc
+            break
+        event = {**e, "row_address": format_address(row_address(e)), **({"transport": exact} if exact else {})}
         send_outcome, exc = await _push_notification(api, chat_id, msg, trust_env=trust_env, event=event)
         if send_outcome == "transient":
             # Stop the batch on the first transient failure: every further
@@ -403,7 +431,8 @@ def _make_notifier(api, *, trust_env: bool = False):
         degraded_cause = ""
         while True:
             settings = _load_settings(api)
-            chat_id = _pinned_chat_id(settings)
+            # No accepted token: wait without sending or spending restart budget; nothing is marked seen.
+            chat_id = _pinned_chat_id(settings) if accepted_token(api) else 0
             transient: Optional[BaseException] = None
             delivered = False
             # Both lanes self-gate. Keep observing task IDs while OFF so enabling
@@ -424,6 +453,11 @@ def _make_notifier(api, *, trust_env: bool = False):
                     )
                     delivered = delivered or tasks_delivered
                 _save_notif_state(api, state)
+            if isinstance(transient, (TelegramTokenMissing, TelegramBindingChanged)):
+                # The token was cleared or replaced mid-batch: a wait, not a degraded transport. The next
+                # cycle sends what is left with the accepted token, or waits quietly for one.
+                await asyncio.sleep(TELEGRAM_RETRY_INITIAL_SEC)
+                continue
             if transient is not None:
                 # Transition logging: one warning entering degraded, one info
                 # on recovery; per-attempt failures stay at debug while the

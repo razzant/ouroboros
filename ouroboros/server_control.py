@@ -155,7 +155,9 @@ def restart_current_process(
     re-pins from ``load_settings()``; an agent- or supervisor-initiated restart
     keeps inheriting it exactly as before.
     """
-    env = os.environ.copy()
+    from ouroboros.node_runtime import without_selected_driver_node
+
+    env = without_selected_driver_node(os.environ.copy())  # the successor selects Playwright's driver Node itself
     desired_host = str(host)
     try:
         from ouroboros.config import load_settings
@@ -305,8 +307,18 @@ def exit_after_shutdown(exit_code: int) -> None:
     interrupted capture stays owed to the next generation. An accepted Panic
     parks the caller until its own flag/control writes and exit finish; Panic
     never waits for this caller. Ordinary imported main()/ASGI shutdown returns.
+    Before the exit the output relay hands its queue to a reading launcher, bounded inside the
+    ordinary stop's own deadline (``finish_output_relay``); Panic and the backstops never do.
     """
-    if _restart_stop_requested:
+    if not _restart_stop_requested:
+        try:
+            from ouroboros.owned_shutdown import stop_deadline
+            from ouroboros.process_logging import finish_output_relay
+
+            finish_output_relay(stop_deadline())
+        except Exception:
+            pass  # the handover never stands between this exit and the process's end
+    if _restart_stop_requested:  # Panic, also one accepted during the handover, owns the exit
         import threading
 
         threading.Event().wait()
@@ -335,10 +347,12 @@ def execute_panic_stop(
     Owner-local request-only APIs signal captured children before settlement.
     Normal admission pins attested daemon identities; ``stop_outcome`` later
     settles custody and attempts same-home CLI shutdown for unresolved targets.
-    The shared daemon survives ordinary close outside the Windows launcher Job,
+    The shared daemon runs outside the Windows launcher Job (closing that Job never ends it),
     so that Job is not a Panic backstop.
     Unconfirmed shutdown remains disclosed with custody retained; names or
     recycled descriptor ports never authorize signalling an unrelated process.
+    A managed execution domain's dedicated containers are killed by the identity
+    this generation measured (``execution_domain``); their settlement only reports.
     """
     global _restart_stop_requested
     _restart_stop_requested = True  # claim termination before any import, stop callback or I/O
@@ -390,6 +404,7 @@ def execute_panic_stop(
         import multiprocessing
 
         from ouroboros.claudexor_daemon import get_owned_daemon
+        from ouroboros.execution_domain import panic_request, panic_scope, panic_settle
         from ouroboros.extension_companion import panic_kill_all
         from ouroboros.local_model import get_manager
         from ouroboros.tools.services import kill_all_services
@@ -416,6 +431,9 @@ def execute_panic_stop(
 
             attempt("retained-daemon", lambda: stop_ledgered_processes(
                 data_dir, {CUSTODY_PURPOSE}, timeout_sec=0))
+        domain = panic_scope()  # a managed execution domain's own containers, by measured identity, unwaited
+        if domain:
+            attempt("execution-domain", panic_request)
         attempt("commands", lambda: kill_all_tracked_subprocesses(request_only=True))
         attempt("executors", lambda: kill_all_foreground(data_dir, request_only=True))
         attempt("services", lambda: kill_all_services(data_dir, request_only=True))
@@ -455,6 +473,8 @@ def execute_panic_stop(
         if model is not None:
             attempt("local-model", model.stop_server, settle=True)
         attempt("daemon", lambda: get_owned_daemon().stop_outcome(), settle=True)
+        if domain:
+            attempt("execution-domain", lambda: panic_settle(data_dir), settle=True)
         attempt("commands", kill_all_tracked_subprocesses, settle=True)
         attempt("executors", lambda: kill_all_foreground(data_dir, wait=False), settle=True)
         attempt("services", lambda: kill_all_services(data_dir, wait=False), settle=True)
@@ -530,13 +550,13 @@ def _persist_panic_controls(data_dir: pathlib.Path) -> None:
 
 
 def _panic_controls(st: dict) -> None:
-    st.update(evolution_mode_enabled=False, bg_consciousness_enabled=False,
+    st.update(evolution_mode_enabled=False, bg_consciousness_enabled=False, bg_consciousness_stop_source="panic",
               evolution_owner_stopped=True, post_task_autostop=False)
     st.pop("evolution_stop_source", None)  # an owner stop: no agent source may un-stick it
 
 
-PANIC_CONTROL_KEYS = ("evolution_mode_enabled", "bg_consciousness_enabled", "evolution_owner_stopped",
-                      "evolution_stop_source", "post_task_autostop")
+PANIC_CONTROL_KEYS = ("evolution_mode_enabled", "bg_consciousness_enabled", "bg_consciousness_stop_source",
+                      "evolution_owner_stopped", "evolution_stop_source", "post_task_autostop")
 
 
 def _record_unconfirmed_daemon_stop(data_dir: pathlib.Path, exc: BaseException) -> None:

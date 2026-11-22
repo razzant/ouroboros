@@ -15,7 +15,7 @@ const list = value => (Array.isArray(value) ? value : []).filter(item => item &&
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const shortSha = value => (/^[0-9a-f]{12,}$/i.test(text(value)) ? text(value).slice(0, 7) : text(value));
 export const SURFACE_LABELS = {
-    commit_gate: 'Code review', change: 'Code review', preflight: 'Early look', result: 'Result review', system: 'System review',
+    commit_gate: 'Code review', change: 'Code review', preflight: 'Pre-review', result: 'Result review', system: 'System review',
     plan: 'Plan', skill: 'Skill review', review_record: 'Review records', task_acceptance: 'Result review',
 };
 const GAP_WORDS = {
@@ -60,12 +60,15 @@ export function reviewViews(groups) {
 }
 
 const ledgerTally = (panel) => {
-    const counted = list(panel.actors).filter(actor => !seatAdviser(actor));
-    const answered = counted.filter(actorAnswered).length;
-    const owed = counted.filter(actor => seatOwed(actor, panel)).length;
-    const unavailable = counted.length - answered - owed;
-    const counts = text(panel.surface) === 'preflight' || !counted.length ? 'answered' : 'counted answered';
-    return [`${answered} of ${counted.length} ${counts}`, unavailable > 0 ? `${unavailable} unavailable` : '',
+    const actors = list(panel.actors), counted = actors.filter(actor => !seatAdviser(actor));
+    // A wave of advisers alone (Cyber Pro) tallies them as advisers: none of them is counted.
+    const seats = counted.length || text(panel.surface) === 'preflight' ? counted : actors;
+    const answered = seats.filter(actorAnswered).length;
+    const owed = seats.filter(actor => seatOwed(actor, panel)).length;
+    const unavailable = seats.length - answered - owed;
+    const counts = seats !== counted && seats.length ? 'advisers answered'
+        : text(panel.surface) === 'preflight' || !counted.length ? 'answered' : 'counted answered';
+    return [`${answered} of ${seats.length} ${counts}`, unavailable > 0 ? `${unavailable} unavailable` : '',
         owed ? `${owed} awaiting` : ''].filter(Boolean).join(' · ');
 };
 
@@ -169,14 +172,21 @@ function ledgerRows(view, attempt, format) {
         const state = seatStateView(actor, panel, { live });
         const observed = text(actor.observed_model || actor.model);
         const requested = text(actor.requested_model);
-        const name = observed || requested || text(actor.slot_id) || 'Reviewer';
+        // What ran is a fact of its own: a seat that ran and left no readable answer still names its executor
+        // (`executions`, the record's own evidence), apart from a request nothing was observed running.
+        const ran = list(actor.executions);
+        const ranModel = observed ? '' : text(ran.find(execution => text(execution.model))?.model);
+        const name = observed || ranModel || requested || text(actor.slot_id) || 'Reviewer';
+        const note = observed ? '' : ranModel ? `ran${state.owed ? '' : ' · no readable answer'}`
+            : ran.length ? `${requested ? 'requested · ' : ''}ran, model not reported`
+                : (requested ? 'requested · not reported' : 'model not reported');
         const sources = list(actor.sources);
         const answerSaved = sources.some(source => source.role === 'response' && source.status === 'retained' && text(source.sha256));
         const meta = [state.tone === 'error' && state.findings > 1 ? plural(state.findings, 'finding') : '', seatLimitText(actor),
             actorAnswered(actor) && !answerSaved ? 'full text not saved' : ''].filter(Boolean).join(' · ');
         return seatRow({
             key: `${attempt.id}:${text(actor.slot_id)}`, identity: format.executions?.(actor, { showModel: false }) || '',
-            name, note: observed ? '' : (requested ? 'requested · not reported' : 'model not reported'),
+            name, note,
             role: text(panel.surface) === 'preflight' ? 'informational' : (seatAdviser(actor) ? 'adviser, not counted' : 'counted'),
             state, said: ledgerSaid(actor, state, stopped), meta,
             read: readButtons(sources, { owner: view.presentationOwnerTaskId, recordId: text(panel.record_id), seatId: text(actor.slot_id), name, domain: 'ledger' }),
@@ -206,7 +216,9 @@ function planRows(view, attempt, format, live) {
     const answered = participants.filter(participant => participant.status === 'answered').length;
     const head = `<p class="review-ask-line">${escape([attempt.label, attempt.summary ? `«${attempt.summary}»` : '',
         `${answered} of ${participants.length} answered`].filter(Boolean).join(' · '))}</p>`;
-    return head + participants.map((participant) => {
+    // The adapter's one sentence when the evidence prepared for this ask is incomplete, read whole; which and why
+    // stay in Record facts.
+    return head + line({ words: text(attempt.evidenceNotice), whole: true }) + participants.map((participant) => {
         const seatId = text(participant.seat_id);
         const state = participantState(participant, objections, live);
         const mine = (objections || []).filter(objection => objection.seat === seatId);
@@ -307,7 +319,10 @@ function ledgerFacts(attempt) {
     const pooled = text(panel.surface) !== 'preflight' && panelPoolRecorded(panel.panel_facts);
     for (const actor of list(panel.actors)) {
         const seat = text(actor.slot_id) || '?';
-        rows.push([`Reviewer ${seat} model`, `requested ${text(actor.requested_model) || 'not recorded'} · observed ${text(actor.observed_model) || 'not reported'}`]);
+        // A seat that ran without a readable answer keeps what ran beside what was asked; an answered seat's is its observed model.
+        const ran = text(actor.observed_model) ? '' : list(actor.executions).map(execution => [text(execution.kind), text(execution.harness_id),
+            text(execution.model) || 'model not reported'].filter(Boolean).join(' ')).join(', ');
+        rows.push([`Reviewer ${seat} model`, `requested ${text(actor.requested_model) || 'not recorded'}${ran ? ` · ran ${ran}` : ''} · observed ${text(actor.observed_model) || 'not reported'}`]);
         if (!pooled && actor.cost && typeof actor.cost === 'object') rows.push([`Reviewer ${seat} cost`, seatCostText(actor.cost)]);
         const failure = describe(Object.fromEntries(['failure_code', 'http_status', 'reset_at', 'operation_state', 'reported_cause']
             .map(key => [key, actor[key]]).filter(([, value]) => value !== undefined)));

@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SUBAGENT_LOCKS, SUBAGENT_MEANINGS, subagentsView } from '../modules/composer_subagents.js';
-import { CHANGE_RULE } from '../modules/composer_owner_controls.js';
+import { CHANGE_RULE } from '../modules/capsule.js';
 import { hoverWindow, mountPair } from './composer_controls_fixture.js';
 
 const value = (el) => el.querySelector('.chat-capsule-value').textContent;

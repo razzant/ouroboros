@@ -45,27 +45,34 @@ from ouroboros.work_stop import STOP_TEXT, activity_stop_view, control_identity,
 REASON_TEXT = {
     **STOP_TEXT,
     "model_handoff": "a model request has no recorded result",
-    "earlier_attempt_finishing": ("Continue starts when the helper of the earlier attempt finishes",
-                                  "Continue starts when {count} helpers of the earlier attempt finish"),
+    "earlier_attempt_finishing": ("Continue starts when the subagent of the earlier attempt finishes",
+                                  "Continue starts when {count} subagents of the earlier attempt finish"),
     "earlier_runs_finishing": ("Continue starts when the external run of the earlier attempt finishes",
                                "Continue starts when {count} external runs of the earlier attempt finish"),
     # Its earlier attempt's work settled, and the host's own start was refused for another reason (``last_resume``).
     "start_refused": "Continue tries to start again by itself",
-    "helpers_running": ("1 helper still working", "{count} helpers still working"),
+    "helpers_running": ("1 subagent still working", "{count} subagents still working"),
     "delegated_running": ("1 external run still working", "{count} external runs still working"),
     "owner_answer": "Waiting for your answer",
+    "no_progress": "No recorded progress",
     "model_access": "The model needs you: sign in or restore access",
     "model_wait": "Waiting for the model to become available",
     "project_admission": "Waiting for Project verification",
     "queued": "",  # a queued row records no cause: never claim one (a free worker)
     "review_work_finishing": "Review work finishing",
     "external_runs_unconfirmed": ("1 external run may still be running", "{count} external runs may still be running"),
+    "external_runs_open": ("1 external run is open", "{count} external runs are open"),
+    # A dated record's last word on a run no current observation answered (a worker's roster): past words only.
+    "external_runs_last_working": ("1 external run last observed working",
+                                   "{count} external runs last observed working"),
+    "external_runs_last_waiting": ("1 external run last observed waiting",
+                                   "{count} external runs last observed waiting"),
     # A sleeping episode's chosen helpers a stop holds, by who releases them (classify_member's release).
-    "awaited_helpers_mind": ("1 helper it waits for is paused until Ouroboros resumes it",
-                             "{count} helpers it waits for are paused until Ouroboros resumes them"),
-    "awaited_helpers_owner": ("1 helper it waits for is paused until you resume it",
-                              "{count} helpers it waits for are paused until you resume them"),
-    "awaited_helpers_paused": ("1 helper it waits for is paused", "{count} helpers it waits for are paused"),
+    "awaited_helpers_mind": ("1 subagent it waits for is paused until Ouroboros resumes it",
+                             "{count} subagents it waits for are paused until Ouroboros resumes them"),
+    "awaited_helpers_owner": ("1 subagent it waits for is paused until you resume it",
+                              "{count} subagents it waits for are paused until you resume them"),
+    "awaited_helpers_paused": ("1 subagent it waits for is paused", "{count} subagents it waits for are paused"),
     # A turn's start step before its own Main call (census ``turn_phase``, supervisor.active_activity.TURN_PHASES).
     "turn_admitted": "Setting up the turn",
     "turn_started": "Starting the turn",
@@ -193,8 +200,9 @@ def _waits_on(sleep: Any) -> List[str]:
 def _start_step(row: Mapping[str, Any]) -> str:
     """The start step a turn stands at before its own Main call, else ''. An inline executor's row says it by
     its census phase (``preparing``); a conversation-lane row's phase says only whether a carrier holds it
-    (``conversation_lane.lane_turn_rows``), so a row its carrier holds says it by its frame-fed ``turn_phase``
-    until a call of its own is observed."""
+    (``conversation_lane.lane_turn_rows``) and a pooled member's only that a worker runs it (``carrier``, from
+    ``gateway.state``), so a row its worker holds says it by its frame-fed ``turn_phase`` until a call of its
+    own is observed."""
     step = str(row.get("turn_phase") or "")
     if step not in _TURN_STEPS:
         return ""
@@ -241,6 +249,8 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
     phase = str(row.get("phase") or "unknown")
     state: Dict[str, Any] = {"task_id": task_id, "activity": "unknown", "transition": "none", "call": "",
                              "reasons": [], "turn": [], "release": "self", "confirmed": True, "live": False}
+    if type(attempt := raw.get("queue_attempt")) is int and attempt >= 0:
+        state["queue_attempt"] = attempt
     if phase == "unknown":
         state["confirmed"] = False
         return state
@@ -270,7 +280,8 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
             # An answered root whose requested Pause only what nobody can confirm holds (``gateway/state.py``): its
             # word is unknown, never running nor a settled Pause; Resume refuses until that tail ends.
             state.update(activity="unknown", release="none", resumable=False)
-        state["reviews_finishing"] = bool(row.get("finishing_reviews") or raw.get("sent_review"))
+        state["sent_review"] = bool(raw.get("sent_review"))
+        state["reviews_finishing"] = bool(row.get("finishing_reviews") or state["sent_review"])
         state["model_handoffs"] = list(raw.get("model_handoffs") or ())
         if _owner_actions({**row, "stop": view["stop"], "refusal": view["refusal"]})[1]:
             state["turn"].append({"kind": "action", "task_id": task_id, "code": view["reason"]["code"]})
@@ -330,10 +341,16 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         return state
     if phase in {"working", "thinking", "preparing"}:
         state.update(activity="working", call=_call(row), live=True)
-        if step := _start_step(row):
-            state["reasons"].append(reason(f"turn_{step}"))
+        # The owner's recorded Stop leads: a working work, a silent one above all, may not reach the step that ends
+        # it soon. The dated silence follows (owner 09.11, Q2 A) until the work's own progress ends the episode, a
+        # fact for whoever waits, never a stop or a mark; then where its turn started.
         if raw.get("cancel_pending"):
             state["reasons"].append(reason("stop_requested"))
+        silence = raw.get("silence_attention")
+        if isinstance(silence, Mapping) and silence.get("state") == "pending_attention" and silence.get("last_progress_at"):
+            state["reasons"].append(reason("no_progress", since=silence["last_progress_at"]))
+        if step := _start_step(row):
+            state["reasons"].append(reason(f"turn_{step}"))
         return state
     state["confirmed"] = False
     return state
@@ -400,14 +417,16 @@ def _outcome(row: Mapping[str, Any]) -> str:
 
 
 def shown_outcome(row: Mapping[str, Any]) -> str:
-    """The settled word a work says beside ``Finalizing…``: its stored lifecycle, except a turn its author or owner
-    stopped, which reads ``cancelled`` wherever its card's status fold says Stopped (``outcome_phase``)."""
+    """The settled word a work says beside ``Finalizing…``: its stored lifecycle, except where its card's status
+    fold reads otherwise (``outcome_phase``): a turn its author or owner stopped reads ``cancelled``, and a failed
+    record whose model answer was delivered before its finalization was cut reads ``completed``."""
     status = _outcome(row)
     if status in {"completed", "failed"}:
         from ouroboros.project_dialogue import outcome_phase
 
-        if outcome_phase({**row, "root_phase_checkpoint": {}}, {}) == "cancelled":
-            return "cancelled"
+        phase = outcome_phase({**row, "root_phase_checkpoint": {}}, {})
+        if phase == "cancelled" or (status == "failed" and phase in {"done", "warn"}):
+            return "cancelled" if phase == "cancelled" else "completed"
     return status
 
 
@@ -429,7 +448,10 @@ def mark_of(activity: str, confirmed: bool, *, live: bool = False, unknown: bool
 
 # Tail kinds: what still runs beside (or after) the current episode, each said by one REASON_TEXT sentence.
 RUN_KINDS = ("run", "review")
-TAIL_STATES = ("live", "unknown")
+TAIL_STATES = ("live", "unknown", "open")
+# An unknown run's ``seen``: what a dated record last saw of its work (``delegate_feed.recorded_activity``: True
+# working, False waiting), said in past words while the run stays unknown (``observe_member_runs``).
+SEEN_TAILS = {True: "external_runs_last_working", False: "external_runs_last_waiting"}
 # A run whose own task ended this way may outlive it unobserved: its liveness is unconfirmed, not running.
 _FAILED_OWNER = frozenset({"failed", "cancelled"})
 
@@ -458,13 +480,14 @@ def _tail(kind: str, code: str, ids: List[str], *, state: str = "live", count: O
 def work_tails(helper_ids: List[str], runs: Iterable[Mapping[str, Any]], *, reviewing: bool = False,
                named: Iterable[str] = ()) -> List[Dict[str, Any]]:
     """What still runs beside an episode, in the order and words every reader says it: working helpers, live
-    external runs, review work (never beside an episode that executes), runs nobody can confirm. ``runs`` are
-    typed by ``run_tail``; ``named`` holds the kinds the episode's own sentence already says (a Continue held for
-    its earlier attempt)."""
+    external runs, review work, runs a dated record last saw working or waiting (``SEEN_TAILS``), unconfirmed
+    runs, then open runs whose executor is waiting. A current member and its work read the same state for each
+    run. ``named`` holds the kinds the episode's own sentence says."""
     runs = [run for run in runs if run.get("kind") in RUN_KINDS and run.get("state") in TAIL_STATES]
     live = [str(run["run_id"]) for run in runs if run["kind"] == "run" and run["state"] == "live"]
     reviews = [str(run["run_id"]) for run in runs if run["kind"] == "review" and run["state"] == "live"]
-    unknown = [str(run["run_id"]) for run in runs if run["state"] == "unknown"]
+    unknown = [str(run["run_id"]) for run in runs if run["state"] == "unknown" and run.get("seen") not in SEEN_TAILS]
+    inactive = [str(run["run_id"]) for run in runs if run["kind"] == "run" and run["state"] == "open"]
     tails: List[Dict[str, Any]] = []
     if helper_ids and "helper" not in named:
         tails.append(_tail("helper", "helpers_running", list(helper_ids)))
@@ -472,38 +495,58 @@ def work_tails(helper_ids: List[str], runs: Iterable[Mapping[str, Any]], *, revi
         tails.append(_tail("run", "delegated_running", live))
     if reviewing or reviews:
         tails.append(_tail("review", "review_work_finishing", reviews))
+    for seen, code in SEEN_TAILS.items():
+        if past := [str(run["run_id"]) for run in runs if run["state"] == "unknown" and run.get("seen") is seen]:
+            tails.append(_tail("run", code, past, state="unknown"))
     if unknown:
         tails.append(_tail("run", "external_runs_unconfirmed", unknown, state="unknown"))
+    if inactive:
+        tails.append(_tail("run", "external_runs_open", inactive, state="open"))
     return tails
 
 
-def awaited_tails(current: Optional[Mapping[str, Any]], helpers: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """The helpers a sleeping episode chose to wait for (its saved selection, never every paused member) that a
+def awaited_tails(current: Optional[Mapping[str, Any]], paused_helpers: Mapping[str, Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The helpers a sleeping task chose to wait for (its saved selection, never every paused member) that a
     stop holds: they finish only after their own Resume, so the sleep does not end by itself. One ``held`` tail
     per classified release, named only when it is true here: Ouroboros for a mind release only when this
     episode holds the helper's request door (its root or parent), else no releaser at all (a Continue's
     predecessor's helper). The episode keeps its word, its controls and its turn."""
-    chosen, episode = set((current or {}).get("waits_on") or ()), str((current or {}).get("task_id") or "")
-    paused = [member for member in helpers if member["task_id"] in chosen and member["activity"] == "paused"]
-
-    def release(member: Mapping[str, Any]) -> str:
-        if member["release"] == "mind":
-            return "mind" if episode in (member.get("door_holders") or ()) else "none"
-        return "owner" if member["release"] == "owner" else "none"
-
-    tails = []
-    for named, code in (("mind", "awaited_helpers_mind"), ("owner", "awaited_helpers_owner"),
-                        ("none", "awaited_helpers_paused")):
-        ids = [member["task_id"] for member in paused if release(member) == named]
-        if ids:
-            tails.append(_tail("helper", code, ids, state="held"))
-    return tails
+    holder = (current or {}).get("task_id")
+    selected: Dict[str, List[str]] = {"mind": [], "owner": [], "paused": []}
+    for task_id in (current or {}).get("waits_on") or ():
+        member = paused_helpers.get(task_id)
+        if member is None:
+            continue
+        release = member["release"]
+        can_name = release == "owner" or (release == "mind" and holder in (member.get("door_holders") or ()))
+        selected[release if can_name else "paused"].append(task_id)
+    return [_tail("helper", f"awaited_helpers_{release}", ids, state="held")
+            for release, ids in selected.items() if ids]
 
 
 def model_tails(blockers: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     attempts = sorted({str(b["attempt_id"]) for b in blockers if b.get("kind") == "model_handoff"
                        and not b.get("review_owned") and b.get("attempt_id")})
     return [_tail("model", "model_handoff", attempts, state="unknown")] if attempts else []
+
+
+def _runs_beside(member: Optional[Mapping[str, Any]], runs: List[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    # A running task's review belongs to its current step. A review can finish beside a wait or Pause.
+    if member is not None and member.get("live") and member["transition"] != "pausing":
+        return [run for run in runs if run["kind"] != "review"]
+    return runs
+
+
+def _member_state(member: Mapping[str, Any], runs: List[Mapping[str, Any]],
+                  handoffs: Iterable[Mapping[str, Any]], awaited: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """This supervisor's own state, with only the concurrent work attributable to it."""
+    state = {key: member[key] for key in ("activity", "transition", "call", "live", "release", "confirmed", "turn")}
+    tails = work_tails([], _runs_beside(member, runs), reviewing=bool(member.get("sent_review")))
+    tails += awaited + model_tails(handoffs)
+    return {**state, "because": member["reasons"], "tails": tails,
+            "mark": mark_of(member["activity"], member["confirmed"], live=member["live"]),
+            **({"queue_attempt": member["queue_attempt"]} if "queue_attempt" in member else {}),
+            **({"last_resume": member["last_resume"]} if member.get("last_resume") else {})}
 
 
 def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mapping[str, Any],
@@ -514,14 +557,24 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
     ``episode`` is the current episode: ``{task_id, live, state?}`` — ``state`` is its own classified
     member when the episode root is live; an ended episode carries only its outcome. Helpers of any
     episode are the other members. ``runs`` are the work's unsettled delegated runs as
-    ``{run_id, kind: run|review, state: live|unknown}`` (``work_projection`` types them)."""
+    ``{run_id, task_id?, kind: run|review, state: live|open|unknown}``. A current member's ordinary run
+    carries its executor's observed activity. An unbound start has no member owner."""
     gaps = list(gaps)
     current = episode.get("state") if isinstance(episode.get("state"), dict) else None
-    # Review work is a tail beside an episode that is not executing; a running episode's own review is its own work.
-    executing = bool(current is not None and current.get("live") and current["transition"] != "pausing")
-    runs = [run for run in runs if run.get("kind") in RUN_KINDS and run.get("state") in TAIL_STATES
-            and not (executing and run["kind"] == "review")]
+    runs = [run for run in runs if run.get("kind") in RUN_KINDS and run.get("state") in TAIL_STATES]
+    runs_by_task: Dict[str, List[Mapping[str, Any]]] = {}
+    for run in runs:
+        if task_id := run.get("task_id"):
+            runs_by_task.setdefault(task_id, []).append(run)
+    # Each paused member can report the whole tree's open model sends. The attempt names its own task.
+    handoffs_by_task: Dict[str, List[Mapping[str, Any]]] = {}
+    for member in members:
+        for blocker in member.get("model_handoffs") or ():
+            handoffs_by_task.setdefault(blocker.get("task_id") or "", []).append(blocker)
+    runs = _runs_beside(current, runs)
     helpers = [member for member in members if member is not current]
+    # Each sleeper looks up only its selected dependencies, not the whole tree.
+    paused_helpers = {member["task_id"]: member for member in helpers if member["activity"] == "paused"}
     working_helpers = [member for member in helpers if member["activity"] == "working" and member["live"]]
     helper_ids = [member["task_id"] for member in working_helpers]
     live_runs = [str(run["run_id"]) for run in runs if run["kind"] == "run" and run["state"] == "live"]
@@ -558,8 +611,9 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
     else:
         # Only runs nobody can confirm remain: the work stays listed (its Stop reaches them), its word unconfirmed.
         reasons, activity, transition, call, release = [], "unknown", "none", "", "none"
-    tails = work_tails(helper_ids, runs, reviewing=reviewing, named=named) + awaited_tails(current, helpers)
-    tails += model_tails(b for member in members for b in member.get("model_handoffs") or ())
+    awaiting = awaited_tails(current, paused_helpers)
+    tails = work_tails(helper_ids, runs, reviewing=reviewing, named=named) + awaiting
+    tails += model_tails(b for blockers in handoffs_by_task.values() for b in blockers)
     episode_live = bool(current is not None and current.get("live"))
     live = episode_live or bool(working_helpers or live_runs or reviewing)
     if turn:
@@ -572,10 +626,9 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
         **({"stop": current.get("stop", {}), "refusal": current.get("refusal", {})} if current else {}),
         **({"last_resume": speaker["last_resume"]} if speaker is not None and speaker.get("last_resume") else {}),
         "members": {"ids": [member["task_id"] for member in members], "states": {
-            member["task_id"]: {**{key: member[key] for key in (
-                "activity", "transition", "call", "live", "release", "confirmed", "turn")},
-                "because": member["reasons"], "tails": model_tails(member.get("model_handoffs") or ()),
-                **({"last_resume": member["last_resume"]} if member.get("last_resume") else {})}
+            member["task_id"]: _member_state(member, runs_by_task.get(member["task_id"], []),
+                                             handoffs_by_task.get(member["task_id"], ()),
+                                             awaiting if member is current else awaited_tails(member, paused_helpers))
             for member in members}},
         "confirmed": all(member["confirmed"] for member in members) and not gaps,
     }
@@ -593,13 +646,65 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
     return work
 
 
-def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Dict[str, Any]:
+def place_questions(works: List[Dict[str, Any]], questions: Iterable[Mapping[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Put every current question that waits for the owner (``main_decisions.question_waits``, the rule Main's
+    pill counts by) where its room shows it. A Project's question belongs to
+    the Project's room and Main's own to Main; a question whose task is a member of a work of that room joins the
+    work's ``turn`` (its row and card lead to it) as an ``open_question``, unless the member's own wait already put
+    it there as the ``question`` its task waits for. An open question is the owner's turn and never the work's word:
+    the work keeps its activity, its reason and its ``release`` (one that goes on with an assumption goes on by
+    itself). Returns the questions no work of their room holds (their task ended, or works elsewhere), by room, for
+    ``roll_up_room``."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.gateway.main_decisions import question_waits
+
+    holders: Dict[tuple, Dict[str, Any]] = {}
+    for work in works:
+        for task_id in (work.get("members") or {}).get("ids") or ():
+            holders.setdefault((str(work.get("room") or 0), str(task_id)), work)
+    waiting = [row for row in questions or () if str(row.get("task_id") or "") and question_waits(row)]
+    # A member's own wait can name its question without the quiz: with exactly one open question of that task, the
+    # wait is that question and takes its address; with several, each stands beside it with its own.
+    unanswered: Dict[tuple, List[str]] = {}
+    for row in waiting:
+        if row.get("quiz_state") == "open" and row.get("quiz_id"):
+            key = (_question_room(row, WEB_UI_CHAT_ID), str(row["task_id"]))
+            unanswered.setdefault(key, []).append(str(row["quiz_id"]))
+    loose: Dict[str, List[Dict[str, Any]]] = {}
+    for row in waiting:
+        task_id, quiz_id = str(row.get("task_id") or ""), str(row.get("quiz_id") or "")
+        room = _question_room(row, WEB_UI_CHAT_ID)
+        item = {"kind": "open_question", "task_id": task_id, **({"quiz_id": quiz_id} if quiz_id else {})}
+        if row.get("quiz_state") not in {"open", "expired_terminal"}:
+            item["code"] = "delivery_unknown"  # answered: only its unknown delivery waits (``question_waits``)
+        work = holders.get((room, task_id))
+        held = loose.setdefault(room, []) if work is None else work["turn"]
+        if unanswered.get((room, task_id)) == [quiz_id]:
+            for entry in held:
+                if entry.get("kind") == "question" and entry.get("task_id") == task_id and not entry.get("quiz_id"):
+                    entry["quiz_id"] = quiz_id
+        # The same question is said once; an item that names no quiz never stands for an exact one.
+        if not any(entry.get("kind") in {"question", "open_question"} and entry.get("task_id") == task_id
+                   and entry.get("quiz_id") == (quiz_id or None) for entry in held):
+            held.append(item)
+    return {room: items for room, items in loose.items() if items}
+
+
+def _question_room(row: Mapping[str, Any], main_chat: Any) -> str:
+    """The room a current question belongs to: its Project's, else Main's."""
+    return str(row.get("project_chat_id") if row.get("project_id") else main_chat)
+
+
+def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True,
+                 questions: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
     """One room from its works: the most active work speaks; whose turn it is never replaces it. The mark moves
     while anything in the room actually runs, a paused work's finishing review included: in a room, motion wins and
-    each work's row says the rest."""
+    each work's row says the rest. ``questions`` are the room's own that no work of it holds (``place_questions``):
+    they are the owner's turn there too, also in a room at rest."""
+    questions = [dict(item) for item in questions]
     if not works:
         activity = "idle" if complete else "unknown"
-        return {"activity": activity, "transition": "none", "call": "", "turn": [], "amber": False,
+        return {"activity": activity, "transition": "none", "call": "", "turn": questions, "amber": bool(questions),
                 "mark": "none" if complete else "ring", "confirmed": complete, "works": []}
     known = [work["activity"] for work in works if work["activity"] != "unknown"]
     activity = min(known, key=_rank) if known else "unknown"
@@ -611,7 +716,7 @@ def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Di
             and any(work["transition"] == "pausing" for work in working):
         transition = "pausing"
     calls = {work["call"] for work in working if work.get("call")}
-    turn = [{"work_id": work["work_id"], **item} for work in works for item in work["turn"]]
+    turn = [{"work_id": work["work_id"], **item} for work in works for item in work["turn"]] + questions
     confirmed = complete and all(work["confirmed"] for work in works)
     live = any(work.get("live") for work in works)
     unknown = any(tail.get("state") == "unknown" for work in works for tail in work.get("tails") or ())
@@ -620,11 +725,69 @@ def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Di
             "confirmed": confirmed, "works": [work["work_id"] for work in works]}
 
 
+def _same_question(one: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """The same task's question, by its quiz id when both name one."""
+    quizzes = (one.get("quiz_id"), other.get("quiz_id"))
+    return one.get("task_id") == other.get("task_id") and (None in quizzes or quizzes[0] == quizzes[1])
+
+
 def roll_up_summary(rooms: Mapping[Any, Mapping[str, Any]], works: List[Mapping[str, Any]],
                     *, complete: bool = True) -> Dict[str, Any]:
     """The tray's one line: counts by activity, how many wait for the owner, and confirmation."""
     counts = {activity: 0 for activity in ACTIVITY_ORDER}
     for work in works:
         counts[work["activity"] if work["activity"] in counts else "unknown"] += 1
-    return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works),
+    # What waits for the owner: each work with a turn once, and each question no work holds (``place_questions``)
+    # unless a counted work already carries it (a private Presence question is asked in Main while its work stands
+    # in its Project): one question is counted once, though both rooms show it.
+    carried = [item for work in works for item in work["turn"] if item.get("kind") in {"question", "open_question"}]
+    loose = sum(1 for room in rooms.values() for item in room.get("turn") or ()
+                if not item.get("work_id") and not any(_same_question(item, held) for held in carried))
+    return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works) + loose,
             "confirmed": complete and all(room.get("confirmed", True) for room in rooms.values())}
+
+
+# A text surface's one word for a work: the cards' chip words (web/modules/work_status.js ``activityWord``, without
+# its call sub-words), so Telegram says Paused, Waiting or Queued as the window does and keeps no table. The chip's
+# catalogue key rides beside it: a translation reads the same ``code:task.chip.*`` entry the window does.
+ACTIVITY_WORDS = {"working": "Working", "finalizing": "Finalizing…", "pausing": "Pausing…", "queued": "Queued",
+                  "waiting": "Waiting", "question": "Waiting for your answer", "paused": "Paused",
+                  "unknown": "Activity unconfirmed"}
+ACTIVITY_CHIP_KEYS = {"working": "task.chip.working", "finalizing": "task.chip.finalizing",
+                      "pausing": "task.chip.pausing", "queued": "task.chip.queued", "waiting": "task.chip.waiting",
+                      "question": "task.chip.waiting_for_answer", "paused": "task.chip.paused",
+                      "unknown": "task.chip.activity_unconfirmed"}
+
+
+def said_works(state: Any) -> Optional[List[Dict[str, str]]]:
+    """The works of an ``/api/state`` body as a text surface lists them, in the server's order: ``name``, ``state``
+    (an ACTIVITY_WORDS key), ``word``, its catalogue ``chip_key``, ``reason`` and its catalogue ``reason_code`` (its first reason's sentence, ``""`` when none). ``None`` when the
+    body is missing or its projection incomplete: said as unknown, never as an empty queue."""
+    works = state.get("works") if isinstance(state, Mapping) else None
+    if not isinstance(works, list) or state.get("works_complete") is not True:
+        return None
+    said = []
+    for work in works:
+        if not isinstance(work, Mapping):
+            continue
+        key = str(work.get("activity") or "")
+        if key == "working" and work.get("transition") in ("finalizing", "pausing"):
+            key = str(work["transition"])
+        elif key == "waiting" and any(isinstance(item, Mapping) and item.get("kind") == "question"
+                                      for item in work.get("turn") or ()):
+            key = "question"
+        key = key if key in ACTIVITY_WORDS else "unknown"
+        reasons = [row for row in work.get("because") or () if isinstance(row, Mapping) and row.get("text")]
+        first = reasons[0] if reasons else {}
+        # Never the word again (the card's ``workLine``): an answer wait's own reason, compared by its code.
+        if (key == "question" and first.get("code") == "owner_answer") or first.get("text") == ACTIVITY_WORDS[key]:
+            first = {}
+        # The code rides when the text is the sentence the window says by ``work.because.<code>``: the code's own one,
+        # a counted reason's singular included; a plural count, a wake or a rewritten sentence goes by its text.
+        phrase = REASON_TEXT.get(first.get("code")) if first else None
+        own = phrase[0] if isinstance(phrase, tuple) and first.get("count") == 1 else phrase
+        code = str(first.get("code") or "") if first and first.get("text") == own else ""
+        said.append({"name": str(work.get("name") or ""), "state": key, "word": ACTIVITY_WORDS[key],
+                     "chip_key": ACTIVITY_CHIP_KEYS[key], "reason": str(first.get("text") or ""), "reason_code": code,
+                     "place_turn": work.get("place_turn") is True})
+    return said

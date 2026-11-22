@@ -4,7 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from ouroboros.context_sections import _build_installed_skills_section, runtime_host_section
-from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, CommitReadinessDebtItem, make_repo_key
+from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key
 from ouroboros.subagent_runtime import review_pool_host_section, subagent_catalog_section
 from tests import _memory_scale_fixture as scale
 
@@ -29,12 +29,10 @@ def pool():
 
 def review_state(root):
     key = make_repo_key(root)
-    debts = [CommitReadinessDebtItem(f'crd-{n}', 'validation', f'Unresolved debt {n}: verify the retained source.',
-             repo_key=key, evidence=[f'Unresolved debt {n}: verify the retained source.']) for n in range(3)]
     runs = [CommitAttemptRecord('2026-09-20T00:00:00Z',
                 f'v7.4.0 historical execution {n}: ' + 'detail ' * 90, 'failed',
                 snapshot_hash=f'{n:064x}', repo_key=key) for n in range(5)]
-    return AdvisoryReviewState(attempts=runs, commit_readiness_debts=debts,
+    return AdvisoryReviewState(attempts=runs,
         last_stale_from_edit_ts='2026-10-23T12:00:00Z', last_stale_reason='The checkout changed.', last_stale_repo_key=key)
 
 

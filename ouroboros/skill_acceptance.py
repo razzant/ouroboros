@@ -13,8 +13,8 @@ skill without a critic PASS when a host-owned fact binds them:
 Both files live in the state plane, outside the payload and its digest, and are owner
 state that generic agent writes cannot forge (``SKILL_OWNER_STATE_FILENAMES``). Edits
 made anywhere else leave the skill "Not reviewed yet". A skill installed from a source
-that reviews each skill keeps blocker findings non-executable even under Advisory
-(``strict_review``); records converted from earlier installs keep the behaviour they had.
+that reviews each skill keeps blocker findings non-executable until the owner skips
+the review (``strict_review``); records converted from earlier installs keep the behaviour they had.
 
 The owner-edit seam is the admitted selected-skill development task
 (``skill_repair_admission.advance_repair_expected_hash``): after each payload write of a

@@ -216,8 +216,10 @@ def test_a_reviewed_file_over_a_tracked_directory_now_a_nested_repository_stages
 
 @pytest.mark.parametrize("operation", ["status", "resolve", "settle"])
 def test_a_blocked_review_does_not_offer_author_continuation_or_rewrite_on_read(task, monkeypatch, operation):  # noqa: F811
-    """A real Blocking rejection followed by an Advisory choice is not an author handback. Reading its status or
-    refusing its reference must not offer an unusable continuation or rewrite its closed seats just to tag them."""
+    """A rejection a Blocking install recorded before Blocking left is not an author handback. Reading its status or
+    refusing its reference must not offer an unusable continuation or rewrite its closed seats just to tag them; the
+    same rejection recorded today is a handback whose status offers the continuation."""
+    import dataclasses
     import json
 
     from ouroboros import review_state
@@ -231,13 +233,17 @@ def test_a_blocked_review_does_not_offer_author_continuation_or_rewrite_on_read(
 
     _baseline(task)
     (task.repo_dir / "own.txt").write_text("change\n", encoding="utf-8")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     _rejected_review(task, monkeypatch)
+    state = review_state.load_state(task.drive_root)
+    assert (state.attempts[-1].status, state.attempts[-1].phase) == ("reviewed", "review_only")
+    assert "review_reference" in json.loads(_handle_review_status(task, task_id=task.task_id))
+    # The row a Blocking install wrote for the same rejection: its refusal, never a handback.
+    state.attempts[-1] = dataclasses.replace(state.attempts[-1], status="blocked", phase="blocking_review")
+    review_state.save_state(task.drive_root, state)
     before = review_state.load_state(task.drive_root).attempts[-1]
     assert (before.status, before.phase) == ("blocked", "blocking_review")
     record = load_record(ledger_root(task), before.review_record_id)
     reference = reference_for(record, before)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     writes = _state_writes(monkeypatch)
 
     if operation == "status":

@@ -1,20 +1,24 @@
 """The engine daemon runs on a Node this installation keeps, not on the app's own copy.
 
-The daemon outlives the app that started it and spawns its children with ``process.execPath`` (browser MCP
+The daemon can outlive its app (a Restart keeps it) and spawns its children with ``process.execPath`` (browser MCP
 launcher, delegation belt, harness CLI, setup runners, its own respawn). A Node inside the app bundle is gone
 once the app is moved, replaced or deleted, or its AppImage mount ends, and every such spawn then fails until the
 daemon restarts. ``claudexor_runtime`` therefore ranks an exact managed Node, complete or Node-only, before the
 bundled one. When none exists, its foreground install owner (``_ensure_node`` under the install lock, never the
-read-only resolver) calls :func:`seed_node` once: the bundle's exact Node bytes are copied into a new immutable
-``state/cx/node`` generation beside the downloaded ones, with no link back to the app. The record states what the
-copy is (``source: bundle_seed``, its sha256, the app version) and never the ``archive_*`` fields that only a
-verified download earns, so a seed serves the daemon and never the npm toolchain. If the copy fails, the bundled
-Node stays in use and the warning names it. Retention keeps Node generations like the downloaded ones
-(docs/PERSISTENCE.md).
+read-only resolver) calls :func:`seed_node` once: the bundle's exact Node bytes are copied into the next immutable
+``state/cx/node`` generation (the path a download would take, already given to children), with no link back to the
+app. The record states what the copy is (``source: bundle_seed``, its sha256, the app version) and never the
+``archive_*`` fields that only a verified download earns, so a seed serves the daemon and never the npm toolchain.
+If the copy fails, the daemon stays on the bundled Node and the warning names it (a Node-only preparation fails).
+Retention keeps Node generations like the downloaded ones (docs/PERSISTENCE.md).
+
+The store's layout is read here too, without the pin's types: a generation's name (:func:`free_generation_index`),
+the roots to try (:func:`generation_roots`) and its record (:func:`node_record`). The runtime decides what qualifies.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import pathlib
@@ -29,18 +33,59 @@ SEED_SOURCE = "bundle_seed"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-def bundled_node(version: str) -> str:
-    """The first bundled Node that runs as exactly ``version``, or ``""``."""
+def bundled_node(version: str, probe=None) -> str:
+    """The first bundled Node that runs as exactly ``version``, or ``""``; ``probe`` answers a file's version (host
+    consumers pass the process's health memo, ``node_runtime.reviewed_host_node``)."""
     from ouroboros.platform_layer import bundled_resource_bases, embedded_node_candidates, probe_node_version
 
     for base in bundled_resource_bases():
         for candidate in embedded_node_candidates(base):
             try:
-                if candidate.is_file() and probe_node_version(str(candidate)) == version:
+                if candidate.is_file() and (probe or probe_node_version)(str(candidate)) == version:
                     return str(candidate)
             except (OSError, RuntimeError):
                 continue
     return ""
+
+
+def free_generation_index(legacy: pathlib.Path, archive_sha256: str) -> int:
+    """The first free ``<legacy>.g-<sha12>-<index>`` for the next Node generation of this archive's pin.
+
+    Read from the folder alone, before any copy or download, by the install owner (under its lock) and by a reader
+    naming the not-yet-prepared Node: both see the same first free name, so a failed attempt's path is exactly where
+    a later success, a download or a :func:`seed_node` copy, publishes. Existing generations are never reused,
+    renamed or repaired."""
+    index = 0
+    while os.path.lexists(legacy.parent / f"{legacy.name}.g-{archive_sha256[:12]}-{index:08d}"):
+        index += 1
+    return index
+
+
+def generation_roots(legacy: pathlib.Path, carried: str = "") -> list[pathlib.Path]:
+    """The Node roots of ``legacy``'s version and platform, best first: its immutable generations (newest name first),
+    the read-only pre-generation root, then the generation the executable ``carried`` lies in, when it is one of this
+    version and platform. ``carried`` is the prepared executable a test or candidate boundary passed in from the
+    store of the installation it isolates (``node_runtime.CARRIED_NODE_ENV``); the caller validates every root by its
+    record alike.
+    Nothing is read beyond the folder listing."""
+    try:
+        generations = sorted(legacy.parent.glob(legacy.name + ".g-*"), reverse=True)
+    except OSError:
+        generations = []
+    foreign = next((root for root in pathlib.Path(carried).parents if root.name.startswith(legacy.name + ".g-")),
+                   None) if carried else None
+    return [*generations, legacy, *([foreign] if foreign is not None and foreign not in generations else [])]
+
+
+def node_record(path: pathlib.Path, schemas: tuple[int, ...]) -> dict[str, Any]:
+    """One generation's record (``managed-node.json``) of a supported schema, else ``{}``; its fields are the caller's."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict) or type(raw.get("schema_version")) is not int or raw["schema_version"] not in schemas:
+        return {}
+    return raw
 
 
 def is_seed_record(raw: Mapping[str, Any], version: str, platform_key: str) -> bool:
@@ -59,20 +104,19 @@ def _sha256(path: "str | pathlib.Path") -> str:
     return digest.hexdigest()
 
 
-def seed_node(legacy: pathlib.Path, version: str, platform_key: str, record_name: str) -> str:
-    """Copy the exact bundled Node into a generation beside ``legacy``, its record named ``record_name`` (the
-    runtime's own reader's file), and return the copy.
+def seed_node(root: "pathlib.Path | None", version: str, platform_key: str, record_name: str) -> str:
+    """Copy the exact bundled Node into the generation ``root`` (the next free one, chosen under the install lock),
+    its record named ``record_name`` (the runtime's own reader's file), and return the copy.
 
-    Returns the bundled path when that copy fails or this platform has no managed Node layout, and
+    Returns the bundled path when that copy fails or this platform has no managed Node layout (no ``root``), and
     ``""`` when the bundle has no exact Node (the caller downloads one)."""
     source = bundled_node(version)
-    if not source or not platform_key:
+    if not source or not root:
         return source
     from ouroboros.platform_layer import embedded_node_candidates, probe_node_version
     from ouroboros.utils import atomic_write_json, replace_atomic
 
-    nonce = uuid.uuid4().hex[:8]
-    staging = legacy.parent / f".tmp-{os.getpid()}-{nonce}"
+    staging = root.parent / f".tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     try:
         node = embedded_node_candidates(staging)[0]
         node.parent.mkdir(parents=True)
@@ -85,7 +129,6 @@ def seed_node(legacy: pathlib.Path, version: str, platform_key: str, record_name
             "schema_version": 1, "version": version, "platform": platform_key, "source": SEED_SOURCE,
             "binary_sha256": digest, "app_version": os.environ.get("OUROBOROS_APP_VERSION", "").strip(),
         }, trailing_newline=True, fsync=True)
-        root = legacy.parent / f"{legacy.name}.g-{digest[:12]}-{nonce}"
         replace_atomic(staging, root)
         return str(embedded_node_candidates(root)[0])
     except Exception as exc:  # a full disk or a vanished bundle: the bundled Node keeps serving, and says so

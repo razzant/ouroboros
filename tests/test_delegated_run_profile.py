@@ -152,7 +152,8 @@ def test_the_host_states_its_prohibitions_on_every_delegated_run(tmp_path, monke
     assert "do not run git commit, tag, push, rebase, reset" in instructions
     assert "explicit task constraints and the assigned edit target still bind" in instructions
     if access == "readonly":
-        assert "inside this root, and make no edits or writes" in instructions
+        assert "make no edits or writes" in instructions
+        assert "parent's existing read authority" in instructions
     else:
         # #2190 permits verification scratch and the named cache, without
         # granting writes to another project or the operator's files.
@@ -184,8 +185,12 @@ def test_the_model_has_no_argument_that_could_widen_the_profile():
         "override_plan_readiness", "workspace", "attachment_paths", "attachment_import", "input_files",
     }
     item = entry.schema["parameters"]["properties"]["input_files"]["items"]
-    assert set(item["properties"]) == {"root", "path"}
-    assert item["additionalProperties"] is False
+    plain, ranged = item["anyOf"]
+    assert set(plain["properties"]) == {"root", "path"}
+    assert set(ranged["properties"]) == {"git_range"}
+    selection = ranged["properties"]["git_range"]
+    assert set(selection["properties"]) == {"root", "repository", "base", "head", "path"}
+    assert all(shape["additionalProperties"] is False for shape in (plain, ranged, selection))
     assert entry.schema["parameters"]["properties"]["attachment_import"]["enum"] == ["reuse", "new"]
     assert entry.schema["parameters"]["properties"]["attachment_paths"]["items"] == {"type": "string"}
     assert entry.schema["parameters"]["properties"]["workspace"]["enum"] == ["copy", "in_place"]
@@ -400,7 +405,7 @@ def test_a_widened_run_is_cancelled_and_typed_not_reported_as_progress(tmp_path,
         task_id="t-nanny", route_id="some-route", model="m",
         project_id="prj", project_owned=False,
     )
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, "run-1"))
     delegate._CUSTODY.clear()
     assert out["status"] == "refused"
     assert out["reason"] == "access_profile_widened"
@@ -430,7 +435,7 @@ def test_a_delegated_run_can_only_be_touched_by_the_task_that_started_it(tmp_pat
     )
 
     for tool, call in (
-        ("delegate_wait", lambda ctx, rid: delegate._delegate_wait(ctx, rid, wait_sec=1)),
+        ("delegate_wait", lambda ctx, rid: delegate._read_run(ctx, rid)),
         # delegate_wait is the tick contract (str); cancel answers natively.
         ("delegate_cancel", lambda ctx, rid: delegate._delegate_cancel(ctx, rid, reason="x").text),
     ):

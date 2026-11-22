@@ -350,7 +350,7 @@ def _refusal_then_correction(tmp_path, monkeypatch, *, refused_at_startup: bool,
             for server in servers:
                 asyncio.run_coroutine_threadsafe(server.__aexit__(None, None, None), loop).result(5)
     assert [method for method, _form in refusing.calls] == ["getMe"]
-    assert _status(state) == {"state": "ready", "reason_code": ""}
+    assert _status(state) == {"state": "ready", "reason_code": "", "bot": "123456"}
     assert ("info", "Telegram settings changed after a rejection; polling resumes.") in api.logs
     return api
 
@@ -436,6 +436,76 @@ def test_an_unavailable_token_is_no_reading_and_only_a_changed_token_ends_the_wa
     assert api.logs.count(("warning", _UNREADABLE)) == 1
 
 
+_CLEARED = "Telegram bot token was cleared while polling waits; still waiting for a saved one."
+
+
+def test_a_parked_wait_says_each_change_of_reason_and_a_closing_binding_says_nothing(tmp_path, monkeypatch):
+    """Parked with the bridge's token binding: each change between a cleared token and settings that cannot be
+    read is said (cleared, unreadable, cleared; then unreadable, cleared, unreadable), the same reason again
+    says nothing, a new token ends the wait, and a closing binding claims no reason in either wait."""
+    binding_mod, settings, api = _parked(tmp_path, monkeypatch)
+    token_mod = sys.modules[f"{_PACKAGE}.lib.telegram_token"]
+    saved = settings.read_text(encoding="utf-8")
+    fingerprint = binding_mod.server_fingerprint(api, _TOKEN)
+    cleared, unknown = {"status": "ok", "values": {}}, {"status": "unknown"}
+    corrected = {"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "123456:CORRECTED"}}
+
+    def bound(token: str):
+        binding = token_mod.TokenBinding()
+        binding.observe({"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": token}})
+        return binding
+
+    def said() -> list:
+        return [entry for entry in api.logs if "while polling waits" in entry[1] or "the bridge waits" in entry[1]]
+
+    async def reach(count: int) -> None:
+        """``count`` lines, and no more over further checks of the same reason."""
+        deadline = time.monotonic() + 5
+        while len(said()) < count:
+            assert time.monotonic() < deadline, said()
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        assert len(said()) == count, said()
+
+    async def scenario():
+        binding = bound(_TOKEN)
+        parked = asyncio.create_task(binding_mod.park_until_settings_change(api, fingerprint, binding))
+        for count, reply in enumerate((cleared, unknown, cleared), start=1):
+            binding.observe(reply)
+            binding.observe(reply)  # the same state once more
+            await reach(count)
+        binding.observe(corrected)
+        await asyncio.wait_for(parked, 5)
+
+        binding = bound(_TOKEN)
+        parked = asyncio.create_task(binding_mod.park_until_settings_change(api, fingerprint, binding))
+        settings.write_text("{", encoding="utf-8")  # the saved settings cannot be read; the token stays in force
+        await reach(4)
+        binding.observe(cleared)
+        await reach(5)
+        binding.observe(unknown)
+        await reach(6)
+        settings.write_text(saved, encoding="utf-8")
+        binding.observe(corrected)
+        await asyncio.wait_for(parked, 5)
+
+        closing = bound(_TOKEN)
+        parked = asyncio.create_task(binding_mod.park_until_settings_change(api, fingerprint, closing))
+        await asyncio.sleep(0.05)
+        closing.close()
+        waiting = asyncio.create_task(token_mod._wait_for_bot_token(api, closing, poll_sec=0.01))
+        await reach(6)
+        for task in (parked, waiting):
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(scenario())
+    assert said() == [("info", _CLEARED), ("warning", _UNREADABLE), ("info", _CLEARED),
+                      ("warning", _UNREADABLE), ("info", _CLEARED), ("warning", _UNREADABLE)]
+    assert api.logs.count(("info", "Telegram settings changed after a rejection; polling resumes.")) == 2
+
+
 @pytest.mark.parametrize("readable", [True, False])
 def test_a_parked_wait_stays_cancellable(tmp_path, monkeypatch, readable):
     binding, settings, api = _parked(tmp_path, monkeypatch)
@@ -464,8 +534,8 @@ def test_a_competing_poll_is_retried_without_a_save_or_the_restart_budget(tmp_pa
     written: list[tuple[str, str]] = []
     save_status = plugin._save_bridge_status
     monkeypatch.setattr(plugin, "_save_bridge_status",
-                        lambda api, state, reason_code="": (written.append((state, reason_code)),
-                                                            save_status(api, state, reason_code))[-1])
+                        lambda api, state, reason_code="", bot="", **kw: (written.append((state, reason_code)),
+                                                                          save_status(api, state, reason_code, bot, **kw))[-1])
     server = _ConflictingServer(conflicts, first_update_id=30)
     with _host_loop(monkeypatch) as loop:
         asyncio.run_coroutine_threadsafe(server.__aenter__(), loop).result(5)
@@ -484,8 +554,344 @@ def test_a_competing_poll_is_retried_without_a_save_or_the_restart_budget(tmp_pa
     assert len(server.methods("getMe")) == 1  # one run of the poller: nothing restarted it
     # Degraded while the token is held, ready after the first successful poll: one write each.
     assert written == [("ready", ""), ("degraded", "telegram_conflict"), ("ready", "")]
-    assert _status(state) == {"state": "ready", "reason_code": ""}
+    assert _status(state) == {"state": "ready", "reason_code": "", "bot": "123456"}
     warnings = [message for level, message in api.logs if level == "warning" and "degraded" in message]
     assert warnings == ["Telegram poller degraded (TelegramRequestRejected): Telegram API getUpdates returned HTTP 409."]
     assert ("info", "Telegram poller recovered after TelegramRequestRejected; polling resumed.") in api.logs
     assert not any(level == "error" for level, _message in api.logs)
+
+
+def test_the_observer_applies_settings_to_the_mini_app_on_its_first_read_and_after_each_change(monkeypatch):
+    """Refresh is asked on the first read and after each accepted change, naming the token read, retried while it
+    cannot settle, confirmed from the host's memory at each read after an applied answer, never asked for an
+    unknown document, and the observer ends when the API closes."""
+    plugin, _api, _notifier = _load()
+    token_mod = sys.modules[plugin.__package__ + ".lib.telegram_token"]
+    replies = iter([{"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a"}, "missing": []},
+                    {"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a"}, "missing": []},
+                    {"status": "unknown", "values": {}, "missing": []},
+                    {"status": "ok", "values": {}, "missing": ["TELEGRAM_BOT_TOKEN"]},
+                    {"status": "ok", "values": {}, "missing": ["TELEGRAM_BOT_TOKEN"]},
+                    {"status": "access_closed", "values": {}, "missing": []}])
+    outcomes = iter(["unchanged", "unchanged", "stop_unconfirmed", "restarted"])
+    asked = []
+
+    class Api:
+        logs = []
+
+        def get_settings_state(self, keys):
+            return next(replies)
+
+        def refresh_companion_process(self, name, expected=None, only_if_differs=False):
+            asked.append((name, expected, only_if_differs))
+            return next(outcomes)
+
+        def log(self, level, message, **_fields):
+            self.logs.append((level, message))
+
+    api = Api()
+    monkeypatch.setattr(token_mod, "WATCH_SEC", 0)
+    woken = []  # the typing cue's wake: told of each accepted change, never of an unchanged or unknown read
+    asyncio.run(token_mod.make_token_observer(api, "miniapp_gateway",
+                                              lambda: woken.append(token_mod.binding_for(api).snapshot()))())
+    assert woken == [("1:a", 1), ("", 2)]
+    # First read; its confirmation at the next read; the change; its retry. Unknown asks nothing.
+    assert asked == [("miniapp_gateway", {"TELEGRAM_BOT_TOKEN": token}, confirm)
+                     for token, confirm in (("1:a", False), ("1:a", True), ("", False), ("", False))]
+    assert token_mod.binding_for(api).state == "closed" and token_mod.binding_for(api).snapshot() == ("", 3)  # closing advanced it
+
+
+@pytest.mark.parametrize("outcome,asks", [("not_desired", 1), ("disabled", 1), ("missing_grants", 1),
+                                          ("settings_unknown", 3), ("settings_changed", 3), ("unchanged", 3)])
+def test_the_observer_settles_on_each_refusal_of_the_closed_set_and_asks_again_only_after_the_others(
+    monkeypatch, outcome, asks,
+):
+    """PluginAPI 2.4 answers any other reason not to run as ``not_desired``: one ask per generation, never a
+    runtime-state read every tick; a state worth asking again (unreadable settings, or a save after this read)
+    is asked each read, and a newer save warns nobody. After an applied answer each read only confirms it
+    (``only_if_differs``), which the host answers from memory."""
+    plugin, _api, _notifier = _load()
+    token_mod = sys.modules[plugin.__package__ + ".lib.telegram_token"]
+    replies = iter([{"status": "ok", "values": {"TELEGRAM_BOT_TOKEN": "1:a"}, "missing": []}] * 3
+                   + [{"status": "access_closed", "values": {}, "missing": []}])
+    asked = []
+
+    class Api:
+        logs = []
+
+        def get_settings_state(self, keys):
+            return next(replies)
+
+        def refresh_companion_process(self, name, expected=None, only_if_differs=False):
+            asked.append(only_if_differs)
+            return outcome
+
+        def log(self, level, message, **_fields):
+            self.logs.append((level, message))
+
+    monkeypatch.setattr(token_mod, "WATCH_SEC", 0)
+    api = Api()
+    asyncio.run(token_mod.make_token_observer(api, "miniapp_gateway")())
+    assert asked == ([False] + [True] * (asks - 1) if outcome == "unchanged" else [False] * asks)
+    warned = [message for level, message in api.logs if level == "warning"]
+    once = f"Telegram Mini App could not apply the saved token yet ({outcome}); retrying."
+    assert warned == ([once] if outcome == "settings_unknown" else [])  # settled, or a newer save to apply
+
+
+def test_a_missing_token_waits_past_the_former_restart_budget(tmp_path, monkeypatch):
+    """Without a token the supervised poller and notifier wait instead of failing: the host's runner with
+    the poller's ten restarts and a fast backoff would have spent them all in this time."""
+    plugin, _api, notifier = _load()
+    state, api = _state(tmp_path)
+    api.granted.clear()
+    sends = []
+    monkeypatch.setattr(plugin, "TelegramClient", lambda *a, **k: sends.append(a) or (_ for _ in ()).throw(AssertionError))
+    with _host_loop(monkeypatch):
+        poller = _supervise(plugin, api)
+        spec = _StagedSupervisedTask(name="notifier", factory=notifier._make_notifier(api), restart_policy="on_failure",
+                                     max_restarts=10, backoff_seconds=0.01)
+        host = types.SimpleNamespace(_skill="telegram", _disclose_model_capable_dispatch=lambda *_args: None)
+        notifying = extension_plugin_api.PluginAPIImpl._start_supervised_task(host, spec)
+        try:
+            time.sleep(1.0)
+            assert not poller.done() and not notifying.done()
+        finally:
+            poller.cancel()
+            notifying.cancel()
+    assert sends == []
+    assert plugin._bridge_status(api)["state"] == "missing_token"
+    assert not [message for level, message in api.logs if level in {"error", "warning"}]
+
+
+def _scripted_host(monkeypatch, plugin, answers: list[str]) -> tuple[list[dict], list[str]]:
+    """The host's /chat/inject answering each post with the next scripted answer, then accepting: ``posts`` holds
+    every delivery, ``accepted`` the owner message ids the host took (one entry per acceptance)."""
+    posts: list[dict] = []
+    accepted: list[str] = []
+
+    async def host_post(_api, path, payload):
+        if path != "/chat/inject":
+            return 200, {}
+        posts.append(payload)
+        if payload.get("text") == "/panic":  # an inert stand-in for the host's Panic door: nothing is stopped
+            return 202, {"ok": True, "status": "accepted"}
+        answer = answers.pop(0) if answers else "accept"
+        if answer == "not_accepted":  # the host's refusal before this attempt was recorded
+            return 503, {"ok": False, "error": "the store is busy before acceptance", "code": "not_accepted"}
+        if answer == "server_error":
+            return 500, {"ok": False, "error": "busy while writing"}
+        if answer == "unavailable":  # a 503 that does not say this attempt was not recorded
+            return 503, {"ok": False, "error": "busy"}
+        if answer == "lost":
+            raise httpx.ReadError("the host's answer was lost")
+        accepted.append(payload["client_message_id"])
+        return 202, {"ok": True, "status": "queued"}
+
+    monkeypatch.setattr(plugin, "_host_post", host_post)
+    return posts, accepted
+
+
+def test_an_update_the_host_did_not_accept_is_delivered_again_and_accepted_once(tmp_path, monkeypatch):
+    plugin, _api_mod, _notifier = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    monkeypatch.setattr(plugin, "_NOT_ACCEPTED_RETRY_SEC", 0.01)
+    posts, accepted = _scripted_host(monkeypatch, plugin, ["not_accepted", "not_accepted"])
+
+    async def scenario():
+        async with _CloudServer(first_update_id=10) as server:
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=server.origin)
+            server.push(_owner_message("first"))
+            server.push(_owner_message("second"))
+            await _poll(plugin, api, lambda: len(accepted) == 2 and len(server.methods("getUpdates")) >= 4)
+            return server, state
+
+    server, state = asyncio.run(scenario())
+    assert [post["text"] for post in posts] == ["first", "first", "first", "second"], "the refused update came again"
+    assert accepted == [posts[0]["client_message_id"], posts[3]["client_message_id"]], "each accepted once, in order"
+    assert len({post["client_message_id"] for post in posts[:3]}) == 1, "the same delivery, not a new message"
+    assert [form["offset"] for form in server.methods("getUpdates")][:3] == ["0", "0", "0"]
+    assert _cursor(state)["offset"] == 12
+    assert not server.methods("sendMessage"), "a delivery the host will take later is no failure to report"
+
+
+@pytest.mark.parametrize("answer", ["server_error", "unavailable", "lost"])
+def test_an_update_whose_outcome_is_unknown_is_never_delivered_again(tmp_path, monkeypatch, answer):
+    plugin, _api_mod, _notifier = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    monkeypatch.setattr(plugin, "_NOT_ACCEPTED_RETRY_SEC", 0.01)
+    posts, accepted = _scripted_host(monkeypatch, plugin, [answer])
+
+    async def scenario():
+        async with _CloudServer(first_update_id=10) as server:
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=server.origin)
+            server.push(_owner_message("first"))
+            server.push(_owner_message("second"))
+            await _poll(plugin, api, lambda: len(accepted) == 1 and len(server.methods("getUpdates")) >= 4)
+            return server, state
+
+    server, state = asyncio.run(scenario())
+    assert [post["text"] for post in posts] == ["first", "second"], "an unknown outcome is not sent again"
+    assert accepted == [posts[1]["client_message_id"]]
+    assert _cursor(state)["offset"] == 12
+    assert len(server.methods("sendMessage")) == 1, "the owner is told once that the update failed"
+
+
+def test_a_panic_already_received_goes_while_an_earlier_update_waits_and_only_once(tmp_path, monkeypatch):
+    """The host does not record the owner's first message twice; the owner's /panic later in the same batch (past
+    the per-poll limit of one) reaches the host's Panic door at once and once, a stranger's /panic never does, and
+    the other messages keep their order and the held update's id. The Panic door here is an inert recorder."""
+    plugin, _api_mod, _notifier = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    monkeypatch.setattr(plugin, "_NOT_ACCEPTED_RETRY_SEC", 0.01)
+    posts, accepted = _scripted_host(monkeypatch, plugin, ["not_accepted", "not_accepted"])
+    stranger = {"message": {"message_id": 9001, "date": int(time.time()) + 5, "chat": {"id": 7, "type": "private"},
+                            "from": {"id": 7, "first_name": "Stranger"}, "text": "/panic"}}
+
+    async def scenario():
+        async with _CloudServer(first_update_id=10) as server:
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=server.origin, TELEGRAM_MAX_UPDATES_PER_POLL=1)
+            for update in (_owner_message("first"), _owner_message("second"), stranger, _owner_message("/panic"),
+                           _owner_message("third")):
+                server.push(update)
+            await _poll(plugin, api, lambda: len(accepted) == 3 and len(server.methods("getUpdates")) >= 8)
+            return server, state
+
+    server, state = asyncio.run(scenario())
+    texts = [post["text"] for post in posts]
+    assert texts[:3] == ["first", "/panic", "first"], "the Panic went while the first message was held"
+    assert texts == ["first", "/panic", "first", "first", "second", "third"], "once each, the rest in order"
+    assert len({post["client_message_id"] for post in posts if post["text"] == "first"}) == 1, "the same id"
+    assert [posts[i]["client_message_id"] for i in (3, 4, 5)] == accepted
+    assert all(post["chat_id"] == 42 for post in posts), "a stranger's /panic is never delivered"
+    assert [form["offset"] for form in server.methods("getUpdates")][:3] == ["0", "0", "0"], "the cursor stays"
+    assert _cursor(state)["offset"] == 15
+
+
+@pytest.mark.parametrize("remember_early", [True, False], ids=["fixed", "mutation-control"])
+def test_d3_lost_panic_answer_survives_rotation_inside_retried_batch(tmp_path, monkeypatch, remember_early):
+    plugin, _, _ = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    monkeypatch.setattr(plugin, "_NOT_ACCEPTED_RETRY_SEC", 0.01)
+    if not remember_early:
+        from importlib import import_module
+
+        cursor = import_module(plugin.__package__ + ".lib.telegram_poll_binding").PollCursor
+        monkeypatch.setattr(cursor, "remember_early", lambda *_: None)
+    posts = []
+
+    async def host_post(_api, path, payload):
+        if path != "/chat/inject":
+            return 200, {}
+        text = payload["text"]
+        posts.append(text)
+        if text == "first" and posts.count(text) == 1:
+            return 503, {"ok": False, "code": "not_accepted"}
+        if text == "/panic":   # the inert host took the request, but its answer was lost
+            raise httpx.ReadError("no delivery receipt")
+        return 202, {"ok": True, "status": "queued"}
+
+    monkeypatch.setattr(plugin, "_host_post", host_post)
+    original_message = plugin._handle_owner_message
+    rotations = []
+    rotated_token = _TOKEN.split(":", 1)[0] + ":new-test-token"
+
+    async def rotate_after_accepting_first(api, client, update, *args, **kwargs):
+        await original_message(api, client, update, *args, **kwargs)
+        if update["message"]["text"] == "first":
+            binding = plugin.binding_for(api)
+            previous = binding.snapshot()[1]
+            api.granted["TELEGRAM_BOT_TOKEN"] = rotated_token
+            assert binding.read_now(api) and not binding.current(previous)
+            rotations.append(previous)
+
+    monkeypatch.setattr(plugin, "_handle_owner_message", rotate_after_accepting_first)
+
+    async def scenario():
+        async with _CloudServer(first_update_id=10) as server:
+            respond = server.respond
+            server.respond = lambda method, path, form: respond(method, path.replace(rotated_token, _TOKEN, 1), form)
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=server.origin, TELEGRAM_MAX_UPDATES_PER_POLL=1)
+            for text in ("first", "second", "third", "/panic", "fourth"):
+                server.push(_owner_message(text))
+            await _poll(plugin, api, lambda: "fourth" in posts and _cursor(state)["offset"] == 15)
+
+    asyncio.run(scenario())
+    assert len(rotations) == 1
+    assert [text for text in posts if text != "/panic"] == ["first", "first", "second", "third", "fourth"]
+    assert posts[:3] == ["first", "/panic", "first"]
+    if remember_early:
+        assert posts.count("/panic") == 1, posts
+    else:
+        assert posts.count("/panic") > 1, posts  # the same assertion above fails with the early record disabled
+
+
+def test_d7_held_reply_keeps_its_row_and_native_card_after_restart_at_server_alias(tmp_path, monkeypatch):
+    plugin, _, _ = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    monkeypatch.setattr(plugin, "_NOT_ACCEPTED_RETRY_SEC", 0.5)
+    posts, accepted = _scripted_host(monkeypatch, plugin, ["not_accepted"])
+    targets = {"address": "task:first-card", "child": "first-card", "card_message_id": 8}
+    monkeypatch.setattr(plugin, "_reply_target", lambda *_args: dict(targets))
+
+    async def scenario():
+        async with _CloudServer(first_update_id=10) as server:
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=server.origin)
+            update = _owner_message("Can you check this?")
+            update["message"]["reply_to_message"] = {"message_id": 8, "from": {"id": 123, "is_bot": True}}
+            server.push(update)
+            await _poll(plugin, api, lambda: bool(posts) and bool(_cursor(state).get("held")))
+            targets.clear()  # neither the Project reference nor the native card is in the mutable lookup now
+            plugin.merge_settings(state, {"TELEGRAM_API_BASE": server.origin.replace("127.0.0.1", "localhost")})
+            await _poll(plugin, api, lambda: bool(accepted))
+            assert not _cursor(state).get("held")
+            assert _cursor(state)["base"] != server.origin and _cursor(state)["offset"] == 11
+
+    asyncio.run(scenario())
+    assert len(posts) == 2 and len(accepted) == 1
+    assert [post["reply_to"] for post in posts] == ["task:first-card"] * 2
+    assert [post["transport"]["reply_card_message_id"] for post in posts] == [8, 8]
+
+
+def test_c3_missing_token_waits_even_with_an_existing_reply_destination(tmp_path, monkeypatch):
+    plugin, api_mod, notifier = _load()
+    _, api = _state(tmp_path)
+    api.granted.clear()
+    event = {"transport": {"kind": "telegram", "conversation_id": "42", "bot_id": "123"}}
+
+    def never_compare(*_args):
+        pytest.fail("an empty token is not another bot")
+
+    monkeypatch.setattr(plugin, "_mirror_options", never_compare)
+    monkeypatch.setattr(notifier, "_mirror_options", never_compare)
+    with pytest.raises(api_mod.TelegramTokenMissing):
+        plugin._bridge_client(api, event, 42)
+    outcome, error = asyncio.run(notifier._push_notification(api, 42, "Completed", event=event))
+    assert outcome == "transient" and isinstance(error, api_mod.TelegramTokenMissing)
+
+
+def test_a2_reply_panic_is_unconfirmed_only_when_the_host_says_not_accepted(tmp_path, monkeypatch):
+    plugin, _, _ = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    monkeypatch.setattr(plugin, "_NOT_ACCEPTED_RETRY_SEC", 0.01)
+    posts = []
+
+    async def host_post(_api, path, payload):
+        if path == "/chat/inject":
+            posts.append(payload)
+            if len(posts) == 1:
+                return 503, {"ok": False, "code": "not_accepted"}
+        return 202, {"ok": True, "status": "accepted"}
+
+    monkeypatch.setattr(plugin, "_host_post", host_post)
+
+    async def scenario():
+        async with _CloudServer(first_update_id=10) as server:
+            state, api = _state(tmp_path, TELEGRAM_API_BASE=server.origin)
+            update = _owner_message("/panic")
+            update["message"]["reply_to_message"] = {"message_id": 8}
+            server.push(update)
+            await _poll(plugin, api, lambda: len(posts) >= 2 and _cursor(state)["offset"] == 11)
+            assert [form["offset"] for form in server.methods("getUpdates")][:2] == ["0", "0"]
+
+    asyncio.run(scenario())
+    assert len(posts) == 2 and posts[0] == posts[1] and posts[0]["text"] == "/panic"

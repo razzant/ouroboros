@@ -36,34 +36,7 @@ from ouroboros.tools.tool_result import (
     _published_tool_result,
     _restore_tool_result_sidecar,
 )
-
-
-def _published(ctx, tool: str, call, *, owner_delta: str = "") -> ToolResult:
-    """Run one producer under the registry's own result-consumption rule.
-
-    ``registry_core`` installs a per-invocation sentinel and accepts the published
-    result only when its text is exactly the string the handler returned; a helper
-    called outside a dispatch must therefore still return that same text.
-    """
-    sentinel = object()
-    token = _install_tool_result_sidecar(ctx, sentinel)
-    try:
-        text = call()
-        published = _published_tool_result(ctx, sentinel)
-    finally:
-        _restore_tool_result_sidecar(token)
-    assert isinstance(published, ToolResult), f"{tool}: producer published no typed result"
-    assert published.text == text, f"{tool}: published text is not the returned text"
-    adapter_code = LegacyTextResultAdapter.from_text(tool, text).code
-    if owner_delta:
-        assert published.code != adapter_code, (
-            f"{tool}: {owner_delta} claims a divergence from the adapter that is not there"
-        )
-    else:
-        assert published.code == adapter_code, (
-            f"{tool}: published code diverges from the adapter answer for the same text"
-        )
-    return published
+from tests._published_results import published_result as _published  # noqa: F401 - also read by the differential suite
 
 
 def _ctx(tmp_path: pathlib.Path) -> ToolContext:
@@ -137,7 +110,8 @@ def test_a_direct_selector_call_without_an_invocation_still_returns_its_text(tmp
     ("label", "prefix"),
     [
         ("effort_arg_error", "⚠️ TOOL_ARG_ERROR (schedule_subagent): effort must be auto or one of: "),
-        ("validator_refusal", "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required."),
+        # Every independent shape problem of the call in one refusal (objective="" and no expected_output).
+        ("validator_refusal", "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required; expected_output is required."),
         (
             "capability_arg_error",
             "⚠️ TOOL_ARG_ERROR (schedule_subagent): required_capabilities must be a list of strings.",

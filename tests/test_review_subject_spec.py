@@ -522,7 +522,7 @@ def _record_facts(frozen, *, reuse_key, pending=False, task_id="task-1"):
     rows = _seat_rows("pending" if pending else "responded")
     return {
         "task_id": task_id, "root_task_id": task_id, "repo_dir": frozen.spec.root, "governance_root": frozen.spec.governance_root,
-        "goal": "g", "scope": "s", "enforcement": "blocking", "enforcement_blocks": True, "blocked": False,
+        "goal": "g", "scope": "s", "enforcement": "advisory", "blocked": False,
         "block_reason": "", "triad_raw": rows, "pending": pending,
         "structured": {"triad_prompt": "T", "started_ts": "2026-10-07T00:00:00+00:00",
                        "rows": [{"slot_id": r["slot_id"], "model": r["model_id"], "route": "api_chat",
@@ -599,11 +599,11 @@ def test_pending_or_refused_records_are_never_reused(tmp_path):
 
 def test_rebuttal_is_a_new_round_and_the_ceiling_stays_common_per_root(tmp_path, monkeypatch):
     """Identity (b): a new ``review_rebuttal`` (its content sha) is one more paid
-    round of the SAME subject — the reuse key changes, the identical-diff refusal
-    does not fire — while the paid-cycle ceiling counts it and stays common to the
-    root task across subjects: a second subject under an exhausted root is refused."""
+    round of the SAME subject — the reuse key changes — while the paid-cycle ceiling
+    counts it and stays common to the root task across subjects: a second subject
+    under an exhausted root meets the same ceiling."""
     from ouroboros.review_state import CommitAttemptRecord, _utc_now, make_repo_key, update_state
-    from ouroboros.tools.commit_gate import check_identical_verdict_refusal, check_review_cycles_ceiling
+    from ouroboros.tools.commit_gate import check_review_cycles_ceiling
 
     monkeypatch.delenv("OUROBOROS_REVIEW_MAX_CYCLES", raising=False)
     repo = _system_repo(tmp_path)
@@ -625,15 +625,9 @@ def test_rebuttal_is_a_new_round_and_the_ceiling_stays_common_per_root(tmp_path,
             rebuttal_sha256=rebuttal, review_contract_fingerprint="cf"))
 
     update_state(drive, lambda state: _verdict_block(state, attempt=1))
-    # The identical subject without a rebuttal is refused for free ...
-    assert "IDENTICAL_DIFF_REFUSED" in check_identical_verdict_refusal(ctx, frozen.diff_sha, contract_fingerprint="cf")
-    # ... a NEW rebuttal buys exactly one paid round (the refusal cache does not fire) ...
-    assert check_identical_verdict_refusal(ctx, frozen.diff_sha, rebuttal_sha256=first_rebuttal, contract_fingerprint="cf") == ""
     assert check_review_cycles_ceiling(ctx, root_task_id="root-1") is None  # 1 of 2 paid
+    # A NEW rebuttal's round is paid and counts toward the ceiling.
     update_state(drive, lambda state: _verdict_block(state, attempt=2, rebuttal=first_rebuttal))
-    # ... and the SPENT rebuttal is refused again, while the round counted toward the ceiling.
-    assert "repeated rebuttal" in check_identical_verdict_refusal(
-        ctx, frozen.diff_sha, rebuttal_sha256=first_rebuttal, contract_fingerprint="cf")
     exhausted = check_review_cycles_ceiling(ctx, root_task_id="root-1")
     assert exhausted is not None and exhausted["cycles_paid"] == 2 and "REVIEW_CYCLES_EXHAUSTED" in exhausted["message"]
     # A second subject under the same root (new bytes, new key) does NOT reset the ceiling.
@@ -641,7 +635,6 @@ def test_rebuttal_is_a_new_round_and_the_ceiling_stays_common_per_root(tmp_path,
     _git(repo, "add", "-A")
     second = freeze_subject(ctx, _index_spec(repo))
     assert second.diff_sha != frozen.diff_sha and _keys(second) != key
-    assert check_identical_verdict_refusal(ctx, second.diff_sha, contract_fingerprint="cf") == ""  # not identical
     assert check_review_cycles_ceiling(ctx, root_task_id="root-1") is not None  # still exhausted
     assert check_review_cycles_ceiling(ctx, root_task_id="root-2") is None  # another root, its own ceiling
 

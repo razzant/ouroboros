@@ -28,8 +28,9 @@ def test_input_transcription_finishes_only_its_item_and_speech_continues(provide
             if outcome == "completed":
                 assert len(events) == 1 and events[0].kind == "caption"
                 assert events[0].data["text"] == "Owner words." and events[0].data["final"]
-            else:
-                assert events == []  # no recognized words to invent a caption from
+            else:  # no recognized words: an empty final closes the item and invents none
+                assert [(event.kind, event.data) for event in events] == [
+                    ("caption", {"speaker": "owner", "item_id": "owner", "text": "", "final": True})]
 
             wire.put({"type": "conversation.item.input_audio_transcription.completed",
                       "item_id": "other", "transcript": "Next words."})

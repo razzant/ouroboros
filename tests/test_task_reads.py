@@ -131,6 +131,22 @@ def test_a_page_built_from_display_views_is_the_page_full_documents_build(tmp_pa
     assert _page(tmp_path)["messages"] == with_views["messages"]
 
 
+@pytest.mark.parametrize("continuation, expected", chosen_rows([
+    ({"predecessor_task_id": "old", "peer_context": ["P" * 100_000], "admission": {"by": {"actor": "owner", "at": "now"}, "x": 1}},
+     {"admission": {"by": {"actor": "owner"}}}),
+    ({"predecessor_task_id": "old"}, {}),
+    ({"admission": {"at": "now"}}, {"admission": {}}),
+], 0, 1, 2), ids=chosen_rows(["recorded", "older", "undeclared"], 0, 1, 2))
+def test_display_keeps_only_who_asked_for_a_continue(tmp_path, continuation, expected):
+    from ouroboros.subagent_messages import initiator_meta
+
+    seed_result(tmp_path, "next", {"task_id": "next", "status": "completed", "metadata": {"continuation": continuation}})
+    full = read_result(tmp_path, "next")
+    view = json.loads(task_store.display_documents(tmp_path, ["next"])["next"])
+    assert view["metadata"]["continuation"] == expected
+    assert initiator_meta(view) == initiator_meta(full)
+
+
 def test_a_page_reads_its_tasks_in_a_few_store_transactions(tmp_path, monkeypatch):
     from ouroboros import store
 

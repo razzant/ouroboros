@@ -65,7 +65,7 @@ def test_http_policy_uses_actual_operation_and_identity(mode, tmp_path, monkeypa
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     record_service_binding(tmp_path, "main", "127.0.0.1", 49159, pid=os.getpid())
     request = SimpleNamespace(url="http://127.0.0.1:49159/api/settings", method="POST",
-                              post_data='{"OUROBOROS_REVIEW_ENFORCEMENT":"advisory"}')
+                              post_data='{"OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS":"true"}')
     decision = browser_policy.browser_request_block_reason
     assert bool(decision(request, None, restricted=False, runtime_mode=mode)) == (mode != "cyber_pro")
     request.method = "GET"
@@ -110,18 +110,18 @@ def test_live_evaluate_reads_policy_words_and_cyber_posts_once(control_page, tmp
         assert "Agency browser ready" in browser._browse_page(ctx, url, engine=engine)
         # These are literal strings, not HTTP operations or changes to settings.
         literal = "/api/owner/context-mode low /api/owner/safety-mode /api/owner/skills/x/attest-review "
-        literal += "settings.json OUROBOROS_REVIEW_ENFORCEMENT OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS "
+        literal += "settings.json OUROBOROS_SUBAGENT_HARNESS OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS "
         literal += "OUROBOROS_POST_TASK_EVOLUTION OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE"
         assert _evaluated(ctx, json.dumps(literal)) == literal
         expression = "() => fetch('/api/settings', {method:'POST', body:JSON.stringify({"
-        expression += "OUROBOROS_REVIEW_ENFORCEMENT:'advisory'})}).then(r => r.json()).then(r => {"
+        expression += "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS:'true'})}).then(r => r.json()).then(r => {"
         expression += "document.querySelector('#result').textContent='Completed '+r.received; return r.received;})"
         assert "BROWSER_OWNER_CONTROL_BLOCKED" in browser._browser_action(ctx, "evaluate", value=expression)
         assert hits == []
         # The next operation reuses the browser and reads the effective mode.
         monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "cyber_pro")
         assert _evaluated(ctx, expression) == "1"
-        assert hits == [("/api/settings", {"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"})]
+        assert hits == [("/api/settings", {"OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS": "true"})]
         assert _evaluated(ctx, "document.querySelector('#result').textContent") == "Completed 1"
         assert "Screenshot captured" in browser._browser_action(ctx, "screenshot")
         screenshot = base64.b64decode(ctx.browser_state.last_screenshot_b64)

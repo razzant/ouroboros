@@ -1,13 +1,14 @@
 """Descriptive Chat history response and its rows, re-exported by the gateway facade.
 
 ``GET /api/chat/history`` projects the dialogue store's stored chat and progress rows
-(``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``). The JSDoc twin is
+(``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``); ``GET /api/chat/search``
+reads a room's saved messages for a word search (``gateway/chat_search.py``). The JSDoc twin is
 ``web/modules/client_contract_types.js``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from ouroboros.gateway.attachment_contracts import ChatAttachmentView
 from ouroboros.gateway.reference_contracts import ChatReplyReference
@@ -117,6 +118,26 @@ class PlaceHistoryFacts(TypedDict, total=False):
     historical_import: PlaceHistoryImport  # never owner confirmation or attention
     sent_at: str  # the provider send time its arrival recorded (``source_order``); absent: unknown, never inferred
     reaction: PlaceHistoryReaction  # a typed reaction arrival or receipt; absent: not one
+    non_text: List[Dict[str, str]]  # the connector's {kind, description} beside the words (kind state_change: a change), never speech
+
+
+class HistoricalTerminal(TypedDict, total=False):
+    """Facts frozen on one published ending. Its publication time and observed end time are separate."""
+
+    status: Required[str]
+    phase: Required[Literal["done", "warn", "error", "cancelled"]]
+    ts: Required[str]
+    provenance: Required[Literal["canonical_task_result_after_finalization"]]
+    model_execution: Dict[str, Any]
+    task_attempt: int
+    terminal_time: Dict[str, Any]
+    terminal_delivery: Dict[str, Any]
+    wake_summary: str
+    suggested_name: str
+    schedule_name: str
+    place_origin: Dict[str, Any]
+    wake_silent: bool
+    quiet_effective: bool
 
 
 class ChatHistoryMessage(TypedDict, total=False):
@@ -140,6 +161,8 @@ class ChatHistoryMessage(TypedDict, total=False):
     place_history: PlaceHistoryFacts
     wait_ended_at: str
     row_address: str
+    reply_excerpt_disabled: bool
+    reply_author_label: str  # whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
     row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening)
     reply_to: ChatReplyReference
     relay: Dict[str, Any]
@@ -173,7 +196,26 @@ class ChatHistoryMessage(TypedDict, total=False):
     quiz: ChatHistoryQuiz
     card: ChatHistoryCard
     summary_kind: str
-    historical_terminal: Dict[str, Any]
+    status: str
+    task_terminal_status: str
+    task_phase: str
+    task_attempt: int
+    task_outcome: Union[str, Dict[str, Any]]  # a legacy status or the recorded ending
+    historical_terminal: HistoricalTerminal
+    current_outcome: Dict[str, Any]  # separately scoped by its own task_attempt and terminal_time when known
+    terminal_time: Dict[str, Any]
+    terminal_delivery: Dict[str, Any]  # scope="task" for unbound debt, preserved_path=None for an unverified copy
+    reason_code: str
+    outcome_axes: Dict[str, Any]
+    _result_text_present: bool
+    delegated_runs_unreconciled: List[str]
+    review_projection: Dict[str, Any]
+    wake_summary: str
+    suggested_name: str
+    schedule_name: str
+    place_origin: Dict[str, Any]
+    wake_silent: bool
+    quiet_effective: bool
     model_waits: Dict[str, Any]  # system_type task_model_wait: wait_id -> the wait's latest revision
     lifecycle_virtual: bool  # the running skill operation, rebuilt on every read, never stored
     review_group: Dict[str, Any]  # folded skill review attempts of one task-bound group
@@ -208,6 +250,8 @@ class ChatHistoryMessage(TypedDict, total=False):
     elapsed_sec: Any
     tool_evidence: Dict[str, Any]  # system_type task_evidence: the task's recorded tool calls
     cancel_origin: Dict[str, Any]
+    finalization_recovery: Dict[str, Any]  # an adopted answer's custody: answer, cause, delivery_id, attempt
+    terminal_origin: str
     continuation_offer: Dict[str, Any]  # ContinuationOffer of an interrupted or author-stopped root
 
 
@@ -265,7 +309,8 @@ class ChatHistoryResponse(TypedDict, total=False):
     """``GET /api/chat/history``: conversation rows oldest first; replay evidence may follow them
     regardless of timestamp and recur across pages. An error answer (400 history_cursor_invalid or
     history_around_invalid, 409 history_view_changed or history_delta_reset, 503 history_source_unavailable
-    or migrating) keeps this shape with no rows, ``has_more`` true and the cursor that was sent as ``next_cursor``."""
+    or migrating) keeps this shape with no rows, ``has_more`` true and the cursor that was sent as ``next_cursor``;
+    a 503 history_source_unavailable may name the store's cause in ``detail``."""
 
     messages: Required[List[ChatHistoryMessage]]
     has_more: Required[bool]
@@ -278,10 +323,111 @@ class ChatHistoryResponse(TypedDict, total=False):
     error: str
     anchor: ChatHistoryAnchor  # an ``around`` read only
     reason_code: str
+    detail: str  # a 503 history_source_unavailable: the store's cause, when it has one
+
+
+class ChatSearchAttachment(TypedDict):
+    """An owner attachment as its bubble draws it (history's ``ChatAttachmentView``, no address): its file card or
+    player shows ``name``, an available image only its picture; the composer's file-name tail the bubble hides is
+    built from the names."""
+
+    name: str
+    kind: Literal["image", "video", "audio", "file"]
+    available: bool
+
+
+class ChatSearchLink(TypedDict):
+    """A link button of a delivered links row: its label is shown, its address only decides whether it is."""
+
+    label: str
+    url: str
+
+
+class ChatSearchQuestion(TypedDict, total=False):
+    """A question row's card as its words are drawn (the question is the row's ``text``): the offered answers'
+    labels and details (``QuizOption`` rows, or a legacy row's labels with ``option_details``), the stake and the
+    owner's own words (``comment``) once the card is settled as answered."""
+
+    quiz_id: Required[str]
+    options: List[Any]
+    option_details: List[str]
+    stake: str
+    comment: str
+
+
+class ChatSearchCandidate(TypedDict, total=False):
+    """One saved message of the room as the fields the room's renderer draws its words from: the text history
+    gives it (``system_type``, ``markdown``, ``narration``, ``source`` and the owner's ``attachments`` names choose
+    how), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
+    question's ``quiz``, a Project lifecycle row's answer and ending (``completion_answer``, ``project_id``,
+    ``project_name``, ``task_name``, ``completion_notice``). Whether its words contain the query is the client's
+    reading of those words. ``history_id`` and ``row_address`` are the row's identity in ``GET /api/chat/history``, whose
+    ``around=<row_address>`` reads the page around it; ``role`` is its author as history names it."""
+
+    history_id: Required[str]
+    row_address: Required[str]
+    role: Required[Literal["user", "assistant", "system"]]
+    ts: Required[str]
+    text: Required[str]
+    system_type: str
+    markdown: bool
+    narration: bool
+    source: str
+    sender_label: str
+    task_id: str
+    attachments: List[ChatSearchAttachment]
+    text_placeholder: bool  # the host's words for an owner who sent only attachments: not shown
+    msg_type: Literal["photo", "video", "document", "links", "quiz"]
+    caption: str
+    filename: str
+    title: str
+    actions: List[ChatSearchLink]
+    quiz: ChatSearchQuestion
+    completion_answer: str
+    project_id: str
+    project_name: str
+    task_name: str
+    completion_reason: str
+    completion_notice: Dict[str, Any]
+
+
+class ChatSearchSpan(TypedDict):
+    """What one search read covered: ``rows`` stored chat rows of the room below the cut, back to the
+    time of the oldest (``reached_ts``, "" when none was read). ``beginning``: it reached the room's
+    first message. ``importing``: older history exists that the archive import has not made readable
+    yet, so it was not searched. ``gaps``: the read range holds lines that could not be read
+    (``malformed_jsonl``, ``invalid_jsonl_row``, ``segment_unimportable``) or a Project's rows written
+    elsewhere not yet known (``appearances_deriving``, ``reply_target_unreadable``)."""
+
+    rows: int
+    reached_ts: str
+    beginning: bool
+    importing: bool
+    gaps: List[str]
+
+
+class ChatSearchResponse(TypedDict, total=False):
+    """``GET /api/chat/search?chat_id=&q=``: one bounded read of the room's saved messages, newest first, as
+    candidates whose shown words the client reads for the query. ``query`` is the query as searched (NFC, white
+    space collapsed). ``has_more`` and ``next_cursor`` continue older; a page may hold no candidate and still
+    continue. The search covered the whole room only when a chain of pages reached ``beginning`` with no
+    ``gaps``. An error answer (400 search_query_invalid or search_cursor_invalid, 409 search_view_changed, 503
+    history_source_unavailable or migrating) keeps this shape with no candidates and the cursor that was sent as
+    ``next_cursor``."""
+
+    query: Required[str]
+    candidates: Required[List[ChatSearchCandidate]]
+    has_more: Required[bool]
+    next_cursor: Required[Optional[str]]
+    searched: Required[ChatSearchSpan]
+    error: str
+    reason_code: str
 
 
 __all__ = [
     "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
-    "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
+    "ChatHistoryQuiz", "ChatHistoryCard", "HistoricalTerminal", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
+    "ChatSearchAttachment", "ChatSearchLink", "ChatSearchQuestion", "ChatSearchCandidate", "ChatSearchSpan",
+    "ChatSearchResponse",
 ]

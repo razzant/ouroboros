@@ -94,16 +94,33 @@ def unfinished_command_result(ctx: Any, ended: subprocess.SubprocessError, timeo
                 else "its exit was NOT observed, so whether it still runs is unknown")
         return _publish_process_result(ctx, "SHELL_ERROR", (
             f"⚠️ SHELL_ERROR ({tool or 'run_command'}): Stop now ended this turn while the command ran; the host sent "
-            f"its process tree the timeout's own kill and {seen} (root={root}, cwd={cwd}).\n\n"
+            f"its process tree the timeout's own kill and {seen}{_oom_note(ended)} (root={root}, cwd={cwd}).\n\n"
             f"{_format_process_output(ended.output, ended.stderr)}"))
     return (
         f"⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of {timeout_sec}s "
-        f"and the host killed what it could still reach of its process tree; a background child may survive untracked (root={root}, cwd={cwd}). NOTE: this is the per-command "
+        f"and the host killed what it could still reach of its process tree{_oom_note(ended)}; a background child may survive untracked (root={root}, cwd={cwd}). NOTE: this is the per-command "
         f"FOREGROUND timeout, NOT the task deadline. For genuinely long-running compute (training, "
         f"sampling, large builds/downloads), start it with start_service and poll "
-        f"service_status/service_logs while you do other work, or pass an explicit timeout_sec=<seconds> "
+        f"service_status/service_logs while you do other work{_service_memory_note()}, or pass an explicit timeout_sec=<seconds> "
         f"(only the task's own deadline or budget narrows it) — and preserve a best-effort deliverable before the task deadline."
     )
+
+
+def _oom_note(ended: Any) -> str:
+    """The kernel's OOM count for the command's memory leaf, when one was recorded: a separate observation from the
+    host's own kill, never merged into it (``process_facts._memory_reason``)."""
+    from ouroboros.tools.process_facts import _memory_reason
+
+    fact = getattr(ended, "memory_oom", None)
+    return f"; separately, {_memory_reason(fact)}" if isinstance(fact, dict) else ""
+
+
+def _service_memory_note() -> str:
+    """Where commands get their own memory group, a service does not: say so beside the advice to start one."""
+    from ouroboros import command_memory
+
+    return (" (a service has no memory group of its own here: a runaway one can take the room of the whole runtime)"
+            if command_memory.isolating() else "")
 
 
 def turn_stop_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
@@ -117,6 +134,28 @@ def turn_stop_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
     if getattr(waiter, "worker_slot_held", True) and not runner_reads_stop(waiter):
         return None
     return lambda: in_process_stop_now(ctx)
+
+
+def turn_control_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
+    """``turn_stop_reader`` widened, for a host wait that runs no command (the gate's wait for memory), to every
+    control the turn's model wait reads (``TaskModelWait.control_reason``): a finalize control (Wrap up, a carrier's
+    cooperative stop at teardown or Update), the task's deadlines. True on a control; None when Stop is unknown or
+    the controls are unreadable (it stops nothing); else False. Reads only, by the waiter's private seen copy:
+    delivery stays the loop's. Ordinary pooled work keeps the worker kill: no reader."""
+    stop = turn_stop_reader(ctx)
+    if stop is None:
+        return None
+    waiter = ctx.model_wait_context
+
+    def read() -> Optional[bool]:
+        stopped = stop()
+        if stopped:
+            return True
+        try:
+            return True if waiter.control_reason() else stopped
+        except Exception:
+            return None
+    return read
 
 
 def communicate_or_stop(proc: subprocess.Popen, timeout: Optional[float], stop: Optional[Callable[[], Any]] = None,
@@ -185,6 +224,12 @@ def tracked_start():
         return proc
 
     try:
+        # Direct git/skill callers share this boundary; interruption must still
+        # settle admission. The census starts no process and holds no start lock.
+        try:
+            maintain_tracked_children()
+        except Exception:
+            log.debug("Tracked-child maintenance failed before spawn", exc_info=True)
         yield publish
     finally:
         try:
@@ -213,15 +258,46 @@ def exit_finalization():
         _FINALIZING.active = previous
 
 
+def start_refused_result(ctx: Any, exc: Exception, *, tool: str, where: str, started_ts: float) -> str:
+    """The no-effect result of a start refused before any argv ran (memory leaf, admission): ``exc`` only when it is
+    that typed refusal. Pause, the store and every other error propagate for their own typed handling."""
+    from ouroboros.owner_pause import OwnerPauseRefused
+    from ouroboros.store import StoreError
+    from ouroboros.tools.shell_effects import _pre_spawn_refusal
+
+    if getattr(exc, "process_not_started", False) is not True or isinstance(exc, (OwnerPauseRefused, StoreError)):
+        raise exc
+    if getattr(exc, "memory_oom", None) is not None:
+        _publish_unfinished_process_facts(ctx, started_ts, spawn_error=exc)
+    return _pre_spawn_refusal(ctx, f"⚠️ TOOL_ERROR ({tool}): {exc}. The check was not run and no receipt was recorded. {where}.", tool=tool)
+
+
+def _admit_gate() -> None:
+    """The final Stop/Panic word, read inside the operation-start lock just before a gate opens."""
+    from ouroboros import workspace_executor as we
+
+    if _panic_requested or we._panic_requested or (stop_begun() and not getattr(_FINALIZING, "active", False)):
+        raise CommandAdmissionClosed("Stop retired command admission before the gate opened")
+
+
 def _tracked_subprocess_run(cmd, **kwargs):
     """subprocess.run replacement with process-tree tracking. When capturing TEXT
     output, decode tolerantly (errors='replace') so binary stdout/stderr (a MIPS
     interpreter, a DOOM framebuffer, raw bytes) surfaces as readable text instead
     of raising UnicodeDecodeError and collapsing the whole call into a
     shell_error. ``stop`` (``turn_stop_reader``) lets an in-process turn's Stop now
-    end the wait through the timeout's own group kill (``communicate_or_stop``)."""
+    end the wait through the timeout's own group kill (``communicate_or_stop``).
+    ``memory`` (default off) runs the command in its own memory leaf where the packaged unit
+    supports it (``command_memory.gated_start``): no argv runs unplaced and unregistered; the
+    result keeps the original argv. A failed custody write releases the placed command with the
+    ordinary ``host_unconfirmed`` fact (it may run). With ``memory`` the timeout is one absolute bound
+    from entry: checked in the final admission just before the launch (gated or plain), and only what
+    remains after registration is waited for. The leaf's OOM facts ride on the result, a timeout and a
+    Stop alike (``memory_oom``)."""
     timeout = kwargs.pop("timeout", None)
+    deadline = None if timeout is None else time.monotonic() + timeout
     stop = kwargs.pop("stop", None)
+    memory = kwargs.pop("memory", False)
     record_path = None
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("errors", "replace")
@@ -241,46 +317,148 @@ def _tracked_subprocess_run(cmd, **kwargs):
     from ouroboros.tool_custody import external_handoff
     confirmed = external_handoff("shell_process")
     proc = None
+    lease = None
+    original = cmd
 
     try:
+        from ouroboros import command_memory
         from ouroboros.owner_pause import operation_start
 
-        with tracked_start() as publish, operation_start():
-            try:
-                proc = contained_popen(subprocess.Popen, cmd, **kwargs)
-            except (OSError, ValueError) as exc:
-                if not hasattr(exc, "process_not_started"):
-                    exc.process_not_started = True
-                raise
-            publish(proc)  # before the spawning owner can exit
-        from ouroboros.workspace_executor import _register_process
-        if target is not None:  # task scope only; the foreground receipt keeps its own condition below
-            record_task_group(*target, proc.pid)
-        if binding.get("drive_root") and binding.get("task_id"):
-            record_path = _register_process(pathlib.Path(binding["drive_root"]), {
-                "record_type": "foreground", "executor_type": "local", "executor_id": "host",
-                "host_pid": proc.pid})
-            if record_path is not None:
-                confirmed()  # root receipt; retained tree custody stays with this process
-    except BaseException:
+        if memory and isinstance(cmd, (list, tuple)) and cmd and not kwargs.get("shell"):
+            lease = command_memory.begin(deadline)  # None: unsupported layout, the old path below; a refusal: before any argv
+        if lease is not None:
+            def spawn(gate_cmd, gate_env, pass_fds):
+                nonlocal proc
+                proc = contained_popen(subprocess.Popen, gate_cmd, **{**kwargs, "env": gate_env, "stdin": subprocess.PIPE,
+                                                                     "pass_fds": pass_fds})
+                publish(proc)  # before the spawning owner can exit
+                return proc
+
+            with tracked_start() as publish:
+                proc, record_path = command_memory.gated_start(
+                    lease, cmd, dict(kwargs["env"] if kwargs.get("env") is not None else os.environ), kwargs.get("cwd"),
+                    spawn=spawn, confirmed=confirmed, owed=bool(binding.get("task_id")), target=target,
+                    drive_root=pathlib.Path(binding["drive_root"]) if binding.get("drive_root") else None,
+                    extra={"executor_type": "local", "executor_id": "host"}, deadline=deadline, stop=stop)
+        if lease is None:
+            with tracked_start() as publish, operation_start():
+                if memory:  # the bound began at entry: the gate's preparation and the maintenance above used part of it
+                    command_memory.check_deadline(deadline)
+                try:
+                    proc = contained_popen(subprocess.Popen, cmd, **kwargs)
+                except (OSError, ValueError) as exc:
+                    if not hasattr(exc, "process_not_started"):
+                        exc.process_not_started = True
+                    raise
+                publish(proc)  # before the spawning owner can exit
+            if target is not None:  # task scope only; the foreground receipt keeps its own condition below
+                record_task_group(*target, proc.pid)
+            if binding.get("drive_root") and binding.get("task_id"):
+                from ouroboros.workspace_executor import _register_process
+                record_path = _register_process(pathlib.Path(binding["drive_root"]), {
+                    "record_type": "foreground", "executor_type": "local", "executor_id": "host", "host_pid": proc.pid})
+                if record_path is not None:
+                    confirmed()  # root receipt; retained tree custody stays with this process
+        if memory and timeout is not None:
+            timeout = max(0.0, deadline - time.monotonic())  # the wait gets only what preparation and registration left
+    except BaseException as exc:
         if proc is None:
             confirmed()
         else:
             retire_tracked(proc)
+        if lease is not None:
+            facts = lease.finish(proc.pid if proc is not None else 0)
+            if proc is not None:
+                attach_memory_facts(exc, facts, proc)
         raise
+    ended = None
     try:
-        stdout, stderr = communicate_or_stop(proc, timeout, stop, lambda: _kill_process_group(proc))
-        return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
-    except subprocess.TimeoutExpired:
-        _kill_process_group(proc)
-        proc.wait(timeout=5)
+        stdout, stderr = communicate_or_stop(proc, timeout, lease.watch(stop) if lease is not None else stop,
+                                             lambda: _kill_process_group(proc))
+        ended = subprocess.CompletedProcess(original, proc.returncode, stdout, stderr)
+        return ended
+    except (subprocess.TimeoutExpired, CommandStopped) as interrupted:
+        ended = interrupted
+        if isinstance(interrupted, subprocess.TimeoutExpired):
+            _kill_process_group(proc)
+            proc.wait(timeout=5)
         raise
     finally:
         retire_tracked(proc)
+        if lease is not None:
+            attach_memory_facts(ended, lease.finish(proc.pid), proc)  # after retire_tracked: the kernel's counts
         if proc.poll() is not None:
             confirmed()
             from ouroboros.workspace_executor import _forget_process
             _forget_process(record_path)
+
+
+def attach_memory_facts(ended, facts, proc) -> None:
+    """The leaf's OOM facts on whatever ended the wait: the result, a timeout or a Stop (``memory_oom``), so the host's
+    interruption and the kernel's OOM count stay two independent observations. Nothing when nothing happened."""
+    from ouroboros.command_memory import facts_worth_publishing
+
+    if ended is not None:
+        ended.memory_oom = facts_worth_publishing(facts, proc.returncode)
+
+
+def execute_local_gated(executor, cmd, cwd, deadline, *, env, target, drive_root, stop, started):
+    """The local executor's memory-gated start (``workspace_executor._execute_local``): ``command_memory.gated_start``
+    with the executor's foreground record, bounded by the caller's absolute ``deadline``. None where the layout has no
+    memory support: the caller's old start runs."""
+    from ouroboros import command_memory
+    from ouroboros import workspace_executor as we
+    from ouroboros.tool_custody import external_handoff, invocation_binding
+
+    if (lease := command_memory.begin(deadline)) is None:
+        return None
+    proc = record_path = confirmed = None
+    try:
+        confirmed = external_handoff("workspace_process")
+
+        def spawn(gate_cmd, gate_env, pass_fds):
+            nonlocal proc
+            proc = subprocess.Popen(gate_cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,
+                                    text=True, errors="replace", env=gate_env, pass_fds=pass_fds, **subprocess_new_group_kwargs())
+            we._FOREGROUND[proc] = (None, executor.kind)  # named to Stop at once
+            if we._panic_requested:
+                request_process_tree_kill(proc)
+            return proc
+
+        proc, record_path = command_memory.gated_start(
+            lease, cmd, env, cwd, spawn=spawn, confirmed=confirmed, drive_root=drive_root, target=target,
+            owed=bool(invocation_binding().get("task_id")),
+            extra={"executor_type": executor.kind, "executor_id": executor.executor_id, "cwd": str(cwd), "cmd": we._redacted_cmd(cmd)},
+            deadline=deadline, stop=stop)
+    except BaseException as exc:
+        we._FOREGROUND.pop(proc, None)
+        if proc is None and confirmed is not None:
+            confirmed()  # no process exists: the external-handoff duty is discharged here (an exited shim's was, in gated_start)
+        facts = lease.finish(proc.pid if proc is not None else 0)
+        if proc is not None:
+            attach_memory_facts(exc, facts, proc)
+        raise
+    we._FOREGROUND[proc] = (record_path, executor.kind)
+    ended = None
+    try:
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        stdout, stderr = communicate_or_stop(proc, remaining, lease.watch(stop), lambda: kill_process_tree(proc))
+        ended = we.ExecutorResult(proc.returncode, stdout or "", stderr or "",
+                                  we._trace(executor, str(cwd), cmd, proc.returncode, started),
+                                  [str(part) for part in cmd], operation_outcome="completed")
+        return ended
+    except (subprocess.TimeoutExpired, CommandStopped) as interrupted:
+        ended = interrupted
+        if isinstance(interrupted, subprocess.TimeoutExpired):
+            kill_process_tree(proc)
+            proc.wait(timeout=5)
+        raise
+    finally:
+        we._FOREGROUND.pop(proc, None)
+        attach_memory_facts(ended, lease.finish(proc.pid), proc)
+        if proc.poll() is not None:
+            confirmed()
+            we._forget_process(record_path)
 
 
 def _held(proc) -> dict:
@@ -411,7 +589,7 @@ def _kill_process_group(proc):
     kill_process_tree(proc)
 
 
-def _tree_remains(proc) -> Optional[bool]:
+def _tree_remains(proc, *, live_groups: Optional[dict[int, bool]] = None) -> Optional[bool]:
     """After its root's exit: whether what its containment holds still runs (its recorded group, or its Job's
     members). None when nothing measured holds it, so an exited root never stands for its tree."""
     held = _held(proc)
@@ -421,21 +599,30 @@ def _tree_remains(proc) -> Optional[bool]:
         if "_ouroboros_group_held" not in held or not retained_child_group(proc):
             return None  # an unknown/reaped/recycled leader cannot vouch for this number
         from ouroboros.process_containment import process_group_has_live_members
+        if live_groups is not None:
+            return live_groups.get(held["_ouroboros_pgid"])
         return process_group_has_live_members(held["_ouroboros_pgid"])
     if held.get("_ouroboros_job") is None:
         return None
     return job_has_running_member(held["_ouroboros_job"])
 
 
-def retire_tracked(proc) -> bool:
+def retire_tracked(proc, *, live_groups: Optional[dict[int, bool]] = None) -> bool:
     """Release only an exited root AND a measured empty tree; otherwise retain it.
 
     A task-group record is discovery, not transfer of this live OS witness.
     Foreground/external receipts describe the root separately. Idle workers
-    keep this registry alive; stop/idle probes retire naturally ended trees.
+    keep this registry alive; stop/idle probes and Linux spawn retries retire
+    naturally ended trees. Spawn retries wait for the owner's first attempt,
+    so publication bookkeeping can still read the retained leader's identity.
     """
     held = _held(proc)
-    if proc.poll() is None or _tree_remains(proc) is not False:
+    if live_groups is None:
+        held["_ouroboros_retirement_pending"] = True
+    if proc.poll() is None:
+        return False
+    remains = _tree_remains(proc) if live_groups is None else _tree_remains(proc, live_groups=live_groups)
+    if remains is not False:
         return False
     held["_ouroboros_tree_settled"] = True
     if held.get("_ouroboros_group_held") and not retained_child_group(proc, release=True):
@@ -515,6 +702,29 @@ def unsettled_tracked_children() -> Optional[dict]:
     return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
 
 
+def maintain_tracked_children() -> None:
+    """Retry exited trees at spawn boundaries; Linux batches a non-spawning census.
+
+    The snapshot belongs to this call, never to the shared process handles. An
+    unreadable census retains POSIX groups without falling back to per-group ps.
+    Jobs keep owner/idle/stop retirement. No global waitpid consumes others' status.
+    """
+    from ouroboros.process_containment import process_groups_have_live_members
+
+    candidates = [proc for proc in _active_subprocesses.copy()
+                  if _held(proc).get("_ouroboros_retirement_pending")
+                  and _held(proc).get("_ouroboros_pgid") and proc.poll() is not None]
+    if not candidates:
+        return
+    pgids = {int(_held(proc).get("_ouroboros_pgid", 0) or 0) for proc in candidates}
+    census = process_groups_have_live_members(pgids) or {}
+    for proc in candidates:
+        pgid = int(_held(proc).get("_ouroboros_pgid", 0) or 0)
+        if census.get(pgid) is not False:
+            continue  # no identity lock/probe for a live or unknown POSIX group
+        retire_tracked(proc, live_groups=census)
+
+
 def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     """For a command whose cwd is OUTSIDE the Ouroboros system repo (an external
     workspace / target project, e.g. SWE-bench dig-direct ``/app``), return an
@@ -531,6 +741,9 @@ def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     if isolated is not None:
         return isolated
     env = runtime_environ()
+    from ouroboros.node_runtime import forward_playwright_node
+
+    forward_playwright_node(env)
     try:
         system_repo = pathlib.Path(getattr(ctx, "repo_dir")).resolve(strict=False)
         wd = pathlib.Path(work_dir).resolve(strict=False)
@@ -697,6 +910,8 @@ def _format_process_output(stdout: str, stderr: str) -> str:
 
 
 def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
+    """Whether the command goes to the executor; an unmapped cwd runs on the host only without a managed
+    executor, whose dispatch then refuses it (``workspace_executor_paths.ManagedPathRefused``)."""
     executor_ref = executor_ref_from_ctx(ctx)
     if executor_ref is None:
         return False
@@ -704,7 +919,7 @@ def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
         executor_map_host_path(executor_ref, pathlib.Path(work_dir).resolve(strict=False))
         return True
     except Exception:
-        return False
+        return executor_ref.managed
 
 def _publish_finished_process_facts(ctx, res, started_ts) -> int:
     """Typed process facts (R5) for a returned child, measured structurally —
@@ -721,12 +936,14 @@ def _publish_finished_process_facts(ctx, res, started_ts) -> int:
         returncode=getattr(res, "returncode", None),
         started_ts=started_ts,
         resolved_runtime=active_resolved_runtime(ctx),
+        memory_oom=getattr(res, "memory_oom", None),
     )
     return lived_ms
 
 
 def _publish_unfinished_process_facts(
     ctx, started_ts, *, timed_out: bool = False, spawn_error: BaseException | None = None, killed: bool = False,
+    memory_oom=None,
 ) -> None:
     """Typed facts for a child with no returncode (timeout / pre-exec failure).
 
@@ -740,7 +957,8 @@ def _publish_unfinished_process_facts(
     An ``OSError`` from the spawn is what a PRE-EXEC failure looks like
     (FileNotFoundError, PermissionError, ...): the command never ran and the
     exception class is the honest typed cause. Any other exception is a
-    host-side failure AROUND the run and claims no pre-exec cause."""
+    host-side failure AROUND the run and claims no pre-exec cause. ``memory_oom`` is the
+    kernel's OOM count for the command's memory leaf, independent of the host's kill."""
     from ouroboros.tools.process_facts import (
         active_resolved_runtime,
         publish_process_facts,
@@ -756,4 +974,5 @@ def _publish_unfinished_process_facts(
                           killed_by_host=timed_out or killed,
                           pre_exec_failure=(
                               type(spawn_error).__name__
-                              if isinstance(spawn_error, OSError) else ""))
+                              if isinstance(spawn_error, OSError) or getattr(spawn_error, "memory_oom", None) else ""),
+                          memory_oom=memory_oom or getattr(spawn_error, "memory_oom", None))

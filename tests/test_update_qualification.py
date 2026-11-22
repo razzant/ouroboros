@@ -6,7 +6,7 @@ import pytest
 
 from ouroboros import update_letter as letter, update_qualification as qualification
 from ouroboros.tools import github
-from tests.test_pr_merge_receipts import BASE, HEAD, _receipts, world  # noqa: F401
+from tests.test_pr_merge_receipts import BASE, HEAD, ROUTE, _receipts, sent, world  # noqa: F401
 from tests.test_update_letter import _capture_for, _commit, _git, _record, _status, history_repo  # noqa: F401
 from tests.test_update_letter_merge_range import merged_range  # noqa: F401
 
@@ -221,9 +221,9 @@ def test_merge_commit_carries_checks_and_missing_evidence_without_blocking(world
     out = github._pr_merge(world.ctx, number=7, expected_head_sha=HEAD, method="merge", checks=checks,
                            review_verdict="AUTHOR ACCEPTED")
     assert "merge: merged" in out
-    call = next(c for c in world.gh.calls if c[:2] == ["pr", "merge"])
-    assert call[6:] == ["--body-file", "-"]
-    body = world.gh.merge_inputs[0]
+    call = next(c for c in world.gh.calls if sent(c))
+    assert call == ["api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
+    body = world.gh.merge_inputs[0]  # the commit_message: GitHub appends it to its automatic title
     receipt = qualification.commit_qualification(body)
     assert receipt == _receipts(world)[0]["qualification"]
     assert receipt["checks"][0] == {**checks[0], "source": "author_declared"}
@@ -238,9 +238,9 @@ def test_merge_commit_carries_checks_and_missing_evidence_without_blocking(world
 def test_rebase_discloses_that_it_creates_no_merge_commit(world):  # noqa: F811
     github._pr_merge(world.ctx, number=7, expected_head_sha=HEAD, method="rebase")
     assert _receipts(world)[0]["commit_receipt"] == "no_merge_commit_for_rebase"
-    assert next(c for c in world.gh.calls if c[:2] == ["pr", "merge"]) == [
-        "pr", "merge", "7", "--rebase", "--match-head-commit", HEAD]
-    assert world.gh.merge_inputs == [None]
+    assert next(c for c in world.gh.calls if sent(c)) == [
+        "api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
+    assert world.gh.merge_payloads == [{"sha": HEAD, "merge_method": "rebase"}] and world.gh.merge_inputs == [None]
 
 
 def test_check_shape_refusal_then_valid_missing_checks_still_merge(world):  # noqa: F811
@@ -338,6 +338,11 @@ def test_check_writes_exact_real_git_range_and_preflight_reads_unqualified_items
         "status": "observed", "runs": [{"sha": target, "conclusion": "failure", "url": "https://github.com/run/1"}]})
     drive = tmp_path / "letter"
     letter.atomic_write_json(letter.record_path(drive), _record(key={**_record()["key"], "base_sha": base, "target_sha": old}))
+    # This install recorded two of its own commits over a review outcome: one comes back in this range, one is its base.
+    letter.atomic_write_json(drive / "state" / "advisory_overrides.json", {"count": 2, "landed": [
+        {"sha": base, "reason": "review_quorum", "task_id": "t0", "at": "2026-11-01T00:00:00+00:00"},
+        {"sha": target, "reason": "critical_findings", "task_id": "t1", "at": "2026-11-02T00:00:00+00:00",
+         "disposition": "accepted", "rationale": "Read the finding."}]})
     letter.refresh_after_check(_status(current_sha=old, running_sha=base, latest_sha=target), drive_root=drive)
     material = json.loads(letter.material_path(drive).read_text(encoding="utf-8"))["text"]
     assert all(word in material for word in (target, "Author accepted two FAILs", "not_run"))
@@ -349,6 +354,33 @@ def test_check_writes_exact_real_git_range_and_preflight_reads_unqualified_items
     assert result["qualification"]["target_sha"] == target
     assert {c["sha"] for c in result["qualification"]["commits"]} == set(_git(repo, "rev-list", f"{base}..{target}").splitlines())
     assert result["qualification"]["github"]["runs"][0]["conclusion"] == "failure"
+    # The range's facts name that commit with its recorded outcome, for the window, the preflight and the author;
+    # the Runtime summary carries the count. Rows that cannot be read leave the key out: unknown, never none.
+    assert result["qualification"]["landed_over_review"] == [{
+        "sha": target, "subject": "Incoming qualification", "reason": "critical_findings",
+        "outcome": 'review FAIL: critical findings; author continued: accepted — "Read the finding."'}]
+    assert qualification.qualification_summary(result["qualification"])["landed_over_review"] == 1
+    again = letter.refresh_after_check(_status(current_sha=old, running_sha=base, latest_sha=target), drive_root=drive)
+    assert again["qualification"]["landed_over_review"] == result["qualification"]["landed_over_review"], (
+        "a later check of the same range keeps its rows")
+    assert "landed over a review FAIL or no verdict" in material
+    for name, counter, expected in (("none", None, []), ("unread", "{not json", "absent")):
+        other = tmp_path / name
+        if counter is not None:
+            (other / "state").mkdir(parents=True)
+            (other / "state" / "advisory_overrides.json").write_text(counter, encoding="utf-8")
+        facts = letter.refresh_after_check(_status(current_sha=old, running_sha=base, latest_sha=target),
+                                           drive_root=other)["qualification"]
+        assert facts.get("landed_over_review", "absent") == expected, name
+        assert ("landed_over_review" in qualification.qualification_summary(facts)) is (expected == [])
+    # A long range keeps only its newest bodies, yet reads the receipt of every first-parent commit: the count of
+    # merges that went in over a review outcome is never short by the commits behind the body bound.
+    (repo / "later.txt").write_text("later", encoding="utf-8")
+    newest = _commit(repo, "A later commit\n\nIts body is the one the bound keeps.")
+    long = letter.collect_range_material(base, newest, git=_capture_for(repo), max_bodies=1)
+    assert [c["body_read"] for c in long["commits"] if c["sha"] in (newest, target)] == [True, False]
+    behind = next(c for c in qualification.range_qualification(long, "")["commits"] if c["sha"] == target)
+    assert behind["body_read"] and behind["receipt"]["checks"][0]["detail"] == "Author accepted two FAILs"
     # Green evidence stays green; host code does not invent a failure from prose.
     green = qualification.merge_qualification({"record": {"verdict": {"aggregate": "PASS"}}},
         [{"name": name, "status": "passed"} for name in qualification.CHECKS])

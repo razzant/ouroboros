@@ -261,8 +261,8 @@ def test_the_hold_acknowledges_only_after_its_receipt_is_in_the_transcript(tmp_p
 
     _settle(tmp_path, task_id=TASK)
     registry = _hold_registry(tmp_path)
-    # The hold's own supervising wait, with the leaf's terminal answer as the observation.
-    monkeypatch.setattr(delegate_hold, "supervised_wait", lambda ctx, run_id: _terminal_wake(ctx, run_id))
+    # The hold's own wake, with the leaf's terminal answer as its one read.
+    monkeypatch.setattr(delegate_hold, "hold_wake", lambda ctx, runs, **_k: _terminal_wake(ctx, runs[0]))
     messages = [{"role": "user", "content": "supervise"}]
     ack_spy.transcript = messages
     assert _hold(registry, tmp_path, messages) == "resume"
@@ -277,7 +277,7 @@ def test_a_hold_whose_acknowledgement_never_lands_drops_its_receipt_and_records_
 
     _settle(tmp_path, task_id=TASK)
     registry = _hold_registry(tmp_path)
-    monkeypatch.setattr(delegate_hold, "supervised_wait", lambda ctx, run_id: _terminal_wake(ctx, run_id))
+    monkeypatch.setattr(delegate_hold, "hold_wake", lambda ctx, runs, **_k: _terminal_wake(ctx, runs[0]))
     monkeypatch.setattr(delegate_hold.time, "sleep", lambda _s: None)
     # The supervision acknowledgement row is rejected by the event log: the real
     # acknowledgement refuses before the terminal row, so nothing may claim an append.

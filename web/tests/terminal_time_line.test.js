@@ -43,6 +43,14 @@ test('an unknown end still says so, and is never the notification time', (t) => 
     }
     assert.deepEqual(terminalTimeNote(ended('2026-10-17T18:41:00Z'), '', now),
         { short: 'Ended 18:41', full: `Task ended ${at('2026-10-17T18:41:00Z')}` }, 'an unreadable row time adds nothing');
+    const cancelled = { v: 1, source: 'supervisor_cancel', occurred_at: '2026-10-17T18:41:00Z', attempt: {} };
+    assert.deepEqual(terminalTimeNote(cancelled, '2026-10-17T18:46:00Z', now),
+        { short: 'Cancelled 18:41 · added 18:46',
+            full: `Task cancelled ${at(cancelled.occurred_at)} · Notification added ${at('2026-10-17T18:46:00Z')}` });
+    assert.equal(terminalTimeNote(cancelled, '2026-10-17T18:41:20Z', now).short, 'Cancelled 18:41');
+    assert.equal(terminalTimeNote(cancelled, '', now).short, 'Cancelled 18:41');
+    assert.equal(savedTerminalRowNote({ system_type: 'task_summary', ts: '2026-10-17T18:41:20Z', terminal_time: cancelled }), '',
+        'a row added in the minute its work was cancelled needs no second time');
 });
 
 test('two different minutes that read alike across a DST fallback carry their zone names', (t) => {
@@ -50,7 +58,12 @@ test('two different minutes that read alike across a DST fallback carry their zo
     const now = new Date('2026-11-01T12:00:00Z');
     const [end, added] = ['2026-11-01T05:30:10Z', '2026-11-01T06:30:40Z'];
     const note = terminalTimeNote(ended(end), added, now);
-    assert.equal(note.short, 'Ended 01:30 EDT · added 01:30 EST');
+    const zone = value => new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+        .formatToParts(new Date(value)).find(part => part.type === 'timeZoneName')?.value;
+    const [endZone, addedZone] = [end, added].map(zone);
+    assert.ok(endZone && addedZone, 'both instants have a zone label');
+    assert.notEqual(endZone, addedZone, 'the fallback instants must remain distinguishable');
+    assert.equal(note.short, `Ended 01:30 ${endZone} · added 01:30 ${addedZone}`);
     assert.equal(note.full, `Task ended ${at(end, 'short')} · Notification added ${at(added, 'short')}`);
 });
 
@@ -72,11 +85,12 @@ test('a completion row writes its one time line into its own time, with no secon
             bubble.innerHTML = '<div class="message"></div><div class="msg-time" title="old">old</div>';
             env.mount.append(bubble);
             const [end, addedAt] = ['2026-09-24T18:18:27Z', '2026-09-26T19:21:43Z'];
+            const fact = role === 'system' ? { ...ended(end), source: 'supervisor_cancel' } : ended(end);
             decorateProjectRow(bubble, { role, projectId: 'p', projectName: 'Build', systemType: 'project_completion_summary',
-                terminalTime: ended(end), addedAt, limitation: 'Windows is not verified.' });
+                terminalTime: fact, addedAt, limitation: 'Windows is not verified.' });
             const time = bubble.querySelector('.msg-time');
-            const note = terminalTimeNote(ended(end), addedAt);
-            assert.equal(note.short, 'Ended Sep 24, 18:18 · added Sep 26, 19:21');
+            const note = terminalTimeNote(fact, addedAt);
+            assert.equal(note.short, `${role === 'system' ? 'Cancelled' : 'Ended'} Sep 24, 18:18 · added Sep 26, 19:21`);
             assert.equal(time.title, note.full);
             assert.deepEqual(time.children.map((node) => [node.className, node.attributes.get('aria-hidden') || '', node.textContent]),
                 [['', 'true', note.short], ['msg-time-full', '', note.full]]);

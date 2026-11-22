@@ -24,6 +24,7 @@ import subprocess
 import time
 from typing import Optional
 
+from ouroboros.node_runtime import discovered_host_node, pinned_node_wait
 from ouroboros.platform_layer import probe_node_version, resolve_bundled_node
 
 # Version floor for the browser-module suite: the object form of
@@ -43,10 +44,10 @@ TESTS_GLOB = "tests/*.test.js"
 
 _REMEDIATION = (
     "The hermetic gate runs the browser-module suite (web/tests/*.test.js) with "
-    "`node --test`, exactly as both CI jobs do. Provide Node.js >= 20.11: run "
-    "`bash scripts/download_node_standalone.sh` from the repository root (it "
-    "stages the official signed runtime under node-standalone/, which resolves "
-    "first), or install a `node` on PATH. The gate does NOT skip the lane when "
+    "`node --test`, exactly as both CI jobs do. It takes the reviewed pinned Node "
+    "first (prepared by the app, or staged under node-standalone/ by "
+    "`python scripts/download_node_standalone.py` from the repository root), else "
+    "a `node` >= 20.11 on PATH, which it names. The gate does NOT skip the lane when "
     "node is absent — a gate that silently drops a suite is indistinguishable "
     "from a green one."
 )
@@ -67,11 +68,13 @@ def candidate_node_tests(worktree: "pathlib.Path | str") -> list:
 
 
 def resolve_node() -> Optional[str]:
-    """Bundled signed node first, then PATH.
+    """The pin's Node first (``resolve_bundled_node``: prepared, carried or an exact shipped copy at any base), then
+    PATH: ordinary web tests may run on a developer's own Node (owner's choice, 14 Nov 2026), and the lane names it
+    and its version. A pin's Node, when there is one, always wins over PATH.
 
     The packaged app's macOS code-signing enforcement can SIGKILL a Homebrew
     node launched from its process tree; the bundled official runtime is
-    re-signed by the build and always safe, so it wins when present.
+    re-signed by the build and always safe.
     """
     try:
         bundled = resolve_bundled_node()
@@ -80,11 +83,12 @@ def resolve_node() -> Optional[str]:
     return bundled or shutil.which("node")
 
 
-def node_environment(env: dict) -> dict:
-    """Give Python tests and their children the Node selected for the web lane.
-    Preserve other PATH entries; discovery alone adds no runtime requirement or probe."""
+def node_environment(env: dict, node: Optional[str] = None) -> dict:
+    """Give Python tests and their children the Node selected for the web lane: ``node``, the one the lane runs, else
+    that selection named without running anything (``discovered_host_node``, else PATH). Preserve other PATH entries;
+    discovery alone adds no runtime requirement or probe."""
     projected = dict(env)
-    node = resolve_node()
+    node = node or discovered_host_node() or shutil.which("node")
     if node:
         current = shutil.which("node", path=env.get("PATH", os.defpath))
         if pathlib.Path(node).is_absolute() and os.path.normcase(node) == os.path.normcase(current or ""):
@@ -135,6 +139,11 @@ def run_node_tests(
         return None
     result = {"files": len(files), "node": None, "returncode": None, "error": None, "reap_error": "", "execution": "not_run"}
     node = resolve_node()
+    version = probe_node_version(node) if node else ""
+    if not version and pinned_node_wait()[1]:  # no usable Node: the gate asks for the pin's, as an acting consumer
+        from ouroboros.server_boot import request_pinned_node
+
+        request_pinned_node()
     if not node:
         result["error"] = pr._diagnosis(
             "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_NODE_MISSING (hard block): no "
@@ -142,8 +151,7 @@ def run_node_tests(
             _REMEDIATION, "", max_output,
         )
         return result
-    result["node"] = node
-    version = probe_node_version(node)
+    result["node"], result["version"] = node, version  # a PATH Node is named with its version, never as the pin's
     if not version:
         result["error"] = pr._diagnosis(
             "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_NODE_MISSING (hard block): "
@@ -173,7 +181,7 @@ def run_node_tests(
     # NODE_OPTIONS admits --test-only/--test-*-pattern/--require: an inherited
     # operator value can silently green a red suite — same class the pytest
     # lane closes by scrubbing PYTEST_* (see _preflight_env).
-    env = pr._preflight_env(temp_root, worktree, cwd=pathlib.Path(worktree) / WEB_DIR)
+    env = pr._preflight_env(temp_root, worktree, cwd=pathlib.Path(worktree) / WEB_DIR, node=node)  # its children too
     env.pop("NODE_OPTIONS", None)
     from ouroboros.test_evidence import FileOutput
 

@@ -376,6 +376,7 @@
           "usage": {
             "prompt_tokens": 200,
             "completion_tokens": 10,
+            "cost": 0.0125,
             "effort": {
               "requested": "xhigh",
               "sent": {
@@ -389,7 +390,6 @@
             "response_finish_reason": "stop",
             "provider": "openai",
             "resolved_model": "openai/gpt-5.5",
-            "cost": 0.0125,
             "cost_estimated": true,
             "cost_final": false,
             "request_wire": {

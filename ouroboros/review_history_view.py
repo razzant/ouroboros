@@ -16,7 +16,7 @@ full bodies and adds a gap, never a replacement verdict or another paid call.
 
 The resident ``[Current review decisions]`` row is the 6A view of the mandatory
 part (``review_index_view``): every decision verbatim, the operative subject,
-untransferred attachments, open obligations and gaps, with reviewer letters,
+untransferred attachments and gaps, with reviewer letters,
 receipts, route/custody metadata and manifests behind one address table of exact
 readers. Its identity is the hash of those decision fields; a new copy is appended
 only when they change and is never rewritten in place between folds. Superseded
@@ -313,7 +313,7 @@ def project_decision_groups(history: dict, notes: Sequence[dict], *, source_hist
 
     Producers name current/open rows. Selection declares that the other named
     history is closed for this author's account; it never changes closure or
-    clears an obligation. The exact member list lives in the selected source.
+    clears open work. The exact member list lives in the selected source.
     """
     entries = {_sha(e["bound_decision"]): e for e in decision_entries(source_history) if e["bound_decision"]}
     result, groups, gaps, replaced = copy.deepcopy(history), [], [], {}
@@ -422,8 +422,7 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
     """The resident row's content: the 6A content of one family's projected history with ONE address table.
 
     Verbatim: every decision row (finding, status, reason, standing and the actor's note; only its ``source``
-    becomes a key of ``addresses``), the operative subject, untransferred attachments, open obligations and
-    gaps. By address, each entry naming what it holds and the exact reader this task resolves: reviewer
+    becomes a key of ``addresses``), the operative subject, untransferred attachments and gaps. By address, each entry naming what it holds and the exact reader this task resolves: reviewer
     letters, outputs and receipts, route and custody metadata, manifests, coverage, earlier plan texts and
     author selections. A round with no addressable source stays whole in ``rounds``; unknown producer
     fields stay whole. Nothing is summarized; nothing leaves the durable record.
@@ -452,8 +451,9 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
 
             ask = wave.get("plan_ask")
             if task_id:
-                entry("plan_record:" + task_id, "this task's plan record: every revision, ask (message, attached evidence "
-                      "manifest), participant status and reply", {"tool": "get_task_result", "arguments": {
+                entry("plan_record:" + task_id, "this task's plan record: every revision, ask (message, the evidence "
+                      "it declared and attached, and each locator cut or not attached with its reason), participant "
+                      "status and reply", {"tool": "get_task_result", "arguments": {
                           "task_id": task_id, "include_authority": True}, "field": "plan_record"})
                 addressed = True
             for row in wave.get("reviewers") or []:
@@ -1015,7 +1015,7 @@ def review_context_updates(ctx: Any, *, families: Mapping[str, str] | None = Non
         if family == "plan":
             history, operative = current_plan_history(ctx)
         else:
-            history, operative = review_dispute_history(drive_root=root, repo_root=repo, task_id=task), None
+            history, operative = review_dispute_history(drive_root=root, repo_root=repo, task_id=task, attempts_root=ctx.drive_root), None
         view = _project_for_context(ctx, history, operative, selection)
         index = _index_message(view["mandatory"], family, repo, task_id=task)
         if (family, repo, index[REVIEW_CONTEXT_INDEX_KEY]["sha256"]) not in indexes:
@@ -1046,7 +1046,7 @@ def review_note_options(ctx: Any) -> dict:
     root = getattr(ctx, "budget_drive_root", None) or ctx.drive_root
     repo = getattr(ctx, "repo_dir", None)
     if repo is not None:
-        histories.append(review_dispute_history(drive_root=root, repo_root=repo, task_id=str(ctx.task_id)))
+        histories.append(review_dispute_history(drive_root=root, repo_root=repo, task_id=str(ctx.task_id), attempts_root=ctx.drive_root))
     entries = [entry for history in histories for entry in decision_entries(history)]
     selected = {}
     for history in histories:

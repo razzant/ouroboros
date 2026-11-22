@@ -137,14 +137,19 @@ def test_an_unrecorded_body_is_unknown_never_zero(tmp_path, _short_confirmation_
     assert not re.search(r"\b0 (running|waiting)", out)
 
 
-def test_a_deferred_promote_was_not_waited_for_and_states_no_wait_or_body(tmp_path, _short_confirmation_window):
+@pytest.mark.parametrize("model", ["", "vendor/example"])
+def test_a_deferred_promote_was_not_waited_for_and_states_no_wait_or_body(tmp_path, _short_confirmation_window, monkeypatch, model):
     """The other side: a deferred emission is admitted after this turn, so there is no wait to measure."""
     from ouroboros.tools.control_routing import _start_task
 
     _record_body(tmp_path, lag=312.5)
     ctx = _promote_ctx(tmp_path, None)
-    out = _start_task(ctx, "Continue the racer", title="Racer continuation", workspace="none")
-    assert out.startswith("Not confirmed yet:") and "is pending (deferred). A [ROUTING_RECEIPTS] row" in out, out
+    ctx._owner_directives = [{"source": "initial_user", "content": "Use that route."}]
+    monkeypatch.setattr("ouroboros.tools.control_models.known_models", lambda: [{"model": model, "use_local": False}])
+    out = _start_task(ctx, "Continue the racer", title="Racer continuation", workspace="none",
+                      model=model, owner_words="Use that route." if model else "")
+    note = " Route found in local configuration; no live catalog check." if model else ""
+    assert out.startswith("Not confirmed yet:") and f"is pending (deferred).{note} A [ROUTING_RECEIPTS] row" in out, out
     assert "No confirmation came" not in out and "Queue" not in out and "load row" not in out
 
 

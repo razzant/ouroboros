@@ -247,6 +247,24 @@ def test_a_promised_return_that_cannot_come_back_says_why(tmp_path, monkeypatch)
     assert restart_retention.recover_saved_running([row], tmp_path, transaction={}, cause="app_stop") == []
     assert len([r for r in _supervisor_rows(tmp_path) if r.get("type") == "restart_return_refused"]) == 1, \
         "a row nothing promised to return is the ordinary path, not a refusal"
+    # A promised return whose final answer the host already holds is not lost work: the fact says so.
+    from supervisor import terminal_delivery as td
+
+    write_task_result(tmp_path, "answered", STATUS_RUNNING, chat_id=1)
+    text = "the authored answer"
+    assert td.register_pending_delivery(tmp_path, {
+        "type": "send_message", "task_id": "answered", "chat_id": 1, "text": text,
+        "delivery_id": td.delivery_id_for("answered", text), "terminal_origin": "model_final"})
+    answered = {"task": {"id": "answered", "type": "task", "chat_id": 1, "_attempt": 1}, "attempt": 1}
+    assert restart_retention.recover_saved_running(
+        [answered], tmp_path, transaction={"return_ids": ["answered"]}, cause="app_stop") == []
+    refusals = lambda: [r["refused"] for r in _supervisor_rows(tmp_path) if r.get("type") == "restart_return_refused"]  # noqa: E731
+    assert refusals()[-1] == {"answered": "answer_owed"}
+    # An unreadable registry is said as that, never as a held answer.
+    (tmp_path / "state" / "terminal_deliveries.json").write_text("{bad json", encoding="utf-8")
+    assert restart_retention.recover_saved_running(
+        [answered], tmp_path, transaction={"return_ids": ["answered"]}, cause="app_stop") == []
+    assert refusals()[-1] == {"answered": "answer_unreadable"}
 
 
 @pytest.mark.parametrize("reason", ["orphaned_running_after_worker_restart", "interrupted_retry_lost"])

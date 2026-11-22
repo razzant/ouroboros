@@ -94,7 +94,7 @@ def test_delegate_wait_returns_and_settles_the_answer_of_a_run_held_by_its_job_i
     assert custody.record_started(tmp_path, delegate._RunCustody(
         run_id=JOB, task_id="t-a", route_id="r", model="m", project_id="p", project_owned=False,
         root_task_id="t-a", ledger_root=str(tmp_path)))
-    out = json.loads(delegate._delegate_wait(_nanny_ctx(tmp_path), JOB, wait_sec=1))
+    out = json.loads(delegate._read_run(_nanny_ctx(tmp_path), JOB))
     delegate._CUSTODY.clear()
     assert out["settlement"]["settled"] is True and out["settlement"]["ledger_recorded"] is True
     assert "the research answer" in json.dumps(out)
@@ -108,7 +108,7 @@ def test_the_live_executor_of_a_run_held_by_its_job_id_is_observed():
     detail = _detail()
     detail["summary"]["jobId"] = "job-1"
     ctx = SimpleNamespace(task_id="child", task_attempt=0)
-    advance = progress.WindowObservations().record(detail, detail["lastSeq"], 0)
+    advance = progress.WindowObservations().record(detail, detail["lastSeq"])
     held = _entry(run_id="job-1")
     assert progress.executor_observation(ctx, "job-1", advance, detail, held) == _observation(run_id="job-1")
     detail["summary"]["jobId"] = "job-2"

@@ -385,48 +385,59 @@ def test_web_and_project_roots_follow_the_mirror_policy_and_rehome(flow):
         flow.stop()
 
 
-def test_a_held_delegated_run_types_while_it_works_and_resumes_by_itself(flow):
-    """running → paused on its question → running again: the idle cue is woken by the
-    supervision owner when the held run works again, with no new turn or start."""
-    from ouroboros.delegate_supervision import supervised_wait
+def test_a_held_delegated_run_types_while_it_works_and_resumes_by_itself(flow, monkeypatch):
+    """running → paused on its question → running again, held by a turn that cannot sleep (its delegate_wait
+    waits in the slot): the body observer's reads wake the idle cue when the held run works again, with no new
+    turn or start, and its terminal ends the wait."""
+    from ouroboros import delegate_collection, delegate_custody as custody, delegate_feed, delegate_supervision
+    from tests._run_wait_shared import scripted_reads
 
+    class Engine:
+        state, waiting = "running", False
+
+        def get_run(self, run_id, timeout_sec=None):
+            return {"summary": {"runId": run_id, "state": self.state, "waitingOnUser": self.waiting,
+                                "effectiveAccess": "readonly"}, "lastSeq": 1, "pendingInteractions": []}
+
+        def close(self):
+            pass
+
+    engine = Engine()
+    monkeypatch.setattr(delegate_feed, "_TICK_SEC", 0.05)
+    monkeypatch.setattr(delegate_supervision, "_loop_gateway", lambda _entry: None)
+    scripted_reads(monkeypatch, lambda _ctx, rid, *_a, **_k: json.dumps(
+        {"status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 2}))
     _running(flow, "root-n", owner_wait={"reason": "owner"})
     _running(flow, "nanny", parent="root-n")
+    assert custody.emit(flow.root, custody.STARTED, {
+        "run_id": "run-1", "invocation_id": "invoke-1", "task_id": "nanny", "root_task_id": "root-n",
+        "parent_task_id": "root-n", "route": "route", "source": "delegate_start", "access": "readonly"})
     ctx = SimpleNamespace(task_id="nanny", task_attempt=1, drive_root=flow.root, budget_drive_root=str(flow.root),
                           task_metadata={"root_task_id": "root-n", "parent_task_id": "root-n",
                                          "delegation_role": "subagent"},
                           event_queue=flow.queue, current_chat_id=1)
-    payloads, calls = queue_module.Queue(), [0]
-
-    def wait_once(*_a, **_k):
-        calls[0] += 1
-        return json.dumps(payloads.get(timeout=10))
-
-    def tick(**observed):
-        before = calls[0]
-        payloads.put({"status": "no_progress", "run_id": "run-1", "state": "running", "last_seq": 1,
-                      "waiting_on_user": False, **observed})
-        assert _until(lambda: calls[0] > before)
-
-    flow.start()
-    hold = threading.Thread(target=supervised_wait, args=(ctx, "run-1"), kwargs={"wait_once": wait_once}, daemon=True)
-    hold.start()
+    runtime = delegate_collection.start_body_runtime(flow.root, gateway_factory=lambda: engine)
+    hold = threading.Thread(target=delegate_supervision.run_wait, args=(ctx, "run-1"), daemon=True)
     try:
-        assert _until(lambda: calls[0] == 1)
-        tick()
+        assert _until(lambda: runtime.observation("run-1").get("run_state") == "running")
+        hold.start()
+        flow.start()
         assert _until(lambda: ("typing", PINNED) in flow.telegram.kinds()), "the observed running run types"
-        tick(waiting_on_user=True)
+        engine.waiting = True
+        assert _until(lambda: runtime.observation("run-1").get("waiting_on_user") is True)
         time.sleep(TICK * 2)
         assert _quiet(flow) and _quiet(flow), "a run paused on its question renews nothing"
         reads = flow.reads[0]
         time.sleep(TICK * 3)
         assert flow.reads[0] == reads, "the idle cue reads nothing while the run waits"
-        tick()
+        engine.waiting = False
         assert _until(lambda: ("typing", PINNED) in flow.telegram.kinds(since=time.monotonic() - TICK)), \
             "working again types again without any new start"
     finally:
-        payloads.put({"status": "completed", "run_id": "run-1", "state": "succeeded", "last_seq": 2})
+        engine.state = "succeeded"  # the body records its terminal: the wait in the slot wakes and ends
         hold.join(10)
+        delegate_collection.stop_body_runtime(flow.root, wait=True)
+    assert not hold.is_alive()
 
 
 def test_a_review_panel_types_while_a_seat_works_and_resumes_when_quota_returns(flow, monkeypatch):
@@ -514,7 +525,7 @@ def test_stop_now_ends_the_cue_at_its_next_read(flow):
 def test_a_warm_sleep_on_its_own_run_types_and_resumes_when_the_body_sees_it_work_again(flow, monkeypatch):
     """await_messages(mode=warm, runs=[own run]): the pool's real park, the body observer's own
     reads, and its working-again announce through the supervisor's typing handler to the cue."""
-    from ouroboros import delegate_collection, delegate_custody as custody, delegate_supervision, model_sleep
+    from ouroboros import delegate_collection, delegate_custody as custody, delegate_feed, model_sleep
     from ouroboros import owner_wait
     from ouroboros.model_wait import TaskModelWait
     from supervisor import worker_owner_wait
@@ -523,13 +534,14 @@ def test_a_warm_sleep_on_its_own_run_types_and_resumes_when_the_body_sees_it_wor
         state = "running"
 
         def get_run(self, run_id, timeout_sec=None):
-            return {"summary": {"runId": run_id, "state": self.state}, "lastSeq": 1, "pendingInteractions": []}
+            return {"summary": {"runId": run_id, "state": self.state, "effectiveAccess": "readonly"}, "lastSeq": 1,
+                    "pendingInteractions": []}
 
         def close(self):
             pass
 
     engine = Engine()
-    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0.05)
+    monkeypatch.setattr(delegate_feed, "_TICK_SEC", 0.05)
     meta = _running(flow, "root-s")
     assert custody.emit(flow.root, custody.STARTED, {
         "run_id": "run-s", "invocation_id": "invoke-s", "task_id": "root-s", "root_task_id": "root-s",

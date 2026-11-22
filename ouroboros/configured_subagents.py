@@ -21,15 +21,17 @@ from ouroboros.route_spec import (
 SUBAGENTS_SETTING = "OUROBOROS_SUBAGENTS"
 SUBAGENTS_RECEIPT_KEY = "OUROBOROS_SUBAGENT_PRESET_RECEIPT"
 # The one ceiling of the catalog AND of a review wave (the review pool IS the
-# marked part of this catalog, so the former per-lane caps fold into it).
-MAX_CONFIGURED_SUBAGENTS = 26
+# marked part of this catalog, so the former per-lane caps fold into it). Every
+# saved row counts, switched off or not; web/modules/subagents_settings.js
+# MAX_AVAILABLE_SUBAGENTS is the editor's copy and must equal it.
+MAX_CONFIGURED_SUBAGENTS = 50
 # Delivery of an ``api_model`` row when it reviews: ``native`` reads the subject
 # with its own tool rounds, ``packet`` receives the assembled pack. A session row
 # always retrieves, so the field is meaningless (and refused) there.
 REVIEW_DELIVERY_NATIVE = "native"
 REVIEW_DELIVERY_PACKET = "packet"
 REVIEW_DELIVERIES = (REVIEW_DELIVERY_NATIVE, REVIEW_DELIVERY_PACKET)
-# Provenance of a row the runtime minted rather than the owner authored: from
+# Birth marker of a row the runtime minted: from
 # a former review lane (the one-time migration) or from the factory panel.
 MINTED_FROM_REVIEW_LANE = "review_lane"
 MINTED_FROM_FACTORY_DEFAULT = "factory_default"
@@ -109,8 +111,8 @@ class ConfiguredSubagent:
     # ``native``/``packet`` on an api_model row (see REVIEW_DELIVERIES); "" on a
     # session row, which always retrieves. Absent in saved bytes means native.
     delivery: str = ""
-    # ``review_lane``/``factory_default`` when the runtime minted the row; "" for
-    # an owner-authored row. Round-trips as saved.
+    # ``review_lane``/``factory_default`` on some runtime-minted rows; empty does
+    # not establish authorship. Round-trips as saved.
     minted_from: str = ""
 
 
@@ -326,7 +328,7 @@ def configured_subagents_dict(config: ConfiguredSubagents) -> dict[str, Any]:
         if not row.enabled:
             payload["enabled"] = False
         # The review fields follow the same rule: defaults (unmarked, native,
-        # owner-authored) are not written, so a document saved before they
+        # no birth marker) are not written, so a document saved before they
         # existed serializes to the same bytes.
         if row.review_eligible:
             payload["review_eligible"] = True
@@ -460,7 +462,7 @@ def validate_unique_engines(config: ConfiguredSubagents, settings: Mapping[str, 
 
     The handle IS the engine with baselines folded, so an unset row and an
     explicit row with the same effective value are one engine, and no two saved
-    rows the OWNER authored can carry the same name. Two deliberate exceptions,
+    rows without a birth marker can carry the same name. Two deliberate exceptions,
     both about the review pool (THESIS: a reviewer's two seats are the owner's
     honest choice): the twins are BOTH marked review-eligible (the same engine
     judging twice, e.g. once by packet and once natively), or at least one of
@@ -729,11 +731,13 @@ def _append_legacy_model_rows(
     # in whatever binding (a compiled role row carries its role's pin), covers it.
     seen = {(row.route.kind, row.route.target_id) for row in items}
     heavy = _legacy_model_target(settings, "HEAVY", "OUROBOROS_MODEL_HEAVY")
-    light_key = "OUROBOROS_MODEL_LIGHT"
-    light_slot = "LIGHT"
-    if not str(settings.get(light_key) or "").strip():
-        light_key, light_slot = "OUROBOROS_MODEL", "MAIN"
-    light = _legacy_model_target(settings, light_slot, light_key)
+    if str(settings.get("OUROBOROS_MODEL_LIGHT") or "").strip():
+        light = _legacy_model_target(settings, "LIGHT", "OUROBOROS_MODEL_LIGHT")
+    else:  # an empty Light is Main's model on the lane the one rule gives it (its own box under a cloud Main)
+        from ouroboros.model_slots import local_lane_label
+        from ouroboros.route_choice import following_route
+
+        light = local_lane_label(settings.get("OUROBOROS_MODEL"), following_route("light", read=settings.get)[1])
     for row_id, recommendation, model, effort in (  # Auto rows: the owner's effort range decides
         ("legacy-heavy", PRIMARY_RECOMMENDATION, heavy, ""),
         ("fast-scout", SCOUT_RECOMMENDATION, light, ""),

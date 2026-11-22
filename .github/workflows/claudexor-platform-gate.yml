@@ -53,29 +53,17 @@
 # (the engine deliberately excludes fakes there); no run response is substituted.
 # Readonly fake runs prove no vendor session or child-process containment.
 #
-# A NARROWER JOB: toolchain. The fixture lane installs the runtime for the daemon
-# but never runs npm, and the live lane pre-installs its harness with setup-node's npm.
-# Neither proves the managed Node/npm toolchain that `install_missing_harness_cli` hands
-# to the engine. The toolchain job does, credential-free and on pushes/PRs: with no
-# node/npm on PATH, no ambient npm config, no CLAUDEXOR_*_BIN override and a disposable
-# home, the production `ensure_cli_command()` installs Node + npm from the pinned
-# official archive, and the managed Node runs the CLI and `npm-cli.js` directly (never
-# an npm .cmd shim) for an offline local-tarball install, a reselect and a repair
-# (scripts/claudexor_toolchain_smoke.py). It never runs `harness install`, so no harness
-# install is claimed by it.
+# toolchain proves engine CLI runtime delivery with no ambient Node/npm: exact
+# official archives, offline local-tarball npm witness, reselect and immutable repair.
+# Vendor maintenance does not use npm; this lane claims no vendor install.
 #
-# A WINDOWS-ONLY JOB: consumer. The same witness, same isolation, then
-# `--harness-install codex`: the production `install_missing_harness_cli` performs a
-# REAL local install of the exact Codex release the engine selects from the npm
-# registry into the disposable home (release-verified or, newer, deterministic-only),
-# and the receipt must name that version and the package-native `codex.exe` or the
-# package-declared Node entry, which must answer `--version` with it directly and by
-# bare name through a shell-less Node spawn, and to which both the harness rows of the
-# daemon Ouroboros starts itself and `claudexor doctor` must resolve; that daemon is
-# always stopped. No login, OAuth, account or model task is attempted. An engine without
-# Windows native Codex install (3.14.0 and older) refuses the dry-run disclosure with
-# its own typed code, so this job stays red until the runtime pin carries that
-# release — there is no skip.
+# consumer additionally starts the isolated owned engine on Windows and installs
+# Codex through the shared maintenance service used by Connect, Settings and tools.
+# It requires an initially absent program, an available vendor install action, a
+# settled selected-version receipt and a selected executable inside disposable HOME.
+# Direct --version and engine doctor must agree with that receipt; every exit stops
+# the owned daemon. An engine without the new contract fails, never skips. No login,
+# OAuth, account or model task is attempted.
 #
 # WHAT MAKES IT RED, ON PURPOSE. There is no "harness unavailable, skipping" branch
 # anywhere below. An absent seam, an engine below the delegated-marker floor, an
@@ -101,9 +89,16 @@ on:
     paths:
       - 'ouroboros/gateways/**'
       - 'ouroboros/claudexor_daemon.py'
+      - 'ouroboros/harness_maintenance.py'
+      - 'ouroboros/harness_program_facts.py'
       - 'ouroboros/claudexor_runtime.py'
+      - 'ouroboros/claudexor_runtime_retention.py'
+      - 'ouroboros/claudexor_node_seed.py'
+      - 'ouroboros/node_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
+      - 'ouroboros/platform_process_target.py'
+      - 'ouroboros/platform_win32_abi.py'
       - 'ouroboros/tools/delegate.py'
       - 'ouroboros/tools/delegate_integration.py'
       - 'ouroboros/tools/subagent_integration.py'
@@ -114,8 +109,13 @@ on:
       - 'ouroboros/config.py'
       - 'scripts/claudexor_platform_smoke.py'
       - 'scripts/claudexor_lifecycle_smoke.py'
+      - 'scripts/claudexor_quit_witness.py'
+      - 'launcher.py'
+      - 'ouroboros/launcher_*.py'
+      - 'tests/test_launcher_quit_engine.py'
       - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
+      - 'scripts/download_node_standalone*'
       - 'Ouroboros.spec'
       - 'build.sh'
       - 'build_linux.sh'
@@ -132,9 +132,16 @@ on:
     paths:
       - 'ouroboros/gateways/**'
       - 'ouroboros/claudexor_daemon.py'
+      - 'ouroboros/harness_maintenance.py'
+      - 'ouroboros/harness_program_facts.py'
       - 'ouroboros/claudexor_runtime.py'
+      - 'ouroboros/claudexor_runtime_retention.py'
+      - 'ouroboros/claudexor_node_seed.py'
+      - 'ouroboros/node_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
+      - 'ouroboros/platform_process_target.py'
+      - 'ouroboros/platform_win32_abi.py'
       - 'ouroboros/tools/delegate.py'
       - 'ouroboros/tools/delegate_integration.py'
       - 'ouroboros/tools/subagent_integration.py'
@@ -145,8 +152,13 @@ on:
       - 'ouroboros/config.py'
       - 'scripts/claudexor_platform_smoke.py'
       - 'scripts/claudexor_lifecycle_smoke.py'
+      - 'scripts/claudexor_quit_witness.py'
+      - 'launcher.py'
+      - 'ouroboros/launcher_*.py'
+      - 'tests/test_launcher_quit_engine.py'
       - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
+      - 'scripts/download_node_standalone*'
       - 'Ouroboros.spec'
       - 'build.sh'
       - 'build_linux.sh'
@@ -163,6 +175,11 @@ on:
         type: boolean
         required: false
         default: true
+      quit_witness_base:
+        description: 'Also run the Quit witness on this base commit, expecting its engine to keep the home held'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -220,14 +237,18 @@ jobs:
           PY
 
   # Production custody and real-engine continuation, without vendor credentials.
+  # The same job's Quit witness: the pinned engine, a fake run as another client's work, a run whose
+  # stand-in harness CLI keeps a child in its project folder, a foreign installation's engine, and the
+  # checkout's own launcher recycle and headless Quit; Windows proves both folders held before Quit
+  # and renamed after it (handle.exe's version and SHA-256 are in witness.json).
   lifecycle:
-    name: lifecycle · ${{ matrix.os }} · custody, cancel, crash, continue, retire
+    name: lifecycle · ${{ matrix.os }} · custody, cancel, crash, continue, retire, Quit
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -239,6 +260,70 @@ jobs:
         run: |
           py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
           "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_lifecycle_smoke.py
+      # The Quit witness runs even after an unrelated red step above, and the base replay even after a red
+      # candidate witness: each leaves its own verdict and full outputs, never a skipped native QA.
+      - name: Sysinternals handle.exe, the Windows holder source
+        if: ${{ !cancelled() && matrix.os == 'windows-latest' }}
+        shell: pwsh
+        env:
+          # Handle 5.0 (each executable's FileVersion), the archive this unversioned official URL served on
+          # 2026-11-14 (Last-Modified 2022-10-26): a re-release fails here, before extraction, until pinned again.
+          HANDLE_SHA256: 279aaf8eccb6f79147f4dcc6ba091fb895c4cb8b199a0dd186a4c76bc519d2cd
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'Handle.zip'
+          Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/Handle.zip' -OutFile $zip
+          $digest = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne $env:HANDLE_SHA256) { throw "Handle digest mismatch: $digest != $env:HANDLE_SHA256" }
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'handle')
+      - name: Quit releases the engine home and the harness's project folder; recycle and planned restart keep them
+        if: ${{ !cancelled() }}
+        run: |
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_quit_witness.py \
+            --expect release --evidence-dir "$RUNNER_TEMP/quit-witness-candidate" \
+            --handle-exe "$RUNNER_TEMP/handle/handle64.exe"
+      - name: A Windows retirement returns only after its real Job members are gone, and spares the engine that left
+        # The native tests that portable fakes cannot replace: exactly their four cases must pass, never skip. The
+        # second runs its generation through this venv's own redirector and in a Job with the redirector's limits.
+        if: ${{ !cancelled() && matrix.os == 'windows-latest' }}
+        run: |
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          out="$RUNNER_TEMP/quit-native-tests"
+          mkdir -p "$out"
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" -m pytest -p no:cacheprovider -rA \
+            --junitxml="$out/junit.xml" \
+            tests/test_launcher_quit_engine.py::test_windows_retirement_returns_only_after_its_real_job_members_are_gone \
+            tests/test_launcher_quit_engine.py::test_windows_engine_leaves_its_generation_job_through_a_silent_job_but_not_a_refusing_one \
+            2>&1 | tee "$out/pytest.log"
+          "$py" - "$out/junit.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).getroot().iter("testcase"))
+          ran = [case.get("name") for case in cases if not {"failure", "error", "skipped"} & {c.tag for c in case}]
+          print("passed:", ran)
+          sys.exit(0 if len(cases) == len(ran) == 4 else "the native real-Job tests did not pass all four cases")
+          PY
+      - name: The same scenario on the named base keeps the home held
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.quit_witness_base != '' }}
+        env:
+          BASE_SHA: ${{ inputs.quit_witness_base }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          # Native Git checks the base out: Git Bash's GNU tar unquoted -C "$RUNNER_TEMP/..." (D:\a\_temp became D:<BEL>\_temp).
+          git worktree add --detach "$RUNNER_TEMP/quit-base" "$BASE_SHA"
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_quit_witness.py \
+            --checkout "$RUNNER_TEMP/quit-base" --expect hold --quit-seconds 30 \
+            --evidence-dir "$RUNNER_TEMP/quit-witness-base" --handle-exe "$RUNNER_TEMP/handle/handle64.exe"
+      - name: Keep the witness outputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: quit-witness-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/quit-witness-candidate
+            ${{ runner.temp }}/quit-witness-base
+            ${{ runner.temp }}/quit-native-tests
+          if-no-files-found: warn
 
   # ────────────────────────────────────────────────────────────────────────────
   # Toolchain lane — free, credential-free. Real managed Node/npm for the CLI.
@@ -262,21 +347,25 @@ jobs:
         run: python -I scripts/claudexor_toolchain_smoke.py --root "$RUNNER_TEMP/cx-toolchain"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Consumer lane — free, credential-free. Real pinned Codex install on Windows.
+  # Consumer lane — free, credential-free. Real vendor Codex install on Windows.
   # ────────────────────────────────────────────────────────────────────────────
   consumer:
-    name: consumer · windows-latest · real pinned Codex local install + doctor, no login, no model task
+    name: consumer · windows-latest · real vendor Codex maintenance + doctor, no login, no model task
     runs-on: windows-latest
-    # Bounds the registry fetches beyond the production install timeout the witness applies.
+    # Bounds vendor network reads beyond the production install timeout the witness applies.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-python-env
-      - name: Install the pinned toolchain, then the pinned Codex through the production installer seam
+      - name: Install the pinned toolchain, then Codex through the shared maintenance service
         # Same isolated start as the toolchain job; no setup-node, no npm, no harness override.
-        run: python -I scripts/claudexor_toolchain_smoke.py --root "$RUNNER_TEMP/cx-consumer" --harness-install codex
+        # PowerShell, the way a desktop install starts: Git Bash puts its own Unix tools ahead
+        # of Windows's on PATH, and the vendor installer's bare `tar` then cannot open a
+        # drive-letter path (razzant/claudexor#680).
+        shell: pwsh
+        run: python -I scripts/claudexor_toolchain_smoke.py --root "$env:RUNNER_TEMP/cx-consumer" --harness-install codex
 
   # ────────────────────────────────────────────────────────────────────────────
   # Live lane — real harness, explicit API key, one README edit. Costs money.
@@ -338,7 +427,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           # Lockstep pair: must equal pin.node_version in ouroboros/claudexor_runtime_pin.json.
-          node-version: '24.16.0'
+          node-version: '24.22.3'
       - name: Stage the host-owned bundled Node layout
         run: |
           set -euo pipefail

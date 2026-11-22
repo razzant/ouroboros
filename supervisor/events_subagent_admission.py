@@ -12,7 +12,7 @@ import logging
 import pathlib
 import subprocess
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from ouroboros.config import MAX_ACTIVE_SUBAGENTS_HARD_CAP
 from ouroboros.delegate_readonly_inputs import native_selection_block
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
@@ -90,13 +90,21 @@ def _depth_reservation_admits(
     return _active_subagent_count(root_task_id, pending, running) < hard_ceiling
 
 
-def _subagent_cap_blocks(root_task_id: str, parent_id: Any, pending: list, running: dict, max_active: int) -> bool:
-    """A subagent schedule is rejected when the tree is at the per-root active cap AND
-    the FR2 depth-aware reservation does not admit it."""
-    return (
-        _active_subagent_count(root_task_id, pending, running) >= max_active
-        and not _depth_reservation_admits(root_task_id, parent_id, pending, running, max_active)
-    )
+def _subagent_cap_blocks(
+    root_task_id: str, parent_id: Any, pending: list, running: dict, max_active: Optional[int]
+) -> bool:
+    """The hard bound counts every child, with or without the owner's number; with a number, queue behind awake
+    pending + acting children unless depth reserves a place. No number: nothing queues behind it."""
+    from supervisor.pool_admission import acting_children, cold_sleeping
+
+    if _active_subagent_count(root_task_id, pending, running) >= MAX_ACTIVE_SUBAGENTS_HARD_CAP:
+        return True
+    if max_active is None:
+        return False
+    awake = [task for task in pending if not cold_sleeping(task)]
+    occupied = _active_subagent_count(root_task_id, awake, {}) + acting_children(root_task_id, running.values())
+    return occupied >= max_active and not _depth_reservation_admits(
+        root_task_id, parent_id, pending, running, max_active)
 
 
 def _subagent_rejection_meta(
@@ -129,9 +137,9 @@ def _subagent_scheduled_meta(
     task_group_id: str,
     requested_model_lane: str,
     active_subagent_count: int,
-    max_active_subagents: int,
+    max_active_subagents: Optional[int],
 ) -> Dict[str, Any]:
-    return {
+    progress_meta = {
         "subagent_event": "scheduled",
         "accepted": True,
         "active_subagent_count": active_subagent_count,
@@ -145,6 +153,9 @@ def _subagent_scheduled_meta(
         # running card (written by the worker after dispatch) carries both.
         "model_lane": requested_model_lane,
     }
+    if max_active_subagents is None:
+        del progress_meta["max_active_subagents"]  # no number of the owner's: the feed names none
+    return progress_meta
 
 
 def _send_subagent_rejection(
@@ -283,17 +294,17 @@ def _compose_subagent_text(
             # schedule time, when the executor is unknown — it states WHERE
             # changes land, never that the child executes them natively itself
             # (the dispatch-time executor note owns execution framing).
-            "All changes land inside the write root only. Do NOT commit, run review gates / "
-            "runtime / skills lifecycle, grant yourself tools, or write identity or scratchpad. "
-            "You may optionally ask independent reviewers about work in your write root with "
-            "review_change; it never approves, commits or integrates that work. "
-            + _CHILD_MEMORY_SENTENCE + " Your "
-            "Git changes are recorded as a workspace.patch; ordinary-folder outputs use their "
-            "registered file artifacts. Isolated self_worktree changes are applied; shared "
-            "external_workspace files are verified without reapplying. "
-            "The parent is the sole committer of the live body. Nested delegation is "
-            "allowed within configured depth/cap limits; depth bounds how DEEP delegation "
-            "nests and never how strong a descendant is — ask for the lane you need.",
+            "Your changes to the project are captured from the write root: that is where this work's result "
+            "lives. Scratch, logs, caches and test evidence are not part of the result; keep them out of it, "
+            "wherever your tools let you write. Committing, review gates, runtime and skills lifecycle, "
+            "granting yourself tools and writing identity or scratchpad are the parent's steps, not yours. You "
+            "may optionally ask independent reviewers about work in your write root with review_change; it "
+            "never approves, commits or integrates that work. "
+            + _CHILD_MEMORY_SENTENCE + " Your Git changes are recorded as a workspace.patch; ordinary-folder "
+            "outputs use their registered file artifacts. Isolated self_worktree changes are applied; shared "
+            "external_workspace files are verified without reapplying. The parent is the sole committer of the "
+            "live body. Nested delegation is allowed within configured depth/cap limits; depth bounds how DEEP "
+            "delegation nests and never how strong a descendant is — ask for the lane you need.",
         ])
         if surface == "genesis":
             parts.append(

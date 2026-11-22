@@ -184,7 +184,7 @@ def test_structured_critic_answer_shrinks_known_mirrors_but_keeps_typed_ids(stag
         return result
     monkeypatch.setattr(review_substrate, 'run_review_request', advisory)
     ctx = ToolContext(repo_dir=Path(staged_body['repo']), drive_root=tmp_path / 'data', task_id=TASK)
-    rid = _run(ctx, surface, '')
+    rid = _run(ctx, surface, '', handed_back=True)  # its finding is material: the outcome returns to the author
     canonical = deepcopy(review_ledger.load_record(ctx.drive_root, rid))
     from ouroboros.review_history import review_dispute_history
     history = review_dispute_history(drive_root=ctx.drive_root, repo_root=ctx.repo_dir, task_id=TASK)

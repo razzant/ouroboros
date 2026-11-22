@@ -27,7 +27,8 @@ window.chat = createChatInstance({ws,state,updateUnreadBadge(){},chatId:1,idPref
         gate(){return Promise.resolve(this.begin());},isCurrent:()=>true,apply(){}}});
 initLogs({ws,state,mount:document.getElementById('logs-mount')});
 window.showLogs=()=>{document.getElementById('chat-mount').hidden=true;document.getElementById('logs-mount').hidden=false;
-    state.activePage='dashboard';state.dashboardActiveSubtab='logs';};
+    state.activePage='dashboard';state.dashboardActiveSubtab='logs';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown',{detail:{page:'dashboard'}}));};
 window.fixtureReady=true;
 </script></body></html>"""
 
@@ -124,8 +125,8 @@ def test_retention_details_and_problem_only_card(engine, width):
                 playwright.expect(page.locator('#log-entries')).to_contain_text('Task history saved')
                 playwright.expect(page.locator('#log-entries')).to_contain_text('Task history needs attention')
                 playwright.expect(page.locator('#log-entries')).to_contain_text('Saving task history')
-                playwright.expect(page.locator('#log-entries .log-body').filter(has_text='OSError: disk full')).to_contain_text('2 × OSError: disk full')
-                page.locator('.log-entry').filter(has_text='Task history needs attention').get_by_role('button', name='Raw', exact=True).click()
+                playwright.expect(page.locator('#log-entries .log-words').filter(has_text='OSError: disk full')).to_contain_text('2 × OSError: disk full')
+                page.locator('.log-entry').filter(has_text='Task history needs attention').locator(':scope > summary').click()
                 playwright.expect(page.locator('.log-raw:visible')).to_contain_text('retained-source')
                 capture("logs")
                 assert not errors

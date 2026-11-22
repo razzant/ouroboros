@@ -400,3 +400,22 @@ def test_only_an_answered_send_without_the_replayed_reasoning_notes_the_omission
     assert isinstance(outcome, _BadReq) is (scenario == "refused_twice")
     assert omitted is (scenario == "refused_then_answered")
     assert LLMClient._has_replayed_reasoning_metadata(sent[-1]) is (scenario == "answered")
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_alibaba_size_refusal_does_not_strip_reasoning(monkeypatch, declared):
+    from pathlib import Path
+    from tests._size_refusal import _sdk_error
+    from ouroboros.llm import LLMClient
+    exc = _sdk_error(400, (Path(__file__).parent / 'fixtures/size_refusals/bodies/issue-3518-openrouter-alibaba.body.json').read_bytes())
+    from ouroboros import pricing
+    monkeypatch.setattr(pricing, 'get_pricing', lambda **_: {'alibaba': pricing.PricingSchedule(
+        (1., None, None, 2.), source={'max_prompt_tokens': 983616})} if declared else {})
+    client = LLMClient.__new__(LLMClient)
+    kwargs = {'messages': _thinking_history(), 'extra_body': {'provider': {'allow_fallbacks': False}}}
+    kwargs.update(model='qwen/fixture', max_tokens=65536)
+    retry = client._openrouter_signature_retry_kwargs(
+        {'supports_openrouter_extensions': True, 'provider': 'openrouter'}, kwargs, exc)
+    assert (retry is None) is declared
+    if retry is not None:
+        assert not client._has_replayed_reasoning_metadata(retry['messages'])

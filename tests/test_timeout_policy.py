@@ -597,8 +597,9 @@ def test_exact_pending_commit_retry_reconciles_before_cycle_cap(tmp_path, monkey
         git_tools, "check_review_cycles_ceiling",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("cap must not gate reconciliation")),
     )
+    import ouroboros.review_state as review_state
     monkeypatch.setattr(
-        git_tools, "check_identical_verdict_refusal",
+        review_state, "settle_completed_round",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("replay gate must not run")),
     )
 
@@ -618,7 +619,8 @@ def test_exact_pending_commit_retry_reconciles_before_cycle_cap(tmp_path, monkey
 
 
 def test_commit_pending_retry_reconciles_same_paid_attempt(tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    """A pending wave returns to the author open; the exact retry rejoins the same paid attempt, past
+    the cycle cap, without a second wave, and returns the settled outcome."""
     import subprocess
     from types import SimpleNamespace
 
@@ -705,15 +707,14 @@ def test_commit_pending_retry_reconciles_same_paid_attempt(tmp_path, monkeypatch
 
     monkeypatch.setattr(git_tools, "_run_parallel_review", wave)
     first = git_tools._run_non_committing_review_cycle(ctx, "same message")
-    assert first["status"] == "blocked", first
-    assert first["block_reason"] == "review_late_result_pending"
+    assert first["status"] == "reviewed" and "reviewers are still running" in first["message"], first
 
     monkeypatch.setattr(
         git_tools, "check_review_cycles_ceiling",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("cap must not gate exact custody")),
     )
     second = git_tools._run_non_committing_review_cycle(ctx, "same message")
-    assert second["status"] == "passed"
+    assert second["status"] == "reviewed" and "reviewers are still running" not in second["message"], second
     assert waves == 2
     assert len(reserved_reconciliations) == 1
 
@@ -809,20 +810,13 @@ def test_strict_review_poll_does_not_raise_the_remaining_window_to_five_seconds(
     assert 0 < gateway.timeout <= 0.001
 
 
-def test_expiring_strict_review_poll_keeps_the_subsecond_bound():
-    from ouroboros.delegate_progress import expiring_poll
+def test_a_spent_strict_review_poll_keeps_the_subsecond_bound():
+    """A review slot whose clock is spent still takes its one read (``review_execution._observe_session`` reads
+    through ``bounded_poll``), bounded at the strict floor of 1 ms, never the ordinary five-second floor."""
+    from ouroboros.delegate_progress import poll_bound
 
-    class Gateway:
-        def __init__(self):
-            self.timeout = None
-
-        def get_run(self, _run_id, *, timeout_sec=None):
-            self.timeout = timeout_sec
-            return {"summary": {"state": "succeeded"}}
-
-    gateway = Gateway()
-    expiring_poll(gateway, "run-1", strict=True)
-    assert 0 < gateway.timeout <= 0.001
+    assert poll_bound(0.0, strict=True) == poll_bound(-3.0, strict=True) == 0.001
+    assert poll_bound(0.0) == 5.0, "the ordinary floor a strict read must not take"
 
 
 def test_strict_poll_splits_http_phase_budget_and_recomputes_retry(monkeypatch):

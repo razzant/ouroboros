@@ -96,11 +96,12 @@ def _resolve_runtime(runtime: str) -> Tuple[Optional[str], str]:
         return (shutil.which("python3") or shutil.which("python")), ""
     if runtime == "node":
         # Skill-family node precedence is owned by
-        # platform_layer.select_skill_node_runtime: bundled-first (the signed
-        # runtime macOS code-signing enforcement cannot SIGKILL inside the
-        # packaged app), with a health ROLLBACK to a working PATH node when the
-        # bundled one is absent or execution-probed broken. A provably dead
-        # candidate is never selected while a usable neighbour exists.
+        # platform_layer.select_skill_node_runtime: where the pin governs this
+        # host, only the pin's reviewed Node (prepared or exactly shipped), and
+        # while it is unprepared no runtime (the reason says so); without a pin
+        # or on a host the pin has no archive for, bundled-first with a health
+        # ROLLBACK to a working PATH node. A provably dead candidate is never
+        # selected while a usable neighbour exists.
         try:
             from ouroboros.platform_layer import select_skill_node_runtime
             selected, info = select_skill_node_runtime()
@@ -731,6 +732,16 @@ def _handle_skill_preflight(
                     "ok": ok,
                     "detail": rel if ok else f"missing or escaping script: {rel}",
                 })
+            if manifest.mcp_servers:  # each declared MCP server's entry, by the one rule its start applies
+                from ouroboros.skill_mcp import entry_problem
+
+                for decl in manifest.mcp_servers:
+                    problem = entry_problem(skill_dir, decl["entry"])
+                    manifest_findings.append({
+                        "item": "manifest_mcp_entry_exists",
+                        "ok": not problem,
+                        "detail": f"server {decl['id']!r}: {problem}" if problem else decl["entry"],
+                    })
         except (OSError, UnicodeDecodeError, SkillManifestError) as exc:
             manifest_findings.append({
                 "item": "manifest_parse",

@@ -13,7 +13,6 @@ from tests.test_git_review_preflight_gate import candidate  # noqa: F401
 @pytest.mark.parametrize("basis", ["none", "explicit_prior", "custody_lost"])
 def test_commit_finish_requires_received_outcome(candidate, monkeypatch, basis):  # noqa: F811
     ctx = candidate
-    monkeypatch.setenv('OUROBOROS_REVIEW_ENFORCEMENT', 'advisory')
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'pro')
     monkeypatch.setenv('OUROBOROS_REVIEW_MAX_CYCLES', 'unlimited')
     ctx.branch_dev = git.run_cmd(['git', 'branch', '--show-current'], cwd=ctx.repo_dir).strip()
@@ -71,7 +70,6 @@ def test_commit_finish_requires_received_outcome(candidate, monkeypatch, basis):
 def test_unavailable_triad_requires_author_handback(candidate, monkeypatch):  # noqa: F811
     ctx = candidate
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE','pro')
-    monkeypatch.setenv('OUROBOROS_REVIEW_ENFORCEMENT','advisory')
     git._reset_commit_review_state(ctx)
     monkeypatch.setattr(git, '_run_review_preflight_tests', lambda *_a, **_kw: None)
     from ouroboros.tools import review
@@ -80,7 +78,7 @@ def test_unavailable_triad_requires_author_handback(candidate, monkeypatch):  # 
         from ouroboros.review_dispatch import invoke_review_paid_stamp
         invoke_review_paid_stamp(ctx._review_paid_stamp)
         error = review._dispatch_unified_review(ctx, message, {
-            'blocking_review':False,'prompt':'fixture','models':['critic'],'stable_prefix_len':0,
+            'prompt':'fixture','models':['critic'],'stable_prefix_len':0,
             'routes':['api_chat'],'session_task':'','target_repo':ctx.repo_dir,'row_plan':{},'retry_key':'fixture'})
         coupling = getattr(ctx, "_last_coupling_result", None) or CouplingOutcome()
         return error, coupling, ctx._last_review_block_reason, list(ctx._review_advisory)
@@ -110,7 +108,6 @@ def test_received_outcome_keeps_live_custody_distinct(rows, terminal, expected):
 @pytest.mark.parametrize("kind", ["clean", "advisory"])
 def test_clean_commit_path_and_structured_advice_are_distinct(candidate, monkeypatch, kind):  # noqa: F811
     ctx = candidate
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     git._reset_commit_review_state(ctx)
     monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *a, **kw: None)
     finding = {"item": "observable review advice", "severity": "advisory", "reason": "Check this tradeoff"}
@@ -177,33 +174,35 @@ def test_the_gate_decides_each_aggregate_branch_once(candidate, monkeypatch, bra
     """The one wave's five branches (§1.7) through the gate's dispatch, in the order
     the record reduces them: pending → QUORUM_FAILED (before FAIL, as the gate) →
     NOT_PERFORMED by coupling → FAIL → PASS. The same ``reduce_verdict`` decides
-    the gate and the durable record."""
+    the gate and the durable record; every branch returns to the author, the ones
+    that did not pass with their signal in the author's list."""
     from ouroboros.tools import review
 
     ctx = candidate
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     git._reset_commit_review_state(ctx)
     results, (aggregate, reason, blocked, block_reason) = _BRANCHES[branch]
     monkeypatch.setattr(review, "_handle_multi_model_review", lambda *a, **kw: json.dumps({"results": results}))
-    prepared = {"blocking_review": True, "prompt": "fixture", "models": list(_PANEL["models"]), "stable_prefix_len": 0,
+    prepared = {"prompt": "fixture", "models": list(_PANEL["models"]), "stable_prefix_len": 0,
                 "routes": list(_PANEL["routes"]), "session_task": "", "target_repo": ctx.repo_dir, "row_plan": dict(_PANEL),
                 "retry_key": "fixture", "retrieving_manifests": [{"slot_id": "s1", "sha": {"brief": "b1"}, "governance_manifest": []}]}
     error = review._dispatch_unified_review(ctx, "Fix amount", prepared)
     verdict = ctx._last_review_verdict
     assert verdict["aggregate"] == aggregate and verdict["reason"] == reason, verdict
-    assert bool(error) is blocked
+    assert error is None  # nothing refuses: the outcome returns to the author
+    signal = json.dumps(ctx._review_advisory, ensure_ascii=False)
+    assert bool(ctx._review_advisory) is blocked, signal
     assert ctx._last_review_block_reason == block_reason
     coupling = ctx._last_coupling_result
     if branch == "fail_coupling":
-        assert coupling.blocked and coupling.verdict == "FAIL" and coupling.critical_findings
-        assert "forgotten_touchpoints" in error and "critical" in error.lower()
+        assert not coupling.blocked and coupling.verdict == "FAIL" and coupling.critical_findings
+        assert "forgotten_touchpoints" in signal and "critical" in signal.lower()
     if branch == "pass":
         assert coupling.status == "responded" and coupling.verdict == "PASS" and verdict["per_question"] == {"change": "PASS", "coupling": "PASS"}
     if branch == "quorum_failed":
         assert verdict["per_question"]["change"] == "FAIL", "the finding is recorded, the wave still has no quorum"
-        assert "1 of 3" in error
+        assert "1 of 3" in signal
     if branch == "coupling_not_performed":
-        assert "Part 2" in error and "asked of: s1" in error
+        assert "Part 2" in signal and "asked of: s1" in signal
         assert verdict["per_question"] == {"change": "PASS", "coupling": "unanswered"}, "asked of one seat that left it out"
     # The record reduces the same rows to the same aggregate.
     from ouroboros import review_ledger as rl
@@ -228,35 +227,32 @@ _PACKET_PANEL = {**_PANEL, "retrieves": [False] * 3, "parts": [("change",)] * 3,
 _REASONLESS = _two_part(coupling=[{**row, "reason": ""} for row in _COUPLING_PASS])
 
 
-def _prepared(ctx, panel, *, blocking=True):
-    return {"blocking_review": blocking, "prompt": "fixture", "models": list(panel["models"]), "stable_prefix_len": 0,
+def _prepared(ctx, panel):
+    return {"prompt": "fixture", "models": list(panel["models"]), "stable_prefix_len": 0,
             "routes": list(panel["routes"]), "session_task": "", "target_repo": ctx.repo_dir, "row_plan": dict(panel),
             "retry_key": "fixture", "retrieving_manifests": [{"slot_id": s, "sha": {"brief": b}, "governance_manifest": []}
                                                              for s, b in zip(panel["slot_ids"], panel["brief_shas"]) if b]}
 
 
-def _dispatch(ctx, monkeypatch, panel, results, *, blocking=True):
+def _dispatch(ctx, monkeypatch, panel, results):
     from ouroboros.tools import review
 
     git._reset_commit_review_state(ctx)
     monkeypatch.setattr(review, "_handle_multi_model_review", lambda *a, **kw: json.dumps({"results": list(results)}))
-    return review._dispatch_unified_review(ctx, "Fix amount", _prepared(ctx, panel, blocking=blocking))
+    return review._dispatch_unified_review(ctx, "Fix amount", _prepared(ctx, panel))
 
 
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
-def test_three_uncountable_coupling_answers_are_named_per_seat(candidate, monkeypatch, enforcement):  # noqa: F811
+def test_three_uncountable_coupling_answers_are_named_per_seat(candidate, monkeypatch):  # noqa: F811
     """Three retrieving seats each answer Part 2 with a matrix the gate cannot count
-    (PASS rows without a reason). NOT_PERFORMED names every seat's own error — in the block
-    (blocking) or in the author's advisory list beside the typed per-seat entries
-    (advisory) — and does not send the owner to configure a retrieving seat: the
-    pool has three. That advice belongs to a panel in which no seat read the work."""
+    (PASS rows without a reason). NOT_PERFORMED names every seat's own error in the
+    author's list beside the typed per-seat entries, and does not send the owner to
+    configure a retrieving seat: the pool has three. That advice belongs to a panel in
+    which no seat read the work."""
     ctx = candidate
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
-    blocking = enforcement == "blocking"  # the assembled wave carries the enforcement into the dispatch
-    error = _dispatch(ctx, monkeypatch, _RETRIEVING_PANEL, [_seat(s, m, _REASONLESS) for s, m in _SEATS], blocking=blocking)
+    error = _dispatch(ctx, monkeypatch, _RETRIEVING_PANEL, [_seat(s, m, _REASONLESS) for s, m in _SEATS])
     assert ctx._last_review_verdict["reason"] == "coupling_not_performed"
-    text = error if enforcement == "blocking" else ctx._review_advisory[0]
-    assert (error is None) is (enforcement == "advisory")
+    text = ctx._review_advisory[0]
+    assert error is None
     assert "Part 2" in text and "asked of: s1, s2, s3" in text
     for seat_id, model in _SEATS:
         line = text.split(f"- {seat_id} ({model}): ", 1)
@@ -265,11 +261,10 @@ def test_three_uncountable_coupling_answers_are_named_per_seat(candidate, monkey
     typed = ctx._last_review_advisory_findings
     assert [(f["item"], f["model"]) for f in typed] == [("review_coupling_unanswered", m) for _s, m in _SEATS]
     assert all("missing reason" in f["reason"] for f in typed)
-    if enforcement == "advisory":
-        assert ctx._review_advisory[1:] == typed, "the early branch keeps the wave's typed diagnostics for the author"
+    assert ctx._review_advisory[1:] == typed, "the early branch keeps the wave's typed diagnostics for the author"
     # No seat could read the work: the same branch, and now the advice is the pool.
-    error = _dispatch(ctx, monkeypatch, _PACKET_PANEL, [_seat(s, m, "[]") for s, m in _SEATS], blocking=blocking)
-    text = error if enforcement == "blocking" else ctx._review_advisory[0]
+    error = _dispatch(ctx, monkeypatch, _PACKET_PANEL, [_seat(s, m, "[]") for s, m in _SEATS])
+    text = ctx._review_advisory[0]
     assert ctx._last_review_verdict["reason"] == "coupling_not_performed" and "asked of: no seat" in text
     assert "configure a retrieving reviewer seat" in text and ctx._last_review_advisory_findings == []
 
@@ -281,7 +276,6 @@ def test_a_critical_in_an_uncountable_matrix_stays_visible_under_an_aggregate_pa
     passes — and the discarded critical is still in the author's advisory list,
     in the record's advisory findings and on the seat's own ledger row."""
     ctx = candidate
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     broken = [{**_COUPLING_PASS[-1], "verdict": "FAIL", "severity": "critical",
                "reason": "the new helper bypasses the documented invariant on a live path"},
               {**_COUPLING_PASS[0], "reason": ""}, *_COUPLING_PASS[1:-1]]
@@ -322,7 +316,6 @@ def test_a_discarded_critical_reaches_the_author_when_the_whole_row_is_uncountab
     with its reason — the same diagnostics a responded seat's uncountable part gets. Control: a seat
     whose text carries no object at all has no answers to diagnose and ends at the row-level entry."""
     ctx = candidate
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     broken = [{**_COUPLING_PASS[-1], "verdict": "FAIL", "severity": "critical",
                "reason": "the new helper bypasses the documented invariant on a live path"},
               {**_COUPLING_PASS[0], "reason": ""}, *_COUPLING_PASS[1:-1]]

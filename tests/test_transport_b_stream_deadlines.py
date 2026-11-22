@@ -150,59 +150,6 @@ def test_json_and_stream_parity_with_usage_tail(isolated, asynchronous):
     assert rows(isolated)[-1]["cost_usd"] == 0.25
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("delivery", ["json", "stream", "no_proxy"])
-def test_go_headers_reach_sdk_wire_through_tool_result_continuation(isolated, monkeypatch, asynchronous, delivery):
-    import ouroboros.net_transport as net_transport
-    from ouroboros.llm_routing import OPENCODE_CLIENT_HEADERS
-
-    rows_config = [{"kind": "openai-compatible", "name": "any-label", "api_key": "key",
-                    "base_url": "https://opencode.ai/inference/go/openai/v1"}]
-    monkeypatch.setenv("OUROBOROS_CONNECTIONS", json.dumps(rows_config))
-    sent = []
-
-    def respond(request):
-        body = json.loads(request.content)
-        sent.append((dict(request.headers), body))
-        call = {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"config\"}"}}
-        finished = any(message.get("role") == "tool" for message in body["messages"])
-        message = ({"role": "assistant", "content": "done"} if finished else
-                   {"role": "assistant", "content": None, "tool_calls": [call]})
-        finish = "stop" if finished else "tool_calls"
-        if body.get("stream"):
-            delta = message if finished else {**message, "tool_calls": [{"index": 0, **call}]}
-            return httpx.Response(200, headers={"content-type": "text/event-stream"},
-                                  content=sse(chunk(delta, finish, usage=completion()["usage"])))
-        result = completion()
-        result["choices"][0].update(message=message, finish_reason=finish)
-        return httpx.Response(200, json=result)
-
-    peer = httpx.MockTransport(respond)
-    monkeypatch.setattr(net_transport, "env_proxies_configured", lambda: False)
-    monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *_args, **_kwargs: peer)
-    client = LLMClient()
-    options = dict(model="openai-compatible@any-label::deepseek-v4.1-flash", tools=TOOLS,
-                   reasoning_effort="low", max_tokens=64, stream=delivery == "stream",
-                   no_proxy=delivery == "no_proxy")
-
-    def chat(history):
-        kwargs = dict(options, messages=list(history))
-        return asyncio.run(client.chat_async(**kwargs)) if asynchronous else client.chat(**kwargs)
-
-    history = [{"role": "user", "content": "use the tool"}]
-    first, _usage = chat(history)
-    assert first["tool_calls"][0]["id"] == "c1"
-    final, _usage = chat(history + [first, {"role": "tool", "tool_call_id": "c1", "content": "ok"}])
-    assert final["content"] == "done"
-    assert len(sent) == 2
-    sessions = {headers["x-opencode-session"] for headers, _body in sent}
-    assert len(sessions) == 1 and next(iter(sessions)).startswith("ouroboros-session-")
-    assert {headers["user-agent"] for headers, _body in sent} == {OPENCODE_CLIENT_HEADERS["User-Agent"]}
-    assert all("extra_headers" not in body for _headers, body in sent)
-    pool = client._async_remote_clients if asynchronous else client._remote_clients
-    assert len(pool) == (0 if delivery == "no_proxy" else 1)
-
-
 def assert_unsettled(root):
     assert rows(root)[-1]["state"] == "dispatched"
 
