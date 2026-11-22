@@ -613,6 +613,8 @@ def test_crash_toast_for_a_bound_task_goes_to_its_project_chat(tmp_path):
 
     incident_notice.assert_called_once()
     assert incident_notice.call_args[0][0] == 5151
+    # A crash that exhausted its retries still offers its manual step (RV4 11: "Please try again." did not vanish).
+    assert incident_notice.call_args.kwargs["progress_meta"]["notice"]["step"] == "try_again"
 
 
 def test_deep_self_review_crash_emits_task_done_event(tmp_path):

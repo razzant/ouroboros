@@ -157,6 +157,9 @@ def test_an_uncredentialed_api_row_is_refused_typed_before_any_send(repo, drive,
         monkeypatch.delenv(key, raising=False)
     llm = _ScriptedLLM([{"content": _REPORT}])
     text, usage = run_deep_self_review(repo, drive, llm, lambda _m: None, slot=_bare_row("openai/gpt-5.5"))
-    assert text.startswith("❌ Deep self-review unavailable: no OpenRouter or direct OpenAI credentials for openai/gpt-5.5")
-    assert usage == {"execution_status": "infra_failed", "reason_code": "deep_self_review_unavailable"}
+    assert text.startswith("Deep self-review is unavailable: no OpenRouter or direct OpenAI credentials for openai/gpt-5.5")
+    assert (usage["execution_status"], usage["reason_code"]) == ("infra_failed", "deep_self_review_unavailable")
+    # The host authors the refusal: its row's notice keeps the cause as details and names the reviewer step.
+    assert usage["terminal_origin"] == "host_notice" and usage["host_notice_row"]["notice"]["step"] == "choose_reviewer"
+    assert "no OpenRouter or direct OpenAI credentials" in usage["host_notice_row"]["notice"]["details"]
     assert llm.calls == []

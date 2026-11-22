@@ -45,15 +45,18 @@ def test_a_named_row_rides_the_task_and_the_ack_names_it(door, monkeypatch):
     tid = door.queue.queue_deep_self_review_task("owner:/review", force=True, chat_id=7, reviewer=" api-scout ")
     [task] = door.pending
     assert (task["id"], task["type"], task["chat_id"], task["reviewer"]) == (tid, "deep_self_review", 7, "api-scout")
-    assert door.sent == [(7, "Deep self-review is queued (owner:/review; reviewer: api-scout).", "deep_self_review_queued")]
-    assert door.notices == [{"code": "deep_self_review_queued", "details": f"task {tid}"}], "its task id is a detail"
+    assert door.sent == [(7, "Deep self-review is queued; reviewer: api-scout.", "deep_self_review_queued")]
+    # Its task id and its origin (``owner:/review``) are details, never words; the row's name is never translated.
+    assert door.notices == [{"code": "deep_self_review_queued", "details": f"task {tid}; requested as owner:/review",
+                             "template": "Deep self-review is queued; reviewer: {reviewer}.",
+                             "values": {"reviewer": "api-scout"}}]
 
 
 def test_no_name_runs_the_main_model(door):
     tid = door.queue.queue_deep_self_review_task("owner:/review", force=True, chat_id=7)
     assert door.pending[0]["reviewer"] == ""
-    assert door.sent == [(7, "Deep self-review is queued (owner:/review; reviewer: Main).", "deep_self_review_queued")]
-    assert door.notices[0]["details"] == f"task {tid}"
+    assert door.sent == [(7, "Deep self-review is queued; reviewer: Main.", "deep_self_review_queued")]
+    assert door.notices[0]["details"] == f"task {tid}; requested as owner:/review"
 
 
 @pytest.mark.parametrize("enabled, name", [(False, "api-scout"), (True, "nobody")])

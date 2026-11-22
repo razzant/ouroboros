@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 import typing
 from types import SimpleNamespace
 
@@ -61,9 +62,9 @@ def test_the_one_line_joins_the_phrase_and_its_step_each_translated_first(tmp_pa
     _seed(tmp_path, "ru", {phrase: {"text": "Бюджет исчерпан."},
                            "code:notice.step.raise_total_budget": {"text": "Поднимите его."}})
     assert host_notice.notice_line(row, "ru", drive_root=tmp_path) == "Бюджет исчерпан. Поднимите его."
-    # A part the memory lacks stays English; the other part is still translated.
+    # While the phrase has no translation the step stays English too: the line is in one language (RV4 17).
     _seed(tmp_path, "de", {"code:notice.step.raise_total_budget": {"text": "Erhöhen."}})
-    assert host_notice.notice_line(row, "de", drive_root=tmp_path) == f"{phrase} Erhöhen."
+    assert host_notice.notice_line(row, "de", drive_root=tmp_path) == f"{phrase} {host_notice.STEPS['raise_total_budget']}"
     # The technical pause is translated by its text, as Telegram did before notices; other rows keep their words.
     pause = {"text": "Paused for its authority.", "role": "system", "system_type": "task_pause_notice",
              "pause_reason": "authority"}
@@ -142,3 +143,261 @@ def test_a_host_notice_terminal_says_its_phrase_while_the_record_keeps_the_error
     review = derive_loop_outcome("Deep self-review failed: X: y", {"execution_status": "infra_failed",
                                                                   "reason_code": "deep_self_review_error"}, {})
     assert review["failure"]["kind"] == "runtime", "a deep review's own failure is the runtime's, as its old prefix said"
+
+
+# --- RV4: the review's accepted findings, each pinned where it would fail without its fix ---------------------------
+
+
+def test_a_variable_phrase_translates_its_template_and_never_its_words(tmp_path):
+    """RV4 3: the mind's note, a name or a count is put back as written; only the constant template is translated."""
+    text, said = host_notice.phrase("project_closed", "Ouroboros closed this project. {note}", step="reopen_project",
+                                    note="Готово, всё сдано.")
+    assert text == "Ouroboros closed this project. Готово, всё сдано."
+    row = {"text": text, "role": "system", **said}
+    assert host_notice.stored(row)["values"] == {"note": "Готово, всё сдано."}, "the template and values persist"
+    _seed(tmp_path, "ru", {"Ouroboros closed this project. {note}": {"text": "Уроборос закрыл проект. {note}"},
+                           "code:notice.step.reopen_project": {"text": "Сообщение здесь откроет его снова."}})
+    assert host_notice.notice_line(row, "ru", drive_root=tmp_path) == (
+        "Уроборос закрыл проект. Готово, всё сдано. Сообщение здесь откроет его снова.")
+
+
+def test_a_read_never_offers_a_phrase_and_the_send_offers_its_template_in_its_own_root(tmp_path, monkeypatch):
+    """RV4 3 and 19: history, search and an operation read without writing; the send offers the template once, and a
+    refused offer is offered again."""
+    from ouroboros import i18n_memory
+
+    host_notice._MISSES.clear()
+    text, said = host_notice.phrase("skill_review_interrupted", "Skill review: `{skill}` — interrupted", skill="alpha")
+    row = {"text": text, "role": "system", **said}
+    host_notice.view(row, drive_root=tmp_path)  # a read, on a Russian install
+    monkeypatch.setattr(i18n_memory, "current_language", lambda: "ru")
+    host_notice.view(row, drive_root=tmp_path)
+    assert not i18n_memory.pending_path(tmp_path, "ru").exists(), "a read writes nothing and wakes nothing"
+    offered = []
+    real = i18n_memory.record_missing
+    monkeypatch.setattr(i18n_memory, "record_missing", lambda root, tag, items: (
+        offered.append((root, [item["key"] for item in items])), {"accepted": 0, "dropped": 1, "pending": 0})[1])
+    host_notice.view(row, drive_root=tmp_path, record_misses=True)
+    host_notice.view(row, drive_root=tmp_path, record_misses=True)
+    assert offered == [(tmp_path, ["Skill review: `{skill}` — interrupted"])] * 2, "a refused offer is offered again"
+    monkeypatch.setattr(i18n_memory, "record_missing", real)
+    host_notice.view(row, drive_root=tmp_path, record_misses=True)
+    host_notice.view(row, drive_root=tmp_path, record_misses=True)
+    pending = json.loads(i18n_memory.pending_path(tmp_path, "ru").read_text(encoding="utf-8"))["items"]
+    assert list(pending) == ["Skill review: `{skill}` — interrupted"] and pending[list(pending)[0]]["count"] == 1
+
+
+def test_search_and_the_room_snapshot_carry_the_notice(tmp_path):
+    """RV4 2 and 16: a search candidate's words are the line the bubble draws; the plan review's snapshot keeps it."""
+    from ouroboros.dialogue_evidence import _row_projection
+    from ouroboros.gateway.chat_search import _candidate
+    from ouroboros.gateway.history_contracts import ChatSearchCandidate
+
+    phrase = "The total budget is spent, so this turn did not start."
+    entry = {"history_id": "chat:1", "row_address": "row:1@t#0", "role": "system", "direction": "system",
+             "system_type": "task_not_started", "ts": "2026-11-22T10:00:00Z", "text": phrase,
+             **host_notice.fields("budget_exhausted", step="raise_total_budget", details="setting: TOTAL_BUDGET")}
+    found = _candidate(entry, tmp_path)
+    assert found["notice"]["line"] == f"{phrase} {host_notice.STEPS['raise_total_budget']}"
+    assert not validate_ingress(found, ChatSearchCandidate) and "notice" in typing.get_type_hints(ChatSearchCandidate)
+    assert _row_projection(entry, "chat", 1)["notice"]["details"] == "setting: TOTAL_BUDGET"
+
+
+def test_a_refused_turn_keeps_its_step_in_the_result_and_the_key_in_details():
+    """RV4 4: the result is the canonical record (phrase and step); the setting's key is the notice's detail."""
+    from supervisor.worker_chat_lane import _budget_spent_notice
+
+    said = _budget_spent_notice()
+    assert said["record"] == f"{said['text']} {host_notice.STEPS['raise_total_budget']}"
+    assert said["notice"] == {"code": "budget_exhausted", "step": "raise_total_budget", "details": "setting: TOTAL_BUDGET"}
+
+
+def test_an_update_outcome_is_worded_from_its_finalization_and_its_stash():
+    """RV4 6: a finished update whose local changes came back is not reported as failed; the note stays its detail."""
+    from supervisor.update_merge import boot_outcome_notice
+
+    done = boot_outcome_notice({"finalized": True, "stash_restore_status": "restored", "stash_note": "local changes restored"})
+    assert done["text"] == "The update is in place, and your local changes were put back."
+    kept = boot_outcome_notice({"finalized": False, "stash_restore_status": "preserved", "stash_note": "git stash apply X"})
+    assert kept["text"] == "The last update did not finish cleanly; Git kept your local changes aside, so they are not lost."
+    assert kept["progress_meta"]["notice"]["details"] == "git stash apply X"
+    assert boot_outcome_notice({"rolled_back": True, "stash_note": "rolled back"})["text"] == "The last update was rolled back."
+    assert all("Details" not in row["text"] for row in (done, kept))
+
+
+def test_crash_recovery_keeps_the_record_a_notice_row_was_sent_with(tmp_path, monkeypatch):
+    """RV4 7: the outbox and the delivered receipt keep the canonical record beside the phrase; recovery adopts it."""
+    from ouroboros import working_checkpoint
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, exception_notice, prepare_terminal_send_event
+    from supervisor import terminal_delivery
+
+    notice = exception_notice(ValueError("boom"))
+    usage = {"terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE, "host_notice_row": notice}
+    event = prepare_terminal_send_event(tmp_path, {"id": "t-rec", "chat_id": 7}, notice["record"], usage,
+                                        {"type": "send_message", "chat_id": 7, "text": notice["record"]}, presence=False)
+    assert event["terminal_record"] == notice["record"] and event["text"] == notice["text"]
+    monkeypatch.setattr(terminal_delivery, "terminal_answer_receipts", lambda root, task_id: {"owed": [
+        {**event, "delivery_id": "final:task:t-rec", "registered_at": "2026-11-22T10:00:00Z"}]})
+    assert working_checkpoint.registered_answer(tmp_path, "t-rec")["text"] == notice["record"]
+    monkeypatch.setattr(terminal_delivery, "terminal_answer_receipts", lambda root, task_id: {"owed": [
+        {"text": "An older row's text.", "delivery_id": "final:task:t-old", "registered_at": "2026-11-22T10:00:00Z"}]})
+    assert working_checkpoint.registered_answer(tmp_path, "t-old")["text"] == "An older row's text.", "older rows as before"
+
+
+def test_a_typed_answer_is_never_classified_by_an_old_prefix():
+    """RV4 8: the prefix table reads only text whose producer typed no status; both directions."""
+    from ouroboros.outcomes import derive_loop_outcome
+
+    quoted = derive_loop_outcome("⚠️ Error during processing: quoted from a log", {
+        "execution_status": "ok", "reason_code": "final_message", "terminal_origin": "model_final"}, {})
+    assert quoted["outcome_axes"]["execution"]["status"] != "infra_failed"
+    untyped = derive_loop_outcome("⚠️ Error during processing: RuntimeError: x", {}, {})
+    assert untyped["outcome_axes"]["execution"]["status"] == "infra_failed"
+
+
+def test_a_failed_review_keeps_its_notice_with_its_ledger_record(tmp_path):
+    """RV4 9: the review's ledger suffix joins the failure's record and details, so the notice survives."""
+    from ouroboros.deep_self_review import deep_review_unavailable, with_review_record
+    from ouroboros.task_finalization import prepare_terminal_send_event
+
+    text, usage = deep_review_unavailable("subscription_window_exhausted")
+    joined = with_review_record(text, usage, "rv-1")
+    assert joined == usage["host_notice_row"]["record"] and joined.endswith("Review record: rv-1 (surface=system)")
+    assert usage["host_notice_row"]["notice"]["details"] == "subscription_window_exhausted; Review record: rv-1 (surface=system)"
+    event = prepare_terminal_send_event(tmp_path, {"id": "t-rv", "chat_id": 7}, joined, usage,
+                                        {"type": "send_message", "chat_id": 7, "text": joined}, presence=False)
+    assert event["text"] == "Deep self-review cannot run on this reviewer row." and "notice" in event["progress_meta"]
+
+
+def test_a_provider_outage_says_a_stable_phrase_with_its_diagnostic_behind_details():
+    """RV4 10: the provider's own words (its last code, a plan note) and the task's id are details, never the line."""
+    from ouroboros.task_finalization import send_provider_death_notice
+
+    sent = []
+    ctx = SimpleNamespace(send_with_budget=lambda chat_id, text, **kw: sent.append((text, kw)))
+    diagnostic = "⏳ The provider kept answering 529 overloaded_error; Ouroboros waited 12 minutes."
+    assert send_provider_death_notice(ctx, 7, "t-down", {"terminal_provider_notice": diagnostic})
+    [(text, kw)] = sent
+    assert text == "A model-provider outage stopped this task; its partial work and workspace files are kept."
+    notice = kw["progress_meta"]["notice"]
+    assert notice["step"] == "inspect_task" and diagnostic in notice["details"] and "task t-down" in notice["details"]
+
+
+def test_a_refused_evolution_start_says_a_phrase_with_its_lock_reason_behind_details(monkeypatch):
+    """RV4 12: the state lock's reason is the notice's detail, never the words of the command's or switch's reply."""
+    from supervisor import events_runtime_controls, evolution_lifecycle, state
+
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+
+    def refused(*_a, **_k):
+        raise state.StateUnavailable("lock_timeout")
+
+    monkeypatch.setattr(state, "update_state", refused)
+    refusal = events_runtime_controls.owner_evolution_start("tidy", source="owner_chat")
+    assert "lock_timeout" not in refusal["text"] and refusal["notice"]["details"] == "lock_timeout"
+
+
+def test_a_split_custody_row_never_inherits_the_answers_notice():
+    """RV4 18: a custody row says its own fact; the answer's step and raw details stay the answer's."""
+    from supervisor.events_chat_delivery import bundled_rows
+
+    answer, rows = bundled_rows({"type": "send_message", "chat_id": 7, "task_id": "t-c", "delivery_id": "final:task:t-c",
+                                 "text": "The total budget is spent.", "terminal_custody_notice": "A delegated run may be live.",
+                                 "progress_meta": host_notice.fields("budget_exhausted", step="raise_total_budget")})
+    assert answer["progress_meta"]["notice"]["code"] == "budget_exhausted"
+    assert rows and "notice" not in rows[0]["progress_meta"]
+
+
+def test_a_version_switch_chooses_its_words_by_its_typed_cause_and_its_step_by_who_pressed(tmp_path, monkeypatch):
+    """RV4 20 and 21: free text that happens to equal a known sentence is Git's output, kept whole in details; an
+    automatic rollback has no "press it again"."""
+    from ouroboros import store_switch
+    from supervisor import message_bus as bus
+
+    sent = []
+    monkeypatch.setattr(bus, "send_with_budget", lambda chat, text, **kw: sent.append((text, kw)))
+    progress = {"outcomes": [
+        {"intent": {"door": "boot_smoke_rollback", "target_ref": "v7.6.0"}, "message": "the export failed twice and was abandoned"},
+        {"intent": {"door": "ui_rollback", "target_ref": "v7.6.0"}, "reason": "second_failure"}]}
+    (tmp_path / store_switch.PROGRESS_REL).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / store_switch.PROGRESS_REL).write_text(json.dumps(progress), encoding="utf-8")
+    store_switch.report_outcomes(tmp_path, 7)
+    (free, free_kw), (typed, typed_kw) = sent
+    assert free == "Automatic rollback did not happen. The app is running the current version."
+    assert "step" not in free_kw["progress_meta"]["notice"]
+    assert free_kw["progress_meta"]["notice"]["details"].endswith(": the export failed twice and was abandoned")
+    assert typed == "Rollback did not happen: the export failed twice and was abandoned. The app is running the current version."
+    assert typed_kw["progress_meta"]["notice"]["step"] == "press_again"
+
+
+def test_an_agent_rollback_is_worded_from_its_deferral_and_restart_facts(monkeypatch):
+    """RV4 20: a deferred switch only recorded its intent; a restart that could not be requested says so, with Restart."""
+    from ouroboros.gateway import control
+    from supervisor import events_runtime_controls
+
+    sent = []
+    ctx = SimpleNamespace(request_restart=lambda: None, load_state=lambda: {"owner_chat_id": 7},
+                          send_with_budget=lambda chat, text, **kw: sent.append((text, kw)))
+    monkeypatch.setattr(events_runtime_controls.threading, "Thread", lambda target, **_k: SimpleNamespace(start=target))
+    monkeypatch.setattr(control, "rollback_through_door", lambda *_a, **_k: (200, {
+        "status": "restart_required", "message": "recorded", "restarting": False, "switch_deferred": True}))
+    events_runtime_controls._handle_rollback_request({"target": "abc123def4567890"}, ctx)
+    [(text, kw)] = sent
+    assert text.startswith("Ouroboros recorded a rollback at its own request") and "could not be requested" in text
+    assert kw["progress_meta"]["notice"]["step"] == "restart"
+
+
+def test_the_duplicate_job_and_a_clipped_progress_row_keep_their_evidence(monkeypatch):
+    """RV4 22: the original job's id is the pointer notice's detail; a summary cut at its cap names its whole row."""
+    from ouroboros import skill_lifecycle_queue as queue
+    from ouroboros.memory import Memory
+    from supervisor import message_bus as bus
+
+    sent = []
+    monkeypatch.setattr(bus, "send_with_budget", lambda chat, text, **kw: sent.append((chat, text, kw)))
+    job = lambda chat, jid: SimpleNamespace(kind="install", target="alpha", status="running", id=jid, chat_id=chat,
+                                            group_id="", task_id="", root_task_id="", origin_task_id="",
+                                            origin_root_task_id="", presentation_owner_task_id="", source="")
+    monkeypatch.setattr(queue, "_effective_chat_id", lambda j: j.chat_id)
+    queue._notify_duplicate_pointer(job(2, "job-new"), job(1, "job-original"))
+    [(_chat, text, kw)] = sent
+    assert "job-original" not in text and kw["progress_meta"]["notice"]["details"] == "job job-original"
+    long = {"text": "x" * 790, "ts": "2026-11-22T10:00:00Z", "history_id": "progress:42",
+            **host_notice.fields("skill_failed", details="ENOENT: no such file")}
+    assert Memory.summarize_progress(SimpleNamespace(), [long]).endswith("[whole row: progress:42]")
+
+
+def test_the_offer_memory_is_bounded(monkeypatch):
+    """RV4 23: a process remembers a bounded number of offered phrases per language."""
+    host_notice._MISSES.clear()
+    monkeypatch.setattr(host_notice, "_MISSES_CAP", 3)
+    import ouroboros.i18n_memory as memory
+    monkeypatch.setattr(memory, "record_missing", lambda *_a, **_k: {"accepted": 1})
+    import ouroboros.ui_translation as ui_translation
+    monkeypatch.setattr(ui_translation, "on_language_event", lambda *_a, **_k: None)
+    for index in range(7):
+        host_notice._miss(f"phrase {index}", "ru", {}, pathlib.Path("/tmp"))
+    assert len(host_notice._MISSES["ru"]) <= 3
+
+
+def test_manual_actions_are_typed_steps_and_an_objective_is_never_the_phrase(monkeypatch, tmp_path):
+    """RV4 11: a supported manual action is a step from the closed table; the evolution objective is its own detail."""
+    from ouroboros import review_overrides, skill_review_runner
+    from supervisor import evolution_lifecycle, message_bus as bus, state
+
+    sent = []
+    monkeypatch.setattr(bus, "send_with_budget", lambda chat, text, **kw: sent.append((text, kw)))
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 7})
+    monkeypatch.setattr(review_overrides, "landed_outcome", lambda *_a: False)
+    campaign = {"objective": "Cut the cold start\nby half"}
+    evolution_lifecycle.notify_owner_cycle_outcome(campaign, {"cycle_outcome": "absorbed", "commit_sha": "c" * 40})
+    evolution_lifecycle.notify_owner_cycle_outcome(campaign, {"cycle_outcome": "abandoned", "abandoned_reason": "red tests"})
+    (absorbed, kept), (abandoned, gone) = sent
+    assert "Cut the cold start" not in absorbed + abandoned and "\n" not in absorbed + abandoned
+    assert "Reply if" not in absorbed and kept["progress_meta"]["notice"]["step"] == "reply_to_revert"
+    assert all("objective: Cut the cold start" in kw["progress_meta"]["notice"]["details"] for kw in (kept, gone))
+    rows = []
+    monkeypatch.setattr(skill_review_runner.dialogue_store, "append_quietly", lambda root, stream, row: rows.append(row))
+    skill_review_runner._append_interrupted_review_progress(tmp_path, "alpha", {"job_id": "j1"}, ts="2026-11-22T10:00:00Z")
+    [row] = rows
+    assert row["notice"]["step"] == "review_again" and row["notice"]["values"] == {"skill": "alpha"}

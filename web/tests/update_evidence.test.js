@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { afterUpdateRows, preflightDescription, preflightEvidenceRows, updateOverReview, updateTarget } from '../modules/update_status.js';
+import { afterUpdateRows, applyTitle, preflightDescription, preflightEvidenceRows, updateOverReview, updateTarget } from '../modules/update_status.js';
 import { factValueHtml, initUpdates } from '../modules/updates.js';
 import { setup } from './dashboard_dom_fixture.js';
 
@@ -88,7 +88,7 @@ test('an update is named by its versions, else by its count of changes, never by
     assert.equal(updateTarget({}), 'unknown');
     const source = (url) => import('node:fs').then((fs) => fs.readFileSync(new URL(url, import.meta.url), 'utf8'));
     return source('../modules/updates.js').then((text) => {
-        assert.match(text, /title: `Update: \$\{updateTarget\(latestStatus\)\}`/, 'the dialog says the versions');
+        assert.match(text, /title: applyTitle\(latestStatus \|\| \{\}, plan\)/, 'the dialog says the versions');
         assert.doesNotMatch(text, /title: `Update \$\{String\(plan\.base_sha\)/, 'no commit pair in the title');
     });
 });
@@ -204,4 +204,12 @@ test('the Updates renderer puts a midpoint break in the served SHA and leaves or
     assert.ok(source, 'the actual status read reached the rendered facts');
     assert.deepEqual(source.children.map(node => node.tagName), ['wbr']);
     assert.ok(values.some(value => value.textContent !== sha && !value.children.length), 'ordinary facts need no break');
+});
+
+test('the Apply dialog names versions only for the very range preflight pinned (RV4 5)', () => {
+    const status = { current_version: '1.0', latest_version: '1.1', running_sha: 'a'.repeat(40), latest_sha: 'b'.repeat(40) };
+    assert.equal(applyTitle(status, { base_sha: 'a'.repeat(40), target_sha: 'b'.repeat(40) }), 'Update: 1.0 → 1.1');
+    assert.equal(applyTitle(status, { base_sha: 'a'.repeat(40), target_sha: 'c'.repeat(40) }), 'Update',
+        'a newer release pinned since the cached read: no cached version names the dialog');
+    assert.equal(applyTitle({}, {}), 'Update');
 });

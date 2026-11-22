@@ -134,8 +134,12 @@ def test_mind_closes_and_reopens_with_one_durable_system_row_per_change(room):
         assert event["text"].startswith("Ouroboros ") and "(one)" not in event["text"], "which work: the notice's detail"
         assert event["progress_meta"]["notice"]["details"] == "by task one"
     assert closed["closed"]["at"] not in events[0]["text"]
-    assert "Finished." in events[0]["text"] and "message from you" in events[0]["text"]
+    assert "Finished." in events[0]["text"] and "message from you" not in events[0]["text"]
+    # Reopening is the closure's step; the mind's note is a value put back as written, never translated (RV4 3, 11).
+    assert events[0]["progress_meta"]["notice"]["step"] == "reopen_project"
+    assert events[0]["progress_meta"]["notice"]["values"] == {"note": "Finished."}
     assert "reopened" in events[1]["text"] and "More work." in events[1]["text"]
+    assert "step" not in events[1]["progress_meta"]["notice"]
 
 
 def test_owner_and_mind_share_one_idempotent_closure_transition(room, monkeypatch):

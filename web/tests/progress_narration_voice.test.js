@@ -679,3 +679,18 @@ test('a skill lifecycle row ends at its typed fact, and an older row at the word
     assert.equal(row({ content: 'Skill install: `alpha` — completed', lifecycle: { status: 'failed', phase: 'failed' } }).phase,
         'lifecycle_error');
 });
+
+test('a host notice on a task card says its line with its step, and its raw details open from that line (RV4 1)', () => {
+    const f = fixture();
+    try {
+        f.census(direct());
+        const line = 'A timed-out worker did not stop after repeated kills; its slot is held. Restart Ouroboros to recover.';
+        f.emit({ role: 'system', narration: false, system_type: 'task_reaper_notice',
+            content: 'A timed-out worker did not stop after repeated kills; its slot is held.',
+            notice: { code: 'task_reaper_wedged', step: 'restart', details: 'task turn-voice, worker slot 3, deadline', line } });
+        // The card builds its event from the frame (chat.js updateLiveCardFromProgressMessage): only a notice that reached
+        // it makes the line openable, its details as the line's body (the headline is the notice line, host_notice_text).
+        const [card] = f.rows();
+        assert.ok(card.classList.contains('expandable'), 'the notice reached the card: its raw details open from the line');
+    } finally { f.close(); }
+});

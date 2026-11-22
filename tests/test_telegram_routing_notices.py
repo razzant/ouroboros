@@ -611,3 +611,22 @@ def test_queued_technical_notice_uses_the_translation_under_its_original_receipt
         assert [sent["text"] for sent in phone.sent()] == [translated]
     finally:
         phone.plugin.telegram_i18n.configure(None)
+
+
+def test_the_phone_says_the_line_its_frame_carries_rather_than_assembling_another(phone, monkeypatch):
+    """RV4 14: a translation that arrived between publication and delivery never splits the phone from the window and
+    Copy: the frame's own line wins; an event the host did not assemble still gets the assembler's line."""
+    from ouroboros.host_notice import fields
+
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setattr(plugin, "_load_settings", lambda _: {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "all"})
+    event = {"text": "This turn did not start.", "role": "system", "system_type": "task_not_started",
+             **fields("budget_exhausted", step="raise_total_budget")}
+    try:
+        asyncio.run(plugin._make_outbound(phone.api)({**event, "notice": {**event["notice"], "line": "Ход не начался. Поднимите бюджет."}}))
+        assert phone.sent()[-1]["text"] == "Ход не начался. Поднимите бюджет."
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        assert phone.sent()[-1]["text"].startswith("This turn did not start.")
+    finally:
+        plugin.telegram_i18n.configure(None)
