@@ -1377,7 +1377,12 @@ def test_key_grants_follow_the_installation_and_permissions_the_accepted_bytes(t
 
     grant(skill)
     assert grant_status_for_skill(drive_root, skill)["all_granted"] is True
-    skill.content_hash = skill.review.content_hash = "hash-b"  # an edit of the same installation (Cyber Pro)
+    skill.content_hash = "hash-b"  # an edit of the same installation in Cyber Pro: the verdict is about earlier bytes
+    monkeypatch.setattr("ouroboros.skill_review_status.cyber_authority", lambda: True)
+    from ouroboros.skill_grant_scope import bytes_accepted
+
+    assert skill.review.gate_for("hash-b")["executable_review"] and bytes_accepted(skill) is False, (
+        "Cyber Pro runs the edit; a stale verdict accepts nothing (18.10)")
     edited = grant_status_for_skill(drive_root, skill)
     assert edited["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"] and edited["missing_keys"] == []
     assert edited["granted_permissions"] == [] and edited["missing_permissions"] == ["notify_owner"]
