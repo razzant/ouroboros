@@ -162,6 +162,7 @@ class LocalModelManager:
         # even before _install_proc is assigned, closing the panic-window race.
         self._install_cancelled = threading.Event()
         self._panic_requested = False
+        self._stopping: set = set()  # children a stop detached and still awaits: Panic's request reaches them
 
     def get_status(self) -> str:
         if self._proc is not None and self._proc.poll() is not None:
@@ -269,16 +270,22 @@ class LocalModelManager:
 
             # stop_server may have run during Popen; kill immediately if so.
             if self._install_cancelled.is_set():
+                self._stopping.add(proc)  # that stop never saw this child: Panic reaches it until its exit is seen
                 try:
                     terminate_process_tree(proc)
                 except Exception:
                     pass
                 self._install_proc = None
                 self._runtime_status = "missing"
+                if proc.stdout:  # this thread sees the exit and lets the child go: no later Stop or Panic is needed
+                    _read_tail(proc.stdout, 4096)
+                proc.wait()
+                self._stopping.discard(proc)
                 return
             output_bytes = _read_tail(proc.stdout, 4096) if proc.stdout else b""
             proc.wait()
             self._install_proc = None
+            self._stopping.discard(proc)  # reaped here: a stop whose one poll came before the exit leaves it set
             self._runtime_install_log = output_bytes.decode("utf-8", errors="replace")
 
             if proc.returncode == 0:
@@ -636,13 +643,14 @@ class LocalModelManager:
         log.error(self._error)
 
     def panic_stop(self, *, request_only: bool = False) -> list:
-        """Signal our captured children before manager locks or cleanup waits."""
+        """Signal our captured children before manager locks or cleanup waits; release, never signal, an exited one."""
         from ouroboros.platform_layer import request_process_tree_kill
 
         self._panic_requested = True
         self._install_cancelled.set()
-        requests = [request_process_tree_kill(proc) for proc in (self._proc, self._install_proc)
-                    if proc is not None]
+        children = dict.fromkeys((self._proc, self._install_proc, *self._stopping.copy()))  # one key per child
+        requests = [request_process_tree_kill(proc) for proc in children  # a snapshot: each asked once
+                    if proc is not None and not self._forget_settled(proc)]  # poll() only: no wait, no lock
         if not request_only:
             self.stop_server()
         return requests
@@ -651,11 +659,14 @@ class LocalModelManager:
         """Stop the local model server subprocess and any ongoing install."""
         # Abort install even before _install_proc exists.
         self._install_cancelled.set()
+        for child in self._stopping.copy():  # an earlier stop's child that exited after that stop's poll goes now
+            self._forget_settled(child)
 
         with self._lock:
             proc = self._proc
             binding, self._service_binding = self._service_binding, None
             install_proc = self._install_proc
+            self._stopping.update(child for child in (install_proc, proc) if child is not None)  # before leaving view
             self._proc = None
             self._install_proc = None
             self._status = "offline"
@@ -678,6 +689,7 @@ class LocalModelManager:
                     kill_process_tree(install_proc)
                 except Exception:
                     pass
+            self._forget_settled(install_proc)
 
         if proc is None:
             return
@@ -694,11 +706,18 @@ class LocalModelManager:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        self._forget_settled(proc)
         if binding is not None and proc.poll() is not None:
             from ouroboros.config import DATA_DIR
             from ouroboros.server_process import clear_service_binding
 
             clear_service_binding(DATA_DIR, "local_model", binding)
+
+    def _forget_settled(self, child: subprocess.Popen) -> bool:
+        """An exited child leaves what Panic's request reaches (True); an unconfirmed one stays reachable."""
+        if (settled := child.poll() is not None):
+            self._stopping.discard(child)
+        return settled
 
     def health_check(self) -> Dict[str, Any]:
         """Query local server health and loaded-model info."""

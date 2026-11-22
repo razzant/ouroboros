@@ -261,11 +261,14 @@ def test_the_resident_page_carries_the_revision_of_the_bytes_shown(tmp_path, sto
 def test_a_presence_workpad_read_is_a_pure_read_not_possible_speech():
     """SPEC §10, verified on the base first: ``may_speak`` counted a workpad read as words for the place."""
     from ouroboros.place_reply import may_speak
-    from ouroboros.tool_capabilities import PURE_READ_TOOLS, READ_ONLY_PARALLEL_TOOLS
+    from ouroboros.tool_capabilities import INERT_READ_TOOLS, PURE_READ_TOOLS, READ_ONLY_PARALLEL_TOOLS
 
     ctx = types.SimpleNamespace(task_metadata={})
     assert may_speak(ctx, {"function": {"name": "workpad_read", "arguments": "{}"}}) is False
     assert "workpad_read" in PURE_READ_TOOLS and "workpad_read" not in READ_ONLY_PARALLEL_TOOLS  # no new parallelism
+    # Running consecutive inert reads of one response together is its own later class (its handler reads the page
+    # and publishes nothing a neighbour observes); the sets above stay as they were.
+    assert "workpad_read" in INERT_READ_TOOLS
     assert may_speak(ctx, {"function": {"name": "workpad_write", "arguments": "{}"}}) is False  # a receipt write, as before
     # K17: the other half: a call that may put words in the place still counts as speech.
     for name, arguments in (("send_message", '{"text": "hello"}'), ("run_shell", '{"cmd": "echo hello"}')):

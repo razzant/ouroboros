@@ -1,0 +1,20 @@
+{
+  "about": "A Project room opens at its newest message; a reply at the live edge follows; the owner's wheel reads back and the next reply stays below the passage; reading forward to the end follows again; Page Up reads back by key, and End, which the engine animates, follows once more.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "a": {"name": "Reading back", "rows": [{"count": 70, "words": [18, 90]}]}
+  },
+  "events": [
+    {"open": "a"},
+    {"arrive": "a", "words": 40},
+    {"wheel": -900, "expect": "reading"},
+    {"arrive": "a", "words": 60},
+    {"arrive": "a", "words": 20},
+    {"wheel": 3000, "expect": "following"},
+    {"arrive": "a", "words": 30},
+    {"key": "PageUp", "expect": "reading"},
+    {"arrive": "a", "words": 30},
+    {"key": "End", "expect": "following"},
+    {"arrive": "a", "words": 30}
+  ]
+}

@@ -3,9 +3,8 @@
 A parent takes a child's work back through two surfaces — the full single-child
 read and the compact batch projection — and they must agree about what matters:
 the outcome axes, the pinned result hash, the receipts, and any capability the
-child did not actually have. The waits add the facts a blocking parent cannot
-see for itself: an attention beacon raised mid-flight, siblings still running,
-an id this tree never minted, and a prompt cache that expired while it waited.
+child did not actually have. The waits add elapsed time, attention beacons,
+live siblings and ids this tree never minted. Round facts own cache observations.
 """
 
 from __future__ import annotations
@@ -67,6 +66,17 @@ def disclosable_effort_fact(data: Dict[str, Any]) -> Dict[str, str]:
         return {}
     return {"level": str(fact["applied"] or ""), "requested": str(fact["requested"] or ""),
             "source": str(fact["source"] or "")}
+
+
+def _handoff_disclosures(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The SEMANTIC handoff facts that decide how far to trust a child's answer, for both parent surfaces
+    (``[SUBTASK_OUTCOME]`` and the compact batch row a fan-out parent absorbs its children through), so the
+    batch and the singleton cannot disagree: a capability reduction, a moved effort request and the receipt's
+    repeat of what differed from the request (``helper_receipt.task_result_line``)."""
+    from ouroboros.helper_receipt import task_result_line
+
+    facts = {"capability_delta": disclosable_capability_delta(data), "effort": disclosable_effort_fact(data)}
+    return {key: value for key, value in {**facts, "receipt": task_result_line(data)}.items() if value}
 
 
 def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None, reader: str = "",
@@ -152,11 +162,7 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
         summary["delegated_custody"] = custody
     if isinstance(data.get("task_contract"), dict):
         summary["task_contract"] = data.get("task_contract")
-    _delta = disclosable_capability_delta(data)
-    if _delta:
-        summary["capability_delta"] = _delta
-    if _effort := disclosable_effort_fact(data):
-        summary["effort"] = _effort
+    summary.update(_handoff_disclosures(data))
     if isinstance(data.get("artifact_bundle"), dict):
         summary["artifact_bundle"] = data.get("artifact_bundle")
     if ledger := verification_ledger_view(data.get("verification_ledger")):
@@ -647,53 +653,6 @@ def _wait_attention_poll(
     return _hook
 
 
-def cache_horizon_note(ctx: Any, elapsed_sec: Any) -> str:
-    """One factual line when a blocking wait outlived the APPLIED prompt-cache TTL.
-
-    Reads the RECORDED fact of this task's latest send — ``_last_prompt_cache_ttl``
-    in the loop's accumulated usage (published on the tool ctx), converted by
-    ``llm.cache_ttl_seconds`` — never a route-level prediction (a second predictor
-    can disagree with the payload after route-filter/promotion/cap). Empty string
-    when the horizon is unknown or not yet elapsed. UNKNOWN covers three cases,
-    all silent: no cached send recorded, a route that carries no markers at all,
-    and a send whose markers were BARE (reported ``"default"``) — a bare marker
-    names no tier, so its horizon is the provider's business and inventing one
-    would mislead the agent into re-planning its waits around a number nobody
-    established. Only the explicitly stamped ``5m``/``1h`` tiers speak here.
-    Deliberately NO token-count predictions: the submarine forensics showed the
-    fact ("the wait outlived the cache") is what changes the agent's next decision
-    (batch waits, longer single windows), while "~X tokens will re-write" is a
-    counterfactual — the next send may reroute, compact, or still hit a live cache.
-
-    REACHABILITY, honestly: the root waits (``wait_task``, ``wait_tasks``) feed
-    their own elapsed window, a LOWER bound on cache age, so at the shipped ``1h``
-    tier only ``wait_tasks`` (7200s ceiling) can cross inside the window and
-    ``wait_task`` sits on the 3600s horizon; at ``5m`` both cross. ``delegate_wait``
-    feeds the time since the task's last recorded model response, once per wake, so
-    its line is reachable at ANY tier and no longer depends on the 3 s tick. Pinned by
-    tests/test_cache_optimization.py::test_cache_horizon_reachability_matches_the_wait_clamps
-    and the supervising-wake tests; the tier is an owner setting, not a constant, and
-    a wait tool that silently could not disclose would be worse.
-    """
-    try:
-        elapsed = float(elapsed_sec)
-    except (TypeError, ValueError):
-        return ""
-    usage = getattr(ctx, "_accumulated_usage", None)
-    if not isinstance(usage, dict):
-        return ""
-    applied_ttl = str(usage.get("_last_prompt_cache_ttl") or "").strip()
-    from ouroboros.llm import cache_ttl_seconds
-
-    horizon = cache_ttl_seconds(applied_ttl)
-    if horizon is None or elapsed <= horizon:
-        return ""
-    return (
-        f"⚠️ configured prompt-cache horizon ({applied_ttl}, {horizon}s) elapsed since the "
-        f"last model response ({elapsed:.0f}s ago); the next model send may be cold."
-    )
-
-
 def _wait_early_return_note(early) -> str:
     if not early:
         return ""
@@ -790,9 +749,6 @@ def _single_wait_text(ctx: Any, tid: str, waited: Dict[str, Any], *, view: str, 
     if held:
         extra += (f"\n\n[ADVISORY] {len(held)} other child(ren) held by a current stop ({', '.join(held)}): "
                   "none reaches a terminal state until its stop is released; get_task_result shows its current_stop.")
-    horizon_note = cache_horizon_note(ctx, waited.get("elapsed_sec"))
-    if horizon_note:
-        extra += f"\n\n{horizon_note}"
     if window:
         extra += f"\n\n[WAIT_WINDOW] {json.dumps(window)}"
     tasks = waited.get("tasks") if isinstance(waited.get("tasks"), dict) else {}
@@ -1017,9 +973,6 @@ def _await_messages(ctx: ToolContext, timeout_sec: Optional[int] = None, mode: A
         "note": _AWAIT_MESSAGES_NOTE,
         **({"owner_stop_state": "unknown"} if stop_unread and not stopped else {}),
     }
-    horizon_note = cache_horizon_note(ctx, elapsed)
-    if horizon_note:
-        out["cache_horizon"] = horizon_note
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -1087,8 +1040,8 @@ def await_messages_entry() -> ToolEntry:
             "nothing itself: the message reaches you at the next round top, exactly as after a wait_task early return. "
             "The ordinary in-flight tool lease keeps the supervisor's silence attention (a notice, never a stop) off "
             f"you until that bound, or for at most {IDLE_LEASE_MAX_SEC // 3600} hours without one (a longer wait keeps "
-            "running and may draw that notice). The result says when the applied prompt-cache horizon elapsed since "
-            "the last model response."
+            "running and may draw that notice). The result reports time in the wait; round facts report the previous "
+            "response's age and recorded request cache TTL separately."
         ),
         "parameters": {"type": "object", "properties": {
             "timeout_sec": {"type": "integer", "description": "Seconds: a sleep's wake time, or the in_slot window."},
@@ -1283,15 +1236,7 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
         projected["test_evidence_gap"] = gap
     if data.get("duplicate_of"):
         projected["duplicate_of"] = str(data.get("duplicate_of"))
-    # A capability reduction is a SEMANTIC handoff fact, not forensics: it is
-    # what decides how far to trust this answer, and this is the surface a
-    # fan-out parent absorbs its children through. Same predicate as the
-    # single-child read, so the batch and the singleton cannot disagree.
-    _delta = disclosable_capability_delta(data)
-    if _delta:
-        projected["capability_delta"] = _delta
-    if _effort := disclosable_effort_fact(data):
-        projected["effort"] = _effort
+    projected.update(_handoff_disclosures(data))
     # Delegation honesty (Q1A, 2026-08-10 amendments): whether a
     # harness-dispatched child ACTUALLY delegated is a handoff fact the
     # fan-out parent absorbs here — the e9108a09 incident hid nine
@@ -1581,9 +1526,6 @@ def _batch_wait_payload(ctx: Any, waited: Dict[str, Any], normalized_ids: List[s
         waited["window_sec"], waited["window_bound"] = expiry[1], expiry[2]
     if note := _wait_early_return_note(waited.get("early_return")):
         waited["early_return_note"] = note + withdrawn
-    horizon_note = cache_horizon_note(ctx, waited.get("elapsed_sec"))
-    if horizon_note:
-        waited["cache_horizon_note"] = horizon_note
     return waited
 
 

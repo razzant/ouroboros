@@ -899,12 +899,33 @@ def test_the_notice_offers_a_result_review_only_where_this_actor_can_ask_for_one
     tools, trace, _content = _nudge_case("pre_delivery_notice", tmp_path, monkeypatch)
     monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: mode.split("_")[0])
     if mode == "auto_without_review_tool":
-        tools.available_tools = lambda: ["write_file", "verify_and_record", "finish_task"]
+        tools.callable_rows = lambda namespace="": [{"name": n} for n in ("write_file", "verify_and_record", "finish_task")]
     notice = _pre_delivery_notice(tools, tmp_path, "t", trace, [])
     assert notice.startswith("Before delivery: no recorded check (verify_and_record) or result review has examined")
     assert ('review_change with subject="result"' in notice) is (mode == "auto")
     assert ("off on this install" in notice) is (mode == "off")
     assert "verify_and_record runs the check" in notice and "or deliver it as it is" in notice
+
+
+@pytest.mark.parametrize("level", ["observe", "full"])
+def test_the_notice_offers_the_check_only_where_this_actor_can_call_it(tmp_path, monkeypatch, level):
+    """An Observe wake is shown verify_and_record (an owner turn's schemas, В31=B) and refused the call: the notice
+    reads what this actor can call, so it offers the check under Full and not under Observe."""
+    from ouroboros import consciousness_authority as ca
+    from ouroboros.loop_nudges import _pre_delivery_notice
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    _tools, trace, _content = _nudge_case("pre_delivery_notice", tmp_path, monkeypatch)
+    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: "auto")
+    metadata = ca.apply_consciousness_authority({"id": "w", "metadata": {
+        "initiator": "consciousness", "consciousness_autonomy": level}})["metadata"]
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="w", task_metadata=metadata))
+    assert "verify_and_record" in registry.available_tools(), "shown at every level"
+    notice = _pre_delivery_notice(registry, tmp_path, "w", trace, [])
+    assert notice.startswith("Before delivery:")
+    assert ("verify_and_record runs the check" in notice) is (level == "full")
 
 
 @pytest.mark.parametrize("cause", ["findings", "pass"])

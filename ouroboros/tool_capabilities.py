@@ -272,6 +272,57 @@ PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
 # serially, so cap/dedup/enqueue remain single-threaded and safe.
 PARALLEL_SAFE_ENQUEUE_TOOLS: frozenset[str] = frozenset({"schedule_subagent"})
 
+# The legacy pool, frozen history and not a property of a tool: a response of more than one call, every one named
+# here, ran whole in the pool before calls ran in segments and still runs exactly so (``legacy_pool_response``);
+# naming a read in the sets above never changes which responses do.
+LEGACY_POOL_TOOLS: frozenset[str] = frozenset({
+    "inspect_harness", "inspect_subagent", "read_file", "list_files", "read_archive", "search_code", "query_code",
+    "query_data", "recent_tasks", "web_search", "chat_history", "vcs_read", "service_status", "service_logs",
+    "get_task_result", "list_projects", "memory_read", "search_ui_translations", "schedule_subagent",
+})
+
+# Every other response runs in segments (``call_segments``): consecutive inert reads run at the same time, every
+# other call alone, in written order. An inert read costs no money, publishes no file or record under an address a
+# call of the same response names as its input, and changes no other call's result; a tool joins only by name, after
+# its handler and its observable effects are checked, and any tool not named runs alone. It MAY lazily create a
+# runtime-internal cache or one-time import (the code-intel inventory of query_code, the chronicle activation of the
+# first memory_read, the dialogue import behind chat_history and list_projects, the usage store behind
+# get_task_result and peek_task, a pack-only file read_file or search_code materializes), and read_file stamps
+# ctx.last_read_view, which only the sequential native reviewer reads: a neighbour in the same group inspecting those
+# internals may not see them yet, as every response made only of reads has behaved in the legacy pool.
+INERT_READ_TOOLS: frozenset[str] = frozenset({
+    "read_file", "list_files", "read_archive", "search_code", "query_code", "recent_tasks", "chat_history",
+    "vcs_read", "get_task_result", "list_projects", "memory_read", "search_ui_translations", "inspect_subagent",
+    "knowledge_read", "knowledge_list", "workpad_read", "journal_read", "tree_read", "peek_task", "live_roots",
+    "memory_map", "list_skills", "youtube_transcript", "compare_subagent_patches",
+})
+
+
+def legacy_pool_response(names: Iterable[str]) -> bool:
+    """Whether this response runs whole in the pool under its old exception rule (``LEGACY_POOL_TOOLS``). Names are
+    taken lazily, as the old question took them: one is read only while every earlier one was legacy."""
+    count = 0
+    for count, name in enumerate(names, 1):
+        if name not in LEGACY_POOL_TOOLS:
+            return False
+    return count > 1
+
+
+def call_segments(names: Iterable[str]) -> list[list[int]]:
+    """One response's calls, by index, in the written order: each maximal run of consecutive ``INERT_READ_TOOLS``
+    is one group that runs at once; every other call is a segment of its own and runs alone."""
+    segments: list[list[int]] = []
+    previous = False
+    for index, name in enumerate(names):
+        together = name in INERT_READ_TOOLS
+        if together and previous:
+            segments[-1].append(index)
+        else:
+            segments.append([index])
+        previous = together
+    return segments
+
+
 # Browser tools run one at a time on the task's sticky executor.
 STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
     "browse_page", "browser_action",
@@ -469,10 +520,14 @@ def mcp_gateway_arguments(value: Any) -> Optional[dict]:
 
 
 def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
-    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
-    asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
+    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns, and any namespace
+    ``list_available_tools`` was asked to list by name (the connections map points there for complete MCP
+    descriptions), are forms the mind asked for; a call through the MCP gateway asks for the view its inner
+    arguments name."""
     if name == "enable_tools":
         return (None, None)
+    if name == "list_available_tools" and isinstance(tool_args, dict) and str(tool_args.get("namespace") or "").strip():
+        return requested_result_view(tool_args) or (None, None)
     if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
         tool_args = mcp_gateway_arguments(tool_args.get("arguments"))
     return requested_result_view(tool_args)

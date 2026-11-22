@@ -24,6 +24,7 @@ import re
 import time
 from typing import Any
 
+from .mac_input import REFUSES_BEFORE_POSTING, permission_refusal, proved, with_refusal
 from .macos_native import parse_info
 
 _UNREAD = object()  # "read the front yourself" marker for _finish
@@ -404,6 +405,16 @@ class PlaceMixin:
                 return {"ok": False, "reason": "target_lost", "error": self._target_error(app, res), "target": ctx["target"], "front": front}, step
         return None, step
 
+    @staticmethod
+    def _first_front(ctx: dict[str, Any], first: dict[str, Any], *, reread: bool) -> None:
+        """The front a sequence's receipt names is its first step's own: the application that step reached, or the one
+        in front when it was refused, as that step read it. ``reread``: the first step read the front again (after the
+        lookup of the sequence's characters), so an unread front there is unknown, not the earlier read; so is one the
+        first step reports it could not read (``front_unread``, a remote probe or a never-policy recheck)."""
+        front = next((first[k] for k in ("delivered_to", "front_at_dispatch", "front") if isinstance(first.get(k), dict)), None)
+        if front is not None or reread or first.get("reason") == "front_unread":
+            ctx["delivered_to"] = front  # a remote probe also reads it in the first step
+
     def _stop_before_activation(self, app: str, front: dict[str, Any] | None = None,
                                 resolved: dict[str, Any] | None = None) -> dict[str, Any] | None:
         """The native Mac helper resolves and may raise in one call. Other transports already read the target and front."""
@@ -438,7 +449,7 @@ class PlaceMixin:
 
     def _finish(self, payload: dict[str, Any], ctx: dict[str, Any], stderr: str = "", *, after: Any = _UNREAD) -> dict[str, Any]:
         """Compose the place facts of an input receipt (any transport) and demote a dispatch the helper itself
-        reported as dropped (cliclick, or the paste chord program, warns on stderr and exits 0). ``after`` is the
+        refused (the macOS input or paste chord program warns on stderr, posts nothing and exits 0). ``after`` is the
         post-input front; the local backends read it here, the remote ones pass what their probe printed (None = unread)."""
         if after is _UNREAD:
             after = self._front_local()
@@ -497,44 +508,42 @@ class PlaceMixin:
                                "was in front; " + next_step + "the rest were not sent; this tool observed no UI change")
             return payload
         dropped = "accessibility" in text.lower() and "not enabled" in text.lower()
-        untyped = re.findall(r"Unable to get key code for (\S+)", text)
-        if untyped or dropped:
+        # An unread layout says so in words of its own (paste_chord.js wraps them in its "Unable to get key code" line):
+        # nothing is known about the keys then, which is not "no key gives it".
+        unread = not dropped and "keyboard layout could not be read" in text
+        untyped = [] if unread else re.findall(r"Unable to get key code for (\S+)", text)
+        if untyped or dropped or unread:
             payload.pop("observed_effect", None)
             payload["ok"] = False
-            chord = payload.get("method") == "command_chord"
-            if chord:
-                # The Command chord program refuses before it makes an event: nothing was posted, a known fact.
+            method = payload.get("method")
+            chord = method == "command_chord"
+            what = {"paste": "paste chord", "command_chord": "shortcut"}.get(method, "input")
+            if method in REFUSES_BEFORE_POSTING:
+                # These programs refuse before they make an event: nothing was posted, a known fact.
                 payload["dispatched"] = False
                 if isinstance(payload.get("delivered_to"), dict):
                     payload["front"] = payload.pop("delivered_to")
                 else:
                     payload.pop("delivered_to", None)
-            if untyped and chord:
-                error = (f"no key of the active keyboard layout gives {untyped[0]} under Command, with or without Shift, so "
-                         "the shortcut was not sent: name it by its Command-plane character (cmd+g, not the layout's own "
-                         "letter), switch the layout or use the app's own commands")
+            if untyped and method == "paste":
+                error = ("no key of the active keyboard layout gives V under Command, so the paste chord was not sent: "
+                         "switch the layout, or use the app's own commands")
                 payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
             elif untyped:
-                # cliclick types through key codes of the ACTIVE keyboard layout and exits 0 when it cannot find
-                # one (measured 27.10.2026: Latin text under a Cyrillic layout typed nothing). Partial typing is unknown.
-                # The paste chord program says the same when no key of the layout gives V under Command: it sent nothing.
-                if payload.get("method") == "paste":
-                    error = ("no key of the active keyboard layout gives V under Command, so the paste chord was not sent: "
-                             "switch the layout, or use the app's own commands")
-                else:
-                    hint = ("switch the keyboard layout (a Latin one for Latin keys) or use the app's own commands"
-                            if "keys" in payload else "use type_text with via=paste")
-                    error = (f"{len(untyped)} character(s) have no key code in the active keyboard layout and were "
-                             f"not typed (the rest may have been); {hint}")
+                error = (f"no key of the active keyboard layout gives {untyped[0]} under Command, with or without Shift, so "
+                         "the shortcut was not sent: name it by its Command-plane character (cmd+g, not the layout's own "
+                         "letter), switch the layout or use the app's own commands" if chord else
+                         f"no key of the active keyboard layout gives {untyped[0]} alone or with Shift, so the keys were "
+                         "not sent: switch the keyboard layout (a Latin one for Latin keys), type the text with "
+                         "type_text, or use the app's own commands")
                 payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
-            else:  # the paste chord program refuses to post rather than have macOS drop it
-                payload.update({"reason": "permission_denied",
+            elif unread:  # no layout data: nothing is known about the keys, which is not "no key gives it"
+                payload.update({"reason": "layout_unread", "error": f"the active keyboard layout could not be read, so the {what} was not sent"})
+            else:
+                payload.update({"reason": "permission_denied", **permission_refusal("post_events"),
                                 "permission": {"accessibility": "untrusted", "source": "helper stderr"},
-                                "error": ("this process may not post input events (the Accessibility grant), so the "
-                                          + ("shortcut was not sent" if chord else "paste chord was not sent")
-                                          if payload.get("method") in ("paste", "command_chord") else
-                                          "macOS drops synthetic input from a process without the Accessibility grant: "
-                                          "the helper exited 0 but nothing reached the screen")})
+                                "error": f"this process may not post input events (the Accessibility grant), so the {what} "
+                                         "was not sent"})
             effects = []
             if target.get("activated"):
                 payload["observed_effect"] = True  # the switch before it was observed
@@ -544,14 +553,7 @@ class PlaceMixin:
                 payload["observed_effect"] = True  # the clipboard write before it completed
                 payload["clipboard_done"] = True
                 effects.append("the clipboard write")
-            if payload.get("method") == "paste":
-                dropped_text = "the paste chord was not sent (see error)"
-            elif chord:
-                dropped_text = "the shortcut was not sent (see error)"
-            elif untyped:
-                dropped_text = "the characters without a key code were dropped (see error); those with one may have been typed"
-            else:
-                dropped_text = "the input was dropped (see error)"
+            dropped_text = f"the {what} was not sent (see error)"
             payload["note"] = ((" and ".join(effects) + " ran; the input after it: " + dropped_text) if effects
                                else dropped_text + "; this tool observed no UI change")
             return payload
@@ -675,10 +677,10 @@ class PlaceMixin:
                             failed[key] = tree[key]
                 if until_text and "until_text" not in failed:
                     failed["until_text"] = {"status": "unknown", "reason": failed["reason"], "reads": 0}
-                return self._json_text(failed)
+                return self._json_text(with_refusal(failed))
             tree.update({"platform": plat, "app": target, "coordinate_note": "node and mark coordinates are INPUT-space "
                          "(macOS logical points): click them with raw=true; a mark is a position, not proof the element reacts"})
-            return self._json_text(tree)
+            return self._json_text(proved(tree, "accessibility"))
         if plat == "linux":
             rows, err = self._x11_windows()
             return self._json_text({"ok": False, "platform": plat, "reason": "unsupported", "session_type": self._session(),
@@ -760,4 +762,6 @@ class PlaceMixin:
         if until_text and "observation" not in out:
             out["observation"] = {"ok": False, "reason": "no_read",
                                   "until_text": {"status": "unknown", "reason": "no_read", "reads": 0}}
-        return self._json_text(out)
+        if isinstance(out.get("observation"), dict):
+            out["observation"] = with_refusal(out["observation"])
+        return self._json_text(proved(with_refusal(out), "accessibility"))

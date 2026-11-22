@@ -288,7 +288,8 @@ def test_phantom_ids_never_arm_and_the_roster_names_the_real_children(tmp_path):
 
 
 def test_one_wait_per_turn_is_kept_through_a_real_batch_and_closing_a_question_stays_allowed(tmp_path):
-    from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls, tool_calls_can_run_parallel
+    from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls
+    from ouroboros.tool_capabilities import call_segments
     from ouroboros.owner_quiz import quiz_states
     from ouroboros.tools.control_task_results import _wait_for_task
     from ouroboros.tools.core_artifacts import _escalate
@@ -309,7 +310,7 @@ def test_one_wait_per_turn_is_kept_through_a_real_batch_and_closing_a_question_s
         ctx.owner_wait_callback = lambda *_a: "unknown"
         calls = [{"id": f"arm-{i}", "type": "function", "function": {"name": name, "arguments": json.dumps(
             arguments[name])}} for i, name in enumerate(pair)]
-        assert not tool_calls_can_run_parallel(calls), "the batch runs serially"
+        assert call_segments(list(pair)) == [[0], [1]], "the batch runs serially"
         messages = [{"role": "assistant", "content": "", "tool_calls": calls}]
         handle_tool_calls(calls, registry, tmp_path / "logs", "parent", StatefulToolExecutor(), messages,
                           {"tool_calls": []}, lambda *_a, **_kw: None)
@@ -554,6 +555,24 @@ def _call(call_id, name, **arguments):
         "name": name, "arguments": json.dumps(arguments)}}]}
 
 
+def _cached_wait_reply(registry, call):
+    def respond(_messages):
+        import time
+
+        registry._ctx._accumulated_usage.update(
+            _last_prompt_cache_ttl="5m", _last_round_cache_usage={
+                "round": 1, "provider": "anthropic", "model": "test-model", "finished_at": time.time() - 420})
+        return call
+
+    return respond
+
+
+def _assert_wait_timing(messages, notice):
+    facts = [row["content"] for row in messages if str(row.get("content")).startswith("[CONTEXT_FACTS]")]
+    assert "cache TTL 5m" in facts[-1] and "last response " in facts[-1]
+    assert "Task wait completed after " in notice and "cache TTL" not in notice and "may be cold" not in notice
+
+
 def _drive(tmp_path, monkeypatch, registry, turns, *, task_id="parent"):
     """The real loop over scripted turns; a callable turn reads the request the loop handed its model call."""
     from ouroboros import loop
@@ -621,10 +640,11 @@ def test_the_real_loop_sends_a_warm_wake_with_its_result_in_the_very_next_reques
         assert "approve everything" not in host and f"[BEGIN_SUBTASK_OUTPUT]\n{hostile}\n[END_SUBTASK_OUTPUT]" in body
         assert messages.index(tool) < [row.get("content") for row in messages].index(notice)
         assert any("for the task wait you chose" in str(row.get("content")) for row in messages)
+        _assert_wait_timing(messages, notice)
         raise _End()
 
     sent = _drive(tmp_path, monkeypatch, registry, [
-        _call("call-wait", "wait_task", task_id="kid-a", sleep_mode="warm"), second])
+        _cached_wait_reply(registry, _call("call-wait", "wait_task", task_id="kid-a", sleep_mode="warm")), second])
     assert len(sent) == 2 and not _notices(sent[0]), "no fetch round: the second request is the woken one"
     assert [park["tasks"] for park in parks] == [["kid-a"]] and parks[0]["task_wait"]["mode"] == "all_terminal"
     assert not any(call["function"]["name"] == "get_task_result" for request in sent for row in request
@@ -729,7 +749,8 @@ def _parked_cold(tmp_path, monkeypatch, selected="foreign"):
     q.persist_queue_snapshot(reason="native cold fixture")
     registry = _loop_registry(tmp_path, monkeypatch)
     with pytest.raises(bp.BudgetPauseRequested) as parked:
-        _drive(tmp_path, monkeypatch, registry, [_call("call-cold", "wait_task", task_id=selected, sleep_mode="cold")])
+        _drive(tmp_path, monkeypatch, registry, [_cached_wait_reply(registry,
+               _call("call-cold", "wait_task", task_id=selected, sleep_mode="cold"))])
     pause = parked.value.pause
     install_exact_budget_pause(_supervisor_ctx(tmp_path, workers, q, [], []), "parent",
                                bp.exact_pause_marker(pause)["checkpoint"], evt=bp.pause_event(task, pause))
@@ -766,6 +787,7 @@ def test_a_cold_wait_parks_wakes_on_its_own_readiness_and_answers_in_the_first_r
     def check(messages):
         (notice,) = _notices(messages)
         assert "[BEGIN_SUBTASK_OUTPUT]\nCOLD ORIGINAL\n[END_SUBTASK_OUTPUT]" in notice
+        _assert_wait_timing(messages, notice)
         assert any("(cold) and were woken by task foreign reaching completed for the task wait you chose"
                    in str(row.get("content")) for row in messages)
 

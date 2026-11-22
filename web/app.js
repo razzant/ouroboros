@@ -1380,7 +1380,7 @@ evolution = initEvolution({ ...ctx, mount: document.getElementById('dashboard-pa
 initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });
 initActivity({ ...ctx, mount: document.getElementById('dashboard-panel-activity') });
 initConsciousnessDashboard({ ...ctx, mount: document.getElementById('dashboard-panel-consciousness') });
-initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
+const costs = initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
 const disposeStorage = initStorage({ ...ctx, mount: document.getElementById('dashboard-panel-storage') });
 skillsControls = initSkills({ ...ctx, layers });
 initWidgets(ctx);
@@ -1399,6 +1399,7 @@ window.addEventListener('pagehide', (event) => {
     if (event.persisted) return;
     evolution.dispose();
     updateStatus.dispose();
+    costs.destroy();
     disposeStorage?.destroy();
     disposeScrollFades.forEach((dispose) => dispose());
     telegramHost.dispose();

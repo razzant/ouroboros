@@ -1247,12 +1247,16 @@ def obsolete_review_index_positions(messages: Sequence[dict]) -> tuple[int, ...]
     return tuple(sorted(obsolete))
 
 
-def refresh_compacted_review_context(ctx: Any, candidate: list, *, selection: Any = _DEFAULT_SELECTION) -> list:
+def refresh_compacted_review_context(ctx: Any, candidate: list, *, selection: Any = _DEFAULT_SELECTION,
+                                     floor: int | None = None) -> list:
     """At an explicit checkpointed rewrite, retire superseded index snapshots.
 
     An unchanged current index stays at its exact position. A changed selection
     replaces that index in place before final measurement, openly changing the
-    prefix there. Unknown typed rows are not reinterpreted or removed.
+    prefix there (the caller passes no floor when the fold carries the mind's own review
+    selection). Unknown typed rows are not reinterpreted or removed. No copy before ``floor``
+    (an ordinary fold's note) is removed or replaced, and the last copy of each identity ends
+    current: a stale last copy before the floor gets the current index appended after it.
     """
     families = dict(getattr(ctx, "_pending_review_context", {}) or {})
     for row in candidate:
@@ -1273,10 +1277,12 @@ def refresh_compacted_review_context(ctx: Any, candidate: list, *, selection: An
             continue
         current = desired.pop(identity)
         same = [i for i in indices if candidate[i].get(REVIEW_CONTEXT_INDEX_KEY) == current[REVIEW_CONTEXT_INDEX_KEY]]
-        at = same[-1] if same else indices[-1]
-        removed.update(i for i in indices if i != at)
-        if not same:
+        at = (same[-1] if same else indices[-1]) if floor is None else indices[-1]  # with a floor: the last copy
+        removed.update(i for i in indices if i != at and (floor is None or i >= floor))
+        if at not in same and (floor is None or at >= floor):
             replacements[at] = current
+        elif at not in same:
+            desired[identity] = current  # appended at the tail
     return [replacements.get(i, row) for i, row in enumerate(candidate) if i not in removed] + [
         *desired.values(), *(row for row in updates if _review_index_identity(row) is None)]
 

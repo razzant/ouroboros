@@ -25,6 +25,8 @@ if str(REPO_ROOT) not in sys.path:
 from devtools.benchmarks.common import launcher_audit  # noqa: E402
 from devtools.benchmarks.common.manifests import repo_provenance  # noqa: E402
 from devtools.e2e_live import run_live_lanes, scenarios, stub_lane, ui_probe  # noqa: E402
+from tests._workspace_git import git_repository, world_git  # noqa: E402
+from tests._worlds import clone_repository, world  # noqa: E402
 
 FAKE_KEY = "sk-or-v1-e2e-live-test-key-value-never-printed-0123456789"
 
@@ -37,13 +39,16 @@ def _commit(repo: pathlib.Path, message: str) -> str:
                           capture_output=True, text=True).stdout.strip()
 
 
+def _lay_source(folder: pathlib.Path) -> None:
+    seed = git_repository(folder / "source", unborn=True)
+    (seed / "VERSION").write_text("7.0.0-test\n", encoding="utf-8")
+    world_git(seed, "add", "-A")
+    world_git(seed, "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q", "-m", "seed")
+
+
 def _git_seed(root: pathlib.Path, *, dirty: bool = False) -> pathlib.Path:
     """A tiny SOURCE checkout: one committed VERSION, optionally a TRACKED uncommitted edit."""
-    seed = root / "source"
-    seed.mkdir()
-    (seed / "VERSION").write_text("7.0.0-test\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=str(seed), check=True)
-    _commit(seed, "seed")
+    seed = clone_repository(world("e2e-live-runner-source", _lay_source) / "source", root / "source")
     if dirty:
         (seed / "VERSION").write_text("7.0.0-dirty\n", encoding="utf-8")  # describe says -dirty
     return seed
@@ -1135,10 +1140,9 @@ def test_sm1_stub_bumps_the_release_carriers_through_the_sync_ssot(tmp_path):
     bumped = carriers["VERSION"].strip()
     assert scenarios.version_is_bumped(seed, bumped) and f"| {bumped} |" in carriers["README.md"]
     root = tmp_path / "carriers"
-    root.mkdir()
     # Release admission reads Git scope, so materialize carriers in a disposable
     # repository rather than a bare directory.
-    subprocess.run(["git", "init", "-q"], cwd=str(root), check=True)
+    git_repository(root, unborn=True)
     for rel in sorted(CARRIER_SPAN_PATHS):
         if (REPO_ROOT / rel).is_file():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)

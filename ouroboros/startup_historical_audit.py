@@ -110,6 +110,31 @@ def finish_maintenance_job(job, process, data_root, started, parse, record):
     return fields
 
 
+# The server's background children that share this spawn and one stop and census shape (``stop``,
+# ``live_children``), in stop order. The restart and Fault cleanup stops and counts them here
+# (``server._emergency_process_cleanup``); Panic asks each by name, inline; Quit stops only the
+# maintenance child. Who stops each kind at each door: ``tests/test_process_custody.py``.
+BACKGROUND_CHILDREN = (("ouroboros.maintenance", "child"), ("ouroboros.storage", "count"),
+                       ("ouroboros.storage_free", "free"))
+
+
+def stop_background_children() -> list:
+    """Stop each owner of BACKGROUND_CHILDREN; return them for ``live_background_children``. Each is
+    read from its module now (a test may replace it), all before the first stop: an import failure
+    raises before any stop, so a lost census never reads as an empty one."""
+    import importlib
+
+    owners = [getattr(importlib.import_module(module), name) for module, name in BACKGROUND_CHILDREN]
+    for owner in owners:
+        owner.stop()
+    return owners
+
+
+def live_background_children(owners) -> list:
+    """Their children alive now, read afresh: an unfinished spawn counts until its owner returns."""
+    return [child for owner in owners for child in owner.live_children()]
+
+
 class HistoricalAudit:
     def __init__(self):
         self._lock = threading.Lock()

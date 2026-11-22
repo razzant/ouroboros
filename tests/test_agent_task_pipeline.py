@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.agent_task_pipeline as pipeline
+from tests._workspace_git import git_repository
 
 
 def test_direct_project_completion_writes_the_real_last_result_pointer(tmp_path, monkeypatch):
@@ -702,12 +703,10 @@ def test_requested_file_result_completes_without_committing_the_worktree(tmp_pat
     """
     import subprocess
 
-    repo = tmp_path / "workspace"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "workspace", unborn=True)
     def git(*args):
         return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout
 
-    git("init", "-q")
     (repo / "answer.txt").write_text("old\n", encoding="utf-8")
     git("add", "answer.txt")
     git("-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "base")

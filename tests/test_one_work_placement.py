@@ -160,11 +160,15 @@ def test_a_move_into_a_folder_another_room_holds_waits_before_selection_and_chan
     workers.RUNNING["other"] = {"task": holder, "worker_id": 0}
     assert dispatch_choice.choose(queue, 5.0, ()) == [], "the chooser leaves it queued"
     assert work["_placement_folder"] == str(shared) and work["workspace_root"] == str(old)
-    assert dispatch_choice.choose(queue, 5.0, ()) == [], "and its next pass names who keeps the folder"
-    assert work["_folder_wait"] == {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    assert dispatch_choice.choose(queue, 5.0, ()) == [], "and its next pass leaves it queued"
+    with queue._queue_lock:  # the queue says who keeps the folder now; the chooser wrote nothing on the row
+        assert dispatch_choice.lane_waits() == {"one": {"lane": "folder", "task_id": "other", "project_id": "elsewhere",
+                                                        "folder": str(shared)}}
+    assert "_lane_wait" not in work and "lane_wait" not in work
     del workers.RUNNING["other"]
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {}
     assert dispatch_choice.choose(queue, 5.0, ()) == [work], "nothing else held it"
-    assert "_folder_wait" not in work
     claimed = [{"task": holder}]  # that work's launch is claimed on the admission lane and not RUNNING yet
     assert not readmit_placement(data, work, repo_dir=repo, running=claimed, pending=workers.PENDING)
     assert work["workspace_root"] == str(old) and "placement_applied_at" not in work, "a refusal changes nothing"
@@ -251,7 +255,9 @@ def test_the_chooser_reads_a_moved_works_copy_records_once_and_its_launch_reads_
         assert not readmit_placement(data, work, repo_dir=repo, running=workers.RUNNING, pending=workers.PENDING)
     assert reads == [False, True] and (work["workspace_root"], work["_placement_folder"]) == ("", str(shared))
     assert [dispatch_choice.choose(queue, 100.0, ()) for _ in range(3)] == [[]] * 3 and len(reads) == 2
-    assert work["_folder_wait"] == {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {"one": {"lane": "folder", "task_id": "other", "project_id": "elsewhere",
+                                                        "folder": str(shared)}}
 
 
 def test_bind_failure_never_changes_pending_or_running(runtime, monkeypatch):
@@ -375,11 +381,11 @@ def test_restore_of_old_execution_scope_readmits_committed_move(host, tmp_path, 
     assert reads == [False, True]
 
 
-def test_a_folder_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_picked(tmp_path, monkeypatch):
+def test_a_lane_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_picked(tmp_path, monkeypatch):
     """Opus 16.11.2026: two rooms share one recorded folder and a store gate (here a schedule's control) refuses both
-    rows every pass. The row a walk picks holds the folder only for the rest of that walk and may never start, so the
-    later row's wait never names it and a pass marks nothing (``dispatch_choice._collect``'s ``waits``). Work that
-    does hold the folder is named once and stays named."""
+    rows every pass. The row a walk picks holds the folder only for the rest of that walk and may never start, so no
+    wait names it (``dispatch_choice.lane_waits`` counts what runs or is claimed). Work that does hold the folder is
+    named for both rows; the chooser writes nothing on a row and persists nothing for a wait."""
     from supervisor import dispatch_choice, evolution_lifecycle, state
     from tests._budget_pause_exact_helpers import _install_queue
 
@@ -405,15 +411,21 @@ def test_a_folder_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk
 
     for _ in range(3):
         one_pass()
-    assert marks.count("folder_wait") == 0 and "_folder_wait" not in second, marks
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {}, "a walk's pick holds no lane"
+    fields = {row["id"]: set(row) for row in (first, second)}  # as the chooser's own passes left them
     workers.RUNNING["other"] = {"task": {"id": "other", "type": "task", "project_id": "elsewhere",
                                          "root_task_id": "other", "workspace_root": str(shared),
                                          "workspace_mode": "external"}, "worker_id": 0}
     one_pass()
     one_pass()
-    wait = {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
-    assert first["_folder_wait"] == second["_folder_wait"] == wait
-    assert marks.count("folder_wait") == 2, "each named once, then unchanged"
+    wait = {"lane": "folder", "task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    with queue._queue_lock:
+        assert dispatch_choice.lane_waits() == {"first": wait, "second": wait}
+    # The chooser writes nothing for a wait: no field on either row (the old ``_folder_wait`` note included) and no
+    # publication for it (the old ``folder_wait`` reason included).
+    assert {row["id"]: set(row) for row in (first, second)} == fields
+    assert not {"folder_wait", "lane_wait"} & set(marks), marks
 
 
 def test_a_moved_rows_unreadable_own_resource_is_said_once_a_move_and_the_row_waits(tmp_path, monkeypatch, caplog):
@@ -452,3 +464,194 @@ def test_a_moved_rows_unreadable_own_resource_is_said_once_a_move_and_the_row_wa
     assert project_placement.pending_resource(work) is not None, "it still waits for its own resource"
     said = [record.levelno for record in caplog.records if "Own resource of moved one" in record.getMessage()]
     assert said == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+
+
+def test_a_queued_roots_lane_wait_is_what_holds_its_lane_now_whatever_the_chooser_saw(tmp_path, monkeypatch):
+    """Owner 21.11.2026 («5A») and review round 1 (a note the chooser stored went stale and was never written on a full
+    pool): the wait is computed under Q from the live rows by the lanes scheduling uses (``dispatch_choice.lane_waits``),
+    with no walk at all, so it holds on a full pool and ends the moment the holder lets the lane go."""
+    from ouroboros.project_placement import _OWN
+    from supervisor import conversation_lane, dispatch_choice
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    shared = str((tmp_path / "shared").resolve())
+
+    def root(tid, project="p", **fields):
+        return {"id": tid, "type": "task", "chat_id": 0, "_attempt": 1, "project_id": project, "root_task_id": tid,
+                "metadata": {}, **fields}
+
+    def waits(running=(), pending=()):
+        workers.RUNNING.clear()
+        workers.RUNNING.update({meta["task"]["id"]: {"worker_id": 0, **meta} for meta in running})
+        workers.PENDING[:] = list(pending)
+        with queue._queue_lock:
+            return dispatch_choice.lane_waits()
+
+    queued, holder = root("q"), root("x")
+    behind_x = {"lane": "project", "task_id": "x", "project_id": "p"}
+    assert waits([{"task": holder}], [queued]) == {"q": behind_x}, "the pool is full and nothing walked: it is said"
+    for reason in ("owner", "budget"):  # the owner's Pause or the spending limit gives the lane back
+        assert waits([], [root("x", _budget_pause={"reason": reason}), queued]) == {}, reason
+    assert waits([], [queued]) == {}, "the holder finished"
+    asleep = root("x", _budget_pause={"reason": "sleep"})
+    assert waits([], [asleep, queued]) == {}, "a solitary cold sleep releases its lane"
+    member = {"task": root("x-kid", delegation_role="subagent", root_task_id="x")}
+    assert waits([member], [asleep, queued]) == {"q": behind_x}, "a sleeping tree with a running member keeps it"
+    assert waits([{"task": holder, "lane": "conversation"}], [queued]) == {}, "a conversation turn holds no lane"
+    assert waits([], [root("x", _launch_claim={"token": "t"}), queued]) == {"q": behind_x}, "a claimed launch holds"
+    for row in (root("q-kid", delegation_role="subagent", root_task_id="y"), root("q", project="")):
+        assert waits([{"task": holder}], [row]) == {}, row
+    monkeypatch.setattr(conversation_lane, "resumes_on_lane", lambda row: row.get("id") == "q")
+    assert waits([{"task": holder}], [queued]) == {}, "a returned turn takes no project lane"
+    monkeypatch.undo()
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    # Folder lane: another Project's tree in the recorded folder; the Project's lane wins when both hold.
+    folder = {"workspace_root": shared, "workspace_mode": "external"}
+    other = {"task": root("o", project="other", **folder)}
+    assert waits([other], [root("q", **folder)]) == {"q": {"lane": "folder", "task_id": "o", "project_id": "other",
+                                                           "folder": shared}}
+    assert waits([other, {"task": root("x", **folder)}], [root("q", **folder)]) == {"q": behind_x}
+    # A sleeper granted back to a folder it already holds waits only for those acting in it (one still parked waits
+    # for its sleep, below).
+    sleeper = root("s", project="s", _budget_pause_resume={"pause": {"reason": "sleep"}}, **folder)
+    kid = {"task": root("s-kid", project="s", delegation_role="subagent", root_task_id="s")}
+    assert waits([kid, other], [sleeper]) == {"s": {"lane": "folder", "task_id": "o", "project_id": "other",
+                                                    "folder": shared}}
+    assert waits([kid], [sleeper]) == {}
+    # Two exclusively cold trees in one folder never wait for each other; once the second root acts, the first does.
+    other_sleeper = root("t", project="t", _budget_pause={"reason": "sleep"}, **folder)
+    other_kid = {"task": root("t-kid", project="t", delegation_role="subagent", root_task_id="t")}
+    assert waits([kid, other_kid], [sleeper, other_sleeper]) == {}
+    woken = {"task": root("t", project="t", **folder)}
+    assert waits([kid, woken], [sleeper]) == {"s": {"lane": "folder", "task_id": "t", "project_id": "t",
+                                                    "folder": shared}}
+    # A moved row whose own resource is unread keeps its Project's answer; its folder lane reads none meanwhile.
+    unread = {_OWN: {"bound_at": "2026-11-21T00:00:00Z", "kind": "move"}, "_placement_folder": ""}
+    assert waits([{"task": root("x")}], [root("q", **unread)]) == {"q": behind_x}
+    assert waits([other], [root("q", **folder, **unread)]) == {}
+    # A folder is said while it answers for the room memory admitted the row to: that room's recorded folder, or an
+    # intent that keeps its own; a row whose room changed and whose folder facts did not yet says none of it.
+    def admitted(working_dir, kind="room_default"):
+        return {"_project_admission": {"project_id": "p", "project": {"id": "p", "working_dir": working_dir}},
+                "metadata": {"resource_intent": {"kind": kind, "project_id": "p"}}}
+
+    by_folder = {"q": {"lane": "folder", "task_id": "o", "project_id": "other", "folder": shared}}
+    assert waits([other], [root("q", **folder, **admitted(shared))]) == by_folder
+    assert waits([other], [root("q", **folder, **admitted("/elsewhere", "explicit_resource"))]) == by_folder
+    assert waits([other], [root("q", **folder, **admitted("/elsewhere"))]) == {}
+    assert waits([other, {"task": root("x")}], [root("q", **folder, **admitted("/elsewhere"))]) == {"q": behind_x}
+    # Only a row the chooser's own memory gates would admit waits for its lane (``_candidate_ineligible`` with no
+    # lanes and no stat reads): its pause, sleep, hold, the owner's hold, a launch claim or its root's fence first.
+    running = [{"task": root("x")}]
+    for fields in ({"_budget_pause": {"reason": "owner"}}, {"_budget_pause": {"reason": "sleep"}},
+                   {"_budget_pause_hold": {"reason": "panic_hold"}}, {"_owner_hold": {"reason": "owner"}},
+                   {"_launch_claim": {"token": "t"}}):
+        assert waits(running, [root("q", **fields)]) == {}, fields
+    queue.BUDGET_ROOT_FENCES["q"] = {"root_task_id": "q", "fence_id": "f1", "status": "paused", "cause": "owner_pause"}
+    assert waits(running, [root("q")]) == {}, "its root's spending fence, not selected against it"
+    grant = {"pause_id": "pz", "grant_id": "g1", "authority": "explicit_resume", "root_fence_id": "f1",
+             "root_grant_id": "rg", "root_resume_generation": 1}  # Opus S1: a member selected against the fence
+    assert waits(running, [root("q", _budget_pause_resume=grant)]) == {"q": behind_x}
+    assert waits(running, [root("q", _resume_selection={"fence_id": "f1"})]) == {"q": behind_x}
+    queue.BUDGET_ROOT_FENCES.clear()
+    resumed = root("q", _budget_pause_resume={"pause_id": "pz", "grant_id": "g1", "authority": "explicit_resume"})
+    assert waits(running, [resumed]) == {"q": behind_x}, "Astra B3: its Resume was granted"
+
+
+def test_a_moved_row_names_no_holder_of_the_folder_it_left_until_the_chooser_reads_its_new_one(tmp_path, monkeypatch):
+    """Review round 3 (Astra B1) and round 4: a move gives a queued row its new room at once and its folder facts
+    only at the chooser's next look (``project_placement`` writes no lane fact), so meanwhile its folder is said
+    only while it answers for that room (``dispatch_choice._folder_answers``): it names no holder of the folder it
+    left, its Project's answer stays, and after the chooser's look it names the holder of its new room's folder."""
+    from supervisor import dispatch_choice, evolution_lifecycle, state
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path / "data"
+    data.mkdir()
+    queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    old, new = ((tmp_path / name).resolve() for name in ("old", "new"))
+    for folder in (old, new):
+        folder.mkdir()
+    create_project(data, "dest")
+    update_project(data, "dest", working_dir=str(new))
+    workers.PENDING.append({"id": "q", "type": "task", "chat_id": 0, "_attempt": 1, "project_id": "prior",
+                            "root_task_id": "q", "workspace_root": str(old), "workspace_mode": "external",
+                            "metadata": {"resource_intent": {"kind": "room_default", "project_id": "prior"}}})
+
+    def holder(tid, project, folder=None):
+        workers.RUNNING[tid] = {"worker_id": 0, "task": {"id": tid, "type": "task", "project_id": project,
+                                                         "root_task_id": tid, **({"workspace_root": str(folder),
+                                                         "workspace_mode": "external"} if folder else {})}}
+
+    def said():
+        with queue._queue_lock:
+            return dispatch_choice.lane_waits()
+
+    holder("x", "other", old)
+    assert said() == {"q": {"lane": "folder", "task_id": "x", "project_id": "other", "folder": str(old)}}
+    place(data, "q", "dest", workers)
+    assert said() == {}, "right after the move it names no holder of the folder it left"
+    holder("z", "dest")
+    assert said() == {"q": {"lane": "project", "task_id": "z", "project_id": "dest"}}, "its Project's answer stays"
+    del workers.RUNNING["z"], workers.RUNNING["x"]
+    holder("y", "other", new)
+    assert dispatch_choice.choose(queue, 100.0, ()) == [], "the chooser's look: its new room's folder is held"
+    assert said() == {"q": {"lane": "folder", "task_id": "y", "project_id": "other", "folder": str(new)}}
+
+
+def test_a_moved_sleeping_root_keeps_its_helpers_folder_from_the_chooser(tmp_path, monkeypatch):
+    """Review round 3 (Astra B1), the invariant round 3 broke: a sleeping root whose helper still writes in its
+    folder is moved to a room with another folder; the chooser still keeps the old folder for that tree, so of
+    two independent works it admits the one in the new folder, as before the move."""
+    from tests.test_sleep_tree_lease import _run, _task, cold_park
+    from supervisor import dispatch_choice, evolution_lifecycle, state
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path / "data"
+    data.mkdir()
+    queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
+    monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    old, new = tmp_path / "old", tmp_path / "new"
+    for folder in (old, new):
+        folder.mkdir()
+    create_project(data, "dest", working_dir=str(new))
+    external = {"workspace_mode": "external"}
+    _run(workers, {**_task(data, "x", project="prior"), "workspace_root": str(old), **external,
+                   "metadata": {"resource_intent": {"kind": "room_default", "project_id": "prior"}}})
+    _run(workers, {**_task(data, "kid", tree="x", project="prior", launch_handoffs={"op": {"tool": "write_file"}}),
+                   "workspace_root": str(old), **external})
+    cold_park(data, monkeypatch, workers, queue, "x", tasks=["kid"])
+    workers.PENDING += [{"id": tid, "type": "task", "chat_id": 1, "_attempt": 1, "project_id": tid,
+                         "root_task_id": tid, "metadata": {}, "workspace_root": str(folder), **external}
+                        for tid, folder in (("old-writer", old), ("new-writer", new))]
+    place(data, "x", "dest", workers)
+    assert [row["id"] for row in dispatch_choice.choose(queue, 100, (), limit=1)] == ["new-writer"]
+
+
+def test_a_failed_lane_wait_reads_as_none_and_is_warned_once_per_distinct_error(tmp_path, monkeypatch, caplog):
+    """Review round 2 (Opus A2, Grok, Astra A2): a display fact never stops a snapshot or the census, so a failure
+    says no wait, and an operator sees it: one warning per distinct error, not one per call."""
+    import logging
+
+    from ouroboros import project_lease
+    from supervisor import dispatch_choice
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(dispatch_choice, "_LANE_WAIT_ERRORS", set())
+    failures = iter(["first", "first", "second"])
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError(next(failures))
+
+    monkeypatch.setattr(project_lease, "lane_holders", broken)
+    with caplog.at_level(logging.WARNING, logger="supervisor.dispatch_choice"), queue._queue_lock:
+        assert [dispatch_choice.lane_waits() for _ in range(3)] == [{}, {}, {}]
+    said = [record.getMessage() for record in caplog.records if "Lane waits unavailable" in record.getMessage()]
+    assert len(said) == 2 and "first" in said[0] and "second" in said[1], said
