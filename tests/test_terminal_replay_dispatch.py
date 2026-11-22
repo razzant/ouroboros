@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import server_liveness, store
+from ouroboros.host_notice import mind_text
 from supervisor import events_chat_delivery as delivery, message_bus, terminal_delivery as td
 from supervisor.event_observation import ObservedEventQueue
 from tests._dialogue import chat_rows, progress_rows
@@ -38,7 +39,7 @@ def dispatch(tmp_path, monkeypatch, sender, isolated_retry):
     def send(chat_id, text, **kwargs):
         did = (kwargs.get("progress_meta") or {}).get("delivery_id")
         if not did:
-            trace.notices.append((chat_id, text))
+            trace.notices.append((chat_id, text + mind_text(kwargs.get("progress_meta") or {})))  # phrase, step, details
             return True, "ok"
         row = next(row for row in td.pending_deliveries(tmp_path) if row["delivery_id"] == did)
         history = progress_rows(tmp_path) if kwargs.get("is_progress") else chat_rows(tmp_path)

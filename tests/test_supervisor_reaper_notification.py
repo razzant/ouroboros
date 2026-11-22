@@ -187,7 +187,7 @@ def test_subagent_provider_death_never_pings_the_owner(sent_and_ctx):
     )
 
     assert not _outage_lines(sent)
-    assert [text for _cid, text in sent if "Subagent kidE failed" in text]
+    assert [text for _cid, text in sent if text == "Subagent failed."]  # its id is the notice's detail
 
 
 def test_provider_incident_is_system_unkeyed_and_host_salvage_suppresses_duplicate(

@@ -38,6 +38,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ouroboros.host_notice import mind_text
 from ouroboros.utils import append_jsonl
 
 
@@ -210,7 +211,9 @@ def seam(pool, monkeypatch, request):
         assert pool.workers.WORKERS[wid] is expected_worker
         respawned.append((wid, kw))
     monkeypatch.setattr(lifecycle, "respawn_worker", respawn)
-    monkeypatch.setattr(pool.workers, "send_with_budget", lambda chat_id, text, **_k: sent.append((chat_id, text)))
+    # What a reader is told: the phrase, then its step and raw details (host_notice).
+    monkeypatch.setattr(pool.workers, "send_with_budget",
+                        lambda chat_id, text, **_k: sent.append((chat_id, text + mind_text(_k.get("progress_meta") or {}))))
     events = pool.root / "logs" / "events.jsonl"
     if getattr(request, "param", "seeded") != "missing":
         append_jsonl(events, {"type": "noise"})
@@ -531,7 +534,7 @@ def test_the_replacement_loop_is_bounded_then_parked_and_reported(pool, seam, mo
     rows = _rows(seam.supervisor, "worker_ready_timeout")
     assert [row["action"] for row in rows] == ["respawn", "parked"]
     assert rows[1]["attempt"] == 2 and rows[1]["max_attempts"] == 2
-    assert seam.sent and seam.sent[0][0] == 7 and "slot 1" in seam.sent[0][1] and "parked" in seam.sent[0][1]
+    assert seam.sent and seam.sent[0][0] == 7 and "slot 1" in seam.sent[0][1] and "set aside" in seam.sent[0][1]
     for wid in (2, 3):
         if wid == 3:
             fresh = _booting_slot(pool, 0, 5000)
@@ -542,7 +545,7 @@ def test_the_replacement_loop_is_bounded_then_parked_and_reported(pool, seam, mo
         pool.lifecycle._replace_unready_slot(wid, failed, 7, time.time(), 2)
         assert failed.readiness_exhausted and failed.reaping and not failed.booting
         assert len(seam.sent) == wid - 1, "only the first park since a successful ready tells the owner"
-    assert "slot 3" in seam.sent[-1][1] and "Use /restart" in seam.sent[-1][1]
+    assert "slot 3" in seam.sent[-1][1] and "Restart Ouroboros" in seam.sent[-1][1]
     assert [row["action"] for row in _rows(seam.supervisor, "worker_ready_timeout")] == ["respawn"] + ["parked"] * 3
     assert disabled == [True] * (3 if lane == "project" else 1)
 
@@ -850,7 +853,7 @@ def test_unconfirmed_final_attempt_parks_only_once_its_death_is_observed(pool, s
     lifecycle.finish_unready_teardown(job)
     assert slot.readiness_exhausted and slot.reaping and workers.WORKERS[1] is slot
     assert seam.respawned == [] and disabled == [True]
-    assert seam.sent and seam.sent[0][0] == 7 and "slot 1" in seam.sent[0][1] and "parked" in seam.sent[0][1]
+    assert seam.sent and seam.sent[0][0] == 7 and "slot 1" in seam.sent[0][1] and "set aside" in seam.sent[0][1]
     assert [row["action"] for row in _rows(seam.supervisor, "worker_ready_timeout")] == ["parked"]
 
 

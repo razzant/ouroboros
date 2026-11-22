@@ -273,9 +273,9 @@ def test_pre_task_budget_refusal_remains_an_exact_failed_operation(tmp_path, mon
     # The carrier's typed refusal is the host operation's exact failed terminal, correlated by its source.
     [task_id] = list(workers.RUNNING)
     stored = load_task_result(tmp_path, task_id)
-    assert stored["status"] == "failed" and "Budget exhausted" in stored["result"], stored
+    assert stored["status"] == "failed" and stored["result"] == "The total budget is spent, so this turn did not start."
     result = client.get(f"/chat/operations/{CHAT}:{MSG}", headers=_headers()).json()
-    assert result["status"] == "failed" and "Budget exhausted" in result["text"]
+    assert result["status"] == "failed" and result["text"] == "The total budget is spent, so this turn did not start."
 
 
 @pytest.mark.parametrize("chat_id", [1, 123456])
@@ -300,7 +300,8 @@ def test_ordinary_main_and_transport_refusals_keep_their_original_envelope(monke
     # The carrier's keyed final: the registered turn's id, no durable origin for an ordinary turn.
     [(args, kwargs)] = finals
     assert kwargs["task_id"] == receipt["activity_id"] and kwargs["system_type"] == "task_not_started"
-    assert args[1].startswith("🚫 Budget exhausted.") and "origin_message_ref" not in kwargs["progress_meta"]
+    assert args[1] == "The total budget is spent, so this turn did not start."
+    assert kwargs["progress_meta"]["notice"]["step"] == "raise_total_budget" and "origin_message_ref" not in kwargs["progress_meta"]
     # Keyed by the registered turn's id, in the owner's closed-class words; an ordinary turn keeps no
     # durable terminal origin (its client id stays on the live receipt).
     stored = load_task_result(workers.DRIVE_ROOT, receipt["activity_id"])
@@ -346,12 +347,14 @@ def test_chat_crash_preserves_only_the_host_accepted_operation(tmp_path, monkeyp
     # The owner reads the failure once, keyed to the turn; only the host-accepted operation keeps its source.
     rows = chat_rows(tmp_path)
     final = rows[-1]
-    assert "test chat execution failed" in final["text"]
+    # Its row says the phrase; the raw error is its notice's detail and stays in the record above.
+    assert final["text"] == "This turn stopped on an unexpected error."
+    assert "test chat execution failed" in final["notice"]["details"]
     assert final["task_terminal_status"] == "failed"
     assert final.get("origin_message_ref") == (ref if host_operation else None)
     # The lane row carries the turn's complete ingress origin: the operation's authority, host op or not.
     result = client.get(f"/chat/operations/{CHAT}:{MSG}", headers=_headers()).json()
-    assert result["status"] == "failed" and "test chat execution failed" in result["text"]
+    assert result["status"] == "failed" and result["text"] == "This turn stopped on an unexpected error."
 
 
 def test_real_server_consumes_one_source_and_authors_only_its_operation_marker(tmp_path, monkeypatch):

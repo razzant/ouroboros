@@ -749,7 +749,7 @@ def test_deferred_replace_records_git_refusal_after_export_and_retirement(replac
     sent = []
     monkeypatch.setattr(message_bus, "send_with_budget", lambda chat, text, **kw: sent.append((chat, text, kw)))
     store_switch.report_outcomes(scene.data, 42)
-    assert len(sent) == 1 and "index.lock" in sent[0][1]
+    assert len(sent) == 1 and "index.lock" in sent[0][2]["progress_meta"]["notice"]["details"]
     assert sent[0][2]["system_type"] == "storage_switch_notice"
 
 
