@@ -15,7 +15,7 @@ for a binding, a carrier that lost its id) neither stand nor retire; the owner's
 Not covered: works with no project, and a root that fails while a later-started root of its project exists. Cost per
 wake: one index probe per open project, one primary-key read of the roots bound to open projects and the bodies of
 the candidates, all in the same snapshot; nothing is stored. An unreadable binding store or a damaged row, or an
-empty registry the strict reader cannot vouch for (one lost beside its commit witness), is the section's named gap.
+empty registry not proved empty (lost beside its commit witness, or no row readable), is the section's named gap.
 
 Own clock (``_clock_section``): ``consciousness_clock.own_clock_lines`` over the state the alarm read when it admitted
 the wake, while a named time or my human's reported zone stands; the appointment and the bounds alone make none.
@@ -292,12 +292,12 @@ def fallen_works(root: Any, *, now: float, projects: Iterable[Mapping[str, Any]]
 
 
 def _fallen_section(facts: StandingFacts) -> Optional[StandingSection]:
-    from ouroboros.projects_registry import reserved_project_chat_ids
+    from ouroboros.projects_registry import list_reserved_projects
 
     if facts.registry is None:
         raise LookupError("project registry unreadable")
-    if not facts.registry:  # empty is "no projects" only where the strict reader agrees (``readable_rooms``' rule)
-        reserved_project_chat_ids(facts.root, strict=True)
+    if not facts.registry:  # empty is "no projects" only where the registry proves it (``readable_rooms``' rule)
+        list_reserved_projects(facts.root, require_readable=True)
     works = fallen_works(facts.root, now=facts.now, projects=facts.registry)
     return StandingSection(FALLEN_KIND, FALLEN_TITLE, FALLEN_WORDS, tuple(work.line for work in works)) if works else None
 

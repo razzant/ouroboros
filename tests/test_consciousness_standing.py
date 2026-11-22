@@ -420,9 +420,9 @@ def test_an_unreadable_source_is_a_named_gap_never_a_missing_wake(tmp_path, monk
 
 
 def test_a_registry_lost_beside_its_commit_witness_is_the_sections_gap_never_no_projects(tmp_path):
-    """An empty registry means no projects only where the strict reader agrees (``projects_registry.readable_rooms``'
-    rule): one lost beside its commit witness is the section's named gap; one committed empty, or never committed (a
-    fresh install), stays quiet."""
+    """An empty registry means no projects only where the registry proves it (``projects_registry.readable_rooms``'
+    rule): one lost beside its commit witness, or one whose rows none is readable, is the section's named gap; one
+    committed empty, or never committed (a fresh install), stays quiet."""
     _registry(tmp_path, *PROJECTS)
     witness = tmp_path / "state" / "projects.json.committed"
     witness.touch()  # what every registry save leaves beside it
@@ -431,6 +431,9 @@ def test_a_registry_lost_beside_its_commit_witness_is_the_sections_gap_never_no_
     (tmp_path / "state" / "projects.json").unlink()
     lost = _observe(tmp_path)
     assert lost.standing == () and "fallen_work unreadable: FileNotFoundError" in lost.gaps
+    _registry(tmp_path, {"id": "Not a project", "name": "Unreadable"})
+    unreadable = _observe(tmp_path)
+    assert unreadable.standing == () and "fallen_work unreadable: ValueError" in unreadable.gaps
     _registry(tmp_path)
     empty = _observe(tmp_path)
     witness.unlink()
