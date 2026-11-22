@@ -351,13 +351,14 @@ def extension_report(result: Any) -> Dict[str, Any]:
             reason["capability_unavailable"] = refusal["capability_unavailable"]
         if permission := _report_id(refusal.get("permission")):
             reason["permission"] = permission
-        if refusal.get("repair") in _REPAIRS:
+        if isinstance(refusal.get("repair"), str) and refusal["repair"] in _REPAIRS:  # a list or object is ignored
             reason["repair"] = refusal["repair"]
         if isinstance(refusal.get("where"), str) and refusal["where"].strip():
             reason["where"] = " ".join(refusal["where"].split())[:_WHERE_CHARS]
         return {"extension_reason": reason}
     text = result.producer_text if result.producer_text is not None else result.text
-    if result.code not in ("OK", "OWNER_OPERATION_REFUSED") or '"permissions_available"' not in str(text or ""):
+    if result.code not in ("OK", "SAFETY_WARNING", "OWNER_OPERATION_REFUSED") or '"permissions_available"' not in str(
+            text or ""):
         return {}  # a success body is parsed again only when it names permissions (it can be megabytes)
     body = _extension_body(result)
     items = body.get("permissions_available") if body.get("ok") is not False else None

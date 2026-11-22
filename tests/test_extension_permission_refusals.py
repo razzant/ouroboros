@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros import extension_health
 from ouroboros.tools.extension_dispatch import _extension_completion, _with_extension_report
-from ouroboros.tools.tool_result import ToolResult
+from ouroboros.tools.tool_result import ToolResult, _compose_execute_result_result
 
 _SKILL = {"skill": "desk"}
 _DENIED = {"ok": False, "reason": "accessibility_untrusted", "refusal": {
@@ -68,7 +70,8 @@ def test_an_unavailable_permission_opens_a_dated_refusal_a_repeat_keeps_it_and_a
     assert _refusals(tmp_path) == opened and extension_health.read_extension_health(tmp_path, "desk")["status"] == "live"
     _with_extension_report(ctx, _SKILL, _completed({"ok": True, "permissions_available": ["post_events"]}))
     assert _refusals(tmp_path)["accessibility"]["since"] == since  # another permission says nothing of this one
-    _with_extension_report(ctx, _SKILL, _completed({"ok": True, "permissions_available": ["accessibility"]}))
+    _with_extension_report(ctx, _SKILL, _compose_execute_result_result(  # a success the host warned about is a success
+        "", _completed({"ok": True, "permissions_available": ["accessibility"]}), "", "A host safety warning."))
     assert _refusals(tmp_path) == {} and "permission_refusals" not in json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -77,3 +80,24 @@ def test_a_refusal_without_a_health_record_writes_nothing(tmp_path):
     result = _with_extension_report(ctx, _SKILL, _completed(_DENIED))
     assert result.meta["extension_reason"]["permission"] == "accessibility"
     assert extension_health.read_extension_health(tmp_path, "desk") is None
+
+
+@pytest.mark.parametrize("repair", [["owner"], {"who": "owner"}, "owner"])
+def test_an_optional_refusal_field_of_another_type_is_ignored_and_the_call_reads_as_reported(tmp_path, repair):
+    ctx = SimpleNamespace(drive_root=tmp_path, task_metadata={})
+    body = {**_DENIED, "refusal": {**_DENIED["refusal"], "repair": repair}}
+    result = _with_extension_report(ctx, _SKILL, _completed(body))
+    assert (result.status, result.code, json.loads(result.text)) == ("error", "TOOL_REPORTED_FAILURE", body)
+    kept = {"code": "accessibility_untrusted", "capability_unavailable": True, "permission": "accessibility",
+            "where": "System Settings > Privacy & Security > Accessibility"}
+    assert result.meta["extension_reason"] == ({**kept, "repair": "owner"} if repair == "owner" else kept)
+
+
+def test_the_dispatcher_itself_copies_the_report_and_dates_the_refusal(tmp_path, monkeypatch):
+    from ouroboros.tools import extension_dispatch
+
+    ctx = SimpleNamespace(drive_root=tmp_path, task_metadata={})
+    extension_health.record_extension_health(tmp_path, "desk", status=extension_health.LIVE)
+    monkeypatch.setattr(extension_dispatch, "_dispatch_extension_tool_untagged", lambda *_a, **_kw: _completed(_DENIED))
+    result = extension_dispatch._dispatch_extension_tool_result(ctx, "desk_click", dict(_SKILL), {})
+    assert result.meta["extension_reason"]["permission"] == "accessibility" and list(_refusals(tmp_path)) == ["accessibility"]
