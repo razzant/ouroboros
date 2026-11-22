@@ -36,11 +36,13 @@ def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
     total[REPORTED_TOKENS_KEY] = cumulative_reported_tokens(total, usage)  # reads the pre-fold seed
     for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_write_tokens"):
         total[k] = int(total.get(k) or 0) + int(usage.get(k) or 0)
-    if usage.get("cost") is not None:
-        total["cost"] = float(total.get("cost") or 0) + float(usage["cost"])
-        if usage.get("cost_final") is False or usage.get("cost_estimated"):
-            total["cost_final"] = False
-    else:
+    if (cost := usage.get("cost")) is not None:
+        total["cost"] = float(total.get("cost") or 0) + float(cost)
+    if usage.get("cost_estimated") is True:
+        total["cost_estimated"] = True
+    if cost is None or usage.get("cost_partial") is True:
+        total["cost_partial"] = True
+    if total.get("cost_partial") or total.get("cost_estimated") or usage.get("cost_final") is False:
         total["cost_final"] = False
     merge_request_wire_usage(total, usage)
 

@@ -27,6 +27,7 @@ from ouroboros.openai_responses import (
 )
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
+from ouroboros.opencode_go import go_chat_headers, is_go_chat_route
 from ouroboros.llm_capability_policy import (
     _EFFORT_CLAMP_CVAR,
     _OPTIONAL_DROPPABLE_PARAMS,
@@ -45,7 +46,7 @@ from ouroboros.request_wire_recovery import (
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
-from ouroboros._usage_response import observed_processing_mode, response_reported_price
+from ouroboros._usage_response import normalize_go_price, observed_processing_mode, response_reported_price
 from ouroboros.event_usage import REPORTED_TOKENS_KEY
 
 
@@ -275,6 +276,8 @@ class _OpenAICompatibleLaneMixin:
             if prepared_tools:
                 kwargs["tools"] = prepared_tools
                 kwargs["tool_choice"] = tool_choice
+            if headers := go_chat_headers(target):
+                kwargs["extra_headers"] = headers
             if bypass_response_cache and provider == "openai-compatible":
                 # Must ride in extra_body: the OpenAI SDK rejects unknown top-level
                 # kwargs with TypeError, so a raw `cache=` argument never reaches
@@ -430,14 +433,17 @@ class _OpenAICompatibleLaneMixin:
         usage = dict(resp_dict.get("usage") or {})
         for host_key in REPLY_FACT_KEYS:  # host-owned terminal facts: a provider usage extension never sets them
             usage.pop(host_key, None)
-        # What the reply consumed (a BYOK reply: gateway charge + provider-billed share).
-        usage["cost"] = cost
-        usage.pop("cost_estimated", None)  # Only the host's estimator below sets this flag.
-        usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
-        if cost_invalid:
-            usage["cost_invalid"] = True
-        if cost_basis:
-            usage["cost_basis"] = cost_basis
+        if is_go_chat_route(target.get("provider"), target.get("base_url")):
+            normalize_go_price(usage)
+        else:
+            # What the reply consumed (a BYOK reply: gateway charge + provider-billed share).
+            usage["cost"] = cost
+            usage.pop("cost_estimated", None)  # Only the host's estimator below sets this flag.
+            usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
+            if cost_invalid:
+                usage["cost_invalid"] = True
+            if cost_basis:
+                usage["cost_basis"] = cost_basis
         usage.pop("processing", None)  # The adapter constructs this receipt, including on compatible endpoints.
         usage.pop("service_tier", None)
         if "service_tier" in resp_dict:

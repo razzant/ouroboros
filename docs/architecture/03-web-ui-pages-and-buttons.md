@@ -43,7 +43,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `log_events.js` ← event classification and the one factual task-presentation projection for Chat and Logs: task truth maps only to DESIGN §4's five task words; it owns no actions, incidents or notifications, and compact headlines never expose raw reason codes. Task-to-task delivery appears in the receiving timeline (`task_message_injected`), delivery or refusal in the sending one (`task_message_routed`).
 - `effort_evidence.js` ← Logs: requested effort, host carrier, engine preparation, sourced provider observation; missing echoes stay unknown.
 - `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts (DESIGN §4), layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
-- `result_files.js` ← Files and validated question materials via canonical artifacts, the reader and explicit downloads.
+- `result_files.js` ← Files and validated question materials: canonical artifacts, reader and explicit downloads. Question materials keep addressable files only; Files may show an opaque (POSIX byte) name, never a link.
 - `history_retention.js` ← history-transfer details and storage problems for Chat and Logs; routine transfer alters no task outcome.
 - `settled_card.js::syncSettledItems` ← one detail drives Files, Continue and the stored Details row (`model_handover.js`); `review_gate_card.js`, each detail's review gate.
 - `task_continue.js` ← Continue projects the host's `continuation_offer` (who may: §6 Continue); `hard_limit_reached` is one neutral reason that buys no model call; one stored nonce per task makes a retry return the same admission.

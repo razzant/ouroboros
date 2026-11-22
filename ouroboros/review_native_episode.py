@@ -814,7 +814,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                             self._rounds_used, last_send_chars = round_idx, transcript_chars  # a dispatched send IS the last one
                             self._observe_sent_view(messages, schemas, confirmed=False)
                             stamp_failed = invoke_late_review_paid_stamp(self.assignment.dispatch_stamp)
-                        observe_failed_review_send(self.usage_observer, exc)
+                        self.attempt_costs.failed(observe_failed_review_send(self.usage_observer, exc))
                         if not stamp_failed and self._images.refuse_send(exc, self.assignment.slot, round_idx, transcript_chars):
                             end_reason = "running"
                             continue  # Same episode, explicit gap; no estimate suppresses an image send.
@@ -850,12 +850,6 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 wire_validation = pop_custom_validation_receipts(usage, tool_calls)
                 validation_by_id = custom_validation_by_call_id(wire_validation)
                 add_usage(total_usage, usage)
-                # add_usage accumulates only token/cost keys: carry the ledger
-                # linkage and provenance facts the substrate's actor records
-                # consume, or the episode rollup would echo the REQUESTED model
-                # dressed as resolved and lose its physical attempt ids.
-                for _attempt_id in (usage.get("ledger_attempt_ids") or []):
-                    total_usage.setdefault("ledger_attempt_ids", []).append(_attempt_id)
                 for _fact in ("resolved_model", "provider", "claudexor", "model_role_route"):
                     if usage.get(_fact):
                         total_usage[_fact] = usage[_fact]
@@ -949,7 +943,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 "native_end_reason": end_reason,
             })
             episode["native_custody_row"] = self._emit_episode_fact(episode)
-            self._episode_usage = dict(total_usage)
+            self._episode_usage = dict(self.attempt_costs.project(total_usage))
             self._episode_usage.update({
                 "provider": str(total_usage.get("provider") or ""),
                 # The slot model stands in for an unreported resolved model ONLY
@@ -1036,6 +1030,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         kwargs: Dict[str, Any] = {
             "messages": self._images.prepare(messages, slot),
             "model": slot.model,
+            "chat_conversation_id": self.assignment.call_id,
             "model_role": f"reviewer:{slot.slot_id}",
             "model_account_override": slot.session_profile,
             "tools": schemas,

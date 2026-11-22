@@ -13,7 +13,7 @@ import anyio
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.utils import iter_jsonl_objects
+from ouroboros.utils import iter_jsonl_objects, json_dumps_utf8
 
 
 _TRUE_LITERALS = frozenset({"1", "true", "yes", "on"})
@@ -138,11 +138,18 @@ async def request_json_or(request: Request, default: Any) -> Any:
     return value if isinstance(value, dict) else None
 
 
+class UTF8JSONResponse(JSONResponse):
+    """A strict UTF-8 JSON response that keeps POSIX filename bytes as JSON escapes."""
+
+    def render(self, content: Any) -> bytes:
+        return json_dumps_utf8(content, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+
+
 def json_error(message: str, status: int = 500, **extra: Any) -> JSONResponse:
     """``JSONResponse({"error": message, **extra}, status_code=status)``."""
     payload: dict[str, Any] = {"error": message}
     payload.update(extra)
-    return JSONResponse(payload, status_code=status)
+    return UTF8JSONResponse(payload, status_code=status)
 
 
 def migrating_error(drive_root: Any) -> JSONResponse | None:

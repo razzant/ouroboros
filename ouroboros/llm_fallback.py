@@ -468,7 +468,8 @@ class _RecoveryLadderMixin:
                 try:
                     response = create_fn(**candidate, **({"timeout": timeout} if timeout is not None else {}))
                     if candidate.get("stream"):
-                        response = consume_stream(response, expected_choices=candidate.get("n", 1), responses=responses_route(target))
+                        response = consume_stream(response, expected_choices=candidate.get("n", 1),
+                                                  responses=responses_route(target), opencode_go=request.opencode_go)
                 except Exception as error:
                     if search_server_tool:
                         refusal_failure_payload(error)  # Retain charges on non-tier search failures too.
@@ -663,7 +664,8 @@ class _RecoveryLadderMixin:
                 try:
                     response = await create_fn(**candidate, **({"timeout": timeout} if timeout is not None else {}))
                     if candidate.get("stream"):
-                        response = await consume_stream_async(response, expected_choices=candidate.get("n", 1), responses=responses_route(target))
+                        response = await consume_stream_async(response, expected_choices=candidate.get("n", 1),
+                                                              responses=responses_route(target), opencode_go=request.opencode_go)
                 except Exception as error:
                     refusal = processing_refusal(target, candidate, error)
                     if refusal is error:

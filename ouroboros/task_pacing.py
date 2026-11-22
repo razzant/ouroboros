@@ -733,6 +733,11 @@ def main_loop_wire_options(
     }
 
 
+def task_chat_conversation_id(task_id: str) -> str:
+    """The task owns its turns: Resume preserves the id; Continue starts a new one."""
+    return f"task:{task_id}" if task_id else ""
+
+
 def prospective_wrapup_attempt_request(
     *, llm: Any, messages: list[Dict[str, Any]], model: str,
     reasoning_effort: str, tools: Optional[list[Dict[str, Any]]] = None,
@@ -741,6 +746,7 @@ def prospective_wrapup_attempt_request(
     model_turn_state: Any = None,
     cache_affinity: Optional[str] = None,
     processing_preference: Optional[str] = None,
+    task_id: str = "",
 ) -> Any:
     """Build the conservative request facts from the prospective wire payload.
 
@@ -778,7 +784,8 @@ def prospective_wrapup_attempt_request(
             force_unknown_reservation=True,
         ))[0]
 
-    target = {**resolved, "processing_preference": processing_preference}
+    target = {**resolved, "processing_preference": processing_preference,
+              "chat_conversation_id": task_chat_conversation_id(task_id)}
     if target.get("provider") == "claudexor":
         from ouroboros.llm_claudexor import _request, cache_key_for_model, prepare_processing_target
 
@@ -866,7 +873,7 @@ def prepared_wrapup_candidate(
                                          task_type=str(getattr(ctx, "task_type", "") or ""))).bound(), \
             bind_physical_attempt_context(physical):
         request = prospective_wrapup_attempt_request(
-            llm=ctx.llm, messages=send_messages, model=ctx.active_model,
+            llm=ctx.llm, messages=send_messages, model=ctx.active_model, task_id=ctx.task_id,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=allow_server_web_search,
             prompt_tokens=int(ctx.accumulated_usage.get("_context_prompt_estimate") or 0),
@@ -928,7 +935,7 @@ def wrapup_reservation_fits(
             return None
         if request is None and messages is not None and callable(getattr(llm, "_resolve_remote_target", None)):
             request = prospective_wrapup_attempt_request(
-                llm=llm, messages=messages, model=model, reasoning_effort=reasoning_effort,
+                llm=llm, messages=messages, model=model, reasoning_effort=reasoning_effort, task_id=task_id,
                 tools=tools, allow_server_web_search=allow_server_web_search, processing_preference=processing_preference,
             )
         if request is None:

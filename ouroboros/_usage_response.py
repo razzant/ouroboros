@@ -161,6 +161,26 @@ def _refusal_price(usage: Any, *fallbacks: Any, byok_known: bool = False) -> _Re
     return _RefusalPrice(total if not disagreement else None, parts, unlabelled_min, disagreement, malformed)
 
 
+def normalize_go_price(usage: Dict[str, Any]) -> Tuple[Optional[float], bool]:
+    """Only ``usage.cost`` is cash (or explicitly a BYOK estimate) on this exact route.
+
+    https://opencode.ai/docs/console/api/inference/#cost: list price, plan allowance
+    and billed-token split are different units, not substitute prices or the
+    OpenAI-compatible prompt's token count.
+    """
+    raw = usage.get("cost")
+    cost = provider_cost_value(raw)
+    opencode = usage.get("opencode")
+    estimated = cost is not None and isinstance(opencode, dict) and opencode.get("estimated") is True
+    for host_key in ("cost_basis", "cost_invalid", "price_source"):
+        usage.pop(host_key, None)
+    final = cost is not None and not estimated
+    usage.update(cost=cost, cost_final=final, cost_estimated=estimated)
+    if raw is not None and cost is None:
+        usage["cost_invalid"] = True
+    return cost, final
+
+
 # Finish reasons that mean a reply reached its output allowance: OpenAI-family ``length``, Anthropic
 # ``max_tokens`` and Responses ``max_output_tokens``. The one vocabulary every finish-reason reader shares.
 OUTPUT_LIMIT_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
@@ -414,7 +434,8 @@ def _reported_usage_empty(raw: dict, reported: dict) -> bool:
 
 
 def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str = "",
-                        provider_reported_cost_only: bool = False) -> Tuple[Dict[str, Any], Optional[float], bool]:
+                        provider_reported_cost_only: bool = False,
+                        opencode_go: bool = False) -> Tuple[Dict[str, Any], Optional[float], bool]:
     """Extract common usage/cost facts without retaining response text."""
     if payload is _UNREAD_PAYLOAD:
         payload = _plain(response)
@@ -489,6 +510,9 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str
         }
         if split:
             normalized["cache_write_tokens_by_ttl"] = split
+    if opencode_go:
+        cost, final = normalize_go_price(normalized)
+        return normalized, cost, final
     cost, invalid, basis = response_reported_price(payload, usage, getattr(response, "total_cost_usd", None))
     normalized.pop("cost_invalid", None)  # Derive from provider prices, never trust their marker.
     if invalid:
@@ -524,6 +548,19 @@ def provider_failure_payload(exc: BaseException) -> Any:
             except Exception:
                 pass
     return _plain(payload)
+
+
+def failure_settlement_price(error: BaseException, payload: Any, provider: str, *, opencode_go: bool):
+    if opencode_go:
+        # Go's only designated cash field may be explicitly estimated.
+        for evidence in ({"usage": getattr(error, "stream_usage", None)}, payload):
+            usage, cost, final = usage_from_response(evidence, opencode_go=True)
+            if cost is not None:
+                return usage, cost, final
+        return None
+    if priced := priced_failure_usage(error, payload, provider):
+        return (*priced, True)
+    return None
 
 
 _ANSWER_CODE_KEYS = ("code", "type", "provider_code", "provider_error_code", "error_type", "limit_source")

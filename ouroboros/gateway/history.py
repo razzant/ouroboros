@@ -46,7 +46,7 @@ from ouroboros.room_appearances import frame_project, room_project
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, subagent_message_meta
 from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIELDS
-from ouroboros.utils import strip_markdown, utc_now_iso
+from ouroboros.utils import json_dumps_utf8, strip_markdown, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -1535,9 +1535,8 @@ def _assemble_history_response(
         "coverage": history_page_coverage(page, stream_gaps),
         **tokens,
     }
-    # Same rendering options as starlette's JSONResponse — serialized here so
-    # the encode of a large payload also happens off the event loop.
-    return json.dumps(
+    # Encode the whole structured page off the loop, keeping local filename bytes as JSON escapes.
+    return json_dumps_utf8(
         payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     ).encode("utf-8")
 

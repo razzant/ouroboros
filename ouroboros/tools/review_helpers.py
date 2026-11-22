@@ -188,7 +188,14 @@ def emit_review_usage(
         session = isinstance(usage_data.get("claudexor"), dict) and usage_data["claudexor"].get("run_id")
         prompt_cache_ttl = str(usage_data.get("prompt_cache_ttl") or "")
         ledger_attempt_ids = [str(value) for value in (usage_data.get("ledger_attempt_ids") or []) if value]
-        routed_provider = provider or str(usage_data.get("provider") or "") or infer_provider_from_model(model)
+        # One attempt's own fact states an unknown model as an explicit ``None``: nothing is then inferred from a
+        # name it does not have, and only a stated provider that is itself a key type names the key.
+        unknown_model = "resolved_model" in usage_data and usage_data["resolved_model"] is None
+        routed_provider = provider or str(usage_data.get("provider") or "") or (
+            "" if unknown_model else infer_provider_from_model(model))
+        api_key_type = infer_api_key_type(model, routed_provider)
+        if unknown_model and api_key_type != routed_provider.strip().lower():
+            api_key_type = ""
         cost = cost_usd if cost_usd is not None else usage_data.get("cost", usage_data.get("total_cost"))
         # Task-tree attribution from the bound usage scope (the supervisor
         # additionally backfills delegation/lane fields from RUNNING).
@@ -215,7 +222,7 @@ def emit_review_usage(
             "root_task_id": root_task_id,
             "parent_task_id": parent_task_id,
             "model": "" if session and split is not None else model,
-            "api_key_type": infer_api_key_type(model, routed_provider),
+            "api_key_type": api_key_type,
             "model_category": infer_model_category(model),
             "usage": {
                 **event_token_counts(usage_data),
@@ -223,6 +230,7 @@ def emit_review_usage(
                 "prompt_cache_ttl": prompt_cache_ttl,
                 "cost": cost,
                 "cost_known": cost is not None,
+                **{key: usage_data[key] for key in ("cost_estimated", "cost_final", "cost_invalid") if key in usage_data},
                 "ledger_attempt_ids": ledger_attempt_ids,
                 **{key: copy.deepcopy(usage_data[key]) for key in ("claudexor", "effort", "effort_resolution",
                                                                    "request_wire") if isinstance(usage_data.get(key), dict)},

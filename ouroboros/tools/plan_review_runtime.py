@@ -24,6 +24,7 @@ from ouroboros.config import EFFORT_SCALE
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.llm import LLMClient
 from ouroboros.review_execution_projection import review_executions_from_actor_usage
+from ouroboros.review_records import reported_review_cost
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
 from ouroboros.utils import utc_now_iso
 
@@ -311,7 +312,7 @@ def _plan_row_from_actor(actor: Dict[str, Any], slot: Any) -> dict:
         "response_ref": actor.get("response_ref") or {},
         "tokens_in": usage.get("prompt_tokens", 0),
         "tokens_out": usage.get("completion_tokens", 0),
-        "cost": float(usage["cost"]) if usage.get("cost") is not None else None,
+        "cost": reported_review_cost(usage),
         # Presentation-only receipt from the actor's RETURNED usage. Requested
         # slot route/model, money, profile and raw telemetry never enter it.
         "executions": review_executions_from_actor_usage([actor]),

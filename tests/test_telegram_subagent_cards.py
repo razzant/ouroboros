@@ -544,7 +544,8 @@ def test_rejection_preserves_persistence_qualification(tmp_path, monkeypatch, ow
                                 "busy": StoreBusy("current store busy: database is locked", reason="contention")}[persistence])
     monkeypatch.setattr(task_admission, "persist_never_admitted_refusal", refusal)
     preparation = SimpleNamespace(token="claim-1", refusal_fields=lambda: {},
-                                  abandon=Mock(return_value=abandoned), after_refusal=Mock())
+                                  abandon=Mock(return_value=abandoned), after_refusal=Mock(),
+                                  store_gate=lambda operation, **_kwargs: operation())
     sent = []
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, send_with_budget=lambda *a, **kw: sent.append((a, kw)))
     kwargs = dict(tid="kid12345", chat_id=42, delegation_role=delegation_role, parent_id="root1",

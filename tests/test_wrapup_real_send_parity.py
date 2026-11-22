@@ -63,8 +63,18 @@ class _Captured(Exception):
 
 
 def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subtests, monkeypatch, tmp_path):
+    import httpx
+
+    from ouroboros import net_transport
+    from ouroboros.opencode_go import GO_CHAT_BASE_URL
+    from tests._openai_sse import streamed_reply
+
+    go_route = ("openai-compatible::example-model", {
+        "OPENAI_COMPATIBLE_API_KEY": "unused", "OPENAI_COMPATIBLE_BASE_URL": GO_CHAT_BASE_URL,
+    })
+    real_execute = llm_module._execute_candidate
     case_paths = case_folders(tmp_path)
-    for model, env in _ROUTES:
+    for model, env in (*_ROUTES, go_route):
         tmp_path = next(case_paths)
         with subtests.test(model=model, env=env), monkeypatch.context() as monkeypatch:
             for key, value in env.items():
@@ -73,8 +83,18 @@ def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subte
 
             def execute(request, send, before_dispatch):
                 captured["request"] = request
+                if model == go_route[0]:
+                    return real_execute(request, send, before_dispatch)
                 raise _Captured()
 
+            if model == go_route[0]:
+                def peer(request):
+                    assert str(request.url) == GO_CHAT_BASE_URL + "/chat/completions"
+                    assert request.headers["x-opencode-session"]
+                    return streamed_reply()
+
+                monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *_a, **_k: httpx.MockTransport(peer))
+                monkeypatch.setattr(net_transport, "env_proxies_configured", lambda: False)
             _patch_execute_candidate(monkeypatch, llm_module, execute)
             client = LLMClient(api_key="unused")
             logs = tmp_path / "logs"
@@ -84,13 +104,15 @@ def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subte
             )):
                 prospective = task_pacing.prospective_wrapup_attempt_request(
                     llm=client, messages=_MESSAGES, model=model, reasoning_effort="high",
-                    tools=_TOOLS, cache_affinity=cache_key_for_model(model),
+                    tools=_TOOLS, cache_affinity=cache_key_for_model(model), task_id="parity",
                 )
                 try:
-                    call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
-                                        queue.Queue(), {}, initial_messages=_MESSAGES)
+                    reply, _ = call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                                   queue.Queue(), {}, initial_messages=_MESSAGES)
+                    if model == go_route[0]:
+                        assert reply["content"] == "4" and usage_accounting.last_physical_attempt_capture().state == "settled"
                 except _Captured:
-                    pass
+                    assert model != go_route[0]
             assert "request" in captured, "the real send never reached the physical executor"
             assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
                 key: getattr(prospective, key) for key in _IDENTITY}

@@ -73,9 +73,22 @@ def _has_receipt_value(value: Any) -> bool:
     return True
 
 
-def _has_api_execution_receipt(usage: Dict[str, Any]) -> bool:
-    """Require at least one substantive allowlisted API receipt fact."""
-    return any(
+def api_review_dispatch_evidence(usage: Dict[str, Any], *, operation_state: str = "") -> bool | None:
+    """An explicit refusal proves no send, even if no usage receipt exists."""
+    if operation_state == "not_dispatched":
+        return False
+    state = str(usage.get("physical_attempt_state") or "").strip().lower()
+    observed = usage.get("physical_dispatch_observed")
+    if observed is None and state not in {"reserved", "released"}:
+        return None
+    rounds = usage.get("native_rounds")
+    return observed is True or (type(rounds) is int and rounds > 0)
+
+
+def _has_api_execution_receipt(usage: Dict[str, Any], operation_state: str) -> bool:
+    """Require typed dispatch or at least one substantive legacy API receipt fact."""
+    dispatched = api_review_dispatch_evidence(usage, operation_state=operation_state)
+    return dispatched if dispatched is not None else any(
         key in usage and _has_receipt_value(usage.get(key))
         for key in _API_EXECUTION_RECEIPT_KEYS
     )
@@ -120,7 +133,7 @@ def review_executions_from_actor_usage(actors: Any) -> List[Dict[str, str]]:
                 "kind": "harness", **({"harness_id": delegated_route} if delegated_route else {}),
                 **({"model": model} if model else {}),
             })
-        elif _has_api_execution_receipt(usage):
+        elif _has_api_execution_receipt(usage, actor.get("operation_state") or ""):
             # The native tool-round episode is an API execution with a
             # different DELIVERY (the reviewer retrieved the subject itself);
             # the wire says so, or the owner reads a retrieving review as a
@@ -202,6 +215,7 @@ def review_actor_progress_text(surface: str, phase: str, slot: Any, actor: Any =
 __all__ = [
     "MAX_PROJECTED_ACTOR_FINDINGS",
     "PROJECTED_FINDING_TEXT_CHARS",
+    "api_review_dispatch_evidence",
     "normalize_review_executions",
     "projected_finding_row",
     "review_executions_from_actor_usage",

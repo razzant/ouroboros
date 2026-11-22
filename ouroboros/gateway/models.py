@@ -138,14 +138,18 @@ async def _fetch_openai_compatible_model_catalog(
     *,
     record_image_input: bool = False,
 ) -> list[dict[str, str]]:
+    from ouroboros.opencode_go import compatible_models_url, go_client_headers
+
     api_root = str(base_url or "").rstrip("/")
     if not api_root:
         return []
 
-    headers = {"Authorization": f"Bearer {api_key}"} if str(api_key or "").strip() else None
+    headers = go_client_headers(provider_id, base_url)
+    if str(api_key or "").strip():
+        headers["Authorization"] = f"Bearer {api_key}"
     response = await client.get(
-        f"{api_root}/models",
-        headers=headers,
+        compatible_models_url(provider_id, base_url),
+        headers=headers or None,
     )
     response.raise_for_status()
     data = response.json()
@@ -155,7 +159,7 @@ async def _fetch_openai_compatible_model_catalog(
         from ouroboros.vision_routing import record_catalog_image_input
 
         await asyncio.to_thread(record_catalog_image_input, provider_id, api_root, raw_models,
-                                source=f"the {provider_label} /models catalog", api_key=api_key if headers else "")
+                                source=f"the {provider_label} /models catalog", api_key=api_key if "Authorization" in headers else "")
 
     models: list[dict[str, str]] = []
     for item in raw_models:
@@ -278,8 +282,7 @@ def _connection_loader(kind: str, target: dict, record_image_input: bool, cache_
         # client and uses the gigachat library directly (auth via key or basic).
         return lambda _client: _fetch_gigachat_model_catalog(
             key, target["scope"], base, target["verify_ssl_certs"], target["user"], target["password"])
-    # MiniMax, DeepSeek, Z.ai, Cloud.ru and every compatible server serve an
-    # OpenAI-compatible GET /models on the connection's own endpoint.
+    # These routes share the OpenAI list shape; each request uses the connection's own key.
     record = {"record_image_input": True} if record_image_input and kind in {"deepseek", "openai-compatible"} else {}
     return lambda client: _fetch_openai_compatible_model_catalog(client, kind, _CATALOG_LABELS[kind], key, base, **record)
 
@@ -877,7 +880,7 @@ _COMPATIBLE_PAIRS = {_DEDICATED_KEY: _DEDICATED_URL,
 
 
 async def api_openai_compatible_models(request: Request) -> JSONResponse:
-    """Proxy GET {baseUrl}/models so the onboarding wizard avoids browser CORS limits."""
+    """Proxy the connection's model list so the onboarding wizard avoids browser CORS limits."""
     try:
         body = await request.json()
         base_url = str(body.get("baseUrl", "") or "").strip()

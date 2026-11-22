@@ -27,7 +27,7 @@ from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatche
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
     _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
-    _plain, _provider_exception_facts, physical_failure_evidence, priced_failure_usage, refusal_failure_payload, provider_cost_value, refusal_conflicts,
+    _plain, _provider_exception_facts, failure_settlement_price, physical_failure_evidence, refusal_failure_payload, provider_cost_value, refusal_conflicts,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
 from ouroboros.transport_custody import ProcessingNotStarted, release_pre_dispatch_attempt, report_attempt_end
@@ -290,6 +290,7 @@ class AttemptRequest:
     # Whether the candidate's own OpenRouter routing may admit endpoints outside its tier pool; None: no candidate.
     provider_routing_pinned: Optional[bool] = None
     unpriced_add_on: bool = False  # Token rates alone cannot price this sealed request.
+    opencode_go: bool = False  # the exact dispatched route, not a response-supplied billing claim
 
     def settlement_policy(self) -> dict:
         return {key: True for key in ("provider_reported_cost_only", "unpriced_add_on") if getattr(self, key)}
@@ -306,6 +307,7 @@ class AttemptReservation:
     scope: Optional[UsageScope] = None
     provider_reported_cost_only: bool = False
     unpriced_add_on: bool = False
+    opencode_go: bool = False
 PhysicalAttemptState = Literal["reserved", "released", "dispatched", "settled", "unresolved"]
 PHYSICAL_ATTEMPT_STATES = frozenset(get_args(PhysicalAttemptState))
 POSITIVE_PHYSICAL_ATTEMPT_STATES = frozenset({"settled", "dispatched", "unresolved"})
@@ -796,7 +798,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         bucket.append(attempt_id)
     return AttemptReservation(attempt_id, root, request.model, request.provider, bound,
                               request.processing_preference, request.submitted_processing_mode,
-                              copy.deepcopy(request.processing_basis), scope=scope, **request.settlement_policy())
+                              copy.deepcopy(request.processing_basis), scope=scope, opencode_go=request.opencode_go, **request.settlement_policy())
 
 
 def record_unmetered_external_dispatch(
@@ -1354,14 +1356,14 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
         return "released"
     provider = str(reservation.provider or "").strip().lower()
     stream_usage = getattr(exc, "stream_usage", None)
-    priced = priced_failure_usage(exc, payload, provider)
-    if isinstance(exc, ProcessingNotStarted) and not tier_conflict:
+    priced = failure_settlement_price(exc, payload, provider, opencode_go=reservation.opencode_go)
+    if isinstance(exc, ProcessingNotStarted) and not tier_conflict and not (reservation.opencode_go and priced):
         _transition(reservation, "settled", cost_usd=priced[1] if priced else None,
                     cost_final=priced is not None, settle_reason="processing_not_started")
         return "settled"
     if priced:
-        usage, cost = priced
-        settle_attempt(reservation, usage, cost_usd=cost, cost_final=True)
+        usage, cost, final = priced
+        settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
         return "settled"
     if provider == "openrouter" and not reservation.provider_reported_cost_only and not tier_conflict:
         for reason, predicate in (("pre_routing_rejection", _is_pre_routing_rejection), ("tos_rejection", _is_tos_rejection)):
@@ -1369,7 +1371,7 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
                 _transition(reservation, "settled", cost_usd=0.0, cost_final=True, settle_reason=reason)
                 return "settled"
     if not tier_conflict and isinstance(stream_usage, dict) and stream_usage:
-        usage, _, billed = usage_from_response({"usage": stream_usage}, provider=provider)
+        usage, _, billed = usage_from_response({"usage": stream_usage}, provider=provider, opencode_go=reservation.opencode_go)
         if not billed:  # A price rejected by priced_failure_usage cannot be recovered from a subset of that evidence.
             settle_attempt(reservation, usage)
             return "settled"
@@ -1507,6 +1509,7 @@ def _account_response(reservation, request, response, extractor, manifest_ref):
     terminal_state = "settled"
     try:
         usage, cost, final = (extractor(response, payload=payload, provider=request.provider,
+                                        opencode_go=reservation.opencode_go,
                                         provider_reported_cost_only=request.provider_reported_cost_only or request.unpriced_add_on)
                               if extractor is usage_from_response else extractor(response))
         usage = dict(usage or {})

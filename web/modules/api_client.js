@@ -279,8 +279,9 @@ export function cancelTask(taskId, { cascade = false, stopPolicy = '', stopActio
 }
 
 const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
 const plainSegments = (text) => typeof text === 'string' && !!text && !text.includes('\\') && !text.includes('\0')
-    && text.split('/').every((part) => part && part !== '.' && part !== '..');
+    && !LONE_SURROGATE.test(text) && text.split('/').every((part) => part && part !== '.' && part !== '..');
 // Python quote(safe='') spelling of one path segment.
 const encodeSegment = (text) => encodeURIComponent(text).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 
@@ -291,7 +292,8 @@ const encodeSegment = (text) => encodeURIComponent(text).replace(/[!'()*]/g, cha
  */
 export function taskArtifactDownloadUrl(taskId, name, relpath = '') {
     if (!TASK_ID_RE.test(String(taskId || ''))
-        || typeof name !== 'string' || !name || name.startsWith('.') || /[/\\]/.test(name)) return '';
+        || typeof name !== 'string' || !name || name.startsWith('.') || /[/\\]/.test(name)
+        || LONE_SURROGATE.test(name)) return '';
     const url = `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeSegment(name)}`;
     if (!relpath || relpath === name) return url;
     if (!plainSegments(relpath) || relpath.split('/').at(-1) !== name) return '';

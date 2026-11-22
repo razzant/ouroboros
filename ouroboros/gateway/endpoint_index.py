@@ -560,7 +560,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/evolution-data": Shape("200:EvolutionDataResponse", query="force",
                                      note="answers from the saved copy at once; new tags or force start one background re-measurement"),
     "POST /api/openai-compatible/models": Shape("200:OpenAICompatibleModelsResponse 400,502:ErrorResponse",
-                                                "OpenAICompatibleModelsRequest", note="lists {baseUrl}/models once; saves nothing"),
+                                                "OpenAICompatibleModelsRequest", note="reads the connection's model catalog once; saves nothing"),
     "GET /api/local-model/status": Shape("200:LocalModelStatusResponse"),
     "POST /api/local-model/start": Shape(
         "200:LocalModelStartResponse 400,403,409:ErrorResponse 412:LocalModelRuntimeMissingResponse", "LocalModelStartRequest",

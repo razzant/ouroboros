@@ -29,6 +29,7 @@ from ouroboros._usage_response import (
 )
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, size_refusal
 from ouroboros.llm_helper_window import _helper_attempt_context, helper_context_for, priced_for
+from ouroboros.opencode_go import is_go_chat_route
 from ouroboros.transport_custody import (  # noqa: F401 -- shared with the catalog and native send builders
     apply_processing_preference, attempt_pricing_fields, processing_transport_modes, provider_reported_cost_only,
     submitted_processing_mode,
@@ -590,6 +591,7 @@ def _attempt_request(
         processing_basis=copy.deepcopy(target.get("processing_basis")),
         effort=effort_request_facts(target, payload),
         provider_receipt_binding=_provider_receipt_binding(target),
+        opencode_go=is_go_chat_route(target.get("provider"), target.get("base_url")),
         candidate_clock_free_sha256=(
             hashlib.sha256(_canonical_candidate_bytes(clock_free)).hexdigest()
             if clock_note is not None else None
