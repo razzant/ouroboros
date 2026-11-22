@@ -12,14 +12,16 @@ value: ``open``, ``arrive`` (``words``, ``role``), ``wheel`` / ``swipe`` (px, + 
 The stand serves the production page (``web/index.html``, no runtime) and answers each ``/api/chat/history`` read with
 the real endpoint over a dialogue store built from the session, so cursors, coverage and the newest arrival are the
 server's own; the shell's other reads get quiet answers, the socket is a stand-in the player pushes frames into, and a
-photo's bytes wait for the session's ``image`` event. Time is real: no fake clock, no replaced animation frames.
+photo's bytes wait for the session's ``image`` event. Every read receipt is recorded as it arrives, with the room shown
+then. Time is real: no fake clock, no replaced animation frames.
 
 After every event the player reads the feed (``FACTS``) and ``Reader`` checks the rules of docs/DESIGN.md the event
 touches: a room first opens at its newest message, an unread one on its newest arrival, and is read once its newest
-reply is shown, never before (a reply in a room not shown leaves it unread and marked in the list, a read room loses
-the mark); a return finds it as left; a quote lands on its row; the live edge follows replies while a passage being
-read stays put through replies, older pages, photos, width, height and the keyboard; a late picture grows away from
-the place read (up out of view above it, down when read); a gesture moves the text by its own way, as far as it went;
+reply is shown, never before (a room not shown is never read while another is, so a reply there leaves it unread and
+marked in the list; a read room loses the mark); a return finds it as left; a quote lands on its row; the live edge
+follows replies while a passage being read stays put through replies, older pages, photos, width, height and the
+keyboard; a late picture grows away from the place read (up out of view when it starts above the band, so its bottom
+and the passage after it stay; down when read); a gesture moves the text by its own way, as far as it went;
 ↓ reaches the retained end at once. The checks hold for every engine, the WebKit without
 scroll anchoring that the macOS window runs too (``overflow-anchor: none``).
 """
@@ -45,6 +47,7 @@ WORDS = ('the', 'reply', 'reads', 'history', 'passage', 'owner', 'room', 'feed',
          'message', 'older', 'page', 'lands', 'while', 'reading', 'scrolls', 'wheel', 'photo', 'below', 'above', 'line')
 TOLERANCE = 2  # px: a passage that stays may move by subpixel rounding, never by a line
 LIVE_EDGE = 48  # px: a gesture toward the end that stops this close to it follows (chat_reading_position.js nearBottom)
+PHOTO_HOLD = 120  # s: a held photo's bytes wait at most this long for its event (its picture is checked to wait)
 
 
 def sessions() -> list[str]:
@@ -93,6 +96,9 @@ class Stand:
         self.minute = 0
         self.main_revision = 1
         self.seen: dict[str, int] = {}
+        self.shown = ''  # the Project room the page shows or is opening ('' while it shows Main)
+        self.allowed: dict[str, int] = {}  # a Project room not shown -> the receipt it may still reach
+        self.receipts: list[dict] = []  # every receipt that reads a Project room further, as it arrives
         self.photos: dict[str, threading.Event] = {}  # photo -> set once its bytes may be served
         self.stored: dict[str, list[dict]] = {}  # room -> its rows as stored, oldest first
         self.quotes: dict[str, dict] = {}  # reply -> {'text': its words, 'target': the words of the row it quotes}
@@ -123,6 +129,8 @@ class Stand:
             revision = self.revise(key)
             # A read room was read to its newest message; an unread one was read before its last arrival.
             self.seen[key] = revision - (1 if room.get('unread') else 0)
+            if key != 'main':  # not shown yet: no receipt may read it further
+                self.allowed[key] = self.seen[key]
 
     def rows(self, key: str, spec: dict) -> list[dict]:
         """A row spec's rows: ``count`` replies (or the owner's, ``role``) of ``words`` [low, high]; a ``photo`` of
@@ -201,10 +209,21 @@ class Stand:
         return {'supervisor_ready': True, 'active_chat_activities': [], 'active_direct_turns': [], 'projects': rows,
                 'project_chat_ids': [row['chat_id'] for row in rows], 'main_visible_revision': self.main_revision}
 
+    def show(self, key: str, keeps: int = 0):
+        """The page shows (or starts to open) room ``key`` from now on. The Project room it leaves may still be read as
+        far as ``keeps`` (the revision of a newest reply it showed: a receipt in flight), never by what comes after."""
+        with self.lock:
+            if self.shown and self.shown != key:
+                self.allowed[self.shown] = max(self.seen.get(self.shown, 0), keeps)
+            self.shown = '' if key == 'main' else key
+
     def preferences(self, written: dict | None = None) -> dict:
         with self.lock:
             for project_id, value in ((written or {}).get('project_seen_revision') or {}).items():
                 key = next((k for k, room in self.rooms.items() if room['project_id'] == project_id), None)
+                if key and int(value) > self.seen.get(key, 0):  # with the room shown as it arrives
+                    self.receipts.append({'room': key, 'seen': int(value), 'shown': self.shown or 'main',
+                                          'allowed': self.allowed.get(key, 0)})
                 if key:
                     self.seen[key] = max(self.seen.get(key, 0), int(value))
             if isinstance((written or {}).get('main_seen_revision'), int) and 'main' in self.rooms:
@@ -293,7 +312,7 @@ class _Handler(SimpleHTTPRequestHandler):
             name = next((n for n in self.stand.photos if photo_url(n) == url.path), None)
             if name is None:
                 return self._json({'error': 'not found'}, 404)
-            self.stand.photos[name].wait(30)
+            self.stand.photos[name].wait(PHOTO_HOLD)
             data = png(640, self.stand.photo_heights[name])
             self.send_response(200)
             self.send_header('Content-Type', 'image/png')
@@ -377,8 +396,9 @@ NO_ANCHOR = """(() => {
 # The room's feed as the reader sees it, in the page's coordinates: the read band between the bar's reach and the
 # composer (project_read_state.js readBand), the row at its top, the row read before (``place``, by its identity), a
 # message named by its words (``named``: an unread room's newest arrival, a quote's target), a photo's picture named
-# by its caption (``picture``), whether the newest reply starts in the band, the live edge, the newest row, ↓ and the
-# rows shown twice (a defect). A row is a keyed bubble, or the keyed item inside an unkeyed one (a photo's).
+# by its caption (``picture``: whether it still loads, its row and the row after it), whether the newest reply starts
+# in the band, the live edge, the newest row, ↓ and the rows shown twice (a defect). A row is a keyed bubble, or the
+# keyed item inside an unkeyed one (a photo's).
 FACTS = """([sel, place, words, reply, photo]) => {
     const feed = document.querySelector(sel);
     if (!feed || !feed.getClientRects().length) return null;
@@ -410,7 +430,10 @@ FACTS = """([sel, place, words, reply, photo]) => {
     };
     const named = bubble(words), newestReply = bubble(reply);
     const item = photo ? [...feed.querySelectorAll('.chat-gallery-item')].find(node => node.textContent.includes(photo)) : null;
-    const img = item?.querySelector('img')?.getBoundingClientRect();
+    const image = item?.querySelector('img'), img = image?.getBoundingClientRect();
+    // The picture's own row and the row after it: the passage that follows a picture growing up out of view.
+    const own = item && rows.find(node => node === item || node.contains(item));
+    const after = own && rows[rows.indexOf(own) + 1];
     const shown = node => Boolean(node) && node.getBoundingClientRect().top >= top - 1
         && node.getBoundingClientRect().top < bottom;
     const newest = rows.at(-1), button = page.querySelector('.chat-scroll-bottom-btn');
@@ -422,7 +445,8 @@ FACTS = """([sel, place, words, reply, photo]) => {
     return {scrollTop: feed.scrollTop, scrollHeight: feed.scrollHeight, clientHeight: feed.clientHeight,
         gap: feed.scrollHeight - feed.scrollTop - feed.clientHeight, band: {top, bottom, height: bottom - top},
         first: first ? at(first) : null, place: held ? at(held) : null, named: named ? at(named) : null,
-        picture: img ? {top: img.top - top, bottom: img.bottom - top, height: img.height} : null,
+        picture: img ? {top: img.top - top, bottom: img.bottom - top, height: img.height, loading: !image.complete,
+            row: own ? id(own) : null, next: after ? at(after) : null} : null,
         replyShown: shown(newestReply),
         newest: newest ? {...at(newest), shown: newest.getBoundingClientRect().bottom <= bottom + 1} : null,
         rows: rows.length, resizing: feed.hasAttribute('data-resizing'), twice,
@@ -482,17 +506,35 @@ class Reader:
         moved = now['y'] - place['y']
         return abs(moved) <= TOLERANCE, f'the row read ({place["id"]}) moved {moved:+.1f}px on the screen'
 
-    def picture(self, before: dict, after: dict):
+    def picture(self, room: str, before: dict, after: dict):
         """A late picture grows away from the place read (DESIGN "History edges"): up out of view when it starts above
-        the band's top (its bottom stays), down when the reader is on it (its top stays)."""
+        the band's top, so its bottom and the passage after it stay (the row read, or the row after the picture's own
+        when that row reaches into the band); down when the reader is on it, so its top and the row read stay."""
         was, now = before.get('picture'), after.get('picture')
         if not (was and now):
             self.note('image: the picture loading is in the feed', False, after, f'picture before {was}, after {now}')
             return
-        above = was['top'] < 0
+        above, place = was['top'] < 0, self.place.get(room)
+        if above and place and place['id'] == was['row']:
+            follows, then = was['next'], now['next']
+            ok = not follows or bool(then and then['id'] == follows['id']
+                                     and abs(then['y'] - follows['y']) <= TOLERANCE)
+            detail = f'the row after the picture, {follows and follows["id"]}, is now {then}'
+        else:
+            ok, detail = self.kept(room, after)
+        self.note('image: the passage being read stays where it was', ok, after, detail)
         moved = now['bottom'] - was['bottom'] if above else now['top'] - was['top']
         self.note('image: a picture above the passage grows up out of view' if above else 'image: a picture read grows down',
                   abs(moved) <= TOLERANCE, after, f'its {"bottom" if above else "top"} moved {moved:+.1f}px')
+
+    def receipts(self, receipts: list[dict], facts: dict | None):
+        """A Project room not shown is never read while another room is: its receipt reaches no further than the room
+        left it (a receipt in flight for the newest reply it showed then), so a reply there leaves it unread."""
+        for receipt in receipts:
+            self.note('a reply in a room not shown leaves it unread', receipt['room'] == receipt['shown']
+                      or receipt['seen'] <= receipt['allowed'], facts or {},
+                      f'{receipt["room"]}: its read receipt reached {receipt["seen"]} while {receipt["shown"]} was '
+                      f'shown (it was left at {receipt["allowed"]})')
 
     def landed(self, after: dict) -> bool:
         """The named message shows its start in the read band, clear of the bar and of the composer."""
@@ -512,10 +554,13 @@ class Reader:
             self.problems.append(f'{kind}: the room {room!r} shows no feed')
             return
         self.note('a row shows once', not after['twice'], after, f'rows shown twice: {after["twice"]}')
+        self.receipts((extra or {}).get('receipts', []), after)
+        if kind == 'image':  # its bytes come with this event: a picture loaded before (a hold run out) compares nothing
+            was = (before or {}).get('picture')
+            self.note('image: the picture still loads until its event (else a stand error)',
+                      bool(was and was['loading']), before or after, f'picture {was}')
         away = (extra or {}).get('away')
         if away:  # a reply in a Project room not shown
-            self.note('a reply in a room not shown leaves it unread', not away['read'], after,
-                      f'{away["room"]}: its read receipt reached the new revision')
             self.note('a room not shown with a new reply is marked unread in the list', away['marked'], after, away['room'])
         if 'marked' in (extra or {}):
             self.note('a room read loses its unread mark in the list, one still unread keeps it', extra['marked'], after,
@@ -550,11 +595,11 @@ class Reader:
             # reader keeps doing what they did: the live edge follows, a passage being read stays.
             if self.mode.get(room) == 'following' and kind != 'older':
                 self.note(f'{kind}: the live edge follows', self.following(after), after)
+            elif kind == 'image':
+                self.picture(room, before, after)
             else:
                 ok, detail = self.kept(room, after)
                 self.note(f'{kind}: the passage being read stays where it was', ok, after, detail)
-                if kind == 'image':
-                    self.picture(before, after)
                 if kind == 'arrive' and event['arrive'] == room:
                     self.note('arrive: a new reply stays below the passage', after['gap'] > TOLERANCE, after)
                     self.note('arrive: ↓ stays shown while reading', after['latest']['shown'], after)

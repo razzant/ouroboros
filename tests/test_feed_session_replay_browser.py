@@ -84,6 +84,7 @@ class Player:
         self.trace: list[dict] = []
         self.started = False
         self.phone = bool(session.get('phone'))
+        self.receipted = 0  # the stand's receipts already handed to the reader
 
     def feed(self, room: str) -> str:
         if room == 'main':
@@ -106,8 +107,9 @@ class Player:
             return False
 
     def read(self, room: str, after: dict | None) -> bool:
-        """Whether the room's read receipt reached its revision: waited for when its newest reply shows (the client
-        acknowledges after the paint), observed for a moment when it does not (an early receipt would show by then)."""
+        """Whether the room shown has its read receipt at its revision: waited for when its newest reply shows (the
+        client acknowledges after the paint), observed for a moment when it does not (an early receipt would show by
+        then). A room not shown is held by every receipt the stand records (``Reader.receipts``), whenever it comes."""
         revision = self.stand.revision(room)
         for _ in range(30 if after and after.get('replyShown') else 5):
             if self.stand.seen.get(room, 0) >= revision:
@@ -136,14 +138,22 @@ class Player:
                 extra = {**(extra or {}), 'read': self.read(room, after)}
                 if room != 'main':
                     extra['marked'] = self.marked(room, not extra['read'])
-            # A reply in a Project room not shown leaves it unread (no receipt reaches it) and marks its row.
+            # A reply in a Project room not shown marks its row; no receipt reaches it while it is away (below).
             away = event.get('arrive')
             if away and away not in (room, 'main') and event.get('role') != 'owner':
-                extra = {**(extra or {}), 'away': {'room': away, 'read': self.read(away, None),
-                                                   'marked': self.marked(away, True)}}
+                extra = {**(extra or {}), 'away': {'room': away, 'marked': self.marked(away, True)}}
+            # Every receipt that came during the event, with the room shown as it came: a late one is still held.
+            receipts = self.stand.receipts[self.receipted:]
+            self.receipted += len(receipts)
+            if receipts:
+                extra = {**(extra or {}), 'receipts': receipts}
             self.reader.check(event, before, after, extra)
             self.trace.append({'event': event, 'extra': extra, 'before': _brief(before), 'after': _brief(after),
                                'problems': self.reader.problems[problems:]})
+        late, problems = self.stand.receipts[self.receipted:], len(self.reader.problems)
+        if late:  # a receipt that came after the last event's checks
+            self.reader.receipts(late, None)
+            self.trace.append({'receipts': late, 'problems': self.reader.problems[problems:]})
 
     # -- events ------------------------------------------------------------------------------------------------
     def _open(self, event):
@@ -158,6 +168,7 @@ class Player:
                 if room != 'main':  # the app's start showed Main first: it was opened at its newest message
                     self.reader.room = 'main'
                     self.reader.check({'open': 'main'}, None, self.facts('main'))
+        self._show(room)
         if room == 'main':
             if self.reader.room and self.reader.room != 'main':
                 self.page.locator('#project-panel-close').click()
@@ -177,6 +188,16 @@ class Player:
         self.rest(room)
         # An unread room's opening lands on its newest arrival (DESIGN "Unread").
         return {'named': self.stand.newest_reply(room)} if self.session['rooms'][room].get('unread') else None
+
+    def _show(self, room: str):
+        """The page shows ``room`` from the moment the reader turns to it. The Project room left may still be read as
+        far as the newest reply it showed (a receipt in flight); a passage left unread, or a reply after, may not."""
+        left, keeps = self.reader.room, 0
+        if left and left not in ('main', room):
+            facts = self.facts(left)
+            if facts and (facts['replyShown'] or self.reader.following(facts)):
+                keeps = self.stand.revision(left)
+        self.stand.show(room, keeps)
 
     def _arrive(self, event):
         room = event['arrive']
