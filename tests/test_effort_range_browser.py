@@ -32,6 +32,17 @@ role_ui = roles.role_ui
 CONTROL = "#page-chat .chat-effort-range"
 HEAD = f"{CONTROL} .chat-effort-head"
 HOVER_MEDIA = "(hover: hover) and (pointer: fine)"
+# A strip's morph (capsule_morph.js) has ended: its glass is gone and no control on its line is still leaving.
+MORPH_ENDED = ("!el.dataset.morph && !('ownerLeaving' in el.parentElement.dataset)"
+               " && !el.parentElement.querySelector('[data-capsule-leaving]')")
+# What the morph still holds, for a wait that never saw it end: a product morph that never ends differs from one a
+# slow runner ended late only here.
+MORPH_STATE = """sel => { const el = document.querySelector(sel), row = el.parentElement;
+    return { morph: el.dataset.morph || '', leaving: 'ownerLeaving' in row.dataset, solo: row.dataset.ownerSolo || '',
+        marked: [...row.querySelectorAll('[data-capsule-leaving]')].map((n) => n.className),
+        animations: row.getAnimations({ subtree: true }).map((a) => ({ on: a.effect?.target?.className || '',
+            state: a.playState, time: a.currentTime, progress: a.effect?.getComputedTiming?.().progress ?? null })),
+        now: document.timeline.currentTime }; }"""
 FACTS = """sel => {
     const el = document.querySelector(sel);
     const rect = (node) => node.getBoundingClientRect();
@@ -282,6 +293,8 @@ def test_phone_press_opens_alone_on_the_line_while_the_others_step_aside(direct_
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
 
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
     url = direct_server_with_data["url"]
     with sync_playwright() as pw:
         browser, page = _launch(pw, engine, viewport={"width": width, "height": 800}, is_mobile=True, has_touch=True)
@@ -297,12 +310,19 @@ def test_phone_press_opens_alone_on_the_line_while_the_others_step_aside(direct_
             _wait(page, "el.dataset.open === 'true'")
             # The opening frame already has every mark on its word: nothing slides into place.
             _assert_strip_geometry(_facts(page))
-            page.wait_for_timeout(300)
+            # While the strip grows (capsule_morph.js) the controls that step aside still stand where they were,
+            # fading out of the line's flow (`data-capsule-leaving`), and they leave only when their fade has
+            # finished; on a slow runner that comes later than any fixed wait. Measure once the morph has ended.
+            try:
+                _wait(page, MORPH_ENDED)
+            except PlaywrightTimeout:
+                pytest.fail(f"the strip's morph never ended: {page.evaluate(MORPH_STATE, CONTROL)}")
             opened = _facts(page)
             # Alone on one line; wider platform fonts may require internal scrolling even at
             # 360 px. DESIGN's fit is measured, never a viewport breakpoint.
             assert opened["fit"] in ("solo", "overflow") and opened["solo"] == "effort", opened
-            assert not opened["subShown"] and not opened["contextShown"], opened
+            assert not opened["subShown"] and not opened["contextShown"], (
+                {k: opened[k] for k in ("fit", "solo", "subShown", "contextShown")}, opened)
             assert abs(opened["rowHeight"] - closed["rowHeight"]) <= 1, (opened, closed)
             assert abs(opened["areaHeight"] - closed["areaHeight"]) <= 1, (opened, closed)
             assert opened["right"] <= opened["rowRight"] + 1, opened
