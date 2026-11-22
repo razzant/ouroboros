@@ -261,6 +261,26 @@ def _seals(root: pathlib.Path, wanted: List[Tuple[int, str]]) -> Tuple[Dict[Tupl
     return found, ""
 
 
+def room_rule_sources(root: pathlib.Path) -> Dict[str, Dict[str, Any]]:
+    """The Project reservations by id, read strictly once, after the task bindings store is proved readable; raises
+    when either cannot be read (a missing registry beside its commit witness included)."""
+    from ouroboros.projects_registry import all_task_project_bindings, list_reserved_projects
+
+    registry = {str(row["id"]): row for row in list_reserved_projects(root, strict=True)}
+    all_task_project_bindings(root, strict=True)
+    return registry
+
+
+def _unread(memory: Any, room: int) -> Dict[str, Any]:
+    """A room read that did not happen: its rule's sources could not be read, so no row of it is a known absence."""
+    from ouroboros import dialogue_store as ds
+
+    root = pathlib.Path(memory.drive_root)
+    upper = ds.stream_end(root, "chat")
+    coverage = capture_coverage(memory, upper=upper, imported=ds.range_coverage(root, "chat", upper=upper), matched=0)
+    return {"pairs": [], "coverage": coverage, "path": f"no read of room {room}"}
+
+
 class Showing:
     """The rooms that show the given rows now: the store's own projection (``memory_inventory.rooms_of_row``:
     the room rule plus a Project's founding owner message), built for exactly these rows and nothing else, and
@@ -297,13 +317,12 @@ class Showing:
         from ouroboros.chat_chain import source_row_id
         from ouroboros.memory_inventory import MembershipFacts, rooms_of_row, row_meta
         from ouroboros.project_dialogue import _source_ref_identity, physical_origin_refs
-        from ouroboros.projects_registry import (RoomResolver, all_task_project_bindings, project_task_bindings,
-                                                 reserved_project_chat_ids)
+        from ouroboros.projects_registry import RoomResolver, project_task_bindings
 
-        projects = frozenset(reserved_project_chat_ids(root, strict=True))
-        all_task_project_bindings(root, strict=True)  # the bindings store reads, or this raises
-        bindings = project_task_bindings(root)  # the same parse, with each binding's founding reference
-        resolver = RoomResolver(root, strict=True)
+        registry = room_rule_sources(root)
+        projects = frozenset(int(row["chat_id"]) for row in registry.values() if row.get("chat_id")) - {0}
+        bindings = project_task_bindings(root)  # the parse the strict read just proved, with founding references
+        resolver = RoomResolver(root, strict=True, reserved=registry)  # one registry read for every bound task
         metas = {source_row_id(dict(row)): row_meta(row) for row in rows}
         keys = {tuple(key) for meta in metas.values() for key in meta.get("source_keys") or ()}
         bound = []
@@ -470,9 +489,17 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
     newest = order != "oldest"
     read = _posted(memory, query) if room is None else None
     handover = (read or {}).get("handover")
-    if read is not None and not handover:
+    scope_gap = ""
+    if room is not None:  # a room's selection reads the room rule: check its sources before any row is selected
+        try:
+            room_rule_sources(root)
+        except Exception as exc:
+            scope_gap = (f"rooms_unreadable ({type(exc).__name__}): which rows room {room} shows cannot be decided, "
+                         "so none was read")
+            read = _unread(memory, room)
+    if not scope_gap and read is not None and not handover:
         read["pairs"] = [(seq, row) for seq, row in read["pairs"] if judge(row)]
-    else:
+    elif not scope_gap:
         read = _scan(memory, room, judge)
         if handover:
             read["path"] += f": more posting candidates than the re-check bound of {RECHECK_BOUND}"
@@ -501,8 +528,8 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
                               "unstable": "edit" if moved else None if stable else "import"}
     gaps = [f"{gap.get('kind') or 'unknown'}" + (f" ({gap['detail']})" if gap.get("detail") else "")
             for gap in coverage.get("gaps") or []] + gaps_extra
-    if showing.gap:
-        gaps.append(showing.gap)
+    if showing.gap or scope_gap:
+        gaps.append(showing.gap or scope_gap)
     if moved:  # an edit landed while this read ran: its count is what it saw, never exact
         gaps.append(UNSTABLE_GAP)
     page = hits_all[offset:offset + count]

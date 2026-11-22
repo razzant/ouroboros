@@ -455,7 +455,14 @@ def _break(root, monkeypatch, source):
         raise OSError(f"{source} unreadable")
 
     if source == "reservations":
-        monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", broken)
+        real = projects_registry.list_reserved_projects
+
+        def strict_broken(root, *args, strict=False, **kwargs):
+            if strict:
+                raise OSError("reservations unreadable")
+            return real(root, *args, strict=strict, **kwargs)
+
+        monkeypatch.setattr(projects_registry, "list_reserved_projects", strict_broken)
     elif source == "bindings":
         (root / "state" / "project_task_bindings.json").write_text("{not json", encoding="utf-8")
     elif source == "lineage":
@@ -500,3 +507,30 @@ def test_the_door_tells_an_import_still_running_from_an_observed_edit(tmp_path, 
     monkeypatch.setattr(dialogue_recall, "_text_revision", lambda _root: next(revisions, 2))
     edited = _search(tmp_path, "archive", count=1)
     assert edited["snapshot"] is None and edited["notes"] == [recall.UNSTABLE_READ]
+
+
+
+@pytest.mark.parametrize("damage", ["registry removed beside its witness", "registry malformed", "bindings malformed"])
+def test_a_read_scoped_to_a_room_never_certifies_an_absence_it_could_not_check(tmp_path, damage):
+    from ouroboros import room_appearances
+    from ouroboros.tools.control_runtime import _chat_history
+    from types import SimpleNamespace
+
+    project = _bound_world(tmp_path)
+    room_appearances.run(tmp_path, lambda: False)
+    alpha = str(project["chat_id"])
+    healthy = _search(tmp_path, "archive bound", room_id=alpha)
+    assert healthy["total"] == 1 and len(healthy["rows"]) == 1
+    registry = tmp_path / "state" / "projects.json"
+    assert registry.exists() and registry.with_name("projects.json.committed").exists()
+    if damage == "registry removed beside its witness":
+        registry.unlink()
+    elif damage == "registry malformed":
+        registry.write_text("{not json", encoding="utf-8")
+    else:
+        (tmp_path / "state" / "project_task_bindings.json").write_text("{not json", encoding="utf-8")
+    door = _search(tmp_path, "archive bound", room_id=alpha)  # typed: never an escaping exception
+    assert door["total"] is None and door["rows"] == [] and sum("rooms_unreadable" in gap for gap in door["gaps"]) == 1
+    mind = str(_chat_history(SimpleNamespace(drive_root=tmp_path, task_metadata={}, pending_events=[], task_id="t"),
+                             words=["archive bound"], room_id=alpha))
+    assert "observed=0; total_unknown" in mind and "rooms_unreadable" in mind and "total=0" not in mind
