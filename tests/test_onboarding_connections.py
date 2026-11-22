@@ -286,7 +286,7 @@ def test_where_reviewed_skills_are_granted_on_their_own_the_consent_turns_on_a_s
     from ouroboros.skill_loader import SkillReviewState, find_skill, load_enabled, load_skill_grants, save_review_state
 
     drive = tmp_path / "data"
-    shutil.copytree(skills / "demo", drive / "skills" / "external" / "demo")
+    shutil.copytree(skills / "demo", drive / "skills" / "external" / "demo")  # first, a namesake a person added
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(tmp_path / "empty"))
     read = config.load_settings  # Finish saved the token: Settings now hold it, which is what makes it grantable
     monkeypatch.setattr(config, "load_settings", lambda *a, **k: {**read(*a, **k), "DEMO_TOKEN": "1:abc"})
@@ -300,6 +300,9 @@ def test_where_reviewed_skills_are_granted_on_their_own_the_consent_turns_on_a_s
         return 409, {}
 
     cards.record_consent(drive, _entry())
+    assert cards.settle(drive, post=post)[0]["post"] == "pending", "a namesake outside the built-in bucket gets nothing"
+    (drive / "skills" / "native").mkdir()
+    shutil.move(str(drive / "skills" / "external" / "demo"), str(drive / "skills" / "native" / "demo"))
     record = cards.settle(drive, post=post)[0]
     assert (calls, "grant" in record, record["post"]) == ([], False, "waiting"), "the owner allows it in Extensions"
     assert load_skill_grants(drive, "demo")["granted_keys"] == [] and load_enabled(drive, "demo") is False

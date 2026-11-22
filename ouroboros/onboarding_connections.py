@@ -342,11 +342,13 @@ def record_consent(drive_root: pathlib.Path, raw: Any) -> List[Dict[str, Any]]:
 
 
 def _installed(drive_root: pathlib.Path, name: str) -> bool:
+    """Whether the built-in the card belongs to is installed: a skill of that name in the built-in bucket (another
+    skill that took the name elsewhere, e.g. one a person added, never receives the card's consent)."""
     from ouroboros.config import get_skills_repo_path
     from ouroboros.skill_loader import find_skill
 
     skill = find_skill(drive_root, name, repo_path=get_skills_repo_path() or None)
-    return skill is not None and not getattr(skill, "load_error", "")
+    return skill is not None and not getattr(skill, "load_error", "") and getattr(skill, "location", "") == "native"
 
 
 def _turn_on(drive_root: pathlib.Path, name: str) -> str:
