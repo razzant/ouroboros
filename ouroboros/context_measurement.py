@@ -274,4 +274,5 @@ def mode_cause(plan: Any, rendered_mode: str) -> str:
     if not started:  # a plan no start fit built: its current selection and that projection's facts
         started = str(getattr(plan, "initial_mode", "") or "")
         cause = start_cause(plan.projection(started).memory_facts) if started else ""
+    cause = "" if cause == "unmeasured" else cause  # a Max start no window measured lowers nothing: never a ledger cause
     return cause if rendered_mode == started and cause else "after_start"

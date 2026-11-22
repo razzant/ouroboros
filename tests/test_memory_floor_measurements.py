@@ -457,6 +457,11 @@ def test_a_lower_mode_names_its_cause_from_the_plans_own_start_facts(tmp_path, m
     assert held.initial_mode == 'max' and crowded is not None
     assert mode_cause(crowded, 'low') == 'memory' and mode_cause(held, 'max') == ''
     assert mode_cause(held, 'low') == 'after_start' and mode_cause(crowded, 'nano') == 'after_start'
+    # A Max start whose window was not known (``unmeasured``) lowered nothing: it is no cause the usage ledger accepts,
+    # even beside an owner's mode that differs from the start's (a carried plan), and a lower mode after it is after_start.
+    unmeasured = dataclasses.replace(held, start=('max', 'unmeasured'))
+    assert mode_cause(unmeasured, 'max') == '' and mode_cause(unmeasured, 'low') == 'after_start'
+    assert mode_cause(dataclasses.replace(unmeasured, preferred_mode='low'), 'max') == 'after_start'
     disposition = measure_main_fit(crowded, crowded.messages_for('low'), scale.tools(), profile='task_local_low',
                                    rendered_mode='low', round_id='e:round:1')
     physical = cf._physical_context_for_fit(disposition)
