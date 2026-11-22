@@ -1537,7 +1537,8 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 
 /* ---- What one page adds -------------------------------------------------------------------------------------------- */
 
-/* Agents (subagents_settings.js): the list's filters, a head's line of what the agent is for (two lines at most), and
+/* Agents (subagents_settings.js): the list's filters, a head's source and rate (wrapped whole, never cut) over what
+   the agent is for (two lines at most), and
    an agent's page, whose form keeps the card recipe of setup (.available-subagent-*), each part in its own card;
    the page is the container their columns read, as a card is in setup. */
 .agents-filters { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-inline: calc(-1 * var(--space-1)); }
@@ -1545,7 +1546,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 /* Under a finger the small capsules reach 8px past their look: in a narrow card Add agent wraps to stand right above
    the filters, so the two rows part by both reaches and neither covers the other (DESIGN "Touch and containment"). */
 @media (pointer: coarse) { .agents-filters { margin-top: var(--space-1); } }
-.agents-root .settings-head-open > .ui-row-meta { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.agents-root .settings-head-open > .agents-head-use { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .agent-page { container: subagentcard / inline-size; }
 .agent-page .available-subagent-purpose textarea { min-height: 84px; max-height: none; }
 .agent-status { margin: 0; }

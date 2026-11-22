@@ -1744,8 +1744,8 @@ reviews create child tasks or prove execution.
 - Harness marks are monochrome `currentColor` vectors with adjacent visible
   text, identity only, neutral across states, with a generic text-preserving
   fallback; direct API shows as `API`. Claude, Cursor and OpenCode paths come
-  from Simple Icons, Codex/OpenAI from SVGL; names and marks belong to their
-  owners.
+  from Simple Icons, Codex/OpenAI from SVGL, Antigravity from Google's own one-colour mark
+  (`antigravity.google/assets/image/brand/antigravity-icon__one-color.svg`); names and marks belong to their owners.
 
 ### Quiz card
 
@@ -2803,7 +2803,11 @@ a server entry):
    keep the status wording their own contract requires.
 5. **Meta line** — `--type-meta`, `--text-meta`, on its own line under the
    name. Quantities are stated in human words ("38% used · resets in 2h"), and
-   an instant is humanized. A row never leads with a raw ISO timestamp.
+   an instant is humanized. A row never leads with a raw ISO timestamp. In
+   Settings → Agents, a head says its source, then the whole rate its key
+   publishes (`$4 in / $20 out per 1M tokens`, `free`; never a condition, an
+   unknown or a measured review cost), wrapped, never cut; its description is a
+   second line.
 6. **Actions** — docked right in a slot of their own, legible at rest. An action
    rendered at secondary ink reads as disabled: its label is `--text-primary` (a
    capsule's name and an unchosen option take the secondary ink, bible principle 4).
