@@ -412,7 +412,7 @@ def test_a_page_recorded_in_another_room_stands_on_the_rung_of_each_room_it_seal
     assert f"room:{i2} 1 recorded, 1 found, 0 missing" in under.split("\n")[0]
 
 
-# --- review round 1: exact readers, honest counts, acting seals, fields -----------------------------
+# --- exact run readers, honest counts, acting seals, one field at a time --------------------------
 
 def _place_row(chat: int, minute: int, text: str, imported: bool = False) -> dict:
     """A place room's arrival; an imported one is an older message stored later, so the room reads by send time."""
