@@ -104,7 +104,8 @@ export function createHistoryReveal({ pager, reading, feed, records, present, ex
             const present = reading.stick === true && reading.nearBottom() === true;
             // A card's header names no row of its own: the card stands where its earliest row is (chat.js stamps it).
             const card = anchor?.cardChain?.find((link) => link.node?.dataset?.historySource)?.node.dataset;
-            const id = anchor?.historyId || (card ? `${card.historySource}:${card.historyOffset}` : '');
+            const id = anchor?.historyId || (card ? `${card.historySource}:${card.historyOffset}` : '')
+                || anchor?.fallbacks?.find((f) => f.historyId)?.historyId || '';
             return { anchor, cursor: (id && pager.pageOf?.(id)) || null, present };
         },
         // The page around a task: `{ target }` to land on; `{ state }` 'absent' (no message of it in this

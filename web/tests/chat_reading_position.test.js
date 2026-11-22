@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createReviewHydrator } from '../modules/review_presentation.js';
 import { createChatReadingPosition } from '../modules/chat_reading_position.js';
+import { createTimelineAnchors } from '../modules/chat_render_batch.js';
 
 function fixture(t, exact = true, restoreTo = 80) {
     const previous = globalThis.requestAnimationFrame;
@@ -736,7 +737,10 @@ test('a resize while a downward key still animates neither writes under it nor e
     f.gesture({ type: 'keydown', key: 'End', target: body }); f.feed.scrollTop = 150; f.frame();
     const restored = f.restored();
     f.reading.reflow();
-    for (const top of [400, 580]) { f.feed.scrollTop = top; f.reading.scroll(); f.frame(); }
+    f.feed.scrollTop = 400; f.reading.scroll(); f.frame();
+    f.reading.mutate(() => true, { remoteContent: true });
+    assert.deepEqual([f.feed.scrollTop, f.restored()], [400, restored], 'mutate while owed neither restores nor writes scrollTop');
+    f.feed.scrollTop = 580; f.reading.scroll(); f.frame();
     f.reading.reflow();
     assert.deepEqual([f.feed.scrollTop, f.restored()], [580, restored], 'nothing writes under the animated scroll: a write stops it short');
     f.feed.scrollTop = 600; f.reading.scroll();
@@ -1099,3 +1103,278 @@ for (const supersede of [false, true]) for (const readBack of [false, true]) {
         assert.deepEqual([state.stick, feed.scrollTop], expected, 'the following reflow keeps the same place');
     });
 }
+
+test('a 300 px disappearance above the viewport during a 60 px downward scroll keeps its unapplied shift across scroll()', t => {
+    const previous = globalThis.requestAnimationFrame, frames = [];
+    globalThis.requestAnimationFrame = fn => frames.push(fn);
+    t.after(() => { globalThis.requestAnimationFrame = previous; });
+    const frame = () => frames.splice(0).forEach(fn => fn());
+    const heard = new Map(), docHeard = new Map();
+    const doc = { body: {}, documentElement: {}, addEventListener: (k, fn) => docHeard.set(k, fn), removeEventListener() {} };
+    const feed = { clientWidth: 400, offsetWidth: 400, clientHeight: 500, offsetHeight: 500, scrollHeight: 3000, scrollTop: 1000,
+        ownerDocument: doc, addEventListener: (k, fn) => heard.set(k, fn), removeEventListener() {},
+        getBoundingClientRect: () => ({ top: 0, bottom: 500, left: 0, right: 400, width: 400, height: 500 }),
+        contains: node => node === feed || Boolean(node?.inFeed) };
+    let rowY = 1390; // starts at +390 px when scrollTop = 1000
+    const row = { inFeed: true, parentElement: feed, isConnected: true, historyId: 'chat:r',
+        getBoundingClientRect: () => ({ top: rowY - feed.scrollTop, bottom: rowY - feed.scrollTop + 100, width: 400, height: 100 }) };
+    const anchors = {
+        serialize: () => null,
+        capture: () => ({ node: row, historyId: row.historyId, offset: row.getBoundingClientRect().top }),
+        restore: a => { if (!a?.node) return false; feed.scrollTop += a.node.getBoundingClientRect().top - a.offset; return true; },
+    };
+    const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+        anchors, changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+    reading.bindGestures(() => {});
+    reading.stick = false; reading.remember(true);
+    docHeard.get('pointerdown')({ type: 'pointerdown', target: { inFeed: true } });
+    docHeard.get('keydown')({ type: 'keydown', key: 'PageDown', target: doc.body, timeStamp: 10 });
+    frame();
+    // While scrolling 60 px down, 300 px disappear above the viewport; the next scroll() updates viewportAnchor.
+    reading.mutate(() => { rowY -= 300; feed.scrollHeight -= 300; return true; }, { remoteContent: true });
+    assert.equal(feed.scrollTop, 1000, 'scrollTop is not written mid-animation');
+    feed.scrollTop = 1060;
+    reading.scroll();
+    heard.get('scrollend')({ type: 'scrollend' });
+    frame(); frame();
+    assert.equal(feed.scrollTop, 760);
+    assert.equal(row.getBoundingClientRect().top, 330, 'row from +390 px lands at +330 px after 60 px scroll, not +30 px');
+});
+
+test('an unchanged repaint and two frames before End delivers its first scroll do not cancel End auto-follow', t => {
+    const f = fixture(t, true, null);
+    const body = f.feed.ownerDocument.body;
+    f.reading.bindGestures(() => {});
+    f.reading.cancel();
+    Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 100, clientHeight: 400 });
+    f.gesture({ type: 'pointerdown', target: { inFeed: true } });
+    f.gesture({ type: 'keydown', key: 'End', target: body, timeStamp: 20 });
+    // Repaint with no shift and two frames pass before the engine's first scroll event of End arrives.
+    f.reading.mutate(() => true, { remoteContent: true });
+    f.frame(); f.frame();
+    for (const top of [350, 600]) { f.feed.scrollTop = top; f.reading.scroll(); }
+    f.gesture({ type: 'scrollend' });
+    f.frame(); f.frame();
+    assert.equal(f.reading.stick, true, 'End reaches the live edge with auto-follow enabled');
+    f.reading.mutate(() => { f.feed.scrollHeight = 1140; return true; }, { remoteContent: true });
+    const clampedGap = Math.max(0, f.feed.scrollHeight - Math.min(f.feed.scrollTop, f.feed.scrollHeight - f.feed.clientHeight) - f.feed.clientHeight);
+    assert.equal(clampedGap, 0, 'next 140 px reply leaves zero gap');
+});
+
+test('scrolling a nested card timeline by 60 px after PageDown and an empty repaint or reflow leaves the outer feed at 150 px', t => {
+    const previous = globalThis.requestAnimationFrame, frames = [];
+    globalThis.requestAnimationFrame = fn => frames.push(fn);
+    t.after(() => { globalThis.requestAnimationFrame = previous; });
+    const frame = () => frames.splice(0).forEach(fn => fn());
+    const feedHeard = new Map(), docHeard = new Map();
+    const doc = { body: {}, documentElement: {}, defaultView: { getComputedStyle: () => ({ overflowY: 'auto' }) },
+        addEventListener: (k, fn) => docHeard.set(k, fn), removeEventListener() {} };
+    const feed = { clientWidth: 400, offsetWidth: 400, clientHeight: 500, offsetHeight: 500, scrollHeight: 2000, scrollTop: 150,
+        ownerDocument: doc, addEventListener: (k, fn) => feedHeard.set(k, fn), removeEventListener() {},
+        getBoundingClientRect: () => ({ top: 0, bottom: 500, left: 0, right: 400, width: 400, height: 500 }),
+        contains: node => node === feed || node === timeline || node === line };
+    const timeline = { parentElement: feed, isConnected: true, clientHeight: 200, scrollHeight: 600, scrollTop: 0,
+        getBoundingClientRect: () => ({ top: 180 - feed.scrollTop, bottom: 380 - feed.scrollTop, width: 400, height: 200 }) };
+    const line = { parentElement: timeline, isConnected: true,
+        getBoundingClientRect: () => ({ top: 180 - feed.scrollTop + 20 - timeline.scrollTop, width: 400, height: 40 }) };
+    const anchors = {
+        serialize: () => null,
+        capture: () => ({ node: line, offset: line.getBoundingClientRect().top }),
+        restore: a => { if (!a?.node) return false; feed.scrollTop += a.node.getBoundingClientRect().top - a.offset; return true; },
+    };
+    const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+        anchors, changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+    reading.bindGestures(() => {});
+    reading.stick = false; reading.remember(true);
+
+    for (const emptyStep of [() => reading.mutate(() => false), () => reading.reflow()]) {
+        feed.scrollTop = 150; timeline.scrollTop = 0; reading.remember(true);
+        docHeard.get('pointerdown')({ type: 'pointerdown', target: feed });
+        docHeard.get('pointerup')({ type: 'pointerup', target: feed });
+        docHeard.get('pointerdown')({ type: 'pointerdown', target: { inFeed: true, parentElement: feed } });
+        docHeard.get('keydown')({ type: 'keydown', key: 'PageDown', target: doc.body, timeStamp: 100 });
+        emptyStep();
+        // Reader scrolls the inner card timeline by 60 px.
+        feedHeard.get('wheel')({ type: 'wheel', deltaY: 60, target: line, timeStamp: 116 });
+        timeline.scrollTop += 60;
+        feedHeard.get('scroll')({ type: 'scroll', target: timeline, timeStamp: 118 });
+        frame(); frame(); frame();
+        assert.equal(feed.scrollTop, 150, 'outer feed stays at 150 px instead of shifting to 90 px');
+    }
+});
+
+function runGestureSeries({ kind, count, spacingMs, withScrollEnd = true, setupFeed, mutateAfterFirst }) {
+    const previous = globalThis.requestAnimationFrame, frames = [];
+    globalThis.requestAnimationFrame = fn => frames.push(fn);
+    try {
+        const frame = () => frames.splice(0).forEach(fn => fn());
+        const feedHeard = new Map(), docHeard = new Map();
+        const doc = { body: {}, documentElement: {}, addEventListener: (k, fn) => docHeard.set(k, fn), removeEventListener() {} };
+        const { feed, anchors, targetRow } = setupFeed(doc, feedHeard);
+        const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+            anchors: { serialize: () => null, capture: anchors.captureVisibleTimelineAnchor, restore: anchors.restoreVisibleTimelineAnchor },
+            changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+        reading.bindGestures(() => {});
+        reading.stick = false; reading.remember(true);
+
+        const queue = [];
+        let touchY = 500;
+        if (kind === 'touch') {
+            docHeard.get('pointerdown')({ type: 'pointerdown', target: targetRow, timeStamp: 98 });
+            feedHeard.get('touchstart')({ type: 'touchstart', target: targetRow, touches: [{ clientX: 200, clientY: touchY }], timeStamp: 99 });
+        }
+        for (let i = 0; i < count; i++) {
+            const at = i * spacingMs;
+            queue.push({ at, order: 1, run: () => {
+                if (kind === 'wheel') {
+                    feedHeard.get('wheel')({ type: 'wheel', deltaY: 60, target: targetRow, timeStamp: 100 + at });
+                } else {
+                    touchY -= 60;
+                    feedHeard.get('touchmove')({ type: 'touchmove', target: targetRow, touches: [{ clientX: 200, clientY: touchY }], timeStamp: 100 + at });
+                }
+                if (i === 0) {
+                    const topBeforeMutate = feed.scrollTop;
+                    mutateAfterFirst(reading);
+                    assert.equal(feed.scrollTop, topBeforeMutate, 'mutate does not write scrollTop mid-gesture');
+                    if (kind === 'touch') docHeard.get('pointercancel')({ type: 'pointercancel', target: targetRow, timeStamp: 100 + at });
+                }
+            } });
+            queue.push({ at: at + 32, order: 2, run: () => { feed.scrollTop += 60; reading.scroll(); } });
+        }
+        const lastScrollAt = (count - 1) * spacingMs + 32;
+        if (kind === 'touch') queue.push({ at: lastScrollAt, order: 3, run: () => docHeard.get('pointerup')({ type: 'pointerup', target: {}, timeStamp: 100 + lastScrollAt }) });
+        if (withScrollEnd) queue.push({ at: lastScrollAt + 8, order: 4, run: () => feedHeard.get('scrollend')({ type: 'scrollend' }) });
+        for (let t = 16; t <= lastScrollAt + 160; t += 16) queue.push({ at: t, order: 0, run: frame });
+        queue.sort((a, b) => (a.at - b.at) || (a.order - b.order));
+        for (const item of queue) item.run();
+        return feed;
+    } finally {
+        globalThis.requestAnimationFrame = previous;
+    }
+}
+
+function makeSeriesDom(doc, feedHeard, { scrollTop, scrollHeight = 5000, clientHeight = 750 }) {
+    const children = [];
+    const feed = {
+        clientWidth: 400, offsetWidth: 400, clientHeight, offsetHeight: clientHeight, scrollHeight, scrollTop, children,
+        ownerDocument: doc, addEventListener: (k, fn) => feedHeard.set(k, fn), removeEventListener() {},
+        getBoundingClientRect: () => ({ top: 0, bottom: clientHeight, left: 0, right: 400, width: 400, height: clientHeight }),
+        contains: node => node === feed || Boolean(node?.inFeed),
+        querySelectorAll: () => children.filter(c => c.dataset?.historyId),
+    };
+    const addRow = ({ classes = ['chat-bubble'], historyId = '', y, height }) => {
+        const set = new Set(classes);
+        const row = {
+            inFeed: true, isConnected: true, parentElement: feed, y, height,
+            dataset: historyId ? { historyId } : {},
+            classList: { contains: c => set.has(c) },
+            getBoundingClientRect: () => ({ top: row.y - feed.scrollTop, bottom: row.y - feed.scrollTop + row.height, left: 0, right: 400, width: 400, height: row.height }),
+            getClientRects: () => (row.height > 0 ? [row.getBoundingClientRect()] : []),
+            closest: sel => (sel === '[data-history-id]' && row.dataset.historyId ? row : null),
+            querySelectorAll: () => [],
+        };
+        children.push(row);
+        return row;
+    };
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map() });
+    return { feed, anchors, addRow };
+}
+
+test('wheel series of 2 and 5 events at 16-60 ms spacing keep owedShift when 300 px disappear above the reading line', () => {
+    for (const count of [2, 5]) for (const spacingMs of [16, 48, 60]) for (const withScrollEnd of [true, false]) {
+        let readingLine;
+        runGestureSeries({
+            kind: 'wheel', count, spacingMs, withScrollEnd,
+            setupFeed: (doc, feedHeard) => {
+                const { feed, anchors, addRow } = makeSeriesDom(doc, feedHeard, { scrollTop: 1000, clientHeight: 500, scrollHeight: 3500 });
+                const topRow = addRow({ historyId: 'chat:top', y: 1020, height: 120 });
+                readingLine = addRow({ historyId: 'chat:read', y: 1390, height: 100 }); // +390 px before scrolling
+                readingLine._topRow = topRow;
+                return { feed, anchors, targetRow: readingLine };
+            },
+            mutateAfterFirst: reading => reading.mutate(() => {
+                readingLine._topRow.y -= 300;
+                readingLine.y -= 300;
+                return true;
+            }, { remoteContent: true }),
+        });
+        const expected = 390 - count * 60; // +270 px for 2 events, +90 px for 5 events
+        assert.equal(readingLine.getBoundingClientRect().top, expected,
+            `wheel count=${count} spacing=${spacingMs}ms scrollend=${withScrollEnd}`);
+    }
+});
+
+test('wheel series of 2 and 5 events at 16-60 ms spacing keep owedShift across a 400 px card face change', () => {
+    for (const count of [2, 5]) for (const spacingMs of [16, 48, 60]) for (const withScrollEnd of [true, false]) {
+        let card, nextRow, lowerRow, domFeed;
+        runGestureSeries({
+            kind: 'wheel', count, spacingMs, withScrollEnd,
+            setupFeed: (doc, feedHeard) => {
+                const { feed, anchors, addRow } = makeSeriesDom(doc, feedHeard, { scrollTop: 2000, clientHeight: 750, scrollHeight: 5000 });
+                domFeed = feed;
+                card = addRow({ classes: ['chat-bubble', 'chat-card-bubble'], historyId: 'card:face', y: 1500, height: 650 }); // [-500..+150]
+                nextRow = addRow({ historyId: 'chat:next', y: 2154, height: 120 }); // +154 px
+                lowerRow = addRow({ historyId: 'chat:lower', y: 2334, height: 120 }); // +334 px
+                return { feed, anchors, targetRow: nextRow };
+            },
+            mutateAfterFirst: reading => reading.mutate(() => {
+                card.height = 250; // 400 px face shrink
+                nextRow.y -= 400;
+                lowerRow.y -= 400;
+                domFeed.scrollHeight -= 400;
+                return true;
+            }, { remoteContent: true }),
+        });
+        assert.equal(nextRow.getBoundingClientRect().top, 154 - count * 60,
+            `nextRow wheel count=${count} spacing=${spacingMs}ms scrollend=${withScrollEnd}`);
+        assert.equal(lowerRow.getBoundingClientRect().top, 334 - count * 60,
+            `lowerRow wheel count=${count} spacing=${spacingMs}ms scrollend=${withScrollEnd}`);
+    }
+});
+
+test('touchmove series of 2 and 5 events at 16-60 ms spacing keep owedShift for 300 px removal and 400 px card face change', () => {
+    for (const count of [2, 5]) for (const spacingMs of [16, 48, 60]) {
+        let readingLine;
+        runGestureSeries({
+            kind: 'touch', count, spacingMs, withScrollEnd: false,
+            setupFeed: (doc, feedHeard) => {
+                const { feed, anchors, addRow } = makeSeriesDom(doc, feedHeard, { scrollTop: 1000, clientHeight: 500, scrollHeight: 3500 });
+                const topRow = addRow({ historyId: 'chat:top', y: 1020, height: 120 });
+                readingLine = addRow({ historyId: 'chat:read', y: 1390, height: 100 });
+                readingLine._topRow = topRow;
+                return { feed, anchors, targetRow: readingLine };
+            },
+            mutateAfterFirst: reading => reading.mutate(() => {
+                readingLine._topRow.y -= 300;
+                readingLine.y -= 300;
+                return true;
+            }, { remoteContent: true }),
+        });
+        assert.equal(readingLine.getBoundingClientRect().top, 390 - count * 60,
+            `touch 300px removal count=${count} spacing=${spacingMs}ms`);
+
+        let card, nextRow, lowerRow, domFeed;
+        runGestureSeries({
+            kind: 'touch', count, spacingMs, withScrollEnd: false,
+            setupFeed: (doc, feedHeard) => {
+                const { feed, anchors, addRow } = makeSeriesDom(doc, feedHeard, { scrollTop: 2000, clientHeight: 750, scrollHeight: 5000 });
+                domFeed = feed;
+                card = addRow({ classes: ['chat-bubble', 'chat-card-bubble'], historyId: 'card:face', y: 1500, height: 650 });
+                nextRow = addRow({ historyId: 'chat:next', y: 2154, height: 120 });
+                lowerRow = addRow({ historyId: 'chat:lower', y: 2334, height: 120 });
+                return { feed, anchors, targetRow: nextRow };
+            },
+            mutateAfterFirst: reading => reading.mutate(() => {
+                card.height = 250;
+                nextRow.y -= 400;
+                lowerRow.y -= 400;
+                domFeed.scrollHeight -= 400;
+                return true;
+            }, { remoteContent: true }),
+        });
+        assert.equal(nextRow.getBoundingClientRect().top, 154 - count * 60,
+            `touch 400px card face nextRow count=${count} spacing=${spacingMs}ms`);
+        assert.equal(lowerRow.getBoundingClientRect().top, 334 - count * 60,
+            `touch 400px card face lowerRow count=${count} spacing=${spacingMs}ms`);
+    }
+});
