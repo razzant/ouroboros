@@ -225,6 +225,30 @@ def test_an_update_outcome_is_worded_from_its_finalization_and_its_stash():
     assert all("Details" not in row["text"] for row in (done, kept))
 
 
+KEPT_NOTE = ('conflicting paths: "a.py"; the original local changes remain in stash 0123456789ab and current files '
+             "should be inspected before recovering with `git stash apply 0123456789abcdef0123`")
+
+
+def test_only_a_kept_stash_sends_the_owner_to_its_git_command_and_the_window_line_stays_one_line():
+    """RV4 15 (Q1=C): the update whose stash Git kept aside carries the step to put the changes back, its exact command
+    as the details; a restored, rolled-back or still unfinished restore carries no such step. The closed table still
+    refuses a step nobody wrote, and the window's line holds no command and names no Details."""
+    from supervisor.update_merge import boot_outcome_notice
+
+    kept = boot_outcome_notice({"finalized": True, "stash_restore_status": "preserved", "stash_note": KEPT_NOTE})
+    assert kept["progress_meta"]["notice"] == {
+        "code": "managed_update_finalized", "step": "restore_kept_changes", "details": KEPT_NOTE}
+    for result in ({"finalized": True, "stash_restore_status": "restored", "stash_note": "local changes restored"},
+                   {"rolled_back": True, "stash_note": "rolled back to 0123456789ab"},
+                   {"finalized": False, "stash_restore_status": "incomplete", "stash_note": "Do not apply it."}):
+        assert "step" not in boot_outcome_notice(result)["progress_meta"]["notice"], result
+    with pytest.raises(ValueError):
+        host_notice.notice("managed_update_finalized", step="restore_changes", details=KEPT_NOTE)
+    line = host_notice.notice_line({"text": kept["text"], "role": "system", **kept["progress_meta"]}, "")
+    assert line == f"{kept['text']} {host_notice.STEPS['restore_kept_changes']}" and "git stash" not in line
+    assert "Details" not in host_notice.STEPS["restore_kept_changes"]
+
+
 def test_crash_recovery_keeps_the_record_a_notice_row_was_sent_with(tmp_path, monkeypatch):
     """RV4 7: the outbox and the delivered receipt keep the canonical record beside the phrase; recovery adopts it."""
     from ouroboros import working_checkpoint

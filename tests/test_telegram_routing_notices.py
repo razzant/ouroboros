@@ -630,3 +630,31 @@ def test_the_phone_says_the_line_its_frame_carries_rather_than_assembling_anothe
         assert phone.sent()[-1]["text"].startswith("This turn did not start.")
     finally:
         plugin.telegram_i18n.configure(None)
+
+
+def test_the_phone_says_a_kept_stash_command_under_its_line_and_every_other_notice_as_its_line(phone, monkeypatch):
+    """RV4 15 (Q1=C): the phone has no Details, so the update row whose stash Git kept aside says its exact command
+    under its line, after one blank line, as plain text. Its typed step selects that, never words: a notice with
+    another step or none says its line alone, the same command in its details included."""
+    from ouroboros.host_notice import STEPS, fields
+    from supervisor import message_bus
+    from supervisor.update_merge import boot_outcome_notice
+    from tests.test_host_notice import KEPT_NOTE
+
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setattr(plugin, "_load_settings", lambda _: {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "all"})
+    kept = boot_outcome_notice({"finalized": True, "stash_restore_status": "preserved", "stash_note": KEPT_NOTE})
+    restored = boot_outcome_notice({"finalized": True, "stash_restore_status": "restored", "stash_note": "restored"})
+    other = {"text": "This turn did not start.",
+             "progress_meta": fields("not_started", step="try_again", details=KEPT_NOTE)}
+    try:
+        message_bus.send_with_budget(42, **kept, role="system", system_type="managed_update_notice")
+        line = f"{kept['text']} {STEPS['restore_kept_changes']}"
+        assert phone.sent()[-1] == {"chat_id": "42", "text": f"{line}\n\n{KEPT_NOTE}"}, "line, blank line, details; plain"
+        message_bus.send_with_budget(42, **restored, role="system", system_type="managed_update_notice")
+        assert phone.sent()[-1]["text"] == restored["text"]
+        message_bus.send_with_budget(42, **other, role="system", system_type="task_not_started")
+        assert phone.sent()[-1]["text"] == f"This turn did not start. {STEPS['try_again']}"
+    finally:
+        plugin.telegram_i18n.configure(None)

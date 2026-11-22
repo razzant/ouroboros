@@ -14,10 +14,12 @@ one typed ``notice`` beside it in the row's ``progress_meta`` (``fields``):
 
 The row keeps it through persistence, history and live delivery (``message_ingress``, ``gateway.history``); the window
 draws it as it is, and a row without one (older history) keeps the display table ``web/modules/host_notice_text.js``.
-Telegram and Copy take one line from ``notice_line``, which sends it and reads it alike (``view``); the mind reads the
-step and the details beside the phrase (``mind_text``). Words stay the producer's: this module holds the steps, the
-one closed vocabulary every notice shares, and none of the phrases. A phrase the translation memory lacks is offered
-to the generator only when its row is sent, in that install's data root; a read never writes and never wakes it.
+Telegram and Copy take one line from ``notice_line``, which sends it and reads it alike (``view``); Telegram, which has
+no Details, says the details under that line only for a step whose details are its instruction
+(``with_instruction_details``). The mind reads the step and the details beside the phrase (``mind_text``). Words stay
+the producer's: this module holds the steps, the one closed vocabulary every notice shares, and none of the phrases.
+A phrase the translation memory lacks is offered to the generator only when its row is sent, in that install's data
+root; a read never writes and never wakes it.
 """
 
 from __future__ import annotations
@@ -44,7 +46,11 @@ STEPS: Dict[str, str] = {
     "reply_to_revert": "Reply if you want it reverted.",
     "reopen_project": "A message from you in this room or a new task reopens it.",
     "inspect_task": "Open the task's details before you start another run.",
+    "restore_kept_changes": "Put your local changes back with the Git command that comes with this message.",
 }
+# Steps whose details are the instruction itself (the exact command that puts kept local changes back: the owner's
+# Q1=C), so a reader without Details says them under the line; every other notice stays one line there.
+INSTRUCTION_STEPS = frozenset({"restore_kept_changes"})
 _STEP_CODE = "code:notice.step."
 _MISSES: Dict[str, set] = {}
 _MISSES_CAP = 2_000  # one process's memory of offered phrases per language; the generator's own queue is bounded too
@@ -161,6 +167,15 @@ def notice_line(row: Mapping[str, Any], lang: Optional[str] = None, *, drive_roo
         return text
     words = STEPS[step] if english or not said else memory.tr(_STEP_CODE + step, tag, STEPS[step], drive_root=drive_root)
     return f"{text} {words}" if text else str(words)
+
+
+def with_instruction_details(row: Mapping[str, Any], line: str) -> str:
+    """The text a reader without Details (Telegram) sends for a host row: its one line, then the notice's details after
+    one blank line, as written, when its typed step is one whose details are its instruction (``INSTRUCTION_STEPS``);
+    the line alone for every other row."""
+    notice = notice_of(row)
+    details = str(notice.get("details") or "").strip()
+    return f"{line}\n\n{details}" if line and details and notice.get("step") in INSTRUCTION_STEPS else line
 
 
 def view(row: Mapping[str, Any], *, drive_root: Optional[pathlib.Path] = None, record_misses: bool = False) -> Dict[str, Any]:

@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 import httpx
 
-from ouroboros.host_notice import notice_line
+from ouroboros.host_notice import notice_line, with_instruction_details
 from ouroboros.net_transport import env_proxies_configured
 from ouroboros.project_facts import project_display_name
 from ouroboros.utils import in_worker_process
@@ -1074,9 +1074,11 @@ def _make_outbound(api, cue: TypingCue | None = None):
                 return
 
             # The host's one line (a notice's phrase and step, the technical pause), each part translated first: the
-            # frame's own line when the host assembled one, so the phone says what the window and Copy say.
+            # frame's own line when the host assembled one, so the phone says what the window and Copy say. The phone
+            # has no Details: a step whose details are its instruction (a Git command) carries them under that line.
             line = event["notice"].get("line") if isinstance(event.get("notice"), dict) else None
             text = line if isinstance(line, str) and line else notice_line(event, lang, drive_root=telegram_i18n.drive_root())
+            text = with_instruction_details(event, text)
             # A relay quotes the owner's own words above Ouroboros's note; they are sent verbatim, as plain text.
             relayed = event.get("system_type") == "relay_entry" and isinstance(event.get("relay"), dict)
             if relayed:

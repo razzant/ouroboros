@@ -239,7 +239,9 @@ English source read through the install's translation memory (a line it lacks is
 generated like a browser miss), so the bot ships no dictionary and follows any
 chosen language. A host notice arrives as the host's one line (`ouroboros/host_notice.py`): its
 phrase and its next step, each translated before they are joined; its raw details stay behind
-Details in the web. The retired bridge-only `TELEGRAM_LANGUAGE` setting is migrated once.
+Details in the web. A step whose details are its instruction (the Git command that puts kept
+local changes back after an update) brings them under the line, after a blank line, as plain
+text. The retired bridge-only `TELEGRAM_LANGUAGE` setting is migrated once.
 
 The bridge starts the Mini App when the Ouroboros server is a container's
 PID 1 without an init. PID 1 counts as the server only when the host named
