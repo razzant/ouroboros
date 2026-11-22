@@ -1324,6 +1324,9 @@ def test_s12_a_keep_saved_after_binding_is_release_unconfirmed_and_a_delivered_r
     # holds, so the answer is partly retired (the thread is gone, its archive kept), no longer already_retired.
     rest = outside_store(after, world.root, TASK)
     assert after["retained"] and rest["retained"] == [] and rest["retired"] == [PLACE], after
+    from ouroboros.payload_release_state import store_of
+    [manifest] = (store_of(world.root, TASK) / "source_handles" / "delegated_activity").glob(f"thread-{THREAD}-manifest-*.json")
+    assert str(manifest) in after["retained"] and after["releases"][str(manifest)] == "held", after  # one real file
     assert (after["status"], after["keep"], rest["releases"]) == ("partly_retired", True,
                                                                   {PLACE: "accepted_pending_removal"})
 
