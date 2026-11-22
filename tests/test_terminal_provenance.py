@@ -376,9 +376,10 @@ def test_budget_rejection_before_any_work_is_a_host_notice(monkeypatch):
     assert text.startswith("The total budget is spent") and "TOTAL_BUDGET" not in text, "words, not the setting's key"
     assert usage["terminal_origin"] == L.TERMINAL_ORIGIN_HOST_NOTICE
     assert usage["reason_code"] == "budget_exhausted"
-    # Its row says the phrase and names the owner's step beside it (DESIGN principle 7).
+    # Its row says the phrase and names the owner's step beside it, the setting's key as its detail (DESIGN principle 7).
     row = usage["host_notice_row"]
-    assert row["record"] == text and row["notice"] == {"code": "budget_exhausted", "step": "raise_total_budget"}
+    assert row["record"] == text and row["notice"] == {"code": "budget_exhausted", "step": "raise_total_budget",
+                                                       "details": "setting: TOTAL_BUDGET"}
     assert row["text"] == "The total budget is spent, so this task stopped before its next paid call."
 
 
