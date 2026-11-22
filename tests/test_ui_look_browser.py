@@ -7,9 +7,11 @@ version of the interface each screen ran. The list stands on every Files screen 
 not, since a desk moves its location and actions into the page's bar and hides it (page_header.js bindPageHeader). With
 frames asked for, every screen is a pair: the served interface beside the draft on the same data, the served one
 without the 7 px text, the draft with it marked new, each frame a flat file in uploads/screenshots named and captioned
-with its version and engine. The stand, run alone at a phone, walks every Dashboard view and Extensions page although
-the phone hides their list after the first press, and opens a Project room by its id. The stand runs in this test's
-interpreter, or in the one LOOK_STAND_PYTHON names (a Python with Playwright, for a test interpreter without it).
+with its version and engine. The stand, run alone at a phone, looks at the Dashboard and Extensions lists the phone
+lands on, then walks every view and page although the phone hides the list after the first press, and opens a Project
+room by its id. On a page of its own it tells what a press shows: a place that did not open, a tab whose declared panel
+does not exist, a list shown before its page. The stand runs in this test's interpreter, or in the one LOOK_STAND_PYTHON
+names (a Python with Playwright, for a test interpreter without it).
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -116,9 +119,12 @@ def test_the_stand_walks_each_view_a_phone_hides_and_opens_a_room_by_its_id(dire
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["finished"] and outcome["exit"] == 0, (outcome, report["notes"])
-    assert not [note for note in report["notes"] if "was not measured" in note], report["notes"]
+    assert not [line for line in report["not_looked"] if "was not measured" in line], report["not_looked"]
     by_place = {place: [screen for screen in report["screens"] if screen["place"] == place]
                 for place in ("dashboard", "skills", "room")}
+    for place in ("dashboard", "skills"):   # the list the phone lands on, before any of its pages
+        assert by_place[place][0]["screen"] == place and by_place[place][0]["tab"] is None, by_place[place][0]
+        by_place[place] = by_place[place][1:]
     dashboard = [(screen["tab"], screen["shows"]) for screen in by_place["dashboard"]]
     assert dashboard == list(zip(_source_list("dashboard.js", "const DASHBOARD_TABS", "label"),
                                  [f"dashboard-panel-{value}" for value in
@@ -128,3 +134,53 @@ def test_the_stand_walks_each_view_a_phone_hides_and_opens_a_room_by_its_id(dire
                                   _source_list("extensions.js", "export const EXTENSIONS_PAGES", "id"))), extensions
     assert [(screen["tab"], screen["shows"], screen["why"]) for screen in by_place["room"]] == [
         ("Look room", room["id"], "asked for")]
+
+
+PROBE = r"""
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("look_probe_stand", sys.argv[1])
+stand = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stand)
+row = json.loads(sys.argv[2])
+html = '''<nav><button data-nav-page="alpha">Alpha</button><button data-nav-page="beta">Beta</button></nav>
+<main class="page active" id="page-alpha"><div class="section-shell"><nav class="section-rail">
+<button class="section-row" data-settings-open="models"><span class="section-row-title">Models</span></button></nav>
+<div class="section-pane" hidden style="min-height: 40px">Models page</div></div><div role="tablist">
+<button role="tab" aria-selected="true" aria-controls="panel-gone">Gone</button>
+<button role="tab" aria-selected="true" aria-controls="panel-here">Here</button></div><section id="panel-here">Here</section></main>
+<main class="page" id="page-beta" hidden>Beta</main>'''
+with stand.Stand(engine=row["engine"], executable_path=row.get("executable_path"), sandbox=row.get("sandbox", True),
+                 launch_args=row.get("args") or (), fallback=False, keep_intercepted=False, out=sys.argv[3],
+                 url="http://127.0.0.1:9") as s:
+    s.page.set_content(html)
+    s.page.evaluate(stand._JS)
+    views = s.tabs()
+    seen = {"views": views, "landing": s.landing(),
+            "shown": [s.page.evaluate("(i) => window.__look.shown(i)", view["i"]) for view in views],
+            "places": [s.page.evaluate("(id) => window.__look.placeShown(id)", id) for id in ("alpha", "beta", "gamma")]}
+    s.page.evaluate("() => { document.querySelector('.section-pane').hidden = false; }")
+    seen["landing_beside_its_page"] = s.landing()
+print(json.dumps(seen))
+"""
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_the_stand_tells_what_a_press_shows(tmp_path, monkeypatch, engine):
+    plugin = _plugin(monkeypatch)
+    rows, missing, env = plugin.engine_rows([engine], {}, tmp_path / "tool-data")
+    assert rows, missing
+    proc = subprocess.Popen([plugin._helper_python(), "-B", "-c", PROBE, str(STAND), json.dumps(rows[0]), str(tmp_path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=plugin._child_env(env),
+                            **plugin._group_kwargs())
+    try:
+        out, err = proc.communicate(timeout=240)
+    finally:
+        if proc.poll() is None:
+            plugin._end_tree(proc)   # the probe and the browser it started, by its own PID
+    assert proc.returncode == 0, err[-2000:]
+    seen = json.loads(out.strip().splitlines()[-1])
+    assert [(view["name"], view["target"]) for view in seen["views"]] == [
+        ("Models", "models"), ("Gone", "panel-gone"), ("Here", "panel-here")], seen["views"]
+    assert seen["shown"] == ["its page is not shown", "its panel panel-gone does not exist", ""], seen["shown"]
+    assert seen["places"] == ["", "did not open", "did not open"], seen["places"]
+    assert seen["landing"] is True and seen["landing_beside_its_page"] is False, seen

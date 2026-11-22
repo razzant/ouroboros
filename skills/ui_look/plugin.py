@@ -35,8 +35,9 @@ EXAMPLE_KINDS = ("text-covered", "controls-overlap", "pinned-over-content", "tar
 SUMMARY_ROWS, EXAMPLES_PER_ROW, FRAMES_LISTED = 60, 3, 80
 NOTE = ("Measurements for your judgement, never a verdict; view_image opens a frame when seeing it helps. A frame is "
         "captioned with the engine that drew it and its version (served or draft); neither engine is the owner's own "
-        "window (the macOS app draws with the system WKWebView). With a draft and frames every screen is a pair, and "
-        "a row's new counts what the draft shows beyond the served page on the same screen.")
+        "window (the macOS app draws with the system WKWebView). With a draft and frames every screen the served "
+        "interface also has is a pair, and a row's new counts what the draft shows beyond the served page on the same "
+        "screen, finding by finding.")
 
 DESCRIPTION = (
     "Look at Ouroboros's own interface, read-only, on the live data. By default the places a change touches: the "
@@ -313,20 +314,24 @@ def summary(report: dict, report_path: pathlib.Path, outcome: dict, missing: lis
     if not ran and tried:
         return _answer(ok=False, reason="no_browser", message="No browser could start; nothing was looked at.",
                        engines=tried + missing, report=str(report_path))
-    if report.get("failed") and not report.get("screens"):
+    if report.get("failed") and not report.get("screens"):  # with what the page asked of the draft and did not get
         return _answer(ok=False, reason="look_failed", message=report["failed"], notes=report.get("notes"),
+                       **{key: report[key] for key in ("not_looked", "draft_files_missing") if report.get(key)},
                        report=str(report_path))
     short = {"chromium": "Chromium", "webkit": "WebKit emulation"}
-    rows, quiet = [], []
+    rows, quiet, unpaired = [], [], []
     for screen in report.get("screens") or []:
         counts = {kind: n for kind, n in (screen.get("counts") or {}).items() if n}
         name = f"{screen['screen']} {screen['theme']} {screen['viewport']} {short.get(screen['engine'], screen['engine'])}"
-        if not counts:
+        if (screen.get("served") or {}).get("absent"):
+            unpaired.append(f"{name} ({screen['served']['absent']})")
+        if not counts and not screen.get("unmeasured"):  # a screen measure.js failed on is not one without findings
             quiet.append(name)
             continue
         rows.append({"screen": screen["screen"], "engine": short.get(screen["engine"], screen["engine"]),
                      "theme": screen["theme"], "viewport": f"{screen['viewport']} {screen['size']}", "counts": counts,
-                     **({"new": screen["new"]} if "new" in screen else {}), "examples": _examples(screen)})
+                     **{key: screen[key] for key in ("new", "new_unknown", "unmeasured") if key in screen},
+                     "examples": _examples(screen)})
     frames = [row for screen in report.get("screens") or [] for row in _frames(screen)]
     plan = report.get("plan") or {}
     answer = {"ok": True, "summary": rows[:SUMMARY_ROWS], "screens_looked": len(report.get("screens") or []),
@@ -339,6 +344,9 @@ def summary(report: dict, report_path: pathlib.Path, outcome: dict, missing: lis
               "notes": (report.get("notes") or []) + (plan.get("unplaced") or []),
               "writes_answered_locally": report.get("writes_answered_locally", 0),
               "elapsed_sec": report.get("elapsed_sec"), "note": NOTE}
+    if unpaired:  # a place or view the served interface lacks: no served frame, nothing marked new
+        answer["notes"].append(f"{len(unpaired)} screen(s) have no served counterpart, so nothing on them is marked new: "
+                               + "; ".join(unpaired[:8]) + (" ..." if len(unpaired) > 8 else ""))
     if report.get("web_root"):  # how much of the draft web/ the page ran; none means the served interface was measured
         answer["draft_files_served"] = report.get("draft_files_served") or 0
         if report.get("screens") and not answer["draft_files_served"]:

@@ -108,7 +108,7 @@ def test_named_changes_touch_their_places(tmp_path, changed, pages, classes, eve
     plan = stand.place_plan(_web(tmp_path / "web"), None, changed)
     assert (plan["pages"], plan["classes"], plan["all"]) == (pages, classes, every), plan
     if not (pages or classes or every):
-        assert plan["unplaced"] and "nothing to look at" in plan["why"][-1]
+        assert plan["unplaced"] and plan["why"][-1] == "no changed file draws a place"
 
 
 @pytest.mark.parametrize("edit,pages,classes,every", [
@@ -327,6 +327,7 @@ def test_the_draft_answers_for_its_whole_interface_and_the_pinned_build_gets_its
     for url, done in (("http://127.0.0.1:9/static/style.css?v=2", ("fulfill", 200, str(draft / "style.css"))),
                       ("http://127.0.0.1:9/static/modules/gone.js", ("fulfill", 404, None)),   # deleted in the draft
                       ("http://127.0.0.1:9/static/../../etc/hosts", ("fulfill", 404, None)),
+                      ("http://127.0.0.1:8/static/illustration.png", ("continue",)),   # another origin's own file
                       ("http://127.0.0.1:9/api/state", ("continue",))):
         route = _Route(url)
         page._http(route, True)
@@ -369,10 +370,11 @@ class _FakePage:
 
 
 class _FakeStand:
-    """What look() drives of the Stand, on a page of places alpha and beta (beta with two views) and one room."""
+    """What look() drives of the Stand, on a page of places alpha and beta (beta with two views) and one room; a test
+    may make a place land on its list, the served page lack a place, the page not open one or the draft hide a class."""
     made: list = []
     report: Path = Path()
-    shell_fails = False
+    shell_fails, lists, served_lacks, unopened, draft_hides = False, (), (), (), False
 
     def __init__(self, **kw):
         _FakeStand.made.append(kw)
@@ -401,10 +403,15 @@ class _FakeStand:
 
     def nav(self, place):
         self.place = place
+        lacks = "the served interface has no such place" if place in self.served_lacks else ""
+        return ("did not open" if place in self.unopened else ""), (None if self.twin is None else lacks)
 
     def tabs(self, page=None):   # the served page lacks the draft's second view
-        views = [{"i": 0, "name": "One"}, {"i": 1, "name": "Two"}] if self.place == "beta" else []
+        views = [{"i": 0, "name": "One", "target": "panel-0"}, {"i": 1, "name": "Two", "target": "panel-1"}] if self.place == "beta" else []
         return views[:1] if page is not None and page is self.twin else views
+
+    def landing(self):
+        return self.place in self.lists
 
     def tab(self, index, twin_index=None):
         return "", (None if self.twin is None else "" if twin_index is not None else "the served interface has no such view")
@@ -415,8 +422,8 @@ class _FakeStand:
     def open_room(self, room_id):
         return "", (None if self.twin is None else "")
 
-    def probe(self, classes):
-        return list(classes) if self.place == "beta" else []
+    def probe(self, classes, page=None):   # page None is the draft's
+        return list(classes) if self.place == "beta" and not (self.draft_hides and page is None) else []
 
     def on_twin(self, act):
         return act(self.twin) if self.twin is not None else None
@@ -446,7 +453,10 @@ def _look(tmp_path, monkeypatch, **spec):
 
 
 def test_with_a_draft_and_frames_every_screen_is_a_pair_and_rooms_are_asked_for(tmp_path, monkeypatch):
+    plan, planning = stand.place_plan, []
+    monkeypatch.setattr(stand, "place_plan", lambda *args: (planning.append(_FakeStand.report.is_file()), plan(*args))[1])
     report = _look(tmp_path, monkeypatch, changed=["web/modules/a.js", "web/modules/b.js"], frames="first", rooms=1)
+    assert planning == [True], "a Stop while the diff is read still finds a report"
     screens = {s["screen"]: s for s in report["screens"]}
     assert _FakeStand.made[0]["twin"] is True and list(screens) == ["alpha", "beta-one", "beta-two", "room-0-room_one"]
     assert screens["room-0-room_one"]["why"] == "asked for" and screens["beta-one"]["shows"] == "panel-0"
@@ -471,6 +481,10 @@ def test_without_frames_one_page_a_note_and_rooms_or_their_absence_said(tmp_path
     assert any("not told apart" in note and "frames 'first'" in note for note in report["notes"]), report["notes"]
     only_rooms = _look(tmp_path, monkeypatch, changed=["ouroboros/loop.py"], frames="none", rooms=1)
     assert [s["screen"] for s in only_rooms["screens"]] == ["room-0-room_one"], "rooms asked for need no place"
+    places = json.loads(plugin.summary(only_rooms, tmp_path / "report.json", {"exit": 0, "ended": ""}, []))["places"]
+    assert "the 1 Project room(s) asked for are looked at all the same" in places
+    assert not any("nothing to look at" in why for why in places), places
+    assert _look(tmp_path, monkeypatch, changed=["ouroboros/loop.py"])["plan"]["why"][-1] == "nothing to look at"
     classes = _look(tmp_path, monkeypatch, changed=["web/modules/panel.js"], frames="none", rooms=0)
     assert [s["screen"] for s in classes["screens"]] == ["beta-one", "beta-two"] and classes["discovered"] == ["phone"]
     assert any("no Project room was opened" in note for note in classes["notes"])
@@ -480,9 +494,103 @@ def test_a_shell_that_never_loads_is_a_failed_look_and_an_unfinished_search_is_n
     monkeypatch.setattr(_FakeStand, "shell_fails", True)
     report = _look(tmp_path, monkeypatch, changed=["web/modules/a.js"], themes=["dark", "light"])
     assert report["screens"] == [] and report["failed"] and len([n for n in report["notes"] if "did not load" in n]) == 2
-    answer = json.loads(plugin.summary(report, tmp_path / "report.json", {"exit": 0, "ended": ""}, []))
+    answer = json.loads(plugin.summary(dict(report, draft_files_missing=["/static/modules/gone.js"]),
+                                       tmp_path / "report.json", {"exit": 0, "ended": ""}, []))
     assert (answer["ok"], answer["reason"]) == (False, "look_failed")
+    assert answer["draft_files_missing"] == ["/static/modules/gone.js"], "the import the shell lacked, in the answer"
     monkeypatch.setattr(_FakeStand, "shell_fails", False)
     monkeypatch.setattr(_FakeStand, "probe", lambda self, classes: (_ for _ in ()).throw(RuntimeError("page crashed")))
     broken = _look(tmp_path, monkeypatch, changed=["web/modules/panel.js"])
     assert broken["discovered"] == [] and any("search for the changed classes did not finish" in n for n in broken["notes"])
+
+
+def _answer(report, tmp_path):
+    return json.loads(plugin.summary(report, tmp_path / "report.json", {"exit": 0, "ended": ""}, []))
+
+
+def test_a_pair_never_frames_a_screen_the_served_page_lacks_and_keeps_a_renamed_view(tmp_path, monkeypatch):
+    assert stand._counterparts([{"i": 0, "name": "Spending", "target": "panel-costs"}],
+                               [{"i": 3, "name": "Costs", "target": "panel-costs"}]) == {0: 3}, "a renamed tab keeps its view"
+    assert stand._counterparts([{"i": 0, "name": "Costs", "target": "panel-new"}],
+                               [{"i": 0, "name": "Costs", "target": "panel-costs"}]) == {}, "a label alone is no match"
+    monkeypatch.setattr(_FakeStand, "served_lacks", ("beta",))
+    monkeypatch.setattr(_FakeStand, "unopened", ("alpha",))
+    report = _look(tmp_path, monkeypatch, places=["alpha", "beta"], frames="first")
+    assert [s["screen"] for s in report["screens"]] == ["beta-one", "beta-two"], "a place that did not open is not measured"
+    assert all(s["served"] == {"absent": "the served interface has no such place"} and "new" not in s for s in report["screens"])
+    assert not list((tmp_path / "frames").glob("*-served-*")), "no served frame stands for a screen the served page lacks"
+    assert any("the place 'alpha' did not open, so it was not measured" in line for line in report["not_looked"])
+    notes = _answer(report, tmp_path)["notes"]
+    assert any("no served counterpart" in note and "beta-two dark phone" in note for note in notes), notes
+
+
+def test_a_class_the_draft_hides_is_looked_at_where_the_served_page_shows_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(_FakeStand, "draft_hides", True)
+    pair = _look(tmp_path, monkeypatch, changed=["web/modules/panel.js"], frames="first")
+    assert [(s["screen"], s["why"]) for s in pair["screens"]] == [("beta-one", "the served page shows .panel-own")]
+    alone = _look(tmp_path, monkeypatch, changed=["web/modules/panel.js"], frames="none")
+    assert alone["screens"] == [] and alone["discovered"] == ["phone"]
+    assert any(line.startswith(".panel-own stood on no screen of the draft") and "frames 'first'" in line
+               for line in alone["not_looked"]), alone["not_looked"]
+
+
+def test_new_findings_are_matched_one_by_one_and_an_unmeasured_page_leaves_them_unknown(tmp_path, monkeypatch):
+    def measure(self, limit=6, page=None):   # the draft fixed Save and made Send short: one short target on each
+        where = "button#save" if page is self.twin else "button#send"
+        return {"uneven_rows": [], "long_texts": [], "layout": {"facts": {"counts": {"target-small": 1}}, "findings": [
+            {"kind": "target-small", "message": "80x20px hit target", "where": where, "value": None}]}}
+
+    monkeypatch.setattr(_FakeStand, "measure", measure)
+    screen = _look(tmp_path, monkeypatch, places=["alpha"], frames="first")["screens"][0]
+    assert screen["new"] == {"target-small": 1} and screen["findings"][0]["new"] is True, screen
+    for broken in ("served page", "draft"):
+        def failing(self, limit=6, page=None, broken=broken):
+            if (page is self.twin) == (broken == "served page"):
+                return {"uneven_rows": [], "long_texts": [], "layout_error": "TypeError: snippet failed"}
+            return measure(self, limit, page)
+
+        monkeypatch.setattr(_FakeStand, "measure", failing)
+        report = _look(tmp_path, monkeypatch, places=["alpha"], frames="first")
+        screen, answer = report["screens"][0], _answer(report, tmp_path)
+        assert "new" not in screen and f"did not measure the {broken}" in screen["new_unknown"], screen
+        assert answer["summary"][0]["new_unknown"] == screen["new_unknown"]
+    assert answer["screens_without_findings"] == [] and "snippet failed" in answer["summary"][0]["unmeasured"]
+
+
+def test_a_place_that_lands_on_its_list_is_looked_at_before_its_pages(tmp_path, monkeypatch):
+    monkeypatch.setattr(_FakeStand, "lists", ("beta",))
+    report = _look(tmp_path, monkeypatch, places=["beta"])
+    assert [(s["screen"], s["tab"]) for s in report["screens"]] == [("beta", None), ("beta-one", "One"), ("beta-two", "Two")]
+
+
+def test_views_that_do_not_show_leave_the_search_unfinished_and_a_named_place_unmeasured(tmp_path, monkeypatch):
+    presses = []
+
+    def tab(self, index, twin_index=None):
+        presses.append(index)
+        return "its panel panel-0 does not exist", None
+
+    monkeypatch.setattr(_FakeStand, "tab", tab)
+    search = _look(tmp_path, monkeypatch, changed=["web/modules/panel.js"], themes=["dark", "light"])
+    assert len(presses) == 4 and search["discovered"] == [], "the second theme searches the views the first could not"
+    assert any("search for the changed classes did not finish, 2 place(s), view(s)" in note for note in search["notes"])
+    assert sum("does not exist, so it was not measured" in line for line in search["not_looked"]) == 4
+    answer = _answer(_look(tmp_path, monkeypatch, places=["beta"]), tmp_path)
+    assert (answer["ok"], answer["reason"]) == (False, "look_failed"), answer
+    assert any("the place 'beta' was asked for, yet no screen of it was measured" in line for line in answer["not_looked"])
+
+
+def test_a_pair_cut_off_before_its_draft_stays_named(tmp_path, monkeypatch):
+    real, on_disk = stand._version, {}
+
+    def version(stand_, page, theme, screen, spec, version, limit=4):
+        if version == "draft":   # the draft's capture times out after the served frame is written
+            on_disk.update(json.loads(_FakeStand.report.read_text(encoding="utf-8")))
+            raise TimeoutError("draft screenshot timed out")
+        return real(stand_, page, theme, screen, spec, version, limit)
+
+    monkeypatch.setattr(stand, "_version", version)
+    report = _look(tmp_path, monkeypatch, places=["alpha"], frames="first")
+    held = [line for line in on_disk["not_looked"] if line.startswith("webkit dark phone: alpha: the served version")]
+    assert held and "look-t-served-webkit-dark-390x844-3x-touch-alpha.png" in held[0], on_disk["not_looked"]
+    assert held[0] in report["not_looked"] and report["screens"] == []

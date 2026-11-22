@@ -31,9 +31,10 @@ CLI (run with a Python that imports Playwright; Playwright's own browsers unless
          places SPEC names, at each of its viewports, themes and engines: per screen the measurements (measure.js
          beside this file: covered text, small targets, overflow, cut text; plus uneven rows and long texts) in
          OUT.json, rewritten after every screen, and on request frames as flat files captioned with the engine that
-         drew them; a view that does not show when pressed is named, not measured under its name. With a draft and frames
-         a second page shows the served interface on the same data: every screen is a pair, served then draft, and a
-         finding the served page lacks is marked new. Ouroboros's `ui_look` tool writes SPEC; look() reads its keys.
+         drew them; a place or view that does not show when pressed is named, not measured under its name. With a draft
+         and frames a second page shows the served interface on the same data: every screen it also has is a pair,
+         served then draft, the changed classes are looked for on both, and a finding the served page lacks (matched
+         one by one) is marked new. Ouroboros's `ui_look` tool writes SPEC; look() reads its keys.
   --engine webkit|chromium (default webkit, the owner's macOS app engine; falls back to chromium when WebKit is missing).
   --executable-path PATH launches exactly that Chromium (Ouroboros's pinned headless shell, as browse_page) and nothing
   else: no fallback to another engine or build.
@@ -48,8 +49,9 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 SIDE_EFFECT_GET = re.compile(r"[?&](force|fresh|refresh|checkLatest|check_latest|probe|recheck|sync)=", re.I)
 OK_BODIES = {"/api/settings": {"ok": True, "immediate_changed": True, "next_task_changed": False,
@@ -135,25 +137,36 @@ _JS = r"""
       nl.onerror = () => res(); l.after(nl); })));
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); };
   const places = () => [...new Set([...document.querySelectorAll('[data-nav-page]')].map((n) => n.getAttribute('data-nav-page')))];
+  const placeRow = (id) => [...document.querySelectorAll('[data-nav-page]')].find((n) => n.getAttribute('data-nav-page') === id);
+  const go = (id) => { const b = placeRow(id); if (b) b.click(); return Boolean(b); };
+  // "" when the place a press asked for is the one shown: its page-<id> section, else its row chosen.
+  const placeShown = (id) => { const page = document.getElementById(`page-${id}`);
+    if (page) return vis(page) ? '' : 'did not open';
+    return (placeRow(id) || document.body).getAttribute('aria-current') === 'page' ? '' : 'did not open'; };
+  const shownPage = () => [...document.querySelectorAll('.page.active, .page:not([hidden])')].find(vis) || document;
   // A page's views: its tabs and the rows of its section list (a Dashboard view, a Settings or Extensions page). Each
-  // is marked once with data-look-tab and named by its title, so a list a phone hides after the first press, or a row
-  // whose answer line changes, still names and reaches the same view.
+  // is marked once with data-look-tab, named by its title and keyed by what it opens (its panel or page), so a list a
+  // phone hides after the first press, a row whose answer line changes or a renamed tab still reaches the same view.
   const tabName = (t) => { const title = t.querySelector('.section-row-title');
     return ((title && title.textContent) || t.getAttribute('aria-label') || ownText(t) || t.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 32); };
-  const tabs = () => { const page = [...document.querySelectorAll('.page.active, .page:not([hidden])')].find(vis) || document;
+  const opens = (t) => t.getAttribute('aria-controls') || t.dataset.settingsOpen || t.dataset.extensionsOpen || '';
+  const tabs = () => { const page = shownPage();
     document.querySelectorAll('[data-look-tab]').forEach((n) => n.removeAttribute('data-look-tab'));   // a page left before
-    return [...page.querySelectorAll('[role="tab"], .section-rail .section-row:not([data-section-out])')]
-      .filter((t) => vis(t) && !t.disabled).map((t, i) => { t.setAttribute('data-look-tab', String(i)); return { i, name: tabName(t) || String(i) }; }); };
+    return [...page.querySelectorAll('[role="tab"], .section-rail .section-row:not([data-section-out])')].filter((t) => vis(t) && !t.disabled)
+      .map((t, i) => { t.setAttribute('data-look-tab', String(i)); return { i, name: tabName(t) || String(i), target: opens(t) }; }); };
+  // The list a place stands on before any of its pages is chosen (a phone's Settings, Extensions or Dashboard list).
+  const landing = () => [...shownPage().querySelectorAll('.section-shell')].some((s) => {
+    const rail = s.querySelector(':scope > .section-rail'), pane = s.querySelector(':scope > .section-pane');
+    return Boolean(rail && vis(rail) && !(pane && vis(pane))); });
   const press = (i) => { const t = document.querySelector(`[data-look-tab="${i}"]`); if (t) t.click(); return Boolean(t); };
-  // "" when the view a press asked for is on screen: its panel shown, else its row chosen beside (or over) its page.
+  // "" when the view a press asked for is on screen: the panel it declares shown (a panel that does not exist is not),
+  // else its row chosen beside (or over) its page.
   const shown = (i) => { const t = document.querySelector(`[data-look-tab="${i}"]`); if (!t) return 'its control is gone';
-    const id = t.getAttribute('aria-controls'), panel = id && document.getElementById(id);
-    if (panel) return vis(panel) ? '' : 'its panel is not shown';
+    const id = t.getAttribute('aria-controls');
+    if (id) { const panel = document.getElementById(id); return !panel ? `its panel ${id} does not exist` : vis(panel) ? '' : 'its panel is not shown'; }
     if (t.getAttribute('role') === 'tab') return t.getAttribute('aria-selected') === 'true' ? '' : 'it is not selected';
     const pane = t.closest('.section-shell') && t.closest('.section-shell').querySelector(':scope > .section-pane');
     return t.getAttribute('aria-current') === 'page' && pane && vis(pane) ? '' : 'its page is not shown'; };
-  const target = (i) => { const t = document.querySelector(`[data-look-tab="${i}"]`);   // what the view opens
-    return t ? (t.getAttribute('aria-controls') || t.dataset.settingsOpen || t.dataset.extensionsOpen || '') : ''; };
   // Project rooms a press can open (a room being deleted cannot), and whether a room is the open one.
   const rooms = () => [...document.querySelectorAll('.nav-project-row[data-project-id]')].filter((b) => !b.disabled)
     .map((b) => ({ id: b.dataset.projectId, name: ((b.querySelector('.nav-row-label') || b).textContent || '').trim().slice(0, 40) }));
@@ -169,8 +182,8 @@ _JS = r"""
     return { saved_sidebar: inline.getPropertyValue('--sidebar-width').trim() || null,
              saved_project_panel: inline.getPropertyValue('--project-panel-width').trim() || null,
              sidebar: width('primary-sidebar'), project_panel: width('project-panel') }; };
-  window.__look = { vis, visualRows, texts, scroller, places, tabs, press, shown, target, rooms, openRoom, roomShown,
-                    snap, swap, probe, panels };
+  window.__look = { vis, visualRows, texts, scroller, places, go, placeShown, tabs, landing, press, shown, rooms, openRoom,
+                    roomShown, snap, swap, probe, panels };
 })();
 """
 
@@ -274,7 +287,8 @@ class Stand:
     def _http(self, route, draft=True):
         req = route.request
         path = "/" + req.url.split("://", 1)[-1].split("/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
-        if draft and self.web_root and req.method in ("GET", "HEAD") and (path.startswith("/static/") or path in ("/", "/index.html")):
+        own = urlsplit(req.url)[:2] == urlsplit(self.url)[:2]   # the interface's origin; another one's files are its own
+        if draft and own and self.web_root and req.method in ("GET", "HEAD") and (path.startswith("/static/") or path in ("/", "/index.html")):
             local = self.web_root / (unquote(path[len("/static/"):]) if path.startswith("/static/") else "index.html")
             if _inside(local, self.web_root) and local.is_file():
                 route.fulfill(status=200, path=str(local))
@@ -340,16 +354,19 @@ class Stand:
         return self.page.evaluate("() => window.__look.places()")
 
     def nav(self, place, wait_ms=5000):
-        self._each(lambda page: page.evaluate("(id) => document.querySelector(`[data-nav-page=\"${id}\"]`)?.click()", place))
-        self.page.wait_for_timeout(wait_ms)
-        self._each(lambda page: page.evaluate(_JS))
-        return self
+        """Go to a place on the page and the twin: (why the page does not show it or "", the twin's or None)."""
+        return self._press("(id) => window.__look.go(id)", "(id) => window.__look.placeShown(id)", place,
+                           place if self.twin is not None else None, wait_ms, "place")
 
     def tabs(self, page=None):
-        """The views of the page shown: [{i, name}], each marked on that page so a press finds it again."""
+        """The views of the page shown: [{i, name, target}], each marked on that page so a press finds it again."""
         return (page or self.page).evaluate("() => window.__look.tabs()")
 
-    def _press(self, press, shown, arg, twin_arg, wait_ms):
+    def landing(self):
+        """Whether the place shown stands on its list before any of its pages is chosen (a phone's section list)."""
+        return bool(self.page.evaluate("() => window.__look.landing()"))
+
+    def _press(self, press, shown, arg, twin_arg, wait_ms, what="view"):
         """Press on the page (and on the twin with ``twin_arg``), wait once, then answer (why the page does not show
         what was pressed, or "") and the same for the twin (None without a twin)."""
         pressed = self.page.evaluate(press, arg)
@@ -359,10 +376,10 @@ class Stand:
         why = self.page.evaluate(shown, arg) if pressed else "cannot be pressed"
         if self.twin is None:
             return why, None
-        if twin_arg is None:
-            return why, "the served interface has no such view"
-        served = self.on_twin(lambda twin: twin.evaluate(shown, twin_arg)) if twin_pressed else "cannot be pressed there"
-        return why, (served if self.twin is not None else None)
+        if twin_arg is None or not twin_pressed:
+            return why, f"the served interface has no such {what}"
+        served = self.on_twin(lambda twin: twin.evaluate(shown, twin_arg))
+        return why, (None if self.twin is None else f"on the served page {served}" if served else "")
 
     def tab(self, index, twin_index=None, wait_ms=4000):
         """Press view ``index`` (and the twin's ``twin_index``): (why it is not on screen or "", the twin's)."""
@@ -376,12 +393,13 @@ class Stand:
     def open_room(self, room_id, wait_ms=6000):
         """Open a Project room by its id: (why it is not the open room or "", the twin's)."""
         return self._press("(id) => window.__look.openRoom(id)", "(id) => window.__look.roomShown(id)", room_id,
-                           room_id if self.twin is not None else None, wait_ms)
+                           room_id if self.twin is not None else None, wait_ms, "room")
 
-    def probe(self, classes):
+    def probe(self, classes, page=None):
         """Which of ``classes`` stand on this screen (shown, on the page shown or in the shell around it)."""
-        self.page.evaluate(_JS)
-        return self.page.evaluate("(c) => window.__look.probe(c)", sorted(classes))
+        page = page or self.page
+        page.evaluate(_JS)
+        return page.evaluate("(c) => window.__look.probe(c)", sorted(classes))
 
     def panels(self):
         """The panel widths the page uses: the saved ones it read from the server, and the drawn ones."""
@@ -472,14 +490,17 @@ def _slug(text) -> str:
 
 
 def _walk(stand, places, frames, collect):
-    """Visit every place and view; collect(name) is called on each screen, a view that does not show is skipped."""
+    """Visit every place and view; collect(name) is called on each screen (a place's list before its pages too), a
+    place or view that does not show is skipped."""
     stand.open()
     for place in (places or stand.places()):
-        stand.nav(place)
-        tabs = stand.tabs()
-        if not tabs:
-            collect(place)
+        why, _ = stand.nav(place)
+        if why:
+            print(f"[live_stand] the place '{place}' {why}; skipped", flush=True)
             continue
+        tabs = stand.tabs()
+        if not tabs or stand.landing():
+            collect(place)
         for t in tabs:
             why, _ = stand.tab(t["i"])
             if why:
@@ -567,10 +588,12 @@ def _safe(name: str) -> str:
 
 
 COUNTERS = ("writes_answered_locally", "dropped_ws_frames", "draft_files_served")
+EXAMPLES, MATCHED = 4, 1000   # examples a screen keeps per kind; in a pair, findings kept until the two are matched
 
 
 def _facts(found: dict) -> dict:
-    """One screen's measurements as the report keeps them: counts per kind first, then their examples."""
+    """One screen's measurements as the report keeps them: counts per kind first, then a few examples of each (those a
+    pair marked new first)."""
     layout = found.get("layout") or {}
     facts = layout.get("facts") or {}
     counts = dict(facts.get("counts") or {})
@@ -580,10 +603,46 @@ def _facts(found: dict) -> dict:
         counts["long-text"] = len(found["long_texts"])
     unmeasured = (f"measure.js failed: {found['layout_error']}" if found.get("layout_error")
                   else "" if layout else "measure.js was not beside the stand")
-    return {"counts": counts, "findings": layout.get("findings") or [], "uneven_rows": found["uneven_rows"][:5],
+    kept, per_kind = [], Counter()
+    for item in sorted(layout.get("findings") or [], key=lambda item: not item.get("new")):
+        per_kind[item.get("kind")] += 1
+        if per_kind[item.get("kind")] <= EXAMPLES:
+            kept.append(item)
+    return {"counts": counts, "findings": kept, "uneven_rows": found["uneven_rows"][:5],
             "long_texts": [dict(t, text=t["text"][:160]) for t in found["long_texts"][:5]],
             "page": facts.get("page"), "text_sizes": facts.get("textSizes"),
             **({"unmeasured": unmeasured} if unmeasured else {})}
+
+
+def _observed(found: dict):
+    """A screen's observations keyed by kind and where each stands (what measure.js counted beyond the examples it
+    listed, by kind alone), or None when measure.js did not measure the screen."""
+    layout = found.get("layout")
+    if not layout or found.get("layout_error"):
+        return None
+    findings = layout.get("findings") or []
+    keys, listed = Counter((item.get("kind"), item.get("where")) for item in findings), Counter(item.get("kind") for item in findings)
+    for kind, total in ((layout.get("facts") or {}).get("counts") or {}).items():
+        keys[(kind, None)] += max(0, total - listed[kind])
+    keys.update(("uneven-rows", tuple(row.get("items") or ())) for row in found["uneven_rows"])
+    keys.update(("long-text", text.get("el")) for text in found["long_texts"])
+    return keys
+
+
+def _mark_new(found: dict, served: dict) -> dict:
+    """What the draft shows beyond the served page on the same screen, matched observation by observation, so a fixed
+    defect does not hide a new one of its kind; each example marked. Unknown when either page went unmeasured."""
+    mine, was = _observed(found), _observed(served)
+    if mine is None or was is None:
+        return {"new_unknown": f"measure.js did not measure the {'draft' if mine is None else 'served page'}, so "
+                               "what the draft adds is unknown"}
+    added = mine - was
+    left = Counter(added)
+    for item in (found.get("layout") or {}).get("findings") or []:
+        key = (item.get("kind"), item.get("where"))
+        item["new"] = left[key] > 0
+        left[key] -= item["new"]
+    return {"new": dict(Counter(kind for kind, _where in added.elements()))}
 
 
 def _note(notes, text):
@@ -591,20 +650,28 @@ def _note(notes, text):
         notes.append(text)
 
 
+def _dotted(names) -> str:
+    names = sorted(names)
+    return "." + ", .".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
+
+
 def _counterparts(views, twin_views) -> dict:
-    """{index of a view: index of the twin's view of the same name}; a view the twin lacks has none."""
+    """{index of a view: index of the twin's view that opens the same panel or page, of the same name when neither
+    names what it opens}; a renamed tab keeps its counterpart, a view the twin lacks has none."""
+    key = lambda view: ("opens", view["target"]) if view.get("target") else ("name", view["name"])   # noqa: E731
     free, out = list(twin_views or []), {}
     for view in views:
-        match = next((other for other in free if other["name"] == view["name"]), None)
+        match = next((other for other in free if key(other) == key(view)), None)
         if match is not None:
             free.remove(match)
             out[view["i"]] = match["i"]
     return out
 
 
-def _screens(stand, plan, known, discover, rooms, notes, combo):
+def _screens(stand, plan, known, discover, rooms, notes, combo, missed):
     """(place, view, screen, served) for each screen this pass visits, after going there: ``view`` is the view or
-    room pressed; ``served`` is "" when the twin shows the same screen, why it does not, or None without a twin."""
+    room pressed; ``served`` is "" when the twin shows the same screen, why it does not, or None without a twin. A
+    place, view or room that does not show when pressed is never measured under its name: it goes to ``missed``."""
     present = stand.places()
     if plan.get("named") and not plan["all"]:
         wanted = [place for place in plan["pages"] if place in present]
@@ -615,20 +682,21 @@ def _screens(stand, plan, known, discover, rooms, notes, combo):
     else:
         wanted = [place for place in present if place in plan["pages"] or any(seen["place"] == place for seen in known.values())]
     for place in wanted:
-        stand.nav(place)
-        views = stand.tabs()
-        if not views:
-            yield place, None, place, ("" if stand.twin is not None else None)
+        why, served = stand.nav(place)
+        if why:
+            missed.append(f"{combo}: the place '{place}' {why}, so it was not measured")
             continue
-        twin_views = stand.on_twin(stand.tabs)
+        views = stand.tabs()
+        if not views or stand.landing():   # the place's own screen, or the list it stands on before its pages
+            yield place, None, place, served
+        twin_views = stand.on_twin(stand.tabs) if views and served == "" else None
         counterpart = _counterparts(views, twin_views) if twin_views is not None else {}
         for view in views:
-            why, served = stand.tab(view["i"], counterpart.get(view["i"]))
-            if why:   # pressed, yet its view is not the one on screen: never measured under its name
-                _note(notes, f"{combo}: the {place} view '{view['name']}' {why}, so it was not measured")
+            why, twin = stand.tab(view["i"], counterpart.get(view["i"]))
+            if why:
+                missed.append(f"{combo}: the {place} view '{view['name']}' {why}, so it was not measured")
                 continue
-            view = dict(view, shows=stand.page.evaluate("(i) => window.__look.target(i)", view["i"]))
-            yield place, view, f"{place}-{_slug(view['name']) or view['i']}", served
+            yield place, dict(view, shows=view.get("target") or ""), f"{place}-{_slug(view['name']) or view['i']}", served or twin
     listed = stand.rooms() if rooms else []
     if len(listed) < rooms:
         _note(notes, f"{len(listed)} Project room(s) can be opened on the page, fewer than the {rooms} asked for")
@@ -636,31 +704,35 @@ def _screens(stand, plan, known, discover, rooms, notes, combo):
         stand.nav("chat")
         why, served = stand.open_room(room["id"])
         if why:
-            _note(notes, f"{combo}: the Project room '{room['name']}' {why}, so it was not measured")
+            missed.append(f"{combo}: the Project room '{room['name']}' {why}, so it was not measured")
             continue
         yield "room", dict(room, room=True), f"room-{i}-{_slug(room['name']) or 'project'}", served
 
 
-def _why(stand, plan, place, view, screen, known, discover) -> str:
-    """Why this screen is looked at, or "" when the change does not touch it."""
+def _why(stand, plan, place, view, screen, known, discover, served=None) -> str:
+    """Why this screen is looked at, or "" when the change does not touch it. The search for the changed classes looks
+    on both pages of a pair, so a class the draft hides is still looked at where it stood."""
+    if discover:
+        hits = set(stand.probe(plan["classes"]))
+        was = set(stand.on_twin(lambda twin: stand.probe(plan["classes"], page=twin)) or ()) - hits if served == "" else set()
+        if hits or was:
+            known[screen] = {"place": place, "classes": sorted(hits | was), "why": "; ".join(
+                ([f"shows {_dotted(hits)}"] if hits else []) + ([f"the served page shows {_dotted(was)}"] if was else []))}
     if plan.get("named") or (view and view.get("room")):
         return "asked for"
     if plan["all"]:
         return "every place"
     if place in plan["pages"]:
         return f"the {place} page imports a changed module"
-    if discover:
-        hits = stand.probe(plan["classes"])
-        if hits:
-            known[screen] = {"place": place, "why": "shows ." + ", .".join(hits[:4]) + (f" and {len(hits) - 4} more" if len(hits) > 4 else "")}
     return known.get(screen, {}).get("why", "")
 
 
-def _version(stand, page, theme, screen, spec, version) -> dict:
-    """One page's measurements of this screen and, when asked, its frames, named and captioned with ``version``."""
+def _version(stand, page, theme, screen, spec, version, limit=EXAMPLES):
+    """One page's raw measurements of this screen and, when asked, its frames named and captioned with ``version``:
+    (found, {"frames", "uncaptioned"?})."""
     label, size = engine_label(stand), f"{stand.width}x{stand.height}"
     png = page.screenshot(timeout=120000)   # the paint measure.js waits for, and the first frame
-    found = stand.measure(limit=4, page=page)
+    found = stand.measure(limit=limit, page=page)
     frames, uncaptioned = [], {}
     if spec["frames"] in ("first", "all"):
         window = f"{size}-{stand.scale:g}x-{'touch' if stand.touch else 'mouse'}"   # two windows never share a file
@@ -675,30 +747,28 @@ def _version(stand, page, theme, screen, spec, version) -> dict:
         if spec["frames"] == "all":
             frames += [str(p) for p in stand.shot_scroll(name, caption=caption, page=page)]
             uncaptioned.update({p: stand.caption_errors[p] for p in frames if p in stand.caption_errors})
-    return {**_facts(found), "frames": frames, **({"uncaptioned": uncaptioned} if uncaptioned else {})}
+    return found, {"frames": frames, **({"uncaptioned": uncaptioned} if uncaptioned else {})}
 
 
-def _mark_new(record, served) -> None:
-    """Per kind, what the draft shows beyond the served page on the same screen; and its examples the served lacks."""
-    was = served.get("counts") or {}
-    record["new"] = {kind: n - was.get(kind, 0) for kind, n in record["counts"].items() if n > was.get(kind, 0)}
-    seen = {(item.get("kind"), item.get("where")) for item in served.get("findings") or []}
-    for item in record["findings"]:
-        item["new"] = item.get("kind") in record["new"] and (item.get("kind"), item.get("where")) not in seen
-
-
-def _look_screen(stand, viewport, theme, place, view, screen, why, spec, served) -> dict:
-    """One screen: the twin's served version first when it shows the same screen, then the page's own."""
-    before = stand.on_twin(lambda twin: _version(stand, twin, theme, screen, spec, "served")) if served == "" else None
+def _look_screen(stand, viewport, theme, place, view, screen, why, spec, served, hold=lambda line: None) -> dict:
+    """One screen: the twin's served version first when it shows the same screen (held as an unfinished pair until the
+    draft beside it is measured), then the page's own; a screen the served interface lacks is named as such."""
+    pair = served == "" and stand.twin is not None
+    limit = MATCHED if pair else EXAMPLES
+    before = stand.on_twin(lambda twin: _version(stand, twin, theme, screen, spec, "served", limit)) if pair else None
+    if before is not None:
+        frame = f" (its frame {Path(before[1]['frames'][0]).name})" if before[1]["frames"] else ""
+        hold(f"{screen}: the served version was measured{frame}, the draft beside it was not, so the pair is unfinished")
     version = "draft" if stand.web_root else "served"
+    found, part = _version(stand, stand.page, theme, screen, spec, version, limit)
+    marks = _mark_new(found, before[0]) if before is not None else {}
     out = {"screen": screen, "place": place, "tab": view["name"] if view else None,
            "shows": (view or {}).get("shows") or (view or {}).get("id"), "engine": stand.engine,
            "label": engine_label(stand), "theme": theme, "viewport": viewport["name"],
            "size": f"{stand.width}x{stand.height}@{stand.scale:g}", "touch": stand.touch, "why": why, "version": version,
-           **_version(stand, stand.page, theme, screen, spec, version)}
+           **_facts(found), **part, **marks}
     if before is not None:
-        out["served"] = before
-        _mark_new(out, before)
+        out["served"] = {**_facts(before[0]), **before[1]}
     elif served:
         out["served"] = {"absent": served}
     return out
@@ -719,6 +789,7 @@ def _look_once(report, plan, engine, viewport, theme, known, deadline, spec, sav
         state.update(status="unavailable", error=_first_line(exc))
         return "unavailable"
     base, before, outcome, twin_named = {key: report[key] for key in COUNTERS}, len(report["screens"]), "measured", False
+    misses, pending = [], []   # what did not show when pressed; a pair whose draft is not measured yet
 
     def checkpoint():   # the counters as they stand now, so a look ended between two screens keeps them
         nonlocal twin_named
@@ -727,27 +798,39 @@ def _look_once(report, plan, engine, viewport, theme, known, deadline, spec, sav
         report["draft_files_served"] = base["draft_files_served"] + stand.served_from_root
         for path in stand.missing_from_root:
             _note(report["draft_files_missing"], path)
+        for line in misses:
+            _note(report["not_looked"], line)
         if stand.twin_error and not twin_named:
             twin_named = True
             report["not_looked"].append(f"{combo}: the served page beside the draft stopped ({stand.twin_error}), so "
                                         "the screens after that have no served version to compare with")
         save()
 
-    discover = bool(plan["classes"]) and not plan.get("named") and viewport["name"] not in report["discovered"]
+    def hold(line):   # on disk before the draft is captured: a timeout, Stop or kill there leaves the pair named
+        pending.append(f"{combo}: {line}")
+        report["not_looked"].append(pending[-1])
+        save()
+
+    discover = bool(plan["classes"]) and not (plan.get("named") or plan["all"]) and viewport["name"] not in report["discovered"]
     try:
         state.update(status="ran", label=engine_label(stand))
         stand.open()
         report["panels"].setdefault(viewport["name"], stand.panels())
-        for place, view, screen, served in _screens(stand, plan, known, discover, spec["rooms"], report["notes"], combo):
+        for place, view, screen, served in _screens(stand, plan, known, discover, spec["rooms"], report["notes"], combo, misses):
             if time.monotonic() > deadline:
                 report["not_looked"].append(f"{combo}: {screen} and the screens after it, the time budget was spent")
                 break
-            why = _why(stand, plan, place, view, screen, known, discover)
+            why = _why(stand, plan, place, view, screen, known, discover, served)
             if why:
-                report["screens"].append(_look_screen(stand, viewport, theme, place, view, screen, why, spec, served))
+                report["screens"].append(_look_screen(stand, viewport, theme, place, view, screen, why, spec, served, hold))
+                while pending:
+                    report["not_looked"].remove(pending.pop())
                 checkpoint()
         else:
-            if discover:   # every screen was searched, so later themes of this window walk only the places found
+            if discover and misses:   # a view that did not show was not searched: a later theme searches again
+                report["notes"].append(f"{combo}: the search for the changed classes did not finish, "
+                                       f"{len(misses)} place(s), view(s) or room(s) did not show")
+            elif discover:   # every screen was searched, so later themes of this window walk only the places found
                 report["discovered"].append(viewport["name"])
     except ShellError as exc:
         report["notes"].append(f"{combo}: {exc}, so nothing was measured there")
@@ -776,20 +859,8 @@ def look(spec: dict, report_path) -> dict:
     started, report_path = time.monotonic(), Path(report_path)
     deadline = started + max(10.0, float(spec.get("budget_sec") or 480))
     web_root, served, names = spec.get("web_root") or None, spec.get("base") or None, spec.get("places") or None
-    if names:
-        plan = {"all": list(names) == ["all"], "pages": [] if list(names) == ["all"] else list(names), "classes": [],
-                "why": ["the places asked for"], "changed": [], "unplaced": [], "named": True}
-    elif web_root or served:
-        try:
-            plan = place_plan(web_root or served, served if web_root else None, spec.get("changed"))
-        except OSError as exc:   # an unreadable web/ folder: say so instead of guessing places
-            plan = {"all": False, "pages": [], "classes": [], "changed": [], "unplaced": [],
-                    "why": [f"the diff could not be read ({_first_line(exc)}), so nothing was looked at"]}
-    else:
-        plan = {"all": True, "pages": [], "classes": [], "why": ["no web/ folder to read a diff from, so every place"],
-                "changed": [], "unplaced": []}
     frames, rooms = spec.get("frames") or "none", max(0, int(spec.get("rooms") or 0))
-    report = {"schema": 1, "url": spec.get("url") or live_url(), "web_root": web_root, "served_web": served, "plan": plan,
+    report = {"schema": 1, "url": spec.get("url") or live_url(), "web_root": web_root, "served_web": served, "plan": None,
               "viewports": spec["viewports"], "themes": spec["themes"], "frames": frames, "rooms": rooms,
               "engines": [], "screens": [], "panels": {}, "discovered": [], "not_looked": [], "notes": [],
               "writes_answered_locally": 0, "dropped_ws_frames": 0, "draft_files_served": 0, "draft_files_missing": [],
@@ -801,6 +872,22 @@ def look(spec: dict, report_path) -> dict:
         part.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(part, report_path)
 
+    save()   # before the diff is read: a Stop while it is read still finds a report
+    if names:
+        plan = {"all": list(names) == ["all"], "pages": [] if list(names) == ["all"] else list(names), "classes": [],
+                "why": ["the places asked for"], "changed": [], "unplaced": [], "named": True}
+    elif web_root or served:
+        try:
+            plan = place_plan(web_root or served, served if web_root else None, spec.get("changed"))
+        except OSError as exc:   # an unreadable web/ folder: say so instead of guessing places
+            plan = {"all": False, "pages": [], "classes": [], "changed": [], "unplaced": [],
+                    "why": [f"the diff could not be read ({_first_line(exc)})"]}
+    else:
+        plan = {"all": True, "pages": [], "classes": [], "why": ["no web/ folder to read a diff from, so every place"],
+                "changed": [], "unplaced": []}
+    if not (plan["all"] or plan["pages"] or plan["classes"]):
+        plan["why"].append(f"the {rooms} Project room(s) asked for are looked at all the same" if rooms else "nothing to look at")
+    report["plan"] = plan
     save()
     try:
         import playwright.sync_api  # noqa: F401
@@ -831,9 +918,22 @@ def look(spec: dict, report_path) -> dict:
                     outcomes.append(_look_once(report, plan, engine, viewport, theme, known.setdefault(viewport["name"], {}),
                                                deadline, look_spec, save))
                     save()
+    stood = {name for window in known.values() for seen in window.values() for name in seen.get("classes", ())}
+    unseen = sorted(set(plan["classes"]) - stood) if report["discovered"] and not (plan["all"] or plan.get("named")) else []
+    if unseen:   # a class the change touches that no searched screen showed: where it stands was not looked at
+        where = "the draft or the served page beside it" if look_spec["twin"] else "the draft" if web_root else "the interface"
+        report["not_looked"].append(
+            f"{_dotted(unseen)} stood on no screen of {where} in the windows searched ({', '.join(report['discovered'])}), "
+            "so where it stands was not looked at" + ("; a call with frames 'first' also looks at the served interface "
+                                                      "beside the draft, which shows where it was" if web_root and not look_spec["twin"] else ""))
+    named = plan["pages"] if plan.get("named") and not plan["all"] else []
+    seen = {screen["place"] for screen in report["screens"]}
+    report["not_looked"] += [f"the place '{place}' was asked for, yet no screen of it was measured" for place in named if place not in seen]
     tried = [outcome for outcome in outcomes if outcome != "unavailable"]
     if tried and all(outcome == "failed" for outcome in tried):
         report["failed"] = "every engine, theme and window tried broke before a screen was measured; the notes say why"
+    elif tried and named and not report["screens"]:
+        report["failed"] = "no screen of the places asked for was measured; not_looked and the notes say why"
     report["finished"] = True
     save()
     return report

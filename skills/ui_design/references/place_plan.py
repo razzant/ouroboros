@@ -232,5 +232,5 @@ def place_plan(web, base=None, changed=None) -> dict:
             every(f"{rel}: not placed by its name or rules, so every place")
     plan["pages"], plan["classes"] = sorted(pages), sorted(probes)
     if not (plan["all"] or pages or probes):
-        plan["why"].append("no changed file draws a place, so nothing to look at")
+        plan["why"].append("no changed file draws a place")
     return plan

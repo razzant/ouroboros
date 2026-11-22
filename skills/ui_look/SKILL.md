@@ -43,10 +43,11 @@ test, check, release step or schedule looks at the product's screens with it.
   WebKit emulation: neither is the owner's macOS window. Nothing is downloaded; with no
   browser the tool says so and starts nothing.
 - **Before and after.** With a draft and frames, a second page shows the served interface
-  on the same data: every screen is a pair (served, then draft) whose frames name their
-  version, and a finding the draft adds is counted as new. That takes about 20–40% longer
-  and holds a second page in memory; without frames only the draft is measured, and new and
-  earlier findings are not told apart.
+  on the same data: every screen it also has is a pair (served, then draft) whose frames
+  name their version, a changed class is looked for on both (so a part the draft hides
+  still shows where it stood), and a finding the draft adds is counted as new. That takes
+  about 20–40% longer and holds a second page in memory; without frames only the draft is
+  measured, and new and earlier findings are not told apart.
 - **Safety.** The stand answers every write locally and drops the page's socket frames, so
   pressing anything inside it changes nothing on the install.
 - **What stays.** The report and, when asked, the frames are flat files in
