@@ -1,7 +1,7 @@
 {
   "consciousnessOffer": {
     "autonomy": "act",
-    "dailyUsd": 20.0,
+    "dailyUsd": 15.0,
     "enabled": null,
     "maxTasks": 2,
     "offered": true,
