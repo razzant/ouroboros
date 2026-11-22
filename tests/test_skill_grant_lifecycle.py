@@ -324,3 +324,35 @@ def test_a_finished_review_carries_the_installation_grants_and_a_wave_without_ve
     skill_review._persist_projection(SimpleNamespace(), find_skill(root, "demo"), root, verdict)
     status = state(root)
     assert (status["granted_permissions"], status["waiting_permissions"]) == (["notify_owner"], [])
+
+
+def test_a_key_granted_later_reaches_an_extension_already_loaded_in_process(tmp_path, monkeypatch):
+    """S12: a key saved later is not passed and unloads nothing (B″); once the owner grants it, the next reconcile
+    reloads the in-process extension, whose ``get_settings`` then sees the key."""
+    from ouroboros import extension_loader
+    from tests._extension_loader_shared import _prepare_extension, extension_tool_answer
+    from tests._shared import clean_extension_runtime_state
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    clean_extension_runtime_state()
+    plugin = ("def register(api):\n    api.register_tool('token', lambda ctx: "
+              "api.get_settings(['MAILER_TOKEN']).get('MAILER_TOKEN', 'none'), description='token', schema={})\n")
+    loaded, repo, drive = _prepare_extension(tmp_path, "mailer", plugin, ["tool", "read_settings"],
+                                             env_from_settings=["MAILER_TOKEN"])
+    values: dict = {}
+    monkeypatch.setattr(config, "load_settings", lambda *_a, **_k: dict(values))
+    try:
+        assert carry_if_accepted(drive, loaded) is False  # the acceptance records its (empty) decision
+        reconcile = lambda: extension_loader.reconcile_extension(  # noqa: E731
+            "mailer", drive, lambda: dict(values), repo_path=str(repo))
+        assert reconcile()["live_loaded"]
+        values["MAILER_TOKEN"] = "fixture-secret"
+        assert reconcile()["live_loaded"], "a key saved later unloads nothing"
+        assert extension_tool_answer(drive, "mailer", "token") == "none", "and it is not passed"
+        current = find_skill(drive, "mailer", repo_path=str(repo))
+        save_skill_grants(drive, "mailer", ["MAILER_TOKEN"], content_hash=current.content_hash,
+                          requested_keys=["MAILER_TOKEN"], install_identity=install_identity(drive, current))
+        assert reconcile()["live_loaded"]
+        assert extension_tool_answer(drive, "mailer", "token") == "fixture-secret", "the later grant reached it"
+    finally:
+        clean_extension_runtime_state()

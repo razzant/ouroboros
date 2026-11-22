@@ -427,8 +427,8 @@ class PluginAPIImpl:
         # ("" until _publish_registrations swaps the snapshot in).
         self._published_generation = ""
         self._api_lock = threading.RLock()
-        # Core settings are exposed only when a content-hash-bound owner grant
-        # was already verified; otherwise the denylist silently drops them.
+        # Core settings are exposed only when an owner grant was verified at load (``skill_grant_scope``:
+        # keys of this installation); otherwise the denylist drops them. A later grant reloads the extension.
         self._granted_upper = frozenset(
             str(k).strip().upper() for k in (config.granted_keys or []) if str(k).strip()
         )

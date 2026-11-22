@@ -377,6 +377,8 @@ def reconcile_extension(
                 bundle = _extensions.get(skill_name)
             if bundle and bundle.runtime_identity:
                 was_live = bundle.runtime_identity == extension_import_identity(subject)
+            if was_live and bundle and (granted := set((state.get("grant_status") or {}).get("granted_keys") or [])):
+                was_live = all(granted <= set(api._granted_upper) for api in bundle.api_instances)  # a later grant reloads
             if was_live and bundle and bundle.catalog_identity is not None:
                 from ouroboros.extension_process_runner import extension_catalog_identity
                 was_live = bundle.catalog_identity == extension_catalog_identity(subject, drive_root, settings_reader)
@@ -537,13 +539,11 @@ def ensure_companions_running(
             }
     grant_status = grant_status_for_skill(drive_root, skill)
     if grant_status.get("blocked"):
-        return {
-            "action": "missing_grants",
-            "started": [],
-            "missing": missing,
-            "missing_keys": list(grant_status.get("missing_keys") or []),
-            "missing_permissions": list(grant_status.get("missing_permissions") or []),
-        }
+        from ouroboros.skill_grant_scope import blocking_lists
+
+        keys, permissions = blocking_lists(grant_status)  # what stops it; pending and waiting items do not
+        return {"action": "missing_grants", "started": [], "missing": missing, "missing_keys": keys,
+                "missing_permissions": permissions}
 
     # Fix-round-6: resolved WITHOUT mkdir — the post-fence attach creates it.
     state_dir = skill_state_dir_path(drive_root, skill.name)
