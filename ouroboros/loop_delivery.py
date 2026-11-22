@@ -1483,10 +1483,14 @@ def _no_tool_final_answer(
         selected, waited = selected_answer_context(limit_ctx)
         if waited and (out := owner_input()) is not False:  # my human may have written under the Pause
             return out
+    noted_before = getattr(tools._ctx, "_records_only_noted", False)
     allowed, refusal = prepare_focus_reply(tools._ctx, str(content or ""), quiet=bool(getattr(candidate, "quiet", False)))
     if not allowed:  # the flag returns with the host facts the mind decides on: destination, its own sends, silence
         messages.append({"role": "user", "content": refusal + refusal_facts(tools._ctx)})
-        _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        if getattr(tools._ctx, "_records_only_noted", False) and not noted_before:
+            _note_delivery_facts(tools, limit_ctx, llm_trace, line="")  # the record note is one-shot: the next answer stands
+        else:
+            _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
         solving_again()
         return held("focus_reply_refused")
     if isinstance(getattr(tools._ctx, "_presence_completion", None), dict):  # Accept only at this common exit.

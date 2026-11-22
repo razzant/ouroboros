@@ -378,11 +378,14 @@ def test_a_threadless_gesture_on_the_waking_message_in_a_thread_rides_and_any_ot
     assert [row["message_id"] for row in room.transport.provider] == ["chat:a:1", "chat:a:other", "chat:a:3", "chat:a:4"]
 
 
-def test_a_prose_final_in_a_records_only_place_returns_the_note_once_then_the_finish_is_the_record(records_room):
+@pytest.mark.parametrize("then", ["finish", "prose"])
+def test_a_prose_final_in_a_records_only_place_returns_the_note_once_then_the_finish_is_the_record(records_room, then):
     """Review R1 MAJOR-2: a tool-less final carries nothing that rides, so after an ack it gets the one return with the
-    ack listed and the way to send; the finish that follows is the record, and the person hears only the ack."""
+    ack listed and the way to send; the finish that follows is the record, and the person hears only the ack. The note
+    is one-shot facts, so an explicit finish_task and the same prose again both stand (no selection is owed)."""
     room = records_room
-    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, finish(answer=FINAL)]
+    after = finish(answer=FINAL) if then == "finish" else {"content": FINAL, "tool_calls": []}
+    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, after]
     view, stored = settle(room, turn(room))
     assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [ACK]
     assert stored["result"] == FINAL and stored["wake_silent"] is True and room.h.calls == 3
