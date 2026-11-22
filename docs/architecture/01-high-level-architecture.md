@@ -531,10 +531,10 @@ ouroboros/ — agent core and shared runtime (§6)
     shell_process.py, shell_effects.py, shell_outputs.py — the command-running substrate: execution, working-tree effects, declared outputs and per-path export eligibility
     plan_review_artifacts.py, plan_author_history.py — Earlier-schema waves and author lineage for history views and the importer
     owner_delivery.py — Owner events: live queue or sticky `pending_events`; room-naming receipts
-    deliverables_shell.py — cp/mv/ln into deliverables with symlink checks
+    deliverables_shell.py — path helpers for shell write checks and the output audit
     shell_audit.py — Post-exec custody audit for process tools
     process_facts.py — Per-call env, egress masking, process facts (loop_tool_execution.py); `check_output_views`; `run_script` dispatch ref
-    write_shape.py — write-shape predicates behind shell_parse.py and shell_guards.py; the task/resource and Supervisor contract owns permission (§6 Safety and runtime mode)
+    write_shape.py — Python body AST and Node/Ruby literal write targets for shell_guards.py; observation, not permission (§6 Safety and runtime mode)
     extension_dispatch.py — Extension tool dispatch; discovery stays in registry.py
     release_sync.py — `sync_release_metadata` for commit-admission preflight; the carrier-span SSOT `VERSION_CARRIER_SPANS` shared by the managed-update resolver and the commit packet (§10 invariant 2)
     review_synthesis.py — Reviewer window caps, coupling part of the brief, plan-review messages

@@ -262,7 +262,7 @@ _SHEET = """() => {
             amber: text(row.querySelector('.model-fallback')), result: row.dataset.result || null,
         })),
         ok: text(dialog.querySelector('[data-confirm-ok]')),
-        body: text(dialog.querySelector('.marketplace-modal-body > p')),
+        body: text(dialog.querySelector('.ui-modal-body > p')),
         inside: box.left >= 0 && box.right <= window.innerWidth + 0.5,
         wide: document.documentElement.scrollWidth - window.innerWidth,
     };
