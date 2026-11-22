@@ -186,13 +186,17 @@ def send_provider_death_notice(
     )
     from ouroboros.host_notice import fields
 
-    # One stable phrase and its step; the provider's own diagnostic (its last code and wait), the open plan review
-    # and the task's id are the notice's details. The task's result keeps its own text.
+    # One stable phrase from the terminal's typed cause (the install's own model slots or engine, else the provider)
+    # and its step; the diagnostic (its last code and wait), the open plan review and the task's id are the notice's
+    # details. The task's result keeps its own text.
+    code, said = {"local_capacity": ("local_model_capacity", "This task stopped because no local model slot freed up for its last request"),
+                  "local_engine": ("local_engine_silent", "This task stopped because the local Claudexor engine did not answer")}.get(
+        str(final_result.get("terminal_provider_cause") or ""), ("provider_outage", "A model-provider outage stopped this task"))
     details = "\n\n".join(part for part in (f"task {task_id}", str(final_result.get("terminal_provider_notice") or ""), plan_note) if part)
     ctx.send_with_budget(
-        chat_id, "A model-provider outage stopped this task; its partial work and workspace files are kept.",
+        chat_id, f"{said}; its partial work and workspace files are kept.",
         role="system", system_type="terminal_incident",
-        progress_meta=fields("provider_outage", step="inspect_task", details=details),
+        progress_meta=fields(code, step="inspect_task", details=details),
     )
     return True
 
@@ -385,7 +389,7 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
         fields["owner_message_sent"] = True
     if usage.get("terminal_plan_review_open") is True:
         fields["terminal_plan_review_open"] = True
-    for key in ("terminal_provider_notice", "terminal_host_notice"):
+    for key in ("terminal_provider_notice", "terminal_provider_cause", "terminal_host_notice"):
         if isinstance(usage.get(key), str) and usage[key]:
             fields[key] = usage[key]
     handovers = usage.get("authoring_handovers")
