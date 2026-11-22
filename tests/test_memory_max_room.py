@@ -141,6 +141,17 @@ def test_a_max_start_the_window_took_to_nano_is_named_nano_in_its_facts(tmp_path
     core = _core()
     low = _start(core, _crowded_window(_fact(_start(core, 2_000_000, monkeypatch))), monkeypatch)
     assert low.initial_mode == "low" and "; Low, temporarily, for the window, cause memory; " in memory_facts(low, "low")
+    # Review round 2 (Astra 4): a Low start a smaller route later takes to Nano names its captured build's mode.
+    crowded = next(plan for plan in (scale.build(tmp_path, monkeypatch, window=window) for window in (
+        300_000, 200_000, 150_000, 120_000, 100_000)) if plan.initial_mode == "low"
+        and mf.crowded_by_memory(plan.projection("low").memory_facts.get("max_room")))
+    record = nano.window_record  # as ``loop_model_call`` rebinds: the smaller route's own record
+    taken = dataclasses.replace(crowded, window_record=record, window_tokens=record.total_equivalent).reproject_for_route(
+        window_tokens=record.total_equivalent, known_window=True, ratio=1.0, output_reserve=crowded.output_reserve_tokens,
+        tool_schemas=scale.tools(), start_mode="low", current_messages=crowded.messages_for("low"))
+    assert taken.initial_mode == "nano" and taken.start == crowded.start == ("low", "memory")
+    line = memory_facts(taken, "nano")
+    assert "; Low, temporarily, for the window, cause memory; " in line and "Nano, temp" not in line
 
 
 def test_reprojected_restore_names_its_captured_build_not_an_unknown_original_start(monkeypatch):

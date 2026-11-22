@@ -60,7 +60,8 @@ def block_label(message, index, block, plan):
 def memory_facts(plan, mode, messages=()):
     """Captured memory facts of an integrating focus, absent from visible facts rows:
     on the owner's Max with a known window, the build's Max room (``memory_floor.measure_text``: the gate's need, the
-    ordinary need, the measure by whose part it is) and how that build settled, a lowered one with its cause.
+    ordinary need, the measure by whose part it is) and how that build settled, a lowered one with its cause, in the
+    build's own mode (its start's Low or Nano: a later route may take it lower; else the current mode).
     A cold restore builds a new capture; the task's historical ``plan.start`` is separate and may be unknown.
     my memory: the story with its pages no part or account holds yet (how many, their tokens, the rooms holding
     most of them) and the rooms' lines; what this view shows only by address and, beside it, the held note heads
@@ -82,7 +83,9 @@ def memory_facts(plan, mode, messages=()):
             line += "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room.get("cuts") else "")
         elif room.get("cause") in ("crowded", "route"):  # any other value is a measure without a settled cause
             cause = floor.lowered_cause(room)  # Nano where protected words left the maps frame no room
-            ran = "Nano, temporarily, for the window" if mode == "nano" else floor.TEMPORARY_LOW
+            start = str((getattr(plan, "start", None) or ("",))[0])
+            built = start if start in ("low", "nano") else mode  # the captured build's mode, not a later route's
+            ran = "Nano, temporarily, for the window" if built == "nano" else floor.TEMPORARY_LOW
             line += f"; {ran}, cause {cause}" + (
                 ", a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here"
                 if cause == "route" else "")
