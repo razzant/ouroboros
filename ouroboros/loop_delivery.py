@@ -1225,6 +1225,17 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
     return True, content
 
 
+def _restored_riding_send(ctx: Any, trace: Dict[str, Any]) -> bool:
+    """A restored selection's send fact, read from its trace as ``consume_completion_request`` read it: the calls after
+    its observation. A restored prose answer selected nothing, so nothing rode with it."""
+    from ouroboros.place_reply import riding_sends
+    selected = getattr(ctx, "_completion_selected", None)
+    if not isinstance(selected, dict):
+        return False
+    calls = (trace.get("tool_calls") or [])[int((selected.get("observation") or {}).get("tool_count") or 0):]
+    return bool(riding_sends(ctx, calls))
+
+
 def _no_tool_final_answer(
     content: Any,
     limit_ctx: _RoundLimitContext,
@@ -1240,10 +1251,13 @@ def _no_tool_final_answer(
     from ouroboros.loop_messages import transcript_growth_signature
     before = transcript_growth_signature(messages)
     origin = "resume" if resume_candidate else "selection" if explicit_candidate else "prose"
-    # A tool-less response carries nothing that rides, and a restored answer whose checkpoint predates its saved send
-    # fact cannot show one did: a records-only place returns its note once. A recorded send still rides once.
-    if origin == "prose" or (origin == "resume" and getattr(tools._ctx, "_completion_riding_send", None) is None):
+    # A tool-less response carries nothing that rides. A restored answer whose checkpoint predates its saved send fact
+    # reads it again from its restored trace: a recorded send still rides once; otherwise a records-only place returns
+    # its note once.
+    if origin == "prose":
         tools._ctx._completion_riding_send = False
+    elif origin == "resume" and getattr(tools._ctx, "_completion_riding_send", None) is None:
+        tools._ctx._completion_riding_send = _restored_riding_send(tools._ctx, llm_trace)
 
     def held(reason: str, subreason: str = ""):
         if transcript_growth_signature(messages) != before:

@@ -1137,28 +1137,44 @@ class _Death(BaseException):
     """The worker dies right after a working save; nothing after it runs."""
 
 
-@pytest.mark.parametrize("saved", ["recorded_no_send", "older_checkpoint", "recorded_send"])
+@pytest.mark.parametrize("saved", ["recorded_no_send", "older_checkpoint", "recorded_send", "older_checkpoint_sent"])
 def test_a_restart_after_a_door_roots_saved_answer_reads_the_record_note_first(focus, monkeypatch, saved):
     """The worker dies right after a door connector's root saved its wordy answer (the ``candidate`` save precedes the
     one return with the record note). The restored attempt reads that note first, from the saved send fact, and from
     an older checkpoint without it by the honest fallback; a send recorded with that finish still rides once, with no
-    note. Either way the answer then stays the record and nothing is posted."""
+    note. Either way the answer then stays the record and nothing is posted. A checkpoint from before the send fact
+    was saved (``older_checkpoint_sent``: its door send and finish in one response, no receipt yet) reads the fact
+    from its restored trace, so that send rides and is never sent twice (review round 2, Astra 2)."""
     import queue
     from ouroboros import loop, working_checkpoint as wc
     from ouroboros.presence_runner import build_presence_result_event
     from ouroboros.task_results import write_task_result
+    from ouroboros.tools.registry import ToolEntry
     from tests.test_place_reply_revision import promoted
     from tests.test_working_checkpoint import _registry
     root = focus[0]
-    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    door = _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
     task = promoted(task_for(focus))
+    task["metadata"]["presence"]["event"]["conversation_key"] = "chat:a:r:0"  # as a connector's event carries it
     write_task_result(root, task["id"], "running", metadata=task["metadata"], delegation_role="root",
                       root_task_id=task["id"], chat_id=1)
-    asked = []
+    asked, sent = [], []
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))  # the send's own check passes
+    schema = {"name": door, "description": "Queue one provider send in this conversation.", "parameters": {
+        "type": "object", "properties": {"channel": {"type": "string"}, "text": {"type": "string"}}}}
+
+    def send_and_keep(text):  # the door send and the finish in one response; the provider's receipt is not in yet
+        return {"content": None, "tool_calls": [
+            {"id": f"send-{len(sent)}", "type": "function", "function": {"name": door, "arguments": json.dumps(
+                {"channel": "r", "text": text})}},
+            {"id": "keep", "type": "function", "function": {"name": "finish_task", "arguments": json.dumps(
+                {"action": "finish", "answer": text})}}]}
 
     def attempt(number, answers, **facts):
         registry = _registry(root, monkeypatch, task["id"], number)
         registry._ctx.task_metadata, registry._ctx.task_contract = task["metadata"], task["task_contract"]
+        registry.register(ToolEntry(name=door, schema=schema, timeout_sec=30, safety_policy="skip",
+                                    handler=lambda _ctx, channel="", text="": sent.append(text) or '{"ok": true}'))
         for key, value in facts.items():
             setattr(registry._ctx, key, value)
         replies = iter(answers)
@@ -1184,11 +1200,11 @@ def test_a_restart_after_a_door_roots_saved_answer_reads_the_record_note_first(f
     with monkeypatch.context() as dying:
         dying.setattr(wc, "save_or_log", save_then_die)
         with pytest.raises(_Death):
-            attempt(1, [{"content": "Hello", "tool_calls": []}])
+            attempt(1, [send_and_keep("Hello") if saved == "older_checkpoint_sent" else {"content": "Hello", "tool_calls": []}])
     state = wc.read_working(root, task["id"], 1)[1]
-    assert state["delivery"]["_completion_riding_send"] is False, "the prose answer's fact is saved beside it"
+    assert state["delivery"]["_completion_riding_send"] is (saved == "older_checkpoint_sent"), "the fact is saved beside it"
     if saved != "recorded_no_send":
-        if saved == "older_checkpoint":
+        if saved in ("older_checkpoint", "older_checkpoint_sent"):
             state["delivery"].pop("_completion_riding_send")  # a checkpoint written before the fact was saved
         else:
             state["delivery"]["_completion_riding_send"] = True  # that finish's door send rode and was recorded
@@ -1197,9 +1213,12 @@ def test_a_restart_after_a_door_roots_saved_answer_reads_the_record_note_first(f
     assert wc.attach_recovery(root, handoff, source_task_id=task["id"], from_attempt=1, cause="worker_crash")
     keep = {"content": None, "tool_calls": [{"id": "keep", "type": "function", "function": {
         "name": "finish_task", "arguments": json.dumps({"action": "finish", "answer": "Hello"})}}]}
-    registry, (text, usage, _trace) = attempt(2, [keep], working_recovery=handoff["_working_recovery"])
+    resend = saved == "older_checkpoint_sent"  # a model told of no send would send again (the duplicate)
+    registry, (text, usage, _trace) = attempt(2, [send_and_keep("Hello") if resend else keep],
+                                              working_recovery=handoff["_working_recovery"])
     second = [words for number, words in asked if number == 2]
-    if saved == "recorded_send":
+    if saved in ("recorded_send", "older_checkpoint_sent"):
+        assert sent == (["Hello"] if resend else []), "its door send reached the person once"
         assert second == [], "the recorded send rode with that finish: the restored answer is the record at once"
     else:
         assert len(second) == 1 and second[0].count("[FOCUS_FINISH_IS_A_RECORD]") == 1, "the note is read first"
