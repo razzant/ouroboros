@@ -206,7 +206,7 @@ def http_transport(opener: Any) -> Any:
                 if response.status_code == 404 and response.request.method == "POST":
                     try:
                         sent = json.loads(response.request.content or b"{}")
-                    except ValueError:
+                    except Exception:  # noqa: BLE001 - a streamed (redirected) or unreadable body names no call
                         return
                     if isinstance(sent, dict) and sent.get("method") == "tools/call":
                         standins.add(sent.get("id"))
