@@ -88,8 +88,8 @@ def test_an_unpinned_server_starts_on_demand_in_every_mode_and_the_map_names_its
     assert "Server instructions: Use numeric project ids, never names." in full
     assert "Every tool description begins: Work account only." in full  # said once, lossless
     assert "- create_issue [not destructive] [not read-only]: Create an issue in a project." in full
-    long_tail = GITLAB[2]["description"].split("Work account only. ", 1)[1].strip()
-    assert f"- get_merge_request [read-only]: {' '.join(long_tail.split())}" in full  # complete, never clipped
+    # Each tool's own first sentence, whole; the rest is one listing away.
+    assert "- get_merge_request [read-only]: Read one merge request with its discussion.\n" in full
     assert "### mcp_slack (Slack): 1 tool," in full and "loaded from task start" in full
     # Pinned too: the map is frozen with the task, and a route ceiling or a later load can leave a pinned schema out.
     assert "- history: Channel history." in full
@@ -131,9 +131,11 @@ def test_the_map_names_only_the_selectors_this_actor_can_call(registry, disabled
     helper, _ = connection_views(registry, helper=True)
     for text in (full, nano, helper):
         assert ("enable_tools" in text) is ("enable_tools" not in disabled), text[:300]
-    for text in (nano, helper):
+    for text in (full, nano, helper):
         assert ("list_available_tools" in text) is ("list_available_tools" not in disabled)
     assert "### mcp_gitlab (GitLab)" in full and "create_issue" in nano  # the map itself stays
+    # Without the reader nothing brings the complete text back, so the map keeps it.
+    assert ("It returns every field" in full) is ("list_available_tools" in disabled)
 
 
 def test_the_map_is_a_pure_function_of_catalog_facts(registry):
@@ -618,6 +620,58 @@ def test_a_helper_reads_names_and_an_integrating_focus_reads_descriptions(regist
     helper, _ = _connections(registry, {"id": "kid", "delegation_role": "subagent"})
     assert "Create an issue in a project." in full and "Create an issue in a project." not in helper
     assert _connections(None, {"id": "main"}) == ("", "")
+
+
+_LINK_TYPES = "Get available Jira issue link types (e.g. Blocks, Duplicate, Clones, Relates). For createIssueLink use the name."
+_PURPOSE_ROWS = [
+    {"name": "link_types", "description": _LINK_TYPES, "input_schema": {"type": "object", "properties": {}}},
+    {"name": "link_types_plain", "description": "Get available link types. For createIssueLink use the name.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "one_sentence", "description": "Get unread messages across all channels.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "no_sentence_end", "description": "Add or update a comment on a Jira issue",
+     "input_schema": {"type": "object", "properties": {}}},
+]
+
+
+def test_an_integrating_focus_reads_first_sentences_and_the_listing_returns_the_rest(registry):
+    """The map holds each tool's own first sentence, whole: after the server's shared leading text, never cut at
+    "e.g."; a one-sentence description and one without a sentence end stay whole. The intro names the exact reader,
+    and that reader returns what the line left out."""
+    from ouroboros import loop as loop_module
+
+    _servers(listing={"gitlab": GITLAB, "slack": _PURPOSE_ROWS})
+    full, _ = connection_views(registry, helper=False)
+    assert 'list_available_tools(namespace="mcp_<server>") lists the server with every description in full.' in full
+    assert "Every tool description begins: Work account only." in full
+    assert "- create_issue [not destructive] [not read-only]: Create an issue in a project.\n" in full
+    assert "- get_merge_request [read-only]: Read one merge request with its discussion.\n" in full
+    assert "It returns every field" not in full and "For createIssueLink" not in full
+    assert "- link_types: Get available Jira issue link types (e.g. Blocks, Duplicate, Clones, Relates).\n" in full
+    assert "- link_types_plain: Get available link types.\n" in full
+    assert full.endswith("\n- one_sentence: Get unread messages across all channels.")
+    assert "- no_sentence_end: Add or update a comment on a Jira issue\n" in full
+    resident = initial_tool_schemas(registry)
+    loop_module._setup_dynamic_tools(registry, resident, [])
+    listing = registry.execute("list_available_tools", {"namespace": "mcp_gitlab"})
+    assert " ".join(GITLAB[2]["description"].split()) in listing  # nothing is lost: the rest is one call away
+    assert "Use numeric project ids, never names." in listing
+    assert _LINK_TYPES in registry.execute("list_available_tools", {"namespace": "mcp_slack"})
+
+
+def test_settings_weighs_the_map_an_integrating_focus_reads(registry):
+    from ouroboros.tool_connections import catalog_weights
+    from ouroboros.utils import estimate_tokens
+
+    _servers()
+    full, _ = connection_views(registry, helper=False)
+    intro, *chunks = full.split("\n\n", 1)[1].split("\n\n### ")
+    sections = {chunk.split(" ", 1)[0][4:]: "\n### " + chunk for chunk in chunks}
+    weights = catalog_weights()
+    assert "It returns every field" not in sections["gitlab"]
+    assert {server: row["map_tokens"] for server, row in weights["servers"].items()} == {
+        server: estimate_tokens(text) for server, text in sections.items()}
+    assert weights["totals"]["map_tokens"] == estimate_tokens(intro) + sum(map(estimate_tokens, sections.values()))
 
 
 def test_the_schema_weight_shown_is_the_weight_loaded(registry):
