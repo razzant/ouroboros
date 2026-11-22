@@ -104,10 +104,11 @@ def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
         intent = outcome.get("intent") or {}
         door = doors.get(intent.get("door"), "Version switch")
         target = intent.get("target_ref") or intent.get("target_sha") or "the requested version"
-        reason = outcome.get("reason") or outcome.get("message") or "the app stopped before changing versions"
+        stopped = "the app stopped before changing versions"
+        reason = outcome.get("reason") or outcome.get("message") or stopped
         # The headline line only: Git's whole output stays in the receipt and progress record.
         reason = " ".join((str(reasons.get(reason, reason)).splitlines() or [""])[0].split()).rstrip(".")
-        known = reason in reasons.values()  # a known cause in words; any other, and the target, are the details
+        known = reason in {*reasons.values(), stopped}  # a cause in words; any other, and the target, are details
         msg = f"{door} did not happen{': ' + reason if known else ''}. The app is running the current version."
         from ouroboros.host_notice import fields
 
