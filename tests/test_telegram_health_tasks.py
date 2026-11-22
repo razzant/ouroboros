@@ -160,6 +160,18 @@ def test_tasks_say_the_windows_translated_chip_word_from_its_catalogue_key(tmp_p
         # by its code when the catalogue has it; else by its text; a word the memory lacks stays English
         assert txt.splitlines() == ["⏸ Migration — На паузе: Вы поставили на паузу",
                                     "⏸ Report — На паузе: Достигнут лимит трат", "⏳ Digest — Queued"]
+        # a reason the catalogue prints as the word itself is not said again; a distinct one stays
+        same = tmp_path / "same"
+        plugin.telegram_i18n.configure(same)
+        memory.update_memory(same, "ru", lambda doc: (memory.apply_generated(doc, {
+            "code:task.chip.paused": {"text": "На паузе"},
+            "code:work.because.paused_by_owner": {"text": "на паузе "},
+            "Spending limit reached": {"text": "Достигнут лимит трат"}}, model="test"), doc)[1], create=True)
+        txt = health._collect_tasks_text(_works(
+            {"name": "Отчёт", "activity": "paused", "because": [{"code": "paused_by_owner", "text": "You paused it"}]},
+            {"name": "Report", "activity": "paused",
+             "because": [{"code": "spending_limit", "text": "Spending limit reached"}]}), "ru")
+        assert txt.splitlines() == ["⏸ Отчёт — На паузе", "⏸ Report — На паузе: Достигнут лимит трат"]
     finally:
         plugin.telegram_i18n.configure(None)
 
@@ -226,9 +238,11 @@ def test_a_correspondents_presence_turn_is_neither_counted_nor_listed_as_the_own
     assert "idle" in health._collect_tasks_text(only_place, "en")
 
 
-def test_the_tasks_page_stays_within_telegrams_limit_with_its_header(tmp_path):
+def test_the_tasks_page_stays_within_telegrams_limit_with_its_header(tmp_path, monkeypatch):
     """Telegram drops a message longer than 4096 UTF-16 code units whole: the page with its header and the ``… +N``
-    line stays within it; a page that fits keeps every line."""
+    line stays within it, for any title and astral names; a page that fits keeps every line."""
+    from ouroboros import i18n_memory as memory
+
     plugin = _load_plugin()
     health = sys.modules["tg_ht_test.lib.telegram_health"]
     units = health._units
@@ -242,6 +256,25 @@ def test_the_tasks_page_stays_within_telegrams_limit_with_its_header(tmp_path):
     one = _works({"name": "x" * 5000, "activity": "working"})
     header, _ = plugin._build_menu_tasks(one, "safe_commands", "")
     assert units(header) <= 4096 and "…" in header
+    astral = _works(*({"name": f"{i:02} " + "🌙" * 77, "activity": "waiting",
+                       "because": [{"code": "model_wait", "text": "Waiting for the model " + "🌙" * 60}]}
+                      for i in range(13)))
+    header, _ = plugin._build_menu_tasks(astral, "safe_commands", "")
+    assert units(header) <= 4096 and header.startswith("📋 Tasks\n\n") and header.splitlines()[-1].startswith("… +")
+    # a translated title that leaves no room for the ``… +13`` line is cut itself; one that leaves it stays whole
+    thirteen = _works(*({"name": str(i), "activity": "working"} for i in range(13)))
+    for title, kept in (("📋" * 2044 + "T", True), ("📋" * 2045, False)):  # 4089 and 4090 units: just fits, one over
+        store = tmp_path / str(len(title))
+        plugin.telegram_i18n.configure(store)
+        monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+        memory.update_memory(store, "ru", lambda doc: (memory.apply_import(doc, {"language": "ru", "entries": {
+            "code:tg.menu.tasks_title": {"text": title}}}), doc)[1], create=True)  # an import takes a long one
+        try:
+            header, _ = plugin._build_menu_tasks(thirteen, "safe_commands", "ru")
+        finally:
+            plugin.telegram_i18n.configure(None)
+        assert units(header) == 4096 and header.splitlines()[-1] == "… +13"
+        assert header.startswith(title + "\n\n") is kept and (kept or header.split("\n")[0].endswith("…"))
 
 
 def test_an_older_core_without_the_renderer_leaves_the_panels_unknown_and_the_bridge_registering(tmp_path,

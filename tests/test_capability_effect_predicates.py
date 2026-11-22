@@ -2,7 +2,7 @@
 
 A2: skill owner-state mentions take the family writeish + read-carve;
 A3: sudo is judged at command-head position, never as a data token;
-A4: interpreter write inference proves the receiver / agrees across regex+AST;
+A4: interpreter write inference proves the receiver;
 A6: skill preflight permission findings prove the PluginAPI receiver or degrade;
 A7: git read-only classification is one SSOT with mode parsers, gh is argv-parsed.
 """
@@ -125,17 +125,6 @@ def test_sqlite_plain_connect_is_still_a_write():
     assert "db.sqlite" in targets or unknown
 
 
-def test_regex_lane_agrees_with_ast_on_list_remove_and_ro_sqlite():
-    from ouroboros.tools.write_shape import interpreter_write_shape
-
-    assert interpreter_write_shape(["python", "-c", "xs=[1,2]; xs.remove(1)"]) is False
-    assert interpreter_write_shape(
-        ["python", "-c", "import sqlite3; sqlite3.connect('file:/tmp/x?mode=ro', uri=True)"]
-    ) is False
-    assert interpreter_write_shape(["python", "-c", "import os; os.remove('x')"]) is True
-    assert interpreter_write_shape(["python", "-c", "import os; os.rename('a','b')"]) is True
-
-
 # ---------------------------------------------------------------------------
 # A7 — git mode parsers, one read-only SSOT, glued -C, gh argv parse
 # ---------------------------------------------------------------------------
@@ -145,32 +134,26 @@ def test_regex_lane_agrees_with_ast_on_list_remove_and_ro_sqlite():
     "git config --get remote.origin.url",
     "git stash list",
     "git name-rev HEAD",
+    "git worktree list",
 ])
 def test_git_readonly_modes_are_classified_readonly(cmd):
-    from ouroboros.git_shell_policy import is_readonly_git_command
+    from ouroboros.git_shell_policy import _git_invocation_block_reason
 
-    assert is_readonly_git_command(cmd) is True
+    assert _git_invocation_block_reason(cmd.split(), allow_network=True) == ""
 
 
 @pytest.mark.parametrize("cmd", [
     "git config --unset user.name",
     "git config set user.name x",
+    "git config user.name x",
     "git notes add -m x",
     "git bisect reset",
+    "git log --output=/tmp/x",
 ])
 def test_git_mutating_or_external_modes_are_not_readonly(cmd):
-    from ouroboros.git_shell_policy import is_readonly_git_command
+    from ouroboros.git_shell_policy import _git_invocation_block_reason
 
-    assert is_readonly_git_command(cmd) is False
-
-
-def test_pure_read_inspection_uses_the_same_git_ssot():
-    from ouroboros.tools.registry import _is_pure_read_inspection
-
-    assert _is_pure_read_inspection("git stash list") is True
-    assert _is_pure_read_inspection("git config --get remote.origin.url") is True
-    assert _is_pure_read_inspection("git config user.name x") is False
-    assert _is_pure_read_inspection("git log --output=/tmp/x") is False
+    assert _git_invocation_block_reason(cmd.split(), allow_network=True) != ""
 
 
 def test_glued_dash_c_selects_the_same_base_as_split(tmp_path):

@@ -292,7 +292,17 @@ def test_a_list_call_is_one_ordinary_event_per_root_and_a_general_resume_keeps_p
         assert json.loads(_pause_task(ctx, "a", "x", task_ids=["b"]))["error"] == "invalid_task_ids"
         assert "'bad id'" in json.loads(_pause_task(ctx, reason="x", task_ids=["a", "bad id"]))["detail"]
         assert not ctx.pending_events, "a bad element refuses the whole call before anything is emitted"
+        for shape in ({}, "b", 7):  # a non-list beside one id refuses before the single form is chosen
+            assert json.loads(_pause_task(ctx, "a", "x", task_ids=shape))["error"] == "invalid_task_ids", shape
+        refused = json.loads(_pause_task(ctx, reason="x", task_ids=["a", 12345678]))
+        assert refused["error"] == "invalid_task_id" and "12345678" in refused["detail"], "list elements are strings"
+        assert not ctx.pending_events, "a non-list task_ids or a bad element emits nothing"
         assert json.loads(_pause_task(ctx, "a", "x", task_ids=[]))["task_id"] == "a", "[] beside one id is no list"
+        ctx.pending_events.clear()
+    with invocation_scope({"tool_call_id": "numeric"}):  # non-strict providers deliver an all-digit id as a number
+        assert json.loads(_pause_task(ctx, 12345678, "x"))["task_id"] == "12345678", "the single form as on target"
+        assert [event["task_id"] for event in ctx.pending_events] == ["12345678"]
+        ctx.pending_events.clear()
     receipt, outcomes, events = _list(ctx, _pause_task, "list-pause", reason="The owner paused all work",
                                       task_ids=["a", "b", "a", "anon", "ghost", "mind-root"])
     assert receipt["task_ids"] == ["a", "b", "anon", "ghost", "mind-root"], "de-duplicated, in order"

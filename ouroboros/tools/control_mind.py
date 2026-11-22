@@ -25,16 +25,18 @@ def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None
     from ouroboros.tools.control_events import _emit_control_event
     from ouroboros.utils import utc_now_iso
 
+    if task_ids is not None and not isinstance(task_ids, list):  # checked before the single or list form is chosen
+        return json.dumps({"ok": False, "error": "invalid_task_ids", "detail": "task_ids must be a non-empty list."})
     if task_id and task_ids:
         return json.dumps({"ok": False, "error": "invalid_task_ids",
                            "detail": "Name one work in task_id or a non-empty list in task_ids, not both."})
     batch = bool(task_ids) and not task_id  # an empty list beside one id is no list
-    if task_ids is not None and not task_id and not (isinstance(task_ids, list) and task_ids):
+    if task_ids is not None and not task_id and not task_ids:
         return json.dumps({"ok": False, "error": "invalid_task_ids", "detail": "task_ids must be a non-empty list."})
     targets = []
     for value in task_ids if batch else [task_id]:
-        try:
-            targets.append(validate_task_id(value if isinstance(value, str) else None))
+        try:  # the single form keeps the target's scalar contract; only list elements must be strings
+            targets.append(validate_task_id((value if isinstance(value, str) else None) if batch else value))
         except ValueError as exc:  # one bad element refuses the whole call before anything is emitted
             return json.dumps({"ok": False, "error": "invalid_task_id", "detail": f"{value!r}: {exc}" if batch
                                else str(exc)})
