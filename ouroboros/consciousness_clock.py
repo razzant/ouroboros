@@ -13,8 +13,8 @@ written meanwhile stays and sets the next wake. The wake that stood appointed wh
 never consumes it: each named time is consumed by one wake that started with it stored, and a passed one never adds
 a wake. With consciousness on, a time at or before the pending appointment is refused: that wake keeps its time
 (owner 12.10, #1603), and ``schedule_followup(run_at=…)`` serves work at that moment. Turning consciousness on
-(``consciousness.start``) appoints the earlier of the appointment Off left and a named time still ahead, no sooner
-than MIN after the last wake, boot or skip.
+(``consciousness.start``) appoints the earlier of the next attempt Off left (its appointment, or the retry a skip or
+refused admission moved it to) and a named time still ahead, no sooner than MIN after the last wake, boot or skip.
 
 My human's last reported zone (``OWNER_ZONE_STATE_KEY``) is overwritten at owner ingress (``note_owner_zone``) from
 their own message whose client reported a valid IANA zone, dated by that message's own time, never over a report

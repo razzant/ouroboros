@@ -699,8 +699,8 @@ class BackgroundConsciousness:
                 return "Consciousness is already on." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""
             # The clock did not advance while disabled: never announce a wake in the past. A named time still ahead
-            # (one stored while off, ``set_next_wakeup(at)``) comes first, no sooner than MIN after the last wake, boot
-            # or skip (the tool's contract).
+            # (one stored while off, ``set_next_wakeup(at)``) comes first when it is earlier than the next attempt Off
+            # left, no sooner than MIN after the last wake, boot or skip (the tool's contract).
             now, stored = time.time(), self._read_state()
             due, named = max(self._next_wake_at, now), target_ts(stored.get(WAKE_TARGET_STATE_KEY))
             if named is not None and named > now:
