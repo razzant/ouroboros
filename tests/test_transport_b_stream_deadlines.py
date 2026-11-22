@@ -20,6 +20,7 @@ from ouroboros.llm_stream import (
     AssembledResponse, IncompleteProviderStream, ProviderStreamError, RejectedProviderStream,
 )
 from ouroboros.loop_llm_call import classify_llm_exception
+from ouroboros.openrouter_attribution import OPENROUTER_BASE_URL
 from tests._usage_store_testing import ledger_rows
 
 WIRE_CORPUS = pathlib.Path(__file__).parent / "fixtures" / "llm_wire"
@@ -694,7 +695,7 @@ def test_slow_recovery_preparation_keeps_both_attempt_receipts(isolated, monkeyp
     assert [row["state"] for row in rows(isolated)] == ["unresolved", "released"]
 
 
-def test_later_free_recovery_cannot_replace_earlier_unknown_custody(isolated, monkeypatch):
+def _later_router_refusal_after_deadline(isolated, monkeypatch, route):
     now, sent = [100], []
     monkeypatch.setattr(model_wait, "monotonic_now", lambda slot=None: now[0])
     def send(**kw):
@@ -704,10 +705,23 @@ def test_later_free_recovery_cannot_replace_earlier_unknown_custody(isolated, mo
         now[0] = 111
         raise Rejected("No endpoints found; response_format unsupported", status=404)
     with model_wait.execution_deadline_scope(110), pytest.raises(PhysicalDispatchInterrupted) as caught:
-        run_driver(send, payload(temperature=0.2, response_format={"type": "json_object"}), target())
-    assert len(sent) == 2 and rows(isolated)[-1]["state"] == "settled"
-    assert caught.value.physical_attempt_capture.attempt_id == rows(isolated)[0]["attempt_id"]
+        run_driver(send, payload(temperature=0.2, response_format={"type": "json_object"}), route)
+    first, later = rows(isolated)
+    assert len(sent) == 2
+    assert caught.value.physical_attempt_capture.attempt_id == first["attempt_id"]
     assert caught.value.physical_attempt_capture.state == "unresolved"
+    return later
+
+
+def test_later_free_recovery_cannot_replace_earlier_unknown_custody(isolated, monkeypatch):
+    route = {**target(), "base_url": OPENROUTER_BASE_URL}
+    later = _later_router_refusal_after_deadline(isolated, monkeypatch, route)
+    assert (later["state"], later["cost_usd"], later["cost_final"]) == ("settled", 0.0, True)
+
+
+def test_router_refusal_at_a_compatible_origin_does_not_prove_zero(isolated, monkeypatch):
+    later = _later_router_refusal_after_deadline(isolated, monkeypatch, target())
+    assert (later["state"], later.get("cost_usd"), later.get("cost_final")) == ("unresolved", None, False)
 
 
 def test_quota_pause_is_execution_only_and_network_wait_spends_time(isolated, monkeypatch):

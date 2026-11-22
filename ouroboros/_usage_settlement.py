@@ -199,6 +199,12 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
             cost_final = False
             if cost is not None:
                 normalized["price_source"] = f"litellm@{evidence['tariff_quote']['fetched_at']}"
+        elif (cost is None and cost_usd is None and normalized.get("cost_invalid")
+              and evidence.get("operation") == "chat" and evidence.get("input") == "text"):
+            # A rejected charge must not be estimated. The raw counters can still explain why pricing is unknown.
+            _, reason = _billed_tokens(normalized)
+            if reason == "usage_malformed":
+                evidence["tariff_pricing"] = {"unpriced": reason}
     elif (cost is None and cost_usd is None and not normalized.get("cost_invalid") and has_usage
           and not reservation.provider_reported_cost_only and not reservation.unpriced_add_on
           and normalized.get("cost_coverage") != "partial" and not has_nontext_usage(normalized)):
