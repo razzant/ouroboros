@@ -230,8 +230,9 @@ def test_remote_backspace_and_delete_press_backspace(tmp_path):
     assert "pyautogui.press('backspace')" in cap[-1][-1]
     impl.key(keys="fwd-delete")
     assert "pyautogui.press('delete')" in cap[-1][-1]
-    assert _mod._ComputerUse._ssh_macos_key_name("delete") == "fwd-delete"
-    assert _mod._ComputerUse._ssh_macos_key_name("backspace") == "delete"
+    mac_input = sys.modules[_mod.__name__ + ".mac_input"]  # pyautogui's "delete" is forward delete on an SSH Mac too
+    assert mac_input.ops_for_pyautogui("pyautogui.press('delete')")[0] == [{"op": "keys", "mods": [], "code": 117}]
+    assert mac_input.ops_for_pyautogui("pyautogui.press('backspace')")[0] == [{"op": "keys", "mods": [], "code": 51}]
 
 
 def test_disabled_active_connection_fails_closed(tmp_path, monkeypatch):

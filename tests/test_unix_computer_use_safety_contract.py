@@ -130,7 +130,7 @@ def test_no_osworld_fallback_after_unknown_completion(tmp_path):
 def test_raise_never_requires_app_and_never_activates_local_target(tmp_path, monkeypatch):
     impl = plugin._ComputerUse(_API(tmp_path))
     monkeypatch.setattr(plugin, "_platform", lambda: "macos")
-    monkeypatch.setattr(plugin, "_which", lambda _tool: "/usr/bin/cliclick")
+    monkeypatch.setattr(plugin, "_which", lambda tool: f"/usr/bin/{tool}")
     calls = []
     impl._native = lambda op, *args, **kw: calls.append((op, args)) or {"ok": True, "candidates": [{"pid": 7, "app": "Editor"}]}
     front = {"pid": 8, "app": "Other"}
@@ -144,7 +144,7 @@ def test_raise_never_requires_app_and_never_activates_local_target(tmp_path, mon
 
     front = {"pid": 7, "app": "Editor"}
     sent = json.loads(impl.key(keys="a", app="Editor", raise_policy="never"))
-    assert sent["ok"] is True and ("input", ["cliclick", "t:a"]) in calls
+    assert sent["ok"] is True and ("input", plugin.mac_input.argv([{"op": "keys", "mods": [], "char": "a"}])) in calls
     assert not any(op == "activate" for op, _ in calls)
 
 

@@ -13,7 +13,7 @@ const UTF16LE = 0x94000100; // NSUTF16LittleEndianStringEncoding
 const KEYBOARD_FLAGS = 0x80000; // a new event carries what the keyboard holds; here Option is held
 
 function trace(program, scenario) {
-  const t = {calls: [], log: [], translated: [], posted: [], released: [], error: null, returned: null};
+  const t = {calls: [], log: [], translated: [], posted: [], tags: [], released: [], error: null, returned: null};
   const owned = [], held = new Set(), bound = new Set(), count = {event: 0, flags: 0, post: 0, delay: 0};
   const fault = (what) => scenario.fail === `${what}:${count[what]++}`;
   const own = (kind, fields) => { const object = {kind, alive: true, ...fields}; owned.push(object); return object; };
@@ -24,6 +24,7 @@ function trace(program, scenario) {
   const string = (value) => ({kind: "NSString", value});
   const deliver = (tap, event) => {
     t.posted.push([tap, event.code, event.down, event.flags]);
+    t.tags.push(event.tag === undefined ? null : event.tag);
     if (event.down) held.add(event.code); else held.delete(event.code);
   };
   const C = {
@@ -62,6 +63,10 @@ function trace(program, scenario) {
       live(event, "CGEvent", "CGEventSetFlags");
       if (fault("flags")) throw new Error("injected flags failure");
       event.flags = flags;
+    },
+    CGEventSetIntegerValueField: (event, field, value) => {
+      live(event, "CGEvent", "CGEventSetIntegerValueField");
+      if (field === 42) event.tag = value;
     },
     CGEventPost: (tap, event) => {
       live(event, "CGEvent", "CGEventPost");

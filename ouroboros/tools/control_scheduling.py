@@ -1224,4 +1224,5 @@ def maybe_emit_delegated_run_fanout(ctx: ToolContext, *, run_id: str, route_id: 
         log.debug("Failed to emit delegated-run swarm_fanout telemetry", exc_info=True)
 
 
-HIDDEN_LEGACY_SCHEDULE_PARAMS: frozenset[str] = frozenset({"model_lane", "executor"})
+# ``title`` is no former field: it reaches the handler so its one refusal can name the call that works.
+HIDDEN_LEGACY_SCHEDULE_PARAMS: frozenset[str] = frozenset({"model_lane", "executor", "title"})
