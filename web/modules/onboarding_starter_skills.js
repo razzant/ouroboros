@@ -245,13 +245,18 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         };
     }
 
+    // Chromium reports a focused field's unreported edit (`change`) from inside the rewrite that removes it; a repaint
+    // the card's handler asks for then would rewrite the list under that rewrite, which throws. It follows instead.
+    let painting = false;
     function paint() {
         if (!host?.isConnected) return;
+        if (painting) { queueMicrotask(paint); return; }
         const html = view === 'step' ? stepHtml(false) : view === 'row' ? rowHtml() : '';
         if (html === painted) return;  // a read that changed nothing rewrites nothing
         const arrive = view === 'step' && !arrived && state.status === 'ready' && items().length > 0;
         const restore = painted && view === 'step' ? readingPlace() : null;
-        host.innerHTML = arrive ? stepHtml(true) : html;
+        painting = true;
+        try { host.innerHTML = arrive ? stepHtml(true) : html; } finally { painting = false; }
         painted = html;
         arrived ||= arrive;
         if (arrive) paceColumns();

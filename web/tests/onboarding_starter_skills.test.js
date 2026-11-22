@@ -501,6 +501,50 @@ test('a draft that is no token is said here, never checked and never sent; the s
     assert.deepEqual(checks, [['telegram', 'x'.repeat(512)]]);
 });
 
+test('a repaint never rewrites the step inside another: an edit the removed field reports is checked and shown after it', async () => {
+    // Chromium reports a focused field's unreported edit (`change`) from inside the rewrite that removes it, and a
+    // rewrite from that handler makes the outer one throw («…moved in a 'blur' event handler?»). This host does the
+    // same: its focused token field's pending edit is reported from inside its rewrite; a rewrite inside it is recorded.
+    let loaded = null;
+    const checks = [];
+    const step = createStarterSkillsStep({ read: async () => withCard(), card: { random: (bytes) => bytes.fill(7),
+        encoder: () => new Promise((done) => { loaded = done; }),  // the QR encoder still loading
+        check: async (skill, token) => { checks.push(token); return token === TOKEN ? new Promise(() => {}) : { status: 'refused' }; } } });
+    await step.loading;
+    const host = fakeHost();
+    const nested = [];
+    let html = '';
+    let writing = false;
+    host.edit = null;  // what the person typed into the focused token field, not yet reported by the browser
+    Object.defineProperty(host, 'innerHTML', { get: () => html, set(value) {
+        if (writing) { nested.push(value); return; }
+        writing = true;
+        try {
+            const edit = host.edit;
+            host.edit = null;
+            const field = { value: edit, closest: (selector) => (selector === '[data-connection-token]' ? field : null) };
+            if (edit !== null) host.handlers.change({ target: field });
+            html = value;
+        } finally { writing = false; }
+    } });
+    step.mount(host);
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    host.handlers.input({ target: target({ '[data-connection-token]': { value: '123:wrong' } }), inputType: 'insertText' });
+    host.handlers.click({ target: target({ '[data-connection-check]': {} }) });
+    assert.match(text(cardOf(host.innerHTML)), /Checking…$/, 'a repaint of its own writes at once');
+    await settle();
+    assert.match(text(cardOf(host.innerHTML)), /Telegram did not accept this token; it is not saved\.$/);
+    // A new token typed into the still focused field; then the encoder finishes loading and repaints the step.
+    host.handlers.input({ target: target({ '[data-connection-token]': { value: TOKEN } }), inputType: 'insertText' });
+    host.edit = TOKEN;
+    loaded(globalThis.qrcodegen);
+    await settle();
+    assert.deepEqual(nested, [], 'no rewrite inside a rewrite');
+    assert.deepEqual(checks, ['123:wrong', TOKEN], 'the edit the removed field reported is checked');
+    assert.match(text(cardOf(host.innerHTML)), /Checking…$/, 'and shown, right after the rewrite that removed the field');
+    step.destroy();
+});
+
 test('the card’s declared words translate as the catalog’s do; an account’s @name stays; composed words go through fmt', async () => {
     const { host } = await cardStep(withCard(), () => ({ status: 'ok', username: 'my_ouro_bot' }));
     host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
