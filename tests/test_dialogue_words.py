@@ -226,3 +226,8 @@ def test_the_locator_says_none_where_nothing_matches_and_a_short_field_is_whole(
     assert locate(parse(["zebra"]), "no such animal") is None
     assert excerpt(parse(["zebra"]), "no such   animal") == "no such animal"
     assert excerpt(parse(["x"]), "x" * 300).startswith("x" * 240) and "[300 chars in full]" in excerpt(parse(["x"]), "x" * 300)
+
+
+def test_a_quoted_part_against_its_neighbours_never_joins_them():
+    assert match_text(parse(['one"two"three']), "one two three")
+    assert not match_text(parse(['one"two"three']), "onethree two")

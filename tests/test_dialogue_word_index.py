@@ -299,13 +299,18 @@ def test_the_maintenance_duty_works_then_rests_and_wakes_on_new_rows(tmp_path):
 def test_a_bounded_postings_read_examines_the_newest_candidates_and_advances(tmp_path, monkeypatch):
     for n in range(6):
         _say(tmp_path, f"2026-11-0{n + 1}T00:00:00Z", f"plum {n}")
+    for n in range(6):  # candidates the postings propose and one field never satisfies
+        ds.append(tmp_path, "chat", {"ts": f"2026-10-0{n + 1}T00:00:00Z", "type": "quiz_answer", "direction": "system",
+                                     "chat_id": 1, "task_id": "asker", "text": "[answer]",
+                                     "quiz": {"quiz_id": f"q{n}", "question": "alpha", "options": ["x"],
+                                              "answered_index": 0, "comment": "beta"}})
     monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 4)
-    none = _read(tmp_path, words=["zzz"])  # the scan, zero matches: the continuation still advances
-    assert "observed=0; total_unknown" in none and re.search(r"snapshot=[0-9a-f]{64}:4", none)
     dwi.run(tmp_path, lambda: False)
+    none = _read(tmp_path, words=["alpha beta"])  # zero matches: the continuation still advances
+    assert "observed=0; total_unknown" in none and re.search(r"snapshot=[0-9a-f]{64}:4", none)
     first = _read(tmp_path, words=["plum"])
     assert "observed=4; total_unknown" in first and "plum 5" in first and "plum 1" not in first
-    assert "4 of 6 candidate rows re-checked, newest by time first" in first
+    assert "4 of 6 candidate rows re-checked, newest first by time" in first
     token = re.search(r"continue beyond with offset=0, snapshot=([0-9a-f]{64}:4)", first).group(1)
     rest = _read(tmp_path, words=["plum"], snapshot=token)
     assert "plum 1" in rest and "plum 0" in rest and "plum 5" not in rest and "this is the last window" in rest

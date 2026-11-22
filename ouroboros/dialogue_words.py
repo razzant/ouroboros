@@ -85,7 +85,7 @@ def _alternative(item: str, position: int) -> Alternative:
             raise ValueError(f"words[{position}]: a quoted part holds no word: {item!r}")
         phrases.append(tuple(quoted))
     rest.append(item[last:])
-    loose = "".join(rest)
+    loose = " ".join(rest)  # a quoted part splits its neighbours: one"two"three is one, "two", three
     if any(char in _QUOTE_CHARS for char in loose):
         raise ValueError(f"words[{position}]: a quote is not closed: {item!r}")
     prefixes = tuple(tokens(loose))

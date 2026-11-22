@@ -118,7 +118,7 @@ def _history_timestamp(value: Any, *, field: str = "ts") -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _chat_history_filter(filters: Mapping[str, str], search: str):
+def chat_history_filter(filters: Mapping[str, str], search: str):
     exact_transport = {
         key: str(filters.get(key) or "").strip()
         for key in ("provider", "account_id", "conversation_id", "thread_id")
@@ -167,7 +167,7 @@ def _chat_history_filter(filters: Mapping[str, str], search: str):
     return matches
 
 
-def _normalized_chat_history_query(filters: Mapping[str, str], search: str) -> Dict[str, str]:
+def normalized_chat_history_query(filters: Mapping[str, str], search: str) -> Dict[str, str]:
     """Canonical actor-query identity for one chat-history snapshot."""
 
     normalized = {
@@ -197,7 +197,7 @@ def _chat_history_snapshot_id(
         })
     payload = {
         "schema_version": 1,
-        "query": _normalized_chat_history_query(filters, search),
+        "query": normalized_chat_history_query(filters, search),
         "generations": generations,
         # Existing consolidator gap blocks are the durable truth that an older
         # span is unknowable after its cursor is rebased.  Their small stable IDs
@@ -584,7 +584,7 @@ class Memory:
             # only A2A virtual transport is excluded. The project-task FOCUS lives
             # in the passive default context (build_recent_sections), NOT in this
             # explicit recall tool — the one mind can deliberately recall anything.
-            matches = _chat_history_filter(filters, search)
+            matches = chat_history_filter(filters, search)
             entries, coverage = self.read_chat_generations(
                 exclude_a2a=True,
                 predicate=matches,
