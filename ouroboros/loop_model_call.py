@@ -1027,6 +1027,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     from ouroboros.send_clock import MainSendClock
     from ouroboros.loop_llm_call import _prepare_main_messages
     from ouroboros.llm_attempt import single_physical_send, track_physical_attempts
+    from ouroboros.transport_custody import physical_attempt_tracker
 
     # Any vision work belongs to this actual reprepare, outside both the Main
     # fit probe and the failed attempt's physical precondition/measurement —
@@ -1041,6 +1042,8 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
             task_attempt=ctx.accumulated_usage.get("_task_attempt"),
             deadline_ts=_loop()._task_deadline_epoch(ctx.tools),
         )
+    if observe := getattr(physical_attempt_tracker(), "prepared_messages", None):
+        observe(kwargs["messages"])
     from ouroboros.llm_claudexor import cache_key_for_model
     from ouroboros.provider_models import provider_for_model
     kwargs["cache_affinity"] = "" if use_local else cache_key_for_model(model)

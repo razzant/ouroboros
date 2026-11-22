@@ -3,7 +3,7 @@ import { formatUsd } from './storage_format.js';
 import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
-    handledRefusalHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase, configuredActorCauseKey, firstAttemptClauseKey } from './task_reason_words.js';
+    handledRefusalHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase, configuredActorCauseKey, firstAttemptClauseKey, refusedSendWords } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { checkpointHasProgressRow, serviceCheckpointFacts, serviceStopCardRow, taskCheckpointIdentity, taskCheckpointLabel, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel, serviceOutputLinksHtml } from './task_checkpoints.js';
@@ -869,7 +869,7 @@ export function summarizeLogEvent(evt) {
 
     if (t === 'llm_round_error' || t === 'llm_api_error') {
         return view('error', about('LLM call failed', compactModel(evt.model)), {
-            body: shortText(evt.error, 260),
+            body: [refusedSendWords(evt), shortText(evt.error, 260)].filter(Boolean).join(' · '),  // a refused send's counts first
             meta: [evt.round ? `r${evt.round}` : ''],
         });
     }
@@ -1101,12 +1101,12 @@ function summarizeHostLogEvent(evt, t, view, about, tool) {
     // only a name visible under Errors, and it is pinned as a remainder, not a taxonomy.
     const level = String(evt.level || '').toLowerCase();
     const name = about(machineWords(t), evt.tool ? tool : compactModel(evt.model));  // its subject: the tool, else the model
-    const body = shortText(
-        evt.error || evt.message || evt.text || evt.result_preview || effortEvidenceText(evt)
-            || compactJson(evt.args || evt.task || evt.checks, 260), 260,
+    const refusal = refusedSendWords(evt);
+    const body = refusal || shortText(  // a refused send's own row says its two counts whole
+        evt.error || evt.message || evt.text || evt.result_preview || effortEvidenceText(evt) || compactJson(evt.args || evt.task || evt.checks, 260), 260,
     );
     if (evt.ok === true) return view('ok', name, { body });
-    if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') return view('error', name, { body });
+    if (refusal || evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') return view('error', name, { body });
     if (level === 'warning' || level === 'warn') return view('warn', name, { body });
     if (['extension_companion_exhausted', 'extension_companion_restart_failed', 'extension_companion_refresh_failed'].includes(t)) return view('error', name, { body });
     if (t.includes('error') || t.includes('crash') || t.includes('fail')) return view('error', name, { body });

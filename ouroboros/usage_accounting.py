@@ -326,8 +326,9 @@ class PhysicalAttemptCapture:
     submitted_processing_mode: str = ""
     processing_basis: Optional[Dict[str, Any]] = None
     effort: Optional[Dict[str, Any]] = None
-    # The submitted fit-estimator count of these bytes (measurement only): 0 unknown, or an exact local count outranks it.
-    prompt_tokens_bounded_estimate: int = 0
+    prompt_tokens_bounded_estimate: int = 0  # fit-estimator count of these bytes; 0 unknown
+    prompt_tokens_exact: Optional[int] = None  # same candidate's serving-tokenizer count; 0 is a count
+    context_window_tokens_exact: Optional[int] = None
     provider_reported_cost_only: bool = False
 
 
@@ -1388,7 +1389,7 @@ def _record_attempt_capture(
     state: str,
     *,
     candidate_manifest_ref: Optional[Dict[str, Any]] = None,
-    exc: Optional[BaseException] = None,
+    exc: Optional[BaseException] = None, response_payload: Any = None,
 ) -> PhysicalAttemptCapture:
     status, code, error_type, error = _provider_exception_facts(exc) if exc is not None else (None, "", "", "")
     capture = PhysicalAttemptCapture(
@@ -1414,8 +1415,8 @@ def _record_attempt_capture(
         submitted_processing_mode=request.submitted_processing_mode,
         processing_basis=copy.deepcopy(request.processing_basis),
         effort=copy.deepcopy(request.effort),
-        prompt_tokens_bounded_estimate=0 if request.prompt_tokens_exact is not None else max(
-            0, int(request.prompt_tokens_bounded_estimate or 0)),
+        prompt_tokens_bounded_estimate=0 if request.prompt_tokens_exact is not None else max(0, int(request.prompt_tokens_bounded_estimate or 0)),
+        prompt_tokens_exact=request.prompt_tokens_exact, context_window_tokens_exact=request.context_window_tokens_exact,
     )
     _LAST_PHYSICAL_ATTEMPT.set(capture)
     _PHYSICAL_DRIVE_ROOT.set((reservation.attempt_id, reservation.drive_root))
@@ -1426,7 +1427,7 @@ def _record_attempt_capture(
             pass
     if state == "released":
         _observe_dispatched(capture)
-    report_attempt_end(capture, exc)
+    report_attempt_end(capture, exc, response_payload)
     return capture
 
 
@@ -1526,7 +1527,7 @@ def _account_response(reservation, request, response, extractor, manifest_ref):
             terminal_state = "unresolved"
         except Exception:
             log.exception("Failed to mark post-response accounting failure unresolved")
-    _record_attempt_capture(reservation, request, terminal_state, candidate_manifest_ref=manifest_ref)
+    _record_attempt_capture(reservation, request, terminal_state, candidate_manifest_ref=manifest_ref, response_payload=payload)
     return response
 
 
@@ -1577,7 +1578,6 @@ async def execute_physical_attempt_async(
             raise
         return await postresponse_off_loop(_account_response, reservation, request, response, extractor, manifest_ref,
                                            retain_on_cancel=retain_unadopted(request, reservation))
-
 
     try:
         return await model_send_async(reservation, complete, retain_on_cancel=retain_unadopted(request, reservation),
