@@ -950,7 +950,7 @@ def _recover_unmarked(root: pathlib.Path, row: Dict[str, Any]) -> str:
         claim.ctx, tid=tid, chat_id=route.get("chat_id"), delegation_role="subagent",
         parent_id=route.get("parent_id"), root_task_id=route["root_task_id"], role=route["role"],
         result_fields={"parent_task_id": route.get("parent_id"), "root_task_id": route["root_task_id"],
-                       "delegation_role": "subagent", "role": route["role"]},
+                       "delegation_role": "subagent", "role": route["role"], **claim.event},
         detail=_DETAILS[reason], reason_code=reason, extra_fields={"admission_outcome": "never_admitted"})
     return "settled" if confirmed else "retained"
 

@@ -147,7 +147,7 @@ def test_history_admission_notices_use_the_refused_children_and_keep_the_parent_
 
 @pytest.mark.parametrize("producer", ["invalid_depth", "project_state", "preflight_unreadable", "preparation_unknown",
                                      "preparation_live", "preparation_recovered", "preparation_write_failed",
-                                     "preparation_recovered_write_failed"])
+                                     "preparation_recovered_write_failed", "preparation_unmarked_write_failed"])
 def test_every_rejection_producer_names_the_refused_childs_selection_live_and_on_replay(tmp_path, monkeypatch, producer):
     """Admission and preparation refusals retain the request even when the result cannot answer."""
     from ouroboros.gateway.history import make_chat_history_endpoint
@@ -184,7 +184,7 @@ def test_every_rejection_producer_names_the_refused_childs_selection_live_and_on
         raise OSError("task authority unavailable")
 
     unrecorded = producer in {"preflight_unreadable", "preparation_unknown", "preparation_write_failed",
-                              "preparation_recovered_write_failed"}
+                              "preparation_recovered_write_failed", "preparation_unmarked_write_failed"}
     if producer == "invalid_depth":
         events._handle_schedule_task({**event, "depth": "not-a-depth"}, ctx)
     elif producer == "project_state":
@@ -196,6 +196,10 @@ def test_every_rejection_producer_names_the_refused_childs_selection_live_and_on
         with monkeypatch.context() as fault:  # only admission's read fails; the replay below reads the registry
             fault.setattr(projects_registry, "project_binding_for_task", unreadable)
             events._handle_schedule_task({**event, "project_id": "proj-1"}, ctx)
+    elif producer == "preparation_unmarked_write_failed":
+        monkeypatch.setattr(task_admission, "persist_never_admitted_refusal", inaccessible)
+        monkeypatch.setattr(prep, "_request_ended", lambda *_: prep.REQUEST_ORPHANED)
+        assert prep._recover_unmarked(tmp_path, load_task_result(tmp_path, tid, strict=True)) == "retained"
     elif producer == "preflight_unreadable":
         monkeypatch.setattr(task_admission, "subagent_schedule_owned", inaccessible)
         events._handle_schedule_task(event, ctx)
@@ -228,7 +232,10 @@ def test_every_rejection_producer_names_the_refused_childs_selection_live_and_on
         effective = TaskReads.effective
         monkeypatch.setattr(TaskReads, "effective", lambda reads, task_id: (
             inaccessible() if task_id == tid else effective(reads, task_id)))
-        assert ("unreadable" in notices[0]["error"] or "scheduled_result_authority_unknown" in notices[0]["error"])
+        if producer == "preparation_unmarked_write_failed":
+            assert notices[0]["error"] == prep._DETAILS[prep.REQUEST_ORPHANED]
+        else:
+            assert ("unreadable" in notices[0]["error"] or "scheduled_result_authority_unknown" in notices[0]["error"])
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "20"})))
     replays = [row for row in json.loads(response.body)["messages"] if row.get("subagent_task_id") == tid
                and row.get("subagent_event") == "rejected"]
