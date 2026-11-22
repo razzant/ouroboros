@@ -255,7 +255,7 @@ class Player:
         self.reader.settle(self.reader.room, self.facts(self.reader.room))
         self.stand.release()
         self.rest(self.reader.room)
-        return {'read': hold['caught']['kind']}
+        return {'page': hold['caught']['kind']}  # which history read landed ('read' is the read receipt)
 
     def _quote(self, event):
         """The owner presses a reply's quote: its room lands on the row it quotes."""
