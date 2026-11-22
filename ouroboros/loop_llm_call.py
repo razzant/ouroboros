@@ -35,7 +35,7 @@ from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_r
 from ouroboros.observability import mark_last_answer, new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, infer_model_category, normalize_usage_cost as _normalize_usage_cost
 from ouroboros.send_clock import main_send_scope
-from ouroboros.task_pacing import main_loop_wire_options
+from ouroboros.task_pacing import main_loop_wire_options, task_chat_conversation_id
 from ouroboros.task_custody import canonical_owner_root
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
 from ouroboros._usage_response import (CONTENT_REFUSAL_FINISH_REASONS, INTERMEDIATE_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS,
@@ -1329,6 +1329,7 @@ def call_llm_with_retry(
             })
             kwargs = {
                 "messages": send_messages, "tools": tools, "model": model,
+                "chat_conversation_id": task_chat_conversation_id(task_id),
                 "model_role": model_role, "model_turn_state": model_turn_state,
                 "model_operation_observer": lambda fact, identity=call_identity, prior=prior: _emit_main_llm_call_state(
                     event_queue, identity, "observed", fact.get("model_activity"),

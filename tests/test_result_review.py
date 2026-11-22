@@ -100,6 +100,101 @@ def test_split_drive_mcp_blob_enters_required_result_and_changes_subject(tmp_pat
                                    and Path(row["path"]).name == "ordinary.txt" for row in files)
 
 
+@pytest.mark.parametrize("name, retained_paths", [
+    ("report-雪.txt", ()),
+    ("report-\udcff.txt", ()),
+    # Saved POSIX receipts remain readable even where that filename cannot now be created.
+    ("report-雪.txt", ("earlier-\udcff.txt", r"earlier-\udcff.txt", "earlier-雪.txt")),
+], ids=["utf8", "byte-name", "retained-byte-receipts"])
+def test_required_review_retains_exact_subject_of_named_artifact(tmp_path, monkeypatch, name, retained_paths):
+    import errno
+    import hashlib
+    import os
+
+    from ouroboros.artifacts import store_task_artifact_bytes, task_artifact_dir_path
+    from ouroboros.outcome_receipt_store import (
+        append_verification_receipt,
+        publish_verification_receipt_union,
+        read_verification_receipts,
+        verification_receipts_path,
+    )
+    from ouroboros.tools import review_result as rr
+    from ouroboros.tools.verify import _verify_and_record
+
+    if "\udcff" in name and os.name != "posix":
+        pytest.skip("POSIX byte filename")
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    data = "Findings: 雪.\n".encode("utf-8")
+    try:
+        store_task_artifact_bytes(ctx.drive_root, ctx.task_id, name, data)
+    except OSError as exc:
+        if "\udcff" in name and exc.errno in {errno.EILSEQ, errno.EINVAL}:
+            pytest.skip("fixture filesystem does not create non-UTF-8 names")
+        raise
+    source = task_artifact_dir_path(ctx.drive_root, ctx.task_id) / name
+    named = json.dumps(str(source), ensure_ascii=False).replace("\udcff", r"\udcff") if "\udcff" in name else str(source)
+    observation = _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=[str(source)])
+    assert "OBSERVED" in observation and "Host-attested receipt recorded" in observation
+    if retained_paths:
+        replica = tmp_path / "receipt-replica"
+        for path in retained_paths:
+            assert append_verification_receipt(replica, ctx.task_id, {
+                "status": "observed", "contract_kind": "artifact_observation", "paths": [path],
+                "summary": f"observed 1 artifact(s): {path}",
+            })
+        assert publish_verification_receipt_union(ctx.drive_root, ctx.task_id, replica)
+        canonical = verification_receipts_path(ctx.drive_root, ctx.task_id)
+        saved = read_verification_receipts(ctx.drive_root, ctx.task_id)
+        assert canonical.read_bytes() == "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in saved).encode(
+            "utf-8", "backslashreplace")
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    trace, shown, answer = {"tool_calls": []}, [], r"The report is ready; \udcff is literal here."
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append)
+    assert len(sends) == 3 and ": PASS." in shown[0]
+    record = review_ledger.load_record(review_ledger.ledger_root(ctx), trace["review_runs"][0]["record_id"])
+    digest = record["subject"]["diff_sha"]
+    text = rr._retained_subject_text(ctx, digest)
+    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == digest
+    assert f"## The reply\n\n{answer}\n" in text
+    assert f"- {named} (artifact;" in text and f"exact copy: {named})" in text
+    assert f"### {named} (the whole file shown)" in text and "Findings: 雪." in text
+    assert source.read_bytes() == data
+    verification = text.split("## Host-attested verification\n\n", 1)[1].strip()
+    evidence = json.loads(verification)
+    assert verification.encode("utf-8") == json.dumps(evidence, ensure_ascii=False, indent=1).encode(
+        "utf-8", "backslashreplace")
+    rows = evidence["receipts"]
+    paths = [*retained_paths, str(source)]
+    assert [row["paths"] for row in rows] == [[path] for path in paths]
+    assert all(row["status"] == "observed" and row["reconciliation_identity"] == "artifact_paths" for row in rows)
+    hashes = [row["paths_identity_sha256"] for row in rows]
+    assert hashes == [hashlib.sha256(json.dumps([path], ensure_ascii=False).encode(
+        "utf-8", "backslashreplace")).hexdigest() for path in paths]
+    assert len(set(hashes)) == len(paths)
+    assert not rr.result_review_at_delivery(ctx, answer, trace, shown.append) and len(sends) == 3
+
+
+def test_subject_paths_distinguish_literal_spelling_and_keep_authored_text(tmp_path):
+    from ouroboros.result_material import _contents_section, answer_text
+
+    readable = tmp_path / "ordinary.txt"
+    contents = r"Source spells \udcff literally; 雪."
+    readable.write_text(contents, encoding="utf-8")
+    names = ["/report-\udcff.txt", r"/report-\udcff.txt", "report-雪.txt"]
+    rows = [{"path": name, "retained": str(readable), "kind": "artifact", "size": len(contents.encode("utf-8")),
+             "sha256": "digest"} for name in names]
+    reply = r"My spelling is \udcff."
+    text = answer_text(reply=reply, produced={"files": rows, "contents_section": _contents_section(rows, 1000)},
+                       verification="none")
+    text.encode("utf-8")
+    labels = [r'"/report-\udcff.txt"', names[1], names[2]]
+    assert reply in text and text.count(contents) == 3
+    for label in labels:
+        assert f"- {label} (artifact;" in text and f"### {label} (the whole file shown)" in text
+    assert json.loads(labels[0]) == names[0] and rows[0]["path"] == names[0]
+
+
 def test_every_seat_answers_the_one_result_question_and_the_same_subject_is_reused_free(tmp_path, monkeypatch):
     ctx, _project = _foreign_project(tmp_path, monkeypatch)
     _reply(ctx, "The report is ready: report.md lists the three findings.")
@@ -1776,3 +1871,48 @@ def test_an_advisers_only_result_review_never_stands_for_the_required_floor(tmp_
         assert (collected["record_id"], collected["state"], collected["aggregate"]) == (
             heard["record_id"], "settled", "NOT_PERFORMED")
         assert sends[-1]["slot_id"] == "t2" and sends[-1]["reconcile_only"] is True
+
+
+def test_answer_text_gap_with_raw_name_byte_stays_utf8_prose():
+    """A copy failure quoting a POSIX byte name reads as UTF-8 prose; the structured gap and path stay untouched."""
+    from ouroboros.result_material import answer_text
+
+    raw = "/w/fixture-\udcff.txt"
+    item = {"path": raw, "kind": "written file", "sha256": "ab", "size": 1,
+            "retained_gap": f"its copy could not be retained (OSError: [Errno 28] {raw})"}
+    text = answer_text(reply="r", produced={"files": [item], "issues": [f"unreadable {raw}"]}, verification="v")
+    text.encode("utf-8")
+    assert "no exact copy: " in text and "\\udcff" in text
+    assert item["path"] == raw and "\udcff" in item["retained_gap"]
+
+
+def test_result_subject_states_ordinary_copy_failure_for_byte_named_material(tmp_path, monkeypatch):
+    """A controlled ordinary OSError while retaining one synthetic material reaches the real subject reader as
+    reversible UTF-8 prose; the structured gap, path and name_status keep their original bytes."""
+    import hashlib
+    import json as _json
+
+    from ouroboros import artifacts, result_material
+    from ouroboros.tools import review_result as rr
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    raw = str(tmp_path / "work" / "report-\udcff.txt")  # a POSIX byte name carried only in memory
+    item = {"path": raw, "kind": "written file", "size": 3, "sha256": hashlib.sha256(b"abc").hexdigest()}
+
+    def refuse(*_args, **_kwargs):
+        raise OSError(f"No space left on device: {raw}")
+
+    monkeypatch.setattr(artifacts, "copy_artifact_file", refuse)
+    item.update(result_material._retained_copy(ctx.drive_root, ctx.task_id, item, None))
+    gap = item["retained_gap"]
+    assert "retained" not in item and gap.startswith("its copy could not be retained (OSError: No space left on device: ")
+    assert "\udcff" in gap  # the structured field keeps the byte
+
+    produced = {"files": [item], "effects": [], "issues": [], "observed": [], "workspace": ""}
+    subject = rr.result_subject(ctx, SimpleNamespace(answer="reply"), governance_root=ctx.repo_dir, produced=produced)
+    subject.diff_text.encode("utf-8")  # hashed and retained as UTF-8
+    assert hashlib.sha256(subject.diff_text.encode("utf-8")).hexdigest() == subject.diff_sha
+    [line] = [row for row in subject.diff_text.splitlines() if "no exact copy:" in row]
+    literal = line.split("no exact copy: ", 1)[1].rsplit(")", 1)[0]
+    assert _json.loads(literal) == gap  # the prose is the gap exactly, as a JSON string
+    assert subject.name_status == (("M", raw),) and item["path"] == raw and item["retained_gap"] == gap

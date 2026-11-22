@@ -452,8 +452,8 @@ class Txn:
         with the distinct models seen (``models``, comma-joined), newest wave first, at most ``limit``.
 
         ``priced`` asks every attempt of the seat for what its bill says: released unsent; settled with a
-        recorded sum that is not a partial one (the accounting's own «priced» of a closed row,
-        ``_usage_rows.summary_delta``); or a subscription call settled without a sum (a delegated session, or a
+        final, non-partial sum (accounting can also book estimates, but these are not measurements);
+        or a subscription call settled without a sum (a delegated session, or a
         model call through the subscription engine), which spends a seat and time and no API money (owner,
         2026-11-15). An attempt still open (an abandoned settlement is one, ``_OPEN_PREDICATE``), or a paid one
         settled without a sum, leaves the seat unmeasured; what the catalog knew before the send
@@ -463,13 +463,12 @@ class Txn:
         sub-select per row, since naming ``extra`` in the grouped statement carries every row's whole ``extra``
         through its sorter (an order of magnitude slower on a ledger of months, inside the store's read hold)."""
         return [dict(record) for record in self.conn.execute(
-            "SELECT review_wave_id AS wave_id, review_slot_id AS row_id, GROUP_CONCAT(DISTINCT model) AS models, "
+            "SELECT review_wave_id AS wave_id, review_slot_id AS row_id, GROUP_CONCAT(DISTINCT CASE WHEN state IN ('dispatched', 'settled', 'unresolved') THEN model END) AS models, "
             "COALESCE(SUM(CAST(cost_usd AS REAL)), MAX(CASE WHEN state='settled' "
             "AND COALESCE(settle_reason, '')!='abandoned' THEN 0.0 END)) AS usd, "
-            "MIN(CASE WHEN state='released' THEN 1 WHEN state!='settled' THEN 0 "
-            "WHEN cost_usd IS NULL THEN COALESCE(settle_reason, '')!='abandoned' "
-            "AND (COALESCE(kind, 'attempt')='subscription_session' OR COALESCE(provider, '')='claudexor') "
-            "ELSE COALESCE((SELECT json_extract(own.extra, '$.cost_partial') FROM attempts own "
+            "MIN(CASE WHEN state='released' THEN 1 WHEN state!='settled' OR settle_reason='abandoned' THEN 0 "
+            "WHEN cost_usd IS NULL THEN (COALESCE(kind, 'attempt')='subscription_session' OR COALESCE(provider, '')='claudexor') "
+            "ELSE COALESCE(cost_final, 0)=1 AND COALESCE((SELECT json_extract(own.extra, '$.cost_partial') FROM attempts own "
             "WHERE own.attempt_id=attempts.attempt_id), 0)=0 END) AS priced, "
             "MAX(ts_last_epoch) AS last_epoch FROM attempts INDEXED BY attempts_category_time "
             "WHERE category=? AND COALESCE(review_wave_id, '') != '' AND COALESCE(review_slot_id, '') != '' "

@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
 from ouroboros.store import StoreError
+from ouroboros.utils import json_dumps_utf8
 
 # The typed kinds of the notes rows (``_host_context_kind``): plain host prose rows
 # the mind folds like any dialogue unit; the key never reaches the wire.
@@ -74,7 +75,7 @@ def project_helper_predecessor_authority(
         omitted = {key: None for key in prior if isinstance(key, str)}
     for key, value in envelope.items():
         if key not in keep and key != "omitted_fields":
-            omitted[key] = len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)) - (
+            omitted[key] = len(json_dumps_utf8(value, ensure_ascii=False, sort_keys=True, default=str)) - (
                 2 if isinstance(value, str) else 0)
     return {
         **{key: copy.deepcopy(value) for key, value in envelope.items() if key in keep},

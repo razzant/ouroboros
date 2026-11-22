@@ -300,6 +300,7 @@ tri-state facts. Provenance grants no runtime authority; cited docstrings/contra
 | Location | Fact | Evidence & re-probe | If stale |
 |---|---|---|---|
 | `ouroboros/tools/imagegen.py`; `ouroboros/gateways/image_api.py` | Image wire facts | [Dated sources](../IMAGE_GENERATION.md#direct-api-contracts); re-check each exact route | Stale positives refuse requests; negatives hide capability |
+| `ouroboros/opencode_go.py` | Go Chat URL: own User-Agent, `x-opencode-session` per conversation | [Go](https://opencode.ai/docs/console/go/#where-can-i-use-it), 2026-11-18, docs only; recheck a real tool exchange | A missing ID can refuse a send; a shared one can mix conversations |
 | `ouroboros/llm_attempt.py::supports_message_cache_control` | Cache markers OpenRouter accepts or translates (`anthropic/`, `google/gemini-`, `openai/`) | `openai/`: OpenRouter caching guide in docstring, no live probe; re-probe before widening | False positive invalidates a request; false negative loses the prompt cache |
 | `ouroboros/request_wire_recovery.py` | A compatible route refuses a cache hint | Its refusal after a repaired success, 14 days per route profile | A fixed server regains hints at expiry |
 | `ouroboros/provider_models.py::MINIMAX_FLASH_EFFORT_ALIASES`, `ANTHROPIC_THINKING_OFF_TYPES` | Direct MiniMax-M3.1-Flash: low/medium/high/xhigh/max; absent=max, none=400. Direct Sonnet 5.5: none=`between_tools`, `disabled`=400 | [MiniMax](https://platform.minimax.io/docs/api-reference/text-openai-api.md), 2026-11-01, no live send; [Anthropic](https://platform.claude.com/docs/en/build-with-claude/thinking) and a live 400, 2026-11-16; recheck before widening | Removed: none fails; stale: new tiers rewritten |
@@ -318,25 +319,20 @@ tri-state facts. Provenance grants no runtime authority; cited docstrings/contra
 
 ### Provider Independence
 
-One configured provider must be sufficient for the agent loop, commit review, scope
-policy, safety, and context/memory flows; core capability must not acquire a hidden
-OpenRouter or second-provider dependency. (SSOT; CHECKLISTS item 11(h) and ARCHITECTURE
-point here.)
+One configured provider must suffice for the loop, commit review, scope, safety and
+context/memory. No hidden OpenRouter or second provider (SSOT for ARCHITECTURE and CHECKLISTS 11(h)).
 
-Tool-schema changes are provider-contract changes: validate the full shipped registry
-against JSON Schema and the cross-provider subset, then run the bounded canaries
-through Main's transports; PR jobs stay secretless, malformed arguments and invalid
-schemas stay red, and no prose parser, provider hop or unbounded retry is added to make
-the contract green (ARCHITECTURE §8 "CI topology").
+Tool schemas are provider contracts. Validate the shipped registry against JSON Schema and its
+cross-provider subset; run bounded Main-transport canaries. PR jobs stay secretless;
+bad arguments/schemas stay red. No prose parser, provider hop or unbounded retry
+to make the contract green (ARCHITECTURE §8 "CI topology").
 
-Adding or changing a provider updates one coherent route contract: credential and
-readiness detection with exact model-id migration; Main/Light/Fallback and
-factory review-pool defaults that never overwrite explicit owner choices; canonical
-tool/reasoning/image/cache intent at `llm.py`, with wire projection and exact-route
-recovery in the small transport leaves; nullable pricing and truthful capability
-omissions; review and scope routing with sourced context-window evidence for send
-sizing; direct-provider and single-provider regression tests; and the route's real
-streamed wire recorded (redacted) into `tests/fixtures/llm_wire/` and replayed, because
+A provider change covers the route: credentials, readiness and exact model-id migration;
+Main/Light/Fallback and factory review-pool defaults preserving explicit choices;
+canonical tool/reasoning/image/cache intent in `llm.py`, wire projection and exact-route
+recovery in transport leaves; nullable pricing and honest capability gaps; review/scope
+routing and sourced context windows for sizing; direct- and single-provider regression tests.
+Record and replay the route's real, redacted stream in `tests/fixtures/llm_wire/`:
 a handmade fixture proves no dialect.
 
 Local-only installs keep their local route; an unauthored slot is proposed blank.

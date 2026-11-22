@@ -28,6 +28,7 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros import work_domain
+from ouroboros.utils import json_dumps_utf8, path_for_prose
 
 RESULT_WORDS_SOURCE = "the produced files named above by path and content hash"
 _EXCERPT_FLOOR = 1200  # characters one text file may take of the excerpt budget before the rest is divided
@@ -57,7 +58,7 @@ def _file_identity(path: pathlib.Path) -> Dict[str, Any]:
         if work_domain.kind(path) == "link" if work else path.is_symlink():
             text = os.fsencode(work_domain.readlink(path)) if work else os.readlink(os.fsencode(path))
             return {"size": len(text), "sha256": hashlib.sha256(text).hexdigest(),
-                    "link": json.dumps(os.fsdecode(text), ensure_ascii=False)}
+                    "link": json_dumps_utf8(os.fsdecode(text), ensure_ascii=False)}
         return work_domain.measure(path) if work else stream_artifact_file(path)
     except (OSError, ValueError) as exc:
         gone = isinstance(exc, FileNotFoundError) and not getattr(exc, "process_not_started", False)
@@ -140,7 +141,7 @@ def _written_paths(ctx: Any, root: Any, task_id: str, effect: Dict[str, Any]) ->
         from ouroboros.tools.edit_ops import normalize_patch_paths
 
         normalize_patch_paths(args["patch"], lambda path: named.append(path) or path)
-    named_text = ", ".join(dict.fromkeys(named)) or "paths its retained arguments do not name"
+    named_text = ", ".join(map(path_for_prose, dict.fromkeys(named))) or "paths its retained arguments do not name"
     if where in _WRITE_ROOTS:  # a record without its writer's receipt: what it resolved then is unknown now
         return [], (f"{tool} wrote {named_text} under {where}, but its call record carries no receipt of the targets "
                     "it resolved; its arguments are not resolved again now, so those bytes are not listed here")
@@ -262,16 +263,16 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
 def answer_text(*, reply: str, produced: Dict[str, Any], verification: str) -> str:
     """The answer half of a result subject (the reply, what the task produced, the verification): its digest
     is the subject's ``tree_sha``, the answer's own identity apart from what was asked."""
-    files = [f"- {item['path']} ({item['kind']}; sha256 {item['sha256']}; {item['size']} bytes; "
+    files = [f"- {path_for_prose(item['path'])} ({item['kind']}; sha256 {item['sha256']}; {item['size']} bytes; "
              + (f"symbolic link, its exact link text {item['link']})" if "link" in item else
-                f"exact copy: {item['retained']})" if item.get("retained") else
-                f"no exact copy: {item.get('retained_gap') or 'not retained'})")
+                f"exact copy: {path_for_prose(item['retained'])})" if item.get("retained") else
+                f"no exact copy: {path_for_prose(str(item.get('retained_gap') or 'not retained'))})")
              for item in produced.get("files") or []]
     effects = [f"- effect declared by {item['tool']}: {item['receipt']}"
-               + (f"\n  host notes on this call: {json.dumps(item['host_notes'], ensure_ascii=False)}"
+               + (f"\n  host notes on this call: {json_dumps_utf8(item['host_notes'], ensure_ascii=False)}"
                   if item.get("host_notes") else "")
                for item in produced.get("effects") or []]
-    gaps = [f"- not captured: {issue}" for issue in produced.get("issues") or []]
+    gaps = [f"- not captured: {path_for_prose(str(issue))}" for issue in produced.get("issues") or []]
     return "\n".join([
         "## The reply", "", reply.strip() or "(no reply text)", "",
         "## What the task produced", "",
@@ -296,9 +297,10 @@ def _contents_section(files: List[Dict[str, Any]], budget: int) -> str:
                       "Exact bytes from each file's retained copy, its first lines within this packet's budget."], []
     remaining = max(0, int(budget))
     for position, item in enumerate(candidates):
+        label = path_for_prose(item["path"])
         share = min(remaining, max(_EXCERPT_FLOOR, remaining // (len(candidates) - position)))
         if share <= 0:
-            unread.append(str(item["path"]))
+            unread.append(label)
             continue
         try:
             with open(item["retained"], "rb") as handle:
@@ -311,7 +313,7 @@ def _contents_section(files: List[Dict[str, Any]], budget: int) -> str:
         try:  # exact bytes or nothing: text that is not UTF-8 is named, never shown with bytes dropped; a character
             text = codecs.getincrementaldecoder("utf-8")().decode(head, final=whole)  # cut by the read stays unread
         except UnicodeDecodeError:
-            blocks += ["", f"### {item['path']} (not shown: not UTF-8 text; it is in its retained copy)"]
+            blocks += ["", f"### {label} (not shown: not UTF-8 text; it is in its retained copy)"]
             continue
         lines = text.splitlines(keepends=True)
         if not whole and lines and lines[-1].splitlines()[0] == lines[-1]:
@@ -328,7 +330,7 @@ def _contents_section(files: List[Dict[str, Any]], budget: int) -> str:
         omitted = ("the whole file shown" if whole and excerpt == text else
                    f"its first {len(shown)} lines shown; the rest is in its retained copy" if shown else
                    f"its first {len(excerpt)} characters shown; the rest is in its retained copy")
-        blocks += ["", f"### {item['path']} ({omitted})"] + ([fence, excerpt.rstrip("\n"), fence] if excerpt else [])
+        blocks += ["", f"### {label} ({omitted})"] + ([fence, excerpt.rstrip("\n"), fence] if excerpt else [])
     if unread:
         blocks += ["", "Not shown: this packet's excerpt budget is spent; each is in its retained copy above: "
                    + ", ".join(unread)]

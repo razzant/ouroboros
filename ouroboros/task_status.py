@@ -54,7 +54,7 @@ from ouroboros.task_results import (
     validate_task_id,
 )
 from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, load_queue_document, queue_stamp
-from ouroboros.utils import iter_jsonl_objects
+from ouroboros.utils import iter_jsonl_objects, path_for_prose
 
 log = logging.getLogger(__name__)
 
@@ -1455,8 +1455,8 @@ def _artifact_stat_marker(path: str) -> str:
 def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
     """Artifact name+path pointers for a child (IDENTIFIERS, not content dumps), each STAT'd
     as a GROUND-TRUTH fact (✓ present / ⚠ MISSING) so the parent absorbs whether a claimed
-    deliverable actually exists. LLM-first: this is a structural fact for the agent to react
-    to — it does NOT change the child's status or force a review (I, v6.39)."""
+    deliverable actually exists: a structural fact for the agent to react to, never a status change
+    or review (I, v6.39). The stat reads the registered path exactly; ``path_for_prose`` only spells it for UTF-8 text."""
     out: List[str] = []
     bundle = child.get("artifact_bundle") if isinstance(child.get("artifact_bundle"), dict) else {}
     arts = bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else (
@@ -1464,13 +1464,13 @@ def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
     )
     for art in arts or []:
         if isinstance(art, dict):
-            name = str(art.get("name") or "").strip()
-            path = str(art.get("abs_path") or art.get("path") or "").strip()
+            name = str(art.get("name") or "")
+            path = str(art.get("abs_path") or art.get("path") or "")
             if path:
-                label = f"{name} -> {path}" if name else path
-                out.append(f"{label} {_artifact_stat_marker(path)}".strip())
+                label = f"{path_for_prose(name)} -> {path_for_prose(path)}" if name else path_for_prose(path)
+                out.append(f"{label} {marker}" if (marker := _artifact_stat_marker(path)) else label)
             elif name:
-                out.append(name)
+                out.append(path_for_prose(name))
     return out[:20]
 
 

@@ -1,4 +1,4 @@
-"""Pure usage and terminal-state projections for delegated-run custody."""
+"""Usage and terminal-state projections for delegated runs and review seats."""
 
 from __future__ import annotations
 
@@ -281,51 +281,232 @@ def observe_session_usage(observer: Any, usage: Dict[str, Any]) -> None:
             observe_review_usage(observer, part)
 
 
-def observe_review_usage(observer: Any, usage: Optional[Dict[str, Any]]) -> None:
-    """Hand one row per ledger attempt to the reviewer usage observer."""
+def observe_review_usage(
+    observer: Any, usage: Optional[Dict[str, Any]], *, known: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Hand one row per physical send to the reviewer usage observer.
+
+    An earlier attempt a later reply names is its own ledger fact, so its event states only
+    what its own receipt holds, route and price alike, never the reply's: the seat's
+    already-recorded fact when ``known`` carries one (``ReviewAttemptCosts._observed``),
+    otherwise the ledger row read through the same indexed ``_review_attempt_rows`` the seat
+    projects. The read is returned, so that projection reuses it instead of repeating it and
+    keeps every id for custody and pricing. A receipt read as a hold that never left the
+    host (``_proven_unsent``) presents no send. A single ordinary exact receipt keeps the
+    zero-read path — an empty earlier set never opens the store — and an unread receipt
+    stays unpriced rather than stating an unknown this module did not observe; its route
+    is stated absent (``_receipt_route``), never borrowed.
+    """
     if observer is None:
-        return
+        return {}
     row = dict(usage or {})
     attempt_ids = [str(value) for value in (row.get("ledger_attempt_ids") or []) if value]
-    for attempt_id in attempt_ids[:-1]:
+    earlier_ids = attempt_ids[:-1]
+    recorded = known or {}
+    receipts = {**{key: recorded[key] for key in earlier_ids if recorded.get(key)},
+                **_review_attempt_rows([key for key in earlier_ids if not recorded.get(key)])}
+    for attempt_id in earlier_ids:
+        receipt = receipts.get(attempt_id)
+        if receipt is not None and _proven_unsent(receipt):
+            continue
         observer({
-            "resolved_model": row.get("resolved_model"), "provider": row.get("provider"),
-            "ledger_attempt_ids": [attempt_id],
+            **_receipt_route(receipt), "ledger_attempt_ids": [attempt_id],
+            **({} if receipt is None else _settled_receipt_price(receipt)),
         })
     if attempt_ids:
         row["ledger_attempt_ids"] = attempt_ids[-1:]
     observer(row)
+    return receipts
 
 
-def observe_failed_review_send(observer: Any, exc: BaseException) -> None:
-    """Rows for every physically dispatched attempt behind a failed reviewer send."""
+def _review_attempt_rows(attempt_ids: list[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Read only these physical ids in the current review's billing scope."""
     from ouroboros import usage_store
-    from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, _drive_root, current_usage_scope
+    from ouroboros.usage_accounting import _drive_root, current_usage_scope
+
+    if attempt_ids:
+        try:
+            scope = current_usage_scope()
+            with usage_store.read(_drive_root(getattr(scope, "drive_root", None)), allow_stale=True) as txn:
+                return {attempt_id: txn.attempt(attempt_id) for attempt_id in attempt_ids}
+        except Exception:
+            log.debug("failed to resolve review attempt states", exc_info=True)
+    return dict.fromkeys(attempt_ids)
+
+
+def _receipt_cash(row: Dict[str, Any]) -> Any:
+    """A settled receipt row's price, in either shape this module holds one.
+
+    A row read from the ledger carries the ledger's own private column; the fact
+    ``ReviewAttemptCosts.observe`` already accounted from an ordinary exact receipt
+    carries the same amount under the usage projection's own name, so no store-shaped
+    row is fabricated here just to borrow the ledger's spelling.
+    """
+    return row.get("cost_usd") if "cost_usd" in row else row.get("cost")
+
+
+def _receipt_route(receipt: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The route one attempt's own receipt names, in the usage projection's vocabulary.
+
+    A ledger row names its model ``model``; the fact ``ReviewAttemptCosts.observe`` accounted
+    keeps its reply's own ``resolved_model``. Both keys are always stated, and ``None`` is
+    this attempt's route explicitly absent (an unread receipt names none): the usage emitter
+    keeps that unknown instead of the seat's configured model, the reply's route or another
+    attempt's.
+    """
+    row = receipt or {}
+    model = row.get("model") if "model" in row else row.get("resolved_model")
+    return {"resolved_model": str(model) if model else None,
+            "provider": str(row["provider"]) if row.get("provider") else None}
+
+
+def _unsent_states() -> frozenset:
+    """The ledger's own states of a hold that never left the host (reserved, released)."""
+    from ouroboros.usage_accounting import PHYSICAL_ATTEMPT_STATES, POSITIVE_PHYSICAL_ATTEMPT_STATES
+
+    return PHYSICAL_ATTEMPT_STATES - POSITIVE_PHYSICAL_ATTEMPT_STATES
+
+
+def _proven_unsent(receipt: Dict[str, Any]) -> bool:
+    """A read receipt in one of those states: its id stays in custody, no send is presented."""
+    return receipt.get("state") in _unsent_states()
+
+
+def _settled_receipt_price(receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """One read receipt row's price, in the usage projection's own vocabulary.
+
+    Shared by a prior physical attempt's event and a failed send's event, so the two
+    lanes cannot fork: a settled row states its exact cash (a reported zero included),
+    any other read state states an explicit unknown, and an estimate keeps its mark.
+    """
+    cash = provider_cost_value(_receipt_cash(receipt)) if receipt.get("state") == "settled" else None
+    return {"cost": cash,
+            "cost_final": cash is not None and receipt.get("cost_final") is True
+            and receipt.get("cost_partial") is not True,
+            "cost_estimated": cash is not None and _review_receipt_estimated(receipt)}
+
+
+def _review_receipt_estimated(row: Dict[str, Any]) -> bool:
+    """For a priced row, keep an exact subtotal distinct from an estimate."""
+    return row.get("cost_final") is not True and not (
+        row.get("cost_partial") is True and row.get("cost_estimated") is False)
+
+
+def observe_failed_review_send(observer: Any, exc: BaseException) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Emit the failed send's physical events; share the same read with its seat's money projection."""
+    from ouroboros._usage_response import UnusableReplyError
+    from ouroboros.usage_accounting import PHYSICAL_ATTEMPT_STATES, POSITIVE_PHYSICAL_ATTEMPT_STATES
 
     capture = getattr(exc, "physical_attempt_capture", None)
-    attempt_ids = [str(value) for value in (getattr(exc, "ledger_attempt_ids", None) or []) if value]
+    attempt_ids = dict.fromkeys(str(value) for ids in (
+        getattr(exc, "ledger_attempt_ids", None),
+        exc.usage.get("ledger_attempt_ids") if isinstance(exc, UnusableReplyError) else None,
+    ) for value in ids or () if value)
     capture_id = str(getattr(capture, "attempt_id", "") or "")
-    if capture_id and capture_id not in attempt_ids:
-        attempt_ids.append(capture_id)
-    rows: Dict[str, Dict[str, Any]] = {}
-    try:
-        scope = current_usage_scope()
-        root = _drive_root(getattr(scope, "drive_root", None))
-        with usage_store.read(root) as txn:  # one PK lookup per attempt id
-            found = {attempt_id: txn.attempt(attempt_id) for attempt_id in attempt_ids}
-        rows = {attempt_id: row for attempt_id, row in found.items() if row is not None}
-    except Exception:
-        log.debug("failed to resolve review attempt states", exc_info=True)
+    if capture_id:
+        attempt_ids[capture_id] = None
+    rows = _review_attempt_rows(list(attempt_ids))
     capture_state = str(getattr(capture, "state", "") or "")
-    for attempt_id in attempt_ids:
-        row = rows.get(attempt_id, {})
+    any_read = any(row is not None for row in rows.values())
+    for attempt_id, receipt in rows.items():
+        row = receipt or {}
         state = str(row.get("state") or (capture_state if attempt_id == capture_id else ""))
         if state not in POSITIVE_PHYSICAL_ATTEMPT_STATES and not (
-            not rows and attempt_id != capture_id
+            not any_read and attempt_id != capture_id
         ):
             continue
-        observe_review_usage(observer, {
-            "resolved_model": str(row.get("model") or getattr(capture, "model", "") or ""),
-            "provider": str(row.get("provider") or getattr(capture, "provider", "") or ""),
-            "ledger_attempt_ids": [attempt_id],
-        })
+        if attempt_id == capture_id:  # share this exact route with its event and seat, never with another id
+            row = rows[attempt_id] = {**row, "state": state, **{
+                key: row.get(key) or getattr(capture, key, None) for key in ("model", "provider")}}
+        usage = {**_receipt_route(row), "ledger_attempt_ids": [attempt_id]}
+        if receipt is not None:
+            usage.update(_settled_receipt_price(receipt))
+        observe_review_usage(observer, usage)
+    # Preserve the physical fact, but never infer money from an unread row.
+    if capture_state in PHYSICAL_ATTEMPT_STATES and capture_id and rows[capture_id] is None:
+        rows[capture_id] = {"state": capture_state}
+    return rows
+
+
+class ReviewAttemptCosts:
+    """Project an API review seat's settled spend once per physical id, not once per answer."""
+
+    def __init__(self) -> None:
+        self._observed: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._unread: dict[str, None] = {}
+        self._returned_reply = False
+        self._last_failed_route: Optional[Dict[str, Any]] = None
+
+    def observe(self, usage: Optional[Dict[str, Any]], observer: Any) -> None:
+        from ouroboros.usage_accounting import last_physical_attempt_capture
+
+        self._returned_reply = True
+        self._last_failed_route = None  # a subsequent returned reply supersedes an earlier transport failure
+        reply = usage or {}
+        ids = [str(value) for value in reply.get("ledger_attempt_ids") or () if value]
+        for attempt_id in ids:
+            if attempt_id not in self._observed:
+                self._observed[attempt_id] = None
+                self._unread[attempt_id] = None
+        capture = last_physical_attempt_capture()
+        # Exact ordinary receipts already pass through settle_attempt. Read back only prices not
+        # accounted for by that receipt (internal resends, nonfinal and unreadable settlement);
+        # the accounted fact stays in this module's own row vocabulary, not the store's, and
+        # keeps the route its own reply stated for an event a later reply may ask of it.
+        if (ids and capture is not None and capture.attempt_id == ids[-1] and capture.state == "settled"
+                and reply.get("cost_final") is True and not any(reply.get(key) for key in (
+                    "cost_partial", "cost_estimated", "cost_invalid"))
+                and (cash := provider_cost_value(reply.get("cost"))) is not None):
+            self._observed[ids[-1]] = {"state": "settled", "cost": cash, "cost_final": True, **{
+                key: reply[key] for key in ("resolved_model", "provider") if reply.get(key)}}
+            self._unread.pop(ids[-1], None)
+        # The events below price the earlier attempts from what this seat already recorded
+        # or read once; the projection shares that same result instead of repeating it.
+        for attempt_id, receipt in observe_review_usage(observer, usage, known=self._observed).items():
+            self._observed[attempt_id] = receipt
+            self._unread.pop(attempt_id, None)
+
+    def failed(self, rows: Optional[Dict[str, Optional[Dict[str, Any]]]]) -> None:
+        from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES
+
+        for attempt_id, row in (rows or {}).items():
+            self._unread.pop(attempt_id, None)
+            if row is not None or not self._observed.get(attempt_id):
+                self._observed[attempt_id] = row
+            if row and row.get("state") in POSITIVE_PHYSICAL_ATTEMPT_STATES:
+                self._last_failed_route = _receipt_route(row)
+
+    def project(self, usage: Dict[str, Any], *, failed: bool = False) -> Dict[str, Any]:
+        from ouroboros._usage_money import amount, exact_money
+        from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES
+
+        if not self._observed:
+            return usage  # uninstrumented legacy replies keep their existing usage grammar
+        self._observed.update(_review_attempt_rows(list(self._unread)))
+        self._unread.clear()
+        amounts = []
+        states = set()
+        partial = estimated = False
+        for row in (receipt or {} for receipt in self._observed.values()):
+            state = row.get("state")
+            states.add(state)
+            if state == "released":
+                continue
+            cash = amount(_receipt_cash(row)) if state == "settled" else None
+            partial |= cash is None or row.get("cost_partial") is True
+            if cash is not None:
+                amounts.append(cash)
+                estimated |= _review_receipt_estimated(row)
+        with exact_money():
+            subtotal = float(sum(amounts)) if amounts else None
+        projected = dict(usage)
+        projected.pop("cost_invalid", None)  # the ledger, not the last reply's price, is the projection's source
+        projected.update(ledger_attempt_ids=list(self._observed), cost=subtotal, cost_partial=partial,
+                         cost_estimated=estimated, cost_final=subtotal is not None and not (partial or estimated))
+        # Billing IDs can include holds that never left the host. Disambiguate only
+        # those receipts; an ordinary returned reply keeps its existing projection.
+        if states & _unsent_states():
+            projected["physical_dispatch_observed"] = self._returned_reply or bool(states & POSITIVE_PHYSICAL_ATTEMPT_STATES)
+        if failed and self._last_failed_route is not None:
+            projected.update(self._last_failed_route, physical_dispatch_observed=True)
+        return projected

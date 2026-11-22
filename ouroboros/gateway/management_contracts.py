@@ -960,7 +960,7 @@ class ModelCatalogResponse(TypedDict, total=False):
 
 
 class OpenAICompatibleModelsRequest(TypedDict):
-    """``POST /api/openai-compatible/models``: list ``{baseUrl}/models`` once; nothing is saved."""
+    """``POST /api/openai-compatible/models``: read the connection's model catalog once; nothing is saved."""
 
     baseUrl: str
     apiKey: NotRequired[str]
