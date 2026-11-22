@@ -12,7 +12,7 @@ const MOVE_FRAMES = 3, WIDTH_HELD_FRAMES = 12;
 export function createChatReadingPosition({ visible, alive, ready, feed, anchors, changed, afterWrite, activity, updateButton }) {
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
-    let viewportAnchor = null, anchorTop = 0;
+    let viewportAnchor = null, width = feed.clientWidth, anchorTop = 0;
     // Where the feed itself is laid out in the page (no transform): the bar entering the flow under a phone keyboard
     // moves it, and a kept place moves the text back by as much, so the passage stays where it is on the screen.
     const feedTop = () => { let y = 0; for (let node = feed; node; node = node.offsetParent) y += node.offsetTop; return y; };
@@ -82,11 +82,9 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
         get pending() { return Boolean(intent); },
         get target() { return intent; },
         get approximate() { return approximate; },
-        // The place is what the reader left in a laid-out box: until a changed box has had its reflow, a scroll or a
-        // write there is the layout's (WebKit drops a relaid box's scroll as the phone keyboard comes or goes).
         remember(force = false) {
-            if (intent || !visible() || (!force && feedBox() !== settledBox)) return;
-            viewportAnchor = anchors.capture(); anchorTop = feedTop();
+            if (intent || !visible() || (!force && width !== feed.clientWidth)) return;
+            width = feed.clientWidth; viewportAnchor = anchors.capture(); anchorTop = feedTop();
         },
         reflow() {
             noteWidth();
@@ -159,7 +157,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             const busy = state.returning;
             generation++; scheduled = false; intent = null; dragging = '';
             const notify = approximate;
-            approximate = false; state.remember();
+            approximate = false; state.remember(true);
             if (notify) changed(); else if (busy) updateButton();
         },
         /** One navigation (↓), including its later history load: the reader's
