@@ -54,14 +54,28 @@ def git_repository(destination: Path, *, unborn: bool = False, identity: bool = 
     return clone(world(key, build), destination)
 
 
+def _subcommand(args):
+    """The git subcommand of ``args``: the first word that is no option (``-c``/``-C`` take a value)."""
+    words = iter(args)
+    for word in words:
+        if word in ("-c", "-C"):
+            next(words, None)
+        elif not word.startswith("-"):
+            return word
+    return None
+
+
 def world_git(root, *args):
     """``git`` in a world's build: the first consumer's own Git state (``GIT_*``, system and global
-    configuration) stays out of these build commands; HOME, XDG and TZ stay what tests/conftest.py gives the run.
-    The world serves the whole run, so a commit that left no branch, because something stood in for git at the
-    first build, fails in that test instead of publishing an unborn tree."""
-    out = git(root, *args, env=_git_environment())
-    if "commit" in args and not any((Path(root) / ".git" / "refs" / "heads").iterdir()):
-        raise RuntimeError("no commit was laid: something stood in for git during the build")
+    configuration) stays out of these build commands; HOME, XDG and TZ are inherited from the caller.
+    The world serves the whole run, so a ``commit`` after which HEAD names no commit, because something stood in
+    for git at the first build, fails in that test instead of publishing an unborn tree."""
+    env = _git_environment()
+    out = git(root, *args, env=env)
+    if _subcommand(args) == "commit":
+        head = git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}", env=env).strip()
+        if len(head) not in (40, 64) or head.strip(b"0123456789abcdef"):
+            raise RuntimeError("no commit was laid: something stood in for git during the build")
     return out
 
 

@@ -2,8 +2,8 @@
 
 Split out of ``tests/test_headless_cli.py`` when that module was divided by
 theme: the shared worker-pool fixture, and the one-commit repository holding
-``tracked.txt`` every sibling suite seeds from, now copied from a world of the
-run. ``_managed_worker_pool_available`` is autouse, so importing it into a
+``tracked.txt`` the suites that use this seed start from, now copied from a
+world of the run. ``_managed_worker_pool_available`` is autouse, so importing it into a
 test module re-applies it there.
 """
 from __future__ import annotations

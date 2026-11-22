@@ -282,7 +282,8 @@ def test_a_fixed_tree_world_whose_commit_did_not_land_fails_its_build_and_publis
         world_git(repo, "add", "a.txt")
         world_git(repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "seed")
 
-    git_repository(tmp_path / "warm", unborn=True)  # the unborn world a fixed tree starts from is already built
+    warm = git_repository(tmp_path / "warm", unborn=True)  # the unborn world a fixed tree starts from is already built
+    assert world_git(warm, "check-ref-format", "--branch", "commit") == b"commit\n"  # a word "commit" is no commit
     real = subprocess.run
 
     def stood_in(args, **options):  # the first consumer's own stub of git, in place before it builds the world
