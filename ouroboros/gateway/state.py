@@ -690,10 +690,10 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                                                   listed={row.get("activity_id") for row in direct_rows})
     try:
         with queue_mod._queue_lock:
-            from supervisor.dispatch_choice import lane_waits
+            from supervisor.queue_publication import note_lane_waits
 
-            # Who keeps a queued root's lane now, beside its copy for its card (never for the owners alone).
-            waits = lane_waits() if work_facts is not None and not owners_only else {}
+            # Who keeps a queued root's lane now, noted as the tick notes it (a claim between ticks moves the revision).
+            waits = note_lane_waits() if work_facts is not None and not owners_only else {}
             pending_rows = [dict(task, lane_wait=waits.get(str(task.get("id") or ""))) for task in queue_mod.PENDING]
             fence_rows = {str(key): dict(value) for key, value in queue_mod.BUDGET_ROOT_FENCES.items()
                           if isinstance(value, dict)}

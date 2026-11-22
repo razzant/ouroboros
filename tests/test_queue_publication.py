@@ -359,6 +359,64 @@ def test_a_wait_that_changes_without_a_transition_reaches_both_publications_at_t
     assert (root / "state" / "queue_snapshot.json").read_bytes() == snapshot, "and writes nothing"
 
 
+@pytest.mark.parametrize("order", ["taken_then_released", "released_then_taken"])
+def test_a_claim_between_two_ticks_never_leaves_a_card_body_built_from_waits_the_tick_did_not_see(published,
+                                                                                                 monkeypatch, order):
+    """Review round 4 (Astra B1): a launch claim taken and released (or released and taken again) between two
+    ticks, with a status card body built in between, cached under the current queue revision. The census reads its
+    waits through the publisher's noting (``queue_publication.note_lane_waits``), so the waits that body was built
+    from are the last ones read: the next tick sees the change, and the next card body and the mind's snapshot say
+    the same holder. Reading again with unchanged waits builds nothing; a quiet tick marks and writes nothing."""
+    from ouroboros.gateway.state_publication import Publisher
+    from ouroboros.peer_roster import independent_roots
+    from supervisor import worker_assignment, workers
+    from tests._work_projection_shared import state_fields
+
+    root, _now = published
+    for name in ("PENDING", "RUNNING", "DRIVE_ROOT"):
+        monkeypatch.setattr(workers, name, getattr(queue, name))
+    monkeypatch.setattr(queue, "INITIALIZED", True, raising=False)
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda frame: None))
+    claim = {"token": "t", "wid": 0}
+    holder = {"id": "x", "type": "task", "project_id": "p", "root_task_id": "x", "title": "Add Ollama support"}
+    queue.PENDING.extend([{**holder, **({"_launch_claim": claim} if order == "released_then_taken" else {})},
+                          {"id": "q", "type": "task", "project_id": "p", "root_task_id": "q", "title": "CI",
+                           "metadata": {}}])
+    queue_publication.publish_queue_changes()
+    publisher = Publisher(str(root))
+
+    def card():
+        body = json.loads(publisher.refresh(lambda direct: {"fields": state_fields(root, {}, direct_turns=[]),
+                                                            "task_bindings": {}}).body)
+        return [reason.get("behind", {}).get("task_id") for work in body["works"] if work["work_id"] == "q"
+                for reason in work["because"]]
+
+    def mind():
+        return [row.get("lane_wait") for row in independent_roots(root)["roots"] if row["task_id"] == "q"]
+
+    def flip():
+        if queue.PENDING[0].get("_launch_claim"):
+            worker_assignment._release_launch(queue, queue.PENDING[0], SimpleNamespace(busy_task_id="x",
+                                                                                         reaping=False), "t")
+        else:
+            with queue._queue_lock:
+                queue.PENDING[0]["_launch_claim"] = dict(claim)
+
+    flip()  # between the ticks: the claim taken (or released) ...
+    assert card() == (["x"] if order == "taken_then_released" else [None]), "a card body built in between"
+    flip()  # ... and released (or taken again) before the next tick
+    queue_publication.publish_queue_changes()
+    expected = [None] if order == "taken_then_released" else ["x"]
+    assert card() == expected and [(wait or {}).get("task_id") for wait in mind()] == expected
+    revision, built = queue_publication.queue_revision(), publisher.productions
+    assert card() == expected and (queue_publication.queue_revision(), publisher.productions) == (revision, built), (
+        "reading again with unchanged waits moves nothing")
+    snapshot = (root / "state" / "queue_snapshot.json").read_bytes()
+    queue_publication.publish_queue_changes()
+    assert queue_publication.queue_revision() == revision, "a quiet tick marks nothing"
+    assert (root / "state" / "queue_snapshot.json").read_bytes() == snapshot, "and writes nothing"
+
+
 def test_the_ticks_wait_mark_keeps_a_pending_reason_and_a_barrier_records_the_waits_it_captured(published,
                                                                                                 monkeypatch):
     """Round 4: the tick's wait mark never replaces the reason of a transition still unpublished (an export

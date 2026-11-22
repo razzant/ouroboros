@@ -282,7 +282,7 @@ def publish_queue_changes() -> Optional[bool]:
     with _queue()._queue_lock:
         if _kept_by_memo():
             return None  # the saved queue is still kept: decided once, not copied or counted again
-        waits = _note_waits()
+        waits = note_lane_waits()
         # One pool reading for capture and refresh. Worker-reported facts can move without a revision.
         pool, measured_after = _pool_counts(), _STATE["capture_seq"]
         census = _census(pool)
@@ -306,11 +306,12 @@ def publish_queue_changes() -> Optional[bool]:
     return failed == answered and _STATE["failed_streak"] < LOOP_CRASH_LIMIT
 
 
-def _note_waits() -> Dict[str, Dict[str, Any]]:
-    """Under Q: who keeps each queued row's lane now (``dispatch_choice.lane_waits``). Its holders change without a
-    queue transition (a claim, a moved row's folder read, the chooser's own refresh), so when the waits differ from
-    the ones last captured or compared the revision moves and both publications follow; a pending transition keeps
-    its reason (a forced or export capture stays one), ``lane_wait`` names it only when nothing else is pending."""
+def note_lane_waits() -> Dict[str, Dict[str, Any]]:
+    """Under Q: who keeps each queued row's lane now (``dispatch_choice.lane_waits``), for the tick and the status
+    census alike. Its holders change without a queue transition (a claim, a moved row's folder read, the chooser's
+    own refresh), so when the waits differ from the ones last captured or read the revision moves and both
+    publications follow; a pending transition keeps its reason (a forced or export capture stays one),
+    ``lane_wait`` names it only when nothing else is pending."""
     from supervisor.dispatch_choice import lane_waits
 
     waits = lane_waits()
