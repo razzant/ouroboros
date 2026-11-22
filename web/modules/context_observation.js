@@ -20,6 +20,10 @@ const at = (fact) => {
     return (Date.parse(stamp) || 0) + Number(fraction.slice(3, 6).padEnd(3, '0')) / 1000;
 };
 const identity = (fact) => `${fact.work}:${fact.task_attempt}:${fact.attempt_id}`;
+// A work the window took from the owner's Max runs in Low, temporarily, for the window, and is named Low; the owner's
+// choice stays Max beside it (`preferred_at_send`, owner 21.11.2026). Rows of 17-22 Nov 2026 named that state Max with
+// chapter maps (`applied` max, `books` maps; a room's own work reads whole books in Max otherwise): they read as Low.
+export const asSent = (fact) => (fact?.applied === 'max' && fact.books === 'maps' ? { ...fact, applied: 'low' } : fact);
 const newest = (facts) => facts.filter(Boolean).reduce((a, b) => (!a || at(b) > at(a) ? b : a), null);
 const sourceIdentity = (fact) => fact?._source_identity || identity(fact);
 const previousIdentity = (fact) => identity({ ...fact.previous, work: fact.work });
@@ -40,7 +44,10 @@ export function roomContextFacts(rows, chatId) {
         && CONTEXT_MODES.includes(row.context_attempt?.applied)
         && ['dispatched', 'settled', 'unresolved', 'released'].includes(row.context_attempt?.ledger_state)
         && (row.task_attempt == null || row.context_attempt.task_attempt === row.task_attempt))
-        .map((row) => ({ ...row.context_attempt, work: String(row.activity_id || '') }));
+        .map((row) => {
+            const fact = asSent(row.context_attempt);
+            return { ...fact, ...(fact.previous ? { previous: asSent(fact.previous) } : {}), work: String(row.activity_id || '') };
+        });
 }
 
 function revisedRelease(old, fact, releasedIds, withoutPrevious) {
@@ -126,13 +133,15 @@ const listed = (modes) => (modes.length > 1
     ? fmt('{first} and {second}', { first: modes.slice(0, -1).map(said).join(', '), second: said(modes.at(-1)) }) : said(modes[0]));
 
 // Why the request ran below the mode its work held at send (`cause`), else that the owner's choice changed since. The
-// task card's start row says its recorded reason in these same words (`task_checkpoints.js`).
+// task card's start row says its recorded reason in these same words (`task_checkpoints.js`). A start the window took
+// from the owner's Max names the work's state (Low for now) apart from that choice, by its cause.
 export function causeOf(fact, preferred) {
     const asked = said(fact.preferred_at_send);
     const ran = said(fact.applied);
     switch (asked && fact.cause) {
-    case 'memory': return fmt('The history does not fit the {mode} window.', { mode: asked });
-    case 'route': return fmt('This model’s window cannot hold {mode}.', { mode: asked });
+    case 'memory': return fmt('{mode} for now, not {chosen}: the whole books do not fit beside the history.', { mode: ran, chosen: asked });
+    case 'request': return fmt('{mode} for now, not {chosen}: even without the history, the request leaves the whole books no room.', { mode: ran, chosen: asked });
+    case 'route': return fmt('{mode} for now, not {chosen}: this model’s window cannot hold the whole books.', { mode: ran, chosen: asked });
     case 'window': return fmt('{mode} did not fit at the start.', { mode: asked });
     case 'after_start': return fmt('The work moved to {mode} after it started.', { mode: ran });
     default: break;
@@ -148,18 +157,6 @@ export function lowMissedOf(fact) {
     if (fact?.applied !== 'low' || fact?.profile !== 'owner_low' || !fact?.target_missed || !(n > 0)) return '';
     return fmt('Low’s 250K target was not met at the last start here: without memory it already needed about {n}; '
         + 'memory keeps its shortest tellings.', { n: `${Math.round(n / 1000)}K` });
-}
-
-// A start the owner holds in Max whose books went to chapter maps stays Max (`books: maps`, owner 15.11.2026, 4A):
-// why, by the start's recorded cause. The task card's start row says the same (`task_checkpoints.js`).
-export function mapsOf(cause) {
-    switch (cause) {
-    case 'memory': return fmt('Chapter maps: the history does not fit beside the whole books.', {});
-    case 'route': return fmt('Chapter maps: this model’s window cannot hold the whole books.', {});
-    case 'window': return fmt('Chapter maps: the whole books did not fit beside the rest of the start.', {});
-    case 'after_start': return fmt('The work moved to chapter maps after it started.', {});
-    default: return fmt('Chapter maps.', {});
-    }
 }
 
 // An explicitly incomplete census: what it listed is kept, but it is not the room's whole current state.
@@ -196,14 +193,10 @@ export function contextShown(observation, preferred) {
     // Agreement is today's closed capsule: its own words name it (as the overlay translated them); open, it is dated.
     const note = obs.partial ? incomplete() : '';
     if (mode === preferred) {
-        const maps = mode === 'max' && obs.latest?.books === 'maps' ? mapsOf(obs.latest.cause) : '';
-        const text = [maps, when.time, note].filter(Boolean).join(' ');
-        return { actual: mode, word, lit: [mode], differs: false,
-            label: maps ? fmt(obs.state === 'now' ? 'Context: Max now, chapter maps' : 'Context: Max last, chapter maps', {}) : '',
-            fact: text ? { word: when.word, text } : null };
+        const text = [when.time, note].filter(Boolean).join(' ');
+        return { actual: mode, word, lit: [mode], differs: false, label: '', fact: text ? { word: when.word, text } : null };
     }
-    // Max whose books went to chapter maps stays Max whatever mode is chosen now: its maps sentence, never a mode move.
-    const why = mode === 'max' && obs.latest?.books === 'maps' ? mapsOf(obs.latest.cause) : causeOf(obs.latest, preferred);
+    const why = causeOf(obs.latest, preferred);
     const sentence = [why, when.time, note].filter(Boolean).join(' ');
     return { actual: mode, word, lit: [mode], differs: true,
         label: fmt(obs.state === 'now' ? 'Context: {word} now, {chosen} chosen' : 'Context: {word} last, {chosen} chosen', { word: said(mode), chosen }),

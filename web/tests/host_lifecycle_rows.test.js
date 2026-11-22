@@ -9,7 +9,7 @@ import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { foldWaitRow, waitEpisode } from '../modules/task_checkpoints.js';
 import { buildTimelineItemHtml } from '../modules/chat_activity.js';
 import { projectResultArtifacts } from '../modules/result_files.js';
-import { causeOf, contextShown, lowMissedOf, mapsOf } from '../modules/context_observation.js';
+import { causeOf, contextShown, lowMissedOf, observeContext } from '../modules/context_observation.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 import {
@@ -108,7 +108,7 @@ test('a lowered start names its recorded reason in the Context capsule\'s own wo
     // Audit item 23(a): the reason a person reads is the recorded one, on the capsule and on the task card alike.
     const row = (extra) => ({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max', effective_mode: 'low',
         round: 1, ...extra });
-    for (const cause of ['memory', 'route', 'window']) {
+    for (const cause of ['memory', 'request', 'route', 'window']) {
         const said = causeOf({ preferred_at_send: 'max', applied: 'low', cause }, 'max');
         assert.ok(said, cause);
         assert.equal(taskCheckpointLabel(row({ cause })), `Context starts in a smaller mode. ${said}`);
@@ -131,37 +131,43 @@ test('where Low is chosen, a room whose last owner-Low start missed the target s
     assert.equal(lowMissedOf({ ...fact, profile: 'task_local_low' }), '', 'only the owner\'s Low has this target');
 });
 
-test('a Max start whose books went to chapter maps stays Max on the capsule and the task card, by its cause', () => {
-    // Owner 15.11.2026, 4A: one fact every surface reads (the owner's Max applied, books as maps, the start's cause).
-    const row = (extra) => ({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max', effective_mode: 'max',
+test('a start the window took from Max is Low for now beside the owner\'s Max, on the capsule and the task card', () => {
+    // Owner 21.11.2026: the work runs in Low, temporarily, for the window, and is named Low; the owner's choice stays
+    // Max. Rows of 17-22 Nov named the same state Max with chapter maps (effective Max, books maps): they read as Low.
+    const row = (extra) => ({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max', effective_mode: 'low',
         books: 'maps', round: 1, ...extra });
     const at = '2026-11-17T10:00:00Z';
-    for (const cause of ['memory', 'route', 'window']) {
-        const maps = mapsOf(cause);
-        assert.match(maps, /^Chapter maps: /, cause);
-        assert.equal(taskCheckpointLabel(row({ cause })), `Context starts in Max with chapter maps. ${maps}`);
-        const fact = { applied: 'max', books: 'maps', cause, preferred_at_send: 'max', observed_at: at };
-        const shown = contextShown({ state: 'now', modes: ['max'], latest: fact }, 'max');
-        assert.equal(shown.word, 'Max');
-        assert.equal(shown.differs, false, 'the owner chose Max and the start ran Max');
-        assert.ok(shown.fact.text.startsWith(maps), cause);
-        assert.equal(shown.label, 'Context: Max now, chapter maps');
+    const census = (applied, cause) => [{ chat_id: 1, activity_id: 'w', task_attempt: 1, context_attempt: {
+        attempt_id: 'a', ledger_state: 'dispatched', task_attempt: 1, applied, books: 'maps', cause,
+        preferred_at_send: 'max', observed_at: at } }];
+    for (const cause of ['memory', 'request', 'route']) {
+        const said = causeOf({ preferred_at_send: 'max', applied: 'low', cause }, 'max');
+        assert.match(said, /^Low for now, not Max: /, cause);
+        for (const effective of ['low', 'max']) {
+            assert.equal(taskCheckpointLabel(row({ cause, effective_mode: effective })), `Context starts in a smaller mode. ${said}`);
+            const observed = observeContext(null, census(effective, cause), 1);
+            assert.deepEqual(observed.modes, ['low'], effective);
+            const shown = contextShown(observed, 'max');
+            assert.equal(shown.word, 'Low');
+            assert.equal(shown.differs, true, 'the work runs in Low for now while the owner\'s choice stays Max');
+            assert.equal(shown.label, 'Context: Low now, Max chosen');
+            assert.ok(shown.fact.text.startsWith(said), cause);
+        }
     }
-    assert.equal(taskCheckpointLabel(row({ cause: 'after_start' })), 'The work moved to chapter maps after it started.');
-    // A row written before the fact keeps its own words: a lowered start is told as before.
-    const old = row({ effective_mode: 'low', books: undefined, cause: 'memory' });
+    assert.equal(taskCheckpointLabel(row({ cause: 'after_start', effective_mode: 'max' })), 'The work moved to Low after it started.');
+    // A row written before the books' form was kept tells the same start in the same words.
+    const old = row({ books: undefined, cause: 'memory' });
     assert.equal(taskCheckpointLabel(old),
         `Context starts in a smaller mode. ${causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'memory' }, 'max')}`);
-    // Low chosen meanwhile: the running work stayed Max and only its books moved, never "moved to Max".
-    const moved = contextShown({ state: 'now', modes: ['max'], latest: { applied: 'max', books: 'maps',
-        cause: 'after_start', preferred_at_send: 'max', observed_at: at } }, 'low');
-    assert.equal(moved.differs, true);
-    assert.ok(moved.fact.text.startsWith('The work moved to chapter maps after it started.'), moved.fact.text);
+    // Low chosen meanwhile: the observation agrees with the choice, and the closed capsule is today's.
+    const agreed = contextShown(observeContext(null, census('max', 'memory'), 1), 'low');
+    assert.equal(agreed.differs, false);
+    assert.equal(agreed.label, '');
     // Whole books in Max add nothing to today's closed capsule.
     const whole = contextShown({ state: 'now', modes: ['max'],
         latest: { applied: 'max', books: 'whole', preferred_at_send: 'max', observed_at: at } }, 'max');
     assert.equal(whole.label, '');
-    assert.ok(!whole.fact || !whole.fact.text.includes('Chapter maps'));
+    assert.ok(!whole.fact || !whole.fact.text.includes('for now'));
 });
 
 test('#931 typed checkpoints are task facts in the expanded card, never narration', () => {

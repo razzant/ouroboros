@@ -630,7 +630,8 @@ test('closed, Context says the mode this room\'s latest request was sent in; the
     assert.deepEqual([low.value, low.actual, low.lit, low.dot, low.label], ['Low', 'low', ['low'], ['157.78', '115.94'], 'Context: Low now, Max chosen'],
         'one word and one lit arc for the observation; Effort\'s dot on the Max arc keeps the choice');
     assert.equal(low.fact[0], 'Low now');
-    assert.match(low.fact[1], /^The history does not fit the Max window\. Request at .+\.$/, 'one short cause and the request\'s time');
+    assert.match(low.fact[1], /^Low for now, not Max: the whole books do not fit beside the history\. Request at .+\.$/,
+        'one short cause and the request\'s time: the work\'s state apart from the choice');
     assert.deepEqual(m.posts, [], 'painting the observation saves nothing');
     assert.equal(m.contextEl.dataset.contextMode, 'max', 'nor changes the saved mode');
     await m.press(m.contextHead);
@@ -646,7 +647,7 @@ test('closed, Context says the mode this room\'s latest request was sent in; the
     // A choice changes the dot, never the word: the next request will try Nano, the last one was sent in Low.
     await m.choose('nano');
     assert.deepEqual([closed(m).value, closed(m).lit, closed(m).dot], ['Low', ['low'], ['26.22', '115.94']]);
-    assert.equal(closed(m).fact[1].split(' Request at')[0], 'The history does not fit the Max window.',
+    assert.equal(closed(m).fact[1].split(' Request at')[0], 'Low for now, not Max: the whole books do not fit beside the history.',
         'the cause is about the mode its work held at send');
     m.controls.destroy();
 });
@@ -657,7 +658,7 @@ test('each recorded reason of a lower request reads as its own sentence; a lower
         m.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low', { cause, id: `work-${cause}` })] });
         return closed(m).fact[1].split(/ ?Request at /)[0];
     };
-    const said = ['memory', 'route', 'window', 'after_start'].map(reason);
+    const said = ['memory', 'request', 'route', 'window', 'after_start'].map(reason);
     assert.ok(said.every(Boolean) && new Set(said).size === said.length, said.join(' | '));
     assert.equal(reason(''), '', 'an unknown start (no recorded reason) is not given one');
     m.controls.destroy();
@@ -871,7 +872,7 @@ test('an explicitly incomplete census never claims the room\'s current mode: its
     const fresh = mountPair();
     fresh.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low')], active_chat_activities_complete: false });
     assert.deepEqual([closed(fresh).value, closed(fresh).label, closed(fresh).fact[0]], ['Low', 'Context: Low last, Max chosen', 'Low last']);
-    assert.match(closed(fresh).fact[1], /^The history does not fit the Max window\. Request at .+\. The current read is incomplete\.$/);
+    assert.match(closed(fresh).fact[1], /^Low for now, not Max: the whole books do not fit beside the history\. Request at .+\. The current read is incomplete\.$/);
     // ... and one whose incomplete read lists nothing: unknown, saying why.
     const empty = mountPair();
     empty.controls.syncState({ context_mode: 'max', active_chat_activities: [], supervisor_ready: false });
