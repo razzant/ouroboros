@@ -390,7 +390,7 @@ def test_a_malformed_snapshot_is_a_typed_400_and_an_unstable_one_a_409_with_its_
         _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", f"archive {minute}")
     first = _search(tmp_path, "archive", count=1)
     token = first["snapshot"]
-    for bad in ("nothex", token + ":x", token + ":5", token[:-1]):  # a suffix is never a snapshot
+    for bad in ("nothex", token + ":x", token + ":5", token[:-1], "   "):  # a suffix or spaces are never a snapshot
         assert _refused(tmp_path, ("words", "archive"), ("snapshot", bad)) == (400, {
             "code": "recall_bad_snapshot",
             "error": "Invalid snapshot. Use the snapshot from a search response or start again without it."})
@@ -428,16 +428,75 @@ def test_a_projects_founding_message_is_found_and_reopened_in_both_its_rooms(tmp
     assert set(reopened["row"]["rooms"]) == {"1", alpha}
 
 
-def test_an_unreadable_registry_is_one_gap_and_leaves_the_total_unknown(tmp_path, monkeypatch):
-    from ouroboros import projects_registry
+def _bound_world(root):
+    """A Project founded by an owner message whose address names only its room and checksum, and a task bound to it
+    that spoke in the hidden partition: both rows are the Project's by the room rule's sources alone."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import create_project
 
-    _say(tmp_path, "2026-11-01T10:00:00Z", "archive")
-    assert _search(tmp_path, "archive")["total"] == 1
+    project = create_project(root, "alpha", name="Alpha")
+    founding = {"ts": "2026-11-01T09:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "",
+                "text": "archive founding words"}
+    ds.append(root, "chat", founding)
+    ref = build_owner_message_ref(chat_id=1, client_message_id="", ts="", text=founding["text"])
+    (root / "state").mkdir(exist_ok=True)
+    (root / "state" / "project_task_bindings.json").write_text(json.dumps({"bindings": {
+        "bound": {"project_id": project["id"], "project_chat_id": project["chat_id"], "chat_id": project["chat_id"],
+                  "source_ref": ref, "source_text": founding["text"]}}}), encoding="utf-8")
+    _say(root, "2026-11-01T10:00:00Z", "archive bound work", chat_id=0, direction="out", task_id="bound")
+    _say(root, "2026-11-01T11:00:00Z", "archive loner reply", direction="out", task_id="loner")  # its room needs lineage
+    return project
+
+
+def _break(root, monkeypatch, source):
+    from ouroboros import project_dialogue, projects_registry
 
     def broken(*_args, **_kwargs):
-        raise OSError("registry unreadable")
+        raise OSError(f"{source} unreadable")
 
-    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", broken)
-    shaky = _search(tmp_path, "archive")
-    assert shaky["total"] is None and sum("rooms_unreadable" in gap for gap in shaky["gaps"]) == 1
+    if source == "reservations":
+        monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", broken)
+    elif source == "bindings":
+        (root / "state" / "project_task_bindings.json").write_text("{not json", encoding="utf-8")
+    elif source == "lineage":
+        monkeypatch.setattr(projects_registry, "_read_lineage", lambda *_a, **_kw: None)
+    else:
+        monkeypatch.setattr(project_dialogue, "physical_origin_refs", broken)
+
+
+@pytest.mark.parametrize("source, words", [
+    ("reservations", "archive bound"), ("bindings", "archive bound"), ("lineage", "archive loner"),
+    ("founding", "archive founding"),
+])
+def test_every_unreadable_source_of_the_room_rule_is_one_gap_and_an_undecidable_reopen(tmp_path, monkeypatch,
+                                                                                         source, words):
+    project = _bound_world(tmp_path)
+    readable = _search(tmp_path, words)
+    row, = readable["rows"]
+    assert readable["total"] == 1 and (source == "lineage") is (str(project["chat_id"]) not in row["rooms"])
+    assert _ok(tmp_path, *_run(row["reopen"]))["row"]["address"] == row["address"]
+    _break(tmp_path, monkeypatch, source)
+    shaky = _search(tmp_path, words)
+    assert shaky["total"] is None and sum("rooms_unreadable" in gap for gap in shaky["gaps"]) == 1, shaky
     assert not any("rooms_unreadable" in note for note in shaky["notes"])
+    status, body = _refused(tmp_path, *_run(row["reopen"]))
+    assert (status, body["code"]) == (503, "recall_source_unreadable")
+
+
+def test_the_door_tells_an_import_still_running_from_an_observed_edit(tmp_path, monkeypatch):
+    for minute in range(3):
+        _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", f"archive {minute}")
+    token = _search(tmp_path, "archive", count=1)["snapshot"]
+    assert recall.IMPORT_INCOMPLETE == ("History import is incomplete. Start again without snapshot or offset after "
+                                        "it completes.")
+    real = ds.range_coverage
+    monkeypatch.setattr(ds, "range_coverage", lambda *a, **kw: {**real(*a, **kw), "imported": False, "pending": 1})
+    importing = _search(tmp_path, "archive", count=1)
+    assert importing["snapshot"] is None and importing["notes"] == [recall.IMPORT_INCOMPLETE]
+    assert _refused(tmp_path, ("words", "archive"), ("snapshot", token), ("offset", "1")) == (409, {
+        "code": "recall_snapshot_changed", "error": recall.IMPORT_INCOMPLETE})
+    monkeypatch.setattr(ds, "range_coverage", real)
+    revisions = iter([1, 2])
+    monkeypatch.setattr(dialogue_recall, "_text_revision", lambda _root: next(revisions, 2))
+    edited = _search(tmp_path, "archive", count=1)
+    assert edited["snapshot"] is None and edited["notes"] == [recall.UNSTABLE_READ]
