@@ -8,10 +8,12 @@ a new page changes B and never A' or D. Anthropic keeps the message seal and giv
 slot to C before schemas. Codex and direct OpenAI keep all stable items and C as one notice (their cache is
 read only inside the leading system group, by prefix: measured 2026-10-03); the view fact of
 the first send reaches the cap info, the task context, one event and the trace.
-Between two works on one memory, mode, authority, catalogue and route, a clock, a restart, the queue, money, review
-records, route health, registration order, the actor's drive or the assignment's size moves neither the schemas (on
-the Claudexor wire and sorted), A', D nor B; each leak still open is a strict xfail on its own tracker item, and a new
-page moves only the story after B's shared head.
+Between two works on one memory, mode, authority, catalogue and route (another work being the control), a clock, a
+restart, the queue, money, review records, route health, registration order, the actor's drive, the assignment's size
+(whole, and on a pressed fixture that frames the second start), the calendar between two framed starts, or a failed MCP
+listing moves neither the schemas (on the Claudexor wire and sorted), A', D nor any section of B, each fact checked to
+have reached the request; a leak still open is a strict xfail on its own tracker item that holds only while exactly its
+named labels move. A new page keeps B's declared head and moves only the story after it.
 Fixture: ``tests._memory_inventory_shared`` (three rooms besides Main, legacy memory).
 """
 from __future__ import annotations
