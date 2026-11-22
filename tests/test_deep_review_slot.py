@@ -364,8 +364,11 @@ def test_retrieving_failure_is_typed_and_recorded_never_a_report(review_repo, re
     monkeypatch.setattr(review_execution, "_review_route_executor", _Refusing)
     monkeypatch.setattr(deep_self_review, "_session_route_reason", lambda row: "")
     text, usage = run_deep_self_review(review_repo, review_drive, object(), lambda _m: None, slot=_session_row())
-    assert text.startswith("❌ Deep self-review failed: ReviewRouteUnavailable: delegated review route unavailable")
+    assert text.startswith("Deep self-review failed: ReviewRouteUnavailable: delegated review route unavailable")
     assert usage["execution_status"] == "infra_failed" and usage["reason_code"] == "deep_self_review_error"
+    # The host ends it: its row is a System notice whose details keep the executor's refusal (DESIGN principle 7).
+    assert usage["terminal_origin"] == "host_notice"
+    assert "delegated review route unavailable" in usage["host_notice_row"]["notice"]["details"]
     # The typed failure usage carries the memory fact and the executor's failure
     # custody — the same usage the «Выполняется как» error row was recorded from.
     assert usage["deep_review_memory"]["total"] == 6 and usage["delegated_run_started"] is False
@@ -403,7 +406,7 @@ def test_memory_fact_precedes_every_runs_as_record_and_rides_the_returned_usage(
     for executor_cls, status, prefix in (
         (_FakeSessionExecutor, "responded", "<!-- deep-review provenance"),
         (_Empty, "error", "⚠️ Model returned an empty response"),
-        (_Boom, "error", "❌ Deep self-review failed: RuntimeError: socket reset"),
+        (_Boom, "error", "Deep self-review failed: RuntimeError: socket reset"),
     ):
         recorded.clear()
         monkeypatch.setattr(review_execution, "_review_route_executor", executor_cls)
@@ -470,12 +473,14 @@ def test_unavailable_row_never_runs_and_returns_typed_usage(review_repo, review_
         monkeypatch.delenv(key, raising=False)
     llm = mock.Mock()
     text, usage = run_deep_self_review(review_repo, review_drive, llm, lambda _m: None, slot=_row())
-    assert text.startswith("❌ Deep self-review unavailable: no OpenRouter or direct OpenAI credentials for openai/fake-deep")
-    assert usage == {"execution_status": "infra_failed", "reason_code": "deep_self_review_unavailable"}
+    assert text.startswith("Deep self-review is unavailable: no OpenRouter or direct OpenAI credentials for openai/fake-deep")
+    assert (usage["execution_status"], usage["reason_code"]) == ("infra_failed", "deep_self_review_unavailable")
+    assert usage["terminal_origin"] == "host_notice" and usage["host_notice_row"]["notice"]["step"] == "choose_reviewer"
+    assert "no OpenRouter or direct OpenAI credentials" in usage["host_notice_row"]["notice"]["details"]
     assert not llm.chat.called
     env.setenv("OUROBOROS_MODEL", "openai/main-model")
     text, usage = run_deep_self_review(review_repo, review_drive, llm, lambda _m: None)
-    assert text.startswith("❌ Deep self-review unavailable: no OpenRouter or direct OpenAI credentials for openai/main-model")
+    assert text.startswith("Deep self-review is unavailable: no OpenRouter or direct OpenAI credentials for openai/main-model")
     assert usage["reason_code"] == "deep_self_review_unavailable" and not llm.chat.called
 
 
@@ -830,8 +835,8 @@ def test_budget_exhaustion_propagates_out_of_the_review(review_repo, review_driv
 
     monkeypatch.setattr(review_execution, "_review_route_executor", _Boom)
     text, usage = run_deep_self_review(review_repo, review_drive, object(), lambda _m: None, slot=_session_row())
-    assert text.startswith("❌ Deep self-review failed: RuntimeError: socket reset")
-    assert usage["reason_code"] == "deep_self_review_error"
+    assert text.startswith("Deep self-review failed: RuntimeError: socket reset")
+    assert usage["reason_code"] == "deep_self_review_error" and usage["terminal_origin"] == "host_notice"
 
 
 def test_slot_override_with_an_empty_target_or_unknown_kind_is_refused_typed(review_repo, review_drive, monkeypatch):
@@ -847,8 +852,8 @@ def test_slot_override_with_an_empty_target_or_unknown_kind_is_refused_typed(rev
         reason, identity = deep_review_route(row)
         assert fragment in reason and identity is None, (row, reason)
         text, usage = run_deep_self_review(review_repo, review_drive, llm, lambda _m: None, slot=row)
-        assert text.startswith("❌ Deep self-review unavailable: ") and fragment in text
-        assert usage["reason_code"] == "deep_self_review_unavailable"
+        assert text.startswith("Deep self-review is unavailable: ") and fragment in text
+        assert usage["reason_code"] == "deep_self_review_unavailable" and fragment in usage["host_notice_row"]["notice"]["details"]
     assert not llm.chat.called
 
 

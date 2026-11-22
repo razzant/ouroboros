@@ -622,8 +622,8 @@ def _skill_tool_preflight(
 def _handle_list_skills(ctx: ToolContext, *, name: str = "", offset: int = 0,
                         snapshot: str = "") -> str:
     try:
-        payload = list_skills_payload(summarize_skills(canonical_data_root(ctx)),
-                                      name=name, offset=offset, snapshot=snapshot)
+        root = canonical_data_root(ctx)
+        payload = list_skills_payload(summarize_skills(root), name=name, offset=offset, snapshot=snapshot, drive_root=root)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (list_skills): {exc}"
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

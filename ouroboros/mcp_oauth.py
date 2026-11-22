@@ -168,8 +168,9 @@ def _required(cfg: Any, doc: Dict[str, Any], reason: str, detail: str = "", **fa
 
 
 def status(cfg: Any) -> Optional[Dict[str, Any]]:
-    """``{state, reason?, required_scope?, since, issuer, pending?}`` once the server asked for sign-in;
-    else ``None``. A grant that needs a wider scope stays signed in with reason ``insufficient_scope``."""
+    """``{state, reason?, required_scope?, required_scope_since?, since, issuer, pending?}`` once the server asked
+    for sign-in; else ``None``. A grant that needs a wider scope stays signed in with reason ``insufficient_scope``
+    and the start of that gap (``None`` when a file written before kept none)."""
     if not applies(cfg):
         return None
     doc = _load(cfg)
@@ -182,7 +183,8 @@ def status(cfg: Any) -> Optional[Dict[str, Any]]:
     if not signed_in:
         out["reason"] = record.get("reason") or "not_signed_in"
     elif doc.get("required_scope"):
-        out.update(reason="insufficient_scope", required_scope=doc["required_scope"])
+        out.update(reason="insufficient_scope", required_scope=doc["required_scope"],
+                   required_scope_since=doc.get("required_scope_since"))
     if doc.get("pending"):
         out["pending"] = True
     return out
@@ -393,7 +395,8 @@ class StoredBearer(httpx.Auth):
             async with _locked(self.cfg):
                 doc = _load(self.cfg)
                 wanted = _union((doc.get("tokens") or {}).get("scope"), doc.get("required_scope"), challenge.get("scope"))
-                _save(self.cfg, {**doc, "challenge": challenge, "required_scope": wanted})
+                since = doc.get("required_scope_since") if doc.get("required_scope") else utc_now_iso()  # an open gap keeps it
+                _save(self.cfg, {**doc, "challenge": challenge, "required_scope": wanted, "required_scope_since": since})
             raise await self._refused(MCPAuthRequired(self.cfg.id, "insufficient_scope", challenge.get("scope") or ""))
 
 
@@ -596,7 +599,7 @@ async def complete(cfg: Any, *, state: str, code: str = "", iss: Optional[str] =
         doc = _load(cfg)
         if (doc.get("pending") or {}).get("nonce") != pending.get("nonce"):
             raise MCPAuthRequired(cfg.id, "sign_in_superseded", "a newer sign-in started meanwhile")
-        for key in ("pending", "challenge", "required_scope"):
+        for key in ("pending", "challenge", "required_scope", "required_scope_since"):
             doc.pop(key, None)
         doc.update(issuer=issuer, resource=pending.get("resource"), metadata=metadata, client=client,
                    tokens=_tokens(token, None, pending.get("scope")),

@@ -12,7 +12,7 @@ import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
 import { checkFailureView, redCheckPhrase, toolStepDiagnostic } from './verification_presentation.js';
-import { hostRowDisplayText, hostTaskMessage, toolErrorDisplayText } from './host_notice_text.js';
+import { hostRowDisplayText, hostTaskMessage, noticeBody, noticeLine, toolErrorDisplayText } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
 import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
@@ -1240,7 +1240,7 @@ export function summarizeChatLiveEvent(evt) {
 function summarizeChatLiveEventView(evt) {
     const t = evt.type || evt.event || 'unknown';
     const groupId = getLogTaskGroupId(evt);
-    const progressText = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240, { markdown: true });
+    const progressText = describeText(String(noticeLine(evt) || evt.content || evt.text || '').replace(/^💬\s*/, ''), 240, { markdown: true });
     const key = (...parts) => [t, groupId, ...parts].join(':');
 
     if (t === 'history_retention') return chatView({ visible: false, dedupeKey: key(evt.status || '') });
@@ -1265,15 +1265,15 @@ function summarizeChatLiveEventView(evt) {
         const label = lifecycle.phase || status || 'working';
         const target = lifecycle.target ? `\`${lifecycle.target}\`` : 'skill';
         const headline = progressText.preview || `Skill ${lifecycle.kind || 'operation'}: ${target} — ${label}`;
-        const body = stale
+        const details = noticeBody(evt).fullBody || '', body = stale  // a notice's raw facts open from the row, not its line
             ? (lifecycle.recovery_hint || 'Lifecycle work is still running; restart may be required.')
-            : (lifecycle.error || lifecycle.message || '');
+            : details ? '' : (lifecycle.error || lifecycle.message || '');
         return chatView({
             phase,
             headline,
             body: shortText(body, 220),
             fullHeadline: progressText.full || headline,
-            fullBody: body,
+            fullBody: [body, details].filter(Boolean).join('\n\n'),
             activityPreview: progressText.preview || shortText(headline, 240),
             visible: true,
             promote: true,
@@ -1346,7 +1346,7 @@ function summarizeChatLiveEventView(evt) {
             phase,
             headline: subagentHeadline(sid, role, label, evt.model),
             body: terminalCause || activity.preview || '',
-            fullBody: [fullOutput, detail].filter(Boolean).join('\n\n'),
+            fullBody: [fullOutput, detail, noticeBody(evt).fullBody].filter(Boolean).join('\n\n'),  // a notice's details too
             activityPreview: terminalCause || activity.preview || '',
             activityLead: !terminalCause && activity === resultText ? report : '',
             visible: true,
@@ -1365,15 +1365,16 @@ function summarizeChatLiveEventView(evt) {
     }
 
     if (evt.is_progress || t === 'send_message') {
-        const lifecycleTerminal = String(evt.task_id || '').startsWith('skill_lifecycle_')
-            && /\s—\s(completed|failed)\b/i.test(progressText.full);
+        // A row with its typed `lifecycle` fact was read above; an older skill lifecycle row ends at the word after its dash.
+        const ended = String(evt.task_id || '').startsWith('skill_lifecycle_')
+            ? (/\s—\s(completed|failed)\b/i.exec(progressText.full)?.[1] || '').toLowerCase() : '';
         // Voice, not wording (P5): the worker stamps `narration` on every note; a
         // host note is a typed fact, never a text match. Both stay visible rows; only
         // narration is promoted (title, collapsed line). ABSENT = predates the fact.
         const narration = evt.narration === true || evt.narration === undefined;
         const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
-        return chatView({
-            phase: lifecycleTerminal ? (/failed\b/i.test(progressText.full) ? 'lifecycle_error' : 'done') : 'working',
+        return Object.assign(chatView({  // a notice's raw details open from its line as plain text, never its toast; new details, new row
+            phase: ended === 'failed' ? 'lifecycle_error' : ended ? 'done' : 'working',
             // An empty note is no narration: a placeholder would become the card title as if said (#1369).
             headline: note.preview || '',
             fullHeadline: note.full || '',
@@ -1385,8 +1386,8 @@ function summarizeChatLiveEventView(evt) {
             // too whenever the frame disclosed a delegated executor.
             chip: executorChip(evt),
             model: evt.model,
-            dedupeKey: progressText.full ? `progress:${progressText.full}` : `progress:${evt.task_id || ''}`,
-        });
+            dedupeKey: progressText.full ? [`progress:${progressText.full}`, noticeBody(evt).fullBody].filter(Boolean).join('\n') : `progress:${evt.task_id || ''}`,
+        }), noticeBody(evt));
     }
 
     if (t === 'llm_usage') {

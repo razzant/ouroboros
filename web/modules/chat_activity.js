@@ -15,7 +15,7 @@ import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
 import { ownerMessageBubble } from './chat_history_replay.js';
 import { placeIngressNote } from './chat_attachments.js';
-import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
+import { hostRowDisplayText, hostSentenceText, noticeBody } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
 import {
     projectMarkdownLines, MARKDOWN_FENCED_CODE, accountedUpperBound,
@@ -105,7 +105,7 @@ export function cardRowSummary(msg, phase, rawTs = '') {
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
         cardRowRevision: msg.card_row_revision, evidenceRef: cardRowEvidenceRef(msg),
-        cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null,
+        cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null, ...noticeBody(msg),
     };
 }
 
@@ -1382,7 +1382,7 @@ export function costMetaKeys(src) {
 const CARD_META_KEYS = [
     ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
     'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'continue_requester', 'cancel_origin',
-    'delegated_activity', 'outcome_axes', 'delegated_runs_unreconciled', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning', 'place_origin',
+    'delegated_activity', 'outcome_axes', 'delegated_runs_unreconciled', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning', 'place_origin', 'notice',
 ];
 export function cardMetaKeys(src) {
     return Object.fromEntries(CARD_META_KEYS.map((key) => [key, src?.[key]]));

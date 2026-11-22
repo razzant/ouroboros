@@ -157,7 +157,7 @@ def test_readme_install_page_and_deployment_guide_name_the_factory_values():
                  "task and its helpers; charges already in flight can pass a limit. Background consciousness starts with "
                  "the setup wizard's switch, which is on unless you turn it off (without the wizard it stays off until "
                  f"you start it), and then has ${daily} for each 24 hours. Settings changes all three.")
-    guided = "The first-run wizard guides accounts and models, access, background consciousness, and budget setup."
+    guided = "The first-run wizard guides accounts and models, access, background consciousness, the skills to start with, and budget setup."
     for path in (REPO / "README.md", SITE / "install" / "index.html", DOCS / "install" / "index.html"):
         assert paragraph in path.read_text(encoding="utf-8"), path.relative_to(REPO)
         assert guided in path.read_text(encoding="utf-8"), path.relative_to(REPO)  # the wizard's steps, its Consciousness one

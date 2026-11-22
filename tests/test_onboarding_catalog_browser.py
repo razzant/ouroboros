@@ -207,6 +207,10 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         expect(page.locator('[data-consciousness-choice]')).to_have_count(2)
         expect(page.locator('#next-btn')).to_be_in_viewport()
         page.click("#next-btn")
+    if "skills" in step_order(page):  # then Skills, while this root's starter list never ran
+        expect(page.locator('[data-starter-skills="step"]')).to_have_count(1)
+        expect(page.locator('#next-btn')).to_be_in_viewport()
+        page.click("#next-btn")
     budget = page.locator('[data-collapse="api-budget"]')
     if not budget.evaluate("el => el.open"):
         budget.locator("summary").click()

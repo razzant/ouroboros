@@ -536,7 +536,7 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
         rows = [row for row in (receipts.get(basis) or []) if isinstance(row, dict)]
         if rows:
             row = max(rows, key=lambda item: str(item.get("registered_at") or ""))
-            return {"basis": basis, "text": str(row.get("text") or ""), "delivery_id": str(row.get("delivery_id") or ""),
+            return {"basis": basis, "text": str(row.get("terminal_record") or row.get("text") or ""), "delivery_id": str(row.get("delivery_id") or ""),
                     "terminal_origin": str(row.get("terminal_origin") or ""), **carried(row),
                     **({"preserved_path": str(row["preserved_path"])} if row.get("preserved_path") else {})}
     delivered = [row for row in (receipts.get("delivered") or []) if isinstance(row, dict)]
@@ -548,7 +548,7 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
 
             record = json.loads(read_actor_source_bytes(root, task_id, receipt.get("source_ref")).decode("utf-8"))
             if isinstance(record, dict):
-                text, origin = str(record.get("text") or ""), str(record.get("terminal_origin") or "")
+                text, origin = str(record.get("terminal_record") or record.get("text") or ""), str(record.get("terminal_origin") or "")
         except Exception:
             log.debug("Retained terminal answer of %s could not be re-read", task_id, exc_info=True)
         return {"basis": "delivered", "text": text, "delivery_id": str(receipt.get("delivery_id") or ""),

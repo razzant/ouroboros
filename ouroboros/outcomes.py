@@ -956,7 +956,7 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
     return public
 
 
-# INFRA-failure host-fallback text prefixes: (prefix, failure kind, default reason_code).
+# INFRA-failure host-fallback text prefixes (prefix, failure kind, default reason_code), read only for untyped text.
 _INFRA_TEXT_PREFIXES = (
     ("⚠️ Failed to get a response", "provider", REASON_PROVIDER_FAILURE),
     ("⚠️ All models are down", "provider", REASON_PROVIDER_FAILURE),
@@ -1083,6 +1083,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # this one function contradict each other.
         failure = {"kind": "runtime" if reason_code in {
             REASON_TASK_EXCEPTION, "context_overflow", "context_capacity", "required_reference_unavailable",
+            REASON_DEEP_SELF_REVIEW_UNAVAILABLE, REASON_DEEP_SELF_REVIEW_ERROR,
         } else "provider", "reason_code": reason_code}
         # Forecasts use context_overflow; actual/legacy provider failures keep llm_api_error.
         # A waited-out outage or unknown outcome keeps its own terminal cause.
@@ -1122,9 +1123,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         execution_status = EXECUTION_FAILED
         reason_code = REASON_EMPTY_FINAL_TEXT
         failure = {"kind": "agent", "reason_code": reason_code}
-    elif (_infra := next(
+    elif not usage_status and usage.get("terminal_origin") != "model_final" and (_infra := next(
         (row for row in _INFRA_TEXT_PREFIXES if text.lstrip().startswith(row[0])), None,
-    )) is not None:
+    )) is not None:  # a producer that typed its status, or the model's own final answer, is never read from its words
         execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or _infra[2]
         failure = {"kind": _infra[1], "reason_code": reason_code}

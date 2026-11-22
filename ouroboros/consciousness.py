@@ -11,7 +11,10 @@ the owner's work in Main or any room and beside the focuses, which never hold it
 Tick order, each step a typed outcome: disabled → its own live wake → not yet due → the
 rolling-24h allowance (an unreadable ledger is the disclosed skip
 ``allowance_unknown``, never a silent block; known spend at the daily limit is
-``allowance_exhausted``) → an owner chat must be bound → launch. A skip keeps the window it met
+``allowance_exhausted``) → where it speaks, read once and passed to the launch: the bound owner
+chat, or Main while that slot is KNOWN empty (the person's first message binds it, the wake binds
+nothing); a binding that cannot be read is the disclosed skip ``owner_chat_unknown``, never a
+guessed chat or chat 0 → launch. A skip keeps the window it met
 (``allowance_fact``, the projection a wake's preparation carries) in its event and in the one
 overwritten ``consciousness_last_skip`` state key, which the mind's status read shows. An exhausted
 allowance waits for its window to free, a time chosen under the limit it met: a changed daily limit
@@ -72,6 +75,7 @@ from ouroboros.consciousness_allowance import STATUS_EXHAUSTED, STATUS_UNKNOWN, 
 from ouroboros.consciousness_authority import is_consciousness_origin, is_own_clock_wake
 from ouroboros.consciousness_clock import OWNER_ZONE_STATE_KEY, WAKE_TARGET_STATE_KEY, consumed_by, target_ts
 from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_continuity, wake_continuity_after, wake_task_metadata
+from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -221,6 +225,30 @@ def _persist_stop(source: str) -> str:
             return _BACKUP_UNSAVED.format(exc.reason)
         return f" Not saved (runtime state unavailable, {exc.reason}): the stop holds in this process only."
     return ""
+
+
+def owner_chat_of(st: Dict[str, Any]) -> Optional[int]:
+    """The owner chat a state read names, the clock's ``owner_chat_id_fn`` on the server: the bound chat, or ``None``
+    while the slot is KNOWN empty: no owner message has bound one (``gateway.control._admit_description_task``
+    places a press by the same rule). A binding that cannot be read now, or a slot that holds no chat, raises
+    ``LookupError`` saying why: a failed read never reads as an empty slot, and a missing value never as chat 0."""
+    from supervisor.state import STATE_READ_KEY, control_value
+
+    known, chat_id = control_value(st, "owner_chat_id")
+    if known and chat_id is None:
+        return None
+    if known:
+        try:
+            if type(chat_id) is not bool and int(chat_id):
+                return int(chat_id)
+        except (TypeError, ValueError):
+            pass
+        raise LookupError(f"the owner chat slot holds {chat_id!r}")
+    read = st.get(STATE_READ_KEY) if isinstance(st, dict) else None
+    if isinstance(read, dict) and read.get("quality") not in ("current", "recovered", "recovered_transient"):
+        reason = f": {read['reason']}" if read.get("reason") else ""
+        raise LookupError(f"runtime state {read.get('quality')}{reason}")
+    raise LookupError("the owner chat binding is not confirmed")  # a recovery holds it unconfirmed
 
 
 class BackgroundConsciousness:
@@ -405,9 +433,10 @@ class BackgroundConsciousness:
                 resets = parse_deadline_ts(str(window.get("resets_at") or ""))
                 return self._skip("allowance_exhausted", max(resets.timestamp() if resets else 0.0, now + self.floor),
                                   window, now=now)
-            if not self._owner_chat_id():
-                return self._skip("waiting_for_first_conversation", now + self.floor, window, now=now)
-        return self._launch(now, int(self._owner_chat_id() or 0), window)
+            chat_id, unread = self._destination()
+            if chat_id is None:
+                return self._skip("owner_chat_unknown", now + self.floor, window, now=now, error=unread)
+        return self._launch(now, chat_id, window)
 
     def _settle_unreported_terminal(self) -> bool:
         """Settle its own known wake from a pooled terminal no dispatcher reported (an orphan sweep, a
@@ -896,11 +925,19 @@ class BackgroundConsciousness:
             return {}
         return dict(facts) if isinstance(facts, dict) else {}
 
-    def _owner_chat_id(self) -> Optional[int]:
+    def _destination(self) -> Tuple[Optional[int], str]:
+        """Where a wake speaks, observed once per tick (``owner_chat_id_fn``, ``owner_chat_of`` on the server): the bound
+        owner chat, or Main while the callback answers that slot is KNOWN empty (``None``); a callback that raises, or a
+        slot that holds no chat, is ``(None, why)``. Before this rule the wake waited for a bound chat as its only
+        destination (``8212eebed``); Main is a destination every surface shows."""
         try:
-            return int(self._owner_chat_id_fn() or 0) or None
-        except Exception:
-            return None
+            bound = self._owner_chat_id_fn()
+            if bound is None:
+                return WEB_UI_CHAT_ID, ""
+            chat_id = int(bound)
+        except Exception as exc:
+            return None, str(exc) or type(exc).__name__
+        return (chat_id, "") if chat_id else (None, "the owner chat slot holds no chat")
 
     def _record(self, event_type: str, **fields: Any) -> None:
         try:

@@ -120,7 +120,7 @@ def test_failed_duty_releases_latch_without_clearing_another_failure(tmp_path, m
 
 
 def test_cold_transfer_observation_uses_body_cadence_without_running_each_tick(tmp_path, monkeypatch):
-    from ouroboros import server_maintenance as sm
+    from ouroboros import server_maintenance as sm, subscription_census
     from ouroboros.delegate_feed import _TICK_SEC
     from supervisor import active_activity, queue
 
@@ -130,6 +130,7 @@ def test_cold_transfer_observation_uses_body_cadence_without_running_each_tick(t
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [clock[0]])
     monkeypatch.setattr(sm, "_LAST_COLD_CUSTODY_SWEEP", [0.0])
     monkeypatch.setattr(sm, "_COLD_CUSTODY_SWEEP_LOCK", threading.Lock())
+    monkeypatch.setitem(subscription_census._PASS, "dispatched", clock[0])  # the census keeps its own cadence
     monkeypatch.setattr(queue, "RUNNING", {"current": {}})
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})

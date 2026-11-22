@@ -228,7 +228,7 @@ Settings paths have no tabs or URLs. `settings.js` and `extensions.js` share lev
 
 Each key row's **Test** (`POST /api/providers/test`, §4) is bounded and physically accounted (`llm_probe.py`), outside chat retry, fallback, reasoning, web, cache and learning; drafts never reach Settings, environment or `LLMClient` caches; kept keys require the same address and no weaker TLS check. A note names charges.
 
-A directory or separately hosted builtin client offers outside-frame recovery via `?builtin=1`; the builtin main page omits it (`ws.pageOwnedByCore`). macOS `launcher_onboarding.setup_recovery_menu` opens it without page JS. Completion writes starter skills; previews write nothing.
+A directory or separately hosted builtin client offers outside-frame recovery via `?builtin=1`; the builtin main page omits it (`ws.pageOwnedByCore`). macOS `launcher_onboarding.setup_recovery_menu` opens it without page JS.
 
 `web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the state's owner (a skill, or `/api/mcp/sign-in`); protocol and outcomes: CREATING_SKILLS “Provider sign-in return”.
 

@@ -15,9 +15,11 @@ Two seams:
   of truth moved from an ``en``/``ru`` pair to one English table plus the memory.
 * ``language()`` — the install's tag (``""`` reads as English) and ``label(tag)``.
 
-A technical pause carries a host-authored reason with no quoted user content.
-Both Telegram and the browser translate that sentence by its text. Other relays
-can include ids and the author's own words.
+A host row reaches Telegram as one line from ``ouroboros.host_notice.notice_line``: a
+notice's phrase and its step, and the technical pause (a host-authored reason with no
+quoted user content), each part translated before they are joined. A host sentence a
+panel relays without a code (a work's reason, ``telegram_health``) is translated by its
+text (``host_sentence``). Other relays can include ids and the author's own words.
 
 The bridge's former private ``TELEGRAM_LANGUAGE`` setting is migrated once
 (``migration_target``): an install that chose Russian in the bridge before the install-wide

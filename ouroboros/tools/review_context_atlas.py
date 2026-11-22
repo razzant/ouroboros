@@ -41,6 +41,7 @@ from ouroboros.tools.review_helpers import (
     _SENSITIVE_EXTENSIONS,
     _SENSITIVE_NAMES,
     _VENDORED_NAMES,
+    _VENDORED_PATHS,
     _VENDORED_SUFFIXES,
     _is_probably_binary,
     format_prompt_code_block,
@@ -240,7 +241,7 @@ def _build_file_facts(repo_dir: pathlib.Path, rel: str, *, exempt: bool) -> _Fil
         facts.disposition = "binary_media"
         facts.reason = "binary/media extension"
         return facts
-    if fname in _VENDORED_NAMES or any(fname.endswith(tail) for tail in _VENDORED_SUFFIXES):
+    if fname in _VENDORED_NAMES or rel in _VENDORED_PATHS or any(fname.endswith(tail) for tail in _VENDORED_SUFFIXES):
         facts.disposition = "vendored_minified"
         facts.reason = "vendored or minified file"
         return facts

@@ -36,6 +36,7 @@ class ServedUiState(TypedDict):
 class SetupStep(TypedDict):
     id: str
     title: str
+    railTitle: str  # the step's short name in the rail; ``title`` heads the step itself
     railCopy: str
     copy: str
     footer: str

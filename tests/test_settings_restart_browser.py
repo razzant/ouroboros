@@ -108,7 +108,8 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
                 expect(field).to_be_visible(timeout=30_000)
                 field.fill(value)
                 field.evaluate("node => node.blur()")
-                row = page.locator(f'#page-settings [data-setting-row="{FOLDER}"]')
+                # The skill sources moved to Extensions (#3921): their old address opens them in #page-skills.
+                row = settings_page(page, "skill-sources").locator(f'[data-setting-row="{FOLDER}"]')
                 expect(row.locator("[data-setting-result]")).to_contain_text("Saved", timeout=30_000)
                 return row
 

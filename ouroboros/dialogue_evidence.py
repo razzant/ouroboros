@@ -28,7 +28,7 @@ _ROW_FACTS = (
     "lifecycle", "quiz", "actions", "title", "filename", "caption", "mime",
     "project_origin_projection", "presence_provenance", "presence_contact", "attachment_gap",
     "reply_to", "relay", "reply_to_relay",  # the host-resolved relations: what a row replies to, the owner words a relay quotes
-    "text_placeholder",
+    "text_placeholder", "notice",  # a host notice's code, step and raw details (its text is only the phrase)
 )
 
 

@@ -581,10 +581,15 @@ class StashRestoreResult:
         return self.status != "incomplete"
 
 
+def stash_recovery_command(stash_sha: str) -> str:
+    """The exact command that puts a kept update stash back (Q1=C): the one line the owner's notice instructs."""
+    return f"git stash apply {stash_sha}"
+
+
 def _stash_recovery_note(stash_sha: str) -> str:
     return (f"the original local changes remain in stash {stash_sha[:12]} "
             "and current files should be inspected before "
-            f"recovering with `git stash apply {stash_sha}`")
+            f"recovering with `{stash_recovery_command(stash_sha)}`")
 
 
 def restore_update_stash(

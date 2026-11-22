@@ -131,6 +131,20 @@ function stopResultTimer(node) {
     }
 }
 
+/** The raw text behind one Details disclosure (ui.css details.ui-disclosure + .ui-result-details): the main view keeps
+ * the words, the codes and the raw error open from here by pointer, touch and keyboard (DESIGN principle 7). */
+export function rawDetails(doc, raw, label = 'Details') {
+    const disclosure = doc.createElement('details');
+    disclosure.className = 'ui-disclosure';
+    const summary = doc.createElement('summary');
+    summary.textContent = label;
+    const body = doc.createElement('pre');
+    body.className = 'ui-result-details';
+    body.textContent = String(raw ?? '');
+    disclosure.append(summary, body);
+    return disclosure;
+}
+
 /** Write a result into `node`: its words, its tone, the raw text behind one Details disclosure; `ends` lets a plain
  * acknowledgement clear itself after SAVE_ACK_MS. An empty result clears the node. */
 export function setResult(node, { text = '', tone = 'muted', details = '', ends = false } = {}) {
@@ -139,18 +153,7 @@ export function setResult(node, { text = '', tone = 'muted', details = '', ends 
     const words = String(text ?? '');
     const raw = String(details ?? '');
     node.textContent = words;
-    if (raw) {
-        const doc = node.ownerDocument;
-        const disclosure = doc.createElement('details');
-        disclosure.className = 'ui-disclosure';
-        const summary = doc.createElement('summary');
-        summary.textContent = 'Details';
-        const body = doc.createElement('pre');
-        body.className = 'ui-result-details';
-        body.textContent = raw;
-        disclosure.append(summary, body);
-        node.append(disclosure);
-    }
+    if (raw) node.append(rawDetails(node.ownerDocument, raw));
     if (!words && !raw) {
         delete node.dataset.tone;
         return;

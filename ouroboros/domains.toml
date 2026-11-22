@@ -191,6 +191,7 @@ D20 = "Presence"
 "ouroboros/local_custody_repair.py" = "D09"
 "ouroboros/custody_owed.py" = "D09"  # local custody writes a process knows but could not yet land
 "ouroboros/physical_attempt_context.py" = "D16"
+"ouroboros/capability_breakage.py" = "D04"
 "ouroboros/capability_evidence.py" = "D03"
 "ouroboros/density_probe.py" = "D03"
 "ouroboros/response_limits.py" = "D03"
@@ -258,6 +259,7 @@ D20 = "Presence"
 "ouroboros/context.py" = "D03"
 "ouroboros/context_input_selection.py" = "D03"
 "ouroboros/context_runtime_facts.py" = "D03"
+"ouroboros/context_first_hour.py" = "D03"  # the Runtime setup facts: how this install began, the first exchange
 "ouroboros/context_budget.py" = "D03"
 "ouroboros/context_compaction.py" = "D03"
 "ouroboros/arrival_notes.py" = "D03"  # the working-view notes in view, named when the owner's words or press arrive
@@ -761,6 +763,7 @@ D20 = "Presence"
 "ouroboros/skill_source_install.py" = "D14"
 "ouroboros/skill_sources.py" = "D14"
 "ouroboros/skill_starter.py" = "D14"
+"ouroboros/onboarding_connections.py" = "D14"  # a built-in skill's setup card: its check, its keys at Finish, its one post
 "ouroboros/skill_review_history.py" = "D14"
 "ouroboros/skill_review_runner.py" = "D14"
 "ouroboros/skill_review_status.py" = "D14"
@@ -792,6 +795,7 @@ D20 = "Presence"
 "ouroboros/subagent_inspection.py" = "D07"
 "ouroboros/claudexor_observations.py" = "D07"
 "ouroboros/engine_facts.py" = "D07"
+"ouroboros/subscription_census.py" = "D07"  # the engine's subscription verdicts counted per family, one dated file
 "ouroboros/subscription_install_presets.py" = "D12"
 "ouroboros/synthesis_cost_text.py" = "D01"
 "ouroboros/task_continuation.py" = "D06"
@@ -972,6 +976,7 @@ D20 = "Presence"
 "ouroboros/triad_review.py" = "D06"
 "ouroboros/ui_language.py" = "D12"
 "ouroboros/ui_translation.py" = "D12"
+"ouroboros/host_notice.py" = "D12"
 "ouroboros/update_channels.py" = "D12"
 "ouroboros/update_letter.py" = "D12"
 "ouroboros/update_qualification.py" = "D12"
@@ -1092,6 +1097,7 @@ D20 = "Presence"
 "supervisor/schedule_time.py" = "D08"
 "supervisor/state.py" = "D08"
 "supervisor/state_initialization.py" = "D08"
+"supervisor/first_meeting.py" = "D08"  # setup's Start opens one host-started root, at most once a state
 "supervisor/steering.py" = "D09"
 "supervisor/subagent_task_truth.py" = "D08"
 "supervisor/task_admission.py" = "D08"
@@ -1391,6 +1397,7 @@ lazy_only = [
   "D04->D03",
   "D04->D06",
   "D04->D07",
+  "D04->D08",
   "D04->D09",
   "D04->D10",
   "D04->D12",

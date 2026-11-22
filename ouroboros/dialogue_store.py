@@ -1015,6 +1015,48 @@ def newest_owner_candidates(root: Any, *, before: int, limit: int) -> List[Row]:
     return [_row(record) for record in records]
 
 
+# The rooms my human reads: Main, Project rooms and owner transport chats; 0 is the hidden partition, negative ids
+# are A2A traffic and ``places.conversation_chat_id`` puts correspondents' place rooms at 2**40 and above.
+_OWNER_ROOMS = (1, (1 << 40) - 1)
+# What I write to my human besides an untyped answer: send_user_message's rows, my questions, what the message bus
+# delivers for me (a photo, a video, a document with my caption, a links card), a living card I show (``show_card``)
+# and my retained words of a live call.
+_MY_MESSAGE_KINDS = ("proactive_message", "main_notice", "relay_reply", "quiz", "photo", "video", "document", "links",
+                     "card", "model_narration")
+_BOTH_WROTE: set = set()  # stores (path, file identity) where both have written: that answer never turns back
+
+
+def owner_exchange(root: Any) -> Tuple[bool, bool]:
+    """``(my human has written, I have written to them)`` in the rooms my human reads, in ONE statement of two
+    existence probes over those rooms that stop at their first match: an untyped inbound row (``dialogue_inbound``;
+    my human's words, as ``newest_owner_candidates`` counts them) and an outbound row of mine, untyped (an answer)
+    or one of ``_MY_MESSAGE_KINDS`` (``dialogue_room``; host rows are System or other types). A store that cannot be
+    read raises: the caller says unknown, never no; so does a negative answer while the store's history is still
+    importing (``require_imported``'s probes, in the same read: a segment whose import commits meanwhile is in neither
+    or both). Once both have written, this store is not asked again in this process (keyed by its file, so a Reset's
+    new store is asked afresh)."""
+    low, high = _OWNER_ROOMS
+    kinds = ", ".join(f"'{kind}'" for kind in _MY_MESSAGE_KINDS)
+    known = (str(path(root)), store.file_identity(path(root)))
+    if known in _BOTH_WROTE:
+        return True, True
+    if not present(root) and holds_dialogue_files(root):  # never a cutover from a read
+        raise StoreMigrating(f"dialogue store not created yet: {path(root)}")
+    with transaction(root, write=False) as conn:
+        theirs, mine = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_inbound WHERE stream='chat' AND direction='in' "
+            "AND chat_id BETWEEN ? AND ? AND kind IS NULL), EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_room "
+            "WHERE stream='chat' AND chat_id BETWEEN ? AND ? AND direction='out' "
+            f"AND (kind IS NULL OR kind IN ({kinds})))",
+            (low, high, low, high)).fetchone()
+        # A no the history still importing could turn is unknown, never no: judged in this same snapshot.
+        missing = "" if theirs and mine else _unimported(conn, root, "chat", 0, _bound(None))
+    _raise_unimported(missing)
+    if theirs and mine and known[1] is not None:
+        _BOTH_WROTE.add(known)
+    return bool(theirs), bool(mine)
+
+
 def latest_inbound_transport(root: Any, chat_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
     """Each chat's newest inbound row's ``transport``, by chat id, in one read (``dialogue_inbound``: one seek a chat):
     only that object leaves the store, never the row (what names a room, ``RoomLabelResolver.warm``)."""
@@ -1469,16 +1511,26 @@ def require_imported(root: Any, stream: str, *, lower: int = 0, upper: Optional[
     bound = _bound(upper)
     if lower >= bound:
         return
-    with transaction(root, write=False) as conn:  # existence, not counts: one indexed probe per state
-        def holds(state: str) -> bool:
-            return conn.execute(
-                "SELECT 1 FROM import_ledger INDEXED BY ledger_state WHERE stream=? AND state=? AND base<? "
-                "AND base+size>? LIMIT 1", (stream, state, bound, lower)).fetchone() is not None
+    with transaction(root, write=False) as conn:
+        missing = _unimported(conn, root, stream, lower, bound)
+    _raise_unimported(missing)
 
-        mismatch, pending = holds("mismatch"), holds("pending") or not _planned(conn, root)
-    if mismatch:
+
+def _unimported(conn: sqlite3.Connection, root: Any, stream: str, lower: int, bound: int) -> str:
+    """What the read ``conn`` holds still lacks of ``stream`` in ``[lower, bound)``: "mismatch", "pending" or ""
+    (existence, not counts: one indexed probe per state)."""
+    def holds(state: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM import_ledger INDEXED BY ledger_state WHERE stream=? AND state=? AND base<? "
+            "AND base+size>? LIMIT 1", (stream, state, bound, lower)).fetchone() is not None
+
+    return "mismatch" if holds("mismatch") else "pending" if holds("pending") or not _planned(conn, root) else ""
+
+
+def _raise_unimported(missing: str) -> None:
+    if missing == "mismatch":
         raise StoreError("Dialogue history: a segment could not be imported")
-    if pending:
+    if missing:
         raise StoreMigrating("Dialogue history is still importing")
 
 

@@ -132,7 +132,9 @@ def test_catalog_marks_the_always_on_skill_from_the_same_discovery(tmp_path):
     assert "Context: always; its text is in the Always-in-context skills section." in entries["kept"]
     assert "Context: always" not in entries["optout"]
     assert "KEPT_SENTINEL" not in section  # the catalog stays metadata
-    assert _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[]) == ""
+    # Nothing installed is said, not silent (п.57): the section keeps its heading and names the empty set.
+    empty = _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[])
+    assert empty.full_text.endswith("\nNo skills are installed.") and "\n- " not in empty.full_text
 
 
 # --- delivery into real context builds ------------------------------------

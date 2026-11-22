@@ -389,6 +389,22 @@ def test_an_engine_without_continue_from_refuses_typed_and_starts_nothing(tmp_pa
     assert "plain new run" in payload["detail"]
 
 
+@pytest.mark.parametrize("health,asks", [(("", "2099-01-01T00:00:00Z"), True), (("route_disabled", ""), False)])
+def test_a_start_refused_on_a_spent_route_asks_the_subscription_census_for_a_read(tmp_path, monkeypatch, health, asks):
+    """Route health proves the subscription spent: the typed, definitely unrun refusal asks the census for a read; an
+    unrelated blocker refuses the same way and asks nothing."""
+    from ouroboros import claudexor_daemon, config, subagents
+    from ouroboros import subscription_census as census
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    monkeypatch.setattr(subagents, "route_health", lambda *_a, **_k: health)
+    _select_transport_access(monkeypatch, "readonly")
+    request, payload, _ctx, calls = _start(tmp_path, monkeypatch, acting=False, run_id="run-spent")
+    assert request is None and calls == [] and payload["definitely_unrun"] is True
+    assert (census.request_mtime() is not None) is asks
+
+
 def test_argument_refusals_precede_the_daemon(tmp_path):
     from ouroboros.delegate_shared import delegate_payload
     from ouroboros.tools import delegate

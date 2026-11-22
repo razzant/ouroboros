@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from tests._wizard_walk import past_consciousness, rail_shows_its_steps, walk
+from tests._wizard_walk import past_quick_steps, rail_shows_its_steps, walk
 from tests.test_subscription_setup_browser import (
     capture,
     subscription_ui as subscription_ui,
@@ -78,7 +78,7 @@ def test_wizard_summary_refresh_keeps_focused_action_and_position(subscription_u
     page = _open_wizard(ui)
     page.set_viewport_size({"width": 390, "height": 600})
     page.click("#quick-start-btn")
-    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
+    past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector(".summary-card")
     assert page.evaluate("document.activeElement.matches('.step-title') && window.scrollY === 0")
     page.locator("#next-btn").focus()
