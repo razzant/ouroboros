@@ -360,14 +360,14 @@ ouroboros run --start \
 
 Use `--jsonl` for a machine-readable event stream and `--detach` when the caller will follow the task with `ouroboros tasks watch <task_id>` or inspect it with `ouroboros tasks show <task_id>`. External workspace runs keep Ouroboros's own repository and governance context separate, then export changes as reviewable patch artifacts.
 
-To find what was said in Ouroboros's conversation without waking it, a program on the same computer reads the recall door. A default install listens on `127.0.0.1:8765`; when that port was busy, the one in use is in `~/Ouroboros/data/state/server_port`. Neither command needs `ouroboros` on PATH (on Linux the packaged command is `./Ouroboros/bin/ouroboros`, on Windows `Ouroboros\bin\ouroboros.cmd`):
+A program on this computer can search the dialogue of every room and reopen a row without a model turn. That includes other people's messages: a tool that sends an answer to its model provider shares those words with that provider. A default install listens on `127.0.0.1:8765`; when that port was busy, the one in use is in `~/Ouroboros/data/state/server_port`. The packaged command does the same as `curl` without `ouroboros` on PATH: `/Applications/Ouroboros.app/Contents/Resources/bin/ouroboros recall` on macOS, `./Ouroboros/bin/ouroboros recall` on Linux, `Ouroboros\bin\ouroboros.cmd recall` on Windows.
 
 ```bash
 curl -sG http://127.0.0.1:8765/api/recall --data-urlencode 'words=archive decision' --data-urlencode order=oldest
-/Applications/Ouroboros.app/Contents/Resources/bin/ouroboros recall --row 'row:1@…#…'  # an address from the answer
+curl -sG http://127.0.0.1:8765/api/recall --data-urlencode 'row=row:1@…#…'  # an address from the answer
 ```
 
-It answers only direct loopback connections, never a request relayed by a proxy or tunnel; in Docker with ordinary port publishing only programs inside the container reach it. Shapes: [docs/CLIENT_CONTRACT.md](docs/CLIENT_CONTRACT.md).
+The server checks the connection itself: a numeric loopback peer and no `Forwarded`, `X-Forwarded-*` or `X-Real-IP` header. A relay on this computer that adds none looks like a local program, here as on every other route ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). In Docker with ordinary port publishing, run the command inside the container. A search of every room can take a minute or more on a large conversation until its word index is built; `room_id` narrows it. Shapes: [docs/CLIENT_CONTRACT.md](docs/CLIENT_CONTRACT.md).
 
 To change Ouroboros itself, follow [CONTRIBUTING.md](CONTRIBUTING.md): read [docs/CHECKLISTS.md](docs/CHECKLISTS.md) in full, and map [BIBLE.md](BIBLE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md), and [docs/DESIGN.md](docs/DESIGN.md) by their headings, reading every section relevant to your change in full before editing.
 

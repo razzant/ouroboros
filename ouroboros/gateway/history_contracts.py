@@ -397,7 +397,9 @@ class RecallReader(TypedDict):
 class RecallField(TypedDict):
     """One typed field of a dialogue row with its own speaker: ``text`` (the message), ``question``,
     ``option <n>``, ``press``, ``comment``, ``closure`` or ``receipt`` (a secret request's non-value record,
-    the only field such a card has). ``text`` is an excerpt on a search answer, whole on a reopened row."""
+    the only field such a card has). ``text`` is an excerpt on a search answer, whole on a reopened row.
+    ``speaker`` is one of ``owner`` (a press or comment on a card), ``host``, ``task <id>``, "the asking task",
+    "the closing task", or the row's author label (``RecallRow.speaker`` without its provenance) for its message."""
 
     name: str
     speaker: str
@@ -406,8 +408,9 @@ class RecallField(TypedDict):
 
 class RecallRow(TypedDict, total=False):
     """One original dialogue row. ``address`` is its full content address (``row:<room>@<time>#<sha256>``);
-    ``rooms`` every room it shows in, its own first; ``speaker`` the author with its provenance, and "API door,
-    sender not recorded" on a row the API door stamped; ``matched`` the fields a search matched ([] on reopen);
+    ``rooms`` every room it shows in, its own first; ``speaker`` the label Ouroboros's own store gives the author,
+    in its own voice (a place row may read "my human: <name>"), with its provenance, and "API door, sender not
+    recorded" on a row the API door stamped; ``matched`` the fields a search matched ([] on reopen);
     ``reply_to`` the recorded reply target's address, ``reply_unresolved`` when it was not resolved;
     ``reopen`` this row whole."""
 
@@ -427,7 +430,8 @@ class RecallRow(TypedDict, total=False):
 class RecallSearchResponse(TypedDict):
     """``GET /api/recall?words=…``: one page of admitted dialogue rows of every room (or ``room_id``) whose words
     match, in the caller's ``order`` of time, never ranked. ``total`` is exact when the read was complete, else
-    null with ``observed`` and the named ``gaps``; ``next`` continues the same capture (``snapshot``)."""
+    null with ``observed`` and the named ``gaps``; ``next`` continues the same capture (``snapshot``) and is null
+    when the capture did not stabilize (``notes`` says so). ``notes`` qualify labels without touching the count."""
 
     mode: Literal["search"]
     words: List[str]
@@ -441,14 +445,16 @@ class RecallSearchResponse(TypedDict):
     snapshot: Optional[str]
     next: Optional[RecallReader]
     gaps: List[str]
+    notes: List[str]
     rows: List[RecallRow]
 
 
 class RecallRowResponse(TypedDict):
-    """``GET /api/recall?row=<address>``: one admitted dialogue row reopened whole."""
+    """``GET /api/recall?row=<address>``: one admitted dialogue row reopened whole; ``notes`` as on a search."""
 
     mode: Literal["row"]
     row: RecallRow
+    notes: List[str]
 
 
 __all__ = [

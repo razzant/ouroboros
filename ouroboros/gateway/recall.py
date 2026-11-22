@@ -1,4 +1,4 @@
-"""``GET /api/recall``: the neighbour door over the conversation (consensus K9, K10; the owner's 2B).
+"""``GET /api/recall``: the neighbour door over the conversation, for every room.
 
 A program on this computer (Claude Code, Codex, Cursor) finds the original rows of Ouroboros's conversation by
 words and reopens one row, without waking Ouroboros: no model turn, no dispatch, no reply. Two exclusive forms:
@@ -31,6 +31,11 @@ from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.server_auth import RECALL_CLOSED, RECALL_PEER
 
 PAGE_DEFAULT, PAGE_MAX = 20, 100  # rows per page: the physical bound of one answer, said in the request's terms
+CHAT_ID_LIMIT = 2**63  # a room address the store can hold: SQLite's signed 64-bit integer
+# A field's speaker on the door, a closed set (``RecallField``): ``owner`` and ``host`` here, ``task <id>``,
+# "the asking task" and "the closing task" from the words reader, else the row's own author label.
+_FIELD_SPEAKERS = {"owner": "owner", "host": "host"}
+OWNER_ACCOUNTS_NOTE = "owner accounts unreadable: no place row is labelled as the owner's"
 _SEARCH_KEYS = ("words", "room_id", "voice", "order", "date_from", "date_to", "count", "offset", "snapshot")
 _FILTER_KEYS = ("date_from", "date_to")
 _HEADERS = {"Cache-Control": "no-store"}
@@ -45,7 +50,11 @@ class Refusal(Exception):
         self.status, self.code, self.error = status, code, error
 
 
-def _reader(params: Sequence[Tuple[str, str]], cli: List[str]) -> Dict[str, Any]:
+def _reader(params: Sequence[Tuple[str, str]]) -> Dict[str, Any]:
+    """The same request as a path and as ``ouroboros recall`` arguments; a value that begins with a dash is
+    written ``--name=value``, so the command line never reads it as an option."""
+    cli = [part for key, text in params for part in (
+        [f"--{key.replace('_', '-')}={text}"] if text.startswith("-") else [f"--{key.replace('_', '-')}", text])]
     return {"path": "/api/recall?" + urllib.parse.urlencode(list(params), quote_via=urllib.parse.quote),
             "cli": ["recall", *cli]}
 
@@ -73,7 +82,7 @@ def row_view(root: pathlib.Path, row: Mapping[str, Any], *, author: Mapping[str,
              matched: Sequence[str], rooms: Any, shown_in: Optional[int] = None, query: Any = None) -> Dict[str, Any]:
     """The closed outward projection of one row. With ``query`` (a search answer) a plain message shows its matched
     field as an excerpt and a card every field; without it (a reopened row) every field whole."""
-    from ouroboros.dialogue_recall import _excerpt, _speaker
+    from ouroboros.dialogue_recall import _excerpt, _speaker  # shared names once the words reader publishes them
     from ouroboros.room_appearances import frame_rooms
 
     address = _full_address(row)
@@ -87,9 +96,9 @@ def row_view(root: pathlib.Path, row: Mapping[str, Any], *, author: Mapping[str,
     view: Dict[str, Any] = {
         "address": address, "room_id": own, "room": rooms.label(row), "rooms": shown,
         "ts": str(row.get("ts") or ""), "speaker": _speaker_label(row, author), "matched": list(matched),
-        "fields": [{"name": field.name, "speaker": _speaker(field, row, author),
+        "fields": [{"name": field.name, "speaker": _FIELD_SPEAKERS.get(field.speaker) or _speaker(field, row, author),
                     "text": field.text if query is None else _excerpt(field.text, query)} for field in listed],
-        "reopen": _reader([("row", address)], ["--row", address])}
+        "reopen": _reader([("row", address)])}
     reply = row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}
     if str(reply.get("address") or ""):
         view["reply_to"] = str(reply["address"])
@@ -97,20 +106,21 @@ def row_view(root: pathlib.Path, row: Mapping[str, Any], *, author: Mapping[str,
     return view
 
 
-def _owner_accounts(root: pathlib.Path) -> Optional[Mapping[str, Any]]:
+def _owner_accounts(root: pathlib.Path) -> Tuple[Optional[Mapping[str, Any]], str]:
+    """``(accounts, note)``: the places' confirmed owner accounts, or None and the note the answer carries."""
     try:
         from ouroboros.places import place_owner_accounts
 
-        return place_owner_accounts(root)
-    except Exception:  # no place row reads as my human's then, as the words reader says in its own header
-        return None
+        return place_owner_accounts(root), ""
+    except Exception as exc:  # no place row is then labelled as the owner's, and the answer says so
+        return None, f"{OWNER_ACCOUNTS_NOTE} ({type(exc).__name__})"
 
 
 def _integer(values: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
     text = str(values.get(name, "") or "").strip()
     if not text:
         return default
-    if not re.fullmatch(r"\d+", text) or not low <= int(text) <= high:
+    if not re.fullmatch(r"[0-9]{1,20}", text) or not low <= int(text) <= high:
         raise Refusal(400, "recall_bad_request", f"{name} is a whole number from {low} to {high}; got {text!r}")
     return int(text)
 
@@ -122,12 +132,8 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
     from ouroboros.memory import Memory
 
     room_text, voice, order = (str(values.get(key, "") or "").strip() for key in ("room_id", "voice", "order"))
-    if room_text and not re.fullmatch(r"-?\d+", room_text):
+    if room_text and not _chat_id(room_text):  # the shared check's room sentence names the mind's own readers
         raise Refusal(400, "recall_bad_request", f"room_id is a room's chat id as text (1 is Main); got {room_text!r}")
-    if voice not in ("", *dialogue_recall.VOICES):
-        raise Refusal(400, "recall_bad_request", f"voice is owner (omit it for every speaker); got {voice!r}")
-    if order not in ("", *dialogue_recall.ORDERS):
-        raise Refusal(400, "recall_bad_request", f"order is newest or oldest (default newest); got {order!r}")
     count = _integer(values, "count", PAGE_DEFAULT, 1, PAGE_MAX)
     offset = _integer(values, "offset", 0, 0, 2**53 - 1)
     filters = {key: values[key] for key in _FILTER_KEYS if str(values.get(key, "") or "").strip()}
@@ -151,12 +157,16 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
         if text]
     following = [*same, ("count", str(count)), ("offset", str(offset + len(page)))] + (
         [("snapshot", current)] if stable else [])
-    flags = [part for key, text in following for part in (f"--{key.replace('_', '-')}", text)]
     labels = RoomLabelResolver(root)
+    # the words reader's note in its own voice becomes the door's; under voice=owner it is already a gap
+    notes = [OWNER_ACCOUNTS_NOTE] if found.get("said") and voice != "owner" else []
+    if more and not stable:
+        notes.append("no continuation: the capture did not stabilize (part of the conversation is still importing); "
+                     "ask again from offset 0 when the import has finished")
     return {"mode": "search", "words": list(words), "room_id": room_text, "voice": voice, "order": order or "newest",
             "total": None if found["gaps"] else len(rows), "observed": len(rows), "offset": offset, "more": more,
-            "snapshot": current if stable else None, "next": _reader(following, flags) if more else None,
-            "gaps": list(found["gaps"]),
+            "snapshot": current if stable else None, "next": _reader(following) if more and stable else None,
+            "gaps": list(found["gaps"]), "notes": notes,
             "rows": [row_view(root, row, **found["hits"][id(row)], rooms=labels, shown_in=room, query=query)
                      for row in page]}
 
@@ -172,6 +182,8 @@ def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
     except ValueError:
         raise Refusal(400, "recall_bad_request", "row is an address as a search answer prints it: "
                                                  "row:<room>@<time>#<12 to 64 hex>") from None
+    if not -CHAT_ID_LIMIT <= wanted["chat_id"] < CHAT_ID_LIMIT:
+        raise Refusal(400, "recall_bad_request", "row names a room id the store cannot hold")
     if is_a2a_chat_id(wanted["chat_id"]):  # never resolved: an unadmitted row answers as a missing one
         raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
     row, found = resolve_row(root, wanted)
@@ -183,9 +195,15 @@ def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
                                                        "address can be neither found nor ruled out")
     if row is None or is_a2a_chat_id(row.get("chat_id")):
         raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
-    author = row_author(row, owner_accounts=_owner_accounts(root))
+    accounts, note = _owner_accounts(root)
+    author = row_author(row, owner_accounts=accounts)
     return {"mode": "row", "row": row_view(root, row, author=author, fields=fields_of(row), matched=[],
-                                           rooms=RoomLabelResolver(root))}
+                                           rooms=RoomLabelResolver(root)), "notes": [note] if note else []}
+
+
+def _chat_id(text: str) -> bool:
+    """A room address as text: an integer the store can hold."""
+    return bool(re.fullmatch(r"-?[0-9]{1,19}", text)) and -CHAT_ID_LIMIT <= int(text) < CHAT_ID_LIMIT
 
 
 def answer(root: pathlib.Path, items: Sequence[Tuple[str, str]]) -> Tuple[int, Dict[str, Any], str]:

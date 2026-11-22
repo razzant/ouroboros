@@ -713,7 +713,8 @@
  */
 
 /**
- * One typed field of a dialogue row with its own speaker; an excerpt on a search answer, whole on a reopened row.
+ * One typed field of a dialogue row with its own speaker (`owner`, `host`, `task <id>`, "the asking task", "the closing
+ * task", or the row's author label); an excerpt on a search answer, whole on a reopened row.
  * @typedef {Object} RecallField
  * @property {string} name
  * @property {string} speaker
@@ -751,6 +752,7 @@
  * @property {?string} snapshot
  * @property {?RecallReader} next
  * @property {string[]} gaps
+ * @property {string[]} notes
  * @property {RecallRow[]} rows
  */
 
@@ -759,6 +761,7 @@
  * @typedef {Object} RecallRowResponse
  * @property {'row'} mode
  * @property {RecallRow} row
+ * @property {string[]} notes
  */
 
 // --- Journey bodies of routes whose handlers check fields by hand (ProjectEntry: ./api_types.js) ---

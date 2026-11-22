@@ -1,4 +1,4 @@
-"""``GET /api/recall``: the neighbour door over the conversation (``ouroboros/gateway/recall.py``, K9).
+"""``GET /api/recall``: the neighbour door over the conversation (``ouroboros/gateway/recall.py``).
 
 The door projects the words reader (``dialogue_recall.collect``) outward and reopens one row through the shared row
 resolver: admitted dialogue rows of every room and nothing else, each a closed ``RecallRow``; every printed reader is
@@ -247,3 +247,80 @@ def test_the_door_starts_no_model_turn_dispatches_nothing_and_writes_no_row(tmp_
     assert done.returncode == 0, done.stderr
     facts = json.loads(done.stdout.strip().splitlines()[-1])
     assert facts == {"statuses": [200, 200], "rows": [1, 1], "modules": []}
+
+
+def _answered_card(root, ts="2026-11-01T12:00:00Z"):
+    ds.append(root, "chat", {
+        "ts": ts, "type": "quiz_answer", "direction": "system", "chat_id": 1, "task_id": "asker-1",
+        "text": "[answer q] chose (2) Archive now",
+        "quiz": {"quiz_id": "q-card", "question": "When do we archive?", "options": ["Later", "Archive now"],
+                 "answered_index": 1, "comment": "archive it now"}})
+
+
+def test_outward_field_speakers_name_the_owner_never_my_human(tmp_path):
+    _answered_card(tmp_path)
+    from ouroboros.memory import Memory
+
+    mind = dialogue_recall.words_history(Memory(drive_root=tmp_path), dialogue_recall.parse(["archive it now"]),
+                                         room=None, filters={})
+    assert "comment (my human): archive it now" in mind  # the mind's own reader speaks in the first person
+    row = _search(tmp_path, "archive it now")["rows"][0]
+    reopened = _ok(tmp_path, ("row", row["address"]))["row"]
+    for view in (row, reopened):
+        speakers = {field["name"]: field["speaker"] for field in view["fields"]}
+        assert speakers == {"question": "task asker-1", "option 1": "task asker-1", "option 2": "task asker-1",
+                            "press": "owner", "comment": "owner"}
+    assert "my human" not in json.dumps([row, reopened])
+
+
+def test_no_runnable_next_while_the_capture_is_unstable_and_dash_values_round_trip(tmp_path, monkeypatch):
+    from ouroboros import cli
+
+    for minute in range(3):
+        _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", f"-rf flag {minute}")
+    stable = _search(tmp_path, "-rf", count=1, room_id=1)
+    assert "--words=-rf" in stable["next"]["cli"] and stable["notes"] == []
+    assert cli.build_parser().parse_args(stable["next"]["cli"]).words == ["-rf"]
+    with pytest.raises(SystemExit):  # the plain two-argument form would be read as an option
+        cli.build_parser().parse_args(["recall", "--words", "-rf"])
+    capture = dialogue_recall.collect
+
+    def unstable(*args, **kwargs):
+        found = capture(*args, **kwargs)
+        found["coverage"] = {**found["coverage"], "snapshot_stable": False}
+        return found
+
+    monkeypatch.setattr(dialogue_recall, "collect", unstable)
+    shaky = _search(tmp_path, "-rf", count=1)
+    assert shaky["next"] is None and shaky["snapshot"] is None and shaky["more"] == 2 and shaky["observed"] == 3
+    assert shaky["notes"] == ["no continuation: the capture did not stabilize (part of the conversation is still "
+                              "importing); ask again from offset 0 when the import has finished"]
+
+
+@pytest.mark.parametrize("items", [
+    [("words", "a"), ("count", "9" * 5000)], [("words", "a"), ("offset", "1" * 25)],
+    [("words", "a"), ("room_id", str(2**70))], [("words", "a"), ("room_id", str(-2**63 - 1))],
+    [("row", f"row:{2**70}@2026-11-01T10:00:00Z#" + "a" * 12)],
+])
+def test_every_bad_number_is_a_typed_400_never_an_escaping_exception(tmp_path, items):
+    _say(tmp_path, "2026-11-01T10:00:00Z", "a")
+    status, body = _refused(tmp_path, *items)
+    assert status == 400 and body["code"] == "recall_bad_request"
+
+
+def test_the_largest_room_id_the_store_holds_is_still_a_search(tmp_path):
+    assert _search(tmp_path, "a", room_id=2**63 - 1)["total"] == 0
+
+
+def test_unreadable_owner_accounts_are_noted_on_search_and_reopen(tmp_path, monkeypatch):
+    _say(tmp_path, "2026-11-01T10:00:00Z", "archive words")
+    address = _search(tmp_path, "archive")["rows"][0]["address"]
+    assert _search(tmp_path, "archive")["notes"] == [] and _ok(tmp_path, ("row", address))["notes"] == []
+    import ouroboros.places
+
+    def broken(_root):
+        raise OSError("places registry unreadable")
+
+    monkeypatch.setattr(ouroboros.places, "place_owner_accounts", broken)
+    assert _search(tmp_path, "archive")["notes"] == [recall.OWNER_ACCOUNTS_NOTE]
+    assert _ok(tmp_path, ("row", address))["notes"] == [f"{recall.OWNER_ACCOUNTS_NOTE} (OSError)"]

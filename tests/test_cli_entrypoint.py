@@ -205,8 +205,9 @@ def test_recall_sends_repeated_alternatives_or_one_row_encoded_and_never_starts_
     seen = []
 
     class FakeClient:
-        def request(self, method, path, body=None):
+        def request(self, method, path, body=None, *, timeout=None):
             seen.append((method, path))
+            assert timeout == cli.RECALL_WAIT_SEC
             return {"mode": "search", "rows": []}
 
     def client(_args, **kwargs):
@@ -262,3 +263,46 @@ def test_recall_finds_the_server_as_chat_send_does_and_runs_on_the_standard_libr
                            "--words", "x"], cwd=repo, capture_output=True, text=True, timeout=60,
                           env={**os.environ, "PYTHONPATH": str(repo), "PYTHONDONTWRITEBYTECODE": "1"})
     assert done.returncode == 2 and "cannot reach Ouroboros server at http://127.0.0.1:9" in done.stderr, done.stderr
+
+
+def test_recall_waits_for_a_slow_whole_conversation_search_past_the_clients_default_wait(monkeypatch, capsys):
+    """A search of every room reads the whole conversation; the command waits for it (``RECALL_WAIT_SEC``) where the
+    client's ordinary wait would give up. The default client is shortened here so the server's delay exceeds it."""
+    import http.server
+    import threading
+
+    from ouroboros import cli
+
+    class Slow(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - the stdlib's handler name
+            if self.path.startswith("/api/recall"):
+                threading.Event().wait(1.5)
+            body = json.dumps({"mode": "search", "rows": []} if self.path.startswith("/api/recall") else {}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        monkeypatch.setattr(cli, "_client", lambda _args, **_kwargs: cli.OuroborosHTTPClient(url, timeout=0.5))
+        with pytest.raises(cli.ConnectionCLIError):  # the ordinary wait ends before the answer
+            cli.OuroborosHTTPClient(url, timeout=0.5).request("GET", "/api/recall?words=x")
+        assert cli.main(["recall", "--words", "x"]) == 0
+        assert json.loads(capsys.readouterr().out) == {"mode": "search", "rows": []}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["recall", "--help"])
+    rendered = " ".join(capsys.readouterr().out.split())
+    assert "can take a minute or more on a large one; --room-id narrows it" in rendered
+    assert "only the owner's rows (a card they answered included)" in rendered and "my human" not in rendered

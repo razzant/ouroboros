@@ -351,6 +351,9 @@ def _chat_history_command(args: argparse.Namespace) -> int:
 
 
 _RECALL_OPTIONS = ("room_id", "voice", "order", "date_from", "date_to", "count", "offset", "snapshot")
+# A search of every room reads the whole conversation until its word index is built: a transport bound long
+# enough that the server's read decides, never the client's default wait.
+RECALL_WAIT_SEC = 600
 
 
 def _recall_command(args: argparse.Namespace) -> int:
@@ -358,7 +361,7 @@ def _recall_command(args: argparse.Namespace) -> int:
     pairs = [("row", args.row)] if args.row is not None else [("words", item) for item in args.words]
     pairs += [(name, str(getattr(args, name))) for name in _RECALL_OPTIONS if getattr(args, name) not in (None, "")]
     query = urllib.parse.urlencode(pairs, quote_via=urllib.parse.quote)
-    _print_json(_client(args).request("GET", f"/api/recall?{query}"))
+    _print_json(_client(args).request("GET", f"/api/recall?{query}", timeout=RECALL_WAIT_SEC))
     return 0
 
 
@@ -644,12 +647,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat_history.set_defaults(func=_chat_history_command)
 
-    recall = subparsers.add_parser("recall", help="find dialogue rows by words or reopen one row (no model turn)")
+    recall = subparsers.add_parser(
+        "recall", help="find dialogue rows by words or reopen one row (no model turn)",
+        description="Find dialogue rows by words, or reopen one row, without a model turn. A search of every room "
+                    "reads the whole conversation and can take a minute or more on a large one; --room-id narrows it.")
     form = recall.add_mutually_exclusive_group(required=True)
-    form.add_argument("--words", action="append", help="words that must all occur in one field; repeat for alternatives")
+    form.add_argument("--words", action="append", help="word prefixes that must all occur in one field of one row "
+                      "(quote a part for an exact word or phrase); repeat for alternatives")
     form.add_argument("--row", help="reopen one row by the address a search printed")
     recall.add_argument("--room-id", dest="room_id", help="one room's chat id (1 is Main); default every room")
-    recall.add_argument("--voice", choices=["owner"], help="only my human's own words")
+    recall.add_argument("--voice", choices=["owner"], help="only the owner's rows (a card they answered included)")
     recall.add_argument("--order", choices=["newest", "oldest"], help="direction of time (default newest)")
     recall.add_argument("--date-from", dest="date_from", help="ISO-8601 lower bound")
     recall.add_argument("--date-to", dest="date_to", help="ISO-8601 upper bound")
