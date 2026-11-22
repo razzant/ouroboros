@@ -45,11 +45,8 @@ from ouroboros.workspace_file_outputs import (
     file_output_states, prepare_file_outputs, verify_file_outputs,
 )
 from ouroboros.review_state import invalidate_advisory_after_mutation
-from ouroboros.runtime_mode_policy import (
-    mode_allows_protected_write,
-    protected_paths_in,
-)
-from ouroboros.workspace_copies import protected_apply_refusal
+from ouroboros.runtime_mode_policy import protected_paths_in
+from ouroboros.workspace_copies import protected_apply_refusal, protected_write_admitted
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.config import get_runtime_mode
@@ -1253,8 +1250,8 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
     target_is_body = source_is_system_repo(target, system_repo_dir_for(ctx)) if child_copy else _target_is_system_repo(ctx)
     protected = protected_paths_in(touched) if target_is_body else []
     if protected:
-        grant_ok = (not is_acting) or bool(getattr(constraint, "protected_paths_grant", False))
-        if not (mode_allows_protected_write(runtime_mode) and grant_ok):
+        grant = bool(getattr(constraint, "protected_paths_grant", False))
+        if not protected_write_admitted(runtime_mode, acting=is_acting, grant=grant):
             _write_verdict(
                 ctx, child_task_id, outcome="blocked_protected", reason=reason, files=touched,
                 manifest=manifest, applied=False, conflicts=[], protected=[p.path for p in protected],
@@ -1263,7 +1260,7 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
             return protected_apply_refusal(
                 path=protected[0].path,
                 runtime_mode=runtime_mode,
-                action=f"integrate subagent patch {child_task_id} touching", grant_ok=grant_ok,
+                action=f"integrate subagent patch {child_task_id} touching", grant_ok=not is_acting or grant,
             )
 
     unindexed, reverted = [], False
@@ -1508,8 +1505,8 @@ def get_tools() -> List[ToolEntry]:
                     "parent; old helpers stay outside its control). "
                     "This never commits; self-modification still requires your "
                     "commit_reviewed. For best-of-N pick a child "
-                    "and integrate it, or integrate several to synthesize. Own-body protected-path changes require "
-                    "pro runtime mode (and, for a nested acting parent, protected_paths_grant). Conflicts "
+                    "and integrate it, or integrate several to synthesize. Own-body protected-path changes require Pro or "
+                    "Cyber Pro runtime mode (in Pro, a nested acting parent also needs protected_paths_grant). Conflicts "
                     "are reported for you to resolve (vcs_read diff) or abort (vcs_restore). Writes a "
                     "subagent_patch_verdict_<task_id>.json audit artifact; an earlier one stays readable beside it."
                 ),
