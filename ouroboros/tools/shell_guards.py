@@ -3,70 +3,37 @@
 from __future__ import annotations
 
 import ast
-import ntpath
 import pathlib
 import re
 from typing import Any, Dict, List
 
-from ouroboros.runtime_mode_policy import FROZEN_CONTRACT_PATH_PREFIXES, PROTECTED_RUNTIME_PATHS
 from ouroboros.shell_parse import (
     POSIX_SHELL_HEADS,
-    EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE,
     collect_leading_env,
-    embedded_absolute_path_tokens,
-    env_chdir_operand,
-    interpreter_reads_program_from_stdin,
     normalize_check_argv,
-    replacement_target_uncertain,
     recover_stringified_argv,
     shell_argv,
     shell_command_string,
-    shell_segment_rows,
     shell_segments,
     shell_tokens_typed,
     split_redirections,
-    strip_leading_env_assignments,
-    unwrap_env_argv,
 )
+from ouroboros.tools.write_shape import python_body_ast, script_literal_write_targets_and_unknown
 
-PROTECTED_RUNTIME_PATHS_LOWER = frozenset(
-    p.lower() for p in PROTECTED_RUNTIME_PATHS
-) | frozenset(prefix.lower() for prefix in FROZEN_CONTRACT_PATH_PREFIXES)
-
-# Write-shape classification lives in its own leaf (extracted at the module-size
-# gate); every historical name stays importable from here.
-from ouroboros.tools.write_shape import (  # noqa: E402,F401
-    INTERPRETER_WRITE_RE,
-    PURE_FILTER_WRITER_COMMANDS,
-    SHELL_WRITE_INDICATORS,
-    _INTERPRETER_ANY_WRITE_RE,
-    _INTERPRETER_LANE_EXCLUDED_INDICATORS,
-    _OPEN_CALL_WRITE_INDICATOR_RE,
-    _SAFE_STDIO_REDIRECT_TOKENS,
-    _shell_write_indicator_scan,
-    interpreter_write_shape,
-    non_interpreter_write_shape,
-    python_body_ast,
-    script_literal_write_targets_and_unknown,
-    segment_write_shape as _segment_write_shape,
-    shell_has_write_indicator,
-)
 
 LIGHT_SHELL_WRITER_COMMANDS = frozenset({
     "chmod", "chown", "cp", "gunzip", "gzip", "ln", "mkdir", "mv",
     "perl", "rm", "ruby", "sed", "sort", "tar", "touch", "truncate", "uniq", "unzip",
 })
 
-EMBEDDED_RELATIVE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:\.\.?/)+[^\s'\"\\),;\]]+")
 # ONE structural owner of "is this executable a script interpreter, and of which
 # family?" (XG-2R.2). The write fences used to match interpreter basenames by exact
 # set plus an ad-hoc `startswith("python")`, so the versioned basenames every other
 # family ships under — ruby3.2, php8.3, perl5.38, node18, the same class INFRA-1
 # fixed for python only — bypassed both guards. A versioned basename IS the
 # interpreter: recognition is by family stem + optional dotted version, not by
-# enumerating spellings. Both fence guards (light_shell_repo_mutation and the
-# registry runtime_data scan) and the protected-artifact interpreter check consume
-# THIS function; do not grow a second classifier next to it.
+# enumerating spellings. The write-target parsers below and the protected-artifact
+# interpreter check consume THIS function; do not grow a second classifier next to it.
 _INTERPRETER_FAMILY_STEMS: tuple[tuple[str, str], ...] = (
     # (basename stem, family) — longer stems before their prefixes ("nodejs" before
     # "node"). pypy executes python code, so it classifies as the python family.
@@ -110,10 +77,8 @@ def _light_writer_command(executable: str) -> bool:
     return (interpreter_family(executable) or executable) in LIGHT_SHELL_WRITER_COMMANDS
 
 
-# Where each family's inline code SITS — a locator, not a safety oracle. Containment
-# does not depend on this table being complete (see light_shell_repo_mutation: an
-# unknown flag makes the invocation unprovable, hence blocked); a missing entry costs
-# only the precision that lets a provable write outside the repo through.
+# Where each family's inline code SITS — a locator, not a safety oracle. A missing
+# entry costs only precision: that family's inline body is not read for write targets.
 # Entries verified by execution against the real interpreters (php's from the upstream
 # CLI manual); the spellings that do NOT execute their argument are deliberately
 # absent — `ruby -c`/`perl -c` are compile checks over a FILENAME, `ruby -E` is an
@@ -271,9 +236,8 @@ def _python_path_open_target(node: ast.AST, names: dict[str, str]) -> tuple[str 
 # "no write targets" conclusion worthless: the payload is computed at runtime
 # (exec/eval/compile/__import__) or handed to another process (os.system, popen,
 # subprocess, exec*/spawn*). This is a LANGUAGE-level list — what defeats the
-# parser — not another file-API vocabulary, and it replaces the same idea that was
-# already scattered through `_INTERPRETER_ANY_WRITE_RE`'s "opaque" branch. Seeing
-# any of these means UNKNOWN, which the callers treat as write-capable.
+# parser — not another file-API vocabulary. Seeing any of these means UNKNOWN;
+# the after-command output audit drops that flag and keeps only resolved targets.
 _PYTHON_OPAQUE_EXEC_NAMES = frozenset({"exec", "eval", "compile", "__import__"})
 _PYTHON_OPAQUE_EXEC_ATTRS = frozenset({
     "system", "popen", "Popen", "check_call", "check_output", "getoutput", "getstatusoutput",
@@ -283,13 +247,11 @@ _PYTHON_OPAQUE_EXEC_ATTRS = frozenset({
 })
 _PYTHON_OPAQUE_SUBPROCESS_ATTRS = frozenset({"run", "call"})
 
-# The rest of the module's ONE write vocabulary, in the form the AST walker needs.
-# `_INTERPRETER_ANY_WRITE_RE` above already enumerates these spellings as writes;
-# the walker used to model only `open`/`Path`/`os.remove`-family calls, so a
-# `shutil.copy` or `Path.touch` payload parsed cleanly, produced ZERO targets, and
-# both callers read that as PROOF the payload cannot write. Two write vocabularies
-# in one module meant the weaker one signed the proof (v6.89.0 panel A4). Anything
-# the regex calls a write is modelled here or is UNKNOWN — never silently absent.
+# The module's ONE write vocabulary, in the form the AST walker needs. The walker
+# used to model only `open`/`Path`/`os.remove`-family calls, so a `shutil.copy` or
+# `Path.touch` payload parsed cleanly, produced ZERO targets, and its callers read
+# that as PROOF the payload cannot write (v6.89.0 panel A4). A known write call is
+# modelled here or is UNKNOWN — never silently absent.
 #
 # The value is the index of the positional argument naming what gets WRITTEN, or
 # None where no argument does (a cwd-relative extract, a hardlink whose direction
@@ -585,211 +547,11 @@ def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool
     # A derivation that collapsed to a degenerate cwd-shape ('.'/'') was NOT
     # really grounded (e.g. .parent of a literal whose separators the resolver
     # could not read) — trusting it false-allowed a real runtime_data write on
-    # the windows CI full-test (v6.55.0). Degenerate ⇒ UNKNOWN: the caller falls
-    # back to the conservative full mention scan; benign relative writes mention
-    # no drive paths and still pass that scan untouched.
+    # the windows CI full-test (v6.55.0). Degenerate ⇒ UNKNOWN, never a claimed target.
     concrete = [t for t in resolved if str(t or "").strip() not in ("", ".", "./")]
     if len(concrete) != len(resolved):
         unknown = True
     return concrete, unknown
-
-# Same resolve(strict=False) containment semantics on all platforms (SSOT).
-from ouroboros.tool_access import path_is_relative_to as _path_inside
-
-
-def _expand_known_runtime_roots(text: str, drive: pathlib.Path, home: pathlib.Path) -> str:
-    """Expand the existing runtime/home spellings for inspection, never execution."""
-    return (text.replace("$OUROBOROS_DATA_DIR", str(drive))
-            .replace("${OUROBOROS_DATA_DIR}", str(drive))
-            .replace("%OUROBOROS_DATA_DIR%", str(drive))
-            .replace("$HOME", str(home)).replace("${HOME}", str(home))
-            .replace("%USERPROFILE%", str(home)).replace("~/", f"{home}/"))
-
-
-def shell_inspection_paths(
-    raw_cmd: Any, *, work_dir: pathlib.Path, drive_root: pathlib.Path | None = None,
-) -> List[pathlib.Path]:
-    """Resolve explicit shell operands/literals for every read-policy caller.
-
-    Sequential and wrapper cwd belong to each row; expansion only affects this
-    inspection view, never execution argv. Embedded Windows paths are harvested
-    before POSIX tokenization can eat their backslashes. Computed paths remain
-    a disclosed limit of argv inspection, not a reason to prohibit interpreters.
-    """
-    from ouroboros.shell_parse import sequential_effective_cwds
-
-    home = pathlib.Path.home()
-    drive = pathlib.Path(drive_root) if drive_root is not None else home
-    found: list[pathlib.Path] = []
-
-    def inspect(command: Any, cwd: pathlib.Path, depth: int = 0) -> None:
-        segments = shell_segment_rows(command)
-        rows = [(collect_leading_env(segment)[1], [], (), False) for segment, _, _ in segments]
-        cwd_rows = [([_expand_known_runtime_roots(str(token), drive, home) for token in argv], [], (), False)
-                    for argv, _, _, _ in rows]
-        cwds = sequential_effective_cwds(cwd_rows, cwd)
-        for (segment, _, heredocs), (argv, _, _, _), row_cwd in zip(segments, rows, cwds):
-            if not argv:
-                continue
-            wrapper_cwd = env_chdir_operand(segment)
-            if wrapper_cwd:
-                wrapper_cwd = _expand_known_runtime_roots(wrapper_cwd, drive, home)
-                row_cwd = (row_cwd / pathlib.Path(wrapper_cwd).expanduser()).resolve(strict=False)
-            head = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
-            nested = []
-            if head in POSIX_SHELL_HEADS and depth < _MAX_INLINE_RECURSION:
-                body = shell_command_string(argv)
-                nested = [body] if body else list(heredocs) if interpreter_reads_program_from_stdin(argv) else []
-                for body in nested:
-                    inspect(body, row_cwd, depth + 1)
-            bodies = nested or interpreter_inline_code(argv)
-            if not bodies and interpreter_reads_program_from_stdin(argv):
-                bodies = list(heredocs)
-            paths = [str(token) for token in argv[1:] if token not in bodies and not str(token).startswith("-")]
-            # Wrapper bodies have already been resolved in their own cwd.
-            for body in (() if nested else bodies):
-                tree = python_body_ast(body)
-                if tree is not None:
-                    paths.extend(node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str))
-                else:
-                    paths.extend(value for _quote, value in re.findall(r"(['\"])(.*?)\1", body))
-            expanded = _expand_known_runtime_roots(" ".join(str(token) for token in argv if token not in nested), drive, home)
-            paths.extend(embedded_absolute_path_tokens(expanded))
-            paths.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(expanded))
-            if isinstance(command, str):
-                paths.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(command))
-            for text in paths:
-                try:
-                    path = pathlib.Path(_expand_known_runtime_roots(text, drive, home)).expanduser()
-                    target = (row_cwd / path).resolve(strict=False)
-                    plausible = "/" in text or "\\" in text or bool(path.suffix) or text.startswith(".") or target.exists()
-                except (OSError, ValueError, RuntimeError):
-                    continue
-                if plausible and target not in found:
-                    found.append(target)
-
-    inspect(raw_cmd, pathlib.Path(work_dir).resolve(strict=False))
-    return found
-
-
-def runtime_data_write_targets(
-    raw_cmd: Any,
-    *,
-    drive_root: pathlib.Path,
-    work_dir: pathlib.Path,
-    allowed_roots: List[pathlib.Path],
-) -> List[str]:
-    """Find explicit runtime-data mentions through the shared inspection resolver."""
-    drive = pathlib.Path(drive_root).resolve(strict=False)
-    allowed = [pathlib.Path(root).resolve(strict=False) for root in allowed_roots]
-    return [str(path) for path in shell_inspection_paths(
-        raw_cmd, drive_root=drive, work_dir=work_dir,
-    ) if _path_inside(path, drive) and not any(_path_inside(path, root) for root in allowed)]
-
-
-def _secret_runtime_data_mentions(
-    raw_cmd: Any,
-    *,
-    drive_root: pathlib.Path,
-    work_dir: pathlib.Path,
-    allowed_roots: List[pathlib.Path] | None = None,
-) -> List[str]:
-    """Inspect the retained runtime-control bindings for command policy.
-
-    Task roots are ordinary content, not a credential store inferred from a
-    filename. An alias to actual owner state still resolves to that state.
-    """
-    from ouroboros.tools.core_secret_paths import is_runtime_secret_target
-
-    drive = pathlib.Path(drive_root).resolve(strict=False)
-    return [text for text in runtime_data_write_targets(
-        raw_cmd, drive_root=drive, work_dir=work_dir,
-        allowed_roots=list(allowed_roots or []),
-    ) if is_runtime_secret_target(pathlib.Path(text), drive, data_root=drive)]
-
-
-def _project_store_runtime_data_mentions(
-    raw_cmd: Any,
-    *,
-    drive_root: pathlib.Path,
-    work_dir: pathlib.Path,
-) -> List[str]:
-    """Mentioned drive paths that target the per-project facts store (``projects/<id>/``).
-
-    Parity with ``read_file(root=runtime_data)`` / ``_data_read``, which deny the
-    per-project store to generic data tools unconditionally (the store is reachable
-    ONLY via the project-scoped tools — no cross-project peeking). Without
-    this, the light-mode read relaxation let an interpreter read another project's
-    facts through a plain ``open()`` while the file API blocked it (v6.55.0)."""
-    try:
-        from ouroboros.project_facts import project_store_access_block
-    except Exception:
-        return []
-    mentions = runtime_data_write_targets(
-        raw_cmd, drive_root=drive_root, work_dir=work_dir, allowed_roots=[],
-    )
-    try:
-        drive = pathlib.Path(drive_root).resolve(strict=False)
-    except Exception:
-        return []
-    hits: List[str] = []
-    for text in mentions:
-        try:
-            rel = str(pathlib.Path(text).resolve(strict=False).relative_to(drive)).replace("\\", "/")
-        except (OSError, ValueError):
-            continue
-        if project_store_access_block(rel):
-            hits.append(text)
-    return hits
-
-
-def runtime_data_guard_targets(
-    raw_cmd: Any,
-    *,
-    writeish: bool,
-    drive_root: pathlib.Path,
-    work_dir: pathlib.Path,
-    allowed_roots: List[pathlib.Path],
-    target_rows: List[tuple] | None = None,
-) -> List[str]:
-    """Apply runtime-data policy to the same per-row effects as the workspace guard.
-
-    Secret/control and project-store reads retain their separate boundaries.
-    Known writes are checked by their targets, so reading a log while writing
-    task scratch is legitimate. Unknown effects keep the existing conservative
-    mention fallback for their own row; prose is never reclassified by a second
-    substring vocabulary. The historical ``writeish`` hint cannot override the
-    shared target facts in either direction.
-    """
-    from ouroboros.shell_parse import sequential_effective_cwds
-    from ouroboros.tools.write_shape import _workspace_write_candidates
-
-    secret_hits = _secret_runtime_data_mentions(
-        raw_cmd, drive_root=drive_root, work_dir=work_dir, allowed_roots=allowed_roots,
-    )
-    project_hits = _project_store_runtime_data_mentions(
-        raw_cmd, drive_root=drive_root, work_dir=work_dir,
-    )
-    blocked = list(dict.fromkeys([*secret_hits, *project_hits]))
-    rows = target_rows if target_rows is not None else writer_target_rows(raw_cmd)
-    cwds = sequential_effective_cwds(rows, pathlib.Path(work_dir))
-    drive = pathlib.Path(drive_root).resolve(strict=False)
-    allowed = [pathlib.Path(root).resolve(strict=False) for root in allowed_roots]
-    home = pathlib.Path.home().resolve(strict=False)
-    for candidate, is_write, row_index in _workspace_write_candidates(rows, [], raw_cmd):
-        if not is_write or candidate == "/dev/null":
-            continue
-        cwd = cwds[row_index] if 0 <= row_index < len(cwds) else pathlib.Path(work_dir)
-        try:
-            path = pathlib.Path(_expand_known_runtime_roots(candidate, drive, home)).expanduser()
-            path = (cwd / path).resolve(strict=False)
-        except (OSError, ValueError, RuntimeError):
-            continue
-        if _path_inside(path, drive) and not any(_path_inside(path, root) for root in allowed):
-            rendered = str(path)
-            if rendered not in blocked:
-                blocked.append(rendered)
-    return blocked
 
 
 def process_shell_guard_args(name: str, args: Dict[str, Any], *, ctx: Any = None, runtime_mode: str = "") -> Dict[str, Any]:
@@ -829,91 +591,6 @@ def parse_porcelain_paths(output: str) -> list[str]:
     return sorted({p for p in paths if p})
 
 
-# Absolute in WINDOWS grammar: `C:\…`/`C:/…`, or a UNC share with both segments.
-# Deliberately NOT `shell_parse.is_absolute_path_text`, which also admits a leading
-# `/`: on Windows a drive-less rooted path means "this drive", which is exactly what
-# joining it onto the work dir already answers correctly.
-_WINDOWS_ABSOLUTE_TOKEN_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])")
-
-
-def _windows_shaped_path_inside(root: pathlib.Path, path_text: str) -> bool:
-    """Containment for a Windows-spelled token, judged with WINDOWS path grammar.
-
-    POSIX ``pathlib`` does not read ``C:\\repo\\x`` as absolute, so the generic branch
-    below JOINED it onto the work dir — and since the default shell cwd IS the system
-    repository, every Windows-shaped path merely MENTIONED in an inline payload read as
-    repo-internal and the light-mode fence refused it. A drive/UNC token is absolute
-    where it comes from, so it is compared as one against the root read the same way:
-    on POSIX a foreign drive is simply not under a POSIX root, and on Windows the token
-    IS absolute natively, so the resolving branch below answers it instead of this one.
-
-    DISCLOSED residual: a backslash is a legal character in a POSIX filename, so a
-    literal `C:\\x` created relative to the repo cwd is no longer counted as a repo
-    mention here. Nothing in the repository is named that, and this fence is a
-    pre-execution mention scan, not the last control — the cost of the alternative was
-    refusing every payload that merely SPELLS a Windows path.
-    """
-    try:
-        return pathlib.PureWindowsPath(ntpath.normpath(path_text)).is_relative_to(
-            pathlib.PureWindowsPath(ntpath.normpath(str(root)))
-        )
-    except (OSError, ValueError):
-        return False
-
-
-def _candidate_path_inside(root: pathlib.Path, work_dir: pathlib.Path, path_text: str) -> bool:
-    text = str(path_text or "").strip()
-    if not text or text in {"-", "--"}:
-        return False
-    if text.startswith(("-", "$")) or text in {"|", "&&", "||", ";", ">", ">>"}:
-        return False
-    if _WINDOWS_ABSOLUTE_TOKEN_RE.match(text) and not pathlib.Path(text).is_absolute():
-        # The host's own grammar cannot read this token, so reading it with the host's
-        # grammar anyway (joining a foreign absolute path onto the work dir) is the one
-        # answer guaranteed to be wrong. Judge it where it comes from.
-        return _windows_shaped_path_inside(root, text)
-    try:
-        root_resolved = pathlib.Path(root).resolve()
-        base = pathlib.Path(text)
-        if not base.is_absolute():
-            base = work_dir / base
-        candidate = base.expanduser().resolve(strict=False)
-        candidate.relative_to(root_resolved)
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def repo_target_mentioned(
-    argv: List[str],
-    *,
-    repo_dir: pathlib.Path,
-    cwd: str = "",
-    work_dir: pathlib.Path | None = None,
-) -> bool:
-    """Whether any argv path operand lands inside ``repo_dir``.
-
-    v6.74.0 (D1): callers pass the RESOLVED ``work_dir`` from the shared
-    ``resolve_shell_cwd`` resolver. The legacy ``cwd`` fallback joins the raw
-    string onto ``repo_dir`` — which turned a resource-root LABEL such as
-    ``cwd="task_drive"`` into a repo-internal path and false-blocked writes to
-    the task's own drive — and is kept only for callers with a genuinely
-    repo-relative cwd."""
-    if work_dir is not None:
-        resolved_work_dir = pathlib.Path(work_dir)
-    else:
-        resolved_work_dir = pathlib.Path(repo_dir)
-        if cwd and str(cwd).strip() not in ("", ".", "./"):
-            try:
-                resolved_work_dir = (pathlib.Path(repo_dir) / str(cwd)).resolve(strict=False)
-            except OSError:
-                pass
-    return any(
-        _candidate_path_inside(pathlib.Path(repo_dir), resolved_work_dir, token)
-        for token in argv[1:]
-    )
-
-
 # A sed SCRIPT that can write or execute: the `w FILE`/`W FILE` command shape
 # (addressed `1w FILE` included — digits stay out of the lookbehind), the GNU
 # `e`/`e cmd` execute command, or a substitute's trailing flag run carrying w/e
@@ -925,7 +602,6 @@ _SED_SCRIPT_WRITE_RE = re.compile(
 )
 # A wrapper body is a command line; `cd` can move later relative writes.
 _DIRECTORY_CHANGE_COMMANDS = frozenset({"cd", "pushd"})
-_MAX_INLINE_RECURSION = 3
 
 
 def direct_shell_rows(raw_cmd: Any) -> List[tuple]:
@@ -975,92 +651,11 @@ def direct_utility_target_rows(raw_cmd: Any, *, certain_only: bool = False) -> L
             for argv, _reads, writes, _shell in direct_shell_rows(raw_cmd)]
 
 
-def writer_target_rows(raw_cmd: Any, _depth: int = 0) -> List[tuple]:
-    """Per-SEGMENT write facts: ``(segment_argv, targets, inline_code, unprovable)``.
-    Shell bodies recurse only to ``_MAX_INLINE_RECURSION``. Unknown body effects,
-    replacement templates, and write shapes without targets are unprovable."""
-    rows: List[tuple] = []
-    structured_rows = shell_segment_rows(raw_cmd)
-    for row_index, (segment, leading_operator, heredoc_bodies) in enumerate(structured_rows):
-        wrapper_cwd = env_chdir_operand(segment)
-        _assignments, argv = collect_leading_env(segment)
-        if not argv:
-            continue
-        executable = pathlib.PurePath(str(argv[0])).name.lower().removesuffix(".exe")
-        program_argv, _stdin_redirects = split_redirections(argv)
-        if _depth < _MAX_INLINE_RECURSION and executable in POSIX_SHELL_HEADS:
-            shell_body = shell_command_string(argv)
-            stdin_bodies = heredoc_bodies if not shell_body and interpreter_reads_program_from_stdin(program_argv) else ()
-            nested = writer_target_rows(shell_body, _depth + 1)
-            for body in stdin_bodies:
-                nested.extend(writer_target_rows(body, _depth + 1))
-            if nested:
-                if wrapper_cwd and any(row[1] or row[3] for row in nested):
-                    rows.append((["cd", wrapper_cwd], [wrapper_cwd], (), False))
-                rows.extend(nested)
-                continue
-            if stdin_bodies:
-                rows.append((argv, [], tuple(stdin_bodies), True))
-                continue
-            if heredoc_bodies and not shell_body:
-                rows.append((program_argv, [], tuple(heredoc_bodies), True))
-                continue
-        family = interpreter_family(executable)
-        inline_code = tuple(interpreter_inline_code([str(token) for token in argv]))
-        stdin_program = bool(family) and not inline_code and interpreter_reads_program_from_stdin(program_argv)
-        unattached_heredoc = bool(family and heredoc_bodies and not inline_code and not stdin_program)
-        if stdin_program or unattached_heredoc:
-            inline_code = (*inline_code, *heredoc_bodies)
-        # A code body is program text, not a target. Python targets + UNKNOWN
-        # come from `_python_write_targets_and_unknown` only.
-        targets = [
-            t for t in _writer_target_tokens_single(argv, include_inline=False)
-            if t not in inline_code
-        ]
-        body_unprovable = unattached_heredoc
-        for body in inline_code:
-            if family == "python":
-                body_targets, body_unknown = _python_write_targets_and_unknown(body)
-                targets.extend(body_targets)
-                body_unprovable = body_unprovable or body_unknown
-            else:
-                body_targets, body_unknown = script_literal_write_targets_and_unknown(family, body)
-                targets.extend(body_targets)
-                body_unprovable = body_unprovable or body_unknown
-        targets, placeholder_unprovable = replacement_target_uncertain(
-            argv, targets, write_shaped=_segment_write_shape(argv),
-        )
-        targets = list(dict.fromkeys(t for t in targets if str(t or "").strip()))
-        if executable in _DIRECTORY_CHANGE_COMMANDS:
-            targets.extend(str(t) for t in argv[1:] if not str(t).startswith("-"))
-        segment_argv, _redirect_targets = split_redirections(argv)
-        # `-` means the unobserved program arrives on stdin.
-        missing_stdin_program = bool(family) and not inline_code and any(
-            str(token) == "-" for token in argv[1:])
-        # A write-shaped Perl body remains uncertain even beside file operands.
-        opaque_perl_body = (
-            family == "perl" and bool(inline_code) and interpreter_write_shape(argv)
-        )
-        unprovable = (
-            missing_stdin_program or body_unprovable or opaque_perl_body or placeholder_unprovable
-            or (not targets and _segment_write_shape(segment_argv))
-        )
-        row_argv = segment_argv
-        if placeholder_unprovable and leading_operator in {"|", "|&"} and row_index:
-            row_argv = [*segment_argv, *structured_rows[row_index - 1][0][1:]]
-        if wrapper_cwd and (targets or unprovable):
-            rows.append((["cd", wrapper_cwd], [wrapper_cwd], (), False))
-        if not row_argv and not targets and not inline_code and not unprovable:
-            continue
-        rows.append((row_argv, targets, inline_code, unprovable))
-    return rows
-
-
 def writer_target_tokens(argv: List[str]) -> List[str]:
-    """Write TARGETS of a (possibly compound) command line, flattened.
-
-    Unlike the row view, the light/protected lanes keep unfiltered code-body
-    signals (XG-7B3.1); only the workspace path lane subtracts them."""
+    """Write TARGETS of a (possibly compound) command line, flattened; an inline
+    code body contributes the targets its parser finds, and a ``perl`` or ``ruby``
+    body is also returned whole. Its one runtime caller is the undeclared-output
+    audit (``shell_audit``)."""
     targets: List[str] = []
     for segment in shell_segments(argv):
         _assignments, segment_argv = collect_leading_env(segment)
@@ -1194,7 +789,7 @@ def directory_destination_pairs(argv: List[str]) -> List[tuple[str, str, str]]:
 
 
 def _writer_target_tokens_single(
-    argv: List[str], *, include_inline: bool = True,
+    argv: List[str], *,
     direct_only: bool = False, parse_redirects: bool = True, certain_only: bool = False,
 ) -> List[str]:
     if not argv:
@@ -1333,7 +928,7 @@ def _writer_target_tokens_single(
     # Inline code, through the ONE per-family flag table: `-c` alone found python
     # bodies and left `node -e` / `ruby -e` / `php -r` / `perl -e` unparsed, so
     # their literal write targets were invisible here (XG-7B3.1).
-    for inline_code in interpreter_inline_code(argv) if include_inline and not direct_only else ():
+    for inline_code in interpreter_inline_code(argv) if not direct_only else ():
         if interpreter_family(cmd) == "python":
             # ONE python body scanner: `_python_write_targets_and_unknown` already
             # models shutil/os/pathlib writers and reports an UNPROVABLE body. The
@@ -1363,234 +958,3 @@ def _writer_target_tokens_single(
     targets.extend(redirect_targets)
 
     return list(dict.fromkeys(target for target in targets if str(target or "").strip()))
-
-
-def shell_writer_targets_protected(raw_cmd: Any) -> bool:
-    argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
-    if not argv:
-        return False
-    executable = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
-    if executable in POSIX_SHELL_HEADS:
-        inline = shell_command_string(argv)
-        return bool(inline and shell_writer_targets_protected(inline))
-    if not _light_writer_command(executable):
-        return False
-    target_text = " ".join(writer_target_tokens(argv)).replace("\\", "/").lower()
-    return bool(target_text and any(cf in target_text for cf in PROTECTED_RUNTIME_PATHS_LOWER))
-
-
-def _workspace_executor_state_target(path: pathlib.Path, drive_root: pathlib.Path) -> bool:
-    try:
-        rel_parts = pathlib.Path(path).resolve(strict=False).relative_to(
-            pathlib.Path(drive_root).resolve(strict=False)
-        ).parts
-    except (OSError, ValueError):
-        return False
-    lowered = [str(part).casefold() for part in rel_parts]
-    return "state" in lowered and "workspace_executor_processes" in lowered
-
-
-def workspace_executor_state_write_block(
-    raw_cmd: Any,
-    *,
-    drive_root: pathlib.Path,
-    cwd: str = "",
-    default_cwd: pathlib.Path | None = None,
-) -> str:
-    try:
-        drive = pathlib.Path(drive_root).resolve(strict=False)
-        work_dir = pathlib.Path(cwd).expanduser() if str(cwd or "").strip() else pathlib.Path(default_cwd or ".")
-        if not work_dir.is_absolute():
-            work_dir = pathlib.Path(default_cwd or ".") / work_dir
-        work_dir = work_dir.resolve(strict=False)
-    except Exception:
-        return ""
-    targets = [
-        target for target in runtime_data_write_targets(raw_cmd, drive_root=drive, work_dir=work_dir, allowed_roots=[])
-        if _workspace_executor_state_target(pathlib.Path(target), drive)
-    ]
-    if not targets:
-        return ""
-    return (
-        "⚠️ WORKSPACE_EXECUTOR_STATE_WRITE_BLOCKED: workspace executor process records "
-        "are owner/runtime control-plane state. Use process/service lifecycle tools "
-        "instead of shell-writing state/workspace_executor_processes. Paths: "
-        + ", ".join(targets[:5])
-    )
-
-
-# Characters that make an argv token CODE rather than a path, a module name or a
-# flag value. Structural and family-independent: it is what lets the fence tell
-# `python -m pytest -q` / `node build.js` (no inline code — the content lives in a
-# file, and this fence is not a script-content scanner) from an inline payload,
-# WITHOUT depending on the inline-flag table being complete. An unknown flag
-# carrying code is still recognized here, which is the case the inversion exists for.
-_INLINE_CODE_SHAPE_RE = re.compile(r"""[(){};$`'"]|\[\s*['"]""")
-
-
-def _carries_inline_code(argv: List[str], bodies: List[str]) -> bool:
-    """Whether this interpreter invocation carries code IN ITS ARGV.
-
-    The SHAPE decides, for located bodies and for every other token alike — which is
-    what separates a real payload from a FILENAME sitting behind the same flag
-    (`ruby -c script.rb` compile-checks a file; the synthetic `[interp, "-c", body]`
-    that `process_shell_guard_args` builds for run_script carries code). Membership in
-    the flag table is not enough on its own, and not required either: an unknown flag
-    carrying code is still recognized here, which is the case the inversion exists for.
-    """
-    return any(
-        _INLINE_CODE_SHAPE_RE.search(str(token or ""))
-        for token in (*bodies, *argv[1:])
-    )
-
-
-def _dynamic_write_could_hit_repo(
-    inline: str,
-    *,
-    repo_dir: pathlib.Path,
-    cwd: str = "",
-    work_dir: pathlib.Path | None = None,
-) -> bool:
-    """Whether a write whose TARGET the scan could not resolve might land in the repo.
-
-    Two ways it can: the code names a repo path somewhere in its text (the classic
-    ``repo = Path('<repo>'); (repo / name).write_text(...)`` shape), or the resolved
-    cwd IS inside the repo, where any unresolved RELATIVE path lands.
-
-    Without this, extending inline inspection to `run_command` (XG-7B3.1) refused an
-    ordinary user_files deliverable whose filename the code computes — a real
-    owner workflow, blocked over a write that provably cannot reach the repo.
-    Fail-closed is right where the danger exists, not everywhere.
-    """
-    resolved_work_dir = pathlib.Path(work_dir) if work_dir is not None else None
-    if resolved_work_dir is not None:
-        try:
-            resolved_work_dir.resolve(strict=False).relative_to(pathlib.Path(repo_dir).resolve(strict=False))
-            return True
-        except (OSError, ValueError):
-            pass
-    text = str(inline or "")
-    mentioned = [
-        *embedded_absolute_path_tokens(text),
-        *EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(text),
-        *EMBEDDED_RELATIVE_PATH_RE.findall(text),
-    ]
-    return bool(mentioned) and repo_target_mentioned(
-        ["", *mentioned], repo_dir=repo_dir, cwd=cwd, work_dir=work_dir,
-    )
-
-
-def light_shell_repo_mutation(
-    raw_cmd: Any,
-    *,
-    repo_dir: pathlib.Path,
-    cwd: str = "",
-    work_dir: pathlib.Path | None = None,
-    detect_interpreter_inline: bool = True,
-) -> bool:
-    """Detect simple shell writer commands that target the repo in light mode.
-
-    ``work_dir`` is the RESOLVED shell cwd (v6.74.0 D1) — pass it from
-    ``resolve_shell_cwd`` so a resource-root label cwd is never misread as a
-    repo-relative path.
-
-    ``detect_interpreter_inline`` DEFAULTS ON (XG-7B3.1). It was opt-in and only
-    `run_script` opted in, so an interpreter's inline code reached the repo
-    unexamined through `run_command`: `node18 -e "...writeFileSync('ordinary.py')"`
-    in light mode mutated the file and only the POST-execution tripwire noticed,
-    which reports and does not roll back. A guard whose reason to fire is what the
-    interpreter executes cannot depend on which tool name invoked it, so the
-    default is now the safe one and a caller has to ask for less."""
-    argv = shell_argv(raw_cmd)
-    if not argv:
-        return False
-    cmd_lower = " ".join(argv).lower()
-
-    unwrapped = unwrap_env_argv(argv)
-    if unwrapped != argv:
-        return light_shell_repo_mutation(
-            unwrapped,
-            repo_dir=repo_dir,
-            cwd=cwd,
-            work_dir=work_dir,
-            detect_interpreter_inline=detect_interpreter_inline,
-        )
-    argv = strip_leading_env_assignments(argv)
-    if not argv:
-        return False
-    executable = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
-
-    if executable in POSIX_SHELL_HEADS:
-        inline = shell_command_string(argv)
-        if inline:
-            return light_shell_repo_mutation(
-                inline,
-                repo_dir=repo_dir,
-                cwd=cwd,
-                work_dir=work_dir,
-                detect_interpreter_inline=detect_interpreter_inline,
-            )
-
-    if _light_writer_command(executable) and repo_target_mentioned([argv[0], *writer_target_tokens(argv)], repo_dir=repo_dir, cwd=cwd, work_dir=work_dir):
-        return True
-
-    # Versioned interpreter basenames classify through the ONE structural family
-    # classifier (XG-2R.2), and inline code is judged by PROOF, not by vocabulary
-    # (XG-7B3.1 r2): the fence asks "can I prove this cannot write into the repo?"
-    # and blocks when it cannot. Chasing write spellings was whack-a-mole by
-    # construction — no token list can prove the ABSENCE of a write in arbitrary
-    # code, and two holes outlived that enumeration. The inversion closes ONE of them:
-    # `python -c "exec(open(...).read())"` is unprovable and therefore refused. Only
-    # python can answer the proof, by parsing; that is what keeps the v6.54.3 read
-    # allowance (whose FP evidence was python scripts opening their own staged
-    # attachment). Everything else — other families, unknown flags, unparseable or
-    # computed payloads — is WRITE-CAPABLE.
-    # Scan side only: advanced/pro is untouched. A SCRIPT or module invocation
-    # (`python -m pytest`) hands nothing inline and is not judged here.
-    #
-    # The COST, stated at full size rather than at its most flattering:
-    #  * A non-python inline invocation that names the repo by an ABSOLUTE path, or by
-    #    a `./`- or `../`-prefixed relative one, is refused even for reading. It is not
-    #    refused otherwise — the resolved-cwd half of `_dynamic_write_could_hit_repo`
-    #    stays python-only, because the default shell cwd IS the system repository and
-    #    applying it to every family refused ordinary `node -e`/`ruby -e` work that
-    #    provably writes elsewhere or only reads.
-    #  * A PLAIN relative spelling is INVISIBLE to this branch. The mention scan is the
-    #    same three-source harvest `runtime_data_write_targets` performs — POSIX absolute,
-    #    Windows absolute, `./`/`../` relative — and none of those regexes anchors on a
-    #    bare separator, so `node -e "…('ouroboros/safety.py')"` names the repo
-    #    to a reader but not to the scan and RUNS — for a write as much as for a read.
-    #    Disclosed, not closed: widening the regex would be a strengthening.
-    #  * The OTHER hole named above, `node -e "eval(process.env.C)"`, stays OPEN — a
-    #    non-python payload the parser cannot read, naming no repo path, runs even
-    #    with the cwd in the repo. `test_unparseable_interpreter_code_is_treated_as_
-    #    write_capable` pins it as `is False` so it cannot be re-tightened by accident.
-    if detect_interpreter_inline and interpreter_family(executable):
-        inline = shell_command_string(argv) or " ".join(argv[1:])
-        bodies = interpreter_inline_code(argv)
-        if _carries_inline_code(argv, bodies):
-            if interpreter_family(executable) == "python":
-                targets, unknown = _python_write_targets_and_unknown(
-                    "\n".join(bodies) if bodies else inline
-                )
-                if not unknown:
-                    # Fully understood: decide on the targets it really has (none = a
-                    # proven read, which stays allowed).
-                    return bool(targets) and repo_target_mentioned(
-                        [argv[0], *targets], repo_dir=repo_dir, cwd=cwd, work_dir=work_dir,
-                    )
-                return _dynamic_write_could_hit_repo(
-                    inline, repo_dir=repo_dir, cwd=cwd, work_dir=work_dir,
-                )
-            mentioned = [
-                *embedded_absolute_path_tokens(inline),
-                *EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(inline),
-                *EMBEDDED_RELATIVE_PATH_RE.findall(inline),
-            ]
-            return bool(mentioned) and repo_target_mentioned(
-                ["", *mentioned], repo_dir=repo_dir, cwd=cwd, work_dir=work_dir,
-            )
-
-    if any(ind in cmd_lower for ind in (" > ", " >> ", " | tee ")):
-        return repo_target_mentioned(argv, repo_dir=repo_dir, cwd=cwd, work_dir=work_dir)
-    return False

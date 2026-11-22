@@ -12,7 +12,6 @@ from ouroboros.tool_access import build_resolved_resource_binding, resource_root
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 
-
 @pytest.mark.parametrize('location,relative', [
     ('repo', 'config/.env'),
     ('repo', 'deploy/credentials.json'),
@@ -239,21 +238,6 @@ def test_readonly_child_can_review_auth_sources_and_scoped_knowledge(environment
     assert 'LOCAL_READONLY_SUBAGENT_BLOCKED' in reg.execute('write_file', {'path': 'x', 'content': 'x'})
 
 
-def test_ssh_subject_separates_remote_payload_and_local_channels():
-    from ouroboros.shell_parse import local_shell_subject
-    from ouroboros.tools.shell_guards import writer_target_rows
-    raw = ['ssh', '-p', '2222', '-E', '/tmp/ssh.log', 'host', 'sudo -n tee /etc/remote.conf']
-    local = local_shell_subject(raw)
-    assert '/etc/remote.conf' not in repr(local)
-    assert '/tmp/ssh.log' in [target for _argv, targets, _body, _unknown in writer_target_rows(local) for target in targets]
-    wrapped = ['sh', '-c', "ssh host 'cat /remote/source' < local.in > local.out"]
-    local = local_shell_subject(wrapped)
-    assert '/remote/source' not in repr(local)
-    assert 'local.in' in local
-    assert 'local.out' in [target for _argv, targets, _body, _unknown in writer_target_rows(local) for target in targets]
-    assert raw[-1] == 'sudo -n tee /etc/remote.conf'
-
-
 @pytest.mark.parametrize(("control", "remote"), [('elevation', False), ('owner_key', True)])
 def test_ssh_keeps_full_command_visible_to_supervisor_and_handler(environment, monkeypatch, remote, control):
     reg, ctx, home, work, _data = environment
@@ -422,25 +406,6 @@ def test_child_inline_source_read_and_bare_word_execute_without_argv_rewrite(env
     result = reg.execute_result('run_command', {'cmd': command, 'cwd': str(work)})
     assert 'SOURCE_READ_OK' in result.text and 'token' in result.text
     assert result.status != 'blocked'
-
-
-@pytest.mark.parametrize('spelling', [
-    '$OUROBOROS_DATA_DIR', '$HOME/Ouroboros/data', '~/Ouroboros/data',
-])
-def test_known_root_expansion_applies_to_write_targets_only(tmp_path, monkeypatch, spelling):
-    from ouroboros.tools.shell_guards import runtime_data_guard_targets
-
-    home = tmp_path / 'home'
-    data = home / 'Ouroboros' / 'data'
-    scratch = data / 'task_drives' / 'current'
-    scratch.mkdir(parents=True)
-    monkeypatch.setattr(pathlib.Path, 'home', lambda: home)
-    def targets(body):
-        return runtime_data_guard_targets(['sh', '-c', body], writeish=True,
-            drive_root=data, work_dir=scratch, allowed_roots=[scratch])
-    log = data / 'logs' / 'events.jsonl'
-    assert str(log) in targets(f'printf changed > "{spelling}/logs/events.jsonl"')
-    assert targets(f'cat "{spelling}/logs/events.jsonl" > "{spelling}/task_drives/current/copy.txt"') == []
 
 
 @pytest.mark.parametrize('command', [

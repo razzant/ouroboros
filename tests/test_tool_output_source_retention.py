@@ -887,17 +887,18 @@ def test_an_argument_refusal_from_the_real_entry_is_a_stable_code_and_keeps_the_
     no fabricated call; the same real registry refuses the same argument the same way."""
     from ouroboros.tools.process_facts import check_output_views
 
-    registry._ctx.task_contract = {"capability_ceiling": _ceiling(bindings=(("end_line", 5),))}
+    # ``tail_lines`` is no spelling ``read_file`` knows (``end_line`` was the example until the entry began to read it).
+    registry._ctx.task_contract = {"capability_ceiling": _ceiling(bindings=(("tail_lines", 5),))}
     _summary, reply, retention = check_output_views(registry._ctx, "a" * 30_000 + "\n" + TAIL_LINE)
     assert retention["output_source_call_unavailable"] == "arg_refused"
-    assert "unsupported argument" in reply and "end_line" in reply  # the real entry's own refusal, not a stub's text
+    assert "unsupported argument" in reply and "tail_lines" in reply  # the real entry's own refusal, not a stub's text
     assert "read_file(" not in reply and retention["output_source"]["path"] in reply  # no fabricated call; the source stands
     stored = artifacts.read_actor_source_bytes(registry._ctx.drive_root, registry._ctx.task_id,
                                                {**retention["output_source"], "kind": "task_source"})
     assert hashlib.sha256(stored).hexdigest() == retention["output_source"]["sha256"]  # and it is genuinely readable
     refused = registry.execute("read_file", {"root": "artifact_store", "path": retention["output_source"]["path"],
-                                             "start_line": 1, "end_line": 5})
-    assert "TOOL_ARG_ERROR" in refused and "end_line" in refused  # what the offer declined is exactly what dispatch declines
+                                             "start_line": 1, "tail_lines": 5})
+    assert "TOOL_ARG_ERROR" in refused and "tail_lines" in refused  # what the offer declined is exactly what dispatch declines
 
 
 def test_a_missing_tool_record_stops_the_consultation_rather_than_bypassing_it(registry, monkeypatch):
