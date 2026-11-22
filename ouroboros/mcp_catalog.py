@@ -11,7 +11,8 @@ Beside each envelope a small call record (``state/mcp/calls/server-<id>.json``) 
 lock; the envelope stays the server's alone (only listings publish it), so a call never
 rewrites the listing every process adopts. A failed listing keeps the start of its open
 failing series (``listing_failing_since``) and a failed call its own (``latest_call.since``)
-on repeats; a record without one has an unknown start.
+on repeats; a record without one has an unknown start. Whether the server answered is seen
+at the session boundary (``answering_session``), before the SDK checks what it answered.
 """
 from __future__ import annotations
 
@@ -140,6 +141,51 @@ def note_call(cfg: Any, *, ok: bool, code: str = "", method: str = "") -> None:
         log.debug("MCP call outcome mark failed for %s", getattr(cfg, "id", "?"), exc_info=True)
 
 
+def answering_session(base: Any) -> Any:
+    """``base`` (the SDK's ``ClientSession``) telling the failure that follows a ``tools/call`` answer so: the
+    server's own JSON-RPC error matched to the request, and a result that then fails the declared output schema,
+    raise with ``mcp_server_answered``. The SDK's stand-ins for no answer (a closed connection, a request timeout)
+    do not. Every session of a call, a task session's too, is built from this class."""
+    if base is None:
+        return None
+
+    def is_call(request: Any) -> bool:
+        return getattr(getattr(request, "root", request), "method", None) == "tools/call"
+
+    class AnsweringSession(base):
+        async def send_request(self, request: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                result = await super().send_request(request, *args, **kwargs)
+            except BaseException as exc:
+                if is_call(request) and _server_error_answer(exc):
+                    exc.mcp_server_answered = True
+                raise
+            if is_call(request):
+                self.mcp_call_answered = True
+            return result
+
+        async def call_tool(self, *args: Any, **kwargs: Any) -> Any:
+            self.mcp_call_answered = False
+            try:
+                return await super().call_tool(*args, **kwargs)
+            except BaseException as exc:
+                if self.mcp_call_answered:  # the answer arrived; the SDK's own check of it failed
+                    exc.mcp_server_answered = True
+                raise
+
+    return AnsweringSession
+
+
+def _server_error_answer(exc: BaseException) -> bool:
+    """The server's own JSON-RPC error, not the SDK's stand-in for a closed connection or a timed-out request."""
+    import httpx
+    from mcp.shared.exceptions import McpError
+    from mcp.types import CONNECTION_CLOSED
+
+    return isinstance(exc, McpError) and getattr(exc.error, "code", None) not in (
+        CONNECTION_CLOSED, httpx.codes.REQUEST_TIMEOUT)
+
+
 def _leaves(exc: BaseException) -> list:
     """``exc`` and every exception its groups carry (the SDK's task groups wrap what names a failure)."""
     from ouroboros.mcp_schema import _ExceptionGroup
@@ -156,9 +202,10 @@ def _leaves(exc: BaseException) -> list:
 
 
 def failure_mark(exc: BaseException) -> tuple[bool, str] | None:
-    """What a failed call says of its server: None for a local refusal (pause, store, model wait, accounting, a
-    task session's own refusal) or an interruption anywhere in it (nothing about the server), else ``(False,
-    code)``: ``MCP_AUTH_REQUIRED``, ``MCP_TIMEOUT`` or ``MCP_ERROR`` (a transport failure before any answer)."""
+    """What a failed call says of its server: ``(True, "")`` when its answer arrived first (``mcp_server_answered``:
+    the caller still gets the error), None for a local refusal (pause, store, model wait, accounting, a task
+    session's own refusal) or an interruption anywhere in it (nothing about the server), else ``(False, code)``:
+    ``MCP_AUTH_REQUIRED``, ``MCP_TIMEOUT`` or ``MCP_ERROR`` (a transport failure before any answer)."""
     import asyncio
 
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
@@ -170,6 +217,8 @@ def failure_mark(exc: BaseException) -> tuple[bool, str] | None:
     from ouroboros.usage_accounting import UsageAccountingError
 
     leaves = _leaves(exc)
+    if any(getattr(error, "mcp_server_answered", False) for error in leaves):
+        return True, ""
     local = (PhysicalDispatchInterrupted, TaskSessionUnavailable, ModelWaitInterrupted, OwnerPauseRefused, StoreError,
              UsageAccountingError)
     if any(isinstance(error, local) or not isinstance(error, Exception) for error in leaves):

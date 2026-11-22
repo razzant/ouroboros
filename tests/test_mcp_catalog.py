@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 from ouroboros import config, mcp_catalog, mcp_client, server_boot
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tool_policy import format_capability_omissions
+from tests.test_mcp_headers_loopback import loopback  # noqa: F401 -- the HTTP fixture of a real answer
 
 
 @pytest.fixture(autouse=True)
@@ -820,3 +821,104 @@ def test_a_local_refusal_or_interruption_leaves_the_record_and_a_transport_failu
     assert failing["ok"] is False and failing["code"] == "MCP_ERROR" and failing["since"] == failing["at"]
     call_with(manager, _local_refusal(kind))
     assert call_now() == failing  # and an open series keeps its start
+
+
+RAW_SERVER = r'''import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    reply = {"jsonrpc": "2.0", "id": request["id"]}
+    if request["method"] == "initialize":
+        reply["result"] = {"protocolVersion": request["params"]["protocolVersion"],
+                           "capabilities": {"tools": {}}, "serverInfo": {"name": "raw", "version": "1"}}
+    elif request["method"] == "tools/list":
+        reply["result"] = {"tools": [{"name": "ping", "inputSchema": {"type": "object"}},
+                                    {"name": "typed", "inputSchema": {"type": "object"},
+                                     "outputSchema": {"type": "object", "required": ["value"]}}]}
+    elif request["method"] == "tools/call":
+        mode = request["params"]["arguments"]["mode"]
+        if mode == "disconnect":
+            break
+        if mode == "protocol":
+            reply["error"] = {"code": -32602, "message": "raw server: invalid params"}
+        else:
+            reply["result"] = {"content": [{"type": "text", "text": mode}], "isError": mode == "tool_error"}
+            if mode == "bad_output":
+                reply["result"]["structuredContent"] = {}
+    else:
+        reply["result"] = {}
+    print(json.dumps(reply), flush=True)
+'''
+
+
+def raw_server(tmp_path, **extra):
+    import sys
+
+    script = tmp_path / "raw_server.py"
+    script.write_text(RAW_SERVER, encoding="utf-8")
+    return {"id": "demo", "enabled": True, "transport": "stdio", "command": sys.executable, "args": [str(script)],
+            **extra}
+
+
+def test_a_server_that_answered_is_answering_even_with_an_error_and_a_closed_connection_is_not(tmp_path):
+    manager = mcp_client.MCPManager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 20, "MCP_SERVERS": [raw_server(tmp_path)]})
+    assert manager.refresh_server("demo")["tool_count"] == 2
+    seen = {}
+    for mode in ("disconnect", "protocol", "disconnect", "tool_error", "disconnect", "bad_output", "good"):
+        result = manager._call_tool_result("mcp_demo__" + ("typed" if mode == "bad_output" else "ping"), {"mode": mode})
+        seen.setdefault(mode, []).append((result.code, call_now()["ok"]))
+        if mode == "protocol":
+            assert "invalid params" in result.text  # the caller still gets the server's error
+    assert seen == {"disconnect": [("MCP_ERROR", False)] * 3,  # the server ended before any answer
+                    "protocol": [("MCP_ERROR", True)],  # its JSON-RPC error answered the call
+                    "tool_error": [("MCP_ERROR", True)], "bad_output": [("MCP_ERROR", True)],  # answers the SDK refused
+                    "good": [("OK", True)]}, seen
+
+
+def test_a_task_session_server_answering_with_a_json_rpc_error_is_answering(tmp_path, monkeypatch):
+    from ouroboros import mcp_task_session
+    from tests.test_batch4_producer_custody import _registry
+    from tests.test_invocation_ownership import owner
+    from tests.test_mcp_task_session import call, wire
+
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    wire(monkeypatch, registry, raw_server(tmp_path, task_session=True))
+    try:
+        with owner(registry):
+            assert call(registry, "ping", {"mode": "disconnect"}, server_id="demo").code == "MCP_ERROR"
+            assert call_now()["ok"] is False
+            refused = call(registry, "ping", {"mode": "protocol"}, server_id="demo")
+            assert refused.code == "MCP_ERROR" and "invalid params" in refused.text
+            assert call_now()["ok"] is True
+    finally:
+        mcp_task_session.close_context_sessions(registry._ctx)
+
+
+def test_an_answer_received_before_its_session_failed_to_close_is_an_answer(loopback, monkeypatch, tmp_path):  # noqa: F811
+    import asyncio
+
+    slow = threading.Event()
+
+    def delay_close(server):
+        async def app(scope, receive, send):
+            if scope.get("method") == "DELETE" and slow.is_set():  # the session's close after the answer
+                await asyncio.sleep(2.5)
+            await server(scope, receive, send)
+        return app
+
+    _app, url = loopback("http", {}, wrap=delay_close)
+    settings = {"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 10, "MCP_SERVERS": [{
+        "id": "demo", "enabled": True, "transport": "streamable_http", "url": url}]}
+    manager = mcp_client.MCPManager()
+    manager.reconfigure(settings)
+    assert manager.refresh_server("demo")["ok"]
+    assert manager._call_tool_result("mcp_demo__echo", {"text": "quick"}).status == "ok"
+    settings["MCP_TOOL_TIMEOUT_SEC"] = 1
+    manager.reconfigure(settings)
+    mcp_catalog.note_call(manager.server_config("demo"), ok=False, code="MCP_ERROR", method="echo")  # an open series
+    assert call_now()["ok"] is False
+    slow.set()
+    late = manager._call_tool_result("mcp_demo__echo", {"text": "answer exists"})
+    assert late.code == "MCP_TIMEOUT" and call_now()["ok"] is True  # the caller timed out; the server had answered
