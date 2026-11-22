@@ -1,0 +1,98 @@
+# Diagnostic only. Execute already-public exact parent with explicit cases seen red on the merge. Never merge this workflow.
+name: "#3913 focused browser failures on the exact parent"
+on:
+  push:
+    branches: [verify/post3913-browser-pair-760cb68e]
+permissions:
+  contents: read
+jobs:
+  pair:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {"label":"browser-clean-1","os":"ubuntu-latest","lane":"browser","sha":"ceb535489cdcecf3010310dbf2ab58fc59b4f611","cases":["tests/test_project_work_card_browser.py::test_an_already_failed_portal_follows_a_later_fast_continue[chromium-dark-mobile-live]","tests/test_project_work_card_browser.py::test_an_already_failed_portal_follows_a_later_fast_continue[chromium-dark-mobile-reload]","tests/test_project_work_card_browser.py::test_an_already_failed_portal_follows_a_later_fast_continue[chromium-light-desktop-live]","tests/test_project_work_card_browser.py::test_an_already_failed_portal_follows_a_later_fast_continue[chromium-light-desktop-reload]","tests/test_project_work_card_browser.py::test_an_already_failed_portal_follows_a_later_fast_continue[webkit-dark-desktop-live]","tests/test_project_work_card_browser.py::test_an_already_failed_portal_follows_a_later_fast_continue[webkit-dark-desktop-reload]","tests/test_project_work_card_browser.py::test_an_already_failed_portal_follows_a_later_fast_continue[webkit-light-mobile-live]","tests/test_project_work_card_browser.py::test_an_already_failed_portal_follows_a_later_fast_continue[webkit-light-mobile-reload]","tests/test_project_work_card_browser.py::test_empty_output_recovery_preserves_failed_card_and_continue[chromium-dark-mobile]","tests/test_project_work_card_browser.py::test_empty_output_recovery_preserves_failed_card_and_continue[chromium-light-desktop]","tests/test_project_work_card_browser.py::test_empty_output_recovery_preserves_failed_card_and_continue[webkit-dark-desktop]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[chromium-dark-mobile-continued-later]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[chromium-dark-mobile-reload]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[chromium-dark-mobile-same-snapshot]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[chromium-light-desktop-continued-later]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[chromium-light-desktop-reload]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[chromium-light-desktop-same-snapshot]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[webkit-dark-desktop-continued-later]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[webkit-dark-desktop-reload]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[webkit-light-mobile-continued-later]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[webkit-light-mobile-reload]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[webkit-light-mobile-same-snapshot]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_successor_that_already_finished[chromium-dark-mobile-live]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_successor_that_already_finished[chromium-dark-mobile-reload]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_successor_that_already_finished[chromium-light-desktop-live]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_successor_that_already_finished[chromium-light-desktop-reload]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_successor_that_already_finished[webkit-dark-desktop-live]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_successor_that_already_finished[webkit-dark-desktop-reload]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_successor_that_already_finished[webkit-light-mobile-live]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_successor_that_already_finished[webkit-light-mobile-reload]","tests/test_project_work_card_browser.py::test_room_card_follows_a_continue_pressed_in_the_room[chromium-light-desktop-room]","tests/test_project_work_card_browser.py::test_room_card_follows_a_continue_pressed_in_the_room[webkit-dark-desktop-room]","tests/test_project_work_card_browser.py::test_room_card_follows_a_continue_pressed_in_the_room[webkit-light-mobile-room]","tests/test_completion_browser.py::test_unfinished_project_parent_preserves_running_child_and_full_output[chromium-1440]","tests/test_history_bookmark_browser.py::test_a_wheel_inside_a_box_supersedes_a_landing_still_reading_and_its_late_answer_moves_no_one[webkit]","tests/test_settings_restart_browser.py::test_pending_survives_reconnect_draft_and_restart_request[webkit-390]"]}
+          - {"label":"browser-clean-2","os":"ubuntu-latest","lane":"browser","sha":"ceb535489cdcecf3010310dbf2ab58fc59b4f611","cases":["tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[hold-dark-1180-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[hold-dark-1180-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[hold-dark-320-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[hold-dark-320-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[hold-light-320-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[hold-light-320-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[hold-light-390-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[hold-light-390-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-dark-1180-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-dark-1180-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-dark-320-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-light-320-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-light-320-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-light-390-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-light-390-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[panic_hold-dark-1180-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[panic_hold-dark-1180-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[panic_hold-dark-320-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[panic_hold-dark-320-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[panic_hold-light-320-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[panic_hold-light-320-webkit]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[panic_hold-light-390-chromium]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[panic_hold-light-390-webkit]","tests/test_telegram_fullscreen_browser.py::test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_the_row[chromium-16]","tests/test_telegram_fullscreen_browser.py::test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_the_row[chromium-24]","tests/test_telegram_fullscreen_browser.py::test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_the_row[webkit-16]","tests/test_telegram_fullscreen_browser.py::test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_the_row[webkit-24]","tests/test_project_child_hold_browser.py::test_held_tree_header_updates_on_child_reply_without_detail_polling[chromium-header-recovery]","tests/test_project_child_hold_browser.py::test_nested_child_wait_and_same_id_recovery[chromium-recovery]","tests/test_project_child_hold_browser.py::test_nested_child_wait_and_same_id_recovery[webkit-recovery]","tests/test_project_admission_refusal_browser.py::test_never_admitted_project_refusal_stays_an_origin_receipt[chromium]","tests/test_project_admission_refusal_browser.py::test_never_admitted_project_refusal_stays_an_origin_receipt[webkit]","tests/test_ui_smoke_status_attention.py::test_task_status_stays_factual_in_main_and_project_chat[desktop]","tests/test_ui_smoke_status_attention.py::test_task_status_stays_factual_in_main_and_project_chat[narrow]","tests/test_post_task_model_wait_browser.py::test_answered_direct_task_waits_through_task_done_and_reload[failed]","tests/test_shell_interactions_browser.py::test_the_desktop_title_band_over_a_page_moves_the_window[chromium-skills]"]}
+          - {"label":"browser-clean-3","os":"ubuntu-latest","lane":"browser","sha":"ceb535489cdcecf3010310dbf2ab58fc59b4f611","cases":["tests/test_executor_card_browser.py::test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch[chromium-dark-desktop]","tests/test_executor_card_browser.py::test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch[chromium-dark-narrow]","tests/test_executor_card_browser.py::test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch[chromium-light-desktop]","tests/test_executor_card_browser.py::test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch[chromium-light-narrow]","tests/test_executor_card_browser.py::test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch[webkit-dark-desktop]","tests/test_executor_card_browser.py::test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch[webkit-dark-narrow]","tests/test_executor_card_browser.py::test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch[webkit-light-desktop]","tests/test_executor_card_browser.py::test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch[webkit-light-narrow]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[chromium-1280-dark]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[chromium-1280-light]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[chromium-390-light]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[webkit-1280-dark]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[webkit-1280-light]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[webkit-390-dark]","tests/test_account_resources_browser.py::test_last_more_closes_at_wheeled_position_until_reader_moves[chromium-fits-when-closed]","tests/test_account_resources_browser.py::test_more_press_keeps_point_when_previous_focus_yields[webkit-more]","tests/test_account_resources_browser.py::test_more_press_keeps_point_when_previous_focus_yields[webkit-refresh]","tests/test_account_resources_browser.py::test_more_press_keeps_point_when_previous_focus_yields[webkit-switch]","tests/test_history_continuity_browser.py::test_feed_scrollbar_drag_to_the_live_edge_follows_new_replies[chromium]","tests/test_history_continuity_browser.py::test_feed_scrollbar_drag_to_the_live_edge_follows_new_replies[webkit]","tests/test_history_continuity_browser.py::test_scrollbar_drag_released_away_stays_when_a_question_copy_below_retires[chromium]","tests/test_history_continuity_browser.py::test_scrollbar_drag_released_away_stays_when_a_question_copy_below_retires[webkit]","tests/test_phone_keyboard_recovery_browser.py::test_a_caret_moved_without_an_edit_stays_in_view_when_its_row_narrows_the_field[chromium-main]","tests/test_phone_keyboard_recovery_browser.py::test_a_caret_moved_without_an_edit_stays_in_view_when_its_row_narrows_the_field[chromium-project]","tests/test_phone_keyboard_recovery_browser.py::test_a_long_telegram_feed_stays_placed_without_scanning_its_rows_on_keyboard_resize[webkit-live-end]","tests/test_phone_keyboard_recovery_browser.py::test_a_long_telegram_feed_stays_placed_without_scanning_its_rows_on_keyboard_resize[webkit-reading]","tests/test_dashboard_settings_browser.py::test_a_door_shares_its_row_with_a_long_value_and_keeps_its_chevron_beside_it[chromium-1087-740]","tests/test_dashboard_settings_browser.py::test_a_door_shares_its_row_with_a_long_value_and_keeps_its_chevron_beside_it[chromium-390-844]","tests/test_dashboard_settings_browser.py::test_a_door_shares_its_row_with_a_long_value_and_keeps_its_chevron_beside_it[webkit-390-844]","tests/test_card_model_browser.py::test_a_works_model_on_its_card_the_fallback_and_the_main_sheet[chromium]","tests/test_card_model_browser.py::test_a_works_model_on_its_card_the_fallback_and_the_main_sheet[webkit]","tests/test_task_episode_history_browser.py::test_physical_episode_content_survives_continue[chromium]","tests/test_task_episode_history_browser.py::test_physical_episode_content_survives_continue[webkit]","tests/test_effort_range_browser.py::test_phone_press_opens_alone_on_the_line_while_the_others_step_aside[webkit-390]","tests/test_review_pool_access_browser.py::test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool[webkit]","tests/test_widgets_ui_browser_heights.py::test_a_small_drag_keeps_the_owners_exact_height_where_the_content_has_no_height_of_its_own[webkit]"]}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install the pinned browser engines
+        if: matrix.lane == 'browser'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Run the selected failures on the exact parent; preserve test outcomes
+        shell: bash
+        env:
+          SUBJECT: ${{ matrix.sha }}
+          CASES: ${{ toJSON(matrix.cases) }}
+          LANE: ${{ matrix.lane }}
+          OUROBOROS_PREFLIGHT_REQUIRE_NODE: '1'
+          OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+          OUROBOROS_PREFLIGHT_TEST_WORKERS: '4'
+          EVIDENCE: ${{ runner.temp }}/pair-evidence
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          env = os.environ.copy()
+          subject = env['SUBJECT']
+          observed = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()
+          if observed != subject:
+              raise SystemExit(f'wrong tested SHA {observed}; expected {subject}')
+          subprocess.run(['git','diff','--exit-code'],check=True)
+          evidence = Path(env['EVIDENCE']); evidence.mkdir(exist_ok=True)
+          cases = json.loads(env['CASES']); lane = env['LANE']
+          import sqlite3, tempfile
+          from ouroboros import store
+          with tempfile.TemporaryDirectory(dir=env['RUNNER_TEMP']) as temp:
+              db=Path(temp)/'mode.sqlite'; db.touch()
+              journal=store._journal_mode(db,store.TIER_ENFORCED)
+          groups={'parallel':['-m','not exclusive','-n','4','--dist','loadgroup','--max-worker-restart=0','--timeout=300'],
+                  'serial':['-m','exclusive','--timeout=300']}
+          launcher=[]
+          if lane == 'browser':
+              env.update(OUROBOROS_RUN_UI_SMOKE='1',OUROBOROS_EXPECT_BROWSER_ENGINES='chromium,webkit',
+                         PLAYWRIGHT_BROWSERS_PATH=str(Path(env['RUNNER_TEMP'])/'ui-browsers'),
+                         PLAYWRIGHT_NODEJS_PATH=str(Path.cwd()/'node-standalone/bin/node'))
+              groups={'host':['-m','ui_browser','--timeout=900']}
+              launcher=['xvfb-run','-a']
+          tree=subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip()
+          (evidence/'subject.json').write_text(json.dumps({'controller':env['GITHUB_SHA'],'tested_sha':subject,'tree':tree,
+              'runner':env.get('RUNNER_OS'),'lane':lane,'nodes':cases,'python':sys.version,'sqlite':sqlite3.sqlite_version,
+              'journal':journal,'controls':groups}))
+          env['GITHUB_SHA'] = subject
+          if journal.upper() != 'WAL':
+              raise SystemExit('journal does not match the original run')
+          exits={}
+          print('TESTED_SHA',subject,'TREE',tree,'CASE_COUNT',len(cases),'SQLITE',sqlite3.sqlite_version,'JOURNAL',journal,flush=True)
+          for name, controls in groups.items():
+              path=evidence/name; path.mkdir()
+              argv=[*launcher,sys.executable,'-I','-S','scripts/safe_test.py','--timeout','1500','--',sys.executable,'-m',
+                    'pytest',*controls,'-q','--tb=short',f'--ci-evidence-dir={path}',*cases]
+              exits[name]=subprocess.run(argv,env=env).returncode
+              (evidence/'exit.json').write_text(json.dumps(exits))
+          sys.exit(0 if all(rc in (0,5) for rc in exits.values()) else 1)
+          PY
+      - name: Retain only projected results and subject binding
+        if: '!cancelled()'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: post3913-tail-${{ matrix.label }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pair-evidence/
+          retention-days: 7
+          if-no-files-found: warn
