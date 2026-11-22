@@ -1,4 +1,6 @@
-"""#1347 A: keys the engine animates to the live edge lead to the present."""
+"""#1347 A: keys the engine animates to the live edge lead to the present, even when a relayout lands while they
+still scroll. A key read without a relayout is a recorded feed session (tests/fixtures/feed_sessions/main_keys.json,
+reading_back_and_following.json)."""
 import json
 
 import pytest
@@ -106,13 +108,6 @@ def _read_by_keys(direct_server_with_data, browser_engine, tmp_path, relayout_ms
             assert page.evaluate('() => window.__historyReads.every(read => !read.cursor)'), 'keys at the edge page nothing'
         finally:
             browser.close()
-
-
-@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_keys_that_read_to_the_live_edge_follow_new_replies(direct_server_with_data, browser_engine, tmp_path):
-    """#1347 A: End or PageDown that the engine animates to the bottom leads to the present,
-    though WebKit ends every step of an animated page; an upward key stops following."""
-    _read_by_keys(direct_server_with_data, browser_engine, tmp_path)
 
 
 @pytest.mark.parametrize('relayout_ms', [20, 60])
