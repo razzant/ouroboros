@@ -65,6 +65,8 @@ def check(token, api_base=None, *, timeout=8.0):
         raise RuntimeError("secret 1:boom at https://api.example.test/bot1:boom/getMe")
     if token.startswith("1:"):
         return {"ok": True, "username": "demo_bot", "id": 1}
+    if token.startswith("3:"):
+        return {"ok": False, "cause": "unreachable"}  # the skill's own answer: it asked and could not reach the service
     return {"ok": False, "cause": "refused"}
 '''
 
@@ -168,10 +170,11 @@ def test_the_token_check_runs_the_declared_function_of_a_built_in_skill_and_name
     assert escaped.status_code == 500 and "username" not in escaped.text
 
 
-def test_a_watchdog_expiring_before_the_service_was_asked_is_no_answer_of_the_service(skills, monkeypatch):
+def test_a_host_deadline_is_could_not_be_checked_and_only_the_skills_own_unreachable_is_unreachable(skills, monkeypatch):
     """The host's watchdog covers its own worker's wait too: expiring before the declared function was reached (a busy
-    worker pool), the check did not run (503; the page says it could not be checked), never «could not reach» the
-    service; expiring while the function waits on the service is the service's silence (rv2 C7)."""
+    worker pool) or while the function waits, the check did not finish (503; the page says it could not be checked):
+    the host has no evidence a request reached the service, so never «unreachable». A function's own «unreachable»
+    answer passes through (rv2 C7)."""
     import asyncio
     import time
 
@@ -196,7 +199,10 @@ def test_a_watchdog_expiring_before_the_service_was_asked_is_no_answer_of_the_se
 
     monkeypatch.setitem(module, "check", silent)
     answer = client.post("/check", json={"skill": "demo", "token": "1:abc"})
-    assert answer.status_code == 200 and answer.json() == {"ok": False, "cause": "unreachable"}
+    assert answer.status_code == 503 and "cause" not in answer.json() and "1:abc" not in answer.text
+    monkeypatch.setitem(module, "check", real)
+    own = client.post("/check", json={"skill": "demo", "token": "3:down"})
+    assert own.status_code == 200 and own.json() == {"ok": False, "cause": "unreachable"}
 
 
 def test_a_declared_reader_names_the_server_the_check_asks_and_a_failing_one_asks_nobody(skills, tmp_path):
