@@ -1037,7 +1037,9 @@ def validate_size_ratchet_transition_against_base(
     parent inventory produces a failing finding, never a false PASS. A module
     HEAD changed since its merge-base with the base answers ``touched_band_errors``
     even when the manifest did not change (a moved-on base, ahead of HEAD, lends
-    HEAD none of its own touches or reasons); HEAD's line counts are read strictly, and a
+    HEAD none of its own touches or reasons); with the parent degradation a merge answers only
+    for what it changed against every parent, so a target merged into a branch lends the branch
+    none of the target's touches. HEAD's line counts are read strictly, and a
     blob or touched list Git cannot give is a ``partial:`` finding, never absence."""
     root = pathlib.Path(repo_dir).resolve()
     tip_text = _git_show_manifest(root, "HEAD", manifest_path)
@@ -1105,6 +1107,9 @@ def validate_size_ratchet_transition_against_base(
     reasons = previous.band_paths
     try:
         touched = _touched_paths(root, since, "HEAD")
+        if validate_parent_tree:  # no event base: a merge owes only what it changed against every parent
+            for other in [parent for parent in _commit_parents(root, "HEAD") if parent != base_commit]:
+                touched &= _touched_paths(root, other, "HEAD")
         if since != base_commit:
             forked = _git_show_manifest(root, since, manifest_path)
             reasons = parse_size_ratchet_manifest(forked).band_paths if forked else {}

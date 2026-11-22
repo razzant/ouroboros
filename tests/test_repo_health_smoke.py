@@ -621,6 +621,31 @@ def test_a_drop_is_judged_against_the_reasons_the_fork_point_recorded(tmp_path: 
         _git(repo, "reset", "-q", "--hard", "HEAD~1")
 
 
+def test_without_an_event_base_a_merge_owes_only_what_it_changed_against_every_parent(tmp_path: Path) -> None:
+    """A dispatch or tag run has no event base and reads HEAD against its parent: a target merged into a
+    branch lends the branch none of the modules the target touched, while a module the merge itself
+    changes, and an ordinary commit's own touch, still owe their reason."""
+    repo = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
+    fork = _git(repo, "rev-parse", "HEAD")
+    _write_lines(repo / "gap.py", 1551)
+    _git(repo, "commit", "-qam", "the target touches gap.py")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "feature", fork)
+    (repo / "README.md").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "an unrelated change")
+    _git(repo, "merge", "-q", "--no-ff", "--no-edit", target)
+    assert validate_size_ratchet_transition_against_base(repo, "") == []
+    _write_lines(repo / "gap.py", 1552)
+    _git(repo, "commit", "-q", "--amend", "--no-edit", "-a")  # the merge itself changes gap.py
+    touched = ["touched 1552-line module needs a nonblank band rationale: gap.py"]
+    assert validate_size_ratchet_transition_against_base(repo, "") == touched
+    _git(repo, "reset", "-q", "--hard", "HEAD^1")
+    _write_lines(repo / "gap.py", 1552)
+    _git(repo, "commit", "-qam", "the feature touches gap.py")
+    assert validate_size_ratchet_transition_against_base(repo, "") == touched
+
+
 def test_tree_validation_reads_staged_bytes_not_unstaged_worktree_bytes(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     baseline = _bootstrap_repo(repo)
