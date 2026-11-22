@@ -672,8 +672,8 @@ def get_tools() -> List[ToolEntry]:
                     "the keep selection; replacement occupies the first replaced unit. "
                     "Batch usefully, shorter than sources: rewriting loses signed reasoning from the earliest change. "
                     "How much is re-read after a fold depends on the nearest cache boundary before its first change. "
-                    "Round facts report the measured re-read. The request's start rows and a full fold's own rows "
-                    "stay until its note is replaced. "
+                    "Round facts report the measured re-read. Start rows and a full fold's own rows stand: an "
+                    "explicit keep_unit_ids list takes them, replacing that fold's note releases its rows. "
                     "Native review ignores schema_names, review_notes and review_transfers; its inspection reports "
                     "window evidence, serialized characters and previous input, never current free tokens."
                 ),
