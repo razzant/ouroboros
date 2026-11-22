@@ -297,7 +297,7 @@ def _compact(row: dict, drive_root: Any = None) -> dict:
     out = {key: row.get(key) for key in _STATE}
     status = skill_status(row)
     out["ready"] = status["ready"]
-    reason = " ".join(status["reasons"][0].split()) if status["reasons"] else ""
+    reason = " ".join(_all_reasons(status).split())  # a preview of the named row's whole ``not_ready``
     if reason:
         out["not_ready"] = reason[:_PREVIEW_CHARS["not_ready"]]
     if status["notes"]:
@@ -339,8 +339,23 @@ def _compact(row: dict, drive_root: Any = None) -> dict:
     return out
 
 
-def _named(rows: list, name: str) -> dict:
-    matches = [row for row in rows if row.get("name") == name]
+def _all_reasons(status: dict) -> str:
+    return "; ".join(status["reasons"])
+
+
+def _with_status(row: dict, drive_root: Any) -> dict:
+    """A named row: the summary row whole (readiness, collision data) plus ``skill_status``'s answer in full, the
+    value every compact preview cuts, and ``off_state`` for an Off one."""
+    status = skill_status(row)
+    out = {**row, "ready": status["ready"], **({"not_ready": _all_reasons(status)} if status["reasons"] else {}),
+           **({"notes": status["notes"]} if status["notes"] else {})}
+    if drive_root is not None and not row.get("enabled") and (off := off_state(drive_root, row)):
+        out["off_state"] = off
+    return out
+
+
+def _named(rows: list, name: str, drive_root: Any = None) -> dict:
+    matches = [_with_status(row, drive_root) for row in rows if row.get("name") == name]
     if not matches:
         return {"found": False, "name": name,
                 "message": "No installed skill has this exact name; list_skills() pages every name."}
@@ -373,7 +388,7 @@ def list_skills_payload(summary: dict, *, name: str = "", offset: int = 0,
     rows = sorted(summary.get("skills") or [],
                   key=lambda row: (str(row.get("name") or ""), str(row.get("location") or "")))
     if name:
-        return _named(rows, name)
+        return _named(rows, name, drive_root)
     # Membership only: readiness, review and payload edits never refuse a page.
     token = sha256(_encode([[row.get("name"), row.get("location")] for row in rows])
                    .encode("utf-8")).hexdigest()[:16]

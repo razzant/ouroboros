@@ -227,10 +227,12 @@ def test_name_returns_full_row_and_read_file_call_of_the_physical_manifest(regis
     # Selection and reading stay separate: the catalogue never carries the text.
     assert "INSTRUCTIONS_END" not in registry.execute("list_skills", {"name": "playbook"})
     row = _consumer(registry, {"name": "playbook"})[0]["skills"][0]
-    # Full, unclipped diagnostics: the same row the shared summary carries.
+    # Full, unclipped diagnostics: the same row the shared summary carries, plus the one status in full (RV1 A3).
     shared = next(r for r in summarize_skills(registry._ctx.drive_root)["skills"]
                   if r["name"] == "playbook")
-    assert row == json.loads(json.dumps(shared))
+    status = skill_catalogue.skill_status(shared)
+    assert row == json.loads(json.dumps({**shared, "ready": status["ready"], "not_ready": "; ".join(status["reasons"]),
+                                         "off_state": "never turned on"}))
     assert row["model_experience"] == {"what_model_sees": "W" * 400, "token_effect": "T" * 300}
     assert row["readiness"]["next_actions"] and row["review_gate"] and row["content_hash"]
     assert row["enabled"] is False  # reading instructions needs no enablement
@@ -502,3 +504,71 @@ def test_list_skills_says_an_unreadable_on_off_record_instead_of_failing(registr
     rows = {row["name"]: row for row in json.loads(registry.execute_result("list_skills", {}).text)["skills"]}
     assert rows["locked"]["off_state"] == "its on/off record is unreadable (state unknown)"
     assert rows["fresh"]["off_state"] == "never turned on"
+
+
+def _admitted_script(registry, name):
+    drive = registry._ctx.drive_root
+    folder = _seed(registry, name, type="script", runtime="python3", scripts=[{"name": "run.py"}])
+    (folder / "scripts").mkdir()
+    (folder / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+    from ouroboros.skill_loader import find_skill
+
+    (drive / "state" / "skills" / name).mkdir(parents=True, exist_ok=True)
+    (drive / "state" / "skills" / name / "review.json").write_text(
+        json.dumps({"status": "pass", "content_hash": find_skill(drive, name).content_hash}), encoding="utf-8")
+    save_enabled(drive, name, True, actor="owner_ui")
+
+
+def _listed(registry, **args):
+    return json.loads(registry.execute_result("list_skills", args).text)
+
+
+def test_the_tool_says_ready_only_while_the_interpreter_is_there(registry, monkeypatch):
+    """Through the registered tool: an enabled, admitted script is ready with its interpreter and not ready without
+    it, in the index and in the named row (RV1 A7: the pair ``ready``/``not_ready`` moves together)."""
+    _admitted_script(registry, "runner")
+    [row] = _listed(registry)["skills"]
+    named = _listed(registry, name="runner")["skills"][0]
+    assert row["ready"] is True and "not_ready" not in row and named["ready"] is True and "not_ready" not in named
+    monkeypatch.setattr("ouroboros.tools.skill_exec._resolve_runtime_binary", lambda _runtime: (None, "not on PATH"))
+    [row] = _listed(registry)["skills"]
+    named = _listed(registry, name="runner")["skills"][0]
+    missing = "entry_unavailable: no interpreter for runtime 'python3': not on PATH"
+    assert row["ready"] is False and row["not_ready"] == missing
+    assert named["ready"] is False and named["not_ready"] == missing and named["readiness"]["ready"] is True
+
+
+def test_the_tool_names_who_left_a_skill_off_and_says_nothing_for_an_enabled_one(registry):
+    drive = registry._ctx.drive_root
+    _seed(registry, "fresh")
+    _seed(registry, "reverted")
+    _seed(registry, "chosen")
+    _seed(registry, "running")
+    save_enabled(drive, "reverted", False, actor="load_error_revert")
+    save_enabled(drive, "chosen", False, actor="owner_ui")
+    save_enabled(drive, "running", True, actor="owner_ui")
+    rows = {row["name"]: row for row in _listed(registry)["skills"]}
+    assert rows["fresh"]["off_state"] == "never turned on"
+    assert rows["reverted"]["off_state"] == "turned off after it failed to load"
+    assert "off_state" not in rows["chosen"] and "off_state" not in rows["running"]
+    named = _listed(registry, name="reverted")["skills"][0]
+    assert named["off_state"] == "turned off after it failed to load"
+    assert named["not_ready"] == "review_stale; skill_disabled"  # every reason, not only the first (RV1 A5)
+
+
+def test_the_index_previews_a_long_reason_and_the_named_row_keeps_it_whole(registry, monkeypatch):
+    sentence = "Not a package this deployment trusts. " * 8
+    row = {"name": "longblock", "type": "extension", "enabled": True, "review_status": "pass",
+           "readiness": {"ready": True, "blockers": []}, "desired_live": False,
+           "live_reason": "deployment_untrusted", "load_error": sentence, "location": "external"}
+    monkeypatch.setattr("ouroboros.tools.skill_exec.summarize_skills", lambda *_a, **_kw: {"count": 1, "skills": [row]})
+    whole = "deployment_untrusted: " + sentence
+    [record] = _listed(registry)["skills"]
+    assert record["ready"] is False and record["not_ready"] == " ".join(whole.split())[:240]
+    assert record["omitted"]["not_ready"] == len(" ".join(whole.split())) - 240 > 0
+    named = _listed(registry, name="longblock")["skills"][0]
+    assert named["not_ready"] == whole and named["ready"] is False
+    monkeypatch.setattr("ouroboros.tools.skill_exec.summarize_skills", lambda *_a, **_kw: {"count": 1, "skills": [
+        {**row, "desired_live": True, "live_reason": "load_error"}]})  # a failed load held in memory: liveness
+    [record] = _listed(registry)["skills"]
+    assert record["ready"] is True and "not_ready" not in record and "not_ready" not in record.get("omitted", {})
