@@ -1,0 +1,353 @@
+# QA-only qualification of one composed product commit — managed post-commit review
+# attribution (#3451). NOT a product workflow: it lives on a disposable
+# `qa/track03-*` ref whose tip adds exactly this one file on top of a known product commit,
+# and it is deleted with that ref. Nothing here is meant to merge into `ouroboros`.
+#
+# Why it exists: `ci.yml … scope=tests` re-ran the WHOLE default battery (100+ min queued
+# behind unrelated suites, and red on pre-existing lint/tests that are not this change).
+# This lane verifies the managed commit and review-attribution paths, on the two runners
+# whose post-merge red lists are disjoint, and stops there.
+#
+# How the subject is pinned (read `Prove the subject`): the run's own ref tip is the carrier
+# commit; the product commit is its first parent and must equal QA_PRODUCT_COMMIT, whose tree
+# must equal QA_PRODUCT_TREE, and the carrier must add nothing but this file. The job then
+# checks out that product commit BEFORE any repo-local setup or test, so `scripts/run_tests.py`,
+# `scripts/ci_retry.py`, `.github/actions/setup-python-env` and every test module are the
+# product tree's own. The literals below are the only pin a human has to read; both legs
+# re-derive them from git and fail closed on any mismatch.
+#
+# Selection: reproduce Pause after Git and validate the review ledger/counter, then exercise
+# the adjacent commit gate and managed-update consumers. The pinned product tree owns the
+# lane filters, build, fixture data and retry processing.
+#
+# Legs, as in post-merge.yml: Linux runs the shipped interpreter (WAL, a fresh install), Windows
+# runs setup-python's 3.10 (PERSIST, an install updated in place). Each leg asserts that claim and
+# is red if the runner no longer delivers it — a leg that does not run what it names proves nothing.
+# Windows gets the same POSIX test utilities ci.yml's Windows legs install (rsync among them); if
+# that provisioning fails, both passes report as skipped and the final step names that red.
+name: QA track03 — review qualification (Linux + Windows)
+
+on:
+  push:
+    branches:
+      - 'qa/track03-*'
+  workflow_dispatch:
+
+# Read-only: this lane runs tests and publishes artifacts. No token is used for anything else,
+# and the checkout runs without persisted credentials.
+permissions:
+  contents: read
+
+# Every run keeps its own group: a re-run of a qualification is evidence, never a replacement
+# of the one before it.
+concurrency:
+  group: ${{ format('qa-track03-{0}-{1}-{2}', github.ref, github.run_id, github.run_attempt) }}
+  cancel-in-progress: false
+
+env:
+  # The composed product commit whose managed commit this ref qualifies, and that commit's tree.
+  # Recreate the ref for a new composition: branch off the new product commit, update these two
+  # literals, add this one file, push. A mismatch is a red leg, never a silent re-target.
+  QA_PRODUCT_COMMIT: beb51ab2e64dfba2fdb289f227dc5e617327100e
+  QA_PRODUCT_TREE: 97fa30a779726e0ead0d3ebf227e16e238961bfb
+  # This file, and nothing else, may be what the carrier commit adds.
+  QA_CARRIER_PATH: .github/workflows/qa-track03-review-qualification.yml
+  # The changed test and its direct review/update consumers.
+  QA_MODULES: >-
+    tests/test_managed_commit_pause.py
+    tests/test_review_overrides.py
+    tests/test_git_review_pipeline.py
+    tests/test_git_review_preflight_gate.py
+    tests/test_update_merge_assisted.py
+    tests/test_managed_review_subject.py
+  QA_MODULES_COUNT: '6'
+  QA_REQUIRED_MODULES: >-
+    tests/test_managed_commit_pause.py tests/test_review_overrides.py
+
+
+jobs:
+  qualify:
+    name: qa-track03 (${{ matrix.leg }})
+    # The accepted-failure check inside scripts/ci_retry.py reads issue label events
+    # (tests/accepted_failures.json), as in ci.yml's test legs. Nothing else writes.
+    permissions:
+      contents: read
+      issues: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: linux, interpreter: shipped, journal: WAL}
+          - {os: windows-latest, leg: windows, interpreter: setup-python, journal: PERSIST}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    env:
+      # The interpreter and journal mode this leg claims to run, asserted below, and the
+      # product binding this leg must prove before it touches a repo-local script.
+      QA_EXPECTED_INTERPRETER: ${{ matrix.interpreter }}
+      QA_EXPECTED_JOURNAL: ${{ matrix.journal }}
+      OUROBOROS_PREFLIGHT_TEST_WORKERS: ${{ matrix.os == 'windows-latest' && '4' || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0          # the product commit is this ref's parent; the assertion reads it
+          persist-credentials: false
+
+      # ── The subject binding. Nothing runs until all five facts hold. ──────────────────
+      - name: Prove the subject (carrier adds only this file; parent is the pinned product commit)
+        id: subject
+        run: |
+          set -euo pipefail
+          git cat-file -e "${QA_PRODUCT_COMMIT}^{commit}" || {
+            echo "::error::${QA_PRODUCT_COMMIT} is not in this repository — the ref was cut from the wrong history."
+            exit 1; }
+          parent=$(git rev-parse "HEAD^1")
+          tree=$(git rev-parse "${QA_PRODUCT_COMMIT}^{tree}")
+          ahead=$(git rev-list --count "${QA_PRODUCT_COMMIT}..HEAD")
+          touched=$(git diff --no-renames --name-only "${QA_PRODUCT_COMMIT}" HEAD)
+          added_only=$(git diff --no-renames --diff-filter=A --name-only "${QA_PRODUCT_COMMIT}" HEAD)
+          not_added=$(git diff --no-renames --diff-filter=DMRTC --name-only "${QA_PRODUCT_COMMIT}" HEAD)
+          [ "$parent" = "$QA_PRODUCT_COMMIT" ] || {
+            echo "::error::This ref's parent is $parent, not the pinned product commit $QA_PRODUCT_COMMIT."
+            exit 1; }
+          [ "$tree" = "$QA_PRODUCT_TREE" ] || {
+            echo "::error::Product tree is $tree, not the pinned $QA_PRODUCT_TREE."
+            exit 1; }
+          [ "$ahead" = "1" ] || {
+            echo "::error::This ref is $ahead commits past the product commit; it must be exactly one carrier commit."
+            exit 1; }
+          [ "$touched" = "$QA_CARRIER_PATH" ] || {
+            echo "::error::The carrier commit is not exactly this one workflow file added:"
+            printf '%s\n' "$touched"
+            exit 1; }
+          [ "$added_only" = "$QA_CARRIER_PATH" ] || {
+            echo "::error::The carrier file is not a pure addition: $added_only"
+            exit 1; }
+          [ -z "$not_added" ] || {
+            echo "::error::The carrier commit also deletes or modifies product paths:"
+            printf '%s\n' "$not_added"
+            exit 1; }
+          # Leave the carrier tree behind: everything after this step is the product tree itself.
+          git checkout --detach "${QA_PRODUCT_COMMIT}"
+          head_now=$(git rev-parse HEAD)
+          tree_now=$(git rev-parse "HEAD^{tree}")
+          dirty=$(git status --porcelain --untracked-files=no)
+          [ "$head_now" = "$QA_PRODUCT_COMMIT" ] || { echo "::error::Not on the product commit: $head_now"; exit 1; }
+          [ "$tree_now" = "$QA_PRODUCT_TREE" ] || { echo "::error::Worked tree is $tree_now, not $QA_PRODUCT_TREE"; exit 1; }
+          [ -z "$dirty" ] || { echo "::error::Tracked files differ from the product tree:"; printf '%s\n' "$dirty"; exit 1; }
+          [ -f .github/actions/setup-python-env/action.yml ] || {
+            echo "::error::The product tree has no setup-python-env action to use."
+            exit 1; }
+          echo "subject=$QA_PRODUCT_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "tree=$QA_PRODUCT_TREE" >> "$GITHUB_OUTPUT"
+
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      # Dependencies and the project, from the product tree, by the repository's own action.
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          interpreter: ${{ matrix.interpreter }}
+
+      # The claim this leg exists to test, stated as a check rather than a comment.
+      - name: The stores run ${{ matrix.journal }} here
+        run: python -c "import os, pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode, '; this leg claims', os.environ['QA_EXPECTED_JOURNAL']); sys.exit(mode != os.environ['QA_EXPECTED_JOURNAL'])"
+
+      # The same POSIX test utilities ci.yml's Windows legs give these suites (rsync among
+      # them). Provisioned, not skipped: if this fails on Windows the two passes below report
+      # as skipped and the final step turns that into a named red, never a green.
+      - name: Set up Windows POSIX test utilities
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        id: posix_tools
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: MSYS
+          release: false
+          update: true
+          install: rsync
+      - name: Select Windows POSIX test utilities
+        id: select_posix_tools
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.posix_tools.outcome == 'success' }}
+        shell: pwsh
+        run: '"${{ steps.posix_tools.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+
+      # The subject's own test set: names the modules, proves each exists in the pinned tree,
+      # and takes the lane barrier from that tree's SSOT. Writes no trailing newline: Git Bash
+      # keeps a Windows CR inside $(...), which would end the last path.
+      - name: Select the subject's modules and the lane barrier
+        id: select
+        shell: python
+        env:
+          QA_MODULES_FILE: ${{ runner.temp }}/qa-modules.txt
+          QA_PARALLEL_EXPR_FILE: ${{ runner.temp }}/qa-parallel-m.txt
+          QA_SERIAL_EXPR_FILE: ${{ runner.temp }}/qa-serial-m.txt
+        run: |
+          import os, pathlib, sys
+          from ouroboros.preflight_runner import EXCLUSIVE_MARKER, LANE_EXCLUSION_EXPR
+          modules = os.environ["QA_MODULES"].split()
+          required = os.environ["QA_REQUIRED_MODULES"].split()
+          expected = int(os.environ["QA_MODULES_COUNT"])
+          missing = [m for m in modules if not pathlib.Path(m).is_file()]
+          absent = [m for m in required if m not in modules]
+          if len(modules) != expected:
+              sys.exit(f"selected {len(modules)} modules, the workflow pins {expected}")
+          if missing:
+              sys.exit("not in the pinned product tree: " + ", ".join(missing))
+          if absent:
+              sys.exit("the changed modules must be selected, missing: " + ", ".join(absent))
+          parallel = f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}"
+          serial = f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}"
+          for path, text in ((os.environ["QA_MODULES_FILE"], " ".join(modules)),
+                             (os.environ["QA_PARALLEL_EXPR_FILE"], parallel),
+                             (os.environ["QA_SERIAL_EXPR_FILE"], serial)):
+              with open(path, "w", encoding="utf-8", newline="") as handle:
+                  handle.write(text)
+          print(f"{len(modules)} modules, required modules present")
+          print(f"parallel -m: {parallel}\nserial   -m: {serial}")
+
+      # The producer steps decide the result: no continue-on-error, no tolerated exit here.
+      # scripts/ci_retry.py is owner decision 1A (one retry per failed test → FLAKY; a test that
+      # fails again, never ran, or is accepted by tests/accepted_failures.json is named in the
+      # verdict); exit 0 only when that verdict is green, flaky or accepted.
+      - name: Run the review modules (parallel — one xdist pass with resource groups)
+        id: tests_parallel
+        timeout-minutes: 30
+        if: >-
+          ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.select.outcome == 'success'
+          && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success'
+              && steps.select_posix_tools.outcome == 'success')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel"
+          --accepted tests/accepted_failures.json --
+          python scripts/run_tests.py $(cat "${{ runner.temp }}/qa-modules.txt")
+          -m "$(cat "${{ runner.temp }}/qa-parallel-m.txt")"
+          -n auto --dist loadgroup --max-worker-restart=0 --timeout=300 -q --tb=short
+          --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel"
+
+      - name: Run the review modules (serial — the serial("exclusive") tests alone, one process)
+        id: tests_serial
+        timeout-minutes: 20
+        if: >-
+          ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.select.outcome == 'success'
+          && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success'
+              && steps.select_posix_tools.outcome == 'success')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial"
+          --accepted tests/accepted_failures.json --
+          python scripts/run_tests.py $(cat "${{ runner.temp }}/qa-modules.txt")
+          -m "$(cat "${{ runner.temp }}/qa-serial-m.txt")"
+          -q --tb=short --timeout=300
+          --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial"
+
+      # Concise, human-checkable binding for the record: what commit, tree, ref, interpreter and
+      # journal mode this leg actually observed, and which modules it ran.
+      - name: Write the subject binding
+        if: ${{ !cancelled() }}
+        shell: python
+        env:
+          QA_OUT: ${{ runner.temp }}/qa-subject.json
+          QA_SUMMARY: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          QA_CARRIER_COMMIT: ${{ github.sha }}
+          QA_REF: ${{ github.ref_name }}
+          QA_EVENT: ${{ github.event_name }}
+          QA_RUN_ID: ${{ github.run_id }}
+          QA_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PARALLEL_OUTCOME: ${{ steps.tests_parallel.outcome }}
+          SERIAL_OUTCOME: ${{ steps.tests_serial.outcome }}
+        run: |
+          import json, os, sqlite3, subprocess, sys
+
+          def git(*args):
+              return subprocess.run(("git", *args),
+                                    capture_output=True, text=True, check=True).stdout.strip()
+
+          binding = {
+              "purpose": "QA-only qualification of one composed product commit (#3451 managed post-commit attribution)",
+              "carrier": {"ref": os.environ["QA_REF"], "event": os.environ["QA_EVENT"],
+                          "commit": os.environ["QA_CARRIER_COMMIT"],
+                          "workflow": os.environ["QA_CARRIER_PATH"]},
+              "product": {"commit": os.environ["QA_PRODUCT_COMMIT"], "tree": os.environ["QA_PRODUCT_TREE"],
+                          "checked_out_head": git("rev-parse", "HEAD"),
+                          "checked_out_tree": git("rev-parse", "HEAD^{tree}"),
+                          "tracked_diff": git("status", "--porcelain", "--untracked-files=no")},
+              "run": {"run_id": os.environ["QA_RUN_ID"], "run_attempt": os.environ["QA_RUN_ATTEMPT"],
+                      "url": os.environ["QA_SUMMARY"]},
+              "leg": {"os": os.environ["RUNNER_OS"], "runner": os.environ["RUNNER_NAME"],
+                      "interpreter_claim": os.environ["QA_EXPECTED_INTERPRETER"],
+                      "journal_claim": os.environ["QA_EXPECTED_JOURNAL"],
+                      "python": sys.version.split()[0], "sqlite": sqlite3.sqlite_version,
+                      "executable": sys.executable},
+              "passes": {"parallel": os.environ["PARALLEL_OUTCOME"], "serial": os.environ["SERIAL_OUTCOME"]},
+              "modules": os.environ["QA_MODULES"].split(),
+          }
+          with open(os.environ["QA_OUT"], "w", encoding="utf-8") as handle:
+              json.dump(binding, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              rows = [f"| {k} | {v} |" for k, v in (
+                  ("leg", f"{binding['leg']['os']} · {binding['leg']['interpreter_claim']} · "
+                          f"{binding['leg']['journal_claim']}"),
+                  ("product commit", "`" + binding["product"]["commit"] + "`"),
+                  ("product tree", "`" + binding["product"]["tree"] + "`"),
+                  ("checked out", "`" + binding["product"]["checked_out_head"]
+                       + "` (tree `" + binding["product"]["checked_out_tree"] + "`)"),
+                  ("interpreter", f"Python {binding['leg']['python']}, SQLite {binding['leg']['sqlite']}"),
+                  ("modules", str(len(binding["modules"]))),
+                  ("passes", f"parallel={binding['passes']['parallel']} serial={binding['passes']['serial']}"))]
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("### QA track03 — " + binding["leg"]["os"] + "\n"
+                               + "| fact | value |\n|---|---|\n" + "\n".join(rows) + "\n")
+          print(json.dumps(binding["product"], indent=2, sort_keys=True))
+
+      # Diagnostics, uploaded whatever the passes did: the producer steps above remain the verdict.
+      - name: Publish test evidence
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        continue-on-error: true
+        uses: ./.github/actions/test-evidence
+        with:
+          name: qa-track03-${{ matrix.leg }}
+          passes: parallel=${{ steps.tests_parallel.outcome }} serial=${{ steps.tests_serial.outcome }}
+
+      - name: Upload the subject binding
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-track03-subject-${{ matrix.leg }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qa-subject.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Completeness, named: a leg is green only when it proved its subject and BOTH passes ran to
+      # success. A deselected or skipped pass is a gap, never a pass.
+      - name: Require the proved subject and both passes
+        if: ${{ !cancelled() }}
+        env:
+          SUBJECT_OUTCOME: ${{ steps.subject.outcome }}
+          SELECT_OUTCOME: ${{ steps.select.outcome }}
+          PARALLEL_OUTCOME: ${{ steps.tests_parallel.outcome }}
+          SERIAL_OUTCOME: ${{ steps.tests_serial.outcome }}
+        run: |
+          set -uo pipefail
+          status=0
+          for pair in subject="$SUBJECT_OUTCOME" select="$SELECT_OUTCOME" \
+                      parallel="$PARALLEL_OUTCOME" serial="$SERIAL_OUTCOME"; do
+            label="${pair%%=*}"; outcome="${pair#*=}"
+            if [ "$outcome" != "success" ]; then
+              echo "::error::The $label step did not succeed ($outcome): this leg does not qualify the subject."
+              status=1
+            fi
+          done
+          exit "$status"
