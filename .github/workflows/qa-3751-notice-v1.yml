@@ -1,0 +1,86 @@
+# Temporary: add only this file at .github/workflows/qa-3751-notice-v1.yml
+# in a single commit whose parent is the qualified product SHA below.
+name: QA 3751 notification delivery
+
+on:
+  push:
+    branches: [qa/telegram-3751-notice-v1]
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_SHA: 'eff8ddc47f92cfd7a76d91131e050f5da6008aa2'
+  MSYS_NO_PATHCONV: '1'
+  PYTHONUTF8: '1'
+
+jobs:
+  focused:
+    name: Notice and reply delivery (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Require the exact product parent and a workflow-only addition
+        run: |
+          set -euo pipefail
+          qa_file=.github/workflows/qa-3751-notice-v1.yml
+          [[ "$PRODUCT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Set PRODUCT_SHA to the exact product commit' >&2; exit 1; }
+          [[ "$(git rev-list --parents -n 1 HEAD)" == "$GITHUB_SHA $PRODUCT_SHA" ]] || {
+            echo 'The QA commit must have exactly the pinned product parent' >&2; exit 1;
+          }
+          [[ "$(git diff --name-status --no-renames "$PRODUCT_SHA" HEAD --)" == $(printf 'A\t%s' "$qa_file") ]] || {
+            echo "The only change must be the addition of $qa_file" >&2; exit 1;
+          }
+          product_tree="$(git rev-parse "$PRODUCT_SHA^{tree}")" || exit $?
+          printf 'QA: %s\nProduct: %s (tree %s)\n' "$GITHUB_SHA" "$PRODUCT_SHA" "$product_tree"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+      - name: Run and verify the exact focused cases (no skips)
+        run: |
+          set -euo pipefail
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          qa="$RUNNER_TEMP/qa-3751-notice-v1"
+          mkdir -p "$qa"
+          main=tests/test_main_terminal_delivery.py
+          watchdog=tests/test_ws3_wedge_resilience.py
+          tg=tests/test_telegram_reply_references.py
+          nodes=(
+            "$main::test_unbound_notice_requires_its_durable_row_without_a_delivery_receipt"{'[None-]','[receipt1-markdown]'}
+            "$watchdog::test_watchdog_alerts_on_chat_turn_wedge"
+            "$watchdog::test_wall_clock_jump_neither_fabricates_nor_masks_a_chat_turn_wedge"
+            "$tg::test_a_reply_about_a_helper_runs_in_its_project_and_quotes_that_helpers_card"{'[all]','[telegram_only]'}
+            "$tg::test_a_helpers_card_reaches_the_phone_beside_another_connectors_binding_of_its_room"{'[all]','[telegram_only]'}
+            "$tg::test_an_exact_replys_progress_goes_where_its_answer_does_without_its_anchor"{'[all]','[telegram_only]'}
+            "$tg::test_d8_helper_uses_its_project_reply_roots_telegram_destination"{'[all-live]','[all-saved]','[telegram_only-live]','[telegram_only-saved]'}
+          )
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" --evidence-dir "$qa/evidence" --timeout 180 -- \
+            "$py" -m pytest -o addopts= -o xfail_strict=true -q --tb=short -rA --junitxml="$qa/junit.xml" "${nodes[@]}" || exit $?
+          "$py" - "$qa/junit.xml" "${nodes[@]}" <<'PY'
+          import sys
+          from collections import Counter
+          from xml.etree import ElementTree as ET
+
+          suites = ET.parse(sys.argv[1]).getroot()
+          expected = Counter((path[:-3].replace('/', '.'), test)
+                             for path, test in (node.split('::', 1) for node in sys.argv[2:]))
+          cases = list(suites.iter('testcase'))
+          observed = Counter((case.get('classname'), case.get('name')) for case in cases)
+          unsettled = [case.get('name') for case in cases
+                       if any(child.tag in {'error', 'failure', 'skipped'} for child in case)]
+          if not expected or observed != expected or unsettled:
+              raise SystemExit(f'Missing: {expected - observed}; extra/duplicate: {observed - expected}; not passed: {unsettled}')
+          print(f'All {len(cases)} named cases passed; none skipped.')
+          PY
