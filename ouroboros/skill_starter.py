@@ -180,16 +180,34 @@ def _record_presented_defaults(drive_root: pathlib.Path, repo_dir: Optional[path
         pathlib.Path(repo_dir) / "skills" if repo_dir is not None else bundled_skills_dir()))
 
 
+def _install_ticked(drive_root: pathlib.Path, item_id: str, rows: List[Dict[str, Any]],
+                    repo_dir: Optional[pathlib.Path], turn_on: bool) -> Dict[str, Any]:
+    """One ticked item inside its lane job. One already installed (a Reset keeps the payloads and their records) that
+    nobody has switched on or off is turned on the way a new install is: its record asks to turn on when ready, and the
+    acceptance runs (the install's own auto-grant setting, the dependencies, the turn-on)."""
+    from ouroboros.skill_install_record import update_install_record
+    from ouroboros.skill_loader import skill_state_dir_path
+    from ouroboros.skill_source_install import accept_and_turn_on, install_item
+
+    result = install_item(drive_root, item_id, actor="owner", reason="starter skills", turn_on_when_ready=turn_on,
+                          rows=rows, repo_dir=repo_dir)
+    name = str(result.get("name") or "")
+    if result.get("already_installed") and turn_on and name \
+            and not (skill_state_dir_path(drive_root, name) / "enabled.json").exists():
+        update_install_record(drive_root, name, turn_on_when_ready=True)
+        result = {**result, "turn_on": accept_and_turn_on(drive_root, name, repo_dir=repo_dir).get("turn_on", "")}
+    return result
+
+
 def _install_one(drive_root: pathlib.Path, item_id: str, rows: List[Dict[str, Any]],
                  repo_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
     from ouroboros.config import get_starter_skills_turn_on
-    from ouroboros.skill_source_install import SkillInstallError, install_item, run_in_lane, start_review
+    from ouroboros.skill_source_install import SkillInstallError, run_in_lane, start_review
 
     try:
-        result = run_in_lane(drive_root, "install", item_id, lambda: install_item(
-            drive_root, item_id, actor="owner", reason="starter skills",
-            turn_on_when_ready=get_starter_skills_turn_on(),
-            rows=rows, repo_dir=repo_dir), message=f"Installing starter skill {item_id}")
+        result = run_in_lane(drive_root, "install", item_id, lambda: _install_ticked(
+            drive_root, item_id, rows, repo_dir, get_starter_skills_turn_on()),
+            message=f"Installing starter skill {item_id}")
     except SkillInstallError as exc:
         status = "pending" if exc.code in _RETRY_CODES else "skipped" if exc.code == "name_taken" else "failed"
         return {"status": status, "code": exc.code, "error": str(exc)[:300]}

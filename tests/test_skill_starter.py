@@ -178,6 +178,31 @@ def test_run_installs_builtins_offline_and_retries_an_unread_hub_later(setup, mo
     assert skill_starter.after_onboarding(drive, ["builtin/unix_computer_use"]) == "done"  # never runs twice
 
 
+def test_a_ticked_skill_already_installed_that_nobody_switched_is_turned_on_like_a_new_one(setup, monkeypatch):
+    """A Reset keeps the payloads: a ticked skill found already installed, with no enable choice recorded, takes the
+    path a new install takes (its record asks to turn on when ready; the acceptance applies the install's own
+    auto-grant, dependencies and turn-on). One somebody switched, or a build that asks no first enablement, does not."""
+    from ouroboros.skill_loader import save_enabled, skill_state_dir_path
+
+    drive, hub, repo = setup
+    accepted, requested = [], []
+    monkeypatch.setattr("ouroboros.skill_source_install.run_in_lane", lambda _d, _k, _i, job, **_kw: job())
+    monkeypatch.setattr("ouroboros.skill_source_install.install_item",
+                        lambda *a, **k: {"name": "telegram", "already_installed": True})
+    monkeypatch.setattr("ouroboros.skill_source_install.accept_and_turn_on",
+                        lambda _d, name, **k: accepted.append(name) or {"turn_on": "enabled"})
+    monkeypatch.setattr("ouroboros.skill_install_record.update_install_record",
+                        lambda _d, name, **changes: requested.append((name, changes)))
+    assert skill_starter._install_one(drive, "builtin/telegram", hub.rows(), repo)["status"] == "installed"
+    assert (accepted, requested) == (["telegram"], [("telegram", {"turn_on_when_ready": True})])
+    save_enabled(drive, "telegram", False, actor="owner_ui")  # somebody switched it: that choice stands
+    skill_starter._install_one(drive, "builtin/telegram", hub.rows(), repo)
+    (skill_state_dir_path(drive, "telegram") / "enabled.json").unlink()
+    monkeypatch.setattr("ouroboros.config.get_starter_skills_turn_on", lambda: False)  # the build asks no first turn-on
+    skill_starter._install_one(drive, "builtin/telegram", hub.rows(), repo)
+    assert accepted == ["telegram"] and len(requested) == 1
+
+
 def test_review_items_start_their_review_and_an_empty_choice_finishes(setup, monkeypatch):
     drive, hub, repo = setup
     reviews = []
