@@ -310,8 +310,9 @@ def _liveness_gap(state: dict) -> dict:
     if reason in _REVIEW_REASONS:
         return _gap("review", "It needs a review or your attestation of these exact bytes.")
     if reason == "missing_grants":
-        grants = state.get("grant_status") or {}
-        missing = [*(grants.get("missing_keys") or []), *(grants.get("missing_permissions") or [])]
+        from ouroboros.skill_grant_scope import blocking_lists
+
+        missing = [item for group in blocking_lists(state.get("grant_status") or {}) for item in group]
         return _gap("grants", "It needs your grant" + (f" for {', '.join(missing)}." if missing else "."))
     if reason == "skill_conflict":
         names = ", ".join((state.get("conflict") or {}).get("skills") or [])
